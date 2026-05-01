@@ -55,6 +55,7 @@ def test_open_location_view_delegates_to_gallery_vm() -> None:
     coord.open_location_view()
 
     coord._gallery_vm.open_location_map.assert_called_once_with()
+    coord._context.library.get_geotagged_assets.assert_not_called()
 
 
 def test_open_people_view_delegates_to_gallery_vm() -> None:

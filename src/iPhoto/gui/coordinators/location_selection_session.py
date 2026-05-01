@@ -57,6 +57,18 @@ class LocationSelectionSession:
         self._request_serial += 1
         return self._request_serial
 
+    def begin_load_with_serial(self, root: Path, serial: int) -> int:
+        normalized_root = Path(root)
+        if self._root != normalized_root:
+            self._asset_index = {}
+            self._full_assets = []
+            self._list_dirty = False
+            self._has_snapshot = False
+        self._root = normalized_root
+        self._invalidated = True
+        self._request_serial = int(serial)
+        return self._request_serial
+
     def accept_loaded(self, serial: int, root: Path, assets: list) -> bool:
         normalized_root = Path(root)
         if serial != self._request_serial or self._root != normalized_root:

@@ -40,19 +40,20 @@ class DummyLibrary:
 class FakeScanService:
     def __init__(self) -> None:
         self.prepared: list[dict] = []
-        self.scanned: list[tuple[Path, bool]] = []
-        self.finalized: list[tuple[Path, list[dict]]] = []
+        self.rescanned: list[dict] = []
+        self.paired: list[Path] = []
 
     def prepare_album_open(self, root: Path, **kwargs):
         self.prepared.append({"root": Path(root), **kwargs})
         return SimpleNamespace(asset_count=1, scanned=False)
 
-    def scan_album(self, root: Path, *, persist_chunks: bool):
-        self.scanned.append((root, persist_chunks))
-        return SimpleNamespace(rows=[{"rel": "a.jpg"}])
+    def rescan_album(self, root: Path, **kwargs):
+        self.rescanned.append({"root": Path(root), **kwargs})
+        return [{"rel": "a.jpg"}]
 
-    def finalize_scan(self, root: Path, rows: list[dict]) -> None:
-        self.finalized.append((root, rows))
+    def pair_album(self, root: Path):
+        self.paired.append(Path(root))
+        return [SimpleNamespace(root=Path(root))]
 
 
 class FakeLifecycleService:
@@ -78,8 +79,11 @@ class FakeFallbackScanService(FakeScanService):
         self.synced: list[Path] = []
         self.instances.append(self)
 
-    def sync_manifest_favorites(self, root: Path) -> None:
-        self.synced.append(Path(root))
+    def rescan_album(self, root: Path, **kwargs):
+        self.rescanned.append({"root": Path(root), **kwargs})
+        if kwargs.get("sync_manifest_favorites"):
+            self.synced.append(Path(root))
+        return [{"rel": "a.jpg"}]
 
 
 class FakeOpenScanService(FakeScanService):
@@ -124,9 +128,14 @@ def test_rescan_album_uses_session_scan_service(tmp_path: Path) -> None:
     rows = service.rescan_album(DummyAlbum(album_root))
 
     assert rows == [{"rel": "a.jpg"}]
-    assert scan_service.scanned == [(album_root, False)]
-    assert scan_service.finalized == [(album_root, [{"rel": "a.jpg"}])]
-    assert lifecycle_service.reconciled == [(album_root, [{"rel": "a.jpg"}])]
+    assert scan_service.rescanned == [
+        {
+            "root": album_root,
+            "sync_manifest_favorites": False,
+            "pair_live": True,
+        }
+    ]
+    assert lifecycle_service.reconciled == []
 
 
 def test_rescan_album_fallback_syncs_manifest_favorites(
@@ -150,8 +159,13 @@ def test_rescan_album_fallback_syncs_manifest_favorites(
     assert len(FakeFallbackScanService.instances) == 1
     fallback = FakeFallbackScanService.instances[0]
     assert fallback.root == album_root
-    assert fallback.scanned == [(album_root, False)]
-    assert fallback.finalized == [(album_root, [{"rel": "a.jpg"}])]
+    assert fallback.rescanned == [
+        {
+            "root": album_root,
+            "sync_manifest_favorites": True,
+            "pair_live": True,
+        }
+    ]
     assert fallback.synced == [album_root]
 
 
@@ -249,47 +263,12 @@ def test_rescan_album_async_fallback_passes_library_root(monkeypatch, tmp_path: 
     lib_root.mkdir()
     album_root.mkdir()
 
-    class StubSignal:
-        def connect(self, *_args, **_kwargs):
-            return None
-
-    class StubScannerSignals:
+    class FakeTaskRunner:
         def __init__(self) -> None:
-            self.progressUpdated = StubSignal()
-            self.chunkReady = StubSignal()
-            self.finished = StubSignal()
-            self.error = StubSignal()
-            self.batchFailed = StubSignal()
+            self.calls: list[dict] = []
 
-    class StubScannerWorker:
-        def __init__(
-            self,
-            root,
-            include,
-            exclude,
-            signals,
-            library_root=None,
-            scan_service=None,
-        ) -> None:
-            self.root = Path(root)
-            self.library_root = library_root
-            self.scan_service = scan_service
-            self._is_cancelled = False
-            self._had_error = False
-
-        @property
-        def cancelled(self) -> bool:
-            return self._is_cancelled
-
-        @property
-        def failed(self) -> bool:
-            return self._had_error
-
-        def cancel(self) -> None:
-            self._is_cancelled = True
-
-    monkeypatch.setattr(lus, "ScannerSignals", StubScannerSignals)
-    monkeypatch.setattr(lus, "ScannerWorker", StubScannerWorker)
+        def start_scan(self, **kwargs) -> None:
+            self.calls.append(kwargs)
 
     task_manager = DummyTaskManager()
     service = lus.LibraryUpdateService(
@@ -297,18 +276,21 @@ def test_rescan_album_async_fallback_passes_library_root(monkeypatch, tmp_path: 
         current_album_getter=lambda: None,
         library_manager_getter=lambda: None,
     )
+    runner = FakeTaskRunner()
+    service._task_runner = runner
 
     service.rescan_album_async(DummyAlbum(album_root))
 
-    assert task_manager.submitted, "scan task should be submitted"
-    worker = task_manager.submitted[0]["worker"]
-    assert isinstance(worker, StubScannerWorker)
-    assert worker.library_root is None
-    assert worker.scan_service is None
+    assert runner.calls
+    call = runner.calls[0]
+    assert call["root"] == album_root
+    assert list(call["include"]) == list(DEFAULT_INCLUDE)
+    assert list(call["exclude"]) == list(DEFAULT_EXCLUDE)
+    assert call["library_root"] is None
+    assert call["scan_service"] is None
 
 
 def test_restore_rescan_worker_receives_session_scan_service(
-    monkeypatch,
     tmp_path: Path,
 ) -> None:
     lib_root = tmp_path / "library"
@@ -317,21 +299,12 @@ def test_restore_rescan_worker_receives_session_scan_service(
     scan_service = FakeScanService()
     lifecycle_service = FakeLifecycleService()
 
-    class StubRescanWorker:
-        def __init__(
-            self,
-            root,
-            signals,
-            library_root=None,
-            scan_service=None,
-            asset_lifecycle_service=None,
-        ) -> None:
-            self.root = Path(root)
-            self.library_root = library_root
-            self.scan_service = scan_service
-            self._asset_lifecycle_service = asset_lifecycle_service
+    class FakeTaskRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
 
-    monkeypatch.setattr(lus, "RescanWorker", StubRescanWorker)
+        def start_restore_refresh(self, **kwargs) -> None:
+            self.calls.append(kwargs)
 
     task_manager = DummyTaskManager()
     service = lus.LibraryUpdateService(
@@ -343,15 +316,16 @@ def test_restore_rescan_worker_receives_session_scan_service(
             lifecycle_service=lifecycle_service,
         ),
     )
+    runner = FakeTaskRunner()
+    service._task_runner = runner
 
     service._refresh_restored_album(album_root, lib_root)
 
-    assert task_manager.submitted
-    worker = task_manager.submitted[0]["worker"]
-    assert isinstance(worker, StubRescanWorker)
-    assert worker.library_root == lib_root
-    assert worker.scan_service is scan_service
-    assert worker._asset_lifecycle_service is lifecycle_service
+    assert runner.calls
+    call = runner.calls[0]
+    assert call["root"] == album_root
+    assert call["library_root"] == lib_root
+    assert call["scan_service"] is scan_service
 
 
 def test_handle_media_load_failure_uses_lifecycle_service(tmp_path: Path) -> None:
@@ -424,3 +398,43 @@ def test_handle_media_load_failure_uses_current_album_root_when_library_root_is_
     replacement = ReplacementLifecycleService.instances[0]
     assert replacement.library_root == album_root
     assert replacement.media_failures == [asset_path]
+
+
+def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:
+    album_root = tmp_path / "Album"
+    album_root.mkdir()
+
+    class FinalizeScanService:
+        def __init__(self) -> None:
+            self.completed: list[tuple[Path, list[dict], bool]] = []
+
+        def finalize_scan_result(self, root: Path, rows: list[dict], *, pair_live: bool):
+            self.completed.append((Path(root), list(rows), pair_live))
+            return list(rows)
+
+    service = lus.LibraryUpdateService(
+        task_manager=DummyTaskManager(),
+        current_album_getter=lambda: None,
+        library_manager_getter=lambda: None,
+    )
+    scan_service = FinalizeScanService()
+    completion = lus.ScanTaskCompletion(
+        root=album_root,
+        rows=[{"rel": "a.jpg"}],
+        scan_service=scan_service,
+        library_root=None,
+    )
+
+    index_updates: list[Path] = []
+    link_updates: list[Path] = []
+    finished: list[tuple[Path, bool]] = []
+    service.indexUpdated.connect(index_updates.append)
+    service.linksUpdated.connect(link_updates.append)
+    service.scanFinished.connect(lambda root, ok: finished.append((root, ok)))
+
+    service._on_scan_completed(completion)
+
+    assert scan_service.completed == [(album_root, [{"rel": "a.jpg"}], True)]
+    assert index_updates == [album_root]
+    assert link_updates == [album_root]
+    assert finished == [(album_root, True)]

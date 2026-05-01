@@ -15,7 +15,12 @@ from ..application.use_cases.scan_library import (
     ScanLibraryUseCase,
 )
 from ..cache.index_store import get_global_repository
-from ..config import ALBUM_MANIFEST_NAMES, DEFAULT_EXCLUDE, DEFAULT_INCLUDE
+from ..config import (
+    ALBUM_MANIFEST_NAMES,
+    DEFAULT_EXCLUDE,
+    DEFAULT_INCLUDE,
+    RECENTLY_DELETED_DIR_NAME,
+)
 from ..errors import (
     AlbumNotFoundError,
     IndexCorruptedError,
@@ -227,6 +232,32 @@ class LibraryScanService:
             )
         )
 
+    def rescan_album(
+        self,
+        root: Path,
+        *,
+        include: Iterable[str] | None = None,
+        exclude: Iterable[str] | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        sync_manifest_favorites: bool = False,
+        pair_live: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Synchronously rebuild one scan scope and persist follow-up state."""
+
+        result = self.scan_album(
+            root,
+            include=include,
+            exclude=exclude,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+            persist_chunks=False,
+        )
+        rows = self.finalize_scan_result(root, result.rows, pair_live=pair_live)
+        if sync_manifest_favorites:
+            self.sync_manifest_favorites(Path(root))
+        return rows
+
     def finalize_scan(self, root: Path, rows: Iterable[dict[str, Any]]) -> None:
         """Persist additive scan side effects after a successful scan."""
 
@@ -240,6 +271,59 @@ class LibraryScanService:
             repository=repository,
         )
         self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
+
+    def finalize_scan_result(
+        self,
+        root: Path,
+        rows: Iterable[dict[str, Any]],
+        *,
+        pair_live: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Persist scan completion side effects for one scope.
+
+        This is the higher-level runtime hook used by GUI adapters after a scan
+        completes. It preserves Recently Deleted restore metadata, persists the
+        snapshot and derived links, prunes stale rows, and optionally refreshes
+        Live Photo pairing state.
+        """
+
+        from .library_asset_lifecycle_service import LibraryAssetLifecycleService
+
+        scan_root = Path(root)
+        lifecycle_service = LibraryAssetLifecycleService(
+            self.library_root,
+            scan_service=self,
+        )
+        materialized_rows = [dict(row) for row in rows]
+
+        if scan_root.name == RECENTLY_DELETED_DIR_NAME:
+            materialized_rows = lifecycle_service.preserve_trash_metadata(
+                scan_root,
+                materialized_rows,
+            )
+
+        self.finalize_scan(scan_root, materialized_rows)
+        lifecycle_service.reconcile_missing_scan_rows(scan_root, materialized_rows)
+        if pair_live:
+            self.pair_album(scan_root)
+        return materialized_rows
+
+    def refresh_restored_album(
+        self,
+        root: Path,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        pair_live: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Refresh one restored album so gallery state and links stay current."""
+
+        return self.rescan_album(
+            root,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+            pair_live=pair_live,
+        )
 
     def reconcile_missing_scan_rows(
         self,

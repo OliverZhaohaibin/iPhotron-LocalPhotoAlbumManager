@@ -76,3 +76,4 @@ def test_open_recently_deleted_delegates_to_gallery_vm() -> None:
     coord.open_recently_deleted()
 
     coord._gallery_vm.open_recently_deleted.assert_called_once_with()
+    coord._context.library.cleanup_deleted_index.assert_not_called()

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from iPhoto.bootstrap.library_people_service import create_people_service
+from iPhoto.people.service import PeopleService
 from iPhoto.settings.manager import SettingsManager
 
 _GROUP_LABEL_RE = re.compile(r"^Group (\d+)$")
@@ -31,9 +32,15 @@ class PinnedItemsService(QObject):
 
     _SETTINGS_KEY = "pinned_items_by_library"
 
-    def __init__(self, settings: SettingsManager, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        settings: SettingsManager,
+        people_service_getter: Callable[[Path | None], PeopleService | None] | None = None,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._people_service_getter = people_service_getter
 
     def items_for_library(self, library_root: Path | None) -> list[PinnedSidebarItem]:
         library_key = self._library_key(library_root)
@@ -363,7 +370,12 @@ class PinnedItemsService(QObject):
                 return True
             return False
 
-        people_service = create_people_service(Path(library_key))
+        people_service = self._people_service_for_library(Path(library_key))
+        if people_service is None:
+            if updated:
+                self._persist(payload)
+                return True
+            return False
         stale_person_ids = [
             person_id for person_id in pinned_person_ids if not people_service.has_cluster(person_id)
         ]
@@ -398,6 +410,13 @@ class PinnedItemsService(QObject):
         payload[library_key] = filtered
         self._persist(payload)
         return True
+
+    def _people_service_for_library(self, library_root: Path) -> PeopleService | None:
+        if self._people_service_getter is not None:
+            service = self._people_service_getter(library_root)
+            if service is not None:
+                return service
+        return PeopleService(Path(library_root))
 
     def _write_item(self, item: PinnedSidebarItem, *, library_root: Path | None) -> None:
         if not item.label:

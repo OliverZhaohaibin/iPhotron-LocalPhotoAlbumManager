@@ -73,7 +73,7 @@ def _make_controller(
 @patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
 def test_people_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
     asset = _make_asset("asset-1", "album/a.jpg")
-    controller, _deps = _make_controller(
+    controller, deps = _make_controller(
         context=MenuContext(
             surface="gallery",
             selection_kind="empty",
@@ -86,9 +86,15 @@ def test_people_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
         selected_assets=[asset],
     )
 
-    with patch("iPhoto.gui.ui.controllers.context_menu_controller.create_people_service") as service_factory:
-        service_factory.return_value.resolve_cluster_cover_face.return_value = "face-a"
-        controller._handle_context_menu(QPoint(10, 10))
+    class _StubPeopleService:
+        def library_root(self) -> Path:
+            return Path("/library")
+
+        def resolve_cluster_cover_face(self, person_id: str, asset_id: str) -> str | None:
+            return "face-a"
+
+    deps["facade"].library_manager = MagicMock(people_service=_StubPeopleService())
+    controller._handle_context_menu(QPoint(10, 10))
 
     actions_added = [args[0] for args, _ in mock_qmenu_cls.return_value.addAction.call_args_list]
     assert "Set as Cover" in actions_added
@@ -97,7 +103,7 @@ def test_people_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
 @patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
 def test_group_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
     asset = _make_asset("asset-1", "album/a.jpg")
-    controller, _deps = _make_controller(
+    controller, deps = _make_controller(
         context=MenuContext(
             surface="gallery",
             selection_kind="empty",
@@ -110,9 +116,15 @@ def test_group_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
         selected_assets=[asset],
     )
 
-    with patch("iPhoto.gui.ui.controllers.context_menu_controller.create_people_service") as service_factory:
-        service_factory.return_value.resolve_group_cover_asset.return_value = "asset-1"
-        controller._handle_context_menu(QPoint(10, 10))
+    class _StubPeopleService:
+        def library_root(self) -> Path:
+            return Path("/library")
+
+        def resolve_group_cover_asset(self, group_id: str, asset_id: str) -> str | None:
+            return "asset-1"
+
+    deps["facade"].library_manager = MagicMock(people_service=_StubPeopleService())
+    controller._handle_context_menu(QPoint(10, 10))
 
     actions_added = [args[0] for args, _ in mock_qmenu_cls.return_value.addAction.call_args_list]
     assert "Set as Cover" in actions_added
@@ -182,3 +194,25 @@ def test_album_cover_uses_active_album_relative_path() -> None:
     )
 
     deps["facade"].set_cover.assert_called_once_with("day1/a.jpg")
+
+
+@patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
+def test_people_cluster_gallery_menu_hides_cover_without_bound_service(mock_qmenu_cls) -> None:
+    asset = _make_asset("asset-1", "album/a.jpg")
+    controller, _deps = _make_controller(
+        context=MenuContext(
+            surface="gallery",
+            selection_kind="empty",
+            gallery_section="people_cluster_gallery",
+            entity_kind="person",
+            entity_id="person-a",
+            active_root=Path("/library"),
+            is_cluster_gallery=True,
+        ),
+        selected_assets=[asset],
+    )
+
+    controller._handle_context_menu(QPoint(10, 10))
+
+    actions_added = [args[0] for args, _ in mock_qmenu_cls.return_value.addAction.call_args_list]
+    assert "Set as Cover" not in actions_added

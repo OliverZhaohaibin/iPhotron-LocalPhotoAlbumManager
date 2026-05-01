@@ -7,7 +7,6 @@ from typing import Any, Iterable, Literal, Optional
 
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
-from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.config import ALL_PHOTOS_TITLE, DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery
@@ -17,8 +16,8 @@ from iPhoto.gui.facade import AppFacade
 from iPhoto.gui.services.location_trash_navigation_service import (
     LocationTrashNavigationService,
 )
+from iPhoto.gui.services.people_service_resolver import resolve_people_service
 from iPhoto.library.geo_aggregator import geotagged_asset_from_row
-from iPhoto.people.service import PeopleService
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -356,12 +355,12 @@ class GalleryViewModel(BaseViewModel):
             self.return_from_cluster_gallery()
             return
 
-        bound_people_service = getattr(self._context.library, "people_service", None)
-        service = (
-            bound_people_service
-            if isinstance(bound_people_service, PeopleService)
-            else create_people_service(root)
+        service = resolve_people_service(
+            self._context.library,
+            library_root=root,
         )
+        if service is None:
+            return
         if self._people_cluster_kind == "person":
             query = service.build_cluster_query(current_id)
         else:

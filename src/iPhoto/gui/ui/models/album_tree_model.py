@@ -10,11 +10,10 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, QObject, Qt
 from PySide6.QtGui import QIcon
 
-from ....bootstrap.library_people_service import create_people_service
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
-from ....people.service import PeopleService
 from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
+from ...services.people_service_resolver import resolve_people_service
 from ..icon import load_icon
 from ..palette import SIDEBAR_ICON_COLOR_HEX
 
@@ -355,20 +354,19 @@ class AlbumTreeModel(QAbstractItemModel):
         needs_people = any(pinned_item.kind == "person" for pinned_item in pinned_items)
         needs_groups = any(pinned_item.kind == "group" for pinned_item in pinned_items)
         if needs_people or needs_groups:
-            bound_people_service = getattr(self._library, "people_service", None)
-            people_service = (
-                bound_people_service
-                if isinstance(bound_people_service, PeopleService)
-                else create_people_service(library_root)
+            people_service = resolve_people_service(
+                self._library,
+                library_root=library_root,
             )
-            cluster_summaries = people_service.list_clusters()
-            if needs_people:
-                person_lookup = {summary.person_id: summary for summary in cluster_summaries}
-            if needs_groups:
-                group_lookup = {
-                    summary.group_id: summary
-                    for summary in people_service.list_groups(summaries=cluster_summaries)
-                }
+            if people_service is not None:
+                cluster_summaries = people_service.list_clusters()
+                if needs_people:
+                    person_lookup = {summary.person_id: summary for summary in cluster_summaries}
+                if needs_groups:
+                    group_lookup = {
+                        summary.group_id: summary
+                        for summary in people_service.list_groups(summaries=cluster_summaries)
+                    }
 
         for pinned_item in pinned_items:
             item = self._create_pinned_item(

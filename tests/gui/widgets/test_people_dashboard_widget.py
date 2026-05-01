@@ -536,7 +536,7 @@ def test_status_message_updates_without_reloading_cards(qapp: QApplication) -> N
     assert "Click a cluster or group card" in widget._message.text()
 
 
-def test_set_library_root_uses_session_people_service_factory(
+def test_set_library_root_uses_asset_aware_people_service_factory(
     monkeypatch, qapp: QApplication, tmp_path: Path
 ) -> None:
     widget = PeopleDashboardWidget()

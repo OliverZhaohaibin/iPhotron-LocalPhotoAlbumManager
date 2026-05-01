@@ -20,11 +20,10 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu
 
-from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.gui.ui.menus.core import MenuContext, populate_menu
 from iPhoto.gui.ui.menus.gallery_menu import GalleryMenuHandlers, gallery_action_specs
 from iPhoto.gui.ui.menus.style import apply_menu_style
-from iPhoto.people.service import PeopleService
+from ...services.people_service_resolver import resolve_people_service
 
 from ...facade import AppFacade
 from ..widgets.asset_grid import AssetGrid
@@ -409,16 +408,20 @@ class ContextMenuController(QObject):
         if context.entity_kind == "album":
             return context.gallery_section in {"album", "pinned_album"}
         if context.entity_kind == "person" and context.entity_id:
-            return (
-                self._people_service_for_context(context).resolve_cluster_cover_face(
+            service = self._people_service_for_context(context)
+            return bool(
+                service is not None
+                and service.resolve_cluster_cover_face(
                     context.entity_id,
                     asset.id,
                 )
                 is not None
             )
         if context.entity_kind == "group" and context.entity_id:
-            return (
-                self._people_service_for_context(context).resolve_group_cover_asset(
+            service = self._people_service_for_context(context)
+            return bool(
+                service is not None
+                and service.resolve_group_cover_asset(
                     context.entity_id,
                     asset.id,
                 )
@@ -436,15 +439,17 @@ class ContextMenuController(QObject):
             success = self._facade.set_cover(self._album_cover_rel_path(context, asset))
         elif context.entity_kind == "person" and context.entity_id:
             service = self._people_service_for_context(context)
-            face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
-            success = bool(face_id) and service.set_cluster_cover(context.entity_id, face_id)
+            if service is not None:
+                face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
+                success = bool(face_id) and service.set_cluster_cover(context.entity_id, face_id)
         elif context.entity_kind == "group" and context.entity_id:
             service = self._people_service_for_context(context)
-            group_asset_id = service.resolve_group_cover_asset(context.entity_id, asset.id)
-            success = bool(group_asset_id) and service.set_group_cover(
-                context.entity_id,
-                group_asset_id,
-            )
+            if service is not None:
+                group_asset_id = service.resolve_group_cover_asset(context.entity_id, asset.id)
+                success = bool(group_asset_id) and service.set_group_cover(
+                    context.entity_id,
+                    group_asset_id,
+                )
 
         if success:
             self._toast.show_toast("Cover Updated")
@@ -463,10 +468,13 @@ class ContextMenuController(QObject):
                 pass
         return asset.rel_path.as_posix()
 
-    def _people_service_for_context(self, context: MenuContext) -> PeopleService:
+    def _people_service_for_context(self, context: MenuContext):
         if context.active_root is None:
-            return PeopleService()
-        return create_people_service(context.active_root)
+            return None
+        return resolve_people_service(
+            self._facade.library_manager,
+            library_root=context.active_root,
+        )
 
     def _remove_selection_rows(self, selected_indexes: list) -> None:
         if not selected_indexes:

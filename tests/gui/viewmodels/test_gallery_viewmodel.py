@@ -12,6 +12,7 @@ from iPhoto.cache.index_store import get_global_repository, reset_global_reposit
 from iPhoto.domain.models.core import MediaType
 from iPhoto.people.index_coordinator import PeopleSnapshotEvent, reset_people_index_coordinators
 from iPhoto.people.repository import FaceRecord, FaceRepository, PersonRecord
+from iPhoto.people.service import PeopleService
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.domain.models.query import AssetQuery
 
@@ -54,11 +55,13 @@ def _make_vm(
     *,
     library_root: Path | None = None,
     location_trash_service: FakeLocationTrashService | None = None,
+    people_service=None,
     return_service: bool = False,
 ):
     store = MagicMock()
     context = MagicMock()
     context.library.root.return_value = library_root
+    context.library.people_service = people_service
     facade = MagicMock()
     asset_service = MagicMock()
     nav_service = location_trash_service or FakeLocationTrashService(library_root)
@@ -647,7 +650,10 @@ def test_people_cluster_gallery_retargets_after_snapshot_redirect(tmp_path: Path
             ),
         ],
     )
-    vm, store, _context, _facade, _asset_service = _make_vm(library_root=library_root)
+    vm, store, _context, _facade, _asset_service = _make_vm(
+        library_root=library_root,
+        people_service=PeopleService(library_root),
+    )
     vm.open_people_cluster_gallery(
         AssetQuery(asset_ids=["asset-a"]),
         kind="person",
@@ -744,7 +750,10 @@ def test_pinned_people_gallery_retargets_after_snapshot_redirect(tmp_path: Path)
             ),
         ],
     )
-    vm, store, _context, _facade, _asset_service = _make_vm(library_root=library_root)
+    vm, store, _context, _facade, _asset_service = _make_vm(
+        library_root=library_root,
+        people_service=PeopleService(library_root),
+    )
     vm.open_pinned_people_query(
         AssetQuery(asset_ids=["asset-a"]),
         kind="person",

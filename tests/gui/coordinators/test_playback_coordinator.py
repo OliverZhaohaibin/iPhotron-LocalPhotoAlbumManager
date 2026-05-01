@@ -397,6 +397,32 @@ def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
 
 
+def test_set_people_library_root_recreates_bound_service_with_asset_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = playback_coordinator_module.PeopleService()
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    library_root = Path("/fake/library")
+    recreated_service = playback_coordinator_module.PeopleService(
+        library_root,
+        asset_repository=Mock(),
+    )
+    create_service = Mock(return_value=recreated_service)
+    monkeypatch.setattr(
+        playback_coordinator_module,
+        "create_people_service",
+        create_service,
+    )
+
+    PlaybackCoordinator.set_people_library_root(coordinator, library_root)
+
+    assert coordinator._people_service is recreated_service
+    assert coordinator._people_service.asset_repository is not None
+    create_service.assert_called_once_with(library_root)
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+
+
 def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     overlay = Mock()

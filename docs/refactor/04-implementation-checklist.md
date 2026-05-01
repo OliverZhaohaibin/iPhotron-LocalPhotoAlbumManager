@@ -191,9 +191,10 @@
 - [x] GUI scan update flows 通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted 保留字段、stale-row reconciliation 与 Live Photo pairing follow-up。
 - [x] Recently Deleted 的 prepare/cleanup throttle 不再由 `NavigationCoordinator` 负责，而是经由 Location/Trash GUI transport adapter。
 - [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
+- [x] People pinned / cluster / cover 等 GUI runtime 入口统一优先走 bound session `people_service`，不再在 coordinator/viewmodel/controller 中重建 bootstrap factory。
 - [ ] GUI services 只保留 presentation coordination。
 - [ ] Background task manager 只保留 Qt transport。
-- [ ] People fallback 仍残留 coordinator/viewmodel touchpoints，作为下一块 GUI residual。
+- [x] People fallback GUI residual 已收口；`PeopleDashboardWidget` 保留 asset-aware compatibility factory 以维持 group common-photo cover，`PlaybackCoordinator` / `ManualFaceAddWorker` 仅保留 compatibility-only fallback。
 
 完成条件：
 
@@ -212,6 +213,7 @@
 - [x] Restore 资产。
 - [x] Favorite/hidden 状态刷新正确。
 - [x] album cover / featured manifest 同步与 favorite state mirror 正确。
+- [x] pinned People / People cluster gallery / context-menu cover 入口通过 session-bound People service 回归通过。
 
 ## 8. Phase 5 - Bounded Context Ports
 

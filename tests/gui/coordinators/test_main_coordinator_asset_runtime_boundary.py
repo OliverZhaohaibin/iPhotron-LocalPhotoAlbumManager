@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+from iPhoto.people.service import PeopleService
 
 
 def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -> None:
@@ -65,6 +66,33 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
         root,
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
+
+
+def test_on_library_tree_updated_uses_bound_people_service_when_available() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    root = Path("/library")
+    people_service = PeopleService(root)
+    people_page = MagicMock()
+
+    coordinator._context = MagicMock()
+    coordinator._context.library.root.return_value = root
+    coordinator._context.library.people_service = people_service
+    coordinator._context.library.state_repository = MagicMock()
+    coordinator._context.library.asset_query_service = MagicMock()
+    coordinator._context.asset_runtime.repository = MagicMock()
+    coordinator._context.asset_runtime.bind_library_root = MagicMock()
+    coordinator._asset_service = MagicMock()
+    coordinator._asset_list_vm = MagicMock()
+    coordinator._gallery_vm = MagicMock()
+    coordinator._logger = MagicMock()
+    coordinator._playback = MagicMock()
+    coordinator._window = MagicMock(ui=MagicMock(people_page=people_page))
+
+    coordinator._on_library_tree_updated()
+
+    people_page.set_people_service.assert_called_once_with(people_service)
+    coordinator._playback.set_people_service.assert_called_once_with(people_service)
+    coordinator._playback.set_people_library_root.assert_not_called()
 
 
 def test_handle_face_name_toggle_changed_persists_setting_and_updates_playback() -> None:

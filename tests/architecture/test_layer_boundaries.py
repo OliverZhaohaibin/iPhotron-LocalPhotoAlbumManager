@@ -101,6 +101,24 @@ def test_gui_runtime_backend_import_is_blocked(tmp_path: Path) -> None:
     )
 
 
+def test_gui_people_bootstrap_factory_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "coordinators" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.bootstrap.library_people_service import create_people_service\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI runtime imports People bootstrap factory "
+        "iPhoto.bootstrap.library_people_service" in violation
+        for violation in violations
+    )
+
+
 def test_gui_library_update_service_worker_import_is_blocked(tmp_path: Path) -> None:
     source = tmp_path / "iPhoto"
     module = source / "gui" / "services" / "library_update_service.py"

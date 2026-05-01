@@ -47,12 +47,12 @@ from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from iPhoto.gui.services.location_trash_navigation_service import (
     LocationTrashNavigationService,
 )
+from iPhoto.gui.services.people_service_resolver import resolve_people_service
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
-from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.people.service import PeopleService
 from maps.map_sources import supports_map_extension_download
 
@@ -110,20 +110,25 @@ class MainCoordinator(QObject):
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._bind_asset_service_library_surfaces(lib_root)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
-        bound_people_service = getattr(context.library, "people_service", None)
-        if isinstance(bound_people_service, PeopleService):
-            self._playback_people_service = bound_people_service
-        elif lib_root is not None:
-            self._playback_people_service = create_people_service(lib_root)
-        else:
-            self._playback_people_service = PeopleService()
+        bound_people_service = resolve_people_service(
+            context.library,
+            library_root=lib_root,
+        )
+        self._playback_people_service = bound_people_service or PeopleService()
         if hasattr(window.ui, "people_page"):
-            if hasattr(window.ui.people_page, "set_people_service"):
+            if bound_people_service is not None and hasattr(window.ui.people_page, "set_people_service"):
                 window.ui.people_page.set_people_service(self._playback_people_service)
             else:
                 window.ui.people_page.set_library_root(lib_root)
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
-        self._pinned_items_service = PinnedItemsService(context.settings, self)
+        self._pinned_items_service = PinnedItemsService(
+            context.settings,
+            people_service_getter=lambda root: resolve_people_service(
+                context.library,
+                library_root=root,
+            ),
+            parent=self,
+        )
         window.ui.sidebar.set_pinned_service(self._pinned_items_service)
         if hasattr(window.ui, "people_page"):
             window.ui.people_page.set_pinned_service(self._pinned_items_service)
@@ -576,18 +581,21 @@ class MainCoordinator(QObject):
         window = getattr(self, "_window", None)
         ui = getattr(window, "ui", None)
         people_page = getattr(ui, "people_page", None)
-        bound_people_service = getattr(self._context.library, "people_service", None)
-        if isinstance(bound_people_service, PeopleService):
+        bound_people_service = resolve_people_service(
+            self._context.library,
+            library_root=root,
+        )
+        if bound_people_service is not None:
             self._playback_people_service = bound_people_service
         if people_page is not None:
-            if isinstance(bound_people_service, PeopleService) and hasattr(people_page, "set_people_service"):
+            if bound_people_service is not None and hasattr(people_page, "set_people_service"):
                 people_page.set_people_service(bound_people_service)
             else:
                 people_page.set_library_root(root)
             people_page.set_status_message(self._context.library.face_scan_status_message())
         playback = getattr(self, "_playback", None)
         if playback is not None:
-            if isinstance(bound_people_service, PeopleService) and hasattr(playback, "set_people_service"):
+            if bound_people_service is not None and hasattr(playback, "set_people_service"):
                 playback.set_people_service(bound_people_service)
             else:
                 playback.set_people_library_root(root)

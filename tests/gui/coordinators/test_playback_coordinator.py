@@ -791,6 +791,41 @@ def test_refresh_info_panel_does_not_retry_after_session_attempt() -> None:
     coordinator._queue_info_panel_metadata_enrichment.assert_not_called()
 
 
+def test_refresh_info_panel_keeps_download_prompt_when_only_legacy_map_runtime_is_available() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock()
+    coordinator._map_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(
+            display_available=True,
+            location_search_available=False,
+            osmand_extension_available=False,
+        ),
+        package_root=lambda: Path("/fake/maps"),
+    )
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = None
+    coordinator._queue_info_panel_metadata_enrichment = Mock()
+
+    PlaybackCoordinator._refresh_info_panel(
+        coordinator,
+        {
+            "abs": "/fake/image.jpg",
+            "rel": "image.jpg",
+            "name": "image.jpg",
+            "is_video": False,
+        },
+    )
+
+    coordinator._info_panel.set_location_capability.assert_called_once_with(
+        enabled=False,
+        preview_enabled=False,
+        fallback_text=playback_coordinator_module._LOCATION_EXTENSION_PROMPT,
+    )
+
+
 def test_ready_enrichment_updates_visible_panel_for_current_asset() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._info_panel = Mock(isVisible=Mock(return_value=True))

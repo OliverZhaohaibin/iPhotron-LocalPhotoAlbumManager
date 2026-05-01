@@ -224,7 +224,7 @@ class PlaybackCoordinator(QObject):
         capabilities = self._map_runtime_capabilities()
         self._info_panel.set_location_capability(
             enabled=self._refresh_location_extension_state(),
-            preview_enabled=bool(capabilities.display_available) if capabilities is not None else False,
+            preview_enabled=self._info_panel_preview_enabled(capabilities),
             fallback_text=_LOCATION_EXTENSION_PROMPT,
         )
 
@@ -926,7 +926,7 @@ class PlaybackCoordinator(QObject):
         location_enabled = self._refresh_location_extension_state()
         self._info_panel.set_location_capability(
             enabled=location_enabled,
-            preview_enabled=bool(capabilities.display_available) if capabilities is not None else location_enabled,
+            preview_enabled=self._info_panel_preview_enabled(capabilities, location_enabled=location_enabled),
             fallback_text=_LOCATION_EXTENSION_PROMPT,
         )
         local_info = dict(info)
@@ -1001,6 +1001,19 @@ class PlaybackCoordinator(QObject):
             self._location_search_service = None
             return False
         return True
+
+    @staticmethod
+    def _info_panel_preview_enabled(
+        capabilities,
+        *,
+        location_enabled: bool = False,
+    ) -> bool:
+        if capabilities is None:
+            return bool(location_enabled)
+        return bool(
+            getattr(capabilities, "display_available", False)
+            and getattr(capabilities, "osmand_extension_available", False)
+        )
 
     def _map_runtime_capabilities(self):
         map_runtime = self._ensure_map_runtime()

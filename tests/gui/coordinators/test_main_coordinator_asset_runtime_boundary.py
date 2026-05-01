@@ -11,9 +11,11 @@ from iPhoto.people.service import PeopleService
 def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
+    map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
 
     coordinator._context = MagicMock()
     coordinator._context.library.root.return_value = root
+    coordinator._context.library.map_runtime = map_runtime
     coordinator._context.library.state_repository = MagicMock()
     coordinator._context.library.asset_query_service = MagicMock()
     coordinator._context.asset_runtime.repository = MagicMock()
@@ -22,6 +24,7 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator._asset_list_vm = MagicMock()
     coordinator._gallery_vm = MagicMock()
     coordinator._logger = MagicMock()
+    coordinator._map_extension_download = MagicMock()
     coordinator._playback = MagicMock()
     coordinator._window = MagicMock(ui=MagicMock(people_page=MagicMock()))
 
@@ -42,29 +45,35 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
     coordinator._playback.set_map_runtime.assert_called_once_with(
-        coordinator._context.library.map_runtime
+        map_runtime
+    )
+    coordinator._map_extension_download.set_package_root.assert_called_once_with(
+        Path("/session/maps").resolve()
     )
     coordinator._playback.set_people_library_root.assert_called_once_with(root)
     coordinator._window.ui.map_view.set_map_runtime.assert_called_once_with(
-        coordinator._context.library.map_runtime
+        map_runtime
     )
     coordinator._window.ui.info_panel.set_map_runtime.assert_called_once_with(
-        coordinator._context.library.map_runtime
+        map_runtime
     )
 
 
 def test_on_library_tree_updated_skips_selection_reload_in_location_context() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
+    map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
 
     coordinator._context = MagicMock()
     coordinator._context.library.root.return_value = root
+    coordinator._context.library.map_runtime = map_runtime
     coordinator._context.asset_runtime.repository = MagicMock()
     coordinator._context.asset_runtime.bind_library_root = MagicMock()
     coordinator._asset_service = MagicMock()
     coordinator._asset_list_vm = MagicMock()
     coordinator._gallery_vm = MagicMock()
     coordinator._logger = MagicMock()
+    coordinator._map_extension_download = MagicMock()
     coordinator._playback = MagicMock()
     coordinator._window = MagicMock(ui=MagicMock(people_page=MagicMock()))
 
@@ -76,7 +85,10 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
     coordinator._playback.set_map_runtime.assert_called_once_with(
-        coordinator._context.library.map_runtime
+        map_runtime
+    )
+    coordinator._map_extension_download.set_package_root.assert_called_once_with(
+        Path("/session/maps").resolve()
     )
 
 
@@ -85,10 +97,12 @@ def test_on_library_tree_updated_uses_bound_people_service_when_available() -> N
     root = Path("/library")
     people_service = PeopleService(root)
     people_page = MagicMock()
+    map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
 
     coordinator._context = MagicMock()
     coordinator._context.library.root.return_value = root
     coordinator._context.library.people_service = people_service
+    coordinator._context.library.map_runtime = map_runtime
     coordinator._context.library.state_repository = MagicMock()
     coordinator._context.library.asset_query_service = MagicMock()
     coordinator._context.asset_runtime.repository = MagicMock()
@@ -97,6 +111,7 @@ def test_on_library_tree_updated_uses_bound_people_service_when_available() -> N
     coordinator._asset_list_vm = MagicMock()
     coordinator._gallery_vm = MagicMock()
     coordinator._logger = MagicMock()
+    coordinator._map_extension_download = MagicMock()
     coordinator._playback = MagicMock()
     coordinator._window = MagicMock(ui=MagicMock(people_page=people_page))
 
@@ -104,10 +119,21 @@ def test_on_library_tree_updated_uses_bound_people_service_when_available() -> N
 
     people_page.set_people_service.assert_called_once_with(people_service)
     coordinator._playback.set_map_runtime.assert_called_once_with(
-        coordinator._context.library.map_runtime
+        map_runtime
+    )
+    coordinator._map_extension_download.set_package_root.assert_called_once_with(
+        Path("/session/maps").resolve()
     )
     coordinator._playback.set_people_service.assert_called_once_with(people_service)
     coordinator._playback.set_people_library_root.assert_not_called()
+
+
+def test_resolve_map_package_root_prefers_bound_runtime_root() -> None:
+    package_root = MainCoordinator._resolve_map_package_root(
+        SimpleNamespace(package_root=lambda: Path("/bound/maps"))
+    )
+
+    assert package_root == Path("/bound/maps").resolve()
 
 
 def test_handle_face_name_toggle_changed_persists_setting_and_updates_playback() -> None:

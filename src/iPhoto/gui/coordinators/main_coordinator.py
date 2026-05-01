@@ -83,7 +83,7 @@ class MainCoordinator(QObject):
         self._map_extension_download = MapExtensionDownloadController(
             window,
             context,
-            package_root=Path(__file__).resolve().parents[3] / "maps",
+            package_root=self._resolve_map_package_root(getattr(context.library, "map_runtime", None)),
         )
         if hasattr(window.ui, "download_map_extension_action"):
             window.ui.download_map_extension_action.setEnabled(supports_map_extension_download())
@@ -597,17 +597,37 @@ class MainCoordinator(QObject):
             else:
                 people_page.set_library_root(root)
             people_page.set_status_message(self._context.library.face_scan_status_message())
+        map_runtime = getattr(self._context.library, "map_runtime", None)
+        self._map_extension_download.set_package_root(
+            self._resolve_map_package_root(map_runtime)
+        )
         if ui is not None and hasattr(ui, "map_view"):
-            ui.map_view.set_map_runtime(getattr(self._context.library, "map_runtime", None))
+            ui.map_view.set_map_runtime(map_runtime)
         if ui is not None and hasattr(ui, "info_panel"):
-            ui.info_panel.set_map_runtime(getattr(self._context.library, "map_runtime", None))
+            ui.info_panel.set_map_runtime(map_runtime)
         playback = getattr(self, "_playback", None)
         if playback is not None:
-            playback.set_map_runtime(getattr(self._context.library, "map_runtime", None))
+            playback.set_map_runtime(map_runtime)
             if bound_people_service is not None and hasattr(playback, "set_people_service"):
                 playback.set_people_service(bound_people_service)
             else:
                 playback.set_people_library_root(root)
+
+    @staticmethod
+    def _resolve_map_package_root(map_runtime: object | None) -> Path:
+        package_root_getter = getattr(map_runtime, "package_root", None)
+        if callable(package_root_getter):
+            try:
+                package_root = package_root_getter()
+            except Exception:
+                package_root = None
+            if package_root is not None:
+                return Path(package_root).resolve()
+
+        package_root = getattr(map_runtime, "_package_root", None)
+        if package_root is not None:
+            return Path(package_root).resolve()
+        return Path(__file__).resolve().parents[3] / "maps"
 
     def _bind_asset_service_library_surfaces(self, root: Path | None) -> None:
         """Bind session-owned asset/state surfaces into the asset app service."""

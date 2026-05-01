@@ -209,6 +209,9 @@ class RuntimeContext:
         bind_people_service = getattr(self.library, "bind_people_service", None)
         if callable(bind_people_service):
             bind_people_service(self.library_session.people)
+        bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
+        if callable(bind_map_runtime):
+            bind_map_runtime(self.library_session.maps)
         return self.library_session
 
     def close_library(self) -> None:
@@ -233,6 +236,9 @@ class RuntimeContext:
         bind_people_service = getattr(self.library, "bind_people_service", None)
         if callable(bind_people_service):
             bind_people_service(None)
+        bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
+        if callable(bind_map_runtime):
+            bind_map_runtime(None)
 
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):

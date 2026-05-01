@@ -221,6 +221,7 @@ class MainCoordinator(QObject):
             people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
+            map_runtime=getattr(context.library, "map_runtime", None),
         )
 
         # Inject optional dependencies into Playback
@@ -231,10 +232,13 @@ class MainCoordinator(QObject):
         )
         # Manually attach info panel if available
         if hasattr(window.ui, "info_panel"):
+            window.ui.info_panel.set_map_runtime(getattr(context.library, "map_runtime", None))
             self._playback.set_info_panel(window.ui.info_panel)
             window.ui.info_panel.downloadMapExtensionRequested.connect(
                 lambda: self._map_extension_download.start_download(source="info_panel")
             )
+        if hasattr(window.ui, "map_view"):
+            window.ui.map_view.set_map_runtime(getattr(context.library, "map_runtime", None))
 
         # 4. Theme Controller
         self._theme_controller = WindowThemeController(window.ui, window, context.theme)
@@ -593,8 +597,13 @@ class MainCoordinator(QObject):
             else:
                 people_page.set_library_root(root)
             people_page.set_status_message(self._context.library.face_scan_status_message())
+        if ui is not None and hasattr(ui, "map_view"):
+            ui.map_view.set_map_runtime(getattr(self._context.library, "map_runtime", None))
+        if ui is not None and hasattr(ui, "info_panel"):
+            ui.info_panel.set_map_runtime(getattr(self._context.library, "map_runtime", None))
         playback = getattr(self, "_playback", None)
         if playback is not None:
+            playback.set_map_runtime(getattr(self._context.library, "map_runtime", None))
             if bound_people_service is not None and hasattr(playback, "set_people_service"):
                 playback.set_people_service(bound_people_service)
             else:

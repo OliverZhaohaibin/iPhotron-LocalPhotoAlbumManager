@@ -41,7 +41,16 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
         root,
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
+    coordinator._playback.set_map_runtime.assert_called_once_with(
+        coordinator._context.library.map_runtime
+    )
     coordinator._playback.set_people_library_root.assert_called_once_with(root)
+    coordinator._window.ui.map_view.set_map_runtime.assert_called_once_with(
+        coordinator._context.library.map_runtime
+    )
+    coordinator._window.ui.info_panel.set_map_runtime.assert_called_once_with(
+        coordinator._context.library.map_runtime
+    )
 
 
 def test_on_library_tree_updated_skips_selection_reload_in_location_context() -> None:
@@ -66,6 +75,9 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
         root,
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
+    coordinator._playback.set_map_runtime.assert_called_once_with(
+        coordinator._context.library.map_runtime
+    )
 
 
 def test_on_library_tree_updated_uses_bound_people_service_when_available() -> None:
@@ -91,6 +103,9 @@ def test_on_library_tree_updated_uses_bound_people_service_when_available() -> N
     coordinator._on_library_tree_updated()
 
     people_page.set_people_service.assert_called_once_with(people_service)
+    coordinator._playback.set_map_runtime.assert_called_once_with(
+        coordinator._context.library.map_runtime
+    )
     coordinator._playback.set_people_service.assert_called_once_with(people_service)
     coordinator._playback.set_people_library_root.assert_not_called()
 

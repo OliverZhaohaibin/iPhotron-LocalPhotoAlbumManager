@@ -12,12 +12,13 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QLocale, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
-from iPhoto.bootstrap.library_people_service import create_people_service
+from iPhoto.application.ports import MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.ui.tasks.assign_location_worker import (
     AssignLocationRequest,
     AssignLocationWorker,
 )
+from iPhoto.infrastructure.services.map_runtime_service import SessionMapRuntimeService
 from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
@@ -35,7 +36,6 @@ from iPhoto.io import sidecar
 from iPhoto.library.manager import LibraryManager
 from iPhoto.people.repository import AssetFaceAnnotation
 from iPhoto.people.service import PeopleService
-from maps.map_sources import has_usable_osmand_search_extension
 from maps.osmand_search import OsmAndSearchService, SearchSuggestion
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ LOGGER = logging.getLogger(__name__)
 _INFO_PANEL_METADATA_CACHE_MAX = 200
 _LOCATION_SEARCH_RESULT_LIMIT = 5
 _LOCATION_SEARCH_DEBOUNCE_MS = 80
-_LOCATION_EXTENSION_PROMPT = "如需Assign a Location功能请下载map extension"
+_LOCATION_EXTENSION_PROMPT = "Install the map extension to use Assign a Location."
 _LOCATION_EXIFTOOL_LIMITED_TITLE = "功能受限"
 _LOCATION_EXIFTOOL_LIMITED_MESSAGE = (
     "地点已保存到本机图库数据库。\n\n"
@@ -100,6 +100,7 @@ class PlaybackCoordinator(QObject):
         people_dashboard_refresh_callback: Callable[[], None] | None = None,
         library_manager: LibraryManager | None = None,
         location_session_invalidator: Callable[[], None] | None = None,
+        map_runtime: MapRuntimePort | None = None,
     ) -> None:
         super().__init__()
         self._player_bar = player_bar
@@ -129,6 +130,7 @@ class PlaybackCoordinator(QObject):
         self._people_dashboard_refresh_callback = people_dashboard_refresh_callback
         self._library_manager = library_manager
         self._location_session_invalidator = location_session_invalidator
+        self._map_runtime = map_runtime or getattr(library_manager, "map_runtime", None)
 
         self._is_playing = False
         self._navigation: NavigationCoordinator | None = None
@@ -196,14 +198,35 @@ class PlaybackCoordinator(QObject):
         service_matches_root = (
             isinstance(people_service, PeopleService)
             and people_service.library_root() == library_root
-            and (library_root is None or people_service.asset_repository is not None)
         )
         if not service_matches_root:
-            if library_root is None:
+            bound_people_service = getattr(self._library_manager, "people_service", None)
+            if (
+                isinstance(bound_people_service, PeopleService)
+                and bound_people_service.library_root() == library_root
+            ):
+                self._people_service = bound_people_service
+            elif library_root is None:
                 self._people_service = PeopleService()
             else:
-                self._people_service = create_people_service(library_root)
+                self._people_service = PeopleService(library_root)
         self._refresh_face_name_overlay_for_current_presentation()
+
+    def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
+        """Bind the current session map runtime capability surface."""
+
+        previous_package_root = self._map_runtime_package_root()
+        self._map_runtime = map_runtime or getattr(self._library_manager, "map_runtime", None)
+        if self._map_runtime_package_root() != previous_package_root:
+            self._reset_location_search_service()
+        if self._info_panel is None or self._info_panel.current_rel() is None:
+            return
+        capabilities = self._map_runtime_capabilities()
+        self._info_panel.set_location_capability(
+            enabled=self._refresh_location_extension_state(),
+            preview_enabled=bool(capabilities.display_available) if capabilities is not None else False,
+            fallback_text=_LOCATION_EXTENSION_PROMPT,
+        )
 
     def set_face_name_display_enabled(self, enabled: bool) -> None:
         self._show_face_names = bool(enabled)
@@ -899,9 +922,11 @@ class PlaybackCoordinator(QObject):
         if not self._info_panel:
             return
         self._ensure_info_panel_metadata_state()
+        capabilities = self._map_runtime_capabilities()
         location_enabled = self._refresh_location_extension_state()
         self._info_panel.set_location_capability(
             enabled=location_enabled,
+            preview_enabled=bool(capabilities.display_available) if capabilities is not None else location_enabled,
             fallback_text=_LOCATION_EXTENSION_PROMPT,
         )
         local_info = dict(info)
@@ -956,32 +981,80 @@ class PlaybackCoordinator(QObject):
             )
 
     def _refresh_location_extension_state(self) -> bool:
-        enabled = has_usable_osmand_search_extension()
+        enabled = False
+        capabilities = self._map_runtime_capabilities()
+        if capabilities is not None:
+            enabled = bool(capabilities.location_search_available)
         if not enabled:
-            location_timer = getattr(self, "_location_search_timer", None)
-            if location_timer is not None:
-                location_timer.stop()
-            self._pending_location_query = ""
-            self._location_search_target_path = None
-            location_cache = getattr(self, "_location_search_cache", None)
-            if location_cache is not None:
-                location_cache.clear()
-            location_service = getattr(self, "_location_search_service", None)
-            if location_service is not None:
-                location_service.shutdown()
-                self._location_search_service = None
+            self._reset_location_search_service()
             return False
 
         if getattr(self, "_location_search_service", None) is not None:
             return True
 
         try:
-            self._location_search_service = OsmAndSearchService()
+            self._location_search_service = OsmAndSearchService(
+                package_root=self._map_runtime_package_root(),
+            )
         except Exception:  # noqa: BLE001
             LOGGER.warning("Failed to initialize offline location search", exc_info=True)
             self._location_search_service = None
             return False
         return True
+
+    def _map_runtime_capabilities(self):
+        map_runtime = self._ensure_map_runtime()
+        capabilities_getter = getattr(map_runtime, "capabilities", None)
+        if callable(capabilities_getter):
+            return capabilities_getter()
+        return None
+
+    def _map_runtime_package_root(self) -> Path | None:
+        map_runtime = self._ensure_map_runtime()
+        package_root_getter = getattr(map_runtime, "package_root", None)
+        if callable(package_root_getter):
+            try:
+                package_root = package_root_getter()
+            except Exception:
+                LOGGER.debug("Failed to resolve playback map runtime package root", exc_info=True)
+            else:
+                if package_root is not None:
+                    return Path(package_root)
+        package_root = getattr(map_runtime, "_package_root", None)
+        if package_root is not None:
+            return Path(package_root)
+        return None
+
+    def _ensure_map_runtime(self) -> MapRuntimePort | None:
+        map_runtime = getattr(self, "_map_runtime", None)
+        if map_runtime is not None:
+            return map_runtime
+        library_manager = getattr(self, "_library_manager", None)
+        library_runtime = getattr(library_manager, "map_runtime", None)
+        if library_runtime is not None:
+            self._map_runtime = library_runtime
+            return library_runtime
+        try:
+            fallback_runtime = SessionMapRuntimeService()
+        except Exception:
+            LOGGER.debug("Failed to create fallback session map runtime", exc_info=True)
+            return None
+        self._map_runtime = fallback_runtime
+        return fallback_runtime
+
+    def _reset_location_search_service(self) -> None:
+        location_timer = getattr(self, "_location_search_timer", None)
+        if location_timer is not None:
+            location_timer.stop()
+        self._pending_location_query = ""
+        self._location_search_target_path = None
+        location_cache = getattr(self, "_location_search_cache", None)
+        if location_cache is not None:
+            location_cache.clear()
+        location_service = getattr(self, "_location_search_service", None)
+        if location_service is not None:
+            location_service.shutdown()
+            self._location_search_service = None
 
     def _normalize_location_query(self, query: str) -> str:
         return " ".join(query.split()).casefold()

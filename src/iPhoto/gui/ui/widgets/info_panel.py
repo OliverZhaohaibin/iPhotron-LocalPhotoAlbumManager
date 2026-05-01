@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
+from ....application.ports import MapRuntimePort
 
 from ..icons import load_icon
 from ..menus.core import MenuActionSpec, MenuContext, populate_menu
@@ -393,6 +394,7 @@ class InfoPanel(QWidget):
         self._post_show_reflow_queued = False
         self._post_show_reflow_recenter = False
         self._location_capability_enabled = False
+        self._location_preview_enabled = False
         self._location_fallback_text = "Install the map extension to use Assign a Location."
         self._location_suggestions: list[object] = []
         self._selected_location_suggestion: object | None = None
@@ -656,10 +658,28 @@ class InfoPanel(QWidget):
 
         return self._close_button
 
-    def set_location_capability(self, *, enabled: bool, fallback_text: str | None = None) -> None:
+    def set_location_capability(
+        self,
+        *,
+        enabled: bool,
+        preview_enabled: bool | None = None,
+        fallback_text: str | None = None,
+    ) -> None:
         self._location_capability_enabled = bool(enabled)
+        self._location_preview_enabled = (
+            bool(preview_enabled)
+            if preview_enabled is not None
+            else self._location_capability_enabled
+        )
         if isinstance(fallback_text, str) and fallback_text.strip():
             self._location_fallback_text = fallback_text.strip()
+        self._apply_location_metadata(self._metadata or {}, previous_rel=self._current_rel)
+        self._refresh_panel_geometry()
+
+    def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
+        """Forward the active session map runtime to the embedded mini-map."""
+
+        self._location_map.set_map_runtime(map_runtime)
         self._apply_location_metadata(self._metadata or {}, previous_rel=self._current_rel)
         self._refresh_panel_geometry()
 
@@ -784,20 +804,37 @@ class InfoPanel(QWidget):
         if previous_rel != self._current_rel:
             self._clear_location_results()
             self._location_dirty = False
+        gps = metadata.get("gps")
+        has_valid_gps = False
+        if isinstance(gps, dict):
+            latitude = gps.get("lat")
+            longitude = gps.get("lon")
+            has_valid_gps = isinstance(latitude, (int, float)) and isinstance(longitude, (int, float))
+
         if not self._location_capability_enabled:
             self._clear_location_results()
             self._location_editor_row.hide()
             self._location_results.hide()
-            self._location_map.hide()
-            self._location_fallback_label.setText(self._location_fallback_text)
-            self._location_fallback_label.show()
-            self._location_download_button.show()
+            if self._location_preview_enabled:
+                self._location_fallback_label.hide()
+                self._location_download_button.hide()
+                if has_valid_gps:
+                    assert isinstance(gps, dict)
+                    self._location_map.set_location(float(gps["lat"]), float(gps["lon"]))
+                    self._location_map.show()
+                else:
+                    self._location_map.clear_location()
+                    self._location_map.hide()
+            else:
+                self._location_map.hide()
+                self._location_fallback_label.setText(self._location_fallback_text)
+                self._location_fallback_label.show()
+                self._location_download_button.show()
             return
 
         self._location_fallback_label.hide()
         self._location_download_button.hide()
         self._location_editor_row.show()
-        gps = metadata.get("gps")
         location_text = metadata.get("location") or metadata.get("place")
         normalized_location = (
             str(location_text).strip()
@@ -819,15 +856,10 @@ class InfoPanel(QWidget):
             "Assign a Location" if not normalized_location else ""
         )
 
-        if isinstance(gps, dict):
-            latitude = gps.get("lat")
-            longitude = gps.get("lon")
-            if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
-                self._location_map.set_location(float(latitude), float(longitude))
-                self._location_map.show()
-            else:
-                self._location_map.clear_location()
-                self._location_map.hide()
+        if has_valid_gps:
+            assert isinstance(gps, dict)
+            self._location_map.set_location(float(gps["lat"]), float(gps["lon"]))
+            self._location_map.show()
         else:
             self._location_map.clear_location()
             self._location_map.hide()

@@ -23,6 +23,7 @@ from PySide6.QtGui import QPainter, QPainterPath, QPixmap, QRegion, QResizeEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
+from ....application.ports import MapRuntimePort
 from maps.map_sources import MapSourceSpec
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.drag_cursor import DragCursorManager
@@ -31,6 +32,7 @@ from maps.map_widget.map_widget import MapWidget
 
 from .photo_map_view import (
     _configure_opaque_map_container,
+    _choose_map_widget_backend_with_runtime,
     check_opengl_support,
     choose_map_widget_backend,
 )
@@ -117,9 +119,19 @@ class InfoLocationMapView(QWidget):
     _PIN_SYNC_EVENT = QEvent.Type(QEvent.registerEventType())
     _VIEWPORT_SYNC_EVENT = QEvent.Type(QEvent.registerEventType())
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        map_runtime: MapRuntimePort | None = None,
+    ) -> None:
         super().__init__(parent)
         _configure_opaque_map_container(self)
+        self._map_runtime = map_runtime
+        self._map_runtime_capabilities = (
+            map_runtime.capabilities() if map_runtime is not None else None
+        )
+        self._map_package_root = self._resolve_package_root(map_runtime)
         self._map_widget: MapWidgetBase | None = None
         self._map_event_targets: list[QObject] = []
         self._application_event_filter_installed = False
@@ -174,6 +186,18 @@ class InfoLocationMapView(QWidget):
 
         self._overlay = _PinOverlay(self, self._map_host)
         self._overlay.hide()
+
+    def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
+        """Bind the session-owned runtime snapshot used for mini-map creation."""
+
+        previous_package_root = self._map_package_root
+        self._map_runtime = map_runtime
+        self._map_runtime_capabilities = (
+            map_runtime.capabilities() if map_runtime is not None else None
+        )
+        self._map_package_root = self._resolve_package_root(map_runtime)
+        if self._map_widget is not None and self._map_package_root != previous_package_root:
+            self.shutdown()
 
     def map_widget(self) -> MapWidgetBase | None:
         return self._map_widget
@@ -372,6 +396,7 @@ class InfoLocationMapView(QWidget):
         return QRegion(path.toFillPolygon().toPolygon())
 
     def _sync_corner_masks(self) -> None:
+        self.setMask(self._rounded_region(self.width(), self.height()))
         host_region = self._rounded_region(self._map_host.width(), self._map_host.height())
         self._map_host.setMask(host_region)
         if isinstance(self._map_widget, QWidget):
@@ -576,12 +601,22 @@ class InfoLocationMapView(QWidget):
     def _create_map_widget(self) -> None:
         if self._map_widget is not None:
             return
-        map_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT)
-        use_opengl = check_opengl_support()
-        widget_cls, resolved_map_source, backend_kind = choose_map_widget_backend(
-            map_source,
-            use_opengl=use_opengl,
+        map_source = MapSourceSpec.osmand_default(self._map_package_root).resolved(
+            self._map_package_root
         )
+        if self._map_runtime_capabilities is not None:
+            use_opengl = self._map_runtime_capabilities.python_gl_available
+            widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_with_runtime(
+                map_source,
+                use_opengl=use_opengl,
+                runtime_capabilities=self._map_runtime_capabilities,
+            )
+        else:
+            use_opengl = check_opengl_support()
+            widget_cls, resolved_map_source, backend_kind = choose_map_widget_backend(
+                map_source,
+                use_opengl=use_opengl,
+            )
         assert resolved_map_source is not None
         try:
             self._map_widget = widget_cls(self._map_host, map_source=resolved_map_source)
@@ -630,6 +665,23 @@ class InfoLocationMapView(QWidget):
         self._sync_corner_masks()
         self._sync_overlay_geometry()
         QTimer.singleShot(0, self._sync_overlay_geometry)
+
+    @staticmethod
+    def _resolve_package_root(map_runtime: MapRuntimePort | None) -> Path:
+        package_root_getter = getattr(map_runtime, "package_root", None)
+        if callable(package_root_getter):
+            try:
+                package_root = package_root_getter()
+            except Exception:
+                LOGGER.debug("Failed to resolve info-panel mini-map package root", exc_info=True)
+            else:
+                if package_root is not None:
+                    return Path(package_root).resolve()
+
+        package_root = getattr(map_runtime, "_package_root", None)
+        if package_root is not None:
+            return Path(package_root).resolve()
+        return _MAPS_PACKAGE_ROOT.resolve()
 
     def _install_map_event_filters(self) -> None:
         self._remove_map_event_filters()

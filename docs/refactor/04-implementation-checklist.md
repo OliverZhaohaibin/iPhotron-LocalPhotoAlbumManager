@@ -229,11 +229,15 @@
 ### Maps
 
 - [x] 定义 `MapRuntimePort`。
-- [ ] 地图可用性查询通过 session。
+- [x] 地图可用性查询通过 session。
 - [x] 地理资产聚合通过 application query。
-- [ ] native runtime fallback 有测试。
+- [x] native runtime fallback 有测试。
 
-本轮仅清理 GUI 侧 Location 入口，Maps runtime 仍是部分完成，不应仅凭本轮将 `MapRuntimePort` 标记为完成。
+本轮已补齐 session-bound Maps runtime capability surface，并将
+`PhotoMapView` / `InfoLocationMapView` / `PlaybackCoordinator`
+接到同一 runtime seam；但 `LocationTrashNavigationService` 仍是临时 GUI seam，
+widget 构造仍保留在 GUI 层，因此不应仅凭本轮将整个 Maps bounded context 视为
+“完全完成”。
 
 ### Thumbnail
 
@@ -258,7 +262,7 @@
 回归测试：
 
 - [x] People scan 后名字、隐藏、分组保持。
-- [ ] Map 页面在 extension 缺失时 graceful fallback。
+- [x] Map 页面在 extension 缺失时 graceful fallback。
 - [x] Thumbnail 生成不阻塞 UI。
 - [ ] Edit sidecar 保存后重启仍可恢复。
 

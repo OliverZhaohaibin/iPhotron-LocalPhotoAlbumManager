@@ -24,6 +24,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
+from ....application.ports import MapRuntimeCapabilities, MapRuntimePort
 from maps.map_sources import (
     MapSourceSpec,
     has_usable_osmand_default,
@@ -76,10 +77,16 @@ def _opengl_explicitly_disabled() -> bool:
 def _native_widget_runtime_is_usable() -> bool:
     """Return ``True`` when the native widget files exist and load cleanly."""
 
-    if not has_usable_osmand_native_widget(_MAPS_PACKAGE_ROOT):
+    return _native_widget_runtime_is_usable_for_root(_MAPS_PACKAGE_ROOT)
+
+
+def _native_widget_runtime_is_usable_for_root(package_root: Path) -> bool:
+    """Return ``True`` when the native widget files exist and load cleanly."""
+
+    if not has_usable_osmand_native_widget(package_root):
         return False
 
-    is_available, reason = probe_native_widget_runtime(_MAPS_PACKAGE_ROOT)
+    is_available, reason = probe_native_widget_runtime(package_root)
     if not is_available and reason:
         logger.warning("Native OsmAnd widget runtime probe failed: %s", reason)
     return is_available
@@ -130,8 +137,11 @@ def check_opengl_support() -> bool:
         return False
 
 
-def _resolve_map_source(map_source: MapSourceSpec) -> MapSourceSpec:
-    return map_source.resolved(_MAPS_PACKAGE_ROOT)
+def _resolve_map_source(
+    map_source: MapSourceSpec,
+    package_root: Path = _MAPS_PACKAGE_ROOT,
+) -> MapSourceSpec:
+    return map_source.resolved(package_root)
 
 
 def _has_resolved_osmand_assets(map_source: MapSourceSpec) -> bool:
@@ -159,18 +169,24 @@ def choose_map_widget_backend(
     map_source: MapSourceSpec | None,
     *,
     use_opengl: bool,
+    runtime_capabilities: MapRuntimeCapabilities | None = None,
+    package_root: Path = _MAPS_PACKAGE_ROOT,
 ) -> tuple[type[MapWidgetBase], MapSourceSpec | None, str]:
     """Return the preferred widget class and source for the photo map view."""
 
     python_widget_cls = _preferred_python_widget_class(use_opengl=use_opengl)
     native_widget_usable = (
-        not _opengl_explicitly_disabled()
-        and prefer_osmand_native_widget()
-        and _native_widget_runtime_is_usable()
+        runtime_capabilities.native_widget_available
+        if runtime_capabilities is not None
+        else (
+            not _opengl_explicitly_disabled()
+            and prefer_osmand_native_widget()
+            and _native_widget_runtime_is_usable_for_root(package_root)
+        )
     )
 
     if map_source is not None:
-        resolved_map_source = _resolve_map_source(map_source)
+        resolved_map_source = _resolve_map_source(map_source, package_root)
         if resolved_map_source.kind == "osmand_obf":
             if native_widget_usable:
                 return NativeOsmAndWidget, resolved_map_source, "osmand_native"
@@ -178,15 +194,90 @@ def choose_map_widget_backend(
 
         return python_widget_cls, resolved_map_source, "legacy_python"
 
-    default_osmand_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT).resolved(_MAPS_PACKAGE_ROOT)
-    if _has_resolved_osmand_assets(default_osmand_source):
+    default_osmand_source = MapSourceSpec.osmand_default(package_root).resolved(package_root)
+    osmand_assets_available = (
+        runtime_capabilities.osmand_extension_available
+        if runtime_capabilities is not None
+        else _has_resolved_osmand_assets(default_osmand_source)
+    )
+    if osmand_assets_available:
         if native_widget_usable:
             return NativeOsmAndWidget, default_osmand_source, "osmand_native"
-        if has_usable_osmand_default(_MAPS_PACKAGE_ROOT):
+        if runtime_capabilities is not None or has_usable_osmand_default(package_root):
             return python_widget_cls, default_osmand_source, "osmand_python"
 
-    legacy_source = MapSourceSpec.legacy_default(_MAPS_PACKAGE_ROOT).resolved(_MAPS_PACKAGE_ROOT)
+    legacy_source = MapSourceSpec.legacy_default(package_root).resolved(package_root)
     return python_widget_cls, legacy_source, "legacy_python"
+
+
+def _choose_map_widget_backend_with_runtime(
+    map_source: MapSourceSpec | None,
+    *,
+    use_opengl: bool,
+    runtime_capabilities: MapRuntimeCapabilities,
+    package_root: Path = _MAPS_PACKAGE_ROOT,
+) -> tuple[type[MapWidgetBase], MapSourceSpec | None, str]:
+    try:
+        return choose_map_widget_backend(
+            map_source,
+            use_opengl=use_opengl,
+            runtime_capabilities=runtime_capabilities,
+            package_root=package_root,
+        )
+    except TypeError as exc:
+        if "runtime_capabilities" not in str(exc) and "package_root" not in str(exc):
+            raise
+        try:
+            return choose_map_widget_backend(
+                map_source,
+                use_opengl=use_opengl,
+                runtime_capabilities=runtime_capabilities,
+            )
+        except TypeError as inner_exc:
+            if "runtime_capabilities" not in str(inner_exc):
+                raise
+            return choose_map_widget_backend(
+                map_source,
+                use_opengl=use_opengl,
+            )
+
+
+def _choose_map_widget_backend_for_root(
+    map_source: MapSourceSpec | None,
+    *,
+    use_opengl: bool,
+    package_root: Path,
+) -> tuple[type[MapWidgetBase], MapSourceSpec | None, str]:
+    try:
+        return choose_map_widget_backend(
+            map_source,
+            use_opengl=use_opengl,
+            package_root=package_root,
+        )
+    except TypeError as exc:
+        if "package_root" not in str(exc):
+            raise
+        return choose_map_widget_backend(
+            map_source,
+            use_opengl=use_opengl,
+        )
+
+
+def _resolve_package_root(map_runtime: MapRuntimePort | None) -> Path:
+    package_root_getter = getattr(map_runtime, "package_root", None)
+    if callable(package_root_getter):
+        try:
+            package_root = package_root_getter()
+        except Exception:
+            logger.debug("Failed to resolve photo map package root", exc_info=True)
+        else:
+            if package_root is not None:
+                return Path(package_root).resolve()
+
+    package_root = getattr(map_runtime, "_package_root", None)
+    if package_root is not None:
+        return Path(package_root).resolve()
+    return _MAPS_PACKAGE_ROOT.resolve()
 
 
 def _confirmed_gl_state(
@@ -443,115 +534,27 @@ class PhotoMapView(QWidget):
         parent: Optional[QWidget] = None,
         *,
         map_source: MapSourceSpec | None = None,
+        map_runtime: MapRuntimePort | None = None,
     ) -> None:
         super().__init__(parent)
         _configure_opaque_map_container(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
+        self._layout = layout
+        self._requested_map_source = map_source
+        self._map_runtime = map_runtime
+        self._map_runtime_capabilities = (
+            map_runtime.capabilities() if map_runtime is not None else None
+        )
+        self._map_package_root = _resolve_package_root(map_runtime)
         self._map_widget: MapWidgetBase
-        use_opengl = check_opengl_support()
-        widget_cls, resolved_map_source, backend_kind = choose_map_widget_backend(
-            map_source,
-            use_opengl=use_opengl,
-        )
-
-        assert resolved_map_source is not None
-        try:
-            self._map_widget = widget_cls(self, map_source=resolved_map_source)
-        except Exception as exc:
-            if backend_kind == "osmand_native":
-                logger.warning(
-                    "Native OsmAnd widget unavailable, falling back to the Python OBF renderer: %s",
-                    exc,
-                )
-                fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
-                try:
-                    self._map_widget = fallback_cls(self, map_source=resolved_map_source)
-                except Exception as fallback_exc:
-                    if not use_opengl:
-                        raise
-                    logger.warning(
-                        "OpenGL OBF fallback unavailable, falling back to the CPU renderer: %s",
-                        fallback_exc,
-                    )
-                    self._map_widget = MapWidget(self, map_source=resolved_map_source)
-                backend_kind = "osmand_python"
-            elif widget_cls in {MapGLWidget, MapGLWindowWidget}:
-                logger.warning(
-                    "OpenGL photo map unavailable, falling back to the CPU renderer: %s",
-                    exc,
-                )
-                self._map_widget = MapWidget(self, map_source=resolved_map_source)
-            else:
-                raise
-
-        actual_uses_gl = _confirmed_gl_state(
-            self._map_widget,
-            backend_kind=backend_kind,
-        ) == "true"
-        if backend_kind == "osmand_native":
-            logger.info("Photo map initialised with the native OsmAnd OBF backend.")
-        elif resolved_map_source.kind == "osmand_obf":
-            if actual_uses_gl:
-                logger.info("Photo map initialised with the OsmAnd OBF backend (GPU fallback).")
-            else:
-                logger.info("Photo map initialised with the OsmAnd OBF backend (CPU fallback).")
-        elif actual_uses_gl:
-            logger.info("Photo map initialised with GPU acceleration enabled.")
-        elif use_opengl:
-            logger.info("Photo map initialised with the legacy CPU map backend.")
-        else:
-            logger.info("Photo map using CPU rendering because OpenGL is unavailable.")
-        layout.addWidget(self._map_widget)
-
+        self._map_event_target: QWidget | None = None
+        self._resolved_map_source: MapSourceSpec | None = None
+        self._backend_kind = "unavailable"
         self._marker_paint_callback = None
-        add_post_render_painter = getattr(self._map_widget, "add_post_render_painter", None)
-        supports_post_render_painter = getattr(
-            self._map_widget,
-            "supports_post_render_painter",
-            lambda: True,
-        )
-        if callable(add_post_render_painter) and supports_post_render_painter():
-            self._overlay = _GLMarkerLayer(self._map_widget)
-            self._marker_paint_callback = self._overlay.paint_markers
-            add_post_render_painter(self._marker_paint_callback)
-        else:
-            self._overlay = _MarkerLayer(self)
-            self._overlay.setGeometry(self._map_widget.geometry())
-            self._overlay.raise_()
-
-        self._map_event_target = cast(QWidget, self._map_widget.event_target())
-        self._map_event_target.installEventFilter(self)
-        self._runtime_diagnostics = format_map_runtime_diagnostics(
-            self._map_widget,
-            backend_kind=backend_kind,
-            map_source=resolved_map_source,
-        )
-        logger.info(self._runtime_diagnostics)
-        print(self._runtime_diagnostics, flush=True)
-
-        self._thumbnail_loader = ThumbnailLoader(self)
-        self._marker_controller = MarkerController(
-            self._map_widget,
-            self._thumbnail_loader,
-            marker_size=self._overlay.marker_size,
-            thumbnail_size=self._overlay.thumbnail_size,
-            provides_place_labels=self._map_widget.map_backend_metadata().provides_place_labels,
-            parent=self,
-        )
-
-        self._map_widget.viewChanged.connect(self._marker_controller.handle_view_changed)
-        self._map_widget.panned.connect(self._marker_controller.handle_pan)
-        self._map_widget.panFinished.connect(self._marker_controller.handle_pan_finished)
-        self._thumbnail_loader.ready.connect(self._marker_controller.handle_thumbnail_ready)
-        self._marker_controller.clustersUpdated.connect(self._overlay.set_clusters)
-        self._marker_controller.citiesUpdated.connect(self._handle_city_annotations)
-        self._marker_controller.assetActivated.connect(self._on_marker_asset_activated)
-        self._marker_controller.clusterActivated.connect(self._on_cluster_activated)
-        self._marker_controller.thumbnailUpdated.connect(self._overlay.set_thumbnail)
-        self._marker_controller.thumbnailsInvalidated.connect(self._overlay.clear_pixmaps)
+        self._assets: list[GeotaggedAsset] = []
+        self._assets_library_root: Path | None = None
 
         # ``FloatingToolTip`` replicates ``QToolTip`` using a styled ``QFrame``
         # instead of a custom paint routine.  The standard tooltip inherits the
@@ -572,6 +575,8 @@ class PhotoMapView(QWidget):
                 # popup itself.
                 filter_candidate.ignore_object(self._tooltip)
         self._last_tooltip_text = ""
+        self._thumbnail_loader = ThumbnailLoader(self)
+        self._build_map_widget()
 
     @Slot(str)
     def _on_marker_asset_activated(self, asset: str) -> None:
@@ -590,6 +595,22 @@ class PhotoMapView(QWidget):
 
         return self._map_widget
 
+    def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
+        """Bind the session-owned map runtime snapshot for later refreshes."""
+
+        previous_capabilities = self._map_runtime_capabilities
+        previous_package_root = self._map_package_root
+        self._map_runtime = map_runtime
+        self._map_runtime_capabilities = (
+            map_runtime.capabilities() if map_runtime is not None else None
+        )
+        self._map_package_root = _resolve_package_root(map_runtime)
+        if (
+            self._map_runtime_capabilities != previous_capabilities
+            or self._map_package_root != previous_package_root
+        ):
+            self._rebuild_map_widget()
+
     def uses_native_osmand_widget(self) -> bool:
         """Return ``True`` when the current backend is the native GL widget."""
 
@@ -603,7 +624,9 @@ class PhotoMapView(QWidget):
     def set_assets(self, assets: Iterable[GeotaggedAsset], library_root: Path) -> None:
         """Replace the asset catalogue shown on the map."""
 
-        self._marker_controller.set_assets(assets, library_root)
+        self._assets = list(assets)
+        self._assets_library_root = library_root
+        self._marker_controller.set_assets(self._assets, library_root)
 
     def clear(self) -> None:
         """Remove all markers from the map."""
@@ -611,6 +634,8 @@ class PhotoMapView(QWidget):
         if self._last_tooltip_text:
             self._tooltip.hide_tooltip()
             self._last_tooltip_text = ""
+        self._assets = []
+        self._assets_library_root = None
         self._marker_controller.clear()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -686,24 +711,164 @@ class PhotoMapView(QWidget):
             self._last_tooltip_text = ""
         self._tooltip.hide_tooltip()
         self._tooltip.deleteLater()
-        if self._map_event_target is not None:
-            self._map_event_target.removeEventFilter(self)
-        remove_post_render_painter = getattr(self._map_widget, "remove_post_render_painter", None)
-        if self._marker_paint_callback is not None and callable(remove_post_render_painter):
-            remove_post_render_painter(self._marker_paint_callback)
-        # ``MarkerController`` maintains a worker thread that aggregates marker clusters.
-        # Explicitly shutting it down prevents the Qt event loop from waiting indefinitely.
-        self._marker_controller.shutdown()
-        # The map widget owns a ``TileManager`` that runs in a separate ``QThread`` to
-        # stream map tiles.  If the thread is not told to exit, the application process
-        # keeps running after the window closes, so we must always shut it down here.
-        self._map_widget.shutdown()
+        self._teardown_map_widget()
         super().closeEvent(event)
 
     def _handle_city_annotations(self, cities: Iterable[CityAnnotation]) -> None:
         """Forward city annotations to the map widget for background rendering."""
 
         self._map_widget.set_city_annotations(list(cities))
+
+    def _build_map_widget(self) -> None:
+        if self._map_runtime_capabilities is not None:
+            use_opengl = self._map_runtime_capabilities.python_gl_available
+            widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_with_runtime(
+                self._requested_map_source,
+                use_opengl=use_opengl,
+                runtime_capabilities=self._map_runtime_capabilities,
+                package_root=self._map_package_root,
+            )
+        else:
+            use_opengl = check_opengl_support()
+            widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_for_root(
+                self._requested_map_source,
+                use_opengl=use_opengl,
+                package_root=self._map_package_root,
+            )
+
+        assert resolved_map_source is not None
+        try:
+            self._map_widget = widget_cls(self, map_source=resolved_map_source)
+        except Exception as exc:
+            if backend_kind == "osmand_native":
+                logger.warning(
+                    "Native OsmAnd widget unavailable, falling back to the Python OBF renderer: %s",
+                    exc,
+                )
+                fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
+                try:
+                    self._map_widget = fallback_cls(self, map_source=resolved_map_source)
+                except Exception as fallback_exc:
+                    if not use_opengl:
+                        raise
+                    logger.warning(
+                        "OpenGL OBF fallback unavailable, falling back to the CPU renderer: %s",
+                        fallback_exc,
+                    )
+                    self._map_widget = MapWidget(self, map_source=resolved_map_source)
+                backend_kind = "osmand_python"
+            elif widget_cls in {MapGLWidget, MapGLWindowWidget}:
+                logger.warning(
+                    "OpenGL photo map unavailable, falling back to the CPU renderer: %s",
+                    exc,
+                )
+                self._map_widget = MapWidget(self, map_source=resolved_map_source)
+            else:
+                raise
+
+        self._backend_kind = backend_kind
+        self._resolved_map_source = resolved_map_source
+        actual_uses_gl = _confirmed_gl_state(
+            self._map_widget,
+            backend_kind=backend_kind,
+        ) == "true"
+        if backend_kind == "osmand_native":
+            logger.info("Photo map initialised with the native OsmAnd OBF backend.")
+        elif resolved_map_source.kind == "osmand_obf":
+            if actual_uses_gl:
+                logger.info("Photo map initialised with the OsmAnd OBF backend (GPU fallback).")
+            else:
+                logger.info("Photo map initialised with the OsmAnd OBF backend (CPU fallback).")
+        elif actual_uses_gl:
+            logger.info("Photo map initialised with GPU acceleration enabled.")
+        elif use_opengl:
+            logger.info("Photo map initialised with the legacy CPU map backend.")
+        else:
+            logger.info("Photo map using CPU rendering because OpenGL is unavailable.")
+        if self._map_runtime_capabilities is not None:
+            logger.info("Photo map runtime capability: %s", self._map_runtime_capabilities.status_message)
+        self._layout.addWidget(self._map_widget)
+
+        add_post_render_painter = getattr(self._map_widget, "add_post_render_painter", None)
+        supports_post_render_painter = getattr(
+            self._map_widget,
+            "supports_post_render_painter",
+            lambda: True,
+        )
+        if callable(add_post_render_painter) and supports_post_render_painter():
+            self._overlay = _GLMarkerLayer(self._map_widget)
+            self._marker_paint_callback = self._overlay.paint_markers
+            add_post_render_painter(self._marker_paint_callback)
+        else:
+            self._overlay = _MarkerLayer(self)
+            self._overlay.setGeometry(self._map_widget.geometry())
+            self._overlay.raise_()
+
+        self._map_event_target = cast(QWidget, self._map_widget.event_target())
+        self._map_event_target.installEventFilter(self)
+        self._runtime_diagnostics = format_map_runtime_diagnostics(
+            self._map_widget,
+            backend_kind=backend_kind,
+            map_source=resolved_map_source,
+        )
+        logger.info(self._runtime_diagnostics)
+        print(self._runtime_diagnostics, flush=True)
+
+        self._marker_controller = MarkerController(
+            self._map_widget,
+            self._thumbnail_loader,
+            marker_size=self._overlay.marker_size,
+            thumbnail_size=self._overlay.thumbnail_size,
+            provides_place_labels=self._map_widget.map_backend_metadata().provides_place_labels,
+            parent=self,
+        )
+
+        self._map_widget.viewChanged.connect(self._marker_controller.handle_view_changed)
+        self._map_widget.panned.connect(self._marker_controller.handle_pan)
+        self._map_widget.panFinished.connect(self._marker_controller.handle_pan_finished)
+        self._thumbnail_loader.ready.connect(self._marker_controller.handle_thumbnail_ready)
+        self._marker_controller.clustersUpdated.connect(self._overlay.set_clusters)
+        self._marker_controller.citiesUpdated.connect(self._handle_city_annotations)
+        self._marker_controller.assetActivated.connect(self._on_marker_asset_activated)
+        self._marker_controller.clusterActivated.connect(self._on_cluster_activated)
+        self._marker_controller.thumbnailUpdated.connect(self._overlay.set_thumbnail)
+        self._marker_controller.thumbnailsInvalidated.connect(self._overlay.clear_pixmaps)
+        if self._assets_library_root is not None:
+            self._marker_controller.set_assets(self._assets, self._assets_library_root)
+
+    def _teardown_map_widget(self) -> None:
+        if self._map_event_target is not None:
+            self._map_event_target.removeEventFilter(self)
+            self._map_event_target = None
+        if self._marker_paint_callback is not None:
+            remove_post_render_painter = getattr(self._map_widget, "remove_post_render_painter", None)
+            if callable(remove_post_render_painter):
+                remove_post_render_painter(self._marker_paint_callback)
+            self._marker_paint_callback = None
+        if hasattr(self, "_marker_controller"):
+            # ``MarkerController`` maintains a worker thread that aggregates marker clusters.
+            # Explicitly shutting it down prevents the Qt event loop from waiting indefinitely.
+            self._marker_controller.shutdown()
+            self._marker_controller.deleteLater()
+        if hasattr(self, "_overlay"):
+            self._overlay.hide()
+            self._overlay.deleteLater()
+        # The map widget owns a ``TileManager`` that runs in a separate ``QThread`` to
+        # stream map tiles.  If the thread is not told to exit, the application process
+        # keeps running after the window closes, so we must always shut it down here.
+        self._layout.removeWidget(self._map_widget)
+        self._map_widget.shutdown()
+        self._map_widget.hide()
+        self._map_widget.setParent(None)
+        self._map_widget.deleteLater()
+
+    def _rebuild_map_widget(self) -> None:
+        if self._last_tooltip_text:
+            self._tooltip.hide_tooltip()
+            self._last_tooltip_text = ""
+        if hasattr(self, "_map_widget"):
+            self._teardown_map_widget()
+        self._build_map_widget()
 
 
 __all__ = ["PhotoMapView"]

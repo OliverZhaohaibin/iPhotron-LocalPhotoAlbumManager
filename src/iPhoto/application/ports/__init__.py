@@ -15,7 +15,12 @@ from .repositories import (
     AssetRepositoryPort,
     LibraryStateRepositoryPort,
 )
-from .runtime import MapRuntimePort, TaskSchedulerPort
+from .runtime import (
+    MapBackendKind,
+    MapRuntimeCapabilities,
+    MapRuntimePort,
+    TaskSchedulerPort,
+)
 
 __all__ = [
     "AlbumRepositoryPort",
@@ -24,6 +29,8 @@ __all__ = [
     "EditSidecarPort",
     "LibraryStateRepositoryPort",
     "LocationMetadataPort",
+    "MapBackendKind",
+    "MapRuntimeCapabilities",
     "MapRuntimePort",
     "MediaScannerPort",
     "MetadataReaderPort",

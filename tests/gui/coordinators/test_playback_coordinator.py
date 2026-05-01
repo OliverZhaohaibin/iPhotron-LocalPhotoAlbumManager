@@ -397,30 +397,108 @@ def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
 
 
-def test_set_people_library_root_recreates_bound_service_with_asset_repository(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_set_people_library_root_prefers_bound_library_manager_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._people_service = playback_coordinator_module.PeopleService()
-    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
     library_root = Path("/fake/library")
     recreated_service = playback_coordinator_module.PeopleService(
         library_root,
         asset_repository=Mock(),
     )
-    create_service = Mock(return_value=recreated_service)
-    monkeypatch.setattr(
-        playback_coordinator_module,
-        "create_people_service",
-        create_service,
-    )
+    coordinator._library_manager = SimpleNamespace(people_service=recreated_service)
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
 
     PlaybackCoordinator.set_people_library_root(coordinator, library_root)
 
     assert coordinator._people_service is recreated_service
     assert coordinator._people_service.asset_repository is not None
-    create_service.assert_called_once_with(library_root)
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+
+
+def test_refresh_location_extension_state_uses_bound_map_runtime_capabilities() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    location_search_service = object()
+    coordinator._map_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(location_search_available=True),
+        package_root=lambda: Path("/fake/maps"),
+    )
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = location_search_service
+
+    enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
+
+    assert enabled is True
+    assert coordinator._location_search_service is location_search_service
+
+
+def test_refresh_location_extension_state_initializes_search_service_with_runtime_package_root(
+    monkeypatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._map_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(location_search_available=True),
+        package_root=lambda: Path("/fake/maps"),
+    )
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = None
+
+    created_kwargs: dict[str, object] = {}
+
+    class _FakeSearchService:
+        def __init__(self, *args, **kwargs) -> None:
+            del args
+            created_kwargs.update(kwargs)
+
+    monkeypatch.setattr(playback_coordinator_module, "OsmAndSearchService", _FakeSearchService)
+
+    enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
+
+    assert enabled is True
+    assert created_kwargs["package_root"] == Path("/fake/maps")
+
+
+def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unbound(
+    monkeypatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._map_runtime = None
+    coordinator._library_manager = SimpleNamespace(map_runtime=None)
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = None
+
+    fallback_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(location_search_available=True),
+        package_root=lambda: Path("/fallback/maps"),
+    )
+    monkeypatch.setattr(
+        playback_coordinator_module,
+        "SessionMapRuntimeService",
+        lambda: fallback_runtime,
+    )
+
+    created_kwargs: dict[str, object] = {}
+
+    class _FakeSearchService:
+        def __init__(self, *args, **kwargs) -> None:
+            del args
+            created_kwargs.update(kwargs)
+
+    monkeypatch.setattr(playback_coordinator_module, "OsmAndSearchService", _FakeSearchService)
+
+    enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
+
+    assert enabled is True
+    assert coordinator._map_runtime is fallback_runtime
+    assert created_kwargs["package_root"] == Path("/fallback/maps")
 
 
 def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:

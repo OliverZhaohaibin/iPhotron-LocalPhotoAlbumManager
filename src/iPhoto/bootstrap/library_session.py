@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..application.ports import AssetRepositoryPort, LibraryStateRepositoryPort
+from ..application.ports import AssetRepositoryPort, LibraryStateRepositoryPort, MapRuntimePort
 from ..infrastructure.repositories.library_state_repository import (
     IndexStoreLibraryStateRepository,
 )
@@ -13,6 +13,7 @@ from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
 from ..infrastructure.services.location_metadata_service import (
     ExifToolLocationMetadataService,
 )
+from ..infrastructure.services.map_runtime_service import SessionMapRuntimeService
 from ..application.services.assign_location_service import AssignLocationService
 from ..people.service import PeopleService
 from .library_album_metadata_service import LibraryAlbumMetadataService
@@ -36,6 +37,7 @@ class LibrarySession:
     asset_lifecycle: LibraryAssetLifecycleService | None = None
     asset_operations: LibraryAssetOperationService | None = None
     people: PeopleService | None = None
+    maps: MapRuntimePort | None = None
     bind_asset_runtime: bool = True
 
     def __post_init__(self) -> None:
@@ -65,6 +67,8 @@ class LibrarySession:
             )
         if self.people is None:
             self.people = create_people_service(self.library_root)
+        if self.maps is None:
+            self.maps = SessionMapRuntimeService()
 
     @property
     def assets(self) -> AssetRepositoryPort:

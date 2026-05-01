@@ -40,6 +40,7 @@ from .workers.scanner_worker import ScannerWorker
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
+    from ..application.ports import MapRuntimePort
     from ..bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
@@ -111,6 +112,7 @@ class LibraryManager(
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
         self._asset_operation_service: "LibraryAssetOperationService | None" = None
         self._people_service: PeopleService | None = None
+        self._map_runtime: "MapRuntimePort | None" = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -318,6 +320,15 @@ class LibraryManager(
     @property
     def people_service(self) -> PeopleService | None:
         return self._people_service
+
+    def bind_map_runtime(self, map_runtime: "MapRuntimePort | None") -> None:
+        """Bind the current library session Maps runtime surface."""
+
+        self._map_runtime = map_runtime
+
+    @property
+    def map_runtime(self) -> "MapRuntimePort | None":
+        return self._map_runtime
 
     def _bind_people_index_coordinator(self, root: Path) -> None:
         coordinator = get_people_index_coordinator(root)

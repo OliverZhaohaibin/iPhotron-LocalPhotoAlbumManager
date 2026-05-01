@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -578,6 +579,27 @@ def test_choose_map_widget_backend_prefers_native_when_runtime_files_are_availab
     assert resolved_source.kind == "osmand_obf"
 
 
+def test_choose_map_widget_backend_uses_runtime_package_root_for_default_source(tmp_path: Path) -> None:
+    package_root = tmp_path / "session-maps"
+
+    _, resolved_source, backend_kind = photo_map_view_module.choose_map_widget_backend(
+        None,
+        use_opengl=False,
+        runtime_capabilities=SimpleNamespace(
+            native_widget_available=False,
+            osmand_extension_available=True,
+        ),
+        package_root=package_root,
+    )
+
+    assert resolved_source is not None
+    assert resolved_source.kind == "osmand_obf"
+    assert Path(resolved_source.data_path) == (
+        package_root / "tiles" / "extension" / "World_basemap_2.obf"
+    )
+    assert backend_kind == "osmand_python"
+
+
 def test_choose_map_widget_backend_still_prefers_native_when_generic_opengl_probe_failed(monkeypatch) -> None:
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
@@ -1088,5 +1110,101 @@ def test_photo_map_view_falls_back_to_cpu_widget_when_legacy_gl_init_fails(
         assert isinstance(view.map_widget(), _FallbackMapWidget)
         assert "backend=legacy_python" in view.runtime_diagnostics()
         assert "confirmed_gl=false" in view.runtime_diagnostics()
+    finally:
+        view.close()
+
+
+def test_photo_map_view_rebuilds_when_runtime_package_root_changes(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    del qapp
+
+    widget_instances: list["_RuntimeSwitchingMapWidget"] = []
+    controller_instances: list["_RecordingMarkerController"] = []
+
+    class _RuntimeSwitchingMapWidget(_FallbackMapWidget):
+        def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
+            super().__init__(parent, map_source=map_source)
+            self.received_map_source = map_source
+            self.shutdown_calls = 0
+            widget_instances.append(self)
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    class _RecordingMarkerController(_DummyMarkerController):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.set_assets_calls: list[tuple[list[object], Path]] = []
+            self.shutdown_calls = 0
+            controller_instances.append(self)
+
+        def set_assets(self, assets, library_root: Path) -> None:
+            self.set_assets_calls.append((list(assets), library_root))
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    def _runtime_backend(
+        map_source: MapSourceSpec | None,
+        *,
+        use_opengl: bool,
+        runtime_capabilities,
+        package_root: Path,
+    ) -> tuple[type[_RuntimeSwitchingMapWidget], MapSourceSpec, str]:
+        del use_opengl, runtime_capabilities
+        resolved_source = (
+            map_source.resolved(package_root)
+            if map_source is not None
+            else MapSourceSpec.osmand_default(package_root).resolved(package_root)
+        )
+        return _RuntimeSwitchingMapWidget, resolved_source, "legacy_python"
+
+    monkeypatch.setattr(photo_map_view_module, "_choose_map_widget_backend_with_runtime", _runtime_backend)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _RecordingMarkerController)
+
+    first_root = tmp_path / "maps-a"
+    second_root = tmp_path / "maps-b"
+    first_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(
+            python_gl_available=False,
+            status_message="runtime-a",
+        ),
+        package_root=lambda: first_root,
+    )
+    second_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(
+            python_gl_available=False,
+            status_message="runtime-b",
+        ),
+        package_root=lambda: second_root,
+    )
+    assets = [object()]
+    library_root = tmp_path / "library"
+
+    view = photo_map_view_module.PhotoMapView(map_runtime=first_runtime)
+    try:
+        first_widget = cast(_RuntimeSwitchingMapWidget, view.map_widget())
+        assert first_widget.received_map_source is not None
+        assert Path(first_widget.received_map_source.data_path) == (
+            first_root / "tiles" / "extension" / "World_basemap_2.obf"
+        )
+
+        view.set_assets(assets, library_root)
+        view.set_map_runtime(second_runtime)
+
+        second_widget = cast(_RuntimeSwitchingMapWidget, view.map_widget())
+        assert second_widget is not first_widget
+        assert first_widget.shutdown_calls == 1
+        assert second_widget.received_map_source is not None
+        assert Path(second_widget.received_map_source.data_path) == (
+            second_root / "tiles" / "extension" / "World_basemap_2.obf"
+        )
+        assert len(controller_instances) == 2
+        assert controller_instances[0].shutdown_calls == 1
+        assert controller_instances[1].set_assets_calls == [(assets, library_root)]
     finally:
         view.close()

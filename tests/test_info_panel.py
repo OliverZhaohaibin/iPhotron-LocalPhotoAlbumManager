@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -1053,6 +1054,38 @@ def test_info_panel_location_map_stays_square(
     panel.close()
 
 
+def test_info_panel_location_map_restores_outer_rounded_corners(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    map_view = panel._location_map
+    assert not map_view.mask().contains(QPoint(0, 0))
+    assert not map_view.mask().contains(QPoint(map_view.width() - 1, 0))
+    assert not map_view.mask().contains(QPoint(0, map_view.height() - 1))
+    assert not map_view.mask().contains(QPoint(map_view.width() - 1, map_view.height() - 1))
+    panel.close()
+
+
 def test_info_panel_shows_download_button_when_location_extension_is_unavailable(
     qapp: QApplication,
 ) -> None:
@@ -1082,6 +1115,171 @@ def test_info_panel_emits_download_request_from_fallback_button(qapp: QApplicati
     panel._location_download_button.click()
 
     assert calls == ["clicked"]
+    panel.close()
+
+
+def test_info_panel_shows_map_preview_without_download_prompt_when_preview_runtime_exists(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=False, preview_enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    assert panel._location_editor_row.isHidden()
+    assert panel._location_fallback_label.isHidden()
+    assert panel._location_download_button.isHidden()
+    assert not panel._location_map.isHidden()
+    panel.close()
+
+
+def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnavailableMiniMapWidget(QWidget):
+        def __init__(
+            self,
+            parent: QWidget | None = None,
+            *,
+            map_source: MapSourceSpec | None = None,
+        ) -> None:
+            del parent, map_source
+            raise RuntimeError("backend unavailable")
+
+    def _fake_unavailable_map_widget_backend(
+        _map_source: MapSourceSpec | None,
+        *,
+        use_opengl: bool,
+    ) -> tuple[type[_UnavailableMiniMapWidget], MapSourceSpec, str]:
+        del use_opengl
+        return (
+            _UnavailableMiniMapWidget,
+            MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+            "legacy_python",
+        )
+
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_unavailable_map_widget_backend,
+    )
+    monkeypatch.setattr(
+        info_location_map_module,
+        "_choose_map_widget_backend_with_runtime",
+        lambda _map_source, *, use_opengl, runtime_capabilities: (
+            _FakeMiniMapWidget,
+            MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+            "legacy_python",
+        ),
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=False, preview_enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    assert panel._location_map._map_widget is None
+    assert not panel._location_map._message_label.isHidden()
+
+    panel.set_map_runtime(
+        SimpleNamespace(
+            capabilities=lambda: SimpleNamespace(
+                python_gl_available=False,
+                display_available=True,
+                location_search_available=False,
+            )
+        )
+    )
+    qapp.processEvents()
+
+    assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
+    assert panel._location_map._message_label.isHidden()
+    assert not panel._location_map.isHidden()
+    panel.close()
+
+
+def test_info_panel_map_runtime_package_root_controls_embedded_map_source(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_map_source: list[MapSourceSpec] = []
+
+    def _capture_runtime_backend(
+        map_source: MapSourceSpec | None,
+        *,
+        use_opengl: bool,
+        runtime_capabilities,
+    ) -> tuple[type[_FakeMiniMapWidget], MapSourceSpec, str]:
+        del use_opengl, runtime_capabilities
+        assert map_source is not None
+        captured_map_source.append(map_source)
+        return (
+            _FakeMiniMapWidget,
+            map_source,
+            "legacy_python",
+        )
+
+    monkeypatch.setattr(
+        info_location_map_module,
+        "_choose_map_widget_backend_with_runtime",
+        _capture_runtime_backend,
+    )
+
+    package_root = tmp_path / "maps-root"
+    panel = InfoPanel()
+    panel.set_map_runtime(
+        SimpleNamespace(
+            capabilities=lambda: SimpleNamespace(
+                python_gl_available=False,
+                display_available=True,
+                location_search_available=True,
+            ),
+            package_root=lambda: package_root,
+        )
+    )
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    assert captured_map_source
+    assert Path(captured_map_source[-1].data_path) == (
+        package_root / "tiles" / "extension" / "World_basemap_2.obf"
+    )
     panel.close()
 
 

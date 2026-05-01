@@ -27,6 +27,7 @@ class _FakeLibrary:
         self.bound_asset_lifecycle_services: list[object | None] = []
         self.bound_asset_operation_services: list[object | None] = []
         self.bound_people_services: list[object | None] = []
+        self.bound_map_runtimes: list[object | None] = []
         self.asset_query_service_during_bind: object | None = None
         self.state_repository_during_bind: object | None = None
 
@@ -87,6 +88,9 @@ class _FakeLibrary:
     def bind_people_service(self, people_service: object | None) -> None:
         self.bound_people_services.append(people_service)
 
+    def bind_map_runtime(self, map_runtime: object | None) -> None:
+        self.bound_map_runtimes.append(map_runtime)
+
 
 def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAssetRuntime]:
     context = RuntimeContext.__new__(RuntimeContext)
@@ -118,6 +122,7 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert library.bound_asset_operation_services[-1] is not None
     assert library.bound_people_services[-1] is not None
+    assert library.bound_map_runtimes[-1] is not None
     assert [request[0] for request in library.scan_requests] == [library_root]
 
 
@@ -138,4 +143,5 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert library.bound_asset_operation_services[-1] is not None
     assert library.bound_people_services[-1] is not None
+    assert library.bound_map_runtimes[-1] is not None
     assert library.scan_requests == []

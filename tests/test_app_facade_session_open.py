@@ -103,3 +103,26 @@ def test_facade_open_album_syncs_manifest_favorites_when_library_root_is_unbound
             "sync_manifest_favorites": True,
         }
     ]
+
+
+def test_facade_rescan_current_async_keeps_public_forwarding_shape(
+    tmp_path: Path,
+) -> None:
+    album_root = tmp_path / "album"
+    album_root.mkdir(parents=True)
+    facade = AppFacade()
+    facade._current_album = SimpleNamespace(root=album_root)
+
+    class _FakeUpdateService:
+        def __init__(self) -> None:
+            self.requested: list[Path] = []
+
+        def rescan_album_async(self, album) -> None:
+            self.requested.append(album.root)
+
+    update_service = _FakeUpdateService()
+    facade._inject_scan_dependencies_for_tests(library_update_service=update_service)
+
+    facade.rescan_current_async()
+
+    assert update_service.requested == [album_root]

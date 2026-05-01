@@ -291,3 +291,18 @@
 - [ ] 没有新增兼容层业务债务。
 - [ ] 没有丢失用户状态的迁移风险。
 - [ ] 文档、测试和架构检查同步更新。
+## Round 19 Update: GUI Update + Location/Trash
+
+Phase 4 status adjustments:
+
+- [x] `LibraryUpdateService` no longer imports `iPhoto.app`, `cache.index_store`, or `library.workers.*`; worker ownership moved behind a GUI task runner and durable scan finalization moved to runtime/library surfaces.
+- [x] GUI scan update flows now use a runtime scan finalize hook for snapshot persistence, Recently Deleted preserved fields, stale-row reconciliation, and Live Photo pairing follow-up.
+- [x] Recently Deleted preparation and cleanup throttling no longer live in `NavigationCoordinator`; they now flow through a dedicated Location/Trash GUI transport adapter that calls existing library/runtime surfaces.
+- [x] Location geotagged-asset loading no longer reads directly from `GalleryViewModel`; background transport and request-token handling now flow through the dedicated Location/Trash adapter.
+- [ ] People fallback still has residual coordinator/viewmodel touchpoints and remains the next GUI residual slice.
+
+Phase 5 status adjustments:
+
+- Maps runtime porting is still not complete in this round.
+- This slice only cleaned the GUI-side Location entry point so later Maps runtime extraction has a narrower boundary to target.
+- Do not mark `MapRuntimePort` complete from this round alone.

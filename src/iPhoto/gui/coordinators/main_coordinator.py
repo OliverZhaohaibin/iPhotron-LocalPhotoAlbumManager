@@ -44,11 +44,14 @@ from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeControl
 from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.services.location_trash_navigation_service import (
+    LocationTrashNavigationService,
+)
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
-from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.people.service import PeopleService
 from maps.map_sources import supports_map_extension_download
@@ -138,12 +141,17 @@ class MainCoordinator(QObject):
 
         # 1. View Router
         self._view_router = ViewRouter(window.ui)
+        self._location_trash_navigation_service = LocationTrashNavigationService(
+            library_manager_getter=lambda: context.library,
+            parent=self,
+        )
 
         self._gallery_vm = GalleryViewModel(
             store=self._gallery_store,
             context=context,
             facade=context.facade,
             asset_service=self._asset_service,
+            location_trash_service=self._location_trash_navigation_service,
         )
 
         # 2. Navigation Coordinator

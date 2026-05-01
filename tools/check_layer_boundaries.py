@@ -72,6 +72,14 @@ GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_IMPORTS = {
     "iPhoto.utils.jsonio",
 }
 
+GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_FILES = {
+    "gui/services/library_update_service.py",
+}
+
+GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_IMPORTS = {
+    "iPhoto.library.workers",
+}
+
 GUI_RUNTIME_BACKEND_FORBIDDEN = {
     "iPhoto.app",
 }
@@ -301,6 +309,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI album metadata service imports retired implementation detail {module}"
+                )
+
+            if rel in GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI library update service imports worker implementation detail {module}"
                 )
 
             if rel not in LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS and (

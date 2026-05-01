@@ -99,3 +99,21 @@ def test_gui_runtime_backend_import_is_blocked(tmp_path: Path) -> None:
         "GUI runtime imports compatibility backend iPhoto.app" in violation
         for violation in violations
     )
+
+
+def test_gui_library_update_service_worker_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "services" / "library_update_service.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.library.workers.scanner_worker import ScannerWorker\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI library update service imports worker implementation detail "
+        "iPhoto.library.workers.scanner_worker" in violation
+        for violation in violations
+    )

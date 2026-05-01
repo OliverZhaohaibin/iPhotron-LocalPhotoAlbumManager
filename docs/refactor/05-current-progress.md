@@ -138,3 +138,28 @@ adapter 职责。
    rescan 后用户状态保护。
 3. 推进 Phase 5 的 Maps / Edit：地图可用性查询、native fallback、`.ipo`
    sidecar 读写与 save/reset/export use case。
+## Round 19 Summary
+
+This round completed the remaining GUI residual orchestration cleanup for `LibraryUpdate` plus `Location/Trash`.
+
+Current phase notes:
+
+- Phase 4: `LibraryUpdateService` is now a presentation-facing adapter. It still exposes the same facade-facing API, but scan worker ownership moved behind a dedicated GUI task runner and durable scan completion behavior moved onto the current runtime/library surface.
+- Phase 4: `NavigationCoordinator` no longer owns Recently Deleted cleanup throttling or background thread launch. `GalleryViewModel` no longer prepares deleted roots or reads geotagged assets directly from `LibraryManager`; those flows now go through a narrow GUI Location/Trash transport adapter.
+- Phase 4: the current repository still uses `LibraryManager` plus bootstrap/mixin runtime surfaces as the real boundary. This round did not force in a new full `LibrarySession` / `RuntimeContext` terminology layer where the codebase does not already have one.
+- Phase 5: Maps runtime extraction is still partial. This round only created a cleaner entry point by removing GUI-side Location orchestration from the coordinator/viewmodel path.
+
+Known exceptions:
+
+- People fallback behavior is still not fully migrated out of coordinator/viewmodel edges.
+- Edit sidecar, full Maps fallback cleanup, and temp-library end-to-end work remain intentionally out of scope for this slice.
+
+Latest verification intent:
+
+- architecture guardrail extended so `gui/services/library_update_service.py` cannot import `library.workers.*`
+- targeted GUI regressions updated around `LibraryUpdateService`, `NavigationCoordinator`, `GalleryViewModel`, and `AppFacade`
+
+Next handoff:
+
+- Continue with the remaining People residuals first, unless Maps runtime port extraction becomes more urgent.
+- When resuming Maps work, treat the new Location/Trash transport adapter as the temporary GUI seam rather than a final Phase 5 runtime boundary.

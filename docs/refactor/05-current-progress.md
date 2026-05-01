@@ -8,26 +8,31 @@
 但运行时主路径已经建立起可执行的 session boundary、repository/state
 boundary 和 architecture guardrail。
 
-本轮新增完成的是 `17-gui-entry-session-routing.md`：GUI 的
-`open/rescan/pair` 入口继续从兼容层收口到 session-owned service，
-`MainCoordinator` 也移除了最后一个 GUI runtime 里的 `iPhoto.app`
-直接调用点。
+本轮新增完成的是 `18-album-metadata-session-migration.md`：album cover、
+featured/favorite mirror 和 import 后 `mark_featured` 的 durable 规则，
+已经从 GUI service 下沉到 session-owned album metadata service；
+`gui/services/album_metadata_service.py` 现在只保留 Qt/watcher/presentation
+adapter 职责。
 
-## 本轮完成：GUI 入口 Session 路由收口
+## 本轮完成：Album Metadata Session 化
 
-- `LibraryUpdateService` 新增了 session-aware 的 album-open 准备入口；
-  `AppFacade.open_album()` 只负责 `Album.open()`、维护当前 album、
-  发 legacy signals，再根据 service 返回结果决定是否触发异步扫描。
-- `AppFacade.rescan_current_async()` 不再直接分支调度 `LibraryManager`；
-  统一转发给 `LibraryUpdateService.rescan_album_async()`，由 service 决定
-  走 active `LibraryManager.start_scanning(...)` 还是兼容 fallback worker。
-- `LibraryAssetLifecycleService` 新增缺失媒体修复命令：
-  通过 repository port 删除坏行，并 best-effort 重建对应 scope 的
-  Live Photo pairing。
-- `LibraryUpdateService` 新增 media-load-failure 修复入口；
-  `MainCoordinator._handle_media_load_failed()` 不再直接删 repository row，
-  也不再直接调用 `app.pair()`。
-- 架构检查新增 guardrail：GUI runtime 不得导入 `iPhoto.app`。
+- 新增 `AlbumRepositoryPort` 与 `AlbumManifestRepository`。
+  - album manifest 的 load/save/exists 现在通过 application/infrastructure
+    boundary 表达，不再让 GUI service 直接持有 manifest persistence 规则。
+- 新增 `LibraryAlbumMetadataService`。
+  - 该 session-owned service 负责 album cover、featured toggle、多 album
+    manifest mirror、favorite state mirror，以及 import 后的
+    `mark_featured` 落盘。
+- `LibrarySession` / `RuntimeContext` / `LibraryManager` 新增
+  `album_metadata` surface 绑定。
+  - active library 打开后，GUI adapter 可以优先走 bound session service；
+    无 active session 时，仍保留 compatibility fallback 构造。
+- `gui/services/album_metadata_service.py` 已瘦身为 presentation adapter。
+  - GUI service 现在只负责 watcher pause/resume、错误转发、当前 album
+    内存态同步和必要的 view refresh。
+- 架构检查新增 guardrail。
+  - `gui/services/album_metadata_service.py` 不得再 runtime import
+    `iPhoto.models.album`、`library_session`、`jsonio` 等旧实现细节。
 
 ## 历史已完成切片摘要
 
@@ -48,6 +53,10 @@ boundary 和 architecture guardrail。
 - People session 化：
   已引入 `PeopleIndexPort` 与 library-scoped People service，GUI 关键
   People 流程改为优先走 session-bound service。
+- Album metadata session 化：
+  已引入 `LibraryAlbumMetadataService` 与 album manifest repository port，
+  album cover / featured / import-mark-featured durable 规则已从 GUI service
+  下沉到 session-owned command surface。
 - GUI 文件操作 command 化：
   move/delete/restore 的 durable planning 已迁入
   `LibraryAssetOperationService`，GUI service 只负责 prompt、worker、
@@ -62,8 +71,8 @@ boundary 和 architecture guardrail。
   imports 等回归方向；仍保留少量明确 allowlist。
 - Phase 1：部分完成。
   `LibrarySession` 已建立并接入 `RuntimeContext`，scan/query/state/
-  lifecycle/operation/People surface 已挂到 active session；GUI startup 仍有
-  进一步收口空间。
+  album-metadata/lifecycle/operation/People surface 已挂到 active session；
+  GUI startup 仍有进一步收口空间。
 - Phase 2：部分完成。
   `global_index.db` 已成为 runtime asset source of truth，favorite 写入和
   gallery 查询已走 state/query boundary；更多 durable user state 仍待继续
@@ -75,9 +84,9 @@ boundary 和 architecture guardrail。
   也已分离为显式 lifecycle reconciliation。
 - Phase 4：部分完成。
   `AppFacade` 的 open/rescan/pair routing、move/delete/restore planning、
-  gallery query reads、media-load-failure 修复都已迁到 session service；
-  但 `gui/services/*` 和 `BackgroundTaskManager` 仍未完全瘦身成纯
-  presentation transport。
+  gallery query reads、media-load-failure 修复、album metadata durable
+  mutation 都已迁到 session service；但 `gui/services/*` 和
+  `BackgroundTaskManager` 仍未完全瘦身成纯 presentation transport。
 - Phase 5：部分完成。
   People、Thumbnail、Assign Location 边界已有明显收口；Maps runtime
   availability/fallback 与 Edit sidecar port 仍待深入迁移。
@@ -106,7 +115,8 @@ boundary 和 architecture guardrail。
 
 本轮在项目 `.venv` 下执行：
 
-- `.venv/bin/python -m pytest tests/test_app_facade_session_open.py tests/services/test_library_update_service_global_db.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/architecture/test_layer_boundaries.py -q`
+- `.venv/bin/python -m pytest tests/services/test_album_metadata_service.py tests/application/test_library_album_metadata_service.py tests/application/test_library_session.py tests/application/test_runtime_context.py -q`
+- `.venv/bin/python -m pytest tests/architecture -q`
 - `.venv/bin/python tools/check_architecture.py`
 
 结果：
@@ -121,8 +131,9 @@ boundary 和 architecture guardrail。
 
 ## 下一步交接
 
-1. 继续瘦身 `gui/services/*` 与 `BackgroundTaskManager`，把剩余的非 Qt
-   业务编排继续下沉到 session-owned application service。
+1. 继续瘦身 `gui/services/*` 与 `BackgroundTaskManager`，优先收口仍在
+   coordinator/viewmodel 里的 location/trash-cleanup/People fallback 之类
+   非 Qt durable orchestration。
 2. 补 `temp library` 端到端回归：import / move / delete / restore，以及
    rescan 后用户状态保护。
 3. 推进 Phase 5 的 Maps / Edit：地图可用性查询、native fallback、`.ipo`

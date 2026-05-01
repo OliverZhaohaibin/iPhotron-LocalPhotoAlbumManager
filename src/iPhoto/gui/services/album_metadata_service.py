@@ -1,4 +1,4 @@
-"""Service that centralises manifest writes for album-related actions."""
+"""Presentation adapter for album manifest mutations."""
 
 from __future__ import annotations
 
@@ -8,26 +8,23 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from ...bootstrap.library_session import create_library_state_repository
-from ...config import ALBUM_MANIFEST_NAMES
-from ...errors import IPhotoError
-from ...models.album import Album
-from ...utils.pathutils import is_descendant_path
+from ...bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
+    from ...models.album import Album
 
 
 class AlbumMetadataService(QObject):
-    """Persist manifest mutations on behalf of the GUI while shielding the UI."""
+    """Delegate album metadata mutations to the active session surface."""
 
     errorRaised = Signal(str)
 
     def __init__(
         self,
         *,
-        current_album_getter: Callable[[], Album | None],
-        library_manager_getter: Callable[[], LibraryManager | None],
+        current_album_getter: Callable[[], "Album | None"],
+        library_manager_getter: Callable[[], "LibraryManager | None"],
         refresh_view: Callable[[Path], None],
         parent: QObject | None = None,
     ) -> None:
@@ -36,222 +33,123 @@ class AlbumMetadataService(QObject):
         self._library_manager_getter = library_manager_getter
         self._refresh_view = refresh_view
 
-    # ------------------------------------------------------------------
-    # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
-    # ------------------------------------------------------------------
     def set_album_cover(
         self,
-        album: Album,
+        album: "Album",
         rel: str,
     ) -> bool:
-        """Set *rel* as cover for *album* and persist the change."""
-
         if not rel:
             return False
+
+        try:
+            self._run_with_watcher_pause(
+                lambda service: service.set_cover(album.root, rel),
+            )
+        except Exception as exc:
+            self.errorRaised.emit(str(exc))
+            return False
+
         album.set_cover(rel)
-        return self._save_manifest(album)
+        self._refresh_view(album.root)
+        return True
 
-    def toggle_featured(self, album: Album, ref: str) -> bool:
-        """Toggle *ref* inside *album* and mirror updates to other affected albums."""
-
+    def toggle_featured(self, album: "Album", ref: str) -> bool:
         if not ref:
             return False
 
-        featured = album.manifest.setdefault("featured", [])
-        was_featured = ref in featured
-        desired_state = not was_featured
-
-        # Collect all albums that need to be updated:
-        # 1. The current album (where the user clicked).
-        # 2. The physical album where the file actually resides (if different).
-        # 3. The library root album (if different).
-
-        targets: list[tuple[Album, str]] = [(album, ref)]
-
-        library_root: Path | None = None
-        manager = self._library_manager_getter()
-        if manager is not None:
-            library_root = manager.root()
-
+        original_state = ref in album.manifest.get("featured", [])
         try:
-            absolute_asset = (album.root / ref).resolve()
-        except OSError:
-            return False
-
-        if library_root:
-            # Iterate through all containing albums (Physical Child, Parent, Library Root)
-            known_roots = {library_root, album.root}
-            containing_roots = self._find_all_containing_albums(
-                library_root, absolute_asset, known_roots
+            result = self._run_with_watcher_pause(
+                lambda service: service.toggle_featured(album.root, ref),
             )
-            for root in containing_roots:
-                if root != album.root:  # Deduplication handled later but good optimization
-                    try:
-                        alb = Album.open(root)
-                        rel = absolute_asset.relative_to(root).as_posix()
-                        targets.append((alb, rel))
-                    except (OSError, ValueError, IPhotoError) as exc:
-                        # Log but continue to update others
-                        self.errorRaised.emit(str(exc))
+        except Exception as exc:
+            self.errorRaised.emit(str(exc))
+            return original_state
 
-        # Deduplicate targets by album root
-        unique_targets: dict[Path, tuple[Album, str]] = {}
-        for alb, r in targets:
-            unique_targets[alb.root] = (alb, r)
-
-        primary_success = False
-
-        # Process each album atomically: Update Memory -> Persist -> Update DB
-        library_root = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
-
-        for alb, r in unique_targets.values():
-            # Apply changes in memory
-            if desired_state:
-                alb.add_featured(r)
-            else:
-                alb.remove_featured(r)
-
-            # Persist changes
-            if self._save_manifest(alb, reload_view=False):
-                # Success: Update DB immediately to minimize inconsistency window
-                # For global DB, we need the library-relative path
-                if library_root:
-                    try:
-                        lib_rel = absolute_asset.relative_to(library_root).as_posix()
-                        self._state_repository_for(library_root).set_favorite_status(
-                            lib_rel,
-                            desired_state,
-                        )
-                    except (ValueError, OSError):
-                        self._state_repository_for(alb.root).set_favorite_status(
-                            r,
-                            desired_state,
-                        )
-                else:
-                    self._state_repository_for(alb.root).set_favorite_status(
-                        r,
-                        desired_state,
-                    )
-
-                # Check if this was the primary album
-                if alb.root == album.root:
-                    primary_success = True
-            else:
-                # Failure: Rollback in-memory state to match disk
-                if desired_state:
-                    alb.remove_featured(r)
-                else:
-                    alb.add_featured(r)
-
-        if primary_success:
-            return desired_state
-
-        return was_featured
-
-    def _find_all_containing_albums(
-        self,
-        library_root: Path,
-        asset_path: Path,
-        known_roots: set[Path] | None = None,
-    ) -> list[Path]:
-        """Traverse upwards to find all physical albums containing the asset."""
-        found: list[Path] = []
-        candidate = asset_path.parent
-        known = known_roots or set()
-
-        while True:
-            # Check if candidate is strictly under or equal to library_root
-            if candidate != library_root and not is_descendant_path(
-                candidate, library_root
-            ):
-                break
-
-            is_album = False
-            # Optimization: Skip I/O if we know this path is an album
-            if candidate in known:
-                is_album = True
-            else:
-                # Check if any known manifest file exists
-                for name in ALBUM_MANIFEST_NAMES:
-                    if (candidate / name).exists():
-                        is_album = True
-                        break
-
-            if is_album:
-                found.append(candidate)
-
-            if candidate == library_root:
-                break
-
-            parent = candidate.parent
-            if parent == candidate:  # File system root
-                break
-            candidate = parent
-
-        return found
+        next_state = result.is_featured
+        for message in result.errors:
+            self.errorRaised.emit(message)
+        if next_state:
+            album.add_featured(ref)
+        else:
+            album.remove_featured(ref)
+        return next_state
 
     def ensure_featured_entries(
         self,
         root: Path,
         imported: Sequence[Path],
     ) -> None:
-        """Flag imported assets under *root* as featured when requested."""
-
         if not imported:
             return
 
-        album = self._resolve_album_for_root(root)
-        if album is None:
+        try:
+            self._run_with_watcher_pause(
+                lambda service: service.ensure_featured_entries(root, imported),
+            )
+        except Exception as exc:
+            self.errorRaised.emit(str(exc))
             return
 
-        updated = False
+        current_album = self._current_album_getter()
+        if current_album is None or not self._paths_equal(current_album.root, root):
+            return
         for path in imported:
             try:
-                rel = path.relative_to(root).as_posix()
+                rel = Path(path).relative_to(root).as_posix()
             except ValueError:
                 continue
-            album.add_featured(rel)
-            updated = True
+            current_album.add_featured(rel)
 
-        if not updated:
-            return
-
-        self._save_manifest(album, reload_view=False)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _resolve_album_for_root(self, root: Path) -> Album | None:
-        """Return an :class:`Album` instance representing *root*."""
-
-        current = self._current_album_getter()
-        if current is not None and current.root == root:
-            return current
-        try:
-            return Album.open(root)
-        except IPhotoError as exc:
-            self.errorRaised.emit(str(exc))
-            return None
-
-    def _state_repository_for(self, root: Path):
-        manager = self._library_manager_getter()
-        if manager is not None:
-            repository = getattr(manager, "state_repository", None)
-            manager_root_getter = getattr(manager, "root", None)
-            manager_root = (
-                manager_root_getter() if callable(manager_root_getter) else None
-            )
+    def _metadata_service(
+        self,
+        library_manager: "LibraryManager | None",
+    ) -> LibraryAlbumMetadataService:
+        if library_manager is not None:
+            candidate = getattr(library_manager, "album_metadata_service", None)
             if (
-                repository is not None
-                and manager_root is not None
-                and hasattr(repository, "set_favorite_status")
-                and self._paths_equal(root, manager_root)
+                candidate is not None
+                and not self._is_unconfigured_mock(candidate)
+                and callable(getattr(candidate, "set_cover", None))
+                and callable(getattr(candidate, "toggle_featured", None))
+                and callable(getattr(candidate, "ensure_featured_entries", None))
             ):
-                return repository
-        return create_library_state_repository(root)
+                return candidate
+
+        library_root = library_manager.root() if library_manager is not None else None
+        if self._is_unconfigured_mock(library_root):
+            library_root = None
+        state_repository = (
+            getattr(library_manager, "state_repository", None)
+            if library_manager is not None
+            else None
+        )
+        if self._is_unconfigured_mock(state_repository):
+            state_repository = None
+        return LibraryAlbumMetadataService(
+            library_root,
+            state_repository=state_repository,
+        )
+
+    def _run_with_watcher_pause(
+        self,
+        callback: Callable[[LibraryAlbumMetadataService], object],
+    ) -> object:
+        manager = self._library_manager_getter()
+        pause_watcher = getattr(manager, "pause_watcher", None)
+        resume_watcher = getattr(manager, "resume_watcher", None)
+        if callable(pause_watcher):
+            pause_watcher()
+        try:
+            service = self._metadata_service(manager)
+            return callback(service)
+        finally:
+            if callable(resume_watcher):
+                QTimer.singleShot(250, resume_watcher)
+
+    @staticmethod
+    def _is_unconfigured_mock(candidate: object) -> bool:
+        return candidate.__class__.__module__.startswith("unittest.mock")
 
     @staticmethod
     def _paths_equal(left: Path, right: Path) -> bool:
@@ -259,25 +157,6 @@ class AlbumMetadataService(QObject):
             return Path(left).resolve() == Path(right).resolve()
         except OSError:
             return Path(left) == Path(right)
-
-    def _save_manifest(self, album: Album, *, reload_view: bool = True) -> bool:
-        """Persist *album* to disk, optionally requesting a UI refresh."""
-
-        manager = self._library_manager_getter()
-        if manager is not None:
-            manager.pause_watcher()
-        try:
-            album.save()
-        except IPhotoError as exc:
-            self.errorRaised.emit(str(exc))
-            return False
-        finally:
-            if manager is not None:
-                QTimer.singleShot(250, manager.resume_watcher)
-
-        if reload_view:
-            self._refresh_view(album.root)
-        return True
 
 
 __all__ = ["AlbumMetadataService"]

@@ -23,6 +23,8 @@ def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None
     assert session.assets is runtime.assets
     assert session.thumbnails is runtime.thumbnail_service
     assert session.state is state
+    assert session.album_metadata is not None
+    assert session.album_metadata.library_root == tmp_path
     assert session.asset_queries is not None
     assert session.asset_queries.library_root == tmp_path
     assert session.scans is not None

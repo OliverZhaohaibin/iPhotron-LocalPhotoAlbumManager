@@ -89,6 +89,19 @@ class AssetRepositoryPort(Protocol):
         """Replace Live Photo role state only inside a library-relative prefix."""
 
 
+class AlbumRepositoryPort(Protocol):
+    """Read and write album manifests without exposing legacy shims upstream."""
+
+    def exists(self, root: Path) -> bool:
+        """Return whether *root* is an album root with a manifest."""
+
+    def load_manifest(self, root: Path) -> dict[str, Any]:
+        """Return a normalized manifest for *root*."""
+
+    def save_manifest(self, root: Path, manifest: dict[str, Any]) -> None:
+        """Persist *manifest* for *root*."""
+
+
 class LibraryStateRepositoryPort(Protocol):
     """Persist durable user choices for one library."""
 

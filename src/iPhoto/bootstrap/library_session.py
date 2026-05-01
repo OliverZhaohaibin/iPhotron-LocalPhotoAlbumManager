@@ -15,6 +15,7 @@ from ..infrastructure.services.location_metadata_service import (
 )
 from ..application.services.assign_location_service import AssignLocationService
 from ..people.service import PeopleService
+from .library_album_metadata_service import LibraryAlbumMetadataService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_asset_operation_service import LibraryAssetOperationService
 from .library_asset_query_service import LibraryAssetQueryService
@@ -29,6 +30,7 @@ class LibrarySession:
     library_root: Path
     asset_runtime: LibraryAssetRuntime = field(default_factory=LibraryAssetRuntime)
     state_repository: LibraryStateRepositoryPort | None = None
+    album_metadata: LibraryAlbumMetadataService | None = None
     asset_queries: LibraryAssetQueryService | None = None
     scans: LibraryScanService | None = None
     asset_lifecycle: LibraryAssetLifecycleService | None = None
@@ -42,6 +44,11 @@ class LibrarySession:
             self.asset_runtime.bind_library_root(self.library_root)
         if self.state_repository is None:
             self.state_repository = IndexStoreLibraryStateRepository(self.library_root)
+        if self.album_metadata is None:
+            self.album_metadata = LibraryAlbumMetadataService(
+                self.library_root,
+                state_repository=self.state_repository,
+            )
         if self.asset_queries is None:
             self.asset_queries = LibraryAssetQueryService(self.library_root)
         if self.scans is None:

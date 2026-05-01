@@ -173,6 +173,13 @@ class RuntimeContext:
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):
             bind_state_repository(self.library_session.state)
+        bind_album_metadata_service = getattr(
+            self.library,
+            "bind_album_metadata_service",
+            None,
+        )
+        if callable(bind_album_metadata_service):
+            bind_album_metadata_service(self.library_session.album_metadata)
 
         try:
             self.library.bind_path(normalized)
@@ -230,6 +237,14 @@ class RuntimeContext:
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):
             bind_state_repository(None)
+
+        bind_album_metadata_service = getattr(
+            self.library,
+            "bind_album_metadata_service",
+            None,
+        )
+        if callable(bind_album_metadata_service):
+            bind_album_metadata_service(None)
 
         bind_asset_query_service = getattr(
             self.library,

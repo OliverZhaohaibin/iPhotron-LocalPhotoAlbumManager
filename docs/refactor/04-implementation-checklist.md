@@ -61,7 +61,7 @@
 - [x] 新增 `LibrarySession`。
 - [x] `RuntimeContext` 持有单个 active `LibrarySession`。
 - [x] library open/bind/shutdown 生命周期进入 session。
-- [x] repository、thumbnail、people runtime 挂到 session；Maps runtime 仍待独立 session surface。
+- [x] repository、thumbnail、people runtime、album metadata runtime 挂到 session；Maps runtime 仍待独立 session surface。
 - [ ] GUI startup 使用 session surface。
 - [x] `appctx.py` 标注并限制为 compatibility proxy。
 - [x] 增加 runtime entry tests。
@@ -178,6 +178,7 @@
 - [x] album open / rescan / media-load-failure 路由迁移到 session update / lifecycle surface。
 - [x] Gallery collection/windowed reads 迁移到 session query surface。
 - [x] Move/delete/restore planning 迁移到 session asset operation surface。
+- [x] album cover / featured / import-mark-featured durable 规则迁移到 session album metadata surface。
 - [ ] GUI services 只保留 presentation coordination。
 - [ ] Background task manager 只保留 Qt transport。
 
@@ -197,6 +198,7 @@
 - [x] 删除到 trash。
 - [x] Restore 资产。
 - [x] Favorite/hidden 状态刷新正确。
+- [x] album cover / featured manifest 同步与 favorite state mirror 正确。
 
 ## Phase 5 - Bounded Context Ports
 

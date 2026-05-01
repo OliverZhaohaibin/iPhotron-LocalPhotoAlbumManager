@@ -23,6 +23,7 @@ class _FakeLibrary:
         self.bound_scan_services: list[object | None] = []
         self.bound_asset_query_services: list[object | None] = []
         self.bound_state_repositories: list[object | None] = []
+        self.bound_album_metadata_services: list[object | None] = []
         self.bound_asset_lifecycle_services: list[object | None] = []
         self.bound_asset_operation_services: list[object | None] = []
         self.bound_people_services: list[object | None] = []
@@ -64,6 +65,12 @@ class _FakeLibrary:
 
     def bind_state_repository(self, state_repository: object | None) -> None:
         self.bound_state_repositories.append(state_repository)
+
+    def bind_album_metadata_service(
+        self,
+        album_metadata_service: object | None,
+    ) -> None:
+        self.bound_album_metadata_services.append(album_metadata_service)
 
     def bind_asset_lifecycle_service(
         self,
@@ -107,6 +114,7 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_scan_services[-1] is not None
     assert library.bound_asset_query_services[-1] is not None
     assert library.bound_state_repositories[-1] is not None
+    assert library.bound_album_metadata_services[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert library.bound_asset_operation_services[-1] is not None
     assert library.bound_people_services[-1] is not None
@@ -126,6 +134,7 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     assert library.bound_scan_services[-1] is not None
     assert library.bound_asset_query_services[-1] is not None
     assert library.bound_state_repositories[-1] is not None
+    assert library.bound_album_metadata_services[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert library.bound_asset_operation_services[-1] is not None
     assert library.bound_people_services[-1] is not None

@@ -40,6 +40,7 @@ from .workers.scanner_worker import ScannerWorker
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
+    from ..bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
     from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
@@ -106,6 +107,7 @@ class LibraryManager(
         self._scan_service: "LibraryScanService | None" = None
         self._asset_query_service: "LibraryAssetQueryService | None" = None
         self._state_repository: "LibraryStateRepositoryPort | None" = None
+        self._album_metadata_service: "LibraryAlbumMetadataService | None" = None
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
         self._asset_operation_service: "LibraryAssetOperationService | None" = None
         self._people_service: PeopleService | None = None
@@ -260,6 +262,18 @@ class LibraryManager(
     @property
     def state_repository(self) -> "LibraryStateRepositoryPort | None":
         return self._state_repository
+
+    def bind_album_metadata_service(
+        self,
+        album_metadata_service: "LibraryAlbumMetadataService | None",
+    ) -> None:
+        """Bind the current library session album metadata command surface."""
+
+        self._album_metadata_service = album_metadata_service
+
+    @property
+    def album_metadata_service(self) -> "LibraryAlbumMetadataService | None":
+        return self._album_metadata_service
 
     def bind_asset_lifecycle_service(
         self,

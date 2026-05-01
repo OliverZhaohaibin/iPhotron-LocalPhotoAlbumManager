@@ -10,6 +10,7 @@ from .media import (
 )
 from .people import PeopleAssetRepositoryPort, PeopleIndexPort
 from .repositories import (
+    AlbumRepositoryPort,
     AssetFavoriteQueryPort,
     AssetRepositoryPort,
     LibraryStateRepositoryPort,
@@ -17,6 +18,7 @@ from .repositories import (
 from .runtime import MapRuntimePort, TaskSchedulerPort
 
 __all__ = [
+    "AlbumRepositoryPort",
     "AssetRepositoryPort",
     "AssetFavoriteQueryPort",
     "EditSidecarPort",

@@ -22,7 +22,6 @@ LEGACY_MODEL_IMPORT_EXCEPTIONS = {
     "cli.py",
     "core/pairing.py",
     "gui/facade.py",
-    "gui/services/album_metadata_service.py",
     "gui/services/asset_move_service.py",
     "gui/ui/tasks/incremental_refresh_worker.py",
     "gui/ui/widgets/albums_dashboard.py",
@@ -60,6 +59,17 @@ GUI_FILE_OPERATION_SERVICE_FORBIDDEN_FILES = {
 GUI_FILE_OPERATION_SERVICE_FORBIDDEN_IMPORTS = {
     "iPhoto.bootstrap.library_asset_lifecycle_service",
     "iPhoto.media_classifier",
+}
+
+GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_FILES = {
+    "gui/services/album_metadata_service.py",
+}
+
+GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_IMPORTS = {
+    "iPhoto.bootstrap.library_session",
+    "iPhoto.config",
+    "iPhoto.models.album",
+    "iPhoto.utils.jsonio",
 }
 
 GUI_RUNTIME_BACKEND_FORBIDDEN = {
@@ -283,6 +293,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI file-operation service imports session planning dependency {module}"
+                )
+
+            if rel in GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI album metadata service imports retired implementation detail {module}"
                 )
 
             if rel not in LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS and (

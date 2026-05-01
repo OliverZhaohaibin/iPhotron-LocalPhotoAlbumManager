@@ -18,6 +18,10 @@ featured/favorite mirror 和 import 后 `mark_featured` 的 durable 规则，
 `gui/services/album_metadata_service.py` 现在只保留 Qt/watcher/presentation
 adapter 职责。
 
+本轮同时补齐 `LibraryUpdate` 与 `Location/Trash` 的 GUI residual 编排收口：
+scan worker ownership 迁入 GUI 任务运行器，durable scan finalize 迁到
+runtime/library surface，Location/Trash 流程改由 GUI transport adapter 收口。
+
 ## 2. 本轮完成：Album Metadata Session 化
 
 - 新增 `AlbumRepositoryPort` 与 `AlbumManifestRepository`。
@@ -91,14 +95,21 @@ adapter 职责。
   gallery query reads、media-load-failure 修复、album metadata durable
   mutation 都已迁到 session service；但 `gui/services/*` 和
   `BackgroundTaskManager` 仍未完全瘦身成纯 presentation transport。
-  本轮已将 `LibraryUpdateService` 定位为 presentation adapter，
-  `NavigationCoordinator` 与 `GalleryViewModel` 的 Location/Trash 流程
-  通过新的 GUI transport adapter 收口，并继续沿用 `LibraryManager`
-  + bootstrap runtime surfaces 作为事实边界。
+  本轮补齐 `LibraryUpdate` + `Location/Trash` GUI residual：
+  `LibraryUpdateService` 的 scan worker ownership 迁入 GUI 任务运行器，
+  durable scan finalize 迁到 runtime/library surface；GUI scan update flows
+  通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted
+  保留字段、stale-row reconciliation 与 Live Photo pairing follow-up；
+  `NavigationCoordinator` 不再负责 Recently Deleted cleanup throttle 或后台
+  线程调度，`GalleryViewModel` 不再直接准备 deleted roots 或读取
+  geotagged assets，统一改走 Location/Trash transport adapter；
+  仍沿用 `LibraryManager` + bootstrap runtime surfaces 作为事实边界，
+  未强制引入新的 `LibrarySession` / `RuntimeContext` 术语层。
 - Phase 5：部分完成。
   People、Thumbnail、Assign Location 边界已有明显收口；Maps runtime
   availability/fallback 与 Edit sidecar port 仍待深入迁移。本轮仅通过
-  清理 GUI 侧 Location 入口为后续 Maps runtime 提取收窄边界。
+  清理 GUI 侧 Location 入口为后续 Maps runtime 提取收窄边界，不应仅凭
+  本轮将 `MapRuntimePort` 视为完成。
 - Phase 6：部分完成。
   architecture tests、targeted application/infrastructure tests 已存在；
   temp-library end-to-end 与性能 baseline 仍未完成。
@@ -120,6 +131,7 @@ adapter 职责。
   best-effort 行为。
 - Maps 与 Edit sidecar 仍缺少完整的 session/runtime boundary 收口。
 - People fallback 仍有 coordinator/viewmodel 残留。
+- temp-library 端到端仍保持 out of scope。
 
 ## 6. 最新验证
 
@@ -145,10 +157,11 @@ adapter 职责。
 ## 7. 下一步交接
 
 1. 继续瘦身 `gui/services/*` 与 `BackgroundTaskManager`，优先收口
-   coordinator/viewmodel 里的 People fallback 与 location/trash-cleanup
-   之类非 Qt durable orchestration。
+   coordinator/viewmodel 里的 People fallback 等 residual；
+   除非 Maps runtime 提取更紧急。
 2. 补 `temp library` 端到端回归：import / move / delete / restore，以及
    rescan 后用户状态保护。
 3. 推进 Phase 5 的 Maps / Edit：地图可用性查询、native fallback、`.ipo`
    sidecar 读写与 save/reset/export use case；恢复 Maps 工作时继续沿用
-   Location/Trash transport adapter 作为临时 GUI seam。
+   Location/Trash transport adapter 作为临时 GUI seam，不作为最终 Phase 5
+   boundary。

@@ -187,15 +187,13 @@
 - [x] Gallery collection/windowed reads 迁移到 session query surface。
 - [x] Move/delete/restore planning 迁移到 session asset operation surface。
 - [x] album cover / featured / import-mark-featured durable 规则迁移到 session album metadata surface。
+- [x] `LibraryUpdateService` 不再导入 `iPhoto.app`、`cache.index_store` 或 `library.workers.*`；worker ownership 迁入 GUI 任务运行器，durable scan finalize 迁到 runtime/library surface。
+- [x] GUI scan update flows 通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted 保留字段、stale-row reconciliation 与 Live Photo pairing follow-up。
+- [x] Recently Deleted 的 prepare/cleanup throttle 不再由 `NavigationCoordinator` 负责，而是经由 Location/Trash GUI transport adapter。
+- [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
 - [ ] GUI services 只保留 presentation coordination。
 - [ ] Background task manager 只保留 Qt transport。
-
-- 本轮补充（第19步）：
-  - [x] `LibraryUpdateService` 不再导入 `iPhoto.app`、`cache.index_store` 或 `library.workers.*`；worker ownership 迁入 GUI 任务运行器，durable scan finalize 迁到 runtime/library surface。
-  - [x] GUI scan update flows 通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted 保留字段、stale-row reconciliation 与 Live Photo pairing follow-up。
-  - [x] Recently Deleted 的 prepare/cleanup throttle 不再由 `NavigationCoordinator` 负责，而是经由 Location/Trash GUI transport adapter。
-  - [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
-  - [ ] People fallback 仍残留 coordinator/viewmodel touchpoints，作为下一块 GUI residual。
+- [ ] People fallback 仍残留 coordinator/viewmodel touchpoints，作为下一块 GUI residual。
 
 完成条件：
 
@@ -232,6 +230,8 @@
 - [ ] 地图可用性查询通过 session。
 - [x] 地理资产聚合通过 application query。
 - [ ] native runtime fallback 有测试。
+
+本轮仅清理 GUI 侧 Location 入口，Maps runtime 仍是部分完成，不应仅凭本轮将 `MapRuntimePort` 标记为完成。
 
 ### Thumbnail
 

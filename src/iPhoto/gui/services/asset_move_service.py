@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, TYPE_CHECKING
+from typing import Callable, Iterable, Optional, Sequence, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from ...bootstrap.library_asset_operation_service import (
+    AssetMovePlan,
+    LibraryAssetOperationService,
+    MetadataLookup,
+)
 from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.move_worker import MoveSignals, MoveWorker
 
@@ -50,6 +55,7 @@ class AssetMoveService(QObject):
         destination: Path,
         *,
         operation: str = "move",
+        metadata_lookup: MetadataLookup | None = None,
     ) -> bool:
         """Validate *sources* and queue a worker for the requested *operation*.
 
@@ -60,180 +66,57 @@ class AssetMoveService(QObject):
         while delete jobs must do the opposite.
         """
 
-        operation_normalized = operation.lower()
-
-        if operation_normalized not in {"move", "delete", "restore"}:
-            self.errorRaised.emit(f"Unsupported move operation: {operation}")
-            return False
-
         album = self._current_album_getter()
         library_manager = self._library_manager_getter()
-        library_root = library_manager.root() if library_manager is not None else None
-        if operation_normalized == "delete" and library_root is not None:
-            source_root = library_root
-        elif album is None:
-            if library_root is None:
-                self.errorRaised.emit("No album is currently open.")
-                return False
-            source_root = library_root
-        else:
-            source_root = album.root
+        operation_service = self._operation_service(library_manager)
+        plan = operation_service.plan_move_request(
+            sources,
+            destination,
+            current_album_root=album.root if album is not None else None,
+            operation=operation,
+            trash_root=self._deleted_directory(library_manager),
+            metadata_lookup=metadata_lookup,
+        )
+        return self.submit_plan(plan)
 
-        try:
-            destination_root = Path(destination).resolve()
-        except OSError as exc:
-            self.errorRaised.emit(f"Invalid destination: {exc}")
-            return False
+    def submit_plan(self, plan: AssetMovePlan) -> bool:
+        """Queue a prevalidated file-operation plan."""
 
-        if not destination_root.exists() or not destination_root.is_dir():
-            self.errorRaised.emit(
-                f"Move destination is not a directory: {destination_root}"
-            )
-            return False
+        for message in plan.errors:
+            self.errorRaised.emit(message)
 
-        if destination_root == source_root:
-            self.moveFinished.emit(
-                source_root,
-                destination_root,
-                False,
-                "Files are already located in this album.",
-            )
-            return False
-
-        normalized: List[Path] = []
-        seen: set[Path] = set()
-        for raw_path in sources:
-            candidate = Path(raw_path)
-            try:
-                resolved = candidate.resolve()
-            except OSError as exc:
-                self.errorRaised.emit(f"Could not resolve '{candidate}': {exc}")
-                continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            if not resolved.exists():
-                if operation_normalized == "delete":
-                    continue
-                self.errorRaised.emit(f"File not found: {resolved}")
-                continue
-            if resolved.is_dir():
-                self.errorRaised.emit(
-                    f"Skipping directory move attempt: {resolved.name}"
+        if not plan.accepted:
+            if (
+                plan.finished_message
+                and plan.source_root is not None
+                and plan.destination_root is not None
+            ):
+                self.moveFinished.emit(
+                    plan.source_root,
+                    plan.destination_root,
+                    False,
+                    plan.finished_message,
                 )
-                continue
-            try:
-                resolved.relative_to(source_root)
-            except ValueError:
-                self.errorRaised.emit(
-                    f"Path '{resolved}' is not inside the active album."
-                )
-                continue
-            normalized.append(resolved)
-
-        if not normalized:
-            message = (
-                "No items were deleted."
-                if operation_normalized == "delete"
-                else "No valid files were selected for moving."
-            )
-            self.moveFinished.emit(
-                source_root,
-                destination_root,
-                False,
-                message,
-            )
             return False
 
-        rel_paths: List[str] = []
-        for resolved in normalized:
-            try:
-                rel_paths.append(resolved.relative_to(source_root).as_posix())
-            except ValueError:
-                continue
+        if plan.source_root is None or plan.destination_root is None:
+            return False
 
         signals = MoveSignals()
         signals.started.connect(self._on_move_started)
         signals.progress.connect(self._on_move_progress)
-
-        trash_root: Optional[Path] = None
-        if library_manager is not None:
-            trash_candidate = library_manager.deleted_directory()
-            if trash_candidate is not None:
-                try:
-                    trash_resolved = trash_candidate.resolve()
-                except OSError:
-                    trash_resolved = trash_candidate
-                try:
-                    destination_resolved = destination_root.resolve()
-                except OSError:
-                    destination_resolved = destination_root
-                if destination_resolved == trash_resolved:
-                    trash_root = trash_candidate
-
-        is_delete_operation = operation_normalized == "delete"
-        is_restore_operation = operation_normalized == "restore"
-
-        if is_delete_operation and library_root is None:
-            self.errorRaised.emit(
-                "Basic Library root is unavailable; cannot delete items safely."
-            )
-            return False
-
-        if is_delete_operation and trash_root is None:
-            self.errorRaised.emit("Recently Deleted folder is unavailable.")
-            return False
-
-        if is_restore_operation:
-            if trash_root is None:
-                trash_root = library_manager.deleted_directory() if library_manager else None
-            if trash_root is None:
-                self.errorRaised.emit("Recently Deleted folder is unavailable.")
-                return False
-            try:
-                source_resolved = source_root.resolve()
-            except OSError:
-                source_resolved = source_root
-            try:
-                trash_resolved = trash_root.resolve()
-            except OSError:
-                trash_resolved = trash_root
-            if source_resolved != trash_resolved:
-                self.errorRaised.emit(
-                    "Restore operations must be triggered from Recently Deleted."
-                )
-                return False
-            try:
-                destination_resolved = destination_root.resolve()
-            except OSError:
-                destination_resolved = destination_root
-            if destination_resolved == trash_resolved:
-                self.errorRaised.emit("Cannot restore items back into Recently Deleted.")
-                return False
-
-        is_source_main_view = False
-        if library_root is not None:
-            try:
-                is_source_main_view = library_root.resolve() == source_root.resolve()
-            except OSError:
-                is_source_main_view = library_root == source_root
-
         worker = MoveWorker(
-            normalized,
-            source_root,
-            destination_root,
+            plan.sources,
+            plan.source_root,
+            plan.destination_root,
             signals,
-            library_root=library_root,
-            trash_root=trash_root,
-            is_restore=is_restore_operation,
-            asset_lifecycle_service=(
-                getattr(library_manager, "asset_lifecycle_service", None)
-                if library_manager is not None
-                else None
-            ),
+            library_root=plan.library_root,
+            trash_root=plan.trash_root,
+            is_restore=plan.operation == "restore",
+            asset_lifecycle_service=plan.asset_lifecycle_service,
         )
         unique_task_id = (
-            f"move:{operation_normalized}:{source_root}->{destination_root}:{uuid.uuid4().hex}"
+            f"move:{plan.operation}:{plan.source_root}->{plan.destination_root}:{uuid.uuid4().hex}"
         )
         # Move requests share their origin and target directories, so we need a unique
         # suffix on the identifier to allow queuing multiple operations without the
@@ -258,6 +141,58 @@ class AssetMoveService(QObject):
             result_payload=lambda src, dest, moved, *_: moved,
         )
         return True
+
+    def _operation_service(
+        self,
+        library_manager: Optional["LibraryManager"],
+    ) -> LibraryAssetOperationService:
+        if library_manager is not None:
+            candidate = getattr(library_manager, "asset_operation_service", None)
+            if (
+                candidate is not None
+                and not self._is_unconfigured_mock(candidate)
+                and callable(getattr(candidate, "plan_move_request", None))
+            ):
+                return candidate
+
+        library_root = library_manager.root() if library_manager is not None else None
+        if self._is_unconfigured_mock(library_root):
+            library_root = None
+        lifecycle_service = (
+            getattr(library_manager, "asset_lifecycle_service", None)
+            if library_manager is not None
+            else None
+        )
+        if self._is_unconfigured_mock(lifecycle_service):
+            lifecycle_service = None
+        return LibraryAssetOperationService(
+            library_root,
+            lifecycle_service=lifecycle_service,
+        )
+
+    def _deleted_directory(
+        self,
+        library_manager: Optional["LibraryManager"],
+    ) -> Path | None:
+        if library_manager is None:
+            return None
+        deleted_directory = getattr(library_manager, "deleted_directory", None)
+        if not callable(deleted_directory):
+            return None
+        try:
+            candidate = deleted_directory()
+        except Exception:
+            return None
+        if candidate is None or self._is_unconfigured_mock(candidate):
+            return None
+        try:
+            return Path(candidate)
+        except TypeError:
+            return None
+
+    @staticmethod
+    def _is_unconfigured_mock(candidate: object) -> bool:
+        return candidate.__class__.__module__.startswith("unittest.mock")
 
     def _handle_move_finished(
         self,

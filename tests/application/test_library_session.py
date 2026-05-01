@@ -29,6 +29,9 @@ def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None
     assert session.scans.library_root == tmp_path
     assert session.asset_lifecycle is not None
     assert session.asset_lifecycle.library_root == tmp_path
+    assert session.asset_operations is not None
+    assert session.asset_operations.library_root == tmp_path
+    assert session.asset_operations.lifecycle_service is session.asset_lifecycle
     assert session.people is not None
     assert session.people.library_root() == tmp_path
 

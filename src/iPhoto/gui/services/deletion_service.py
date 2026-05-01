@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal
 
@@ -35,6 +35,10 @@ class DeletionService(QObject):
     def delete_assets(self, sources: Iterable[Path]) -> bool:
         """Move *sources* into the dedicated deleted-items folder."""
 
+        requested_sources = list(sources)
+        if not requested_sources:
+            return False
+
         library = self._library_manager_getter()
         if library is None:
             self.errorRaised.emit("Basic Library has not been configured.")
@@ -46,50 +50,20 @@ class DeletionService(QObject):
             self.errorRaised.emit(str(exc))
             return False
 
-        def _normalize(path: Path) -> Path:
-            try:
-                return path.resolve()
-            except OSError:
-                return path
-
-        normalized: List[Path] = []
-        seen: Set[str] = set()
-        for raw_path in sources:
-            candidate = _normalize(Path(raw_path))
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(candidate)
-
-        if not normalized:
-            return False
-
-        # Use model provider to get live motion
         model_provider = self._model_provider_getter()
         model = model_provider() if model_provider else None
 
-        for still_path in list(normalized):
-            metadata = None
-            if model and hasattr(model, "metadata_for_path"):
-                metadata = model.metadata_for_path(still_path)
-
-            if not metadata or not metadata.get("is_live"):
-                continue
-            motion_raw = metadata.get("live_motion_abs")
-            if not motion_raw:
-                continue
-            motion_path = _normalize(Path(str(motion_raw)))
-            motion_key = str(motion_path)
-            if motion_key not in seen:
-                seen.add(motion_key)
-                normalized.append(motion_path)
+        def _metadata_lookup(path: Path):
+            if model is None or not hasattr(model, "metadata_for_path"):
+                return None
+            return model.metadata_for_path(path)
 
         return bool(
             self._move_service.move_assets(
-                normalized,
+                requested_sources,
                 deleted_root,
                 operation="delete",
+                metadata_lookup=_metadata_lookup,
             )
         )
 

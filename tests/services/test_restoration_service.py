@@ -93,6 +93,10 @@ def test_restore_uses_lifecycle_rows_to_resolve_destination(tmp_path: Path) -> N
     album_root = library_root / "AlbumA"
     trash_root = library_root / RECENTLY_DELETED_DIR_NAME
     album_root.mkdir(parents=True)
+    (album_root / ".iphoto.album.json").write_text(
+        '{"id": "album-a"}',
+        encoding="utf-8",
+    )
     trash_root.mkdir()
     trashed_asset = trash_root / "photo.jpg"
     trashed_asset.write_bytes(b"data")
@@ -159,6 +163,10 @@ def test_restore_uses_album_metadata_to_recover_stale_subalbum_rows(
     album_root = library_root / "AlbumA"
     trash_root = library_root / RECENTLY_DELETED_DIR_NAME
     album_root.mkdir(parents=True)
+    (album_root / ".iphoto.album.json").write_text(
+        '{"id": "album-a"}',
+        encoding="utf-8",
+    )
     trash_root.mkdir()
     trashed_asset = trash_root / "photo.jpg"
     trashed_asset.write_bytes(b"data")

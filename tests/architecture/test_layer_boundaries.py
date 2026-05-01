@@ -56,3 +56,29 @@ def test_gui_viewmodel_domain_repository_import_is_blocked(tmp_path: Path) -> No
         "iPhoto.domain.repositories" in violation
         for violation in violations
     )
+
+
+def test_gui_file_operation_service_planning_import_is_blocked(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "services" / "restoration_service.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService\n"
+        "from iPhoto.media_classifier import IMAGE_EXTENSIONS\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI file-operation service imports session planning dependency "
+        "iPhoto.bootstrap.library_asset_lifecycle_service" in violation
+        for violation in violations
+    )
+    assert any(
+        "GUI file-operation service imports session planning dependency "
+        "iPhoto.media_classifier" in violation
+        for violation in violations
+    )

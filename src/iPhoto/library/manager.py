@@ -41,6 +41,7 @@ LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
+    from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
     from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
     from ..bootstrap.library_scan_service import LibraryScanService
     from ..application.ports import LibraryStateRepositoryPort
@@ -106,6 +107,7 @@ class LibraryManager(
         self._asset_query_service: "LibraryAssetQueryService | None" = None
         self._state_repository: "LibraryStateRepositoryPort | None" = None
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
+        self._asset_operation_service: "LibraryAssetOperationService | None" = None
         self._people_service: PeopleService | None = None
 
     # ------------------------------------------------------------------
@@ -270,6 +272,18 @@ class LibraryManager(
     @property
     def asset_lifecycle_service(self) -> "LibraryAssetLifecycleService | None":
         return self._asset_lifecycle_service
+
+    def bind_asset_operation_service(
+        self,
+        asset_operation_service: "LibraryAssetOperationService | None",
+    ) -> None:
+        """Bind the current library session file-operation command surface."""
+
+        self._asset_operation_service = asset_operation_service
+
+    @property
+    def asset_operation_service(self) -> "LibraryAssetOperationService | None":
+        return self._asset_operation_service
 
     def bind_people_service(self, people_service: PeopleService | None) -> None:
         """Bind the current library session People surface."""

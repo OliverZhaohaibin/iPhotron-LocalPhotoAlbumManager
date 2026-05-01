@@ -1,6 +1,6 @@
 # 05 - Current Progress
 
-> Last updated: 2026-04-30
+> Last updated: 2026-05-01
 
 ## Summary
 
@@ -231,17 +231,39 @@ migration steps.
 - Added `docs/refactor/15-gallery-query-read-migration.md` as the process
   handoff for this pass.
 
+## Completed In GUI File Operation Command Migration
+
+- Added `LibraryAssetOperationService` as the session-owned planning surface
+  for move, delete, and restore requests.
+- Exposed `LibrarySession.asset_operations` and bound it into `LibraryManager`
+  from `RuntimeContext.open_library()` / `close_library()`.
+- Refactored `AssetMoveService`, `DeletionService`, and `RestorationService`
+  so durable planning rules live outside GUI services; GUI code now forwards
+  metadata lookup/prompt callbacks and submits returned move plans to
+  `MoveWorker`.
+- Moved delete Live Photo companion expansion, restore metadata lookup, stale
+  restore-row fallback, album-id destination recovery, restore-to-root prompt
+  decisions, and same-stem restore fallback into the session operation surface.
+- Extended architecture checks so GUI file-operation services cannot directly
+  import the lifecycle service or media classifier again.
+- Added operation-service, session-binding, GUI-service, and architecture
+  guardrail tests.
+- Added `docs/refactor/16-gui-file-operation-command-migration.md` as the
+  process handoff for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
   guardrails now cover application/concrete imports, lower-layer GUI imports,
   GUI concrete index-store imports, asset-runtime SQLite regressions, new
   legacy model shim imports, new legacy domain-repository use case imports, and
-  GUI collection/viewmodel imports of legacy domain repositories.
+  GUI collection/viewmodel imports of legacy domain repositories, plus direct
+  planning-dependency imports from GUI file-operation services.
 - Phase 1 is partially complete: `LibrarySession` exists and is reachable from
   runtime entry objects; scan, asset lifecycle, asset query, asset repository,
-  durable state, and People session surfaces are bound into `LibraryManager`,
-  but GUI/coordinators/viewmodels still need broader session-surface migration.
+  asset operation planning, durable state, and People session surfaces are
+  bound into `LibraryManager`, but GUI/coordinators/viewmodels still need
+  broader session-surface migration.
 - Phase 2 is partially complete: repository/state ports exist and
   `global_index.db` is now the runtime asset source of truth; legacy
   `IAssetRepository` callers can bridge through the index-store adapter, active
@@ -260,9 +282,9 @@ migration steps.
   need review before Phase 3 can be marked fully complete.
 - Phase 4 is partially complete: GUI favorite writes, gallery collection/
   windowed reads, asset grid reads, export reads, dashboard metadata, Location
-  map aggregation, and key People dashboard/navigation/manual-face flows now use
-  session surfaces, but `gui.facade.py` and GUI services still carry legacy
-  business orchestration.
+  map aggregation, key People dashboard/navigation/manual-face flows, and
+  move/delete/restore planning now use session surfaces, but `gui.facade.py`
+  and some GUI services still carry legacy presentation orchestration.
 - Phase 5 is partially complete: thumbnail, Assign Location, and People
   boundaries were improved; Maps, Edit sidecar, and full thumbnail renderer
   ports still need deeper migration.
@@ -279,6 +301,8 @@ migration steps.
   facts source of truth.
 - `LibraryAssetLifecycleService` still uses the current index-store repository
   as the move/delete/restore lifecycle source of truth.
+- `LibraryAssetOperationService` owns move/delete/restore planning, but actual
+  file movement still runs in the GUI Qt `MoveWorker`.
 - `SQLiteAssetRepository` remains in place for legacy/domain repository tests
   and old use cases, but it is no longer the library-scoped runtime asset
   repository.
@@ -392,6 +416,16 @@ Additional gallery query read migration verification:
 Results: all passed with the same existing pytest config warning and legacy
 shim deprecation warnings where compatibility code imports old model shims.
 
+Additional GUI file operation command migration verification:
+
+- `.venv/bin/python -m pytest tests/application/test_library_asset_operation_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py -q`
+- `.venv/bin/python -m pytest tests/application/test_library_session.py tests/application/test_runtime_context.py -q`
+- `.venv/bin/python -m pytest tests/architecture -q`
+- `.venv/bin/python tools/check_architecture.py`
+
+Results: all passed with the same existing pytest config warning and legacy
+shim deprecation warnings where compatibility code imports old model shims.
+
 Additional session cleanup / live read migration verification:
 
 - `.venv/bin/python tools/check_architecture.py`
@@ -411,8 +445,8 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Continue reducing `gui.facade.py`, `library.manager.py`, and GUI services to
-   presentation/compatibility surfaces only.
+1. Continue slimming `gui.facade.py` open/rescan/pair routing so it delegates
+   to session command/query surfaces with less inline branching.
 2. Review remaining legacy scan-like application services before marking Phase
    3 fully complete.
 3. Expand end-to-end temp-library tests for import/move/delete/restore and

@@ -52,6 +52,16 @@ GUI_DOMAIN_REPOSITORY_FORBIDDEN_PREFIXES = (
     "gui/ui/models/",
 )
 
+GUI_FILE_OPERATION_SERVICE_FORBIDDEN_FILES = {
+    "gui/services/deletion_service.py",
+    "gui/services/restoration_service.py",
+}
+
+GUI_FILE_OPERATION_SERVICE_FORBIDDEN_IMPORTS = {
+    "iPhoto.bootstrap.library_asset_lifecycle_service",
+    "iPhoto.media_classifier",
+}
+
 LEGACY_DOMAIN_USE_CASE_MODULES = {
     "iPhoto.application.use_cases.aggregate_geo_data",
     "iPhoto.application.use_cases.apply_edit",
@@ -253,6 +263,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI collection/viewmodel imports legacy domain repository {module}"
+                )
+
+            if rel in GUI_FILE_OPERATION_SERVICE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_FILE_OPERATION_SERVICE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI file-operation service imports session planning dependency {module}"
                 )
 
             if rel not in LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS and (

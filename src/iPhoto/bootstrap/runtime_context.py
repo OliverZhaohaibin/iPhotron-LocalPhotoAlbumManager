@@ -192,6 +192,13 @@ class RuntimeContext:
         )
         if callable(bind_asset_lifecycle_service):
             bind_asset_lifecycle_service(self.library_session.asset_lifecycle)
+        bind_asset_operation_service = getattr(
+            self.library,
+            "bind_asset_operation_service",
+            None,
+        )
+        if callable(bind_asset_operation_service):
+            bind_asset_operation_service(self.library_session.asset_operations)
         bind_people_service = getattr(self.library, "bind_people_service", None)
         if callable(bind_people_service):
             bind_people_service(self.library_session.people)
@@ -207,6 +214,14 @@ class RuntimeContext:
         )
         if callable(bind_asset_lifecycle_service):
             bind_asset_lifecycle_service(None)
+
+        bind_asset_operation_service = getattr(
+            self.library,
+            "bind_asset_operation_service",
+            None,
+        )
+        if callable(bind_asset_operation_service):
+            bind_asset_operation_service(None)
 
         bind_people_service = getattr(self.library, "bind_people_service", None)
         if callable(bind_people_service):

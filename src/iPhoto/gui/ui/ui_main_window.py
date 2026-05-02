@@ -172,7 +172,10 @@ class Ui_MainWindow(object):
 
         self.sidebar = AlbumSidebar(library, MainWindow)
         self.preview_window = PreviewWindow(MainWindow)
-        self.map_view = PhotoMapView(map_runtime=getattr(library, "map_runtime", None))
+        self.map_view = PhotoMapView(
+            map_runtime=getattr(library, "map_runtime", None),
+            map_interaction_service=getattr(library, "map_interaction_service", None),
+        )
 
         self.gallery_page = GalleryPageWidget()
         self.grid_view = self.gallery_page.grid_view

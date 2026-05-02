@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from typing import Literal
 
-from ..dtos import GeotaggedAsset
+from ..dtos import GeotaggedAsset, MapMarkerActivation
 
 
 MapBackendKind = Literal[
@@ -42,6 +42,16 @@ class MapRuntimePort(Protocol):
 
     def package_root(self) -> Path | None:
         """Return the maps package root bound to the current runtime."""
+
+
+class MapInteractionServicePort(Protocol):
+    """Library-scoped map marker interaction boundary."""
+
+    def activate_marker_assets(
+        self,
+        assets: object,
+    ) -> MapMarkerActivation:
+        """Return the routing decision for a clicked marker asset payload."""
 
 
 class LocationAssetServicePort(Protocol):

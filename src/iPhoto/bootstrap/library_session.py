@@ -10,8 +10,10 @@ from ..application.ports import (
     EditServicePort,
     LibraryStateRepositoryPort,
     LocationAssetServicePort,
+    MapInteractionServicePort,
     MapRuntimePort,
 )
+from ..application.services.map_interaction_service import LibraryMapInteractionService
 from ..infrastructure.repositories.library_state_repository import (
     IndexStoreLibraryStateRepository,
 )
@@ -46,6 +48,7 @@ class LibrarySession:
     asset_operations: LibraryAssetOperationService | None = None
     people: PeopleService | None = None
     maps: MapRuntimePort | None = None
+    map_interactions: MapInteractionServicePort | None = None
     edit: EditServicePort | None = None
     locations: LocationAssetServicePort | None = None
     bind_asset_runtime: bool = True
@@ -79,6 +82,8 @@ class LibrarySession:
             self.people = create_people_service(self.library_root)
         if self.maps is None:
             self.maps = SessionMapRuntimeService()
+        if self.map_interactions is None:
+            self.map_interactions = LibraryMapInteractionService()
         if self.edit is None:
             self.edit = LibraryEditService(self.library_root)
         if self.locations is None:

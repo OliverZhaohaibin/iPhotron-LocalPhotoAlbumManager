@@ -231,17 +231,22 @@
 
 - [x] 定义 `MapRuntimePort`。
 - [x] 定义 `LocationAssetServicePort`。
+- [x] 定义 `MapInteractionServicePort`。
 - [x] 地图可用性查询通过 session。
 - [x] 地理资产聚合通过 session location query。
+- [x] marker 点击 routing 通过 session map interaction surface。
+- [x] full map / mini map widget 构造选择收口到共享 GUI factory。
 - [x] Recently Deleted cleanup 优先通过 session lifecycle surface。
 - [x] native runtime fallback 有测试。
 
 当前已补齐 session-bound Maps runtime capability surface，并将
 `PhotoMapView` / `InfoLocationMapView` / `PlaybackCoordinator`
 接到同一 runtime seam；地理资产查询也已迁入 `LibrarySession.locations`。
-`LocationTrashNavigationService` 仍保留为 Qt transport seam，widget 构造与
-marker/event routing 仍在 GUI 层，因此不应仅凭当前切片将整个 Maps bounded
-context 视为“完全完成”。
+本轮继续补齐 `LibrarySession.map_interactions`，marker 点击语义不再由
+`MarkerController` 决定；full map / mini map 的 concrete widget 选择也已集中到
+`map_widget_factory`。`LocationTrashNavigationService` 仍保留为 Qt transport
+seam，map widget 事件过滤、overlay/pin 绘制、drag cursor 与 marker hit testing
+仍在 GUI 层，因此不应仅凭当前切片将整个 Maps bounded context 视为“完全完成”。
 
 ### Thumbnail
 
@@ -259,7 +264,7 @@ context 视为“完全完成”。
 
 完成条件：
 
-- [ ] 每个 bounded context 都有 application-level boundary。
+- [x] 每个 bounded context 都有 application-level boundary。
 - [x] GUI 可以用 fake port 做 viewmodel/coordinator 测试。
 - [x] runtime adapter 可替换。
 

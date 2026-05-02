@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 from typing import Callable
 
@@ -32,26 +31,121 @@ from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QW
 
 from ....application.ports import MapRuntimePort
 from maps.map_sources import MapSourceSpec
-from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.drag_cursor import DragCursorManager
-from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
-from maps.map_widget.map_widget import MapWidget
 
 from .photo_map_view import (
     _configure_opaque_map_container,
+)
+from .map_widget_factory import (
+    MapGLWidget,
+    MapGLWindowWidget,
+    MapWidget,
+    MapWidgetBase,
+    MapWidgetFactoryResult,
     _choose_map_widget_backend_with_runtime,
+    _preferred_python_widget_class,
     check_opengl_support,
     choose_map_widget_backend,
+    resolve_map_package_root,
 )
 
 LOGGER = logging.getLogger(__name__)
 
-_MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[4] / "maps"
 _PIN_ICON_PATH = Path(__file__).resolve().parents[1] / "icon" / "map.pin.svg"
 _PIN_ICON_WIDTH = 90
 _PIN_ICON_HEIGHT = 114
 _PIN_ANCHOR_X_RATIO = 256.0 / 512.0
 _PIN_ANCHOR_Y_RATIO = 418.0 / 512.0
+
+
+def create_map_widget(
+    parent: QWidget,
+    *,
+    map_source: MapSourceSpec | None,
+    map_runtime_capabilities,
+    package_root: Path,
+    log: logging.Logger | None = None,
+    context: str = "info-panel mini-map",
+) -> MapWidgetFactoryResult:
+    """Build the mini-map through shared factory primitives.
+
+    The wrapper keeps long-standing tests able to patch this module's backend
+    chooser while the concrete widget imports remain isolated in
+    ``map_widget_factory``.
+    """
+
+    active_logger = log or LOGGER
+    if map_runtime_capabilities is not None:
+        use_opengl = map_runtime_capabilities.python_gl_available
+        try:
+            widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_with_runtime(
+                map_source,
+                use_opengl=use_opengl,
+                runtime_capabilities=map_runtime_capabilities,
+                package_root=package_root,
+            )
+        except TypeError as exc:
+            if "package_root" not in str(exc):
+                raise
+            widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_with_runtime(
+                map_source,
+                use_opengl=use_opengl,
+                runtime_capabilities=map_runtime_capabilities,
+            )
+    else:
+        use_opengl = check_opengl_support()
+        try:
+            widget_cls, resolved_map_source, backend_kind = choose_map_widget_backend(
+                map_source,
+                use_opengl=use_opengl,
+                package_root=package_root,
+            )
+        except TypeError as exc:
+            if "package_root" not in str(exc):
+                raise
+            widget_cls, resolved_map_source, backend_kind = choose_map_widget_backend(
+                map_source,
+                use_opengl=use_opengl,
+            )
+
+    assert resolved_map_source is not None
+    try:
+        widget = widget_cls(parent, map_source=resolved_map_source)
+        return MapWidgetFactoryResult(widget, resolved_map_source, backend_kind, use_opengl)
+    except Exception as exc:
+        if backend_kind == "osmand_native":
+            active_logger.warning(
+                "Native OsmAnd widget unavailable for %s, falling back: %s",
+                context,
+                exc,
+            )
+            fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
+            widget = fallback_cls(parent, map_source=resolved_map_source)
+            return MapWidgetFactoryResult(
+                widget,
+                resolved_map_source,
+                "osmand_python",
+                use_opengl,
+            )
+        if widget_cls in {MapGLWidget, MapGLWindowWidget}:
+            active_logger.warning(
+                "OpenGL mini-map unavailable, falling back to CPU renderer: %s",
+                exc,
+            )
+            widget = MapWidget(parent, map_source=resolved_map_source)
+            fallback_backend_kind = (
+                "osmand_python"
+                if resolved_map_source.kind == "osmand_obf"
+                else "legacy_python"
+            )
+            return MapWidgetFactoryResult(
+                widget,
+                resolved_map_source,
+                fallback_backend_kind,
+                use_opengl,
+            )
+        active_logger.warning("Mini-map backend unavailable", exc_info=True)
+        return MapWidgetFactoryResult(None, resolved_map_source, "unavailable", use_opengl)
 
 
 def _build_pin_pixmap(width: int, height: int) -> QPixmap:
@@ -161,7 +255,7 @@ class InfoLocationMapView(QWidget):
         self._map_runtime_capabilities = (
             map_runtime.capabilities() if map_runtime is not None else None
         )
-        self._map_package_root = self._resolve_package_root(map_runtime)
+        self._map_package_root = resolve_map_package_root(map_runtime)
         self._map_widget: MapWidgetBase | None = None
         self._map_event_targets: list[QObject] = []
         self._application_event_filter_installed = False
@@ -236,7 +330,7 @@ class InfoLocationMapView(QWidget):
         self._map_runtime_capabilities = (
             map_runtime.capabilities() if map_runtime is not None else None
         )
-        self._map_package_root = self._resolve_package_root(map_runtime)
+        self._map_package_root = resolve_map_package_root(map_runtime)
         if self._map_widget is not None and self._map_package_root != previous_package_root:
             self.shutdown()
 
@@ -702,49 +796,16 @@ class InfoLocationMapView(QWidget):
         map_source = MapSourceSpec.osmand_default(self._map_package_root).resolved(
             self._map_package_root
         )
-        if self._map_runtime_capabilities is not None:
-            use_opengl = self._map_runtime_capabilities.python_gl_available
-            widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_with_runtime(
-                map_source,
-                use_opengl=use_opengl,
-                runtime_capabilities=self._map_runtime_capabilities,
-            )
-        else:
-            use_opengl = check_opengl_support()
-            widget_cls, resolved_map_source, backend_kind = choose_map_widget_backend(
-                map_source,
-                use_opengl=use_opengl,
-            )
-        assert resolved_map_source is not None
-        try:
-            self._map_widget = widget_cls(self._map_host, map_source=resolved_map_source)
-            self._backend_kind = backend_kind
-        except Exception as exc:
-            if backend_kind == "osmand_native":
-                LOGGER.warning(
-                    "Native OsmAnd widget unavailable for info-panel mini-map, falling back: %s",
-                    exc,
-                )
-                fallback_cls = (
-                    MapGLWindowWidget
-                    if use_opengl and sys.platform == "darwin"
-                    else MapGLWidget
-                    if use_opengl
-                    else MapWidget
-                )
-                self._map_widget = fallback_cls(self._map_host, map_source=resolved_map_source)
-                self._backend_kind = "osmand_python"
-            elif widget_cls in {MapGLWidget, MapGLWindowWidget}:
-                LOGGER.warning(
-                    "OpenGL mini-map unavailable, falling back to CPU renderer: %s",
-                    exc,
-                )
-                self._map_widget = MapWidget(self._map_host, map_source=resolved_map_source)
-                self._backend_kind = "legacy_python"
-            else:
-                LOGGER.warning("Mini-map backend unavailable", exc_info=True)
-                self._map_widget = None
-                self._backend_kind = "unavailable"
+        result = create_map_widget(
+            self._map_host,
+            map_source=map_source,
+            map_runtime_capabilities=self._map_runtime_capabilities,
+            package_root=self._map_package_root,
+            log=LOGGER,
+            context="info-panel mini-map",
+        )
+        self._map_widget = result.widget
+        self._backend_kind = result.backend_kind
 
         if self._map_widget is None:
             self._map_host.hide()
@@ -763,23 +824,6 @@ class InfoLocationMapView(QWidget):
         self._sync_corner_masks()
         self._sync_overlay_geometry()
         QTimer.singleShot(0, self._sync_overlay_geometry)
-
-    @staticmethod
-    def _resolve_package_root(map_runtime: MapRuntimePort | None) -> Path:
-        package_root_getter = getattr(map_runtime, "package_root", None)
-        if callable(package_root_getter):
-            try:
-                package_root = package_root_getter()
-            except Exception:
-                LOGGER.debug("Failed to resolve info-panel mini-map package root", exc_info=True)
-            else:
-                if package_root is not None:
-                    return Path(package_root).resolve()
-
-        package_root = getattr(map_runtime, "_package_root", None)
-        if package_root is not None:
-            return Path(package_root).resolve()
-        return _MAPS_PACKAGE_ROOT.resolve()
 
     def _install_map_event_filters(self) -> None:
         self._remove_map_event_filters()

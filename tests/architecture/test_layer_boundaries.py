@@ -155,6 +155,24 @@ def test_gui_location_helper_import_is_blocked(tmp_path: Path) -> None:
     )
 
 
+def test_map_widgets_must_use_factory_for_concrete_widget_imports(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "ui" / "widgets" / "photo_map_view.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from maps.map_widget.map_gl_widget import MapGLWidget\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "map widget construction must go through map_widget_factory"
+        in violation
+        for violation in violations
+    )
+
+
 def test_gui_library_update_service_worker_import_is_blocked(tmp_path: Path) -> None:
     source = tmp_path / "iPhoto"
     module = source / "gui" / "services" / "library_update_service.py"

@@ -8,8 +8,8 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for marker controller tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtCore", reason="QtCore is required for marker controller tests", exc_type=ImportError)
 
-from PySide6.QtCore import QCoreApplication, QObject
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QObject, QPointF
+from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.marker_controller import MarkerController
 from maps.map_widget.map_renderer import CityAnnotation
@@ -17,11 +17,11 @@ from iPhoto.library.manager import GeotaggedAsset
 
 
 @pytest.fixture
-def qapp() -> QCoreApplication:
+def qapp() -> QApplication:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QCoreApplication.instance()
+    app = QApplication.instance()
     if app is None:
-        app = QCoreApplication([])
+        app = QApplication([])
     return app
 
 
@@ -65,7 +65,7 @@ class _DummyThumbnailLoader(QObject):
 
 
 def test_marker_controller_suppresses_city_labels_when_backend_provides_them(
-    qapp: QCoreApplication,
+    qapp: QApplication,
 ) -> None:
     controller = MarkerController(
         _DummyMapWidget(),
@@ -96,7 +96,7 @@ def test_marker_controller_suppresses_city_labels_when_backend_provides_them(
 
 
 def test_marker_controller_uses_exact_screen_projection_when_requested(
-    qapp: QCoreApplication,
+    qapp: QApplication,
     tmp_path: Path,
 ) -> None:
     del qapp
@@ -161,7 +161,7 @@ def test_marker_controller_uses_exact_screen_projection_when_requested(
 
 
 def test_marker_controller_reuses_existing_map_state_when_assets_are_unchanged(
-    qapp: QCoreApplication,
+    qapp: QApplication,
     tmp_path: Path,
 ) -> None:
     loader = _DummyThumbnailLoader()
@@ -208,3 +208,42 @@ def test_marker_controller_reuses_existing_map_state_when_assets_are_unchanged(
     assert loader.reset_calls == [tmp_path]
     assert len(invalidations) == first_invalidations
     assert len(city_updates) == first_city_updates
+
+
+def test_marker_controller_emits_raw_marker_assets(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    asset = GeotaggedAsset(
+        library_relative="a.jpg",
+        album_relative="a.jpg",
+        absolute_path=tmp_path / "a.jpg",
+        album_path=tmp_path,
+        asset_id="a",
+        latitude=20.0,
+        longitude=10.0,
+        is_image=True,
+        is_video=False,
+        still_image_time=None,
+        duration=None,
+        location_name=None,
+        live_photo_group_id=None,
+        live_partner_rel=None,
+    )
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        controller.handle_marker_click(controller._clusters[0] if controller._clusters else type("_Cluster", (), {"assets": [asset]})())
+    finally:
+        controller.shutdown()
+
+    assert emitted == [[asset]]

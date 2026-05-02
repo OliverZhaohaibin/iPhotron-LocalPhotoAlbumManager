@@ -244,6 +244,9 @@ class MainCoordinator(QObject):
             )
         if hasattr(window.ui, "map_view"):
             window.ui.map_view.set_map_runtime(getattr(context.library, "map_runtime", None))
+            window.ui.map_view.set_map_interaction_service(
+                getattr(context.library, "map_interaction_service", None)
+            )
 
         # 4. Theme Controller
         self._theme_controller = WindowThemeController(window.ui, window, context.theme)
@@ -608,11 +611,17 @@ class MainCoordinator(QObject):
                 people_page.set_library_root(root)
             people_page.set_status_message(self._context.library.face_scan_status_message())
         map_runtime = getattr(self._context.library, "map_runtime", None)
+        map_interaction_service = getattr(
+            self._context.library,
+            "map_interaction_service",
+            None,
+        )
         self._map_extension_download.set_package_root(
             self._resolve_map_package_root(map_runtime)
         )
         if ui is not None and hasattr(ui, "map_view"):
             ui.map_view.set_map_runtime(map_runtime)
+            ui.map_view.set_map_interaction_service(map_interaction_service)
         if ui is not None and hasattr(ui, "info_panel"):
             ui.info_panel.set_map_runtime(map_runtime)
         playback = getattr(self, "_playback", None)

@@ -19,6 +19,7 @@ from .repositories import (
 )
 from .runtime import (
     LocationAssetServicePort,
+    MapInteractionServicePort,
     MapBackendKind,
     MapRuntimeCapabilities,
     MapRuntimePort,
@@ -36,6 +37,7 @@ __all__ = [
     "LocationAssetServicePort",
     "LocationMetadataPort",
     "MapBackendKind",
+    "MapInteractionServicePort",
     "MapRuntimeCapabilities",
     "MapRuntimePort",
     "MediaScannerPort",

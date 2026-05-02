@@ -12,10 +12,12 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
     map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
+    map_interaction_service = SimpleNamespace()
 
     coordinator._context = MagicMock()
     coordinator._context.library.root.return_value = root
     coordinator._context.library.map_runtime = map_runtime
+    coordinator._context.library.map_interaction_service = map_interaction_service
     coordinator._context.library.state_repository = MagicMock()
     coordinator._context.library.asset_query_service = MagicMock()
     coordinator._context.asset_runtime.repository = MagicMock()
@@ -53,6 +55,9 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator._playback.set_people_library_root.assert_called_once_with(root)
     coordinator._window.ui.map_view.set_map_runtime.assert_called_once_with(
         map_runtime
+    )
+    coordinator._window.ui.map_view.set_map_interaction_service.assert_called_once_with(
+        map_interaction_service
     )
     coordinator._window.ui.info_panel.set_map_runtime.assert_called_once_with(
         map_runtime

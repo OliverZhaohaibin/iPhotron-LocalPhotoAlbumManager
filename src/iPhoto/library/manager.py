@@ -43,6 +43,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..application.ports import (
         EditServicePort,
         LocationAssetServicePort,
+        MapInteractionServicePort,
         MapRuntimePort,
     )
     from ..bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
@@ -117,6 +118,7 @@ class LibraryManager(
         self._asset_operation_service: "LibraryAssetOperationService | None" = None
         self._people_service: PeopleService | None = None
         self._map_runtime: "MapRuntimePort | None" = None
+        self._map_interaction_service: "MapInteractionServicePort | None" = None
         self._edit_service: "EditServicePort | None" = None
         self._location_service: "LocationAssetServicePort | None" = None
 
@@ -339,6 +341,18 @@ class LibraryManager(
     @property
     def map_runtime(self) -> "MapRuntimePort | None":
         return self._map_runtime
+
+    def bind_map_interaction_service(
+        self,
+        map_interaction_service: "MapInteractionServicePort | None",
+    ) -> None:
+        """Bind the current library session Maps interaction surface."""
+
+        self._map_interaction_service = map_interaction_service
+
+    @property
+    def map_interaction_service(self) -> "MapInteractionServicePort | None":
+        return self._map_interaction_service
 
     def bind_edit_service(self, edit_service: "EditServicePort | None") -> None:
         """Bind the current library session edit surface."""

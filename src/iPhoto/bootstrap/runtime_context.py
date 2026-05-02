@@ -218,6 +218,13 @@ class RuntimeContext:
         bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
         if callable(bind_map_runtime):
             bind_map_runtime(self.library_session.maps)
+        bind_map_interaction_service = getattr(
+            self.library,
+            "bind_map_interaction_service",
+            None,
+        )
+        if callable(bind_map_interaction_service):
+            bind_map_interaction_service(self.library_session.map_interactions)
         return self.library_session
 
     def close_library(self) -> None:
@@ -245,6 +252,13 @@ class RuntimeContext:
         bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
         if callable(bind_map_runtime):
             bind_map_runtime(None)
+        bind_map_interaction_service = getattr(
+            self.library,
+            "bind_map_interaction_service",
+            None,
+        )
+        if callable(bind_map_interaction_service):
+            bind_map_interaction_service(None)
 
         bind_location_service = getattr(self.library, "bind_location_service", None)
         if callable(bind_location_service):

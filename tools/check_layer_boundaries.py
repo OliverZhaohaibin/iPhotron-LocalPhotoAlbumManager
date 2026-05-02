@@ -120,6 +120,18 @@ GUI_LOCATION_HELPER_FORBIDDEN = {
     "iPhoto.library.geo_aggregator",
 }
 
+GUI_MAP_WIDGET_FACTORY_ONLY_FILES = {
+    "gui/ui/widgets/photo_map_view.py",
+    "gui/ui/widgets/info_location_map.py",
+}
+
+GUI_MAP_WIDGET_FACTORY_ONLY_IMPORTS = {
+    "maps.map_widget.map_gl_widget",
+    "maps.map_widget.map_widget",
+    "maps.map_widget.native_osmand_widget",
+    "maps.map_widget.qt_location_map_widget",
+}
+
 LEGACY_DOMAIN_USE_CASE_MODULES = {
     "iPhoto.application.use_cases.aggregate_geo_data",
     "iPhoto.application.use_cases.apply_edit",
@@ -311,6 +323,15 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI runtime imports legacy location helper {module}"
+                )
+
+            if rel in GUI_MAP_WIDGET_FACTORY_ONLY_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_MAP_WIDGET_FACTORY_ONLY_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: map widget construction must go "
+                    f"through map_widget_factory, not {module}"
                 )
 
             if (

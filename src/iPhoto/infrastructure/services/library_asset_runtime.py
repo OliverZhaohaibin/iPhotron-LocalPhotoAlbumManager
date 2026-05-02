@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...application.ports import AssetRepositoryPort, EditServicePort
 from ...config import WORK_DIR_NAME
-from ...application.ports import AssetRepositoryPort
 from ...cache.index_store import get_global_repository
 from ...domain.repositories import IAssetRepository
 from ...utils.pathutils import ensure_work_dir
@@ -33,6 +33,13 @@ class LibraryAssetRuntime:
     @property
     def thumbnail_service(self) -> ThumbnailCacheService:
         return self._thumbnail_service
+
+    def bind_edit_service(self, edit_service: EditServicePort | None) -> None:
+        """Bind the current library session edit surface into thumbnail rendering."""
+
+        setter = getattr(self._thumbnail_service, "set_edit_service", None)
+        if callable(setter):
+            setter(edit_service)
 
     def bind_library_root(self, library_root: Path | None) -> None:
         """Rebuild the asset repository and cache path for *library_root*."""

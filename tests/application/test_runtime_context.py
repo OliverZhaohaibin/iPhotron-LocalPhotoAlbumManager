@@ -8,12 +8,16 @@ from iPhoto.bootstrap.runtime_context import RuntimeContext
 class _FakeAssetRuntime:
     def __init__(self) -> None:
         self.bound_roots: list[Path] = []
+        self.bound_edit_services: list[object | None] = []
 
     def bind_library_root(self, root: Path) -> None:
         self.bound_roots.append(root)
         work_dir = root / ".iPhoto"
         work_dir.mkdir(parents=True, exist_ok=True)
         (work_dir / "global_index.db").touch()
+
+    def bind_edit_service(self, edit_service: object | None) -> None:
+        self.bound_edit_services.append(edit_service)
 
 
 class _FakeLibrary:
@@ -24,6 +28,7 @@ class _FakeLibrary:
         self.bound_asset_query_services: list[object | None] = []
         self.bound_state_repositories: list[object | None] = []
         self.bound_album_metadata_services: list[object | None] = []
+        self.bound_edit_services: list[object | None] = []
         self.bound_asset_lifecycle_services: list[object | None] = []
         self.bound_asset_operation_services: list[object | None] = []
         self.bound_people_services: list[object | None] = []
@@ -79,6 +84,9 @@ class _FakeLibrary:
     ) -> None:
         self.bound_asset_lifecycle_services.append(asset_lifecycle_service)
 
+    def bind_edit_service(self, edit_service: object | None) -> None:
+        self.bound_edit_services.append(edit_service)
+
     def bind_asset_operation_service(
         self,
         asset_operation_service: object | None,
@@ -112,6 +120,7 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     context.resume_startup_tasks()
 
     assert asset_runtime.bound_roots == [library_root]
+    assert asset_runtime.bound_edit_services[-1] is not None
     assert (library_root / ".iPhoto" / "global_index.db").exists()
     assert library.asset_query_service_during_bind is not None
     assert library.state_repository_during_bind is not None
@@ -119,6 +128,7 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_asset_query_services[-1] is not None
     assert library.bound_state_repositories[-1] is not None
     assert library.bound_album_metadata_services[-1] is not None
+    assert library.bound_edit_services[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert library.bound_asset_operation_services[-1] is not None
     assert library.bound_people_services[-1] is not None
@@ -136,10 +146,12 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     context.resume_startup_tasks()
 
     assert asset_runtime.bound_roots == [library_root]
+    assert asset_runtime.bound_edit_services[-1] is not None
     assert library.bound_scan_services[-1] is not None
     assert library.bound_asset_query_services[-1] is not None
     assert library.bound_state_repositories[-1] is not None
     assert library.bound_album_metadata_services[-1] is not None
+    assert library.bound_edit_services[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert library.bound_asset_operation_services[-1] is not None
     assert library.bound_people_services[-1] is not None

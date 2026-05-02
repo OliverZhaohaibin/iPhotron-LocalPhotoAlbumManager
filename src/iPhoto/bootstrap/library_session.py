@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..application.ports import AssetRepositoryPort, LibraryStateRepositoryPort, MapRuntimePort
+from ..application.ports import (
+    AssetRepositoryPort,
+    EditServicePort,
+    LibraryStateRepositoryPort,
+    MapRuntimePort,
+)
 from ..infrastructure.repositories.library_state_repository import (
     IndexStoreLibraryStateRepository,
 )
@@ -20,6 +25,7 @@ from .library_album_metadata_service import LibraryAlbumMetadataService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_asset_operation_service import LibraryAssetOperationService
 from .library_asset_query_service import LibraryAssetQueryService
+from .library_edit_service import LibraryEditService
 from .library_people_service import create_people_service
 from .library_scan_service import LibraryScanService
 
@@ -38,6 +44,7 @@ class LibrarySession:
     asset_operations: LibraryAssetOperationService | None = None
     people: PeopleService | None = None
     maps: MapRuntimePort | None = None
+    edit: EditServicePort | None = None
     bind_asset_runtime: bool = True
 
     def __post_init__(self) -> None:
@@ -69,6 +76,11 @@ class LibrarySession:
             self.people = create_people_service(self.library_root)
         if self.maps is None:
             self.maps = SessionMapRuntimeService()
+        if self.edit is None:
+            self.edit = LibraryEditService(self.library_root)
+        bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
+        if callable(bind_edit_service):
+            bind_edit_service(self.edit)
 
     @property
     def assets(self) -> AssetRepositoryPort:
@@ -87,6 +99,9 @@ class LibrarySession:
         return AssignLocationService(self.state, ExifToolLocationMetadataService())
 
     def shutdown(self) -> None:
+        bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
+        if callable(bind_edit_service):
+            bind_edit_service(None)
         self.asset_runtime.shutdown()
 
 

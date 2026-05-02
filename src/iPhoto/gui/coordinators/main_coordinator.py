@@ -94,6 +94,7 @@ class MainCoordinator(QObject):
             self._asset_service = self._container.resolve(AssetService)
         else:
             raise RuntimeError("DependencyContainer is required for MainCoordinator")
+        edit_service_getter = lambda: getattr(context.library, "edit_service", None)
 
         # --- ViewModels Setup ---
         lib_root = context.library.root()
@@ -101,6 +102,7 @@ class MainCoordinator(QObject):
         self._asset_list_vm = GalleryListModelAdapter.create(
             asset_query_service=getattr(context.library, "asset_query_service", None),
             thumbnail_service=self._context.asset_runtime.thumbnail_service,
+            edit_service_getter=edit_service_getter,
             library_root=lib_root,
             parent=window.ui.grid_view,
         )
@@ -172,6 +174,7 @@ class MainCoordinator(QObject):
             asset_vm=self._asset_list_vm,
             pause_watcher=self._navigation.pause_library_watcher,
             resume_watcher=self._navigation.resume_library_watcher,
+            edit_service_getter=edit_service_getter,
             parent=self,
         )
         self._detail_vm = DetailViewModel(
@@ -179,6 +182,7 @@ class MainCoordinator(QObject):
             media_session=self._media_session,
             asset_service=self._asset_service,
             adjustment_commit_port=self._adjustment_committer,
+            edit_service_getter=edit_service_getter,
         )
 
         # 3. Playback Coordinator
@@ -190,6 +194,7 @@ class MainCoordinator(QObject):
             window.ui.video_area,
             window.ui.player_placeholder,
             window.ui.live_badge,
+            edit_service_getter=edit_service_getter,
         )
         self._header_controller = HeaderController(
             window.ui.location_label,
@@ -254,6 +259,7 @@ class MainCoordinator(QObject):
             self._navigation,
             self._media_session,
             self._adjustment_committer,
+            edit_service_getter,
         )
 
         # --- Legacy Controllers ---
@@ -276,6 +282,7 @@ class MainCoordinator(QObject):
             copy_file_action=window.ui.share_action_copy_file,
             copy_path_action=window.ui.share_action_copy_path,
             reveal_action=window.ui.share_action_reveal_file,
+            edit_service_getter=edit_service_getter,
         )
         self._share_controller.restore_preference()
 
@@ -315,7 +322,10 @@ class MainCoordinator(QObject):
         self._filmstrip_delegate = AssetGridDelegate(window.ui.filmstrip_view, filmstrip_mode=True)
         window.ui.filmstrip_view.setItemDelegate(self._filmstrip_delegate)
 
-        self._preview_controller = PreviewController(window.ui.preview_window)
+        self._preview_controller = PreviewController(
+            window.ui.preview_window,
+            edit_service_getter=edit_service_getter,
+        )
         self._preview_controller.bind_view(window.ui.grid_view)
 
         self._selection_controller = SelectionController(

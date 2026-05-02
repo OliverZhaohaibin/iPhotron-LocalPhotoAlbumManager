@@ -249,15 +249,15 @@ widget 构造仍保留在 GUI 层，因此不应仅凭本轮将整个 Maps bound
 ### Edit
 
 - [x] 定义 `EditSidecarPort`。
-- [ ] `.ipo` 读写通过 port。
-- [ ] edit save/reset/export 通过 use case。
-- [ ] GUI edit widget 不直接拥有 durable business state。
+- [x] `.ipo` 读写通过 port。
+- [x] edit save/export 通过 session command surface；reset 默认值来源统一通过 edit service。
+- [x] GUI edit widget 不直接拥有 durable business state。
 
 完成条件：
 
 - [ ] 每个 bounded context 都有 application-level boundary。
-- [ ] GUI 可以用 fake port 做 viewmodel/coordinator 测试。
-- [ ] runtime adapter 可替换。
+- [x] GUI 可以用 fake port 做 viewmodel/coordinator 测试。
+- [x] runtime adapter 可替换。
 
 回归测试：
 

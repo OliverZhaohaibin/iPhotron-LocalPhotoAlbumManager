@@ -264,18 +264,20 @@ def test_preserve_live_presentation_keeps_existing_motion_during_same_asset_refr
 def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator._library_manager = SimpleNamespace(
+        edit_service=Mock(read_adjustments=Mock(return_value={"Exposure": 0.2}))
+    )
     coordinator._player_view = SimpleNamespace(
         video_area=Mock(rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})),
         image_viewer=Mock(rotate_image_ccw=Mock()),
     )
 
-    with patch(
-        "iPhoto.gui.coordinators.playback_coordinator.sidecar.load_adjustments",
-        return_value={"Exposure": 0.2},
-    ):
-        PlaybackCoordinator._handle_rotate_requested(coordinator, Path("/fake/video.mp4"), True)
+    PlaybackCoordinator._handle_rotate_requested(coordinator, Path("/fake/video.mp4"), True)
 
     coordinator._player_view.video_area.rotate_image_ccw.assert_called_once_with()
+    coordinator._library_manager.edit_service.read_adjustments.assert_called_once_with(
+        Path("/fake/video.mp4")
+    )
     coordinator._adjustment_committer.commit.assert_called_once_with(
         Path("/fake/video.mp4"),
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},

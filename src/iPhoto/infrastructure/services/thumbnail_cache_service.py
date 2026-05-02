@@ -6,6 +6,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QSize, Signal, QThreadPool, QRunnable, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
 
+from iPhoto.application.ports import EditServicePort
 from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
 from iPhoto.core.color_resolver import compute_color_statistics
 from iPhoto.core import geo_utils
@@ -58,6 +59,7 @@ class ThumbnailCacheService(QObject):
         self._disk_cache_path = disk_cache_path
         self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._generator = PillowThumbnailGenerator()
+        self._edit_service: EditServicePort | None = None
 
         # Simple in-memory cache: Dict[Path, QPixmap]
         # In a real app, use an LRU cache with size tracking.
@@ -81,6 +83,11 @@ class ThumbnailCacheService(QObject):
         self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._memory_cache.clear()
         self._pending_tasks.clear()
+
+    def set_edit_service(self, edit_service: EditServicePort | None) -> None:
+        """Bind the current edit surface used for thumbnail rendering."""
+
+        self._edit_service = edit_service
 
     def get_thumbnail(self, path: Path, size: QSize) -> Optional[QPixmap]:
         if self._is_shutting_down:
@@ -220,12 +227,20 @@ class ThumbnailCacheService(QObject):
         if qimage is None or qimage.isNull():
             return None
 
-        raw_adjustments = sidecar.load_adjustments(path)
-        stats = compute_color_statistics(qimage) if raw_adjustments else None
-        adjustments = sidecar.resolve_render_adjustments(
-            raw_adjustments,
-            color_stats=stats,
-        )
+        if self._edit_service is not None and self._edit_service.sidecar_exists(path):
+            stats = compute_color_statistics(qimage)
+            state = self._edit_service.describe_adjustments(
+                path,
+                color_stats=stats,
+            )
+            adjustments = state.resolved_adjustments
+        else:
+            raw_adjustments = sidecar.load_adjustments(path)
+            stats = compute_color_statistics(qimage) if raw_adjustments else None
+            adjustments = sidecar.resolve_render_adjustments(
+                raw_adjustments,
+                color_stats=stats,
+            )
 
         if adjustments:
             qimage = self._apply_geometry_and_crop(qimage, adjustments) or qimage

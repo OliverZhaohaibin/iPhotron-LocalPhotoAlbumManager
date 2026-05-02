@@ -40,7 +40,7 @@ from .workers.scanner_worker import ScannerWorker
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..application.ports import MapRuntimePort
+    from ..application.ports import EditServicePort, MapRuntimePort
     from ..bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
@@ -113,6 +113,7 @@ class LibraryManager(
         self._asset_operation_service: "LibraryAssetOperationService | None" = None
         self._people_service: PeopleService | None = None
         self._map_runtime: "MapRuntimePort | None" = None
+        self._edit_service: "EditServicePort | None" = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -329,6 +330,15 @@ class LibraryManager(
     @property
     def map_runtime(self) -> "MapRuntimePort | None":
         return self._map_runtime
+
+    def bind_edit_service(self, edit_service: "EditServicePort | None") -> None:
+        """Bind the current library session edit surface."""
+
+        self._edit_service = edit_service
+
+    @property
+    def edit_service(self) -> "EditServicePort | None":
+        return self._edit_service
 
     def _bind_people_index_coordinator(self, root: Path) -> None:
         coordinator = get_people_index_coordinator(root)

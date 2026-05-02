@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QLocale, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
-from iPhoto.application.ports import MapRuntimePort
+from iPhoto.application.ports import EditServicePort, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.ui.tasks.assign_location_worker import (
     AssignLocationRequest,
@@ -32,7 +32,6 @@ from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
-from iPhoto.io import sidecar
 from iPhoto.library.manager import LibraryManager
 from iPhoto.people.repository import AssetFaceAnnotation
 from iPhoto.people.service import PeopleService
@@ -888,6 +887,12 @@ class PlaybackCoordinator(QObject):
             return
         self._header_controller.update_from_values(presentation.location, presentation.timestamp)
 
+    def _edit_service(self) -> EditServicePort | None:
+        library_manager = getattr(self, "_library_manager", None)
+        if library_manager is None:
+            return None
+        return getattr(library_manager, "edit_service", None)
+
     def select_next(self) -> None:
         self._detail_vm.next()
 
@@ -912,7 +917,10 @@ class PlaybackCoordinator(QObject):
         else:
             updates = self._player_view.image_viewer.rotate_image_ccw()
         try:
-            current_adjustments = sidecar.load_adjustments(path)
+            edit_service = self._edit_service()
+            if edit_service is None:
+                raise RuntimeError("Edit service is unavailable")
+            current_adjustments = edit_service.read_adjustments(path)
             current_adjustments.update(updates)
             self._adjustment_committer.commit(path, current_adjustments, reason="rotate")
         except Exception:

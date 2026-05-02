@@ -10,6 +10,7 @@ pytest.importorskip("PySide6.QtCore", reason="QtCore is required for preview con
 
 from PySide6.QtCore import QPoint, QRect
 
+from iPhoto.application.ports import EditRenderingState
 from iPhoto.gui.ui.controllers.preview_controller import PreviewController
 from iPhoto.gui.ui.models.roles import Roles
 
@@ -32,7 +33,17 @@ def _make_view(rect: QRect) -> Mock:
 
 def test_request_preview_passes_adjustments_and_trim_to_preview_window() -> None:
     preview_window = Mock()
-    controller = PreviewController(preview_window)
+    edit_service = Mock()
+    edit_service.describe_adjustments.return_value = EditRenderingState(
+        sidecar_exists=True,
+        raw_adjustments={"Exposure": 0.5},
+        resolved_adjustments={"Exposure": 0.5},
+        adjusted_preview=True,
+        has_visible_edits=True,
+        trim_range_ms=(1000, 4000),
+        effective_duration_sec=3.0,
+    )
+    controller = PreviewController(preview_window, edit_service_getter=lambda: edit_service)
     preview_path = Path("D:/fake/video.mp4")
     view = _make_view(QRect(10, 20, 120, 90))
     index = _make_index(
@@ -44,23 +55,7 @@ def test_request_preview_passes_adjustments_and_trim_to_preview_window() -> None
         }
     )
 
-    with patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.load_adjustments",
-        return_value={"Exposure": 0.5},
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.has_non_default_adjustments",
-        return_value=True,
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.resolve_render_adjustments",
-        return_value={"Exposure": 0.5},
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.trim_is_non_default",
-        return_value=True,
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.normalise_video_trim",
-        return_value=(1.0, 4.0),
-    ):
-        controller._handle_request_preview(view, index)
+    controller._handle_request_preview(view, index)
 
     preview_window.show_preview.assert_called_once()
     args, kwargs = preview_window.show_preview.call_args
@@ -72,7 +67,7 @@ def test_request_preview_passes_adjustments_and_trim_to_preview_window() -> None
     assert kwargs["adjusted_preview"] is True
 
 
-def test_request_preview_falls_back_to_raw_video_when_sidecar_read_fails() -> None:
+def test_request_preview_falls_back_to_raw_video_without_edit_service() -> None:
     preview_window = Mock()
     controller = PreviewController(preview_window)
     preview_path = Path("D:/fake/video.mp4")
@@ -86,11 +81,7 @@ def test_request_preview_falls_back_to_raw_video_when_sidecar_read_fails() -> No
         }
     )
 
-    with patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.load_adjustments",
-        side_effect=RuntimeError("boom"),
-    ):
-        controller._handle_request_preview(view, index)
+    controller._handle_request_preview(view, index)
 
     preview_window.show_preview.assert_called_once()
     args, kwargs = preview_window.show_preview.call_args
@@ -102,9 +93,45 @@ def test_request_preview_falls_back_to_raw_video_when_sidecar_read_fails() -> No
     assert kwargs["adjusted_preview"] is False
 
 
+def test_request_preview_falls_back_to_raw_video_when_edit_lookup_fails() -> None:
+    preview_window = Mock()
+    edit_service = Mock()
+    edit_service.describe_adjustments.side_effect = OSError("broken sidecar")
+    controller = PreviewController(preview_window, edit_service_getter=lambda: edit_service)
+    preview_path = Path("D:/fake/video.mp4")
+    view = _make_view(QRect(0, 0, 80, 60))
+    index = _make_index(
+        {
+            Roles.IS_VIDEO: True,
+            Roles.IS_LIVE: False,
+            Roles.ABS: str(preview_path),
+            Roles.INFO: {"dur": 5.0, "w": 1280, "h": 720},
+        }
+    )
+
+    controller._handle_request_preview(view, index)
+
+    preview_window.show_preview.assert_called_once()
+    args, kwargs = preview_window.show_preview.call_args
+    assert args[0] == preview_path
+    assert kwargs["adjustments"] is None
+    assert kwargs["trim_range_ms"] is None
+    assert kwargs["adjusted_preview"] is False
+
+
 def test_live_preview_uses_motion_video_but_loads_adjustments_from_still_asset() -> None:
     preview_window = Mock()
-    controller = PreviewController(preview_window)
+    edit_service = Mock()
+    edit_service.describe_adjustments.return_value = EditRenderingState(
+        sidecar_exists=True,
+        raw_adjustments={"Exposure": 0.25},
+        resolved_adjustments={"Exposure": 0.25},
+        adjusted_preview=True,
+        has_visible_edits=True,
+        trim_range_ms=None,
+        effective_duration_sec=3.0,
+    )
+    controller = PreviewController(preview_window, edit_service_getter=lambda: edit_service)
     still_path = Path("D:/fake/live_still.jpg")
     motion_path = Path("D:/fake/live_motion.mov")
     view = _make_view(QRect(5, 6, 70, 50))
@@ -118,22 +145,9 @@ def test_live_preview_uses_motion_video_but_loads_adjustments_from_still_asset()
         }
     )
 
-    with patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.load_adjustments",
-        return_value={"Exposure": 0.25},
-    ) as load_adjustments, patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.has_non_default_adjustments",
-        return_value=True,
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.resolve_render_adjustments",
-        return_value={"Exposure": 0.25},
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.trim_is_non_default",
-        return_value=False,
-    ):
-        controller._handle_request_preview(view, index)
+    controller._handle_request_preview(view, index)
 
-    load_adjustments.assert_called_once_with(still_path)
+    edit_service.describe_adjustments.assert_called_once()
     preview_window.show_preview.assert_called_once()
     args, kwargs = preview_window.show_preview.call_args
     assert args[0] == motion_path
@@ -143,7 +157,17 @@ def test_live_preview_uses_motion_video_but_loads_adjustments_from_still_asset()
 
 def test_macos_request_preview_routes_rotate_only_edits_through_adjusted_popup() -> None:
     preview_window = Mock()
-    controller = PreviewController(preview_window)
+    edit_service = Mock()
+    edit_service.describe_adjustments.return_value = EditRenderingState(
+        sidecar_exists=True,
+        raw_adjustments={"Crop_Rotate90": 3.0},
+        resolved_adjustments={"Crop_Rotate90": 3.0},
+        adjusted_preview=False,
+        has_visible_edits=True,
+        trim_range_ms=None,
+        effective_duration_sec=5.0,
+    )
+    controller = PreviewController(preview_window, edit_service_getter=lambda: edit_service)
     preview_path = Path("/fake/video.mov")
     view = _make_view(QRect(0, 0, 80, 60))
     index = _make_index(
@@ -158,15 +182,6 @@ def test_macos_request_preview_routes_rotate_only_edits_through_adjusted_popup()
     with patch(
         "iPhoto.gui.ui.controllers.preview_controller.sys.platform",
         "darwin",
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.load_adjustments",
-        return_value={"Crop_Rotate90": 3.0},
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.resolve_render_adjustments",
-        return_value={"Crop_Rotate90": 3.0},
-    ), patch(
-        "iPhoto.gui.ui.controllers.preview_controller.sidecar.trim_is_non_default",
-        return_value=False,
     ):
         controller._handle_request_preview(view, index)
 

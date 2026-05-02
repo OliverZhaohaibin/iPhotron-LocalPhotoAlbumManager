@@ -96,6 +96,18 @@ GUI_BOOTSTRAP_PEOPLE_FORBIDDEN = {
     "iPhoto.bootstrap.library_people_service",
 }
 
+GUI_SIDECAR_FORBIDDEN_PREFIXES = (
+    "gui/coordinators/",
+    "gui/services/",
+    "gui/ui/controllers/",
+    "gui/ui/models/",
+    "gui/viewmodels/",
+)
+
+GUI_SIDECAR_FORBIDDEN = {
+    "iPhoto.io.sidecar",
+}
+
 LEGACY_DOMAIN_USE_CASE_MODULES = {
     "iPhoto.application.use_cases.aggregate_geo_data",
     "iPhoto.application.use_cases.apply_edit",
@@ -195,9 +207,11 @@ class _ImportCollector(ast.NodeVisitor):
             module=node.module,
         )
         self.imports.append((node.lineno, resolved))
-        if resolved == "iPhoto":
-            for alias in node.names:
-                self.imports.append((node.lineno, f"iPhoto.{alias.name}"))
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            if resolved:
+                self.imports.append((node.lineno, f"{resolved}.{alias.name}"))
 
 
 def _runtime_imports(py_file: Path, src_root: Path) -> list[tuple[int, str]]:
@@ -269,6 +283,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI runtime imports People bootstrap factory {module}"
+                )
+
+            if rel.startswith(GUI_SIDECAR_FORBIDDEN_PREFIXES) and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_SIDECAR_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports edit sidecar implementation {module}"
                 )
 
             if (

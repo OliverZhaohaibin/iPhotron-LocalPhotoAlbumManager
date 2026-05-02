@@ -180,6 +180,9 @@ class RuntimeContext:
         )
         if callable(bind_album_metadata_service):
             bind_album_metadata_service(self.library_session.album_metadata)
+        bind_edit_service = getattr(self.library, "bind_edit_service", None)
+        if callable(bind_edit_service):
+            bind_edit_service(self.library_session.edit)
 
         try:
             self.library.bind_path(normalized)
@@ -251,6 +254,9 @@ class RuntimeContext:
         )
         if callable(bind_album_metadata_service):
             bind_album_metadata_service(None)
+        bind_edit_service = getattr(self.library, "bind_edit_service", None)
+        if callable(bind_edit_service):
+            bind_edit_service(None)
 
         bind_asset_query_service = getattr(
             self.library,

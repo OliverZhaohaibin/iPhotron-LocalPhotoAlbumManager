@@ -36,6 +36,8 @@ def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None
     assert session.asset_operations.lifecycle_service is session.asset_lifecycle
     assert session.people is not None
     assert session.people.library_root() == tmp_path
+    assert session.edit is not None
+    runtime.bind_edit_service.assert_called_once_with(session.edit)
 
 
 def test_library_session_shutdown_delegates_to_asset_runtime(tmp_path: Path) -> None:
@@ -47,4 +49,5 @@ def test_library_session_shutdown_delegates_to_asset_runtime(tmp_path: Path) -> 
 
     session.shutdown()
 
+    runtime.bind_edit_service.assert_any_call(None)
     runtime.shutdown.assert_called_once()

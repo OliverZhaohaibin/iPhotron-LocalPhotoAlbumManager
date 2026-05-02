@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, Slot
 
+from iPhoto.application.ports import EditServicePort
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.core.adjustment_mapping import normalise_video_trim
 from iPhoto.gui.ui.models.roles import Roles, role_names
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
-from iPhoto.io import sidecar as _io_sidecar
 from iPhoto.utils.geocoding import resolve_location_name
 
 from .gallery_collection_store import GalleryCollectionStore
@@ -29,11 +28,13 @@ class GalleryListModelAdapter(QAbstractListModel):
         self,
         store: GalleryCollectionStore,
         thumbnail_service: ThumbnailCacheService,
+        edit_service_getter: Callable[[], EditServicePort | None] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._store = store
         self._thumbnails = thumbnail_service
+        self._edit_service_getter = edit_service_getter
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
         self._last_snapshot: Optional[tuple[int, bytes]] = None
@@ -50,11 +51,17 @@ class GalleryListModelAdapter(QAbstractListModel):
         *,
         asset_query_service,
         thumbnail_service: ThumbnailCacheService,
+        edit_service_getter: Callable[[], EditServicePort | None] | None = None,
         library_root: Optional[Path] = None,
         parent=None,
     ) -> "GalleryListModelAdapter":
         store = GalleryCollectionStore(asset_query_service, library_root)
-        return cls(store, thumbnail_service, parent=parent)
+        return cls(
+            store,
+            thumbnail_service,
+            edit_service_getter=edit_service_getter,
+            parent=parent,
+        )
 
     @property
     def store(self) -> GalleryCollectionStore:
@@ -359,10 +366,17 @@ class GalleryListModelAdapter(QAbstractListModel):
             return asset.duration
         if asset.abs_path in self._duration_cache:
             return self._duration_cache[asset.abs_path]
-        adjustments = _io_sidecar.load_adjustments(asset.abs_path)
-        if adjustments:
-            trim_in, trim_out = normalise_video_trim(adjustments, asset.duration)
-            effective = trim_out - trim_in
+        edit_service = self._edit_service_getter() if self._edit_service_getter else None
+        if edit_service is not None:
+            state = edit_service.describe_adjustments(
+                asset.abs_path,
+                duration_hint=asset.duration,
+            )
+            effective = (
+                state.effective_duration_sec
+                if state.effective_duration_sec is not None
+                else asset.duration
+            )
         else:
             effective = asset.duration
         self._duration_cache[asset.abs_path] = effective

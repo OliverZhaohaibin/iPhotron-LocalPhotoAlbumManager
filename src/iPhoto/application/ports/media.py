@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -84,8 +85,49 @@ class ThumbnailRendererPort(Protocol):
 class EditSidecarPort(Protocol):
     """Read and write non-destructive edit sidecars."""
 
+    def sidecar_exists(self, path: Path) -> bool:
+        """Return ``True`` when *path* has a persisted sidecar file."""
+
     def read_adjustments(self, path: Path) -> dict[str, Any]:
         """Read persisted edit adjustments."""
 
     def write_adjustments(self, path: Path, adjustments: dict[str, Any]) -> None:
         """Persist edit adjustments atomically."""
+
+
+@dataclass(frozen=True)
+class EditRenderingState:
+    """Resolved edit metadata for one asset."""
+
+    sidecar_exists: bool
+    raw_adjustments: dict[str, Any]
+    resolved_adjustments: dict[str, Any]
+    adjusted_preview: bool
+    has_visible_edits: bool
+    trim_range_ms: tuple[int, int] | None
+    effective_duration_sec: float | None
+
+
+class EditServicePort(Protocol):
+    """Library-scoped edit sidecar and render-state surface."""
+
+    def sidecar_exists(self, path: Path) -> bool:
+        """Return ``True`` when *path* has a persisted sidecar file."""
+
+    def read_adjustments(self, path: Path) -> dict[str, Any]:
+        """Read persisted edit adjustments."""
+
+    def write_adjustments(self, path: Path, adjustments: dict[str, Any]) -> None:
+        """Persist edit adjustments atomically."""
+
+    def default_adjustments(self) -> dict[str, Any]:
+        """Return the canonical default edit-session values."""
+
+    def describe_adjustments(
+        self,
+        path: Path,
+        *,
+        duration_hint: float | None = None,
+        color_stats: Any | None = None,
+    ) -> EditRenderingState:
+        """Return resolved edit metadata for *path*."""

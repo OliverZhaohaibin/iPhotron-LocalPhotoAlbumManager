@@ -40,7 +40,11 @@ from .workers.scanner_worker import ScannerWorker
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..application.ports import EditServicePort, MapRuntimePort
+    from ..application.ports import (
+        EditServicePort,
+        LocationAssetServicePort,
+        MapRuntimePort,
+    )
     from ..bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
@@ -114,6 +118,7 @@ class LibraryManager(
         self._people_service: PeopleService | None = None
         self._map_runtime: "MapRuntimePort | None" = None
         self._edit_service: "EditServicePort | None" = None
+        self._location_service: "LocationAssetServicePort | None" = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -126,6 +131,10 @@ class LibraryManager(
 
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
+        location_service = getattr(self, "location_service", None)
+        invalidate_cache = getattr(location_service, "invalidate_cache", None)
+        if callable(invalidate_cache):
+            invalidate_cache()
         if emit_tree_updated:
             self.treeUpdated.emit()
 
@@ -339,6 +348,20 @@ class LibraryManager(
     @property
     def edit_service(self) -> "EditServicePort | None":
         return self._edit_service
+
+    def bind_location_service(
+        self,
+        location_service: "LocationAssetServicePort | None",
+    ) -> None:
+        """Bind the current library session Location query surface."""
+
+        self._location_service = location_service
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+
+    @property
+    def location_service(self) -> "LocationAssetServicePort | None":
+        return self._location_service
 
     def _bind_people_index_coordinator(self, root: Path) -> None:
         coordinator = get_people_index_coordinator(root)

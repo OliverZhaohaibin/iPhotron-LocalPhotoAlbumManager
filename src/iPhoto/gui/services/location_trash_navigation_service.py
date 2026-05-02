@@ -102,7 +102,7 @@ class LocationTrashNavigationService(QObject):
         except Exception as exc:  # noqa: BLE001 - surface to GUI
             self.errorRaised.emit(str(exc))
             return None
-        self._schedule_trash_cleanup(library)
+        self._schedule_trash_cleanup(library, deleted_root)
         return deleted_root
 
     def request_location_assets(self) -> tuple[int, Path] | None:
@@ -125,7 +125,7 @@ class LocationTrashNavigationService(QObject):
             _LocationAssetsWorker(
                 serial=serial,
                 root=root,
-                load_assets=lambda: list(library.get_geotagged_assets()),
+                load_assets=lambda: list(self._load_location_assets(library)),
                 signals=signals,
             )
         )
@@ -157,7 +157,11 @@ class LocationTrashNavigationService(QObject):
             return
         self.errorRaised.emit(message)
 
-    def _schedule_trash_cleanup(self, library: "LibraryManager") -> None:
+    def _schedule_trash_cleanup(
+        self,
+        library: "LibraryManager",
+        trash_root: Path,
+    ) -> None:
         with self._trash_cleanup_lock:
             should_start = (
                 not self._trash_cleanup_running and self._should_run_trash_cleanup()
@@ -172,7 +176,7 @@ class LocationTrashNavigationService(QObject):
         self._trash_cleanup_signals = signals
         self._thread_pool.start(
             _TrashCleanupWorker(
-                cleanup=library.cleanup_deleted_index,
+                cleanup=lambda: self._cleanup_deleted_index(library, trash_root),
                 signals=signals,
             )
         )
@@ -192,6 +196,27 @@ class LocationTrashNavigationService(QObject):
             time.monotonic() - self._last_trash_cleanup_at
         ) >= self._TRASH_CLEANUP_THROTTLE_SEC
 
+    def _load_location_assets(self, library: "LibraryManager") -> list:
+        location_service = getattr(library, "location_service", None)
+        list_geotagged_assets = getattr(
+            location_service,
+            "list_geotagged_assets",
+            None,
+        )
+        if callable(list_geotagged_assets):
+            return list(list_geotagged_assets())
+        return list(library.get_geotagged_assets())
+
+    def _cleanup_deleted_index(self, library: "LibraryManager", trash_root: Path) -> int:
+        lifecycle_service = getattr(library, "asset_lifecycle_service", None)
+        cleanup_deleted_index = getattr(
+            lifecycle_service,
+            "cleanup_deleted_index",
+            None,
+        )
+        if callable(cleanup_deleted_index):
+            return int(cleanup_deleted_index(trash_root))
+        return int(library.cleanup_deleted_index())
+
     def _library_manager(self) -> "LibraryManager | None":
         return self._library_manager_getter()
-

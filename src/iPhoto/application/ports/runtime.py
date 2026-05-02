@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Protocol
 from typing import Literal
 
+from ..dtos import GeotaggedAsset
+
 
 MapBackendKind = Literal[
     "osmand_native",
@@ -40,6 +42,19 @@ class MapRuntimePort(Protocol):
 
     def package_root(self) -> Path | None:
         """Return the maps package root bound to the current runtime."""
+
+
+class LocationAssetServicePort(Protocol):
+    """Library-scoped location asset query boundary."""
+
+    def list_geotagged_assets(self) -> list[GeotaggedAsset]:
+        """Return every visible asset with GPS metadata."""
+
+    def asset_from_row(self, row: object) -> GeotaggedAsset | None:
+        """Convert one scan/index row to a geotagged asset when possible."""
+
+    def invalidate_cache(self) -> None:
+        """Drop cached location assets after scan or state changes."""
 
 
 class TaskSchedulerPort(Protocol):

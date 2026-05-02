@@ -1,7 +1,7 @@
 # 05 - 当前进度
 
-> **版本:** 1.0 | **日期:** 2026-05-02  
-> **状态:** 进行中  
+> **版本:** 1.0 | **日期:** 2026-05-02
+> **状态:** 进行中
 > **范围:** vNext 重构进度与交接记录
 
 ---
@@ -12,51 +12,47 @@
 但运行时主路径已经建立起可执行的 session boundary、repository/state
 boundary 和 architecture guardrail。
 
-本轮新增完成的是 `22-edit-sidecar-session-migration.md`：Edit sidecar 已通过
-`LibrarySession.edit` / `LibraryManager.edit_service` 收口到 active session。
-`.ipo` 持久化、视频 trim/effective duration、adjusted preview / visible edits
-判定、导出与剪贴板渲染入口，现在都可以消费同一份 edit runtime surface。
+本轮新增完成的是 `23-maps-location-session-residual-migration.md`：Location
+地理资产查询与 Recently Deleted cleanup 已从 GUI/`LibraryManager` 临时入口
+进一步收口到 active session surface。`LibrarySession.locations` /
+`LibraryManager.location_service` 现在承接地图页 geotagged assets 读取、
+scan-row 增量转换、缓存失效与 legacy `get_geotagged_assets()` 兼容代理。
 
 这一步有三个关键落点：
 
-- 新增 `LibraryEditService` 与 filesystem `EditSidecarPort` adapter，保留现有
-  `.ipo` XML 格式不变，只迁运行时边界。
-- `EditCoordinator`、`PlaybackCoordinator.rotate_current_asset()`、
-  `DetailViewModel`、`PreviewController`、`ShareController`、`ExportController`
-  与 `ThumbnailCacheService` 不再作为 durable edit 业务入口直接读取
-  `iPhoto.io.sidecar`。
+- 新增 application-level `GeotaggedAsset` DTO、`LocationAssetServicePort`
+  与 `LibraryLocationService`，地理资产聚合不再由 GUI 或 legacy
+  `GeoAggregatorMixin` 作为主入口。
+- `LocationTrashNavigationService` 只保留 Qt background transport、request
+  serial、signals 与 cleanup throttle；地理资产加载优先走
+  `location_service.list_geotagged_assets()`，trash cleanup 优先走
+  `asset_lifecycle_service.cleanup_deleted_index(deleted_root)`。
 - 新增 architecture guardrail，阻止 GUI/runtime 业务入口重新导入
-  `iPhoto.io.sidecar`；仅保留 `move_worker` 的 path helper 与 `thumbnail_job`
-  的 sidecar mtime 这两个显式例外。
+  `iPhoto.library.geo_aggregator`。
 
-## 2. 本轮完成：Edit Sidecar Runtime + Session 绑定
+## 2. 本轮完成：Maps Location Query + Session 绑定
 
-- 新增 session-owned edit surface。
-  - `application/ports/media.py` 现在定义 `EditRenderingState` 与
-    `EditServicePort`。
-  - 新增 `bootstrap/library_edit_service.py`，统一计算：
-    raw/resolved adjustments、trim range、effective duration、
-    adjusted preview 与 visible edits。
+- 新增 session-owned location surface。
+  - `application/dtos.py` 现在定义 application-level `GeotaggedAsset`。
+  - `application/ports/runtime.py` 现在定义 `LocationAssetServicePort`。
+  - 新增 `bootstrap/library_location_service.py`，统一处理 geotagged rows
+    读取、scan-row 转换、去重、排序与缓存失效。
 - `LibrarySession` / `RuntimeContext` / `LibraryManager` 绑定链路补齐。
-  - `LibrarySession.edit` 创建并持有当前 edit surface。
+  - `LibrarySession.locations` 创建并持有当前 Location query surface。
   - `RuntimeContext.open_library()` / `close_library()` 负责 bind/unbind。
-  - `LibraryManager` 暴露 `edit_service` property，供 GUI/runtime 消费。
-- GUI/runtime 的 edit 读写入口收口到同一 surface。
-  - `MediaAdjustmentCommitter` 改为依赖 injected `EditServicePort`。
-  - `EditCoordinator` 进入编辑时通过 edit service 读取 persisted state。
-  - `PlaybackCoordinator.rotate_current_asset()` 改为读取 active persisted
-    adjustments 再提交。
-  - `DetailViewModel`、`PreviewController`、`PlayerViewController`、
-    `GalleryListModelAdapter`、`ShareController`、`ExportController`
-    不再自己拼视频 edit 判定。
-- 导出 / 分享 / 缩略图渲染路径同步收口。
-  - `core/export.py` 继续作为导出与剪贴板渲染共用入口。
-  - `ThumbnailCacheService` 支持 bind 当前 `edit_service`，缩略图渲染可以消费
-    相同的 session-bound edit state。
+  - `LibraryManager` 暴露 `location_service` property，供 GUI transport 与
+    legacy compatibility 入口消费。
+- GUI/runtime 的 Location/Trash 入口进一步收口。
+  - `GalleryViewModel` 的 scan chunk 增量转换不再导入
+    `iPhoto.library.geo_aggregator`，优先走 bound `location_service`。
+  - `LocationTrashNavigationService` 不再作为业务查询边界，只负责 Qt
+    background task transport 与 request token。
+  - `GeoAggregatorMixin.get_geotagged_assets()` 保留兼容 API，但 active
+    session 下委托给 `LibraryLocationService`。
 
 ## 3. 历史已完成切片摘要
 
-以下切片已经完成，详细过程性交接分别见 `06` 到 `20`：
+以下切片已经完成，详细过程性交接分别见 `06` 到 `22`：
 
 - 基础边界与 session 基础：
   已引入 `application/ports/*`、`LibrarySession`、state repository adapter、
@@ -83,6 +79,10 @@ boundary 和 architecture guardrail。
   已引入 `LibraryEditService`、filesystem `EditSidecarPort` adapter、
   session-bound `edit_service` surface，以及统一的视频 edit/render state
   判定入口。
+- Maps Location query session 化：
+  已引入 `LibraryLocationService`、`LocationAssetServicePort` 与
+  session-bound `location_service` surface，地理资产查询和 trash cleanup
+  不再以 GUI transport/legacy manager 方法作为主业务入口。
 - Album metadata session 化：
   已引入 `LibraryAlbumMetadataService` 与 album manifest repository port，
   album cover / featured / import-mark-featured durable 规则已从 GUI service
@@ -101,8 +101,8 @@ boundary 和 architecture guardrail。
   imports 等回归方向；仍保留少量明确 allowlist。
 - Phase 1：部分完成。
   `LibrarySession` 已建立并接入 `RuntimeContext`，scan/query/state/
-  album-metadata/lifecycle/operation/People surface 已挂到 active session；
-  GUI startup 仍有进一步收口空间。
+  album-metadata/lifecycle/operation/People/Maps/Edit/Location surface 已挂到
+  active session；GUI startup 仍有进一步收口空间。
 - Phase 2：部分完成。
   `global_index.db` 已成为 runtime asset source of truth，favorite 写入和
   gallery 查询已走 state/query boundary；更多 durable user state 仍待继续
@@ -135,9 +135,9 @@ boundary 和 architecture guardrail。
 - Phase 5：部分完成。
   Edit 已完成；People、Thumbnail 与 Assign Location 边界已有明显收口；Maps
   方面，`MapRuntimePort` 已经具备 session-bound capability surface，
-  availability 查询与 native fallback 测试也已补齐，但
-  `LocationTrashNavigationService` 仍是临时 GUI seam，widget 构造与最终
-  event/query shape 仍未完全下沉。
+  availability 查询、native fallback、Location geotagged query 与 trash
+  cleanup 测试也已补齐；`LocationTrashNavigationService` 仍保留为 Qt
+  transport seam，widget 构造与 marker/event routing 仍未完全下沉。
 - Phase 6：部分完成。
   architecture tests、targeted application/infrastructure tests 已存在；
   temp-library end-to-end 与性能 baseline 仍未完成。
@@ -157,8 +157,8 @@ boundary 和 architecture guardrail。
   提供的是 API boundary，而不是独立 `library_state.db`。
 - `global_index.db` 兼容 schema 可能缺失 `metadata` 列；state adapter 保持
   best-effort 行为。
-- Maps 现在已有 session-bound capability surface，但 widget 构造仍在 GUI 层，
-  `LocationTrashNavigationService` 也仍是临时 seam。
+- Maps 现在已有 session-bound capability 与 Location query surface，但 widget
+  构造、marker interaction 与最终 event routing 仍在 GUI 层。
 - Edit sidecar 迁移后仍保留两个显式 path-level 例外：
   `move_worker` 继续为了伴随物一起移动使用 sidecar path helper，
   `thumbnail_job` 继续为了 cache stamp 读取 sidecar mtime。
@@ -173,7 +173,7 @@ boundary 和 architecture guardrail。
 
 本轮在项目 `.venv` 下执行：
 
-- `.venv/bin/python -m pytest tests/application/test_library_edit_service.py tests/application/test_runtime_context.py tests/gui/coordinators/test_edit_coordinator.py tests/gui/coordinators/test_playback_coordinator.py tests/gui/viewmodels/test_detail_viewmodel.py tests/ui/test_media_adjustment_committer.py tests/ui/controllers/test_preview_controller.py tests/ui/controllers/test_share_controller_rendering.py tests/core/test_export.py tests/test_thumbnail_loader.py tests/architecture/test_layer_boundaries.py -q`
+- `.venv/bin/python -m pytest tests/application/test_library_location_service.py tests/application/test_runtime_context.py tests/gui/viewmodels/test_gallery_viewmodel.py tests/gui/services/test_location_trash_navigation_service.py tests/test_navigation_coordinator_cluster_gallery.py tests/test_library_geotagged_assets.py tests/test_library_manager_cleanup.py tests/architecture/test_layer_boundaries.py -q`
 - `.venv/bin/python tools/check_architecture.py`
 
 结果：
@@ -182,16 +182,17 @@ boundary 和 architecture guardrail。
 - `tools/check_architecture.py` 通过。
 - 仍有既有的 pytest `Unknown config option: env` warning。
 - 仍有既有的 legacy model shim / pairing deprecation warnings。
-- 本轮新增验证意图：session-bound edit binding、统一的视频 edit/render
-  判定、clipboard/export 共用渲染路径、thumbnail edit service binding、
-  以及 GUI `iPhoto.io.sidecar` import guardrail。
+- 本轮新增验证意图：session-bound location binding、geotagged row conversion
+  与缓存失效、Location/Trash GUI transport 优先走 session surface、
+  legacy `get_geotagged_assets()` 兼容代理，以及 GUI
+  `iPhoto.library.geo_aggregator` import guardrail。
 
-之前各个切片的针对性验证命令和结果，继续以 `06` 到 `20` 交接文档为准；
+之前各个切片的针对性验证命令和结果，继续以 `06` 到 `22` 交接文档为准；
 本文件只保留当前整体验证结论和最新增量验证。
 
 ## 7. 下一步交接
 
-1. 继续完善 Maps：若后续要继续下沉，应优先处理 widget 构造 / event-routing
-   仍留在 GUI 层的问题，并逐步淡化 `LocationTrashNavigationService` 这个临时 seam。
+1. 继续完善 Maps：若后续要继续下沉，应优先处理 widget 构造、marker
+   interaction 与 event-routing 仍留在 GUI 层的问题。
 2. 补 `temp library` 端到端回归：import / move / delete / restore，以及
    rescan 后用户状态保护。

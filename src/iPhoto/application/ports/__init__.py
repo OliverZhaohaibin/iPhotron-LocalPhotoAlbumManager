@@ -18,6 +18,7 @@ from .repositories import (
     LibraryStateRepositoryPort,
 )
 from .runtime import (
+    LocationAssetServicePort,
     MapBackendKind,
     MapRuntimeCapabilities,
     MapRuntimePort,
@@ -32,6 +33,7 @@ __all__ = [
     "EditServicePort",
     "EditSidecarPort",
     "LibraryStateRepositoryPort",
+    "LocationAssetServicePort",
     "LocationMetadataPort",
     "MapBackendKind",
     "MapRuntimeCapabilities",

@@ -62,6 +62,7 @@ def _make_vm(
     context = MagicMock()
     context.library.root.return_value = library_root
     context.library.people_service = people_service
+    context.library.location_service = None
     facade = MagicMock()
     asset_service = MagicMock()
     nav_service = location_trash_service or FakeLocationTrashService(library_root)
@@ -294,6 +295,35 @@ def test_location_scan_chunk_updates_map_snapshot_incrementally(tmp_path: Path) 
     snapshot = vm.location_session.full_assets()
     assert [asset.library_relative for asset in snapshot] == ["Album/new.jpg", "a.jpg"]
     assert payloads[-1] == (snapshot, tmp_path)
+
+
+def test_location_scan_chunk_uses_session_location_service(tmp_path: Path) -> None:
+    vm, _store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    serial = vm.location_session.begin_load(tmp_path)
+    assert vm.location_session.accept_loaded(serial, tmp_path, [])
+    vm.location_session.set_mode("map")
+    converted = SimpleNamespace(
+        library_relative="Album/from-session.jpg",
+        absolute_path=tmp_path / "Album" / "from-session.jpg",
+    )
+    context.library.location_service = MagicMock()
+    context.library.location_service.asset_from_row.return_value = converted
+
+    vm.handle_location_scan_chunk(
+        tmp_path / "Album",
+        [
+            {
+                "rel": "Album/new.jpg",
+                "id": "asset-2",
+                "gps": {"lat": 52.5, "lon": 13.4},
+                "mime": "image/jpeg",
+                "parent_album_path": "Album",
+            }
+        ],
+    )
+
+    context.library.location_service.asset_from_row.assert_called_once()
+    assert vm.location_session.full_assets() == [converted]
 
 
 def test_location_scan_chunk_removes_assets_that_no_longer_qualify(tmp_path: Path) -> None:

@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
 from iPhoto.application.services.asset_service import AssetService
+from iPhoto.application.services.location_asset_service import (
+    geotagged_asset_from_row,
+)
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import ALL_PHOTOS_TITLE, DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
@@ -17,7 +20,6 @@ from iPhoto.gui.services.location_trash_navigation_service import (
     LocationTrashNavigationService,
 )
 from iPhoto.gui.services.people_service_resolver import resolve_people_service
-from iPhoto.library.geo_aggregator import geotagged_asset_from_row
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -388,7 +390,7 @@ class GalleryViewModel(BaseViewModel):
 
         changed = False
         for row in chunk:
-            asset = geotagged_asset_from_row(root, row)
+            asset = self._location_asset_from_row(row, root)
             if asset is not None:
                 changed = self._location_session.upsert_asset(asset) or changed
                 continue
@@ -420,6 +422,13 @@ class GalleryViewModel(BaseViewModel):
         if request_root != root:
             root = request_root
         self._location_session.begin_load_with_serial(root, serial)
+
+    def _location_asset_from_row(self, row: object, root: Path):
+        location_service = getattr(self._context.library, "location_service", None)
+        asset_from_row = getattr(location_service, "asset_from_row", None)
+        if callable(asset_from_row):
+            return asset_from_row(row)
+        return geotagged_asset_from_row(root, row)
 
     def _handle_location_assets_loaded(
         self,

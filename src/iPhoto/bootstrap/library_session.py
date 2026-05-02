@@ -9,6 +9,7 @@ from ..application.ports import (
     AssetRepositoryPort,
     EditServicePort,
     LibraryStateRepositoryPort,
+    LocationAssetServicePort,
     MapRuntimePort,
 )
 from ..infrastructure.repositories.library_state_repository import (
@@ -26,6 +27,7 @@ from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_asset_operation_service import LibraryAssetOperationService
 from .library_asset_query_service import LibraryAssetQueryService
 from .library_edit_service import LibraryEditService
+from .library_location_service import LibraryLocationService
 from .library_people_service import create_people_service
 from .library_scan_service import LibraryScanService
 
@@ -45,6 +47,7 @@ class LibrarySession:
     people: PeopleService | None = None
     maps: MapRuntimePort | None = None
     edit: EditServicePort | None = None
+    locations: LocationAssetServicePort | None = None
     bind_asset_runtime: bool = True
 
     def __post_init__(self) -> None:
@@ -78,6 +81,11 @@ class LibrarySession:
             self.maps = SessionMapRuntimeService()
         if self.edit is None:
             self.edit = LibraryEditService(self.library_root)
+        if self.locations is None:
+            self.locations = LibraryLocationService(
+                self.library_root,
+                query_service=self.asset_queries,
+            )
         bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
         if callable(bind_edit_service):
             bind_edit_service(self.edit)

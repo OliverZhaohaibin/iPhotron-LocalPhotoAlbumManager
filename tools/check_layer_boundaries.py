@@ -108,6 +108,18 @@ GUI_SIDECAR_FORBIDDEN = {
     "iPhoto.io.sidecar",
 }
 
+GUI_LOCATION_HELPER_FORBIDDEN_PREFIXES = (
+    "gui/coordinators/",
+    "gui/services/",
+    "gui/ui/controllers/",
+    "gui/ui/models/",
+    "gui/viewmodels/",
+)
+
+GUI_LOCATION_HELPER_FORBIDDEN = {
+    "iPhoto.library.geo_aggregator",
+}
+
 LEGACY_DOMAIN_USE_CASE_MODULES = {
     "iPhoto.application.use_cases.aggregate_geo_data",
     "iPhoto.application.use_cases.apply_edit",
@@ -291,6 +303,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI runtime imports edit sidecar implementation {module}"
+                )
+
+            if rel.startswith(GUI_LOCATION_HELPER_FORBIDDEN_PREFIXES) and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_LOCATION_HELPER_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports legacy location helper {module}"
                 )
 
             if (

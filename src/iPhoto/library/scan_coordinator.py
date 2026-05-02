@@ -300,15 +300,13 @@ class ScanCoordinatorMixin:
         if not chunk:
             return
 
-        self._geotagged_assets_cache = None
-        self._geotagged_assets_cache_root = None
+        self.invalidate_geotagged_assets_cache()
         if self._current_face_scanner is not None:
             self._current_face_scanner.enqueue_rows(chunk)
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
-        self._geotagged_assets_cache = None
-        self._geotagged_assets_cache_root = None
+        self.invalidate_geotagged_assets_cache()
 
         # Clear worker reference before downstream listeners react so a completed
         # scan does not still appear in-flight while final post-processing runs.

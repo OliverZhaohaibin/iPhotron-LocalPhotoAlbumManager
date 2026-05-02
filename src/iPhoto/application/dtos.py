@@ -69,3 +69,23 @@ class PairLivePhotosRequest:
 @dataclass
 class PairLivePhotosResponse:
     paired_count: int
+
+
+@dataclass(slots=True, frozen=True)
+class GeotaggedAsset:
+    """Lightweight descriptor describing an asset with GPS metadata."""
+
+    library_relative: str
+    album_relative: str
+    absolute_path: Path
+    album_path: Path
+    asset_id: str
+    latitude: float
+    longitude: float
+    is_image: bool
+    is_video: bool
+    still_image_time: Optional[float]
+    duration: Optional[float]
+    location_name: Optional[str]
+    live_photo_group_id: Optional[str]
+    live_partner_rel: Optional[str]

@@ -52,6 +52,20 @@ class _QueryService:
         return self._repo.read_geotagged()
 
 
+class _LocationService:
+    def __init__(self, assets: list) -> None:
+        self.assets = assets
+        self.calls = 0
+        self.invalidations = 0
+
+    def list_geotagged_assets(self):
+        self.calls += 1
+        return list(self.assets)
+
+    def invalidate_cache(self) -> None:
+        self.invalidations += 1
+
+
 def test_geotagged_assets_use_classifier(tmp_path: Path, qapp: QApplication) -> None:
     """Ensure GPS-enabled assets are classified even if flags are missing."""
 
@@ -126,6 +140,27 @@ def test_geotagged_assets_reuse_cached_rows_until_library_changes(
 
     assert repo.calls == 1
     assert first == second
+
+
+def test_geotagged_assets_delegate_to_bound_location_service(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    asset = object()
+    service = _LocationService([asset])
+    manager.bind_location_service(service)  # type: ignore[arg-type]
+
+    assert manager.get_geotagged_assets() == [asset]
+    assert service.calls == 1
+
+    manager.invalidate_geotagged_assets_cache()
+
+    assert service.invalidations == 1
 
 
 def test_scan_chunk_invalidates_geotagged_cache(tmp_path: Path) -> None:

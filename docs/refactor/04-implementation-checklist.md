@@ -1,7 +1,7 @@
 # 04 - 重构实施清单
 
-> **版本:** 1.0 | **日期:** 2026-05-01  
-> **状态:** 进行中  
+> **版本:** 1.0 | **日期:** 2026-05-02
+> **状态:** 进行中
 > **范围:** vNext 重构执行清单与回归要求
 
 ---
@@ -69,7 +69,7 @@
 - [x] 新增 `LibrarySession`。
 - [x] `RuntimeContext` 持有单个 active `LibrarySession`。
 - [x] library open/bind/shutdown 生命周期进入 session。
-- [x] repository、thumbnail、people runtime、album metadata runtime 挂到 session；Maps runtime 仍待独立 session surface。
+- [x] repository、thumbnail、people runtime、album metadata、Maps runtime、Edit、Location query surface 挂到 session。
 - [ ] GUI startup 使用 session surface。
 - [x] `appctx.py` 标注并限制为 compatibility proxy。
 - [x] 增加 runtime entry tests。
@@ -191,6 +191,7 @@
 - [x] GUI scan update flows 通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted 保留字段、stale-row reconciliation 与 Live Photo pairing follow-up。
 - [x] Recently Deleted 的 prepare/cleanup throttle 不再由 `NavigationCoordinator` 负责，而是经由 Location/Trash GUI transport adapter。
 - [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
+- [x] Location/Trash adapter 只保留 Qt transport、request serial 与 cleanup throttle；地理资产查询和 Recently Deleted cleanup 优先走 session surface。
 - [x] People pinned / cluster / cover 等 GUI runtime 入口统一优先走 bound session `people_service`，不再在 coordinator/viewmodel/controller 中重建 bootstrap factory。
 - [ ] GUI services 只保留 presentation coordination。
 - [ ] Background task manager 只保留 Qt transport。
@@ -229,15 +230,18 @@
 ### Maps
 
 - [x] 定义 `MapRuntimePort`。
+- [x] 定义 `LocationAssetServicePort`。
 - [x] 地图可用性查询通过 session。
-- [x] 地理资产聚合通过 application query。
+- [x] 地理资产聚合通过 session location query。
+- [x] Recently Deleted cleanup 优先通过 session lifecycle surface。
 - [x] native runtime fallback 有测试。
 
-本轮已补齐 session-bound Maps runtime capability surface，并将
+当前已补齐 session-bound Maps runtime capability surface，并将
 `PhotoMapView` / `InfoLocationMapView` / `PlaybackCoordinator`
-接到同一 runtime seam；但 `LocationTrashNavigationService` 仍是临时 GUI seam，
-widget 构造仍保留在 GUI 层，因此不应仅凭本轮将整个 Maps bounded context 视为
-“完全完成”。
+接到同一 runtime seam；地理资产查询也已迁入 `LibrarySession.locations`。
+`LocationTrashNavigationService` 仍保留为 Qt transport seam，widget 构造与
+marker/event routing 仍在 GUI 层，因此不应仅凭当前切片将整个 Maps bounded
+context 视为“完全完成”。
 
 ### Thumbnail
 

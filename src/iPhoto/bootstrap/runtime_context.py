@@ -180,6 +180,9 @@ class RuntimeContext:
         )
         if callable(bind_album_metadata_service):
             bind_album_metadata_service(self.library_session.album_metadata)
+        bind_location_service = getattr(self.library, "bind_location_service", None)
+        if callable(bind_location_service):
+            bind_location_service(self.library_session.locations)
         bind_edit_service = getattr(self.library, "bind_edit_service", None)
         if callable(bind_edit_service):
             bind_edit_service(self.library_session.edit)
@@ -242,6 +245,10 @@ class RuntimeContext:
         bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
         if callable(bind_map_runtime):
             bind_map_runtime(None)
+
+        bind_location_service = getattr(self.library, "bind_location_service", None)
+        if callable(bind_location_service):
+            bind_location_service(None)
 
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):

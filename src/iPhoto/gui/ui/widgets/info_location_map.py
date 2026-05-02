@@ -19,7 +19,14 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QPainter, QPainterPath, QPixmap, QRegion, QResizeEvent
+from PySide6.QtGui import (
+    QPainter,
+    QPainterPath,
+    QPixmap,
+    QRegion,
+    QResizeEvent,
+    QWindow,
+)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
@@ -108,6 +115,29 @@ class _PinOverlay(QWidget):
         return self._pin
 
 
+class _RoundedMapClipFrame(QWidget):
+    """Paint and clip the mini-map viewport as a stable rounded surface."""
+
+    def __init__(self, *, radius: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._radius = float(radius)
+        self.setObjectName("infoLocationMapClipFrame")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.palette().color(self.backgroundRole()))
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(self._radius, rect.width() / 2.0, rect.height() / 2.0)
+        painter.drawRoundedRect(rect, radius, radius)
+
+
 class InfoLocationMapView(QWidget):
     """Embed a non-editing map preview centred on a single assigned location."""
 
@@ -142,6 +172,7 @@ class InfoLocationMapView(QWidget):
         self._longitude: float | None = None
         self._screen_point: QPointF | None = None
         self._requested_zoom = self.DEFAULT_ZOOM
+        self._last_set_location: tuple[float, float, float] | None = None
         self._pending_viewport_sync = False
         self._pending_pin_sync_queue = False
         self._pending_viewport_sync_queue = False
@@ -170,13 +201,23 @@ class InfoLocationMapView(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
 
-        self._map_host = QWidget(self)
+        self._map_clip_frame = _RoundedMapClipFrame(
+            radius=self._CORNER_RADIUS,
+            parent=self,
+        )
+        _configure_opaque_map_container(self._map_clip_frame)
+        self._map_clip_layout = QVBoxLayout(self._map_clip_frame)
+        self._map_clip_layout.setContentsMargins(0, 0, 0, 0)
+        self._map_clip_layout.setSpacing(0)
+        self._layout.addWidget(self._map_clip_frame, 1)
+
+        self._map_host = QWidget(self._map_clip_frame)
         self._map_host.setObjectName("infoLocationMapHost")
         _configure_opaque_map_container(self._map_host)
         self._map_host_layout = QVBoxLayout(self._map_host)
         self._map_host_layout.setContentsMargins(0, 0, 0, 0)
         self._map_host_layout.setSpacing(0)
-        self._layout.addWidget(self._map_host, 1)
+        self._map_clip_layout.addWidget(self._map_host, 1)
 
         self._message_label = QLabel("", self)
         self._message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -206,9 +247,28 @@ class InfoLocationMapView(QWidget):
         return self._latitude, self._longitude
 
     def set_location(self, latitude: float, longitude: float, *, zoom: float | None = None) -> None:
-        self._latitude = float(latitude)
-        self._longitude = float(longitude)
-        self._requested_zoom = float(zoom if zoom is not None else self.DEFAULT_ZOOM)
+        next_latitude = float(latitude)
+        next_longitude = float(longitude)
+        next_zoom = float(zoom if zoom is not None else self.DEFAULT_ZOOM)
+        same_location = self._matches_current_location(
+            next_latitude,
+            next_longitude,
+            next_zoom,
+        )
+        self._latitude = next_latitude
+        self._longitude = next_longitude
+        self._requested_zoom = next_zoom
+        self._last_set_location = (next_latitude, next_longitude, next_zoom)
+        if same_location and self._map_widget is not None:
+            self._message_label.hide()
+            self._map_clip_frame.show()
+            self._map_host.show()
+            self._sync_corner_masks()
+            self._sync_overlay_geometry()
+            if self._screen_point is None and self._map_widget_ready_for_sync():
+                self._sync_pin_position_now()
+            return
+
         self._pending_viewport_sync = True
         self._screen_point = None
         if self._map_widget is None:
@@ -216,12 +276,14 @@ class InfoLocationMapView(QWidget):
         if self._map_widget is None:
             self._message_label.setText("Map preview unavailable")
             self._message_label.show()
+            self._map_clip_frame.hide()
             self._map_host.hide()
             self._overlay.hide()
             self._pending_viewport_sync = False
             return
 
         self._message_label.hide()
+        self._map_clip_frame.show()
         self._map_host.show()
         self._sync_overlay_geometry()
         if self._map_widget_ready_for_sync():
@@ -232,10 +294,19 @@ class InfoLocationMapView(QWidget):
             self._overlay.hide()
 
     def clear_location(self) -> None:
+        already_clear = (
+            self._latitude is None
+            and self._longitude is None
+            and self._screen_point is None
+            and not self._pending_viewport_sync
+        )
+        if already_clear:
+            return
         self._reset_drag_cursor()
         self._latitude = None
         self._longitude = None
         self._screen_point = None
+        self._last_set_location = None
         self._pending_viewport_sync = False
         self._pin_sync_timer.stop()
         self._pin_settle_timer.stop()
@@ -269,6 +340,7 @@ class InfoLocationMapView(QWidget):
         self._pending_viewport_sync = False
         self._overlay.set_screen_point(None)
         self._overlay.hide()
+        self._map_clip_frame.hide()
         self._map_host.hide()
 
     def hasHeightForWidth(self) -> bool:  # type: ignore[override]
@@ -397,11 +469,37 @@ class InfoLocationMapView(QWidget):
 
     def _sync_corner_masks(self) -> None:
         self.setMask(self._rounded_region(self.width(), self.height()))
-        host_region = self._rounded_region(self._map_host.width(), self._map_host.height())
-        self._map_host.setMask(host_region)
+        self._apply_rounded_mask(self._map_clip_frame)
+        self._apply_rounded_mask(self._map_host)
         if isinstance(self._map_widget, QWidget):
-            widget_region = self._rounded_region(self._map_widget.width(), self._map_widget.height())
-            self._map_widget.setMask(widget_region)
+            self._apply_rounded_mask(self._map_widget)
+        for target in self._map_event_targets:
+            self._apply_rounded_mask(target)
+
+    def _apply_rounded_mask(self, target: QObject) -> None:
+        if isinstance(target, QWidget):
+            target.setMask(self._rounded_region(target.width(), target.height()))
+            return
+        if isinstance(target, QWindow):
+            size = target.size()
+            target.setMask(self._rounded_region(size.width(), size.height()))
+
+    def _matches_current_location(
+        self,
+        latitude: float,
+        longitude: float,
+        zoom: float,
+    ) -> bool:
+        current = self._last_set_location
+        if current is None:
+            return False
+        current_lat, current_lon, current_zoom = current
+        return (
+            abs(current_lat - latitude) <= self._VIEWPORT_MATCH_EPSILON
+            and abs(current_lon - longitude) <= self._VIEWPORT_MATCH_EPSILON
+            and abs(current_zoom - zoom) <= self._VIEWPORT_MATCH_EPSILON
+            and not self._pending_viewport_sync
+        )
 
     def _sync_overlay_geometry(self) -> None:
         target_rect = self._visible_map_rect()

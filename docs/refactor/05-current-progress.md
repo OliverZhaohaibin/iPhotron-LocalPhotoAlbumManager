@@ -12,50 +12,46 @@
 但运行时主路径已经建立起可执行的 session boundary、repository/state
 boundary 和 architecture guardrail。
 
-本轮新增完成的是 `24-maps-widget-interaction-session-migration.md`：Maps
-residual 继续收口，marker 点击语义已从 GUI marker controller 迁到
-session/application interaction surface，full map 与 info-panel mini-map 的
-concrete widget 构造选择也集中到共享 GUI factory。
+本轮新增完成的是 `25-maps-gui-transport-overlay-residual-migration.md`：Maps
+residual 继续收口，但这次不再扩 session port，而是把 full map / mini-map
+里重复的 GUI transport 细节抽成共享 helper，并把 marker pointer-hit 入口
+收回 controller seam。
 
 这一步有三个关键落点：
 
-- 新增 application-level `MapMarkerActivation` DTO、
-  `MapInteractionServicePort` 与 `LibraryMapInteractionService`，
-  `LibrarySession.map_interactions` / `LibraryManager.map_interaction_service`
-  现在承接 marker 点击后的 asset/cluster routing 决策。
-- `MarkerController` 只保留 hit testing、clustering、thumbnail/city annotation
-  与 raw marker payload 发射；`PhotoMapView` 继续发出既有
-  `assetActivated` / `clusterActivated` 兼容信号。
-- 新增 `gui/ui/widgets/map_widget_factory.py`，集中处理
-  `MapRuntimeCapabilities`、package root、native/Python/legacy backend fallback
-  与 diagnostics；`PhotoMapView` 和 `InfoLocationMapView` 不再直接导入
-  concrete map widget modules。
-- 新增 architecture guardrail，阻止 GUI/runtime 业务入口重新导入
-  concrete map widget 构造依赖。
+- 新增 `gui/ui/widgets/map_widget_support.py`，统一承接 map widget
+  `event_target()` 绑定、可选 application-level event filter 与 post-render /
+  QWidget overlay attachment fallback。
+- `PhotoMapView` 不再自行拼装 marker 命中链路；pointer press 先交给
+  `MarkerController.handle_pointer_press(...)`，view 只保留 tooltip 与兼容 signal
+  转发。
+- `InfoLocationMapView` 不再自己维护 `_map_event_targets` 和 post-render pin
+  painter 注册分支；mini-map pin overlay、drag cursor target 跟随与 shutdown
+  清理由共享 helper 统一承接。
 
-## 2. 本轮完成：Maps Widget + Interaction Session 绑定
+## 2. 本轮完成：Maps GUI Transport + Overlay Residual 收口
 
-- 新增 session-owned map interaction surface。
-  - `application/dtos.py` 现在定义 `MapMarkerActivation`。
-  - `application/ports/runtime.py` 现在定义 `MapInteractionServicePort`。
-  - 新增 `application/services/map_interaction_service.py`，统一处理空 marker、
-    单资产 marker 与 cluster marker 的 routing 决策。
-- `LibrarySession` / `RuntimeContext` / `LibraryManager` 绑定链路补齐。
-  - `LibrarySession.map_interactions` 创建并持有当前 interaction surface。
-  - `RuntimeContext.open_library()` / `close_library()` 负责 bind/unbind。
-  - `LibraryManager` 暴露 `map_interaction_service` property，供 GUI map view 消费。
-- GUI/runtime 的 map widget 与 marker 入口进一步收口。
-  - `MarkerController.handle_marker_click()` 只发出 raw marker assets。
-  - `PhotoMapView` 将 raw marker assets 交给 bound interaction service，再发出
-    既有兼容 signal。
-  - `Ui_MainWindow` / `MainCoordinator` 同步下发 `map_runtime` 与
-    `map_interaction_service`。
-  - `PhotoMapView` / `InfoLocationMapView` 共享 `map_widget_factory` 的 backend
-    选择与 fallback 策略。
+- 新增共享 GUI helper。
+  - `gui/ui/widgets/map_widget_support.py` 现在定义
+    `MapEventSurfaceBridge` 与 `MapOverlayAttachment`。
+  - 两者分别负责 map widget / event target / application filter 的注册与清理，
+    以及 post-render painter / QWidget overlay fallback 的注册与清理。
+- `PhotoMapView` 内部职责进一步缩小。
+  - marker 命中入口优先走 `MarkerController.handle_pointer_press(...)`。
+  - widget rebuild / close 时的 event filter 与 painter teardown 改由共享 helper
+    执行。
+  - `assetActivated` / `clusterActivated`、runtime diagnostics 与 session-bound
+    `map_interaction_service` 行为保持兼容。
+- `InfoLocationMapView` 去重 mini-map transport 细节。
+  - `_install_map_event_filters()` / `_remove_map_event_filters()` 现在只是共享
+    bridge 的薄包装。
+  - pin painter attach/detach 改走 `MapOverlayAttachment`，保留现有
+    post-render pin 与 QWidget overlay fallback 行为。
+  - drag cursor 仍是 GUI 责任，但 cursor targets 现在由共享 bridge 提供。
 
 ## 3. 历史已完成切片摘要
 
-以下切片已经完成，详细过程性交接分别见 `06` 到 `22`：
+以下切片已经完成，详细过程性交接分别见 `06` 到 `25`：
 
 - 基础边界与 session 基础：
   已引入 `application/ports/*`、`LibrarySession`、state repository adapter、
@@ -91,6 +87,11 @@ concrete widget 构造选择也集中到共享 GUI factory。
   session-bound `map_interaction_service` surface；marker routing 不再由
   `MarkerController` 直接决定，full map / mini map widget backend 选择收口到
   共享 GUI factory。
+- Maps GUI transport/overlay residual 收口：
+  已引入共享 `MapEventSurfaceBridge` / `MapOverlayAttachment` helper，
+  `PhotoMapView` / `InfoLocationMapView` 不再重复维护 event target、
+  post-render painter 与 QWidget overlay fallback，marker pointer-hit 入口
+  也不再由 view 本身拼装。
 - Album metadata session 化：
   已引入 `LibraryAlbumMetadataService` 与 album manifest repository port，
   album cover / featured / import-mark-featured durable 规则已从 GUI service
@@ -145,8 +146,10 @@ concrete widget 构造选择也集中到共享 GUI factory。
   方面，`MapRuntimePort` 已经具备 session-bound capability surface，
   availability 查询、native fallback、Location geotagged query、trash
   cleanup、marker interaction surface 与 map widget factory 测试也已补齐；
-  `LocationTrashNavigationService` 仍保留为 Qt transport seam，widget 事件过滤、
-  overlay/pin 绘制、drag cursor 与 marker hit testing 仍在 GUI 层。
+  本轮继续把 `PhotoMapView` / `InfoLocationMapView` 里重复的 event target、
+  overlay attachment 与 painter teardown 提炼到共享 GUI helper，marker
+  pointer-hit 入口也已收回 controller seam；`LocationTrashNavigationService`
+  仍保留为 Qt transport seam，overlay/pin 绘制与 drag cursor 策略仍在 GUI 层。
 - Phase 6：部分完成。
   architecture tests、targeted application/infrastructure tests 已存在；
   temp-library end-to-end 与性能 baseline 仍未完成。
@@ -167,9 +170,9 @@ concrete widget 构造选择也集中到共享 GUI factory。
 - `global_index.db` 兼容 schema 可能缺失 `metadata` 列；state adapter 保持
   best-effort 行为。
 - Maps 现在已有 session-bound capability、Location query 与 marker
-  interaction surface；concrete widget 构造选择已集中到 GUI factory，但 Qt
-  widget 事件过滤、overlay/pin 绘制、drag cursor 与 marker hit testing 仍在
-  GUI 层。
+  interaction surface；concrete widget 构造选择已集中到 GUI factory，event
+  target / overlay attachment 也已集中到共享 GUI helper，但 overlay/pin 绘制
+  与 drag cursor 策略仍在 GUI 层。
 - Edit sidecar 迁移后仍保留两个显式 path-level 例外：
   `move_worker` 继续为了伴随物一起移动使用 sidecar path helper，
   `thumbnail_job` 继续为了 cache stamp 读取 sidecar mtime。
@@ -184,26 +187,25 @@ concrete widget 构造选择也集中到共享 GUI factory。
 
 本轮在项目 `.venv` 下执行：
 
-- `.venv/bin/python -m pytest tests/application/test_map_interaction_service.py tests/application/test_runtime_context.py tests/test_marker_controller_place_labels.py tests/test_photo_map_view.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/architecture/test_layer_boundaries.py -q`
-- `.venv/bin/python -m pytest tests/test_info_panel.py -k "location_map or set_location_capability or map_runtime" -q`
+- `.venv/bin/python -m pytest tests/test_photo_map_view.py tests/test_info_panel.py tests/test_map_drag_cursor.py tests/test_marker_controller_place_labels.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/architecture/test_layer_boundaries.py -q`
 - `.venv/bin/python tools/check_architecture.py`
 
 结果：
 
-- 上述 focused regressions 通过（`61 passed` + `15 passed`）。
+- 上述 focused regressions 通过（`104 passed`）。
 - `tools/check_architecture.py` 通过。
 - 仍有既有的 pytest `Unknown config option: env` warning。
 - 仍有既有的 legacy model shim / pairing deprecation warnings。
-- 本轮新增验证意图：session-bound map interaction binding、marker raw payload
-  routing、PhotoMapView 兼容 signal、full map / mini map 共享 factory、runtime
-  package root rebuild，以及 concrete map widget import guardrail。
+- 本轮新增验证意图：共享 event bridge、overlay attachment teardown、
+  `PhotoMapView` pointer-hit 委托、mini-map drag cursor target 跟随、
+  post-render pin fallback，以及既有 concrete map widget import guardrail。
 
-之前各个切片的针对性验证命令和结果，继续以 `06` 到 `22` 交接文档为准；
+之前各个切片的针对性验证命令和结果，继续以 `06` 到 `25` 交接文档为准；
 本文件只保留当前整体验证结论和最新增量验证。
 
 ## 7. 下一步交接
 
-1. 继续完善 Maps：若后续要继续下沉，应优先处理 Qt widget 事件过滤、
-   overlay/pin 绘制、drag cursor 与 marker hit testing 仍留在 GUI 层的问题。
-2. 补 `temp library` 端到端回归：import / move / delete / restore，以及
+1. 优先补 `temp library` 端到端回归：import / move / delete / restore，以及
    rescan 后用户状态保护。
+2. 若后续再回到 Maps，只处理新暴露问题；当前不再主动扩新的 session/runtime
+   boundary。

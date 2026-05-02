@@ -36,6 +36,7 @@ from maps.map_widget.drag_cursor import DragCursorManager
 from .photo_map_view import (
     _configure_opaque_map_container,
 )
+from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
 from .map_widget_factory import (
     MapGLWidget,
     MapGLWindowWidget,
@@ -257,6 +258,11 @@ class InfoLocationMapView(QWidget):
         )
         self._map_package_root = resolve_map_package_root(map_runtime)
         self._map_widget: MapWidgetBase | None = None
+        self._event_bridge = MapEventSurfaceBridge(
+            self,
+            install_application_filter=True,
+        )
+        self._overlay_attachment = MapOverlayAttachment()
         self._map_event_targets: list[QObject] = []
         self._application_event_filter_installed = False
         self._drag_cursor = DragCursorManager()
@@ -599,12 +605,16 @@ class InfoLocationMapView(QWidget):
         target_rect = self._visible_map_rect()
         if target_rect is None:
             return
-        self._overlay.setGeometry(target_rect)
         if self._uses_post_render_pin:
+            self._overlay.setGeometry(target_rect)
             self._overlay.hide()
             self._request_pin_repaint()
         else:
-            self._overlay.raise_()
+            self._overlay_attachment.sync_widget_overlay(
+                self._overlay,
+                geometry=target_rect,
+                raise_overlay=True,
+            )
         if self._latitude is not None and self._longitude is not None:
             if self._map_widget_ready_for_sync():
                 self._sync_pin_position_now()
@@ -829,41 +839,15 @@ class InfoLocationMapView(QWidget):
         self._remove_map_event_filters()
         if self._map_widget is None:
             return
-
-        targets: list[QObject] = []
-        if isinstance(self._map_widget, QObject):
-            targets.append(self._map_widget)
-
-        event_target_getter = getattr(self._map_widget, "event_target", None)
-        if callable(event_target_getter):
-            try:
-                event_target = event_target_getter()
-            except Exception:
-                LOGGER.debug("Failed to resolve info-panel mini-map event target", exc_info=True)
-            else:
-                if isinstance(event_target, QObject) and not any(
-                    event_target is target for target in targets
-                ):
-                    targets.append(event_target)
-
-        for target in targets:
-            target.installEventFilter(self)
-        self._map_event_targets = targets
-        app = QApplication.instance()
-        if app is not None and not self._application_event_filter_installed:
-            app.installEventFilter(self)
-            self._application_event_filter_installed = True
+        self._event_bridge.bind(self._map_widget)
+        self._map_event_targets = list(self._event_bridge.targets())
+        self._application_event_filter_installed = (
+            self._event_bridge.application_filter_installed
+        )
 
     def _remove_map_event_filters(self) -> None:
-        for target in self._map_event_targets:
-            try:
-                target.removeEventFilter(self)
-            except RuntimeError:
-                continue
+        self._event_bridge.unbind()
         self._map_event_targets = []
-        app = QApplication.instance()
-        if app is not None and self._application_event_filter_installed:
-            app.removeEventFilter(self)
         self._application_event_filter_installed = False
 
     def _cursor_targets(self) -> tuple[object, ...]:
@@ -885,33 +869,22 @@ class InfoLocationMapView(QWidget):
     def _install_pin_painter_if_supported(self) -> None:
         if self._map_widget is None:
             return
-        add_post_render_painter = getattr(self._map_widget, "add_post_render_painter", None)
-        supports_post_render_painter = getattr(
+        self._overlay_attachment.attach(
             self._map_widget,
-            "supports_post_render_painter",
-            lambda: True,
+            callback=self._paint_pin,
+            overlay=self._overlay,
         )
-        if not callable(add_post_render_painter) or not supports_post_render_painter():
-            self._uses_post_render_pin = False
-            self._pin_paint_callback = None
-            return
-
-        self._pin_paint_callback = self._paint_pin
-        self._uses_post_render_pin = True
-        add_post_render_painter(self._pin_paint_callback)
-        self._overlay.set_screen_point(None)
-        self._overlay.hide()
+        self._pin_paint_callback = self._overlay_attachment.callback
+        self._uses_post_render_pin = self._overlay_attachment.uses_post_render
+        if self._uses_post_render_pin:
+            self._overlay.set_screen_point(None)
+            self._overlay.hide()
 
     def _remove_pin_painter(self, map_widget: MapWidgetBase) -> None:
-        callback = self._pin_paint_callback
-        if callback is None:
-            return
-        remove_post_render_painter = getattr(map_widget, "remove_post_render_painter", None)
-        if callable(remove_post_render_painter):
-            try:
-                remove_post_render_painter(callback)
-            except Exception:
-                LOGGER.debug("Failed to remove info-panel mini-map pin painter", exc_info=True)
+        try:
+            self._overlay_attachment.detach(map_widget)
+        except Exception:
+            LOGGER.debug("Failed to remove info-panel mini-map pin painter", exc_info=True)
         self._pin_paint_callback = None
         self._uses_post_render_pin = False
 

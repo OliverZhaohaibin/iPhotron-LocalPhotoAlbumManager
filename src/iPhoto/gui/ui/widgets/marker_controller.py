@@ -407,6 +407,15 @@ class MarkerController(QObject):
 
         self.markerActivated.emit(list(cluster.assets))
 
+    def handle_pointer_press(self, position: QPointF) -> bool:
+        """Resolve a click position into a marker activation when possible."""
+
+        cluster = self.cluster_at(position)
+        if cluster is None:
+            return False
+        self.handle_marker_click(cluster)
+        return True
+
     def handle_thumbnail_ready(self, root: Path, rel: str, pixmap: QPixmap) -> None:
         """Forward freshly rendered thumbnails to the UI layer."""
 

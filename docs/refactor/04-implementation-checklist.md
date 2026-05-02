@@ -236,6 +236,7 @@
 - [x] 地理资产聚合通过 session location query。
 - [x] marker 点击 routing 通过 session map interaction surface。
 - [x] full map / mini map widget 构造选择收口到共享 GUI factory。
+- [x] `PhotoMapView` / `InfoLocationMapView` 的 map event target 绑定、post-render / QWidget overlay attachment 与 marker pointer-hit 入口收口到共享 GUI helper / controller seam。
 - [x] Recently Deleted cleanup 优先通过 session lifecycle surface。
 - [x] native runtime fallback 有测试。
 
@@ -244,9 +245,12 @@
 接到同一 runtime seam；地理资产查询也已迁入 `LibrarySession.locations`。
 本轮继续补齐 `LibrarySession.map_interactions`，marker 点击语义不再由
 `MarkerController` 决定；full map / mini map 的 concrete widget 选择也已集中到
-`map_widget_factory`。`LocationTrashNavigationService` 仍保留为 Qt transport
-seam，map widget 事件过滤、overlay/pin 绘制、drag cursor 与 marker hit testing
-仍在 GUI 层，因此不应仅凭当前切片将整个 Maps bounded context 视为“完全完成”。
+`map_widget_factory`。最新一轮继续抽出共享 `map_widget_support` helper，
+`PhotoMapView` / `InfoLocationMapView` 不再各自直接维护 map event target 绑定、
+post-render painter attachment 与 QWidget overlay fallback，marker pointer-hit
+入口也已交回 `MarkerController`；但 `LocationTrashNavigationService` 仍保留为 Qt
+transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因此不应仅凭
+当前切片将整个 Maps bounded context 视为“完全完成”。
 
 ### Thumbnail
 

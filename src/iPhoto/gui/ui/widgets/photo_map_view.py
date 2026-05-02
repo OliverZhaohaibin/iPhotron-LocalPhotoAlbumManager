@@ -28,6 +28,7 @@ from ....library.manager import GeotaggedAsset
 from ..tasks.thumbnail_loader import ThumbnailLoader
 from .marker_controller import MarkerController, _MarkerCluster
 from .custom_tooltip import FloatingToolTip, ToolTipEventFilter
+from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
 from .map_widget_factory import (
     MapGLWidget,
     MapGLWindowWidget,
@@ -294,6 +295,8 @@ class PhotoMapView(QWidget):
         self._map_package_root = resolve_map_package_root(map_runtime)
         self._map_widget: MapWidgetBase
         self._map_event_target: QWidget | None = None
+        self._event_bridge = MapEventSurfaceBridge(self)
+        self._overlay_attachment = MapOverlayAttachment()
         self._resolved_map_source: MapSourceSpec | None = None
         self._backend_kind = "unavailable"
         self._marker_paint_callback = None
@@ -392,10 +395,13 @@ class PhotoMapView(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        if self._overlay.parent() is self:
-            self._overlay.setGeometry(self._map_widget.geometry())
-        else:
+        if self._overlay_attachment.uses_post_render:
             self._overlay.update()
+        else:
+            self._overlay_attachment.sync_widget_overlay(
+                self._overlay,
+                geometry=self._map_widget.geometry(),
+            )
         self._marker_controller.handle_resize()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
@@ -449,10 +455,19 @@ class PhotoMapView(QWidget):
                 if self._last_tooltip_text:
                     self._tooltip.hide_tooltip()
                     self._last_tooltip_text = ""
-                cluster = self._marker_controller.cluster_at(mouse_event.position())
-                if cluster is not None:
-                    self._marker_controller.handle_marker_click(cluster)
-                    return True
+                handle_pointer_press = getattr(
+                    self._marker_controller,
+                    "handle_pointer_press",
+                    None,
+                )
+                if callable(handle_pointer_press):
+                    if handle_pointer_press(mouse_event.position()):
+                        return True
+                else:
+                    cluster = self._marker_controller.cluster_at(mouse_event.position())
+                    if cluster is not None:
+                        self._marker_controller.handle_marker_click(cluster)
+                        return True
         return super().eventFilter(watched, event)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
@@ -509,23 +524,25 @@ class PhotoMapView(QWidget):
             logger.info("Photo map runtime capability: %s", self._map_runtime_capabilities.status_message)
         self._layout.addWidget(self._map_widget)
 
-        add_post_render_painter = getattr(self._map_widget, "add_post_render_painter", None)
-        supports_post_render_painter = getattr(
-            self._map_widget,
-            "supports_post_render_painter",
-            lambda: True,
-        )
-        if callable(add_post_render_painter) and supports_post_render_painter():
+        if self._overlay_attachment.supports_post_render(self._map_widget):
             self._overlay = _GLMarkerLayer(self._map_widget)
-            self._marker_paint_callback = self._overlay.paint_markers
-            add_post_render_painter(self._marker_paint_callback)
+            self._overlay_attachment.attach(
+                self._map_widget,
+                callback=self._overlay.paint_markers,
+            )
         else:
             self._overlay = _MarkerLayer(self)
-            self._overlay.setGeometry(self._map_widget.geometry())
-            self._overlay.raise_()
+            self._overlay_attachment.attach(
+                self._map_widget,
+                callback=None,
+                overlay=self._overlay,
+                overlay_geometry=self._map_widget.geometry(),
+                raise_overlay=True,
+            )
+        self._marker_paint_callback = self._overlay_attachment.callback
 
-        self._map_event_target = cast(QWidget, self._map_widget.event_target())
-        self._map_event_target.installEventFilter(self)
+        self._event_bridge.bind(self._map_widget)
+        self._map_event_target = cast(QWidget | None, self._event_bridge.event_target())
         self._runtime_diagnostics = format_map_runtime_diagnostics(
             self._map_widget,
             backend_kind=result.backend_kind,
@@ -556,14 +573,10 @@ class PhotoMapView(QWidget):
             self._marker_controller.set_assets(self._assets, self._assets_library_root)
 
     def _teardown_map_widget(self) -> None:
-        if self._map_event_target is not None:
-            self._map_event_target.removeEventFilter(self)
-            self._map_event_target = None
-        if self._marker_paint_callback is not None:
-            remove_post_render_painter = getattr(self._map_widget, "remove_post_render_painter", None)
-            if callable(remove_post_render_painter):
-                remove_post_render_painter(self._marker_paint_callback)
-            self._marker_paint_callback = None
+        self._event_bridge.unbind()
+        self._map_event_target = None
+        self._overlay_attachment.detach(self._map_widget)
+        self._marker_paint_callback = None
         if hasattr(self, "_marker_controller"):
             # ``MarkerController`` maintains a worker thread that aggregates marker clusters.
             # Explicitly shutting it down prevents the Qt event loop from waiting indefinitely.

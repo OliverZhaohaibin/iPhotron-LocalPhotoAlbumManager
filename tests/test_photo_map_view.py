@@ -561,6 +561,65 @@ def test_photo_map_view_routes_marker_assets_through_interaction_service(
     assert emitted == [asset.library_relative]
 
 
+def test_photo_map_view_delegates_pointer_hit_testing_to_marker_controller(
+    qapp: QApplication,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    del qapp
+
+    source = MapSourceSpec(
+        kind="legacy_pbf",
+        data_path=tmp_path / "tiles",
+        style_path=tmp_path / "style.json",
+    )
+
+    class _PointerAwareMarkerController(_DummyMarkerController):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.pointer_positions: list[QPointF] = []
+
+        def handle_pointer_press(self, position: QPointF) -> bool:
+            self.pointer_positions.append(QPointF(position))
+            return True
+
+    controller_instances: list[_PointerAwareMarkerController] = []
+
+    def _create_controller(*args, **kwargs):
+        controller = _PointerAwareMarkerController(*args, **kwargs)
+        controller_instances.append(controller)
+        return controller
+
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _create_controller)
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "create_map_widget",
+        lambda *args, **kwargs: MapWidgetFactoryResult(
+            _FallbackMapWidget(args[0], map_source=source),
+            source,
+            "legacy_python",
+            False,
+        ),
+    )
+
+    view = photo_map_view_module.PhotoMapView(map_source=source)
+    try:
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(14.0, 18.0),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        assert view.eventFilter(cast(QObject, view._map_event_target), event)
+        assert len(controller_instances) == 1
+        assert controller_instances[0].pointer_positions == [QPointF(14.0, 18.0)]
+    finally:
+        view.close()
+
+
 def test_native_marker_overlay_precomposes_opaque_marker_buffer(
     qapp: QApplication,
     tmp_path,

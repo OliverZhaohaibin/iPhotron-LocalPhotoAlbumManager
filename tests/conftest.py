@@ -2,7 +2,7 @@ import sys
 import os
 from types import ModuleType
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -230,3 +230,53 @@ def pytest_ignore_collect(collection_path, config):
     if "/ui/" in path_str or "/gui/" in path_str:
         return True
     return None
+
+
+class _PatchProxy:
+    def __init__(self, owner):
+        self._owner = owner
+
+    def __call__(self, target, *args, **kwargs):
+        return self._owner._start_patch(patch(target, *args, **kwargs))
+
+    def object(self, target, attribute, *args, **kwargs):
+        return self._owner._start_patch(
+            patch.object(target, attribute, *args, **kwargs)
+        )
+
+    def dict(self, in_dict, values=(), clear=False, **kwargs):
+        return self._owner._start_patch(
+            patch.dict(in_dict, values=values, clear=clear, **kwargs)
+        )
+
+
+class _SimpleMocker:
+    Mock = Mock
+    MagicMock = MagicMock
+    ANY = ANY
+    call = call
+
+    def __init__(self):
+        self._patchers = []
+        self.patch = _PatchProxy(self)
+
+    def _start_patch(self, patcher):
+        started = patcher.start()
+        self._patchers.append(patcher)
+        return started
+
+    def stopall(self):
+        while self._patchers:
+            self._patchers.pop().stop()
+
+
+import pytest
+
+
+@pytest.fixture()
+def mocker():
+    helper = _SimpleMocker()
+    try:
+        yield helper
+    finally:
+        helper.stopall()

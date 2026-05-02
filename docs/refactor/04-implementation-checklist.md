@@ -293,7 +293,7 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 
 - [x] application use case fake-port tests。
 - [x] SQLite repository integration tests。
-- [ ] temp library end-to-end tests。
+- [x] temp library end-to-end tests。
 - [x] architecture guard tests。
 - [ ] scan performance baseline。
 - [ ] gallery pagination baseline。
@@ -306,7 +306,7 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 - [x] 架构违规会在 CI 失败。
 - [x] 用户状态保护有回归测试。
 - [ ] 扫描、分页、缩略图性能不回退。
-- [ ] 关键产品流程有 end-to-end tests。
+- [x] 关键产品流程有 end-to-end tests。
 
 回归测试：
 
@@ -314,6 +314,7 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 - [x] `pytest tests/application -q`
 - [ ] `pytest tests/infrastructure -q`
 - [x] `pytest tests/architecture -q`
+- [x] `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/tasks/test_import_worker.py -q`
 - [ ] 性能测试按项目约定运行。
 
 ## 10. Definition of Done

@@ -12,46 +12,46 @@
 但运行时主路径已经建立起可执行的 session boundary、repository/state
 boundary 和 architecture guardrail。
 
-本轮新增完成的是 `25-maps-gui-transport-overlay-residual-migration.md`：Maps
-residual 继续收口，但这次不再扩 session port，而是把 full map / mini-map
-里重复的 GUI transport 细节抽成共享 helper，并把 marker pointer-hit 入口
-收回 controller seam。
+本轮新增完成的是 `26-temp-library-end-to-end-regression.md`：Phase 6 的
+temp-library 端到端回归正式落地，不再只是“以后补”的 follow-up。
 
-这一步有三个关键落点：
+这一步有四个关键落点：
 
-- 新增 `gui/ui/widgets/map_widget_support.py`，统一承接 map widget
-  `event_target()` 绑定、可选 application-level event filter 与 post-render /
-  QWidget overlay attachment fallback。
-- `PhotoMapView` 不再自行拼装 marker 命中链路；pointer press 先交给
-  `MarkerController.handle_pointer_press(...)`，view 只保留 tooltip 与兼容 signal
-  转发。
-- `InfoLocationMapView` 不再自己维护 `_map_event_targets` 和 post-render pin
-  painter 注册分支；mini-map pin overlay、drag cursor target 跟随与 shutdown
-  清理由共享 helper 统一承接。
+- 新增 `tests/application/test_temp_library_end_to_end.py`，用真实 `tmp_path`
+  文件系统覆盖 `import / move / delete / restore / rescan` 主链路。
+- 回归入口明确采用 `LibrarySession + ImportWorker / MoveWorker`，而不是继续围绕
+  GUI facade/service 拼更高层 smoke。
+- 用户状态保护先锁定已稳定的 `favorite + trash`：favorite 在 rescan 后保持，
+  delete/restore 的 trash metadata 在 worker + lifecycle 主链路中保持正确。
+- `tests/conftest.py` 新增最小 `mocker` fixture，使 focused regressions 在
+  当前“禁用第三方 pytest 自动加载”的环境里仍能运行。
 
-## 2. 本轮完成：Maps GUI Transport + Overlay Residual 收口
+## 2. 本轮完成：Temp Library End-to-End Regression
 
-- 新增共享 GUI helper。
-  - `gui/ui/widgets/map_widget_support.py` 现在定义
-    `MapEventSurfaceBridge` 与 `MapOverlayAttachment`。
-  - 两者分别负责 map widget / event target / application filter 的注册与清理，
-    以及 post-render painter / QWidget overlay fallback 的注册与清理。
-- `PhotoMapView` 内部职责进一步缩小。
-  - marker 命中入口优先走 `MarkerController.handle_pointer_press(...)`。
-  - widget rebuild / close 时的 event filter 与 painter teardown 改由共享 helper
-    执行。
-  - `assetActivated` / `clusterActivated`、runtime diagnostics 与 session-bound
-    `map_interaction_service` 行为保持兼容。
-- `InfoLocationMapView` 去重 mini-map transport 细节。
-  - `_install_map_event_filters()` / `_remove_map_event_filters()` 现在只是共享
-    bridge 的薄包装。
-  - pin painter attach/detach 改走 `MapOverlayAttachment`，保留现有
-    post-render pin 与 QWidget overlay fallback 行为。
-  - drag cursor 仍是 GUI 责任，但 cursor targets 现在由共享 bridge 提供。
+- 新增 temp-library E2E harness。
+  - `tests/application/test_temp_library_end_to_end.py` 通过真实临时库目录、
+    轻量 fake scanner 与 fake `process_media_paths` seam，稳定驱动 session-bound
+    scan/import/move/delete/restore 行为。
+  - `LibrarySession` 在测试中显式替换掉不相关的 Maps runtime capability
+    probe，避免无头环境下的 OpenGL 探测把回归拖进 GUI/runtime 细节。
+- import/move/delete/restore 主链路现在有同一层级回归。
+  - `ImportWorker` 通过 session-bound `scan_service` / `asset_lifecycle_service`
+    更新单库 `global_index.db`。
+  - `MoveWorker` 通过 session-bound `asset_operations` planning +
+    `asset_lifecycle` apply path，验证 album-to-album move、Recently Deleted delete
+    与 restore-to-origin 行为。
+- 用户状态保护在 temp-library 层级得到确认。
+  - `favorite` 经过完整 `rescan_album()` 后仍保留。
+  - trash row 的 `original_rel_path` / `original_album_id` /
+    `original_album_subpath` 在 delete 后写入，restore 后从目标 row 清除。
+- focused 验证环境补齐。
+  - `tests/conftest.py` 提供最小 `mocker` fixture，覆盖仓库当前实际依赖的
+    `Mock` / `MagicMock` / `patch` 能力，避免因缺少 `pytest-mock` 插件导致
+    worker/service 回归无法执行。
 
 ## 3. 历史已完成切片摘要
 
-以下切片已经完成，详细过程性交接分别见 `06` 到 `25`：
+以下切片已经完成，详细过程性交接分别见 `06` 到 `26`：
 
 - 基础边界与 session 基础：
   已引入 `application/ports/*`、`LibrarySession`、state repository adapter、
@@ -100,6 +100,10 @@ residual 继续收口，但这次不再扩 session port，而是把 full map / m
   move/delete/restore 的 durable planning 已迁入
   `LibraryAssetOperationService`，GUI service 只负责 prompt、worker、
   signal 和用户提示。
+- Temp-library 端到端回归：
+  `LibrarySession + workers` 主链路现在已有真实临时库级别回归，覆盖 import /
+  move / delete / restore / rescan，以及当前已稳定的 `favorite + trash`
+  用户状态保护。
 
 ## 4. 当前阶段状态
 
@@ -151,8 +155,8 @@ residual 继续收口，但这次不再扩 session port，而是把 full map / m
   pointer-hit 入口也已收回 controller seam；`LocationTrashNavigationService`
   仍保留为 Qt transport seam，overlay/pin 绘制与 drag cursor 策略仍在 GUI 层。
 - Phase 6：部分完成。
-  architecture tests、targeted application/infrastructure tests 已存在；
-  temp-library end-to-end 与性能 baseline 仍未完成。
+  architecture tests、targeted application/infrastructure tests 与
+  temp-library end-to-end 已存在；性能 baseline 仍未完成。
 
 ## 5. 已知迁移例外
 
@@ -181,31 +185,33 @@ residual 继续收口，但这次不再扩 session port，而是把 full map / m
   `PlaybackCoordinator.set_people_library_root()`、`ManualFaceAddWorker` 与
   `PinnedItemsService` standalone 清理路径仍保留 compatibility fallback，
   但 `PlaybackCoordinator` 已不再以 bootstrap People factory 作为运行时主路径。
-- temp-library 端到端仍保持 out of scope。
+- temp-library E2E 目前先锁 `favorite + trash`；`hidden/pinned/order` 仍待
+  后续 state-boundary residual 继续补齐。
 
 ## 6. 最新验证
 
 本轮在项目 `.venv` 下执行：
 
-- `.venv/bin/python -m pytest tests/test_photo_map_view.py tests/test_info_panel.py tests/test_map_drag_cursor.py tests/test_marker_controller_place_labels.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/architecture/test_layer_boundaries.py -q`
+- `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/tasks/test_import_worker.py -q`
 - `.venv/bin/python tools/check_architecture.py`
 
 结果：
 
-- 上述 focused regressions 通过（`104 passed`）。
+- 上述 focused regressions 通过（`47 passed`）。
 - `tools/check_architecture.py` 通过。
 - 仍有既有的 pytest `Unknown config option: env` warning。
 - 仍有既有的 legacy model shim / pairing deprecation warnings。
-- 本轮新增验证意图：共享 event bridge、overlay attachment teardown、
-  `PhotoMapView` pointer-hit 委托、mini-map drag cursor target 跟随、
-  post-render pin fallback，以及既有 concrete map widget import guardrail。
+- 本轮新增验证意图：temp-library 下的 session-bound import/move/delete/
+  restore/rescan 主链路、favorite 状态保留、trash metadata 往返，以及 worker /
+  service focused regressions 在无 `pytest-mock` 插件环境下仍可运行。
 
-之前各个切片的针对性验证命令和结果，继续以 `06` 到 `25` 交接文档为准；
+之前各个切片的针对性验证命令和结果，继续以 `06` 到 `26` 交接文档为准；
 本文件只保留当前整体验证结论和最新增量验证。
 
 ## 7. 下一步交接
 
-1. 优先补 `temp library` 端到端回归：import / move / delete / restore，以及
-   rescan 后用户状态保护。
-2. 若后续再回到 Maps，只处理新暴露问题；当前不再主动扩新的 session/runtime
-   boundary。
+1. 优先继续补 Phase 2 residual：`hidden / pinned / order` 等 durable user
+   state 仍未全部收口到当前 temp-library E2E 覆盖。
+2. 补 Phase 6 性能 baseline：scan、gallery pagination、thumbnail cache。
+3. 若后续再回到 Maps，只处理新暴露问题；当前不再主动扩新的
+   session/runtime boundary。

@@ -270,6 +270,8 @@ class LibraryAssetLifecycleService:
         self,
         root: Path,
         materialised_rows: Iterable[dict[str, Any]],
+        *,
+        exclude_globs: Iterable[str] | None = None,
     ) -> int:
         """Explicitly prune stale scan rows for a completed scan scope."""
 
@@ -281,6 +283,7 @@ class LibraryAssetLifecycleService:
             materialised_rows,
             library_root=self.library_root,
             repository=repository,
+            exclude_globs=exclude_globs,
         )
 
     def _remove_source_rows(
@@ -547,7 +550,7 @@ class LibraryAssetLifecycleService:
         visited: list[Path] = []
         while True:
             visited.append(current)
-            if resolve_work_dir(current) is not None:
+            if self._has_album_manifest(current) or resolve_work_dir(current) is not None:
                 album_root: Path | None = current
                 break
             parent = current.parent
@@ -558,7 +561,11 @@ class LibraryAssetLifecycleService:
                 library_root_key is not None
                 and self._normalised_string(parent) == library_root_key
             ):
-                album_root = parent if resolve_work_dir(parent) is not None else None
+                album_root = (
+                    parent
+                    if self._has_album_manifest(parent) or resolve_work_dir(parent) is not None
+                    else None
+                )
                 visited.append(parent)
                 break
             current = parent
@@ -645,6 +652,10 @@ class LibraryAssetLifecycleService:
                 )
 
         return manifest_id
+
+    @staticmethod
+    def _has_album_manifest(root: Path) -> bool:
+        return any((root / manifest_name).exists() for manifest_name in ALBUM_MANIFEST_NAMES)
 
     @staticmethod
     def _relative_to(path: Path, root: Path) -> Path | None:

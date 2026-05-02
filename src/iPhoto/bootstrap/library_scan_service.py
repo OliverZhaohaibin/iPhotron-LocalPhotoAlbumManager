@@ -245,15 +245,25 @@ class LibraryScanService:
     ) -> list[dict[str, Any]]:
         """Synchronously rebuild one scan scope and persist follow-up state."""
 
-        result = self.scan_album(
-            root,
+        resolved_include, resolved_exclude = self.scan_filters(
+            Path(root),
             include=include,
             exclude=exclude,
+        )
+        result = self.scan_album(
+            root,
+            include=resolved_include,
+            exclude=resolved_exclude,
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
             persist_chunks=False,
         )
-        rows = self.finalize_scan_result(root, result.rows, pair_live=pair_live)
+        rows = self.finalize_scan_result(
+            root,
+            result.rows,
+            pair_live=pair_live,
+            exclude=resolved_exclude,
+        )
         if sync_manifest_favorites:
             self.sync_manifest_favorites(Path(root))
         return rows
@@ -278,6 +288,7 @@ class LibraryScanService:
         rows: Iterable[dict[str, Any]],
         *,
         pair_live: bool = True,
+        exclude: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Persist scan completion side effects for one scope.
 
@@ -290,6 +301,9 @@ class LibraryScanService:
         from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 
         scan_root = Path(root)
+        resolved_exclude = tuple(
+            exclude if exclude is not None else self.scan_filters(scan_root)[1]
+        )
         lifecycle_service = LibraryAssetLifecycleService(
             self.library_root,
             scan_service=self,
@@ -303,7 +317,11 @@ class LibraryScanService:
             )
 
         self.finalize_scan(scan_root, materialized_rows)
-        lifecycle_service.reconcile_missing_scan_rows(scan_root, materialized_rows)
+        lifecycle_service.reconcile_missing_scan_rows(
+            scan_root,
+            materialized_rows,
+            exclude_globs=resolved_exclude,
+        )
         if pair_live:
             self.pair_album(scan_root)
         return materialized_rows
@@ -329,17 +347,23 @@ class LibraryScanService:
         self,
         root: Path,
         rows: Iterable[dict[str, Any]],
+        *,
+        exclude_globs: Iterable[str] | None = None,
     ) -> int:
         """Prune stale rows for a completed full scan scope."""
 
         scan_root = Path(root)
         materialized_rows = [dict(row) for row in rows]
         repository = self._repository()
+        resolved_exclude = tuple(
+            exclude_globs if exclude_globs is not None else self.scan_filters(scan_root)[1]
+        )
         return prune_index_scope(
             scan_root,
             materialized_rows,
             library_root=self.library_root,
             repository=repository,
+            exclude_globs=resolved_exclude,
         )
 
     def scan_specific_files(

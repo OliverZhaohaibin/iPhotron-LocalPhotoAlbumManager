@@ -282,6 +282,62 @@ def test_prepare_album_open_autoscan_prunes_stale_hidden_rows(
     assert list(store.read_all(filter_hidden=False)) == []
 
 
+def test_rescan_album_materializes_one_shot_filters_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+
+    class _CapturingScanner:
+        def __init__(self) -> None:
+            self.include: list[str] | None = None
+            self.exclude: list[str] | None = None
+
+        def scan(
+            self,
+            _root: Path,
+            include: Iterable[str],
+            exclude: Iterable[str],
+            **_kwargs: object,
+        ):
+            self.include = list(include)
+            self.exclude = list(exclude)
+            yield {"rel": "kept.jpg", "id": "kept"}
+
+    scanner = _CapturingScanner()
+    service = LibraryScanService(library_root, scanner=scanner)
+    finalized: dict[str, object] = {}
+
+    def fake_finalize_scan_result(
+        _root: Path,
+        rows: Iterable[dict[str, Any]],
+        *,
+        pair_live: bool = True,
+        exclude: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        finalized["pair_live"] = pair_live
+        finalized["exclude"] = list(exclude or ())
+        return [dict(row) for row in rows]
+
+    monkeypatch.setattr(service, "finalize_scan_result", fake_finalize_scan_result)
+
+    rows = service.rescan_album(
+        library_root,
+        include=(pattern for pattern in ("**/*.jpg",)),
+        exclude=(pattern for pattern in ("**/.Trash/**",)),
+        pair_live=False,
+    )
+
+    assert rows == [{"rel": "kept.jpg", "id": "kept"}]
+    assert scanner.include == ["**/*.jpg"]
+    assert scanner.exclude == ["**/.Trash/**"]
+    assert finalized == {
+        "pair_live": False,
+        "exclude": ["**/.Trash/**"],
+    }
+
+
 def test_sync_manifest_favorites_raises_recoverable_errors_by_default(
     tmp_path: Path,
 ) -> None:

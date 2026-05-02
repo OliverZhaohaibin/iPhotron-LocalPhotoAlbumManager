@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 
 from .cache.lock import FileLock
+from .config import RECENTLY_DELETED_DIR_NAME
 from .core.pairing import pair_live
 from .errors import IndexCorruptedError, ManifestInvalidError
 from .models.types import LiveGroup
@@ -221,6 +222,7 @@ def prune_index_scope(
     library_root: Optional[Path] = None,
     *,
     repository: "AssetRepositoryPort",
+    exclude_globs: Iterable[str] | None = None,
 ) -> int:
     """Delete rows under *root* that were not rediscovered by the completed scan.
 
@@ -250,10 +252,22 @@ def prune_index_scope(
     else:
         scoped_rows = repository.read_all(sort_by_date=False, filter_hidden=False)
 
+    preserve_existing_trash_rows = (
+        root.name != RECENTLY_DELETED_DIR_NAME
+        and library_root is not None
+        and any(RECENTLY_DELETED_DIR_NAME in pattern for pattern in (exclude_globs or ()))
+    )
+    trash_prefix = f"{RECENTLY_DELETED_DIR_NAME}/"
     removable: List[str] = []
     for row in scoped_rows:
         rel_key = normalise_rel_key(row.get("rel"))
         if rel_key is None:
+            continue
+        if (
+            preserve_existing_trash_rows
+            and rel_key.startswith(trash_prefix)
+            and (library_root / rel_key).exists()
+        ):
             continue
         if rel_key not in fresh_rels:
             removable.append(rel_key)

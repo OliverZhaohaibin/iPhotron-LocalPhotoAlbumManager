@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -16,26 +15,13 @@ from iPhoto.library.workers.rescan_worker import RescanSignals, RescanWorker
 
 class FakeScanService:
     def __init__(self) -> None:
-        self.scanned: list[tuple[Path, bool]] = []
-        self.finalized: list[tuple[Path, list[dict]]] = []
+        self.refreshed: list[tuple[Path, bool]] = []
 
-    def scan_album(self, root: Path, *, progress_callback=None, persist_chunks: bool):
-        self.scanned.append((root, persist_chunks))
+    def refresh_restored_album(self, root: Path, *, progress_callback=None, pair_live: bool):
+        self.refreshed.append((root, pair_live))
         if progress_callback is not None:
             progress_callback(1, 2)
-        return SimpleNamespace(rows=[{"rel": "a.jpg"}])
-
-    def finalize_scan(self, root: Path, rows: list[dict]) -> None:
-        self.finalized.append((root, rows))
-
-
-class FakeLifecycleService:
-    def __init__(self) -> None:
-        self.reconciled: list[tuple[Path, list[dict]]] = []
-
-    def reconcile_missing_scan_rows(self, root: Path, rows: list[dict]) -> int:
-        self.reconciled.append((root, rows))
-        return 0
+        return [{"rel": "a.jpg"}]
 
 
 def test_rescan_worker_uses_session_scan_service(tmp_path: Path) -> None:
@@ -43,7 +29,6 @@ def test_rescan_worker_uses_session_scan_service(tmp_path: Path) -> None:
     album_root.mkdir()
     scan_service = FakeScanService()
     signals = RescanSignals()
-    lifecycle_service = FakeLifecycleService()
     progress: list[tuple[Path, int, int]] = []
     finished: list[tuple[Path, bool]] = []
     signals.progressUpdated.connect(
@@ -55,12 +40,9 @@ def test_rescan_worker_uses_session_scan_service(tmp_path: Path) -> None:
         album_root,
         signals,
         scan_service=scan_service,
-        asset_lifecycle_service=lifecycle_service,
     )
     worker.run()
 
-    assert scan_service.scanned == [(album_root, False)]
-    assert scan_service.finalized == [(album_root, [{"rel": "a.jpg"}])]
-    assert lifecycle_service.reconciled == [(album_root, [{"rel": "a.jpg"}])]
+    assert scan_service.refreshed == [(album_root, True)]
     assert progress == [(album_root, 1, 2)]
     assert finished == [(album_root, True)]

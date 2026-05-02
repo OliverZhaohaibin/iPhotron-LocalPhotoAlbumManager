@@ -311,6 +311,70 @@ def test_delete_and_restore_preserve_trash_metadata_in_temp_library(
     assert restored_row.get("original_album_subpath") is None
 
 
+def test_library_rescan_does_not_break_recently_deleted_restore(
+    tmp_path: Path,
+    qapp: QCoreApplication,
+) -> None:
+    pil_image = pytest.importorskip("PIL.Image")
+
+    library_root = tmp_path / "Library"
+    album_root = library_root / "AlbumA"
+    album_root.mkdir(parents=True)
+    (album_root / ".iphoto.album.json").write_text(
+        '{"id": "album-a"}',
+        encoding="utf-8",
+    )
+    asset = album_root / "photo.jpg"
+    pil_image.new("RGB", (4, 4), color="red").save(asset)
+    trash_root = library_root / RECENTLY_DELETED_DIR_NAME
+    trash_root.mkdir()
+
+    scan_service = LibraryScanService(library_root)
+    lifecycle_service = LibraryAssetLifecycleService(
+        library_root,
+        scan_service=scan_service,
+    )
+    operation_service = LibraryAssetOperationService(
+        library_root,
+        lifecycle_service=lifecycle_service,
+    )
+
+    scan_service.rescan_album(library_root)
+    delete_plan = operation_service.plan_delete_request([asset], trash_root=trash_root)
+    _run_move_plan(delete_plan)
+
+    indexed_after_delete = {
+        row["rel"]: row
+        for row in get_global_repository(library_root).read_all(filter_hidden=False)
+    }
+    trashed_rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
+    assert indexed_after_delete[trashed_rel]["original_rel_path"] == "AlbumA/photo.jpg"
+
+    scan_service.rescan_album(library_root)
+    indexed_after_library_rescan = {
+        row["rel"]: row
+        for row in get_global_repository(library_root).read_all(filter_hidden=False)
+    }
+    assert trashed_rel in indexed_after_library_rescan
+    assert indexed_after_library_rescan[trashed_rel]["original_rel_path"] == "AlbumA/photo.jpg"
+
+    scan_service.rescan_album(trash_root)
+    indexed_after_trash_rescan = {
+        row["rel"]: row
+        for row in get_global_repository(library_root).read_all(filter_hidden=False)
+    }
+    assert indexed_after_trash_rescan[trashed_rel]["original_rel_path"] == "AlbumA/photo.jpg"
+
+    restore_plan = operation_service.plan_restore_request([trash_root / "photo.jpg"], trash_root=trash_root)
+    assert restore_plan.errors == []
+    assert len(restore_plan.batches) == 1
+    assert restore_plan.batches[0].destination_root == album_root
+
+    _run_move_plan(restore_plan.batches[0], is_restore=True)
+    assert (album_root / "photo.jpg").exists()
+    assert not (trash_root / "photo.jpg").exists()
+
+
 def test_favorite_survives_rescan_in_temp_library(
     tmp_path: Path,
     qapp: QCoreApplication,

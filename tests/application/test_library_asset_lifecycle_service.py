@@ -124,6 +124,43 @@ def test_delete_annotation_and_stale_trash_cleanup(tmp_path: Path) -> None:
     assert rows[trash_rel]["original_album_subpath"] == "photo.jpg"
 
 
+def test_delete_annotation_uses_manifest_album_without_work_dir(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "AlbumA"
+    trash_root = library_root / RECENTLY_DELETED_DIR_NAME
+    album_root.mkdir(parents=True)
+    trash_root.mkdir()
+    (album_root / ".iphoto.album.json").write_text(
+        json.dumps({"id": "album-a"}),
+        encoding="utf-8",
+    )
+    source = album_root / "photo.jpg"
+    target = trash_root / "photo.jpg"
+    source.write_bytes(b"source")
+    target.write_bytes(b"target")
+
+    get_global_repository(library_root).write_rows(
+        [{"rel": "AlbumA/photo.jpg", "id": "asset-1"}]
+    )
+    service = LibraryAssetLifecycleService(
+        library_root,
+        scan_service=_PairRecorder(),  # type: ignore[arg-type]
+    )
+
+    result = service.apply_move(
+        moved=[(source, target)],
+        source_root=album_root,
+        destination_root=trash_root,
+        trash_root=trash_root,
+    )
+
+    rows = _rows(library_root)
+    trash_rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
+    assert result.errors == []
+    assert rows[trash_rel]["original_album_id"] == "album-a"
+    assert rows[trash_rel]["original_album_subpath"] == "photo.jpg"
+
+
 def test_delete_annotation_normalizes_legacy_album_manifest(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     album_root = library_root / "LegacyAlbum"
@@ -294,6 +331,33 @@ def test_reconcile_missing_scan_rows_prunes_scope_after_scan_finalize(
     assert removed == 1
     assert set(rows) == {"AlbumA/keep.jpg", "AlbumB/other.jpg"}
     assert bool(rows["AlbumA/keep.jpg"]["is_favorite"]) is True
+
+
+def test_reconcile_missing_scan_rows_keeps_excluded_trash_rows(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir(parents=True)
+    trash_rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "AlbumA/keep.jpg", "id": "keep"},
+            {"rel": "AlbumA/stale.jpg", "id": "stale"},
+            {"rel": trash_rel, "id": "trash", "original_rel_path": "AlbumA/photo.jpg"},
+        ]
+    )
+    service = LibraryAssetLifecycleService(library_root)
+
+    removed = service.reconcile_missing_scan_rows(
+        library_root,
+        [{"rel": "AlbumA/keep.jpg", "id": "keep"}],
+        exclude_globs=[f"**/{RECENTLY_DELETED_DIR_NAME}/**"],
+    )
+
+    rows = _rows(library_root)
+    assert removed == 1
+    assert set(rows) == {"AlbumA/keep.jpg", trash_rel}
+    assert rows[trash_rel]["original_rel_path"] == "AlbumA/photo.jpg"
 
 
 def test_read_index_rows_by_rels_returns_library_rows(tmp_path: Path) -> None:

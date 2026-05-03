@@ -132,6 +132,20 @@ GUI_MAP_WIDGET_FACTORY_ONLY_IMPORTS = {
     "maps.map_widget.qt_location_map_widget",
 }
 
+GUI_LEGACY_APP_SERVICE_FORBIDDEN_PREFIXES = (
+    "gui/coordinators/",
+    "gui/viewmodels/",
+)
+
+GUI_LEGACY_APP_SERVICE_ALLOWED_FILES = {
+    "gui/viewmodels/album_viewmodel.py",
+}
+
+GUI_LEGACY_APP_SERVICE_FORBIDDEN = {
+    "iPhoto.application.services.asset_service",
+    "iPhoto.application.services.album_service",
+}
+
 LEGACY_DOMAIN_USE_CASE_MODULES = {
     "iPhoto.application.use_cases.aggregate_geo_data",
     "iPhoto.application.use_cases.apply_edit",
@@ -370,6 +384,18 @@ def check(src_root: Path) -> list[str]:
                 violations.append(
                     f"{py_file}:{lineno}: map widget construction must go "
                     f"through map_widget_factory, not {module}"
+                )
+
+            if (
+                rel.startswith(GUI_LEGACY_APP_SERVICE_FORBIDDEN_PREFIXES)
+                and rel not in GUI_LEGACY_APP_SERVICE_ALLOWED_FILES
+                and any(
+                    _is_or_under(module, forbidden)
+                    for forbidden in GUI_LEGACY_APP_SERVICE_FORBIDDEN
+                )
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports legacy app service {module}"
                 )
 
             if (

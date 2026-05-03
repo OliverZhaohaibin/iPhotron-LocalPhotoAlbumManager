@@ -21,10 +21,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
-from iPhoto.application.services.asset_service import AssetService
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
-from iPhoto.di.container import DependencyContainer
-from iPhoto.events.bus import EventBus
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
@@ -70,12 +67,10 @@ class MainCoordinator(QObject):
         self,
         window: MainWindow,
         context: RuntimeEntryContract,
-        container: DependencyContainer | None = None,
     ) -> None:
         super().__init__(window)
         self._window = window
         self._context = context
-        self._container = container if container is not None else context.container
         # facade reference kept for signal wiring as some systems still emit through it
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
@@ -88,13 +83,9 @@ class MainCoordinator(QObject):
         if hasattr(window.ui, "download_map_extension_action"):
             window.ui.download_map_extension_action.setEnabled(supports_map_extension_download())
 
-        # Resolve Services
-        if self._container:
-            self._event_bus = self._container.resolve(EventBus)
-            self._asset_service = self._container.resolve(AssetService)
-        else:
-            raise RuntimeError("DependencyContainer is required for MainCoordinator")
+        self._event_bus = context.event_bus
         edit_service_getter = lambda: getattr(context.library, "edit_service", None)
+        asset_state_service = getattr(context.library, "asset_state_service", None)
 
         # --- ViewModels Setup ---
         lib_root = context.library.root()
@@ -109,8 +100,6 @@ class MainCoordinator(QObject):
         self._gallery_store = self._asset_list_vm.store
         self._media_session = MediaSelectionSession()
         self._media_session.bind_collection(self._gallery_store)
-        self._asset_service.set_repository(self._context.asset_runtime.repository)
-        self._bind_asset_service_library_surfaces(lib_root)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
         bound_people_service = resolve_people_service(
             context.library,
@@ -157,7 +146,7 @@ class MainCoordinator(QObject):
             store=self._gallery_store,
             context=context,
             facade=context.facade,
-            asset_service=self._asset_service,
+            asset_state_service=asset_state_service,
             location_trash_service=self._location_trash_navigation_service,
         )
 
@@ -180,7 +169,7 @@ class MainCoordinator(QObject):
         self._detail_vm = DetailViewModel(
             collection_store=self._gallery_store,
             media_session=self._media_session,
-            asset_service=self._asset_service,
+            asset_state_service=asset_state_service,
             adjustment_commit_port=self._adjustment_committer,
             edit_service_getter=edit_service_getter,
         )
@@ -588,12 +577,13 @@ class MainCoordinator(QObject):
         root = self._context.library.root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
         self._context.asset_runtime.bind_library_root(root)
-        self._asset_service.set_repository(self._context.asset_runtime.repository)
-        self._bind_asset_service_library_surfaces(root)
         self._asset_list_vm.rebind_asset_query_service(
             getattr(self._context.library, "asset_query_service", None),
             root,
         )
+        asset_state_service = getattr(self._context.library, "asset_state_service", None)
+        self._gallery_vm.bind_asset_state_service(asset_state_service)
+        self._detail_vm.bind_asset_state_service(asset_state_service)
         self._gallery_vm.on_library_tree_updated()
         window = getattr(self, "_window", None)
         ui = getattr(window, "ui", None)
@@ -647,30 +637,6 @@ class MainCoordinator(QObject):
         if package_root is not None:
             return Path(package_root).resolve()
         return Path(__file__).resolve().parents[3] / "maps"
-
-    def _bind_asset_service_library_surfaces(self, root: Path | None) -> None:
-        """Bind session-owned asset/state surfaces into the asset app service."""
-
-        bind = getattr(self._asset_service, "bind_library_surfaces", None)
-        clear = getattr(self._asset_service, "clear_library_surfaces", None)
-        state_repository = getattr(self._context.library, "state_repository", None)
-        asset_query_service = getattr(self._context.library, "asset_query_service", None)
-
-        if (
-            root is not None
-            and state_repository is not None
-            and asset_query_service is not None
-            and callable(bind)
-        ):
-            bind(
-                library_root=root,
-                state_repository=state_repository,
-                favorite_query=asset_query_service,
-            )
-            return
-
-        if callable(clear):
-            clear()
 
     def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
         self._pinned_items_service.remap_album_path(

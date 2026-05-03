@@ -173,6 +173,24 @@ def test_map_widgets_must_use_factory_for_concrete_widget_imports(tmp_path: Path
     )
 
 
+def test_gui_runtime_legacy_app_service_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "viewmodels" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.application.services.asset_service import AssetService\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI runtime imports legacy app service "
+        "iPhoto.application.services.asset_service" in violation
+        for violation in violations
+    )
+
+
 def test_gui_library_update_service_worker_import_is_blocked(tmp_path: Path) -> None:
     source = tmp_path / "iPhoto"
     module = source / "gui" / "services" / "library_update_service.py"

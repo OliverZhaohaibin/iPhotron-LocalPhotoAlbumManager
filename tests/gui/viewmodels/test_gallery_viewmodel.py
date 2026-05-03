@@ -64,16 +64,16 @@ def _make_vm(
     context.library.people_service = people_service
     context.library.location_service = None
     facade = MagicMock()
-    asset_service = MagicMock()
+    asset_state_service = MagicMock()
     nav_service = location_trash_service or FakeLocationTrashService(library_root)
     vm = GalleryViewModel(
         store=store,
         context=context,
         facade=facade,
-        asset_service=asset_service,
+        asset_state_service=asset_state_service,
         location_trash_service=nav_service,
     )
-    result = (vm, store, context, facade, asset_service, nav_service)
+    result = (vm, store, context, facade, asset_state_service, nav_service)
     if return_service:
         return result
     return result[:-1]
@@ -807,15 +807,15 @@ def test_pinned_people_gallery_retargets_after_snapshot_redirect(tmp_path: Path)
 
 
 def test_toggle_favorite_row_updates_store_via_asset_service(tmp_path: Path) -> None:
-    vm, store, _context, _facade, asset_service = _make_vm(library_root=tmp_path)
+    vm, store, _context, _facade, asset_state_service = _make_vm(library_root=tmp_path)
     dto = SimpleNamespace(abs_path=tmp_path / "photo.jpg")
     store.asset_at.return_value = dto
-    asset_service.toggle_favorite_by_path.return_value = True
+    asset_state_service.toggle_favorite.return_value = True
 
     result = vm.toggle_favorite_row(3)
 
     assert result is True
-    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    asset_state_service.toggle_favorite.assert_called_once_with(dto.abs_path)
     store.update_favorite_status.assert_called_once_with(3, True)
 
 

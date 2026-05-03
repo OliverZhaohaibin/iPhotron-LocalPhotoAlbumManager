@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
-from iPhoto.application.ports import EditRenderingState, EditServicePort
+from iPhoto.application.ports import (
+    AssetStateServicePort,
+    EditRenderingState,
+    EditServicePort,
+)
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.application.services.asset_service import AssetService
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.utils.geocoding import resolve_location_name
 
@@ -62,14 +65,14 @@ class DetailViewModel(BaseViewModel):
         *,
         collection_store: GalleryCollectionStore,
         media_session: MediaSelectionPort,
-        asset_service: AssetService,
+        asset_state_service: AssetStateServicePort | None,
         adjustment_commit_port: AdjustmentCommitPort | None = None,
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
     ) -> None:
         super().__init__()
         self._store = collection_store
         self._media_session = media_session
-        self._asset_service = asset_service
+        self._asset_state_service = asset_state_service
         self._adjustment_commit_port = adjustment_commit_port
         self._edit_service_getter = edit_service_getter
         self._info_panel_visible = False
@@ -93,6 +96,13 @@ class DetailViewModel(BaseViewModel):
         self.presentation_changed = Signal()
         self.edit_requested = Signal()
         self.rotate_requested = Signal()
+
+    def bind_asset_state_service(
+        self,
+        asset_state_service: AssetStateServicePort | None,
+    ) -> None:
+        self._asset_state_service = asset_state_service
+        self._refresh_presentation()
 
     def show_row(self, row: int) -> None:
         source = self._media_session.set_current_row(row)
@@ -126,12 +136,12 @@ class DetailViewModel(BaseViewModel):
 
     def toggle_favorite(self) -> None:
         row = self.current_row.value
-        if row is None or row < 0:
+        if row is None or row < 0 or self._asset_state_service is None:
             return
         dto = self._store.asset_at(row)
         if dto is None:
             return
-        new_state = self._asset_service.toggle_favorite_by_path(dto.abs_path)
+        new_state = self._asset_state_service.toggle_favorite(dto.abs_path)
         self._store.update_favorite_status(row, new_state)
         self._refresh_presentation()
 
@@ -301,7 +311,7 @@ class DetailViewModel(BaseViewModel):
             can_edit=True,
             can_rotate=True,
             can_share=True,
-            can_toggle_favorite=True,
+            can_toggle_favorite=self._asset_state_service is not None,
             info_panel_visible=self._info_panel_visible,
             live_motion_rel=live_motion_rel,
             live_motion_abs=live_motion_abs,

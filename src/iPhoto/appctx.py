@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover
     from .bootstrap.runtime_context import RuntimeContext
     from .di.container import DependencyContainer
+    from .events.bus import EventBus
     from .gui.facade import AppFacade
     from .gui.ui.theme_manager import ThemeManager
     from .bootstrap.library_session import LibrarySession
@@ -42,6 +43,10 @@ class AppContext:
     @property
     def facade(self) -> "AppFacade":
         return self._runtime.facade
+
+    @property
+    def event_bus(self) -> "EventBus":
+        return self._runtime.event_bus
 
     @property
     def container(self) -> "DependencyContainer":

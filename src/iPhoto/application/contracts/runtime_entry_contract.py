@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...di.container import DependencyContainer
+    from ...events.bus import EventBus
     from ...gui.facade import AppFacade
     from ...gui.ui.theme_manager import ThemeManager
     from ...infrastructure.services.library_asset_runtime import LibraryAssetRuntime
@@ -23,6 +24,7 @@ class RuntimeEntryContract(Protocol):
     library: "LibraryManager"
     facade: "AppFacade"
     theme: "ThemeManager"
+    event_bus: "EventBus"
     container: "DependencyContainer"
     asset_runtime: "LibraryAssetRuntime"
     library_session: "LibrarySession | None"

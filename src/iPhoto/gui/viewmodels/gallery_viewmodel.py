@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-from iPhoto.application.services.asset_service import AssetService
+from iPhoto.application.ports import AssetStateServicePort
 from iPhoto.application.services.location_asset_service import (
     geotagged_asset_from_row,
 )
@@ -35,7 +35,7 @@ class GalleryViewModel(BaseViewModel):
         store: GalleryCollectionStore,
         context: RuntimeEntryContract,
         facade: AppFacade,
-        asset_service: AssetService,
+        asset_state_service: AssetStateServicePort | None,
         location_session: LocationSelectionSession | None = None,
         location_trash_service: LocationTrashNavigationService | None = None,
     ) -> None:
@@ -43,7 +43,7 @@ class GalleryViewModel(BaseViewModel):
         self._store = store
         self._context = context
         self._facade = facade
-        self._asset_service = asset_service
+        self._asset_state_service = asset_state_service
         self._location_session = location_session or LocationSelectionSession()
         self._location_trash_service = location_trash_service or LocationTrashNavigationService(
             library_manager_getter=lambda: self._context.library,
@@ -78,6 +78,12 @@ class GalleryViewModel(BaseViewModel):
     @property
     def location_session(self) -> LocationSelectionSession:
         return self._location_session
+
+    def bind_asset_state_service(
+        self,
+        asset_state_service: AssetStateServicePort | None,
+    ) -> None:
+        self._asset_state_service = asset_state_service
 
     def open_album(self, path: Path, *, select_sidebar_path: bool = True) -> None:
         album = self._facade.open_album(path)
@@ -568,9 +574,9 @@ class GalleryViewModel(BaseViewModel):
 
     def toggle_favorite_row(self, row: int) -> Optional[bool]:
         path = self.path_for_row(row)
-        if path is None:
+        if path is None or self._asset_state_service is None:
             return None
-        new_state = self._asset_service.toggle_favorite_by_path(path)
+        new_state = self._asset_state_service.toggle_favorite(path)
         self._store.update_favorite_status(row, new_state)
         return new_state
 

@@ -8,6 +8,8 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 
+_UNSET = object()
+
 
 def _make_dto(path: str, *, is_video: bool = False, is_favorite: bool = False) -> AssetDTO:
     return AssetDTO(
@@ -25,18 +27,19 @@ def _make_dto(path: str, *, is_video: bool = False, is_favorite: bool = False) -
     )
 
 
-def _make_vm(*, edit_service=None):
+def _make_vm(*, edit_service=None, asset_state_service=_UNSET):
     store = Mock()
     session = Mock()
-    asset_service = Mock()
+    if asset_state_service is _UNSET:
+        asset_state_service = Mock()
     vm = DetailViewModel(
         collection_store=store,
         media_session=session,
-        asset_service=asset_service,
+        asset_state_service=asset_state_service,
         adjustment_commit_port=None,
         edit_service_getter=(lambda: edit_service) if edit_service is not None else None,
     )
-    return vm, store, session, asset_service
+    return vm, store, session, asset_state_service
 
 
 def test_show_row_builds_presentation_and_requests_detail_route():
@@ -77,31 +80,59 @@ def test_next_and_previous_delegate_to_session():
 
 
 def test_toggle_favorite_updates_store_and_presentation():
-    vm, store, session, asset_service = _make_vm()
+    vm, store, session, asset_state_service = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")
     store.asset_at.return_value = dto
     session.set_current_row.return_value = dto.abs_path
     vm.show_row(0)
-    asset_service.toggle_favorite_by_path.return_value = True
+    asset_state_service.toggle_favorite.return_value = True
 
     vm.toggle_favorite()
 
-    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    asset_state_service.toggle_favorite.assert_called_once_with(dto.abs_path)
     store.update_favorite_status.assert_called_once_with(0, True)
 
 
 def test_toggle_favorite_uses_visible_asset_path_not_playback_source():
-    vm, store, session, asset_service = _make_vm()
+    vm, store, session, asset_state_service = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")
     store.asset_at.return_value = dto
     session.set_current_row.return_value = Path("/tmp/photo.mov")
     vm.show_row(0)
-    asset_service.toggle_favorite_by_path.return_value = True
+    asset_state_service.toggle_favorite.return_value = True
 
     vm.toggle_favorite()
 
-    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    asset_state_service.toggle_favorite.assert_called_once_with(dto.abs_path)
     store.update_favorite_status.assert_called_once_with(0, True)
+
+
+def test_show_row_disables_favorite_action_without_asset_state_service():
+    vm, store, session, _ = _make_vm(asset_state_service=None)
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+
+    assert vm.presentation.value.can_toggle_favorite is False
+
+
+def test_binding_asset_state_service_refreshes_favorite_action_state():
+    vm, store, session, _ = _make_vm(asset_state_service=None)
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+    assert vm.presentation.value.can_toggle_favorite is False
+
+    asset_state_service = Mock()
+    vm.bind_asset_state_service(asset_state_service)
+    assert vm.presentation.value.can_toggle_favorite is True
+
+    vm.bind_asset_state_service(None)
+    assert vm.presentation.value.can_toggle_favorite is False
 
 
 def test_toggle_info_flips_presentation_flag():

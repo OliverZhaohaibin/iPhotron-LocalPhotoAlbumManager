@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from iPhoto.bootstrap.runtime_context import RuntimeContext
+from iPhoto.events.bus import EventBus
 
 
 class _FakeAssetRuntime:
@@ -30,6 +31,7 @@ class _FakeLibrary:
         self.bound_scan_services: list[object | None] = []
         self.bound_asset_query_services: list[object | None] = []
         self.bound_state_repositories: list[object | None] = []
+        self.bound_asset_state_services: list[object | None] = []
         self.bound_album_metadata_services: list[object | None] = []
         self.bound_edit_services: list[object | None] = []
         self.bound_asset_lifecycle_services: list[object | None] = []
@@ -77,6 +79,9 @@ class _FakeLibrary:
     def bind_state_repository(self, state_repository: object | None) -> None:
         self.bound_state_repositories.append(state_repository)
 
+    def bind_asset_state_service(self, asset_state_service: object | None) -> None:
+        self.bound_asset_state_services.append(asset_state_service)
+
     def bind_album_metadata_service(
         self,
         album_metadata_service: object | None,
@@ -119,7 +124,9 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     library = _FakeLibrary()
     asset_runtime = _FakeAssetRuntime()
     context.library = library
+    context.event_bus = EventBus(__import__("logging").getLogger("EventBus"))
     context.asset_runtime = asset_runtime
+    context._container = None
     context._pending_basic_library_path = root
     return context, library, asset_runtime
 
@@ -141,6 +148,7 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_scan_services[-1] is not None
     assert library.bound_asset_query_services[-1] is not None
     assert library.bound_state_repositories[-1] is not None
+    assert library.bound_asset_state_services[-1] is not None
     assert library.bound_album_metadata_services[-1] is not None
     assert library.bound_edit_services[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None
@@ -166,6 +174,7 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     assert library.bound_scan_services[-1] is not None
     assert library.bound_asset_query_services[-1] is not None
     assert library.bound_state_repositories[-1] is not None
+    assert library.bound_asset_state_services[-1] is not None
     assert library.bound_album_metadata_services[-1] is not None
     assert library.bound_edit_services[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None

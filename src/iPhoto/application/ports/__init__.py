@@ -19,6 +19,7 @@ from .repositories import (
     PinnedStateRepositoryPort,
 )
 from .runtime import (
+    AssetStateServicePort,
     LocationAssetServicePort,
     MapInteractionServicePort,
     MapBackendKind,
@@ -31,6 +32,7 @@ __all__ = [
     "AlbumRepositoryPort",
     "AssetRepositoryPort",
     "AssetFavoriteQueryPort",
+    "AssetStateServicePort",
     "EditRenderingState",
     "EditServicePort",
     "EditSidecarPort",

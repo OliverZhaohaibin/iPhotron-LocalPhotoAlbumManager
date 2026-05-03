@@ -41,6 +41,7 @@ LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..application.ports import (
+        AssetStateServicePort,
         EditServicePort,
         LocationAssetServicePort,
         MapInteractionServicePort,
@@ -113,6 +114,7 @@ class LibraryManager(
         self._scan_service: "LibraryScanService | None" = None
         self._asset_query_service: "LibraryAssetQueryService | None" = None
         self._state_repository: "LibraryStateRepositoryPort | None" = None
+        self._asset_state_service: "AssetStateServicePort | None" = None
         self._album_metadata_service: "LibraryAlbumMetadataService | None" = None
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
         self._asset_operation_service: "LibraryAssetOperationService | None" = None
@@ -276,6 +278,18 @@ class LibraryManager(
     @property
     def state_repository(self) -> "LibraryStateRepositoryPort | None":
         return self._state_repository
+
+    def bind_asset_state_service(
+        self,
+        asset_state_service: "AssetStateServicePort | None",
+    ) -> None:
+        """Bind the current library session asset-state command surface."""
+
+        self._asset_state_service = asset_state_service
+
+    @property
+    def asset_state_service(self) -> "AssetStateServicePort | None":
+        return self._asset_state_service
 
     def bind_album_metadata_service(
         self,

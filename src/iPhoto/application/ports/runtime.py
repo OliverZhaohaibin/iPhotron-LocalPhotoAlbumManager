@@ -67,6 +67,13 @@ class LocationAssetServicePort(Protocol):
         """Drop cached location assets after scan or state changes."""
 
 
+class AssetStateServicePort(Protocol):
+    """Library-scoped durable asset-state command boundary."""
+
+    def toggle_favorite(self, path: Path) -> bool:
+        """Toggle favorite state for *path* and return the new state."""
+
+
 class TaskSchedulerPort(Protocol):
     """Background task lifecycle boundary."""
 

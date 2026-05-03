@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..application.ports import (
     AssetRepositoryPort,
+    AssetStateServicePort,
     EditServicePort,
     LibraryStateRepositoryPort,
     LocationAssetServicePort,
@@ -24,6 +25,7 @@ from ..infrastructure.services.location_metadata_service import (
 from ..infrastructure.services.map_runtime_service import SessionMapRuntimeService
 from ..application.services.assign_location_service import AssignLocationService
 from ..people.service import PeopleService
+from .library_asset_state_service import LibraryAssetStateService
 from .library_album_metadata_service import LibraryAlbumMetadataService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_asset_operation_service import LibraryAssetOperationService
@@ -41,6 +43,7 @@ class LibrarySession:
     library_root: Path
     asset_runtime: LibraryAssetRuntime = field(default_factory=LibraryAssetRuntime)
     state_repository: LibraryStateRepositoryPort | None = None
+    asset_state: AssetStateServicePort | None = None
     album_metadata: LibraryAlbumMetadataService | None = None
     asset_queries: LibraryAssetQueryService | None = None
     scans: LibraryScanService | None = None
@@ -59,13 +62,19 @@ class LibrarySession:
             self.asset_runtime.bind_library_root(self.library_root)
         if self.state_repository is None:
             self.state_repository = IndexStoreLibraryStateRepository(self.library_root)
+        if self.asset_queries is None:
+            self.asset_queries = LibraryAssetQueryService(self.library_root)
+        if self.asset_state is None:
+            self.asset_state = LibraryAssetStateService(
+                self.library_root,
+                state_repository=self.state_repository,
+                favorite_query=self.asset_queries,
+            )
         if self.album_metadata is None:
             self.album_metadata = LibraryAlbumMetadataService(
                 self.library_root,
                 state_repository=self.state_repository,
             )
-        if self.asset_queries is None:
-            self.asset_queries = LibraryAssetQueryService(self.library_root)
         if self.scans is None:
             self.scans = LibraryScanService(self.library_root)
         if self.asset_lifecycle is None:

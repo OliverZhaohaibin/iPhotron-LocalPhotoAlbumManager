@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .container import build_container
+from ..events.bus import EventBus
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..di.container import DependencyContainer
@@ -55,6 +55,10 @@ def _create_asset_runtime() -> "LibraryAssetRuntime":
     return LibraryAssetRuntime()
 
 
+def _create_event_bus() -> EventBus:
+    return EventBus(logging.getLogger("EventBus"))
+
+
 @dataclass
 class RuntimeContext:
     """Authoritative runtime dependency bundle for GUI startup."""
@@ -62,12 +66,17 @@ class RuntimeContext:
     settings: "SettingsManager" = field(default_factory=_create_settings_manager)
     library: "LibraryManager" = field(default_factory=_create_library_manager)
     facade: "AppFacade" = field(default_factory=_create_facade)
-    container: "DependencyContainer" = field(default_factory=build_container)
+    event_bus: EventBus = field(default_factory=_create_event_bus)
     asset_runtime: "LibraryAssetRuntime" = field(default_factory=_create_asset_runtime)
     recent_albums: list[Path] = field(default_factory=list)
     defer_startup_tasks: bool = False
     theme: "ThemeManager" = field(init=False)
     library_session: "LibrarySession | None" = field(init=False, default=None)
+    _container: "DependencyContainer | None" = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -96,6 +105,16 @@ class RuntimeContext:
         """Create a runtime context for desktop startup."""
 
         return cls(defer_startup_tasks=defer_startup)
+
+    @property
+    def container(self) -> "DependencyContainer":
+        """Return the compatibility DI container on demand."""
+
+        if self._container is None:
+            from .container import build_container
+
+            self._container = build_container()
+        return self._container
 
     def resume_startup_tasks(self) -> None:
         """Run deferred startup work such as binding the default library path."""
@@ -173,6 +192,13 @@ class RuntimeContext:
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):
             bind_state_repository(self.library_session.state)
+        bind_asset_state_service = getattr(
+            self.library,
+            "bind_asset_state_service",
+            None,
+        )
+        if callable(bind_asset_state_service):
+            bind_asset_state_service(self.library_session.asset_state)
         bind_album_metadata_service = getattr(
             self.library,
             "bind_album_metadata_service",
@@ -267,6 +293,13 @@ class RuntimeContext:
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):
             bind_state_repository(None)
+        bind_asset_state_service = getattr(
+            self.library,
+            "bind_asset_state_service",
+            None,
+        )
+        if callable(bind_asset_state_service):
+            bind_asset_state_service(None)
 
         bind_album_metadata_service = getattr(
             self.library,

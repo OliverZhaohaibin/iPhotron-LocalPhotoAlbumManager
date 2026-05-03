@@ -298,9 +298,9 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 - [x] SQLite repository integration tests。
 - [x] temp library end-to-end tests。
 - [x] architecture guard tests。
-- [ ] scan performance baseline。
-- [ ] gallery pagination baseline。
-- [ ] thumbnail cache baseline。
+- [x] scan performance baseline。
+- [x] gallery pagination baseline。
+- [x] thumbnail cache baseline。
 - [x] CI 加入 architecture checks。
 - [x] CI 加入关键 use case tests。
 
@@ -308,7 +308,7 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 
 - [x] 架构违规会在 CI 失败。
 - [x] 用户状态保护有回归测试。
-- [ ] 扫描、分页、缩略图性能不回退。
+- [x] 扫描、分页、缩略图性能不回退。
 - [x] 关键产品流程有 end-to-end tests。
 
 回归测试：
@@ -320,7 +320,7 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 - [x] `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/tasks/test_import_worker.py -q`
 - [x] `.venv/bin/python -m pytest tests/application/test_pinned_state_service.py tests/application/test_library_people_service.py tests/test_settings_manager.py -q`
 - [x] `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_people_service.py tests/test_people_repository.py tests/test_settings_manager.py tests/gui/widgets/test_people_dashboard_widget.py tests/test_album_sidebar.py tests/test_album_tree_model.py tests/ui/test_albums_dashboard.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py -q`
-- [ ] 性能测试按项目约定运行。
+- [x] `.venv/bin/python -m pytest tests/performance -q`
 
 ## 10. Definition of Done
 

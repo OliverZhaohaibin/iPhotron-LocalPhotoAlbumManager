@@ -12,47 +12,35 @@
 但运行时主路径已经建立起可执行的 session boundary、repository/state
 boundary 和 architecture guardrail。
 
-本轮新增完成的是 `27-durable-user-state-residual-boundary.md`：Phase 2 的
-durable user state residual 已收口，`hidden / pinned / order` 不再只是
-temp-library E2E 之外的松散 follow-up。
+本轮新增完成的是 `28-performance-baseline.md`：Phase 6 的 scan、gallery
+pagination、thumbnail cache baseline 已补齐，历史不可运行 benchmark 入口已清理。
 
 这一步有四个关键落点：
 
-- 新增 `PinnedStateRepositoryPort` 与 `PinnedSidebarStateService`，把 pinned
-  album/person/group 的 pin、unpin、rename、remap、redirect/prune 规则移到
-  application 层。
-- `gui/services/pinned_items_service.py` 保留兼容 API 与 Qt `changed` signal，
-  但只作为 Settings adapter + transport wrapper。
-- `LibrarySession.people` 新增 session-level 回归，确认 People hidden、person
-  order、group order 在 People reload/rescan 后仍保留。
-- 新增 `tests/application/test_pinned_state_service.py`，让 pinned state 规则在无
-  PySide6 的 application 层独立可测。
+- 删除 `tools/benchmarks/benchmark_refactor.py`，不再保留旧 benchmark 兼容入口。
+- `tools/testbase/` 已加入 `.gitignore`，真实素材集只作为本地可选输入。
+- 新增 `tests/performance/test_refactor_performance_baseline.py`，覆盖 scan merge、
+  gallery cursor pagination 与 thumbnail cache hit baseline。
+- Phase 6 清单中的三项性能 baseline 已改为可执行回归。
 
-## 2. 本轮完成：Durable User State Residual Boundary
+## 2. 本轮完成：Performance Baseline
 
-- 新增 application-level pinned state boundary。
-  - `PinnedStateRepositoryPort` 定义 pinned payload 的读写边界。
-  - `PinnedSidebarStateService` 承接 library scoping、item normalization、
-    dedupe、rename、album path remap、People redirect/prune 与 group label 规则。
-  - 当前物理存储仍复用 settings payload，不写入 `global_index.db`。
-- GUI pinned service 瘦身。
-  - `PinnedItemsService` 继续暴露既有 API、`PinnedSidebarItem` 与 `changed`
-    signal。
-  - Settings 读写通过内部 repository adapter 注入 application service。
-  - People stale pin 清理继续优先使用注入的 active People service；standalone
-    fallback 仍保留为兼容路径。
-- People hidden/order 增加 session-level 回归。
-  - 通过 `LibrarySession.people` 设置 hidden、person order、group order。
-  - 模拟 People repository reload/rescan 后确认状态仍由 `FaceStateRepository`
-    保留。
-- focused tests 补齐。
-  - `tests/application/test_pinned_state_service.py` 独立覆盖 pinned state 规则。
-  - `tests/application/test_library_people_service.py` 补充 session-level hidden /
-    order 回归。
+- 清理历史 benchmark。
+  - `tools/benchmarks/benchmark_refactor.py` 已删除。
+  - 当前不再把 `tools/benchmarks/` 作为 Phase 6 性能入口。
+- 本地测试集隔离。
+  - `tools/testbase/` 已加入 `.gitignore`。
+  - CI 和普通 pytest 不依赖真实 HEIC/MOV 素材存在。
+- 新增 performance regression sanity checks。
+  - scan baseline 通过 `LibraryScanService`、synthetic scanner 与
+    `global_index.db` merge path 覆盖 scan orchestration。
+  - gallery baseline 覆盖 `get_assets_page()` cursor pagination。
+  - thumbnail baseline 覆盖 L2 hit 回填 L1 后的 cache-hit 路径，确认不触发
+    generator。
 
 ## 3. 历史已完成切片摘要
 
-以下切片已经完成，详细过程性交接分别见 `06` 到 `26`：
+以下切片已经完成，详细过程性交接分别见 `06` 到 `27`：
 
 - 基础边界与 session 基础：
   已引入 `application/ports/*`、`LibrarySession`、state repository adapter、
@@ -108,6 +96,9 @@ temp-library E2E 之外的松散 follow-up。
 - Durable user state residual 收口：
   People hidden / person order / group order 已通过 session-level 回归锁定；
   pinned sidebar 状态规则已迁入 application service，GUI 只保留 Qt transport。
+- Performance baseline：
+  历史不可运行 benchmark 入口已清理；scan、gallery pagination、thumbnail cache
+  已有 `tests/performance` 小数据 baseline，真实素材集只作为本地可选输入。
 
 ## 4. 当前阶段状态
 
@@ -162,7 +153,9 @@ temp-library E2E 之外的松散 follow-up。
   仍保留为 Qt transport seam，overlay/pin 绘制与 drag cursor 策略仍在 GUI 层。
 - Phase 6：部分完成。
   architecture tests、targeted application/infrastructure tests 与
-  temp-library end-to-end 已存在；性能 baseline 仍未完成。
+  temp-library end-to-end 已存在；scan、gallery pagination、thumbnail cache
+  baseline 已补齐。性能 baseline 是 regression sanity check，不代表跨机器
+  绝对性能认证。
 
 ## 5. 已知迁移例外
 
@@ -193,6 +186,8 @@ temp-library E2E 之外的松散 follow-up。
   但 `PlaybackCoordinator` 已不再以 bootstrap People factory 作为运行时主路径。
 - pinned sidebar 状态物理存储仍在 settings payload；`PinnedStateRepositoryPort`
   提供的是 application boundary，不代表迁移到独立数据库。
+- `tools/testbase/` 是本地真实素材集，已被 `.gitignore` 忽略；CI baseline 使用
+  合成数据，不依赖该目录。
 
 ## 6. 最新验证
 
@@ -201,6 +196,7 @@ temp-library E2E 之外的松散 follow-up。
 - `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/tasks/test_import_worker.py -q`
 - `.venv/bin/python -m pytest tests/application/test_pinned_state_service.py tests/application/test_library_people_service.py tests/test_settings_manager.py -q`
 - `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_people_service.py tests/test_people_repository.py tests/test_settings_manager.py tests/gui/widgets/test_people_dashboard_widget.py tests/test_album_sidebar.py tests/test_album_tree_model.py tests/ui/test_albums_dashboard.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py -q`
+- `.venv/bin/python -m pytest tests/performance -q`
 - `.venv/bin/python tools/check_architecture.py`
 
 结果：
@@ -208,18 +204,19 @@ temp-library E2E 之外的松散 follow-up。
 - 上述 focused regressions 通过（`47 passed`）。
 - 新增 durable user state focused regressions 通过（`17 passed`）。
 - 计划内聚合 focused regressions 通过（`112 passed`）。
+- 新增 performance baseline tests 通过（`3 passed`）。
 - `tools/check_architecture.py` 通过。
 - 仍有既有的 pytest `Unknown config option: env` warning。
 - 仍有既有的 legacy model shim / pairing deprecation warnings。
-- 本轮新增验证意图：application-level pinned state 规则、GUI pinned wrapper
-  兼容信号语义、People hidden/person order/group order 在 session-level reload
-  后仍保留。
+- 本轮新增验证意图：scan merge、gallery cursor pagination、thumbnail cache hit
+  路径具备可执行 baseline。
 
-之前各个切片的针对性验证命令和结果，继续以 `06` 到 `26` 交接文档为准；
+之前各个切片的针对性验证命令和结果，继续以 `06` 到 `27` 交接文档为准；
 本文件只保留当前整体验证结论和最新增量验证。
 
 ## 7. 下一步交接
 
-1. 补 Phase 6 性能 baseline：scan、gallery pagination、thumbnail cache。
+1. 若需要更严格的真实素材性能追踪，新增当前架构下可运行的 benchmark CLI，
+   不恢复旧 `tools/benchmarks/benchmark_refactor.py`。
 2. 若后续再回到 Maps，只处理新暴露问题；当前不再主动扩新的
    session/runtime boundary。

@@ -27,6 +27,7 @@ class _FakeAssetRuntime:
 class _FakeLibrary:
     def __init__(self) -> None:
         self._root: Path | None = None
+        self.library_session = None
         self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
         self.bound_scan_services: list[object | None] = []
         self.bound_asset_query_services: list[object | None] = []
@@ -58,6 +59,36 @@ class _FakeLibrary:
 
     def root(self) -> Path | None:
         return self._root
+
+    def bind_library_session(self, library_session: object | None) -> None:
+        self.library_session = library_session
+        if library_session is None:
+            self.bind_location_service(None)
+            self.bind_edit_service(None)
+            self.bind_map_interaction_service(None)
+            self.bind_map_runtime(None)
+            self.bind_people_service(None)
+            self.bind_asset_operation_service(None)
+            self.bind_asset_lifecycle_service(None)
+            self.bind_album_metadata_service(None)
+            self.bind_asset_state_service(None)
+            self.bind_state_repository(None)
+            self.bind_asset_query_service(None)
+            self.bind_scan_service(None)
+            return
+
+        self.bind_asset_query_service(library_session.asset_queries)
+        self.bind_state_repository(library_session.state)
+        self.bind_asset_state_service(library_session.asset_state)
+        self.bind_album_metadata_service(library_session.album_metadata)
+        self.bind_location_service(library_session.locations)
+        self.bind_edit_service(library_session.edit)
+        self.bind_scan_service(library_session.scans)
+        self.bind_asset_lifecycle_service(library_session.asset_lifecycle)
+        self.bind_asset_operation_service(library_session.asset_operations)
+        self.bind_people_service(library_session.people)
+        self.bind_map_runtime(library_session.maps)
+        self.bind_map_interaction_service(library_session.map_interactions)
 
     def is_scanning_path(self, _root: Path) -> bool:
         return False

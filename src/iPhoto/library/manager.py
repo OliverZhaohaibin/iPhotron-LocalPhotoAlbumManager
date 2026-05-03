@@ -51,6 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
     from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
+    from ..bootstrap.library_session import LibrarySession
     from ..bootstrap.library_scan_service import LibraryScanService
     from ..application.ports import LibraryStateRepositoryPort
 
@@ -111,6 +112,8 @@ class LibraryManager(
         self._geotagged_assets_cache_root: Optional[Path] = None
         self._face_scan_status_message: Optional[str] = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
+        self._library_session: "LibrarySession | None" = None
+        self._owns_library_session = False
         self._scan_service: "LibraryScanService | None" = None
         self._asset_query_service: "LibraryAssetQueryService | None" = None
         self._state_repository: "LibraryStateRepositoryPort | None" = None
@@ -164,7 +167,7 @@ class LibraryManager(
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
         self._root = normalized
-        self._bind_people_index_coordinator(normalized)
+        self._bind_headless_session_if_needed(normalized)
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)
@@ -246,6 +249,57 @@ class LibraryManager(
     def face_scan_status_message(self) -> str | None:
         return self._face_scan_status_message
 
+    def bind_library_session(
+        self,
+        library_session: "LibrarySession | None",
+        *,
+        owned: bool = False,
+    ) -> None:
+        """Bind or clear the active library session surface for this manager."""
+
+        previous = self._library_session
+        previous_owned = self._owns_library_session
+        if previous is library_session and previous is not None:
+            self._owns_library_session = owned
+            return
+
+        self._library_session = library_session
+        self._owns_library_session = bool(library_session is not None and owned)
+
+        if library_session is None:
+            self.bind_location_service(None)
+            self.bind_edit_service(None)
+            self.bind_map_interaction_service(None)
+            self.bind_map_runtime(None)
+            self.bind_people_service(None)
+            self.bind_asset_operation_service(None)
+            self.bind_asset_lifecycle_service(None)
+            self.bind_album_metadata_service(None)
+            self.bind_asset_state_service(None)
+            self.bind_state_repository(None)
+            self.bind_asset_query_service(None)
+            self.bind_scan_service(None)
+        else:
+            self.bind_asset_query_service(library_session.asset_queries)
+            self.bind_state_repository(library_session.state)
+            self.bind_asset_state_service(library_session.asset_state)
+            self.bind_album_metadata_service(library_session.album_metadata)
+            self.bind_location_service(library_session.locations)
+            self.bind_edit_service(library_session.edit)
+            self.bind_scan_service(library_session.scans)
+            self.bind_asset_lifecycle_service(library_session.asset_lifecycle)
+            self.bind_asset_operation_service(library_session.asset_operations)
+            self.bind_people_service(library_session.people)
+            self.bind_map_runtime(library_session.maps)
+            self.bind_map_interaction_service(library_session.map_interactions)
+
+        if previous is not None and previous is not library_session and previous_owned:
+            previous.shutdown()
+
+    @property
+    def library_session(self) -> "LibrarySession | None":
+        return self._library_session
+
     def bind_scan_service(self, scan_service: "LibraryScanService | None") -> None:
         """Bind the current library session scan command surface."""
 
@@ -262,6 +316,23 @@ class LibraryManager(
         """Bind the current library session asset query surface."""
 
         self._asset_query_service = asset_query_service
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+        active_session = self._library_session
+        default_location_service = (
+            active_session.locations if active_session is not None else None
+        )
+        if (
+            self._root is not None
+            and asset_query_service is not None
+            and self._location_service is default_location_service
+        ):
+            from ..bootstrap.library_location_service import LibraryLocationService
+
+            self._location_service = LibraryLocationService(
+                self._root,
+                query_service=asset_query_service,
+            )
 
     @property
     def asset_query_service(self) -> "LibraryAssetQueryService | None":
@@ -398,6 +469,23 @@ class LibraryManager(
             self._on_people_snapshot_committed, Qt.ConnectionType.QueuedConnection
         )
         self._people_index_coordinator = coordinator
+
+    def _bind_headless_session_if_needed(self, root: Path) -> None:
+        session = self._library_session
+        if session is not None and session.library_root == root:
+            # ``bind_path()`` temporarily disconnects the People coordinator while
+            # clearing state for a rebind. When a GUI-owned session is already
+            # bound for this root, restore the People surface so snapshot events
+            # keep flowing after the tree refresh completes.
+            self.bind_people_service(session.people)
+            return
+
+        from ..bootstrap.library_session import create_headless_library_session
+
+        self.bind_library_session(
+            create_headless_library_session(root),
+            owned=True,
+        )
 
     def _unbind_people_index_coordinator(self) -> None:
         if self._people_index_coordinator is None:

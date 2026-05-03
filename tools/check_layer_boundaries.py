@@ -170,7 +170,7 @@ LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS = {
 
 LEGACY_DOMAIN_USE_CASE_PACKAGE = "iPhoto.application.use_cases"
 
-SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS = {"gui", "library"}
+SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS = {"gui"}
 
 SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS = {
     "LibraryAlbumMetadataService",
@@ -179,6 +179,25 @@ SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS = {
     "LibraryAssetQueryService",
     "LibraryLocationService",
     "LibraryScanService",
+}
+
+LIBRARY_COMPAT_FACTORY_FORBIDDEN = {
+    "iPhoto.bootstrap.service_factories",
+    "iPhoto.bootstrap.service_factories.create_compat_album_metadata_service",
+    "iPhoto.bootstrap.service_factories.create_compat_asset_lifecycle_service",
+    "iPhoto.bootstrap.service_factories.create_compat_asset_operation_service",
+    "iPhoto.bootstrap.service_factories.create_compat_asset_query_service",
+    "iPhoto.bootstrap.service_factories.create_compat_location_service",
+    "iPhoto.bootstrap.service_factories.create_compat_scan_service",
+}
+
+LIBRARY_COMPAT_FACTORY_CALLS = {
+    "create_compat_album_metadata_service",
+    "create_compat_asset_lifecycle_service",
+    "create_compat_asset_operation_service",
+    "create_compat_asset_query_service",
+    "create_compat_location_service",
+    "create_compat_scan_service",
 }
 
 
@@ -477,14 +496,27 @@ def check(src_root: Path) -> list[str]:
                     f"{py_file}:{lineno}: runtime imports legacy domain-repository use case {module}"
                 )
 
-        if top_level in SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS:
-            for lineno, call_name in calls:
-                if call_name in SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS:
-                    violations.append(
-                        f"{py_file}:{lineno}: GUI/library runtime constructs "
-                        f"session service fallback directly via {call_name}; "
-                        "use an active LibrarySession surface or an explicit compatibility factory"
-                    )
+            if top_level == "library" and module in LIBRARY_COMPAT_FACTORY_FORBIDDEN:
+                violations.append(
+                    f"{py_file}:{lineno}: library runtime imports compatibility service factory {module}"
+                )
+
+        for lineno, call_name in calls:
+            if (
+                top_level in SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS
+                and call_name in SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI/library runtime constructs "
+                    f"session service fallback directly via {call_name}; "
+                    "use an active LibrarySession surface or an explicit compatibility factory"
+                )
+            if top_level == "library" and call_name in LIBRARY_COMPAT_FACTORY_CALLS:
+                violations.append(
+                    f"{py_file}:{lineno}: library runtime constructs "
+                    f"compatibility service factory {call_name}; "
+                    "bind an active LibrarySession instead"
+                )
 
     return violations
 

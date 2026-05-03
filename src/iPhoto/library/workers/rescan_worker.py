@@ -7,7 +7,6 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ...bootstrap.library_scan_service import LibraryScanService
-from ...bootstrap.service_factories import create_compat_scan_service
 from ...errors import IPhotoError
 
 
@@ -57,10 +56,10 @@ class RescanWorker(QRunnable):
 
     @property
     def scan_service(self) -> LibraryScanService:
-        """Return the session scan service, creating a compatibility fallback."""
+        """Return the session scan service used by the worker."""
 
         if self._scan_service is None:
-            self._scan_service = create_compat_scan_service(
+            self._scan_service = LibraryScanService(
                 self._library_root or self._root
             )
         return self._scan_service

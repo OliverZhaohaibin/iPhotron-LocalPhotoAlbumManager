@@ -182,36 +182,41 @@ class RuntimeContext:
             asset_runtime=self.asset_runtime,
             bind_asset_runtime=False,
         )
-        bind_asset_query_service = getattr(
-            self.library,
-            "bind_asset_query_service",
-            None,
-        )
-        if callable(bind_asset_query_service):
-            bind_asset_query_service(self.library_session.asset_queries)
-        bind_state_repository = getattr(self.library, "bind_state_repository", None)
-        if callable(bind_state_repository):
-            bind_state_repository(self.library_session.state)
-        bind_asset_state_service = getattr(
-            self.library,
-            "bind_asset_state_service",
-            None,
-        )
-        if callable(bind_asset_state_service):
-            bind_asset_state_service(self.library_session.asset_state)
-        bind_album_metadata_service = getattr(
-            self.library,
-            "bind_album_metadata_service",
-            None,
-        )
-        if callable(bind_album_metadata_service):
-            bind_album_metadata_service(self.library_session.album_metadata)
-        bind_location_service = getattr(self.library, "bind_location_service", None)
-        if callable(bind_location_service):
-            bind_location_service(self.library_session.locations)
-        bind_edit_service = getattr(self.library, "bind_edit_service", None)
-        if callable(bind_edit_service):
-            bind_edit_service(self.library_session.edit)
+        bind_library_session = getattr(self.library, "bind_library_session", None)
+        used_session_binding = callable(bind_library_session)
+        if used_session_binding:
+            bind_library_session(self.library_session)
+        else:
+            bind_asset_query_service = getattr(
+                self.library,
+                "bind_asset_query_service",
+                None,
+            )
+            if callable(bind_asset_query_service):
+                bind_asset_query_service(self.library_session.asset_queries)
+            bind_state_repository = getattr(self.library, "bind_state_repository", None)
+            if callable(bind_state_repository):
+                bind_state_repository(self.library_session.state)
+            bind_asset_state_service = getattr(
+                self.library,
+                "bind_asset_state_service",
+                None,
+            )
+            if callable(bind_asset_state_service):
+                bind_asset_state_service(self.library_session.asset_state)
+            bind_album_metadata_service = getattr(
+                self.library,
+                "bind_album_metadata_service",
+                None,
+            )
+            if callable(bind_album_metadata_service):
+                bind_album_metadata_service(self.library_session.album_metadata)
+            bind_location_service = getattr(self.library, "bind_location_service", None)
+            if callable(bind_location_service):
+                bind_location_service(self.library_session.locations)
+            bind_edit_service = getattr(self.library, "bind_edit_service", None)
+            if callable(bind_edit_service):
+                bind_edit_service(self.library_session.edit)
 
         try:
             self.library.bind_path(normalized)
@@ -220,109 +225,113 @@ class RuntimeContext:
             raise
 
         self.asset_runtime.bind_library_root(normalized)
-
-        bind_scan_service = getattr(self.library, "bind_scan_service", None)
-        if callable(bind_scan_service):
-            bind_scan_service(self.library_session.scans)
-        bind_asset_lifecycle_service = getattr(
-            self.library,
-            "bind_asset_lifecycle_service",
-            None,
-        )
-        if callable(bind_asset_lifecycle_service):
-            bind_asset_lifecycle_service(self.library_session.asset_lifecycle)
-        bind_asset_operation_service = getattr(
-            self.library,
-            "bind_asset_operation_service",
-            None,
-        )
-        if callable(bind_asset_operation_service):
-            bind_asset_operation_service(self.library_session.asset_operations)
-        bind_people_service = getattr(self.library, "bind_people_service", None)
-        if callable(bind_people_service):
-            bind_people_service(self.library_session.people)
-        bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
-        if callable(bind_map_runtime):
-            bind_map_runtime(self.library_session.maps)
-        bind_map_interaction_service = getattr(
-            self.library,
-            "bind_map_interaction_service",
-            None,
-        )
-        if callable(bind_map_interaction_service):
-            bind_map_interaction_service(self.library_session.map_interactions)
+        if not used_session_binding:
+            bind_scan_service = getattr(self.library, "bind_scan_service", None)
+            if callable(bind_scan_service):
+                bind_scan_service(self.library_session.scans)
+            bind_asset_lifecycle_service = getattr(
+                self.library,
+                "bind_asset_lifecycle_service",
+                None,
+            )
+            if callable(bind_asset_lifecycle_service):
+                bind_asset_lifecycle_service(self.library_session.asset_lifecycle)
+            bind_asset_operation_service = getattr(
+                self.library,
+                "bind_asset_operation_service",
+                None,
+            )
+            if callable(bind_asset_operation_service):
+                bind_asset_operation_service(self.library_session.asset_operations)
+            bind_people_service = getattr(self.library, "bind_people_service", None)
+            if callable(bind_people_service):
+                bind_people_service(self.library_session.people)
+            bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
+            if callable(bind_map_runtime):
+                bind_map_runtime(self.library_session.maps)
+            bind_map_interaction_service = getattr(
+                self.library,
+                "bind_map_interaction_service",
+                None,
+            )
+            if callable(bind_map_interaction_service):
+                bind_map_interaction_service(self.library_session.map_interactions)
         return self.library_session
 
     def close_library(self) -> None:
         """Close the active library-scoped session if one exists."""
 
-        bind_asset_lifecycle_service = getattr(
-            self.library,
-            "bind_asset_lifecycle_service",
-            None,
-        )
-        if callable(bind_asset_lifecycle_service):
-            bind_asset_lifecycle_service(None)
+        bind_library_session = getattr(self.library, "bind_library_session", None)
+        if callable(bind_library_session):
+            bind_library_session(None)
+        else:
+            bind_asset_lifecycle_service = getattr(
+                self.library,
+                "bind_asset_lifecycle_service",
+                None,
+            )
+            if callable(bind_asset_lifecycle_service):
+                bind_asset_lifecycle_service(None)
 
-        bind_asset_operation_service = getattr(
-            self.library,
-            "bind_asset_operation_service",
-            None,
-        )
-        if callable(bind_asset_operation_service):
-            bind_asset_operation_service(None)
+            bind_asset_operation_service = getattr(
+                self.library,
+                "bind_asset_operation_service",
+                None,
+            )
+            if callable(bind_asset_operation_service):
+                bind_asset_operation_service(None)
 
-        bind_people_service = getattr(self.library, "bind_people_service", None)
-        if callable(bind_people_service):
-            bind_people_service(None)
-        bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
-        if callable(bind_map_runtime):
-            bind_map_runtime(None)
-        bind_map_interaction_service = getattr(
-            self.library,
-            "bind_map_interaction_service",
-            None,
-        )
-        if callable(bind_map_interaction_service):
-            bind_map_interaction_service(None)
+            bind_people_service = getattr(self.library, "bind_people_service", None)
+            if callable(bind_people_service):
+                bind_people_service(None)
+            bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
+            if callable(bind_map_runtime):
+                bind_map_runtime(None)
+            bind_map_interaction_service = getattr(
+                self.library,
+                "bind_map_interaction_service",
+                None,
+            )
+            if callable(bind_map_interaction_service):
+                bind_map_interaction_service(None)
 
-        bind_location_service = getattr(self.library, "bind_location_service", None)
-        if callable(bind_location_service):
-            bind_location_service(None)
+            bind_location_service = getattr(self.library, "bind_location_service", None)
+            if callable(bind_location_service):
+                bind_location_service(None)
 
-        bind_state_repository = getattr(self.library, "bind_state_repository", None)
-        if callable(bind_state_repository):
-            bind_state_repository(None)
-        bind_asset_state_service = getattr(
-            self.library,
-            "bind_asset_state_service",
-            None,
-        )
-        if callable(bind_asset_state_service):
-            bind_asset_state_service(None)
+            bind_state_repository = getattr(self.library, "bind_state_repository", None)
+            if callable(bind_state_repository):
+                bind_state_repository(None)
+            bind_asset_state_service = getattr(
+                self.library,
+                "bind_asset_state_service",
+                None,
+            )
+            if callable(bind_asset_state_service):
+                bind_asset_state_service(None)
 
-        bind_album_metadata_service = getattr(
-            self.library,
-            "bind_album_metadata_service",
-            None,
-        )
-        if callable(bind_album_metadata_service):
-            bind_album_metadata_service(None)
-        bind_edit_service = getattr(self.library, "bind_edit_service", None)
-        if callable(bind_edit_service):
-            bind_edit_service(None)
+            bind_album_metadata_service = getattr(
+                self.library,
+                "bind_album_metadata_service",
+                None,
+            )
+            if callable(bind_album_metadata_service):
+                bind_album_metadata_service(None)
+            bind_edit_service = getattr(self.library, "bind_edit_service", None)
+            if callable(bind_edit_service):
+                bind_edit_service(None)
 
-        bind_asset_query_service = getattr(
-            self.library,
-            "bind_asset_query_service",
-            None,
-        )
-        if callable(bind_asset_query_service):
-            bind_asset_query_service(None)
+            bind_asset_query_service = getattr(
+                self.library,
+                "bind_asset_query_service",
+                None,
+            )
+            if callable(bind_asset_query_service):
+                bind_asset_query_service(None)
 
-        bind_scan_service = getattr(self.library, "bind_scan_service", None)
-        if callable(bind_scan_service):
-            bind_scan_service(None)
+            bind_scan_service = getattr(self.library, "bind_scan_service", None)
+            if callable(bind_scan_service):
+                bind_scan_service(None)
 
         session = getattr(self, "library_session", None)
         if session is None:

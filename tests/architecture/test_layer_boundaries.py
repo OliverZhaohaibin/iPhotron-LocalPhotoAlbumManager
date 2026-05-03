@@ -228,3 +228,27 @@ def test_gui_library_session_service_fallback_construction_is_blocked(
         "LibraryScanService" in violation
         for violation in violations
     )
+
+
+def test_library_runtime_compat_factory_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "library" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.bootstrap.service_factories import create_compat_scan_service\n"
+        "service = create_compat_scan_service('/tmp/library')\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "library runtime imports compatibility service factory "
+        "iPhoto.bootstrap.service_factories.create_compat_scan_service" in violation
+        for violation in violations
+    )
+    assert any(
+        "library runtime constructs compatibility service factory "
+        "create_compat_scan_service" in violation
+        for violation in violations
+    )

@@ -7,12 +7,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
-from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ..bootstrap.library_scan_service import LibraryScanService
-from ..bootstrap.service_factories import (
-    create_compat_asset_query_service,
-    create_compat_scan_service,
-)
 from ..utils.logging import get_logger
 from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
@@ -29,19 +24,21 @@ class _PairingWorker(QRunnable):
     def __init__(
         self,
         scan_root: Path,
-        library_root: Optional[Path],
         scan_service: LibraryScanService | None = None,
     ) -> None:
         super().__init__()
         self._scan_root = scan_root
-        self._library_root = library_root
         self._scan_service = scan_service
 
     def run(self) -> None:
         try:
-            scan_service = self._scan_service or create_compat_scan_service(
-                self._library_root or self._scan_root
-            )
+            scan_service = self._scan_service
+            if scan_service is None:
+                LOGGER.warning(
+                    "Skipping live photo pairing for %s because no bound scan service is available",
+                    self._scan_root,
+                )
+                return
             scan_service.pair_album(self._scan_root)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
@@ -208,11 +205,8 @@ class ScanCoordinatorMixin:
     ) -> List[Dict]:
         try:
             query_service = getattr(self, "asset_query_service", None)
-            if (
-                query_service is None
-                or getattr(query_service, "library_root", library_root) != library_root
-            ):
-                query_service = create_compat_asset_query_service(library_root)
+            if query_service is None:
+                return []
             rows = query_service.read_library_relative_asset_rows(
                 query_root,
                 sort_by_date=True,
@@ -348,7 +342,7 @@ class ScanCoordinatorMixin:
 
         # Persist live-photo pairings in the background to avoid blocking the
         # main thread while downstream listeners start refreshing.
-        self._scan_thread_pool.start(_PairingWorker(root, self._root, scan_service))
+        self._scan_thread_pool.start(_PairingWorker(root, scan_service))
 
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

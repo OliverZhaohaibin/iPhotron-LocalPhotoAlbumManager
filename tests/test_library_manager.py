@@ -14,6 +14,7 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.bootstrap.library_session import LibrarySession
 from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.manager import LibraryManager
 
@@ -77,6 +78,52 @@ def test_bind_path_relays_people_snapshot_events(tmp_path: Path, qapp: QApplicat
     assert snapshot_spy.count() == 1
     assert snapshot_spy.at(0)[0] is event
     assert index_spy.count() == 1
+
+
+def test_bind_path_rebinds_people_snapshot_events_for_prebound_session(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    session = LibrarySession(root)
+    manager.bind_library_session(session)
+
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    snapshot_spy = QSignalSpy(manager.peopleSnapshotCommitted)
+    index_spy = QSignalSpy(manager.peopleIndexUpdated)
+    coordinator = manager._people_index_coordinator
+    assert coordinator is not None
+
+    event = object()
+    coordinator.snapshotCommitted.emit(event)
+    qapp.processEvents()
+
+    assert snapshot_spy.count() == 1
+    assert snapshot_spy.at(0)[0] is event
+    assert index_spy.count() == 1
+
+
+def test_bind_path_auto_binds_headless_library_session(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    assert manager.library_session is not None
+    assert manager.library_session.library_root == root
+    assert manager.scan_service is not None
+    assert manager.asset_query_service is not None
+    assert manager.asset_lifecycle_service is not None
+    assert manager.location_service is not None
 
 
 def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:

@@ -280,3 +280,70 @@ def mocker():
         yield helper
     finally:
         helper.stopall()
+
+
+class _SignalBlocker:
+    def __init__(self, signal):
+        self.args = None
+        self._signal = signal
+
+    def __enter__(self):
+        if hasattr(self._signal, "connect"):
+            self._signal.connect(self._capture)
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def _capture(self, *args):
+        self.args = list(args)
+
+
+class _SimpleQtBot:
+    def __init__(self):
+        self._widgets = []
+
+    def addWidget(self, widget):
+        self._widgets.append(widget)
+
+    def waitSignal(self, signal, *args, **kwargs):
+        return _SignalBlocker(signal)
+
+    def mouseClick(self, widget, button, *args, **kwargs):
+        from PySide6.QtTest import QTest
+
+        QTest.mouseClick(widget, button, *args, **kwargs)
+
+    def mouseMove(self, widget, pos=None, *args, **kwargs):
+        from PySide6.QtTest import QTest
+
+        if pos is None:
+            QTest.mouseMove(widget, *args, **kwargs)
+            return
+        QTest.mouseMove(widget, pos, *args, **kwargs)
+
+    def close_widgets(self):
+        while self._widgets:
+            widget = self._widgets.pop()
+            close = getattr(widget, "close", None)
+            if callable(close):
+                close()
+            delete_later = getattr(widget, "deleteLater", None)
+            if callable(delete_later):
+                delete_later()
+
+
+@pytest.fixture()
+def qtbot():
+    from PySide6.QtWidgets import QApplication
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    helper = _SimpleQtBot()
+    try:
+        yield helper
+    finally:
+        helper.close_widgets()
+        app.processEvents()

@@ -1,6 +1,6 @@
 # 05 - 当前进度
 
-> **版本:** 1.0 | **日期:** 2026-05-02
+> **版本:** 1.0 | **日期:** 2026-05-03
 > **状态:** 进行中
 > **范围:** vNext 重构进度与交接记录
 
@@ -12,42 +12,43 @@
 但运行时主路径已经建立起可执行的 session boundary、repository/state
 boundary 和 architecture guardrail。
 
-本轮新增完成的是 `26-temp-library-end-to-end-regression.md`：Phase 6 的
-temp-library 端到端回归正式落地，不再只是“以后补”的 follow-up。
+本轮新增完成的是 `27-durable-user-state-residual-boundary.md`：Phase 2 的
+durable user state residual 已收口，`hidden / pinned / order` 不再只是
+temp-library E2E 之外的松散 follow-up。
 
 这一步有四个关键落点：
 
-- 新增 `tests/application/test_temp_library_end_to_end.py`，用真实 `tmp_path`
-  文件系统覆盖 `import / move / delete / restore / rescan` 主链路。
-- 回归入口明确采用 `LibrarySession + ImportWorker / MoveWorker`，而不是继续围绕
-  GUI facade/service 拼更高层 smoke。
-- 用户状态保护先锁定已稳定的 `favorite + trash`：favorite 在 rescan 后保持，
-  delete/restore 的 trash metadata 在 worker + lifecycle 主链路中保持正确。
-- `tests/conftest.py` 新增最小 `mocker` fixture，使 focused regressions 在
-  当前“禁用第三方 pytest 自动加载”的环境里仍能运行。
+- 新增 `PinnedStateRepositoryPort` 与 `PinnedSidebarStateService`，把 pinned
+  album/person/group 的 pin、unpin、rename、remap、redirect/prune 规则移到
+  application 层。
+- `gui/services/pinned_items_service.py` 保留兼容 API 与 Qt `changed` signal，
+  但只作为 Settings adapter + transport wrapper。
+- `LibrarySession.people` 新增 session-level 回归，确认 People hidden、person
+  order、group order 在 People reload/rescan 后仍保留。
+- 新增 `tests/application/test_pinned_state_service.py`，让 pinned state 规则在无
+  PySide6 的 application 层独立可测。
 
-## 2. 本轮完成：Temp Library End-to-End Regression
+## 2. 本轮完成：Durable User State Residual Boundary
 
-- 新增 temp-library E2E harness。
-  - `tests/application/test_temp_library_end_to_end.py` 通过真实临时库目录、
-    轻量 fake scanner 与 fake `process_media_paths` seam，稳定驱动 session-bound
-    scan/import/move/delete/restore 行为。
-  - `LibrarySession` 在测试中显式替换掉不相关的 Maps runtime capability
-    probe，避免无头环境下的 OpenGL 探测把回归拖进 GUI/runtime 细节。
-- import/move/delete/restore 主链路现在有同一层级回归。
-  - `ImportWorker` 通过 session-bound `scan_service` / `asset_lifecycle_service`
-    更新单库 `global_index.db`。
-  - `MoveWorker` 通过 session-bound `asset_operations` planning +
-    `asset_lifecycle` apply path，验证 album-to-album move、Recently Deleted delete
-    与 restore-to-origin 行为。
-- 用户状态保护在 temp-library 层级得到确认。
-  - `favorite` 经过完整 `rescan_album()` 后仍保留。
-  - trash row 的 `original_rel_path` / `original_album_id` /
-    `original_album_subpath` 在 delete 后写入，restore 后从目标 row 清除。
-- focused 验证环境补齐。
-  - `tests/conftest.py` 提供最小 `mocker` fixture，覆盖仓库当前实际依赖的
-    `Mock` / `MagicMock` / `patch` 能力，避免因缺少 `pytest-mock` 插件导致
-    worker/service 回归无法执行。
+- 新增 application-level pinned state boundary。
+  - `PinnedStateRepositoryPort` 定义 pinned payload 的读写边界。
+  - `PinnedSidebarStateService` 承接 library scoping、item normalization、
+    dedupe、rename、album path remap、People redirect/prune 与 group label 规则。
+  - 当前物理存储仍复用 settings payload，不写入 `global_index.db`。
+- GUI pinned service 瘦身。
+  - `PinnedItemsService` 继续暴露既有 API、`PinnedSidebarItem` 与 `changed`
+    signal。
+  - Settings 读写通过内部 repository adapter 注入 application service。
+  - People stale pin 清理继续优先使用注入的 active People service；standalone
+    fallback 仍保留为兼容路径。
+- People hidden/order 增加 session-level 回归。
+  - 通过 `LibrarySession.people` 设置 hidden、person order、group order。
+  - 模拟 People repository reload/rescan 后确认状态仍由 `FaceStateRepository`
+    保留。
+- focused tests 补齐。
+  - `tests/application/test_pinned_state_service.py` 独立覆盖 pinned state 规则。
+  - `tests/application/test_library_people_service.py` 补充 session-level hidden /
+    order 回归。
 
 ## 3. 历史已完成切片摘要
 
@@ -104,6 +105,9 @@ temp-library 端到端回归正式落地，不再只是“以后补”的 follow
   `LibrarySession + workers` 主链路现在已有真实临时库级别回归，覆盖 import /
   move / delete / restore / rescan，以及当前已稳定的 `favorite + trash`
   用户状态保护。
+- Durable user state residual 收口：
+  People hidden / person order / group order 已通过 session-level 回归锁定；
+  pinned sidebar 状态规则已迁入 application service，GUI 只保留 Qt transport。
 
 ## 4. 当前阶段状态
 
@@ -116,10 +120,11 @@ temp-library 端到端回归正式落地，不再只是“以后补”的 follow
   `LibrarySession` 已建立并接入 `RuntimeContext`，scan/query/state/
   album-metadata/lifecycle/operation/People/Maps/Edit/Location surface 已挂到
   active session；GUI startup 仍有进一步收口空间。
-- Phase 2：部分完成。
+- Phase 2：已完成当前 residual。
   `global_index.db` 已成为 runtime asset source of truth，favorite 写入和
-  gallery 查询已走 state/query boundary；更多 durable user state 仍待继续
-  收口。
+  gallery 查询已走 state/query boundary；trash lifecycle 已走 session lifecycle
+  surface；People hidden/order 由 `FaceStateRepository` 持久化并有 session-level
+  回归；pinned sidebar 规则已通过 application-level state service 收口。
 - Phase 3：已完成。
   GUI、CLI、watcher、`app.py` compatibility wrapper、restore/import follow-up、
   以及本轮的 GUI `open/rescan/pair` 入口都已收口到
@@ -144,7 +149,8 @@ temp-library 端到端回归正式落地，不再只是“以后补”的 follow
   `LibraryManager.people_service`；`PlaybackCoordinator` 也已移除 GUI runtime
   的 bootstrap People factory import；仍沿用 `LibraryManager` + bootstrap
   runtime surfaces 作为事实边界，未强制引入新的 `LibrarySession` /
-  `RuntimeContext` 术语层。
+  `RuntimeContext` 术语层。本轮继续将 `PinnedItemsService` 瘦身为 Qt transport
+  wrapper，pinned 状态规则不再由 GUI service 直接拥有。
 - Phase 5：部分完成。
   Edit 已完成；People、Thumbnail 与 Assign Location 边界已有明显收口；Maps
   方面，`MapRuntimePort` 已经具备 session-bound capability surface，
@@ -185,33 +191,35 @@ temp-library 端到端回归正式落地，不再只是“以后补”的 follow
   `PlaybackCoordinator.set_people_library_root()`、`ManualFaceAddWorker` 与
   `PinnedItemsService` standalone 清理路径仍保留 compatibility fallback，
   但 `PlaybackCoordinator` 已不再以 bootstrap People factory 作为运行时主路径。
-- temp-library E2E 目前先锁 `favorite + trash`；`hidden/pinned/order` 仍待
-  后续 state-boundary residual 继续补齐。
+- pinned sidebar 状态物理存储仍在 settings payload；`PinnedStateRepositoryPort`
+  提供的是 application boundary，不代表迁移到独立数据库。
 
 ## 6. 最新验证
 
 本轮在项目 `.venv` 下执行：
 
 - `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/tasks/test_import_worker.py -q`
+- `.venv/bin/python -m pytest tests/application/test_pinned_state_service.py tests/application/test_library_people_service.py tests/test_settings_manager.py -q`
+- `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_people_service.py tests/test_people_repository.py tests/test_settings_manager.py tests/gui/widgets/test_people_dashboard_widget.py tests/test_album_sidebar.py tests/test_album_tree_model.py tests/ui/test_albums_dashboard.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py -q`
 - `.venv/bin/python tools/check_architecture.py`
 
 结果：
 
 - 上述 focused regressions 通过（`47 passed`）。
+- 新增 durable user state focused regressions 通过（`17 passed`）。
+- 计划内聚合 focused regressions 通过（`112 passed`）。
 - `tools/check_architecture.py` 通过。
 - 仍有既有的 pytest `Unknown config option: env` warning。
 - 仍有既有的 legacy model shim / pairing deprecation warnings。
-- 本轮新增验证意图：temp-library 下的 session-bound import/move/delete/
-  restore/rescan 主链路、favorite 状态保留、trash metadata 往返，以及 worker /
-  service focused regressions 在无 `pytest-mock` 插件环境下仍可运行。
+- 本轮新增验证意图：application-level pinned state 规则、GUI pinned wrapper
+  兼容信号语义、People hidden/person order/group order 在 session-level reload
+  后仍保留。
 
 之前各个切片的针对性验证命令和结果，继续以 `06` 到 `26` 交接文档为准；
 本文件只保留当前整体验证结论和最新增量验证。
 
 ## 7. 下一步交接
 
-1. 优先继续补 Phase 2 residual：`hidden / pinned / order` 等 durable user
-   state 仍未全部收口到当前 temp-library E2E 覆盖。
-2. 补 Phase 6 性能 baseline：scan、gallery pagination、thumbnail cache。
-3. 若后续再回到 Maps，只处理新暴露问题；当前不再主动扩新的
+1. 补 Phase 6 性能 baseline：scan、gallery pagination、thumbnail cache。
+2. 若后续再回到 Maps，只处理新暴露问题；当前不再主动扩新的
    session/runtime boundary。

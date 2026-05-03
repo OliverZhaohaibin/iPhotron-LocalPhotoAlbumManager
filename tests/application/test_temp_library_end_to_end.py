@@ -18,8 +18,14 @@ pytest.importorskip(
     reason="QtCore is required for temp-library worker regressions",
     exc_type=ImportError,
 )
+pytest.importorskip(
+    "PySide6.QtWidgets",
+    reason="QtWidgets is required for temp-library worker regressions",
+    exc_type=ImportError,
+)
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 
 import iPhoto.bootstrap.library_scan_service as scan_service_module
 from iPhoto.bootstrap.library_asset_lifecycle_service import (
@@ -169,9 +175,9 @@ def _reset_global_index() -> None:
 @pytest.fixture()
 def qapp() -> QCoreApplication:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QCoreApplication.instance()
+    app = QApplication.instance()
     if app is None:
-        app = QCoreApplication([])
+        app = QApplication([])
     return app
 
 

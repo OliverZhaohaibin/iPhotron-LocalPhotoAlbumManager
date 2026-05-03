@@ -1,6 +1,6 @@
 # 04 - 重构实施清单
 
-> **版本:** 1.0 | **日期:** 2026-05-02
+> **版本:** 1.0 | **日期:** 2026-05-03
 > **状态:** 进行中
 > **范围:** vNext 重构执行清单与回归要求
 
@@ -104,7 +104,7 @@
 - [x] 明确现有两个 asset repository 的保留/合并策略：`cache/index_store.AssetRepository` / `global_index.db` 是运行时 source of truth，`SQLiteAssetRepository` 暂保留为 legacy/domain 测试适配器。
 - [x] scan merge API 保留用户状态。
 - [x] active GUI favorite 写入走 state boundary。
-- [ ] hidden/trash/pinned/order 等其他用户状态继续收敛到 state boundary。
+- [x] hidden/trash/pinned/order 等其他用户状态继续收敛到 state boundary。
 - [x] repository 支持 transaction boundary。
 - [x] 写 integration tests 验证 scan rebuild 不丢用户状态。
 - [x] 旧 domain-repository use case graph 标注为 compatibility-only，并由架构检查限制新导入。
@@ -121,6 +121,8 @@
 - [x] repository SQLite integration tests。
 - [x] favorite 在 rescan 后保持。
 - [x] trash/restore 在 rescan 后保持。
+- [x] People hidden / person order / group order 在 reload/rescan 后保持。
+- [x] pinned album/person/group 状态规则通过 application-level state service。
 - [x] Live Photo role 在 pairing 后可查询。
 
 ## 6. Phase 3 - 扫描管线统一
@@ -193,6 +195,7 @@
 - [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
 - [x] Location/Trash adapter 只保留 Qt transport、request serial 与 cleanup throttle；地理资产查询和 Recently Deleted cleanup 优先走 session surface。
 - [x] People pinned / cluster / cover 等 GUI runtime 入口统一优先走 bound session `people_service`，不再在 coordinator/viewmodel/controller 中重建 bootstrap factory。
+- [x] `PinnedItemsService` 瘦身为 Qt transport wrapper；pin/rename/remap/prune 规则迁入 application state service。
 - [ ] GUI services 只保留 presentation coordination。
 - [ ] Background task manager 只保留 Qt transport。
 - [x] People fallback GUI residual 已收口；`PeopleDashboardWidget` 保留 asset-aware compatibility factory 以维持 group common-photo cover，`PlaybackCoordinator` / `ManualFaceAddWorker` 仅保留 compatibility-only fallback。
@@ -315,6 +318,8 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 - [ ] `pytest tests/infrastructure -q`
 - [x] `pytest tests/architecture -q`
 - [x] `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/tasks/test_import_worker.py -q`
+- [x] `.venv/bin/python -m pytest tests/application/test_pinned_state_service.py tests/application/test_library_people_service.py tests/test_settings_manager.py -q`
+- [x] `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_people_service.py tests/test_people_repository.py tests/test_settings_manager.py tests/gui/widgets/test_people_dashboard_widget.py tests/test_album_sidebar.py tests/test_album_tree_model.py tests/ui/test_albums_dashboard.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py -q`
 - [ ] 性能测试按项目约定运行。
 
 ## 10. Definition of Done

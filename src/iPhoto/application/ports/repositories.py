@@ -125,6 +125,19 @@ class LibraryStateRepositoryPort(Protocol):
         """Persist GPS, location, and metadata overlays for one asset."""
 
 
+class PinnedStateRepositoryPort(Protocol):
+    """Persist pinned sidebar state for all libraries."""
+
+    def load_pinned_items_payload(self) -> dict[str, list[dict[str, object]]]:
+        """Return the raw pinned-items payload keyed by normalized library root."""
+
+    def save_pinned_items_payload(
+        self,
+        payload: dict[str, list[dict[str, object]]],
+    ) -> None:
+        """Persist the raw pinned-items payload."""
+
+
 class AssetFavoriteQueryPort(Protocol):
     """Read favorite state through a session-owned query surface."""
 

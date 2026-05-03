@@ -16,6 +16,7 @@ from .repositories import (
     AssetFavoriteQueryPort,
     AssetRepositoryPort,
     LibraryStateRepositoryPort,
+    PinnedStateRepositoryPort,
 )
 from .runtime import (
     LocationAssetServicePort,
@@ -45,6 +46,7 @@ __all__ = [
     "MetadataWriterPort",
     "PeopleIndexPort",
     "PeopleAssetRepositoryPort",
+    "PinnedStateRepositoryPort",
     "TaskSchedulerPort",
     "ThumbnailRendererPort",
 ]

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
+from ..bootstrap.service_factories import create_compat_asset_lifecycle_service
 from ..config import (
     RECENTLY_DELETED_DIR_NAME,
 )
@@ -73,7 +74,7 @@ class TrashManagerMixin:
 
         lifecycle_service = getattr(self, "asset_lifecycle_service", None)
         if lifecycle_service is None:
-            lifecycle_service = LibraryAssetLifecycleService(root)
+            lifecycle_service = create_compat_asset_lifecycle_service(root)
         return lifecycle_service.cleanup_deleted_index(trash_root)
 
     def _initialize_deleted_dir(self) -> None:

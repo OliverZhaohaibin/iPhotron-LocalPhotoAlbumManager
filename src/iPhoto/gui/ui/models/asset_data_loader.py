@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from PySide6.QtCore import QObject, QThreadPool, Signal, QTimer
 
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
+from ....bootstrap.service_factories import create_compat_asset_query_service
 from ..tasks.asset_loader_worker import (
     AssetLoaderSignals,
     AssetLoaderWorker,
@@ -107,7 +108,7 @@ class AssetDataLoader(QObject):
         if query_library_root is None and self._asset_query_service is not None:
             query_library_root = self._asset_query_service.library_root
         effective_index_root, _album_path = compute_album_path(root, query_library_root)
-        query_service = self._asset_query_service or LibraryAssetQueryService(
+        query_service = self._asset_query_service or create_compat_asset_query_service(
             effective_index_root
         )
 

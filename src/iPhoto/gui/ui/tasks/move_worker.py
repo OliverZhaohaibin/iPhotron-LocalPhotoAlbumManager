@@ -9,6 +9,7 @@ from typing import Iterable, List, Optional, Tuple
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ....bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
+from ....bootstrap.service_factories import create_compat_asset_lifecycle_service
 from ....io import sidecar
 from ....utils.logging import get_logger
 
@@ -261,7 +262,7 @@ class MoveWorker(QRunnable):
         """Return the session lifecycle service, creating a compatibility fallback."""
 
         if self._asset_lifecycle_service is None:
-            self._asset_lifecycle_service = LibraryAssetLifecycleService(
+            self._asset_lifecycle_service = create_compat_asset_lifecycle_service(
                 self._library_root,
             )
         return self._asset_lifecycle_service

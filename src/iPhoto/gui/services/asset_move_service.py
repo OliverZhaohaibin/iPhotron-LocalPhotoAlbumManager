@@ -13,6 +13,7 @@ from ...bootstrap.library_asset_operation_service import (
     LibraryAssetOperationService,
     MetadataLookup,
 )
+from ...bootstrap.service_factories import create_compat_asset_operation_service
 from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.move_worker import MoveSignals, MoveWorker
 
@@ -165,7 +166,7 @@ class AssetMoveService(QObject):
         )
         if self._is_unconfigured_mock(lifecycle_service):
             lifecycle_service = None
-        return LibraryAssetOperationService(
+        return create_compat_asset_operation_service(
             library_root,
             lifecycle_service=lifecycle_service,
         )

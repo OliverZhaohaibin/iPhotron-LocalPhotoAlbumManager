@@ -11,6 +11,7 @@ from ...bootstrap.library_asset_operation_service import (
     AssetMovePlan,
     LibraryAssetOperationService,
 )
+from ...bootstrap.service_factories import create_compat_asset_operation_service
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -115,7 +116,7 @@ class RestorationService(QObject):
         lifecycle_service = getattr(library, "asset_lifecycle_service", None)
         if self._is_unconfigured_mock(lifecycle_service):
             lifecycle_service = None
-        return LibraryAssetOperationService(
+        return create_compat_asset_operation_service(
             library_root,
             lifecycle_service=lifecycle_service,
         )

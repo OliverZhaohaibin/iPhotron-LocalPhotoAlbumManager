@@ -41,6 +41,7 @@
 - [x] 扩展架构检查：禁止新增 runtime `iPhoto.models.*` import。
 - [x] 扩展架构检查：旧 domain-repository use case 只允许兼容入口导入。
 - [x] 扩展架构检查：GUI runtime 禁止导入 `iPhoto.app`。
+- [x] 扩展架构检查：GUI/library runtime 禁止直接构造 session service fallback。
 - [x] 将架构检查加入 CI 或 documented verification。
 
 完成条件：
@@ -163,6 +164,7 @@
 - [x] 新增文件被扫描并显示。
 - [x] 修改文件只重读必要 metadata。
 - [x] 删除文件不隐式清空用户状态。
+- [x] Library/Trash rescan 后 Recently Deleted restore 不丢 index metadata。
 - [x] 扫描后 People 候选状态正确。
 - [x] 扫描后 Live Photo pairing 可恢复。
 - [x] `LibraryScanService.finalize_scan()` 不再隐式删除 stale rows。
@@ -315,7 +317,7 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 
 - [x] `python3 tools/check_architecture.py`
 - [x] `pytest tests/application -q`
-- [ ] `pytest tests/infrastructure -q`
+- [x] `pytest tests/infrastructure -q`
 - [x] `pytest tests/architecture -q`
 - [x] `.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/tasks/test_import_worker.py -q`
 - [x] `.venv/bin/python -m pytest tests/application/test_pinned_state_service.py tests/application/test_library_people_service.py tests/test_settings_manager.py -q`

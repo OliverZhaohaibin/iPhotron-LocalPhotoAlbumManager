@@ -11,6 +11,7 @@ from ...bootstrap.library_scan_service import (
     LibraryScanService,
     merge_scan_chunk_with_repository,
 )
+from ...bootstrap.service_factories import create_compat_scan_service
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
 
@@ -86,7 +87,7 @@ class ScannerWorker(QRunnable):
         """Return the session scan service used by this worker."""
 
         if self._scan_service is None:
-            self._scan_service = LibraryScanService(self._library_root)
+            self._scan_service = create_compat_scan_service(self._library_root)
         return self._scan_service
 
     @property

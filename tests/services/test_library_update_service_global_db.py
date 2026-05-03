@@ -145,7 +145,11 @@ def test_rescan_album_fallback_syncs_manifest_favorites(
     album_root = tmp_path / "Album"
     album_root.mkdir()
     FakeFallbackScanService.instances.clear()
-    monkeypatch.setattr(lus, "LibraryScanService", FakeFallbackScanService)
+    monkeypatch.setattr(
+        lus,
+        "create_compat_scan_service",
+        lambda root: FakeFallbackScanService(root),
+    )
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
@@ -210,7 +214,11 @@ def test_prepare_album_open_requests_async_rescan_when_scope_is_empty(
     album_root = tmp_path / "Album"
     album_root.mkdir()
     FakeOpenScanService.instances.clear()
-    monkeypatch.setattr(lus, "LibraryScanService", FakeOpenScanService)
+    monkeypatch.setattr(
+        lus,
+        "create_compat_scan_service",
+        lambda root: FakeOpenScanService(root),
+    )
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
@@ -380,7 +388,14 @@ def test_handle_media_load_failure_uses_current_album_root_when_library_root_is_
             return Path(path).parent
 
     ReplacementLifecycleService.instances.clear()
-    monkeypatch.setattr(lus, "LibraryAssetLifecycleService", ReplacementLifecycleService)
+    monkeypatch.setattr(
+        lus,
+        "create_compat_asset_lifecycle_service",
+        lambda root, *, scan_service=None: ReplacementLifecycleService(
+            root,
+            scan_service=scan_service,
+        ),
+    )
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),

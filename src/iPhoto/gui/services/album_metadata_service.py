@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from ...bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
+from ...bootstrap.service_factories import create_compat_album_metadata_service
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -126,7 +127,7 @@ class AlbumMetadataService(QObject):
         )
         if self._is_unconfigured_mock(state_repository):
             state_repository = None
-        return LibraryAlbumMetadataService(
+        return create_compat_album_metadata_service(
             library_root,
             state_repository=state_repository,
         )

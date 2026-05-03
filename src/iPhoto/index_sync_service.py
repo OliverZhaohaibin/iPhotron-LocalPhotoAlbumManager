@@ -263,11 +263,7 @@ def prune_index_scope(
         rel_key = normalise_rel_key(row.get("rel"))
         if rel_key is None:
             continue
-        if (
-            preserve_existing_trash_rows
-            and rel_key.startswith(trash_prefix)
-            and (library_root / rel_key).exists()
-        ):
+        if preserve_existing_trash_rows and rel_key.startswith(trash_prefix):
             continue
         if rel_key not in fresh_rels:
             removable.append(rel_key)

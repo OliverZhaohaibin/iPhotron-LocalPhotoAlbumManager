@@ -76,7 +76,7 @@ def test_prune_index_scope_keeps_excluded_trash_rows_during_library_rescan(
     assert remaining == {"AlbumA/keep.jpg", f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"}
 
 
-def test_prune_index_scope_removes_missing_excluded_rows_during_library_rescan(
+def test_prune_index_scope_keeps_missing_trash_rows_during_library_rescan(
     tmp_path: Path,
 ) -> None:
     library_root = tmp_path / "library"
@@ -99,9 +99,9 @@ def test_prune_index_scope_removes_missing_excluded_rows_during_library_rescan(
         exclude_globs=[f"**/{RECENTLY_DELETED_DIR_NAME}/**"],
     )
 
-    assert removed == 2
+    assert removed == 1
     remaining = {row["rel"] for row in store.read_all(filter_hidden=False)}
-    assert remaining == {"AlbumA/keep.jpg"}
+    assert remaining == {"AlbumA/keep.jpg", f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"}
 
 
 def test_prune_index_scope_removes_rows_under_non_trash_excludes_during_library_rescan(

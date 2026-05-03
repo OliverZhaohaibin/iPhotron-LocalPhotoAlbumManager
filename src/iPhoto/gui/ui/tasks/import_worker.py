@@ -10,6 +10,10 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ....bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ....bootstrap.library_scan_service import LibraryScanService
+from ....bootstrap.service_factories import (
+    create_compat_asset_lifecycle_service,
+    create_compat_scan_service,
+)
 
 # Max updates per second for progress signal
 MAX_UPDATES_PER_SEC = 10
@@ -63,7 +67,9 @@ class ImportWorker(QRunnable):
         """Return the session scan service, creating a compatibility fallback."""
 
         if self._scan_service is None:
-            self._scan_service = LibraryScanService(self._library_root or self._destination)
+            self._scan_service = create_compat_scan_service(
+                self._library_root or self._destination
+            )
         return self._scan_service
 
     @property
@@ -71,7 +77,7 @@ class ImportWorker(QRunnable):
         """Return the lifecycle service used for explicit scan reconciliation."""
 
         if self._asset_lifecycle_service is None:
-            self._asset_lifecycle_service = LibraryAssetLifecycleService(
+            self._asset_lifecycle_service = create_compat_asset_lifecycle_service(
                 self._library_root or self._destination,
                 scan_service=self.scan_service,
             )

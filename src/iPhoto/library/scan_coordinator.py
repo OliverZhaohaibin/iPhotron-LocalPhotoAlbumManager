@@ -9,6 +9,10 @@ from PySide6.QtCore import QMutexLocker, QRunnable
 
 from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ..bootstrap.library_scan_service import LibraryScanService
+from ..bootstrap.service_factories import (
+    create_compat_asset_query_service,
+    create_compat_scan_service,
+)
 from ..utils.logging import get_logger
 from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
@@ -35,7 +39,7 @@ class _PairingWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            scan_service = self._scan_service or LibraryScanService(
+            scan_service = self._scan_service or create_compat_scan_service(
                 self._library_root or self._scan_root
             )
             scan_service.pair_album(self._scan_root)
@@ -208,7 +212,7 @@ class ScanCoordinatorMixin:
                 query_service is None
                 or getattr(query_service, "library_root", library_root) != library_root
             ):
-                query_service = LibraryAssetQueryService(library_root)
+                query_service = create_compat_asset_query_service(library_root)
             rows = query_service.read_library_relative_asset_rows(
                 query_root,
                 sort_by_date=True,

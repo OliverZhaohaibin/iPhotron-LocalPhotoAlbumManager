@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -186,18 +186,16 @@ def test_scan_finished_skips_prune_when_worker_failed(tmp_path: Path, qapp: QApp
     class _Worker:
         cancelled = False
         failed = True
+        scan_service = Mock()
 
     spy = QSignalSpy(manager.scanFinished)
     manager._current_scanner_worker = _Worker()
 
-    with (
-        patch("iPhoto.library.scan_coordinator.LibraryAssetLifecycleService") as lifecycle_mock,
-        patch.object(manager._scan_thread_pool, "start") as start_mock,
-    ):
+    with patch.object(manager._scan_thread_pool, "start") as start_mock:
         manager._on_scan_finished(root, [])
         qapp.processEvents()
 
-    lifecycle_mock.assert_not_called()
+    _Worker.scan_service.finalize_scan_result.assert_not_called()
     start_mock.assert_not_called()
     assert spy.count() == 1
     assert spy.at(0)[1] is False

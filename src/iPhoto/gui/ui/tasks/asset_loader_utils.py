@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
+from ....bootstrap.service_factories import create_compat_asset_query_service
 from ....config import RECENTLY_DELETED_DIR_NAME
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
@@ -434,9 +435,9 @@ def compute_asset_rows(
 
     query_service = asset_query_service
     if query_service is None:
-        query_service = LibraryAssetQueryService(effective_index_root)
+        query_service = create_compat_asset_query_service(effective_index_root)
     elif album_path is None and query_service.library_root != effective_index_root:
-        query_service = LibraryAssetQueryService(effective_index_root)
+        query_service = create_compat_asset_query_service(effective_index_root)
 
     location_writer = query_service.location_cache_writer(root)
     dir_cache: Dict[Path, Optional[Set[str]]] = {}

@@ -11,6 +11,10 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from ...bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ...bootstrap.library_scan_service import LibraryScanService
+from ...bootstrap.service_factories import (
+    create_compat_asset_lifecycle_service,
+    create_compat_scan_service,
+)
 from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ...errors import IPhotoError
 from ...utils.pathutils import resolve_work_dir
@@ -94,7 +98,9 @@ class LibraryUpdateService(QObject):
 
         scan_root = Path(root)
         library_root, scan_service = self._scan_dependencies(scan_root)
-        active_scan_service = scan_service or LibraryScanService(library_root or scan_root)
+        active_scan_service = scan_service or create_compat_scan_service(
+            library_root or scan_root
+        )
         preparation = active_scan_service.prepare_album_open(
             scan_root,
             autoscan=autoscan,
@@ -120,7 +126,7 @@ class LibraryUpdateService(QObject):
         """Synchronously rebuild the album index and emit cache updates."""
 
         library_root, scan_service = self._scan_dependencies(album.root)
-        active_scan_service = scan_service or LibraryScanService(
+        active_scan_service = scan_service or create_compat_scan_service(
             library_root or album.root
         )
 
@@ -172,7 +178,7 @@ class LibraryUpdateService(QObject):
         library_root, scan_service = self._scan_dependencies(album.root)
 
         try:
-            active_scan_service = scan_service or LibraryScanService(
+            active_scan_service = scan_service or create_compat_scan_service(
                 library_root or album.root
             )
             groups = active_scan_service.pair_album(album.root)
@@ -205,7 +211,7 @@ class LibraryUpdateService(QObject):
                 or not self._paths_equal(Path(lifecycle_root), repair_root)
             )
         ):
-            lifecycle_service = LibraryAssetLifecycleService(
+            lifecycle_service = create_compat_asset_lifecycle_service(
                 repair_root,
                 scan_service=scan_service,
             )

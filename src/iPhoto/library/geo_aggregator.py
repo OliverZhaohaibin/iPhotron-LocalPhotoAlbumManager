@@ -9,6 +9,10 @@ from ..application.dtos import GeotaggedAsset
 from ..application.services.location_asset_service import geotagged_asset_from_row
 from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ..bootstrap.library_location_service import LibraryLocationService
+from ..bootstrap.service_factories import (
+    create_compat_asset_query_service,
+    create_compat_location_service,
+)
 from ..cache.index_store import get_global_repository
 from ..utils.geocoding import resolve_location_name  # compatibility patch target
 
@@ -36,11 +40,11 @@ class GeoAggregatorMixin:
 
         query_service = getattr(self, "asset_query_service", None)
         if query_service is None:
-            query_service = LibraryAssetQueryService(
+            query_service = create_compat_asset_query_service(
                 root,
                 repository_factory=get_global_repository,
             )
-        service = LibraryLocationService(root, query_service=query_service)
+        service = create_compat_location_service(root, query_service=query_service)
         assets = service.list_geotagged_assets()
         setattr(self, "_geotagged_assets_cache_root", root)
         setattr(self, "_geotagged_assets_cache", list(assets))

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..bootstrap.library_scan_service import LibraryScanService
+from ..bootstrap.service_factories import create_compat_scan_service
 from ..config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 
 if TYPE_CHECKING:
@@ -101,7 +102,7 @@ class FileSystemWatcherMixin:
 
         scan_service = getattr(self, "scan_service", None)
         if scan_service is None:
-            scan_service = LibraryScanService(self._root)
+            scan_service = create_compat_scan_service(self._root)
 
         while self._watch_scan_queue:
             scan_root = self._watch_scan_queue.pop(0)

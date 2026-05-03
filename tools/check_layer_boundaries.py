@@ -156,6 +156,17 @@ LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS = {
 
 LEGACY_DOMAIN_USE_CASE_PACKAGE = "iPhoto.application.use_cases"
 
+SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS = {"gui", "library"}
+
+SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS = {
+    "LibraryAlbumMetadataService",
+    "LibraryAssetLifecycleService",
+    "LibraryAssetOperationService",
+    "LibraryAssetQueryService",
+    "LibraryLocationService",
+    "LibraryScanService",
+}
+
 
 def _is_type_checking_guard(node: ast.If) -> bool:
     test = node.test
@@ -238,6 +249,24 @@ class _ImportCollector(ast.NodeVisitor):
                 self.imports.append((node.lineno, f"{resolved}.{alias.name}"))
 
 
+class _CallCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str]] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        name = self._call_name(node.func)
+        if name is not None:
+            self.calls.append((node.lineno, name))
+        self.generic_visit(node)
+
+    def _call_name(self, node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return None
+
+
 def _runtime_imports(py_file: Path, src_root: Path) -> list[tuple[int, str]]:
     source = py_file.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -247,6 +276,14 @@ def _runtime_imports(py_file: Path, src_root: Path) -> list[tuple[int, str]]:
     )
     collector.visit(tree)
     return collector.imports
+
+
+def _runtime_calls(py_file: Path) -> list[tuple[int, str]]:
+    source = py_file.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    collector = _CallCollector()
+    collector.visit(tree)
+    return collector.calls
 
 
 def _relative_key(py_file: Path, src_root: Path) -> str:
@@ -260,6 +297,7 @@ def check(src_root: Path) -> list[str]:
         top_level = rel.split("/", 1)[0]
         try:
             imports = _runtime_imports(py_file, src_root)
+            calls = _runtime_calls(py_file)
         except SyntaxError as exc:
             violations.append(f"{py_file}: PARSE_ERROR - {exc}")
             continue
@@ -412,6 +450,15 @@ def check(src_root: Path) -> list[str]:
                 violations.append(
                     f"{py_file}:{lineno}: runtime imports legacy domain-repository use case {module}"
                 )
+
+        if top_level in SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS:
+            for lineno, call_name in calls:
+                if call_name in SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS:
+                    violations.append(
+                        f"{py_file}:{lineno}: GUI/library runtime constructs "
+                        f"session service fallback directly via {call_name}; "
+                        "use an active LibrarySession surface or an explicit compatibility factory"
+                    )
 
     return violations
 

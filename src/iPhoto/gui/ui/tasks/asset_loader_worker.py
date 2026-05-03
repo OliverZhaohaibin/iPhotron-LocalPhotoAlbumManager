@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Set
 from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
+from ....bootstrap.service_factories import create_compat_asset_query_service
 from ....config import RECENTLY_DELETED_DIR_NAME
 from ....core.pairing import pair_live
 from ....utils.pathutils import ensure_work_dir
@@ -136,9 +137,9 @@ class AssetLoaderWorker(QRunnable):
 
         query_service = self._asset_query_service
         if query_service is None:
-            query_service = LibraryAssetQueryService(effective_index_root)
+            query_service = create_compat_asset_query_service(effective_index_root)
         elif album_path is None and query_service.library_root != effective_index_root:
-            query_service = LibraryAssetQueryService(effective_index_root)
+            query_service = create_compat_asset_query_service(effective_index_root)
         location_writer = query_service.location_cache_writer(self._root)
 
         # Emit indeterminate progress initially

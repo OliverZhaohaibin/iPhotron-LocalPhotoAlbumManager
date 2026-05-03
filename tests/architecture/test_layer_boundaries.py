@@ -189,3 +189,24 @@ def test_gui_library_update_service_worker_import_is_blocked(tmp_path: Path) -> 
         "iPhoto.library.workers.scanner_worker" in violation
         for violation in violations
     )
+
+
+def test_gui_library_session_service_fallback_construction_is_blocked(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "services" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.bootstrap.library_scan_service import LibraryScanService\n"
+        "service = LibraryScanService('/tmp/library')\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI/library runtime constructs session service fallback directly via "
+        "LibraryScanService" in violation
+        for violation in violations
+    )

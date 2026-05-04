@@ -95,17 +95,18 @@ iphoto-gui /fotos/LondonReise
 ## 🌟 Überblick
 
 **iPhotron** ist ein **ordnerbasierter Foto-Manager**, inspiriert von macOS *Fotos*.  
-Es organisiert Ihre Medien mit leichtgewichtigen JSON-Manifesten und Cache-Dateien —  
-bietet umfangreiche Album-Funktionalität und hält Bearbeitungen von den
-Original-Mediendateien getrennt.
+Es behält Ihre Ordner als Albumstruktur bei, kombiniert ordnerlokale Manifeste
+mit einer bibliotheksweiten `.iPhoto/global_index.db` und trennt wiederaufbaubare
+Cache-Fakten von dauerhaften Benutzerentscheidungen, während Bearbeitungen von
+den Original-Mediendateien getrennt bleiben.
 
 Wichtige Highlights:
 - 🗂 Ordnerbasiertes Design — jeder Ordner *ist* ein Album, kein Import erforderlich.
-- ⚙️ JSON-basierte Manifeste zeichnen "menschliche Entscheidungen" auf (Cover, Favoriten, Reihenfolge).
-- ⚡ **SQLite-gestützte globale Datenbank** für blitzschnelle Abfragen auf massiven Bibliotheken.
+- ⚙️ Ordnerlokale Manifeste speichern Album-Metadaten wie Cover, Favoriten und Reihenfolge.
+- ⚡ **SQLite-gestützte globale Datenbank** für schnelle session-gestützte Abfragen auf massiven Bibliotheken.
 - 🧠 Intelligentes inkrementelles Scannen mit persistentem SQLite-Index.
 - 🎥 Vollständige **Live Photo**-Paarungs- und Wiedergabeunterstützung.
-- 🗺 Kartenansicht, die GPS-Metadaten über alle Fotos und Videos visualisiert.
+- 🗺 Optionale Kartenansicht, die GPS-Metadaten über alle Fotos und Videos visualisiert und ohne Maps Extension sauber zurückfällt.
 - 👥 Optionales People-Scanning mit Face Clusters, Namen, Covern, versteckten Personen und Mehrpersonen-Gruppen.
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
@@ -117,6 +118,9 @@ Die Offline-OBF-Kartenlaufzeit von iPhotron wird als selbstenthaltene
 **maps extension** unter `src/maps/tiles/extension/` bereitgestellt. Genau
 dieses Verzeichnislayout wird von der lokalen Entwicklung, von Paket-Builds
 und von plattformspezifischen Installationsartefakten verwendet.
+Die App bleibt auch ohne diese Extension nutzbar; kartenspezifische Ansichten
+und Panels verwenden die Runtime-Verfügbarkeitsgrenze, um sauberes
+Fallback-Verhalten anzuzeigen.
 
 Die Extension enthält derzeit:
 - Offline-Kartendaten in `World_basemap_2.obf`
@@ -178,7 +182,10 @@ Mehrere Personen lassen sich zu Gruppen zusammenfassen, um gemeinsame Fotos
 anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
 Sortierung und können aufgelöst werden, solange sie nicht angepinnt sind. Das
 Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
-Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar.
+Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar. People-Zustand bleibt
+hinter der Library-Session-Grenze dauerhaft erhalten, damit Namen, Cover,
+versteckte Personen, Gruppen und manuelle Gesichtsanmerkungen erneute Scans
+überstehen.
 ![People and groups interface](<../picture/People & Group.png>)
 
 ### 🖼 Immersive Detailansicht
@@ -210,7 +217,8 @@ Eine umfassende Bearbeitungssuite mit **Anpassen**- und **Zuschneiden**-Modi:
 - **Schwarzrand-Prävention:** Automatische Validierung stellt sicher, dass nach Perspektivtransformationen keine schwarzen Kanten erscheinen
   
 ![crop interface](../picture/cropview.png)
-Alle Bearbeitungen werden in `.ipo`-Sidecar-Dateien gespeichert und bewahren die Originalfotos unberührt.
+Alle Bearbeitungen werden über die Edit-Session-Oberfläche in
+`.ipo`-Sidecar-Dateien gespeichert und bewahren die Originalfotos unberührt.
 
 ### ℹ️ Schwebendes Info-Panel
 Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF,
@@ -251,7 +259,7 @@ Detaillierte technische Dokumentation (auf Englisch):
 
 | Dokument | Beschreibung |
 |----------|-------------|
-| [Architecture](../architecture.md) | Gesamtarchitektur, Modulgrenzen, Datenfluss, wichtige Designentscheidungen |
+| [Architecture](../architecture.md) | Aktuelle vNext library-scoped modular monolith Architektur, Modulgrenzen, Legacy-Quarantäne, Datenfluss und wichtige Designentscheidungen |
 | [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der maps-extension-Workflow für Windows, Linux und macOS |
 | [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, QRhi-Shader-Assets, maps-extension-Synchronisierung und Plattformlaufzeit-Hinweise |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |

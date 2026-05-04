@@ -94,17 +94,18 @@ iphoto-gui /photos/LondonTrip
 ## 🌟 Overview
 
 **iPhotron** is a **folder-native photo manager** inspired by macOS *Photos*.  
-It organizes your media using lightweight JSON manifests and cache files —  
-offering rich album functionality while keeping destructive edits out of your
+It keeps your folders as the album structure, combines folder-local manifests
+with a library-scoped `.iPhoto/global_index.db`, and separates rebuildable cache
+facts from durable user choices while keeping destructive edits out of your
 original media files.
 
 Key highlights:
 - 🗂 Folder-native design — every folder *is* an album, no import needed.
-- ⚙️ JSON-based manifests record "human decisions" (cover, featured, order).
-- ⚡ **SQLite-powered global database** for lightning-fast queries on massive libraries.
+- ⚙️ Folder-local manifests record album metadata such as cover, featured items, and order.
+- ⚡ **SQLite-powered global database** for lightning-fast session-backed queries on massive libraries.
 - 🧠 Smart incremental scanning with persistent SQLite index.
 - 🎥 Full **Live Photo** pairing and playback support.
-- 🗺 Map view that visualizes GPS metadata across all photos & videos.
+- 🗺 Optional map view that visualizes GPS metadata across all photos & videos and falls back gracefully when the maps extension is unavailable.
 - 👥 Optional People scanning with face clusters, names, covers, hidden people,
   and multi-person groups.
 ![Main interface](docs/picture/mainview.png)
@@ -116,6 +117,8 @@ Key highlights:
 iPhotron's offline OBF map runtime ships as a self-contained **maps extension**
 rooted at `src/maps/tiles/extension/`. That directory is the contract consumed
 by local development, packaged builds, and platform-specific installers.
+The app remains usable without this extension; map-specific views and panels use
+the runtime availability surface to show graceful fallback behavior.
 
 The extension currently contains:
 - `World_basemap_2.obf` offline map data
@@ -173,7 +176,9 @@ show hidden people, and keep chosen covers persistent across rescans.
 Drag people into groups to collect shared photos for multiple people. Group
 cards can use a selected cover, be reordered, and be disbanded when they are not
 pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo
-manager remains usable without installing the AI runtime.
+manager remains usable without installing the AI runtime, and People state is
+kept behind the library session so names, covers, hidden flags, groups, and
+manual faces survive rescans.
 ![People and groups interface](<docs/picture/People & Group.png>)
 
 ### 🖼 Immersive Detail View
@@ -203,7 +208,8 @@ A comprehensive editing suite with **Adjust** and **Crop** modes:
 - **Black Border Prevention:** Automatic validation ensures no black edges appear after perspective transforms
   
 ![crop interface](docs/picture/cropview.png)
-All edits are stored in `.ipo` sidecar files, preserving original photos untouched.
+All edits are stored in `.ipo` sidecar files through the edit session surface,
+preserving original photos untouched.
 
 ### ℹ️ Floating Info Panel
 Toggle a floating metadata panel with EXIF, camera/lens details, exposure,
@@ -242,7 +248,7 @@ For deeper technical details, see the following docs:
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/architecture.md) | Overall architecture, module boundaries, data flow, key design decisions |
+| [Architecture](docs/architecture.md) | Current vNext library-scoped modular monolith architecture, module boundaries, legacy quarantine policy, data flow, and key design decisions |
 | [Development](docs/development.md) | Dev environment, dependencies, debugging, and the side-project-based maps extension workflow for Windows, Linux, and macOS |
 | [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, QRhi shader assets, maps extension sync, and platform runtime notes |
 | [Security](docs/security.md) | Permissions, encryption, data storage locations, threat model |

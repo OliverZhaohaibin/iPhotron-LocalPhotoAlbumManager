@@ -41,6 +41,7 @@ class LibraryUpdateTaskRunner:
         scan_service: LibraryScanService | None,
         on_progress: Callable[[Path, int, int], None],
         on_chunk: Callable[[Path, list[dict]], None],
+        on_batch_failed: Callable[[Path, int], None],
         on_cancelled: Callable[[Path, bool], None],
         on_completed: Callable[[ScanTaskCompletion], None],
         on_error: Callable[[Path, str, bool], None],
@@ -48,6 +49,8 @@ class LibraryUpdateTaskRunner:
         """Submit an asynchronous scan task or request a restart."""
 
         if self._scanner_worker is not None:
+            if self._paths_equal(self._scanner_worker.root, root):
+                return
             self._scanner_worker.cancel()
             self._scan_pending = True
             return
@@ -55,6 +58,7 @@ class LibraryUpdateTaskRunner:
         signals = ScannerSignals()
         signals.progressUpdated.connect(on_progress)
         signals.chunkReady.connect(on_chunk)
+        signals.batchFailed.connect(on_batch_failed)
 
         worker = ScannerWorker(
             root,
@@ -98,6 +102,29 @@ class LibraryUpdateTaskRunner:
             return
         self._scanner_worker.cancel()
         self._scan_pending = False
+
+    def active_scan_root(self) -> Path | None:
+        """Return the currently scanned root when a scan is active."""
+
+        if self._scanner_worker is None:
+            return None
+        return Path(self._scanner_worker.root)
+
+    def is_scanning_path(self, path: Path) -> bool:
+        """Return ``True`` when *path* is covered by the active scan worker."""
+
+        active_root = self.active_scan_root()
+        if active_root is None:
+            return False
+
+        try:
+            target = Path(path).resolve()
+            scan_root = active_root.resolve()
+            if target == scan_root:
+                return True
+            return scan_root in target.parents
+        except (OSError, ValueError):
+            return False
 
     def start_restore_refresh(
         self,
@@ -181,4 +208,11 @@ class LibraryUpdateTaskRunner:
     def _cleanup_scan_worker(self) -> None:
         self._scanner_worker = None
         self._scan_pending = False
+
+    @staticmethod
+    def _paths_equal(left: Path, right: Path) -> bool:
+        try:
+            return Path(left).resolve() == Path(right).resolve()
+        except OSError:
+            return Path(left) == Path(right)
 

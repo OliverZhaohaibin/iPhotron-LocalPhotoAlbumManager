@@ -9,17 +9,20 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CH
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from ...bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ...bootstrap.library_scan_service import LibraryScanService
-from ...bootstrap.service_factories import (
-    create_compat_asset_lifecycle_service,
-    create_compat_scan_service,
+from ...bootstrap.standalone_album_services import (
+    create_standalone_asset_lifecycle_service,
+    create_standalone_scan_service,
 )
 from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ...errors import IPhotoError
 from ...utils.pathutils import resolve_work_dir
 from ..background_task_manager import BackgroundTaskManager
 from .library_update_tasks import LibraryUpdateTaskRunner, ScanTaskCompletion
+from .session_service_resolver import (
+    bound_asset_lifecycle_service,
+    bound_scan_service,
+)
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -59,6 +62,7 @@ class LibraryUpdateService(QObject):
     scanProgress = Signal(Path, int, int)
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
+    scanBatchFailed = Signal(Path, int)
     indexUpdated = Signal(Path)
     linksUpdated = Signal(Path)
     assetReloadRequested = Signal(Path, bool, bool)
@@ -97,21 +101,15 @@ class LibraryUpdateService(QObject):
         """Prepare one album open through the active session scan surface."""
 
         scan_root = Path(root)
-        library_root, scan_service = self._scan_dependencies(scan_root)
-        active_scan_service = scan_service or create_compat_scan_service(
-            library_root or scan_root
-        )
-        preparation = active_scan_service.prepare_album_open(
+        _library_root, scan_service = self._require_scan_dependencies(scan_root)
+        preparation = scan_service.prepare_album_open(
             scan_root,
             autoscan=autoscan,
             hydrate_index=hydrate_index,
             sync_manifest_favorites=sync_manifest_favorites,
         )
 
-        library = self._library_manager()
-        is_already_scanning = bool(
-            library is not None and library.is_scanning_path(scan_root)
-        )
+        is_already_scanning = self._is_scan_active_for(scan_root)
         should_rescan_async = (
             preparation.asset_count == 0
             and not preparation.scanned
@@ -125,18 +123,14 @@ class LibraryUpdateService(QObject):
     def rescan_album(self, album: "Album") -> List[dict]:
         """Synchronously rebuild the album index and emit cache updates."""
 
-        library_root, scan_service = self._scan_dependencies(album.root)
-        active_scan_service = scan_service or create_compat_scan_service(
-            library_root or album.root
-        )
-
         try:
-            rows = active_scan_service.rescan_album(
+            library_root, scan_service = self._require_scan_dependencies(album.root)
+            rows = scan_service.rescan_album(
                 album.root,
-                sync_manifest_favorites=scan_service is None and library_root is None,
+                sync_manifest_favorites=library_root is None,
                 pair_live=True,
             )
-        except IPhotoError as exc:
+        except (IPhotoError, RuntimeError) as exc:
             self.errorRaised.emit(str(exc))
             return []
 
@@ -148,20 +142,46 @@ class LibraryUpdateService(QObject):
         """Start an asynchronous rescan for *album* using the background pool."""
 
         include, exclude = self._scan_filters(album)
-        lib_manager = self._library_manager()
-        if lib_manager is not None:
-            lib_manager.start_scanning(album.root, include, exclude)
+        self.scan_root_async(album.root, include=include, exclude=exclude)
+
+    def scan_root_async(
+        self,
+        root: Path,
+        *,
+        include: Iterable[str],
+        exclude: Iterable[str],
+    ) -> None:
+        """Start an asynchronous scan for *root* through the bound session."""
+
+        scan_root = Path(root)
+        if self._is_scan_active_for(scan_root):
             return
 
-        library_root, scan_service = self._scan_dependencies(album.root)
+        try:
+            library_root, scan_service = self._require_scan_dependencies(scan_root)
+        except RuntimeError as exc:
+            self.errorRaised.emit(str(exc))
+            return
+
+        # Bound Basic Library scans still need the legacy LibraryManager path
+        # because it owns additional side effects such as face-index workers and
+        # scanFinished subscribers that have not been migrated to this service.
+        library = self._library_manager()
+        if library is not None and library_root is not None:
+            start_scanning = getattr(library, "start_scanning", None)
+            if callable(start_scanning):
+                start_scanning(scan_root, include, exclude)
+                return
+
         self._task_runner.start_scan(
-            root=album.root,
+            root=scan_root,
             include=include,
             exclude=exclude,
             library_root=library_root,
             scan_service=scan_service,
             on_progress=self._relay_scan_progress,
             on_chunk=self._relay_scan_chunk_ready,
+            on_batch_failed=self._relay_scan_batch_failed,
             on_cancelled=self._on_scan_cancelled,
             on_completed=self._on_scan_completed,
             on_error=self._on_scan_error,
@@ -175,14 +195,10 @@ class LibraryUpdateService(QObject):
     def pair_live(self, album: "Album") -> List[dict]:
         """Rebuild Live Photo pairings for *album* and refresh related views."""
 
-        library_root, scan_service = self._scan_dependencies(album.root)
-
         try:
-            active_scan_service = scan_service or create_compat_scan_service(
-                library_root or album.root
-            )
-            groups = active_scan_service.pair_album(album.root)
-        except IPhotoError as exc:
+            _library_root, scan_service = self._require_scan_dependencies(album.root)
+            groups = scan_service.pair_album(album.root)
+        except (IPhotoError, RuntimeError) as exc:
             self.errorRaised.emit(str(exc))
             return []
 
@@ -198,9 +214,13 @@ class LibraryUpdateService(QObject):
         library_root = library.root() if library is not None else None
         scan_service = getattr(library, "scan_service", None) if library is not None else None
         repair_root = library_root or self._standalone_missing_asset_root(target)
+
         lifecycle_service = (
-            getattr(library, "asset_lifecycle_service", None)
-            if library is not None
+            bound_asset_lifecycle_service(
+                library,
+                library_root=library_root,
+            )
+            if library_root is not None
             else None
         )
         lifecycle_root = getattr(lifecycle_service, "library_root", None)
@@ -211,10 +231,11 @@ class LibraryUpdateService(QObject):
                 or not self._paths_equal(Path(lifecycle_root), repair_root)
             )
         ):
-            lifecycle_service = create_compat_asset_lifecycle_service(
+            lifecycle_service = create_standalone_asset_lifecycle_service(
                 repair_root,
                 scan_service=scan_service,
             )
+
         refresh_root = lifecycle_service.repair_missing_asset(target)
         if refresh_root is not None and library_root is None:
             refresh_root = repair_root
@@ -412,6 +433,11 @@ class LibraryUpdateService(QObject):
 
         self.scanChunkReady.emit(root, chunk)
 
+    def _relay_scan_batch_failed(self, root: Path, count: int) -> None:
+        """Forward partial persistence failures to listeners."""
+
+        self.scanBatchFailed.emit(root, count)
+
     def _on_scan_cancelled(self, root: Path, restart_requested: bool) -> None:
         self.scanFinished.emit(root, True)
         if restart_requested:
@@ -456,22 +482,36 @@ class LibraryUpdateService(QObject):
         if restart_requested:
             self._schedule_scan_retry()
 
-    def _scan_dependencies(
+    def _require_scan_dependencies(
         self,
         root: Path,
     ) -> tuple[
         Path | None,
-        LibraryScanService | None,
+        LibraryScanService,
     ]:
+        scan_root = Path(root)
         library_root: Path | None = None
-        scan_service: LibraryScanService | None = None
         library = self._library_manager()
         if library is not None:
             library_root = library.root()
-            scan_service = getattr(library, "scan_service", None)
-        if library_root is None:
-            root = Path(root)
+        if library_root is None or not self._path_is_descendant(scan_root, library_root):
+            return None, create_standalone_scan_service(scan_root)
+        scan_service = bound_scan_service(
+            library,
+            library_root=library_root,
+        )
+        if scan_service is None:
+            raise RuntimeError(
+                "Active library session is unavailable; scans require a bound "
+                "LibrarySession."
+            )
         return library_root, scan_service
+
+    def _is_scan_active_for(self, path: Path) -> bool:
+        library = self._library_manager()
+        if library is not None and library.is_scanning_path(path):
+            return True
+        return self._task_runner.is_scanning_path(path)
 
     def _scan_filters(self, album: "Album") -> tuple[Iterable[str], Iterable[str]]:
         filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}

@@ -1,12 +1,15 @@
 import logging
 from pathlib import Path
+
 from PySide6.QtCore import QObject, Signal
+
 from iPhoto.application.services.album_service import AlbumService
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.domain.models.query import AssetQuery
 
+
 class AlbumViewModel(QObject):
-    albumLoaded = Signal(object) # Payload: Album DTO or similar
+    albumLoaded = Signal(object)  # Payload: Album DTO or similar
     assetsLoaded = Signal(list)
     scanFinished = Signal()
 
@@ -19,21 +22,13 @@ class AlbumViewModel(QObject):
 
     def load_album(self, path: Path):
         try:
-            # 1. Open Album
             response = self._album_service.open_album(path)
-            # The response might be an AlbumDTO (id) or OpenAlbumResponse (album_id)
-            # Adjust based on actual DTO structure used in tests vs code
-            if hasattr(response, 'album_id'):
+            if hasattr(response, "album_id"):
                 self._current_album_id = response.album_id
-            elif hasattr(response, 'id'):
+            elif hasattr(response, "id"):
                 self._current_album_id = response.id
 
             self.albumLoaded.emit(response)
-
-            # 2. Trigger Scan (async typically, but sync for now or via service)
-            # self._album_service.scan_album(response.album_id)
-
-            # 3. Load Assets
             self.refresh_assets()
 
         except Exception as e:
@@ -52,3 +47,4 @@ class AlbumViewModel(QObject):
             self._album_service.scan_album(self._current_album_id)
             self.refresh_assets()
             self.scanFinished.emit()
+

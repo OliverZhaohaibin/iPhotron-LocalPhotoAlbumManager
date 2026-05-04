@@ -8,12 +8,12 @@ from typing import Dict, List, Optional, Tuple
 from PySide6.QtCore import QObject, QThreadPool, Signal, QTimer
 
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
-from ....bootstrap.service_factories import create_compat_asset_query_service
 from ..tasks.asset_loader_worker import (
     AssetLoaderSignals,
     AssetLoaderWorker,
     compute_album_path,
     compute_asset_rows,
+    require_query_service,
 )
 
 
@@ -108,9 +108,26 @@ class AssetDataLoader(QObject):
         if query_library_root is None and self._asset_query_service is not None:
             query_library_root = self._asset_query_service.library_root
         effective_index_root, _album_path = compute_album_path(root, query_library_root)
-        query_service = self._asset_query_service or create_compat_asset_query_service(
-            effective_index_root
-        )
+        try:
+            query_service = require_query_service(
+                effective_index_root,
+                self._asset_query_service,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+
+            def _emit_error(
+                album_root: Path = root,
+                error_message: str = message,
+            ) -> None:
+                self.error.emit(album_root, error_message)
+
+            def _emit_failed(album_root: Path = root) -> None:
+                self.loadFinished.emit(album_root, False)
+
+            QTimer.singleShot(0, _emit_error)
+            QTimer.singleShot(0, _emit_failed)
+            return None
 
         try:
             # We use row count from SQLite instead of file size.
@@ -209,11 +226,25 @@ class AssetDataLoader(QObject):
             lambda r, msg: self._handle_error(r, msg, current_request_id)
         )
 
+        try:
+            query_library_root = self._library_root
+            if query_library_root is None and self._asset_query_service is not None:
+                query_library_root = self._asset_query_service.library_root
+            effective_index_root, _album_path = compute_album_path(root, query_library_root)
+            query_service = require_query_service(
+                effective_index_root,
+                self._asset_query_service,
+            )
+        except RuntimeError as exc:
+            self.error.emit(root, str(exc))
+            self.loadFinished.emit(root, False)
+            return
+
         worker = AssetLoaderWorker(
             root, featured, signals,
             filter_params=filter_params,
             library_root=self._library_root,
-            asset_query_service=self._asset_query_service,
+            asset_query_service=query_service,
         )
         self._worker = worker
         self._signals = signals

@@ -149,6 +149,14 @@ class LibraryManager(
     # Binding and tree coordination
     # ------------------------------------------------------------------
     def bind_path(self, root: Path) -> None:
+        self._bind_path(root, bind_session_if_needed=True)
+
+    def bind_path_from_session(self, root: Path) -> None:
+        """Bind *root* without creating a headless compatibility session."""
+
+        self._bind_path(root, bind_session_if_needed=False)
+
+    def _bind_path(self, root: Path, *, bind_session_if_needed: bool) -> None:
         LOGGER.info("bind_path: binding to %s", root)
         # Clear existing watches to ensure initialization operations (like creating
         # the deleted items folder) do not trigger "directoryChanged" signals
@@ -167,7 +175,8 @@ class LibraryManager(
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
         self._root = normalized
-        self._bind_headless_session_if_needed(normalized)
+        if bind_session_if_needed:
+            self._bind_headless_session_if_needed(normalized)
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)

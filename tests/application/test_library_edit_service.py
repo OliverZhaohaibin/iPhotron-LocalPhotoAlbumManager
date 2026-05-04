@@ -41,6 +41,19 @@ def test_library_edit_service_describes_video_adjustments(tmp_path: Path) -> Non
     assert state.resolved_adjustments
 
 
+def test_library_edit_service_restores_adjustments_after_reopen(tmp_path: Path) -> None:
+    asset = tmp_path / "photo.jpg"
+    asset.touch()
+
+    first_service = LibraryEditService(tmp_path)
+    first_service.write_adjustments(asset, {"Crop_W": 0.7, "Light_Master": 0.1})
+
+    reopened_service = LibraryEditService(tmp_path)
+
+    assert reopened_service.sidecar_exists(asset) is True
+    assert reopened_service.read_adjustments(asset)["Crop_W"] == 0.7
+
+
 def test_library_edit_service_exposes_default_adjustments(tmp_path: Path) -> None:
     service = LibraryEditService(tmp_path)
 

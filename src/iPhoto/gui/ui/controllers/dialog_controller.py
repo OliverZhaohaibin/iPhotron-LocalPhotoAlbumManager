@@ -83,10 +83,10 @@ class DialogController:
             return
         if self._context.library.is_scanning_path(bound_root):
             return
-        self._context.library.start_scanning(
+        self._context.facade.scan_root_async(
             bound_root,
-            DEFAULT_INCLUDE,
-            DEFAULT_EXCLUDE,
+            include=DEFAULT_INCLUDE,
+            exclude=DEFAULT_EXCLUDE,
         )
 
     def show_error(self, message: str) -> None:

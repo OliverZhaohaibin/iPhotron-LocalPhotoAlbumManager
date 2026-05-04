@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 from pathlib import Path
 from PySide6.QtTest import QSignalSpy
 
-from iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
+from iPhoto.legacy.gui.viewmodels.album_viewmodel import AlbumViewModel
 from iPhoto.application.services.album_service import AlbumService
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.domain.models import Album, Asset

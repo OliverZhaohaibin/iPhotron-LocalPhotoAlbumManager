@@ -24,6 +24,20 @@ class _FakeAssetRuntime:
         return None
 
 
+class _FakeFacade:
+    def __init__(self) -> None:
+        self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
+
+    def scan_root_async(
+        self,
+        root: Path,
+        *,
+        include,
+        exclude,
+    ) -> None:
+        self.scan_requests.append((Path(root), list(include), list(exclude)))
+
+
 class _FakeLibrary:
     def __init__(self) -> None:
         self._root: Path | None = None
@@ -155,6 +169,7 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     library = _FakeLibrary()
     asset_runtime = _FakeAssetRuntime()
     context.library = library
+    context.facade = _FakeFacade()
     context.event_bus = EventBus(__import__("logging").getLogger("EventBus"))
     context.asset_runtime = asset_runtime
     context._container = None
@@ -188,7 +203,7 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
-    assert [request[0] for request in library.scan_requests] == [library_root]
+    assert [request[0] for request in context.facade.scan_requests] == [library_root]
 
 
 def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) -> None:
@@ -214,7 +229,7 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
-    assert library.scan_requests == []
+    assert context.facade.scan_requests == []
 
 
 def test_close_library_unbinds_map_interaction_service(tmp_path: Path) -> None:

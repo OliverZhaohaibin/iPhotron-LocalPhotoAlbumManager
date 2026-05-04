@@ -137,9 +137,7 @@ GUI_LEGACY_APP_SERVICE_FORBIDDEN_PREFIXES = (
     "gui/viewmodels/",
 )
 
-GUI_LEGACY_APP_SERVICE_ALLOWED_FILES = {
-    "gui/viewmodels/album_viewmodel.py",
-}
+GUI_LEGACY_APP_SERVICE_ALLOWED_FILES = set()
 
 GUI_LEGACY_APP_SERVICE_FORBIDDEN = {
     "iPhoto.application.services.asset_service",
@@ -199,6 +197,13 @@ LIBRARY_COMPAT_FACTORY_CALLS = {
     "create_compat_location_service",
     "create_compat_scan_service",
 }
+
+GUI_COMPAT_FACTORY_FORBIDDEN = LIBRARY_COMPAT_FACTORY_FORBIDDEN
+GUI_COMPAT_FACTORY_CALLS = LIBRARY_COMPAT_FACTORY_CALLS
+
+GUI_SCAN_ENTRY_FORBIDDEN_CALLS = {"start_scanning"}
+
+LEGACY_RUNTIME_IMPORT_FORBIDDEN = "iPhoto.legacy"
 
 
 def _is_type_checking_guard(node: ast.If) -> bool:
@@ -372,6 +377,14 @@ def check(src_root: Path) -> list[str]:
                     f"{py_file}:{lineno}: GUI runtime imports compatibility backend {module}"
                 )
 
+            if top_level == "gui" and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_COMPAT_FACTORY_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports compatibility service factory {module}"
+                )
+
             if rel.startswith(GUI_BOOTSTRAP_PEOPLE_FORBIDDEN_PREFIXES) and any(
                 _is_or_under(module, forbidden)
                 for forbidden in GUI_BOOTSTRAP_PEOPLE_FORBIDDEN
@@ -501,7 +514,26 @@ def check(src_root: Path) -> list[str]:
                     f"{py_file}:{lineno}: library runtime imports compatibility service factory {module}"
                 )
 
+            if top_level != "legacy" and _is_or_under(
+                module,
+                LEGACY_RUNTIME_IMPORT_FORBIDDEN,
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: runtime imports legacy quarantine module {module}"
+                )
+
         for lineno, call_name in calls:
+            if top_level == "gui" and call_name in GUI_COMPAT_FACTORY_CALLS:
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime constructs "
+                    f"compatibility service factory {call_name}; "
+                    "use an active LibrarySession surface instead"
+                )
+            if top_level == "gui" and call_name in GUI_SCAN_ENTRY_FORBIDDEN_CALLS:
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime calls legacy scan entry "
+                    f"{call_name}; use a session-bound scan surface instead"
+                )
             if (
                 top_level in SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS
                 and call_name in SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS

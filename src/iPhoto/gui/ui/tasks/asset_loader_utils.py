@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
-from ....bootstrap.service_factories import create_compat_asset_query_service
+from ....bootstrap.standalone_album_services import (
+    create_standalone_asset_query_service,
+)
 from ....config import RECENTLY_DELETED_DIR_NAME
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
@@ -114,6 +116,33 @@ def adjust_rel_for_album(row: Dict[str, object], album_path: Optional[str]) -> D
 
 def normalize_featured(featured: Iterable[str]) -> Set[str]:
     return {str(entry) for entry in featured}
+
+
+def require_query_service(
+    effective_index_root: Path,
+    asset_query_service: LibraryAssetQueryService | None,
+) -> LibraryAssetQueryService:
+    """Return a query service for *effective_index_root*.
+
+    Standalone ``Open Album...`` flows still need a per-folder query surface when
+    no library session is active, or when the selected album lives outside the
+    currently bound library root.
+    """
+
+    if asset_query_service is None:
+        return create_standalone_asset_query_service(effective_index_root)
+
+    try:
+        bound_root = Path(asset_query_service.library_root)
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError(
+            "Bound asset query service is misconfigured for the active LibrarySession."
+        ) from exc
+
+    if not _paths_equal(bound_root, effective_index_root):
+        return create_standalone_asset_query_service(effective_index_root)
+
+    return asset_query_service
 
 
 def _determine_size(row: Dict[str, object], is_image: bool) -> object:
@@ -433,11 +462,10 @@ def compute_asset_rows(
     if album_path is None and query_library_root is not None:
         params.setdefault("exclude_path_prefix", RECENTLY_DELETED_DIR_NAME)
 
-    query_service = asset_query_service
-    if query_service is None:
-        query_service = create_compat_asset_query_service(effective_index_root)
-    elif album_path is None and query_service.library_root != effective_index_root:
-        query_service = create_compat_asset_query_service(effective_index_root)
+    query_service = require_query_service(
+        effective_index_root,
+        asset_query_service,
+    )
 
     location_writer = query_service.location_cache_writer(root)
     dir_cache: Dict[Path, Optional[Set[str]]] = {}
@@ -487,3 +515,10 @@ def _safe_signal_emit(signal_func: Callable, *args) -> bool:
     except RuntimeError:
         # Signal source has been deleted - this is expected during rapid switching
         return False
+
+
+def _paths_equal(first: Path, second: Path) -> bool:
+    try:
+        return Path(first).resolve() == Path(second).resolve()
+    except OSError:
+        return Path(first) == Path(second)

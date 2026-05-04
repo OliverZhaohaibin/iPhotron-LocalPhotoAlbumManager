@@ -1,6 +1,6 @@
 # 04 - 重构实施清单
 
-> **版本:** 1.0 | **日期:** 2026-05-03
+> **版本:** 1.1 | **日期:** 2026-05-04
 > **状态:** 进行中
 > **范围:** vNext 重构执行清单与回归要求
 
@@ -71,7 +71,7 @@
 - [x] `RuntimeContext` 持有单个 active `LibrarySession`。
 - [x] library open/bind/shutdown 生命周期进入 session。
 - [x] repository、thumbnail、people runtime、album metadata、Maps runtime、Edit、Location query surface 挂到 session。
-- [ ] GUI startup 使用 session surface。
+- [x] GUI startup 使用 session surface。
 - [x] `appctx.py` 标注并限制为 compatibility proxy。
 - [x] 增加 runtime entry tests。
 
@@ -198,14 +198,18 @@
 - [x] Location/Trash adapter 只保留 Qt transport、request serial 与 cleanup throttle；地理资产查询和 Recently Deleted cleanup 优先走 session surface。
 - [x] People pinned / cluster / cover 等 GUI runtime 入口统一优先走 bound session `people_service`，不再在 coordinator/viewmodel/controller 中重建 bootstrap factory。
 - [x] `PinnedItemsService` 瘦身为 Qt transport wrapper；pin/rename/remap/prune 规则迁入 application state service。
+- [x] GUI 运行期 `create_compat_*` 使用数为 0；缺少 active session 时不再静默创建 compatibility service。
+- [x] GUI `open/rescan/pair` 与 startup 初始扫描统一走 session/facade scan surface，不再直接调用 `LibraryManager.start_scanning()`。
+- [x] legacy-only `AlbumViewModel` 已迁入 `src/iPhoto/legacy/gui/viewmodels/` 隔离区。
 - [ ] GUI services 只保留 presentation coordination。
-- [ ] Background task manager 只保留 Qt transport。
+- [x] Background task manager 只保留 Qt transport。
 - [x] People fallback GUI residual 已收口；`PeopleDashboardWidget` 保留 asset-aware compatibility factory 以维持 group common-photo cover，`PlaybackCoordinator` / `ManualFaceAddWorker` 仅保留 compatibility-only fallback。
 
 完成条件：
 
 - [x] `gui.facade.py` 不直接调用 `iPhoto.app` 业务函数。
 - [x] GUI 不直接调用 concrete repository singleton。
+- [x] GUI 运行期 `create_compat_*` 使用数为 0。
 - [ ] ViewModels 通过 session commands/queries 访问业务。
 - [ ] Coordinators 不拥有 persistence 规则。
 
@@ -282,7 +286,7 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 - [x] People scan 后名字、隐藏、分组保持。
 - [x] Map 页面在 extension 缺失时 graceful fallback。
 - [x] Thumbnail 生成不阻塞 UI。
-- [ ] Edit sidecar 保存后重启仍可恢复。
+- [x] Edit sidecar 保存后重启仍可恢复。
 
 ## 9. Phase 6 - 测试、性能、CI
 
@@ -325,6 +329,10 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 - [x] `.venv/bin/python -m pytest tests/performance -q`
 
 ## 10. Definition of Done
+
+补充约束：
+
+- [x] `src/iPhoto/legacy/` 中的隔离代码已明确标注将在下一个 major release 移除。
 
 - [ ] 代码边界符合 `01-target-architecture-vnext.md`。
 - [ ] 行为需求符合 `02-detailed-requirements.md`。

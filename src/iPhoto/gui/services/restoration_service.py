@@ -11,7 +11,7 @@ from ...bootstrap.library_asset_operation_service import (
     AssetMovePlan,
     LibraryAssetOperationService,
 )
-from ...bootstrap.service_factories import create_compat_asset_operation_service
+from .session_service_resolver import bound_asset_operation_service
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -68,7 +68,11 @@ class RestorationService(QObject):
                 return None
             return model.metadata_for_path(path)
 
-        operation_service = self._operation_service(library, library_root)
+        try:
+            operation_service = self._operation_service(library, library_root)
+        except RuntimeError as exc:
+            self.errorRaised.emit(str(exc))
+            return False
         restore_plan = operation_service.plan_restore_request(
             requested_sources,
             trash_root=trash_root,
@@ -105,20 +109,16 @@ class RestorationService(QObject):
         library: "LibraryManager",
         library_root: Path,
     ) -> LibraryAssetOperationService:
-        candidate = getattr(library, "asset_operation_service", None)
-        if (
-            candidate is not None
-            and not self._is_unconfigured_mock(candidate)
-            and callable(getattr(candidate, "plan_restore_request", None))
-        ):
+        candidate = bound_asset_operation_service(
+            library,
+            library_root=library_root,
+        )
+        if candidate is not None:
             return candidate
 
-        lifecycle_service = getattr(library, "asset_lifecycle_service", None)
-        if self._is_unconfigured_mock(lifecycle_service):
-            lifecycle_service = None
-        return create_compat_asset_operation_service(
-            library_root,
-            lifecycle_service=lifecycle_service,
+        raise RuntimeError(
+            "Active library session is unavailable; restore operations require a "
+            "bound LibrarySession."
         )
 
     @staticmethod

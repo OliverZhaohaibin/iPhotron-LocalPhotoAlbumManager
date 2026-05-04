@@ -101,6 +101,30 @@ def test_gui_runtime_backend_import_is_blocked(tmp_path: Path) -> None:
     )
 
 
+def test_gui_runtime_compat_factory_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "services" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.bootstrap.service_factories import create_compat_scan_service\n"
+        "service = create_compat_scan_service('/tmp/library')\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI runtime imports compatibility service factory "
+        "iPhoto.bootstrap.service_factories.create_compat_scan_service" in violation
+        for violation in violations
+    )
+    assert any(
+        "GUI runtime constructs compatibility service factory "
+        "create_compat_scan_service" in violation
+        for violation in violations
+    )
+
+
 def test_gui_people_bootstrap_factory_import_is_blocked(tmp_path: Path) -> None:
     source = tmp_path / "iPhoto"
     module = source / "gui" / "coordinators" / "example.py"
@@ -191,6 +215,24 @@ def test_gui_runtime_legacy_app_service_import_is_blocked(tmp_path: Path) -> Non
     )
 
 
+def test_gui_runtime_direct_start_scanning_call_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "viewmodels" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "def refresh(view):\n"
+        "    view.start_scanning('/tmp/library', ['*.jpg'], [])\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI runtime calls legacy scan entry start_scanning" in violation
+        for violation in violations
+    )
+
+
 def test_gui_library_update_service_worker_import_is_blocked(tmp_path: Path) -> None:
     source = tmp_path / "iPhoto"
     module = source / "gui" / "services" / "library_update_service.py"
@@ -250,5 +292,23 @@ def test_library_runtime_compat_factory_import_is_blocked(tmp_path: Path) -> Non
     assert any(
         "library runtime constructs compatibility service factory "
         "create_compat_scan_service" in violation
+        for violation in violations
+    )
+
+
+def test_runtime_legacy_quarantine_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.legacy.gui.viewmodels.album_viewmodel import AlbumViewModel\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "runtime imports legacy quarantine module "
+        "iPhoto.legacy.gui.viewmodels.album_viewmodel" in violation
         for violation in violations
     )

@@ -437,12 +437,19 @@ class MainCoordinator(QObject):
     def _connect_signals(self) -> None:
         """Connect application signals."""
         ui = self._window.ui
+        updates = self._facade.library_updates
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
         self._context.library.albumRenamed.connect(self._on_album_renamed)
-        self._facade.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
-        self._facade.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        # Library watcher rescans still emit through the bound LibraryManager,
+        # while facade-initiated rescans emit through LibraryUpdateService.
+        self._context.library.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
+        self._context.library.scanFinished.connect(self._gallery_store.handle_scan_finished)
         self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
         self._context.library.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
+        updates.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
+        updates.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        updates.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
+        updates.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
         self._gallery_vm.message_requested.connect(self._status_bar.show_message)
 
         # Grid interactions
@@ -524,7 +531,6 @@ class MainCoordinator(QObject):
         # Status Bar Connections (Restored)
         # Facade Signals -> Status Bar
         # Note: AppFacade exposes library_updates (ScannerSignals)
-        updates = self._facade.library_updates
         updates.scanProgress.connect(self._status_bar.handle_scan_progress)
         updates.scanFinished.connect(self._status_bar.handle_scan_finished)
         self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)

@@ -1,0 +1,2 @@
+"""Legacy GUI compatibility artifacts."""
+

@@ -148,10 +148,10 @@ class RuntimeContext:
                     not had_existing_index
                     and not self.library.is_scanning_path(candidate)
                 ):
-                    self.library.start_scanning(
+                    self.facade.scan_root_async(
                         candidate,
-                        DEFAULT_INCLUDE,
-                        DEFAULT_EXCLUDE,
+                        include=DEFAULT_INCLUDE,
+                        exclude=DEFAULT_EXCLUDE,
                     )
             except LibraryError as exc:
                 _logger.error("resume_startup_tasks: bind_path failed: %s", exc)
@@ -219,7 +219,11 @@ class RuntimeContext:
                 bind_edit_service(self.library_session.edit)
 
         try:
-            self.library.bind_path(normalized)
+            bind_path_from_session = getattr(self.library, "bind_path_from_session", None)
+            if callable(bind_path_from_session):
+                bind_path_from_session(normalized)
+            else:
+                self.library.bind_path(normalized)
         except Exception:
             self.close_library()
             raise

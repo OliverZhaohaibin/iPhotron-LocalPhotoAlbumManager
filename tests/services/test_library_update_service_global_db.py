@@ -38,7 +38,8 @@ class DummyLibrary:
 
 
 class FakeScanService:
-    def __init__(self) -> None:
+    def __init__(self, library_root: Path | None = None) -> None:
+        self.library_root = Path(library_root) if library_root is not None else None
         self.prepared: list[dict] = []
         self.rescanned: list[dict] = []
         self.paired: list[Path] = []
@@ -57,7 +58,8 @@ class FakeScanService:
 
 
 class FakeLifecycleService:
-    def __init__(self) -> None:
+    def __init__(self, library_root: Path | None = None) -> None:
+        self.library_root = Path(library_root) if library_root is not None else None
         self.reconciled: list[tuple[Path, list[dict]]] = []
         self.media_failures: list[Path] = []
 
@@ -74,7 +76,7 @@ class FakeFallbackScanService(FakeScanService):
     instances: ClassVar[list["FakeFallbackScanService"]] = []
 
     def __init__(self, root: Path) -> None:
-        super().__init__()
+        super().__init__(root)
         self.root = Path(root)
         self.synced: list[Path] = []
         self.instances.append(self)
@@ -90,7 +92,7 @@ class FakeOpenScanService(FakeScanService):
     instances: ClassVar[list["FakeOpenScanService"]] = []
 
     def __init__(self, root: Path) -> None:
-        super().__init__()
+        super().__init__(root)
         self.root = Path(root)
         self.instances.append(self)
 
@@ -112,8 +114,8 @@ def test_rescan_album_uses_session_scan_service(tmp_path: Path) -> None:
     album_root = lib_root / "Album"
     lib_root.mkdir()
     album_root.mkdir()
-    scan_service = FakeScanService()
-    lifecycle_service = FakeLifecycleService()
+    scan_service = FakeScanService(lib_root)
+    lifecycle_service = FakeLifecycleService(lib_root)
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
@@ -147,7 +149,7 @@ def test_rescan_album_fallback_syncs_manifest_favorites(
     FakeFallbackScanService.instances.clear()
     monkeypatch.setattr(
         lus,
-        "create_compat_scan_service",
+        "create_standalone_scan_service",
         lambda root: FakeFallbackScanService(root),
     )
 
@@ -178,7 +180,7 @@ def test_prepare_album_open_uses_session_scan_service(tmp_path: Path) -> None:
     album_root = lib_root / "Album"
     lib_root.mkdir()
     album_root.mkdir()
-    scan_service = FakeScanService()
+    scan_service = FakeScanService(lib_root)
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: None,
@@ -208,22 +210,21 @@ def test_prepare_album_open_uses_session_scan_service(tmp_path: Path) -> None:
 
 
 def test_prepare_album_open_requests_async_rescan_when_scope_is_empty(
-    monkeypatch,
     tmp_path: Path,
 ) -> None:
-    album_root = tmp_path / "Album"
+    lib_root = tmp_path / "Library"
+    album_root = lib_root / "Album"
+    lib_root.mkdir()
     album_root.mkdir()
-    FakeOpenScanService.instances.clear()
-    monkeypatch.setattr(
-        lus,
-        "create_compat_scan_service",
-        lambda root: FakeOpenScanService(root),
-    )
+    scan_service = FakeOpenScanService(lib_root)
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: None,
-        library_manager_getter=lambda: None,
+        library_manager_getter=lambda: DummyLibrary(
+            lib_root,
+            scan_service=scan_service,
+        ),
     )
 
     routing = service.prepare_album_open(
@@ -235,8 +236,7 @@ def test_prepare_album_open_requests_async_rescan_when_scope_is_empty(
 
     assert routing.asset_count == 0
     assert routing.should_rescan_async is True
-    assert len(FakeOpenScanService.instances) == 1
-    assert FakeOpenScanService.instances[0].prepared == [
+    assert scan_service.prepared == [
         {
             "root": album_root,
             "autoscan": False,
@@ -246,34 +246,57 @@ def test_prepare_album_open_requests_async_rescan_when_scope_is_empty(
     ]
 
 
-def test_rescan_album_async_uses_library_manager_scan_entry(tmp_path: Path) -> None:
+def test_rescan_album_async_routes_bound_library_scans_via_library_manager(
+    tmp_path: Path,
+) -> None:
     lib_root = tmp_path / "library"
     album_root = lib_root / "Album"
     lib_root.mkdir()
     album_root.mkdir()
-    library = DummyLibrary(lib_root)
+    scan_service = FakeScanService(lib_root)
+    library = DummyLibrary(
+        lib_root,
+        scan_service=scan_service,
+    )
+
+    class FakeTaskRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def is_scanning_path(self, _path: Path) -> bool:
+            return False
+
+        def start_scan(self, **kwargs) -> None:
+            self.calls.append(kwargs)
+
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: None,
         library_manager_getter=lambda: library,
     )
+    runner = FakeTaskRunner()
+    service._task_runner = runner
 
     service.rescan_album_async(DummyAlbum(album_root))
 
+    assert runner.calls == []
     assert library.started == [
         (album_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE))
     ]
 
 
-def test_rescan_album_async_fallback_passes_library_root(monkeypatch, tmp_path: Path) -> None:
-    lib_root = tmp_path / "library"
-    album_root = lib_root / "Album"
-    lib_root.mkdir()
-    album_root.mkdir()
+def test_rescan_album_async_fallback_uses_standalone_scan_service(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    scan_service = FakeFallbackScanService(tmp_path / "Album")
 
     class FakeTaskRunner:
         def __init__(self) -> None:
             self.calls: list[dict] = []
+
+        def is_scanning_path(self, _path: Path) -> bool:
+            return False
 
         def start_scan(self, **kwargs) -> None:
             self.calls.append(kwargs)
@@ -284,9 +307,16 @@ def test_rescan_album_async_fallback_passes_library_root(monkeypatch, tmp_path: 
         current_album_getter=lambda: None,
         library_manager_getter=lambda: None,
     )
+    monkeypatch.setattr(
+        lus,
+        "create_standalone_scan_service",
+        lambda root: scan_service,
+    )
     runner = FakeTaskRunner()
     service._task_runner = runner
 
+    album_root = tmp_path / "Album"
+    album_root.mkdir()
     service.rescan_album_async(DummyAlbum(album_root))
 
     assert runner.calls
@@ -295,7 +325,52 @@ def test_rescan_album_async_fallback_passes_library_root(monkeypatch, tmp_path: 
     assert list(call["include"]) == list(DEFAULT_INCLUDE)
     assert list(call["exclude"]) == list(DEFAULT_EXCLUDE)
     assert call["library_root"] is None
-    assert call["scan_service"] is None
+    assert call["scan_service"] is scan_service
+
+
+def test_scan_root_async_fallback_relays_batch_failures(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    scan_service = FakeFallbackScanService(tmp_path / "Album")
+
+    class FakeTaskRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def is_scanning_path(self, _path: Path) -> bool:
+            return False
+
+        def start_scan(self, **kwargs) -> None:
+            self.calls.append(kwargs)
+
+    service = lus.LibraryUpdateService(
+        task_manager=DummyTaskManager(),
+        current_album_getter=lambda: None,
+        library_manager_getter=lambda: None,
+    )
+    monkeypatch.setattr(
+        lus,
+        "create_standalone_scan_service",
+        lambda root: scan_service,
+    )
+    runner = FakeTaskRunner()
+    service._task_runner = runner
+
+    album_root = tmp_path / "Album"
+    album_root.mkdir()
+    failures: list[tuple[Path, int]] = []
+    service.scanBatchFailed.connect(lambda root, count: failures.append((root, count)))
+
+    service.scan_root_async(
+        album_root,
+        include=DEFAULT_INCLUDE,
+        exclude=DEFAULT_EXCLUDE,
+    )
+
+    assert runner.calls
+    runner.calls[0]["on_batch_failed"](album_root, 2)
+    assert failures == [(album_root, 2)]
 
 
 def test_restore_rescan_worker_receives_session_scan_service(
@@ -304,8 +379,8 @@ def test_restore_rescan_worker_receives_session_scan_service(
     lib_root = tmp_path / "library"
     album_root = lib_root / "Album"
     album_root.mkdir(parents=True)
-    scan_service = FakeScanService()
-    lifecycle_service = FakeLifecycleService()
+    scan_service = FakeScanService(lib_root)
+    lifecycle_service = FakeLifecycleService(lib_root)
 
     class FakeTaskRunner:
         def __init__(self) -> None:
@@ -341,7 +416,7 @@ def test_handle_media_load_failure_uses_lifecycle_service(tmp_path: Path) -> Non
     album_root = lib_root / "Album"
     asset_path = album_root / "missing.mov"
     album_root.mkdir(parents=True)
-    lifecycle_service = FakeLifecycleService()
+    lifecycle_service = FakeLifecycleService(lib_root)
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: None,
@@ -357,7 +432,7 @@ def test_handle_media_load_failure_uses_lifecycle_service(tmp_path: Path) -> Non
     assert lifecycle_service.media_failures == [asset_path]
 
 
-def test_handle_media_load_failure_uses_current_album_root_when_library_root_is_missing(
+def test_handle_media_load_failure_falls_back_to_standalone_lifecycle_service(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -365,54 +440,34 @@ def test_handle_media_load_failure_uses_current_album_root_when_library_root_is_
     nested_root = album_root / "nested"
     asset_path = nested_root / "missing.mov"
     nested_root.mkdir(parents=True)
+    fallback_lifecycle = FakeLifecycleService(album_root)
+    created: list[tuple[Path, object | None]] = []
 
-    class ExistingLifecycleService:
-        library_root = None
-
-        def repair_missing_asset(self, _path: Path) -> Path | None:
-            raise AssertionError(
-                "standalone repair should use an album-root-scoped lifecycle service"
-            )
-
-    class ReplacementLifecycleService:
-        instances: ClassVar[list["ReplacementLifecycleService"]] = []
-
-        def __init__(self, root: Path, *, scan_service=None) -> None:
-            self.library_root = Path(root)
-            self.scan_service = scan_service
-            self.media_failures: list[Path] = []
-            self.__class__.instances.append(self)
-
-        def repair_missing_asset(self, path: Path) -> Path | None:
-            self.media_failures.append(Path(path))
-            return Path(path).parent
-
-    ReplacementLifecycleService.instances.clear()
-    monkeypatch.setattr(
-        lus,
-        "create_compat_asset_lifecycle_service",
-        lambda root, *, scan_service=None: ReplacementLifecycleService(
-            root,
-            scan_service=scan_service,
-        ),
-    )
+    def _create_lifecycle(root: Path, *, scan_service=None):
+        created.append((Path(root), scan_service))
+        return fallback_lifecycle
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: DummyAlbum(album_root),
         library_manager_getter=lambda: DummyLibrary(
             None,
-            lifecycle_service=ExistingLifecycleService(),
         ),
     )
+    monkeypatch.setattr(
+        lus,
+        "create_standalone_asset_lifecycle_service",
+        _create_lifecycle,
+    )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
 
     refreshed = service.handle_media_load_failure(asset_path)
 
     assert refreshed == album_root
-    assert len(ReplacementLifecycleService.instances) == 1
-    replacement = ReplacementLifecycleService.instances[0]
-    assert replacement.library_root == album_root
-    assert replacement.media_failures == [asset_path]
+    assert created == [(album_root, None)]
+    assert fallback_lifecycle.media_failures == [asset_path]
+    assert errors == []
 
 
 def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:

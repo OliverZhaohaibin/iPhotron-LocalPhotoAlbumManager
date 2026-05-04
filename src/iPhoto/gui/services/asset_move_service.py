@@ -13,9 +13,12 @@ from ...bootstrap.library_asset_operation_service import (
     LibraryAssetOperationService,
     MetadataLookup,
 )
-from ...bootstrap.service_factories import create_compat_asset_operation_service
+from ...bootstrap.standalone_album_services import (
+    create_standalone_asset_operation_service,
+)
 from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.move_worker import MoveSignals, MoveWorker
+from .session_service_resolver import bound_asset_operation_service
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -69,7 +72,11 @@ class AssetMoveService(QObject):
 
         album = self._current_album_getter()
         library_manager = self._library_manager_getter()
-        operation_service = self._operation_service(library_manager)
+        try:
+            operation_service = self._operation_service(library_manager)
+        except RuntimeError as exc:
+            self.errorRaised.emit(str(exc))
+            return False
         plan = operation_service.plan_move_request(
             sources,
             destination,
@@ -147,18 +154,17 @@ class AssetMoveService(QObject):
         self,
         library_manager: Optional["LibraryManager"],
     ) -> LibraryAssetOperationService:
-        if library_manager is not None:
-            candidate = getattr(library_manager, "asset_operation_service", None)
-            if (
-                candidate is not None
-                and not self._is_unconfigured_mock(candidate)
-                and callable(getattr(candidate, "plan_move_request", None))
-            ):
-                return candidate
-
         library_root = library_manager.root() if library_manager is not None else None
         if self._is_unconfigured_mock(library_root):
             library_root = None
+        if library_root is not None:
+            candidate = bound_asset_operation_service(
+                library_manager,
+                library_root=library_root,
+            )
+            if candidate is not None:
+                return candidate
+
         lifecycle_service = (
             getattr(library_manager, "asset_lifecycle_service", None)
             if library_manager is not None
@@ -166,7 +172,7 @@ class AssetMoveService(QObject):
         )
         if self._is_unconfigured_mock(lifecycle_service):
             lifecycle_service = None
-        return create_compat_asset_operation_service(
+        return create_standalone_asset_operation_service(
             library_root,
             lifecycle_service=lifecycle_service,
         )

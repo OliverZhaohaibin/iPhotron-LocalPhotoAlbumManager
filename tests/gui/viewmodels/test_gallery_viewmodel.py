@@ -828,4 +828,4 @@ def test_rescan_current_emits_message_without_open_library() -> None:
     vm.rescan_current()
 
     assert messages == [("No album is currently open.", 3000)]
-    context.library.start_scanning.assert_not_called()
+    facade.scan_root_async.assert_not_called()

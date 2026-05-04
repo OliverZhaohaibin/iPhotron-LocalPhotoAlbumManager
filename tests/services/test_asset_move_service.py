@@ -21,6 +21,7 @@ pytest.importorskip(
 from PySide6.QtWidgets import QApplication
 
 import iPhoto.bootstrap.library_asset_lifecycle_service as lifecycle_module
+from iPhoto.bootstrap.library_asset_operation_service import LibraryAssetOperationService
 from iPhoto.cache.index_store import IndexStore
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.gui.services.asset_move_service import AssetMoveService
@@ -65,6 +66,17 @@ class _LifecycleRecorder:
         return lifecycle_module.AssetLifecycleResult()
 
 
+def _build_operation_service(
+    library_root: Path,
+    *,
+    lifecycle_service=None,
+) -> LibraryAssetOperationService:
+    return LibraryAssetOperationService(
+        library_root,
+        lifecycle_service=lifecycle_service,
+    )
+
+
 def test_move_assets_requires_active_album(
     mocker,
     tmp_path: Path,
@@ -107,10 +119,18 @@ def test_move_assets_submits_worker_and_emits_completion(
 
     album = mocker.MagicMock()
     album.root = source_root
+    lifecycle_service = _LifecycleRecorder()
+    library_manager = mocker.MagicMock()
+    library_manager.root.return_value = source_root
+    library_manager.asset_operation_service = _build_operation_service(
+        source_root,
+        lifecycle_service=lifecycle_service,  # type: ignore[arg-type]
+    )
 
     service = _create_service(
         task_manager=task_manager,
         current_album=lambda: album,
+        library_manager=library_manager,
     )
 
     results: list[tuple[Path, Path, bool, str]] = []
@@ -159,6 +179,40 @@ def test_move_assets_submits_worker_and_emits_completion(
     assert is_restore is False
 
 
+def test_move_assets_falls_back_to_standalone_service_when_library_is_unbound(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Standalone album moves should still queue a worker without a library session."""
+
+    source_root = tmp_path / "Source"
+    destination_root = tmp_path / "Destination"
+    source_root.mkdir()
+    destination_root.mkdir()
+    asset = source_root / "photo.jpg"
+    asset.write_bytes(b"data")
+
+    task_manager = mocker.MagicMock()
+    album = mocker.MagicMock()
+    album.root = source_root
+    service = _create_service(
+        task_manager=task_manager,
+        current_album=lambda: album,
+        library_manager=None,
+    )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
+
+    accepted = service.move_assets([asset], destination_root)
+
+    assert accepted is True
+    assert task_manager.submit_task.call_count == 1
+    worker = task_manager.submit_task.call_args.kwargs["worker"]
+    assert isinstance(worker, MoveWorker)
+    assert errors == []
+
+
 def test_delete_assets_skips_already_missing_sources(
     mocker,
     tmp_path: Path,
@@ -173,6 +227,10 @@ def test_delete_assets_skips_already_missing_sources(
     library_manager = mocker.MagicMock()
     library_manager.root.return_value = library_root
     library_manager.deleted_directory.return_value = trash_root
+    library_manager.asset_operation_service = _build_operation_service(
+        library_root,
+        lifecycle_service=_LifecycleRecorder(),  # type: ignore[arg-type]
+    )
 
     service = _create_service(
         task_manager=task_manager,
@@ -220,10 +278,15 @@ def test_delete_service_acceptance_runs_move_worker(
             rows.append({"rel": candidate.resolve().relative_to(root).as_posix()})
         return rows
 
-    library_manager.bind_asset_lifecycle_service(
-        lifecycle_module.LibraryAssetLifecycleService(
+    lifecycle_service = lifecycle_module.LibraryAssetLifecycleService(
+        library_root,
+        media_processor=_fake_process_media_paths,
+    )
+    library_manager.bind_asset_lifecycle_service(lifecycle_service)
+    library_manager.bind_asset_operation_service(
+        LibraryAssetOperationService(
             library_root,
-            media_processor=_fake_process_media_paths,
+            lifecycle_service=lifecycle_service,
         )
     )
     monkeypatch.setattr(lifecycle_module.LibraryScanService, "pair_album", lambda *_: [])
@@ -371,14 +434,17 @@ def test_move_assets_passes_session_lifecycle_service(
     destination_root.mkdir()
     asset = source_root / "photo.jpg"
     asset.write_bytes(b"data")
-    lifecycle_service = object()
+    lifecycle_service = _LifecycleRecorder()
 
     task_manager = mocker.MagicMock()
     album = mocker.MagicMock()
     album.root = source_root
     library_manager = mocker.MagicMock()
     library_manager.root.return_value = library_root
-    library_manager.asset_lifecycle_service = lifecycle_service
+    library_manager.asset_operation_service = _build_operation_service(
+        library_root,
+        lifecycle_service=lifecycle_service,  # type: ignore[arg-type]
+    )
 
     service = _create_service(
         task_manager=task_manager,
@@ -434,6 +500,9 @@ def test_restore_repopulates_library_index(
         library_root=library_root,
         trash_root=trash_root,
         is_restore=True,
+        asset_lifecycle_service=lifecycle_module.LibraryAssetLifecycleService(
+            library_root
+        ),
     )
 
     worker.run()
@@ -488,6 +557,9 @@ def test_restore_moves_ipo_sidecar_with_renamed_media(
         library_root=library_root,
         trash_root=trash_root,
         is_restore=True,
+        asset_lifecycle_service=lifecycle_module.LibraryAssetLifecycleService(
+            library_root
+        ),
     )
 
     worker.run()
@@ -542,6 +614,9 @@ def test_delete_records_original_path_for_restore(
         delete_signals,
         library_root=library_root,
         trash_root=trash_root,
+        asset_lifecycle_service=lifecycle_module.LibraryAssetLifecycleService(
+            library_root
+        ),
     )
     worker.run()
 
@@ -592,6 +667,9 @@ def test_move_from_library_root_updates_source_album_index(
         album_b,
         signals,
         library_root=library_root,
+        asset_lifecycle_service=lifecycle_module.LibraryAssetLifecycleService(
+            library_root
+        ),
     )
 
     worker.run()
@@ -645,6 +723,9 @@ def test_delete_collision_assigns_unique_trash_paths(
         signals,
         library_root=library_root,
         trash_root=trash_root,
+        asset_lifecycle_service=lifecycle_module.LibraryAssetLifecycleService(
+            library_root
+        ),
     )
     worker.run()
 
@@ -657,6 +738,9 @@ def test_delete_collision_assigns_unique_trash_paths(
         signals2,
         library_root=library_root,
         trash_root=trash_root,
+        asset_lifecycle_service=lifecycle_module.LibraryAssetLifecycleService(
+            library_root
+        ),
     )
     worker2.run()
 

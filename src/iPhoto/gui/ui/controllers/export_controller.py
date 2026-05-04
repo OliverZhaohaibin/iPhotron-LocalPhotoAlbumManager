@@ -12,8 +12,6 @@ from PySide6.QtWidgets import QWidget, QFileDialog
 from ....application.ports import EditServicePort
 from ....core.export import export_asset, DEFAULT_EXPORT_FORMAT
 from ....config import EXPORT_DIR_NAME
-from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
-from ....bootstrap.service_factories import create_compat_asset_query_service
 from ....library.manager import LibraryManager
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
@@ -93,7 +91,11 @@ class LibraryExportWorker(QRunnable):
         to_export = []
         query_service = getattr(self._library, "asset_query_service", None)
         if query_service is None:
-            query_service = create_compat_asset_query_service(root)
+            self.signals.message.emit(
+                "Active library session is unavailable; export requires a bound LibrarySession."
+            )
+            self.signals.finished.emit(0, 0)
+            return
 
         try:
             rows = query_service.read_asset_rows(root, filter_hidden=False)

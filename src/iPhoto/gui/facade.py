@@ -91,6 +91,9 @@ class AppFacade(QObject):
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
         self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
+        self._library_update_service.scanBatchFailed.connect(
+            self._relay_scan_batch_failed
+        )
         self._library_update_service.indexUpdated.connect(self._relay_index_updated)
         self._library_update_service.linksUpdated.connect(self._relay_links_updated)
         self._library_update_service.assetReloadRequested.connect(
@@ -194,7 +197,7 @@ class AppFacade(QObject):
                 hydrate_index=False,
                 sync_manifest_favorites=library_root is None,
             )
-        except IPhotoError as exc:
+        except (IPhotoError, RuntimeError) as exc:
             self.errorRaised.emit(str(exc))
             return None
 
@@ -228,6 +231,21 @@ class AppFacade(QObject):
             return
 
         self._library_update_service.rescan_album_async(album)
+
+    def scan_root_async(
+        self,
+        root: Path,
+        *,
+        include: Iterable[str],
+        exclude: Iterable[str],
+    ) -> None:
+        """Start a background scan for *root* through the bound session surface."""
+
+        self._library_update_service.scan_root_async(
+            root,
+            include=include,
+            exclude=exclude,
+        )
 
     def _inject_scan_dependencies_for_tests(
         self,

@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from ...bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
-from ...bootstrap.service_factories import create_compat_album_metadata_service
+from ...bootstrap.standalone_album_services import (
+    create_standalone_album_metadata_service,
+)
+from .session_service_resolver import bound_album_metadata_service
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -107,19 +110,20 @@ class AlbumMetadataService(QObject):
         library_manager: "LibraryManager | None",
     ) -> LibraryAlbumMetadataService:
         if library_manager is not None:
-            candidate = getattr(library_manager, "album_metadata_service", None)
-            if (
-                candidate is not None
-                and not self._is_unconfigured_mock(candidate)
-                and callable(getattr(candidate, "set_cover", None))
-                and callable(getattr(candidate, "toggle_featured", None))
-                and callable(getattr(candidate, "ensure_featured_entries", None))
-            ):
-                return candidate
-
-        library_root = library_manager.root() if library_manager is not None else None
+            library_root = library_manager.root()
+        else:
+            library_root = None
         if self._is_unconfigured_mock(library_root):
             library_root = None
+
+        if library_root is not None:
+            candidate = bound_album_metadata_service(
+                library_manager,
+                library_root=library_root,
+            )
+            if candidate is not None:
+                return candidate
+
         state_repository = (
             getattr(library_manager, "state_repository", None)
             if library_manager is not None
@@ -127,7 +131,7 @@ class AlbumMetadataService(QObject):
         )
         if self._is_unconfigured_mock(state_repository):
             state_repository = None
-        return create_compat_album_metadata_service(
+        return create_standalone_album_metadata_service(
             library_root,
             state_repository=state_repository,
         )

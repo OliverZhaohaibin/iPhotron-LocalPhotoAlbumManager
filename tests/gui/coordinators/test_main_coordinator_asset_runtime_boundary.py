@@ -15,6 +15,7 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     map_interaction_service = SimpleNamespace()
 
     coordinator._context = MagicMock()
+    coordinator._context.library_session = None
     coordinator._context.library.root.return_value = root
     coordinator._context.library.map_runtime = map_runtime
     coordinator._context.library.map_interaction_service = map_interaction_service
@@ -67,6 +68,7 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
     map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
 
     coordinator._context = MagicMock()
+    coordinator._context.library_session = None
     coordinator._context.library.root.return_value = root
     coordinator._context.library.map_runtime = map_runtime
     coordinator._context.library.asset_query_service = MagicMock()
@@ -103,6 +105,7 @@ def test_on_library_tree_updated_uses_bound_people_service_when_available() -> N
     map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
 
     coordinator._context = MagicMock()
+    coordinator._context.library_session = None
     coordinator._context.library.root.return_value = root
     coordinator._context.library.people_service = people_service
     coordinator._context.library.map_runtime = map_runtime
@@ -160,7 +163,7 @@ def test_on_map_asset_activated_delegates_to_navigation() -> None:
     coordinator._navigation.open_location_asset.assert_called_once_with("nested/photo.jpg")
 
 
-def test_connect_signals_wires_location_scan_updates_from_library() -> None:
+def test_connect_signals_wires_location_scan_updates_from_library_and_service() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     coordinator._window = MagicMock()
     coordinator._window.ui = MagicMock()
@@ -193,9 +196,27 @@ def test_connect_signals_wires_location_scan_updates_from_library() -> None:
     coordinator._connect_signals()
 
     coordinator._context.library.scanChunkReady.connect.assert_any_call(
+        coordinator._gallery_store.handle_scan_chunk
+    )
+    coordinator._context.library.scanFinished.connect.assert_any_call(
+        coordinator._gallery_store.handle_scan_finished
+    )
+    coordinator._context.library.scanChunkReady.connect.assert_any_call(
         coordinator._gallery_vm.handle_location_scan_chunk
     )
     coordinator._context.library.scanFinished.connect.assert_any_call(
+        coordinator._gallery_vm.handle_location_scan_finished
+    )
+    coordinator._facade.library_updates.scanChunkReady.connect.assert_any_call(
+        coordinator._gallery_store.handle_scan_chunk
+    )
+    coordinator._facade.library_updates.scanFinished.connect.assert_any_call(
+        coordinator._gallery_store.handle_scan_finished
+    )
+    coordinator._facade.library_updates.scanChunkReady.connect.assert_any_call(
+        coordinator._gallery_vm.handle_location_scan_chunk
+    )
+    coordinator._facade.library_updates.scanFinished.connect.assert_any_call(
         coordinator._gallery_vm.handle_location_scan_finished
     )
     coordinator._facade.move_service.moveFinished.connect.assert_any_call(

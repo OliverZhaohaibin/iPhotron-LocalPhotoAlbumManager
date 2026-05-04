@@ -11,6 +11,7 @@ pytest.importorskip(
 )
 
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.bootstrap.library_asset_operation_service import LibraryAssetOperationService
 from iPhoto.gui.services.restoration_service import RestorationService
 
 
@@ -45,6 +46,10 @@ class _FakeLibrary:
     ) -> None:
         self._root = Path(root)
         self.asset_lifecycle_service = lifecycle_service
+        self.asset_operation_service = LibraryAssetOperationService(
+            self._root,
+            lifecycle_service=lifecycle_service,  # type: ignore[arg-type]
+        )
         self._albums_by_uuid = albums_by_uuid or {}
 
     def root(self) -> Path:

@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
 
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
-from ....bootstrap.service_factories import create_compat_asset_query_service
 from ....errors import LibraryError
 from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
@@ -352,9 +351,12 @@ class AlbumDataWorker(QRunnable):
 
         try:
             index_root = self._library_root if self._library_root else self.node.path
-            query_service = self._asset_query_service or create_compat_asset_query_service(
-                index_root
-            )
+            query_service = self._asset_query_service
+            if query_service is None:
+                raise RuntimeError(
+                    "Active library session is unavailable; album dashboard queries "
+                    "require a bound LibrarySession."
+                )
 
             count = query_service.count_assets(self.node.path)
 

@@ -9,6 +9,10 @@ from typing import Callable, Iterable, List, Optional, Sequence
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from ...bootstrap.standalone_album_services import (
+    create_standalone_asset_lifecycle_service,
+    create_standalone_scan_service,
+)
 from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.import_worker import ImportSignals, ImportWorker
 from .album_metadata_service import AlbumMetadataService
@@ -79,22 +83,35 @@ class AssetImportService(QObject):
         signals.started.connect(self._on_import_started)
         signals.progress.connect(self._on_import_progress)
 
-        library_root: Optional[Path] = None
-        scan_service = None
-        lifecycle_service = None
-        if self._library_manager_getter is not None:
-            manager = self._library_manager_getter()
-            if manager is not None:
-                library_root = manager.root()
-                scan_service = getattr(manager, "scan_service", None)
-                lifecycle_service = getattr(manager, "asset_lifecycle_service", None)
+        manager = (
+            self._library_manager_getter() if self._library_manager_getter is not None else None
+        )
+        library_root: Optional[Path] = manager.root() if manager is not None else None
+        scan_service = (
+            getattr(manager, "scan_service", None)
+            if manager is not None and library_root is not None
+            else None
+        )
+        lifecycle_service = (
+            getattr(manager, "asset_lifecycle_service", None)
+            if manager is not None and library_root is not None
+            else None
+        )
+        service_root = library_root or target_root
+        if scan_service is None:
+            scan_service = create_standalone_scan_service(service_root)
+        if lifecycle_service is None:
+            lifecycle_service = create_standalone_asset_lifecycle_service(
+                service_root,
+                scan_service=scan_service,
+            )
 
         worker = ImportWorker(
             normalized,
             target_root,
             self._copy_into_album,
             signals,
-            library_root=library_root,
+            library_root=service_root,
             scan_service=scan_service,
             asset_lifecycle_service=lifecycle_service,
         )

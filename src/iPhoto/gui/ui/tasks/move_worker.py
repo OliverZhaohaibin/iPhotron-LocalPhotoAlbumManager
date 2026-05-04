@@ -9,7 +9,6 @@ from typing import Iterable, List, Optional, Tuple
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ....bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
-from ....bootstrap.service_factories import create_compat_asset_lifecycle_service
 from ....io import sidecar
 from ....utils.logging import get_logger
 
@@ -259,11 +258,12 @@ class MoveWorker(QRunnable):
 
     @property
     def asset_lifecycle_service(self) -> LibraryAssetLifecycleService:
-        """Return the session lifecycle service, creating a compatibility fallback."""
+        """Return the bound lifecycle service for this move operation."""
 
         if self._asset_lifecycle_service is None:
-            self._asset_lifecycle_service = create_compat_asset_lifecycle_service(
-                self._library_root,
+            raise RuntimeError(
+                "Active library session is unavailable; file moves require a bound "
+                "lifecycle service."
             )
         return self._asset_lifecycle_service
 

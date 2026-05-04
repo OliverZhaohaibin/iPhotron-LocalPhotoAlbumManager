@@ -512,10 +512,10 @@ class GalleryViewModel(BaseViewModel):
             self.message_requested.emit("No album is currently open.", 3000)
             return
 
-        self._context.library.start_scanning(
+        self._facade.scan_root_async(
             library_root,
-            DEFAULT_INCLUDE,
-            DEFAULT_EXCLUDE,
+            include=DEFAULT_INCLUDE,
+            exclude=DEFAULT_EXCLUDE,
         )
 
     def path_for_row(self, row: int) -> Optional[Path]:

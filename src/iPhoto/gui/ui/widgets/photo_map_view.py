@@ -24,7 +24,7 @@ from ....application.ports import MapInteractionServicePort, MapRuntimePort
 from ....application.services.map_interaction_service import LibraryMapInteractionService
 from maps.map_widget.map_renderer import CityAnnotation
 
-from ....library.manager import GeotaggedAsset
+from ....library.runtime_controller import GeotaggedAsset
 from ..tasks.thumbnail_loader import ThumbnailLoader
 from .marker_controller import MarkerController, _MarkerCluster
 from .custom_tooltip import FloatingToolTip, ToolTipEventFilter

@@ -11,7 +11,7 @@ import pytest
 from PySide6.QtGui import QAction, QActionGroup
 
 from iPhoto.gui.ui.controllers.export_controller import ExportController
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 
 def _make_settings(destination: str = "library", export_format: str = "jpg"):
@@ -45,7 +45,7 @@ def _make_actions():
 def _build_controller(settings=None, actions=None, tmp_path=None):
     settings = settings or _make_settings()
     actions = actions or _make_actions()
-    lib = MagicMock(spec=LibraryManager)
+    lib = MagicMock(spec=LibraryRuntimeController)
     lib.root.return_value = tmp_path or Path("/fake/lib")
     return ExportController(
         settings=settings,

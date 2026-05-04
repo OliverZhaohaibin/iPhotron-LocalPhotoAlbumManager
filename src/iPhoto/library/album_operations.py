@@ -16,7 +16,7 @@ from ..errors import (
     AlbumNameConflictError,
     AlbumOperationError,
 )
-from ..models.album import Album
+from ..application.services.album_manifest_service import Album
 from ..utils.jsonio import read_json
 from .tree import AlbumNode
 
@@ -35,7 +35,7 @@ _RESERVED_LIBRARY_DIR_NAMES = frozenset(
 
 
 class AlbumOperationsMixin:
-    """Mixin providing album CRUD operations for LibraryManager."""
+    """Mixin providing album CRUD operations for LibraryRuntimeController."""
 
     def create_album(self, name: str) -> AlbumNode:
         root = self._require_root()

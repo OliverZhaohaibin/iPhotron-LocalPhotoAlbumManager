@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from iPhoto.application.services.parallel_scanner import ParallelScanner, ScanResult, _default_max_workers
-from iPhoto.application.services.library_service import LibraryService
-from iPhoto.application.services.asset_service import AssetService
+from iPhoto.legacy.application.services.parallel_scanner import ParallelScanner, ScanResult, _default_max_workers
+from iPhoto.legacy.application.services.library_service import LibraryService
+from iPhoto.legacy.application.services.asset_service import AssetService
 from iPhoto.di.bootstrap import bootstrap
 from iPhoto.di.container import Container
 from iPhoto.domain.models.core import Album, Asset, MediaType

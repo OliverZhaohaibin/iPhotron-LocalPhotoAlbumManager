@@ -11,11 +11,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from ...bootstrap.library_asset_operation_service import LibraryAssetOperationService
     from ...bootstrap.library_asset_query_service import LibraryAssetQueryService
     from ...bootstrap.library_scan_service import LibraryScanService
-    from ...library.manager import LibraryManager
+    from ...library.runtime_controller import LibraryRuntimeController
 
 
 def bound_album_metadata_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     library_root: Path | None = None,
 ) -> "LibraryAlbumMetadataService | None":
@@ -30,7 +30,7 @@ def bound_album_metadata_service(
 
 
 def bound_asset_lifecycle_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     library_root: Path | None = None,
 ) -> "LibraryAssetLifecycleService | None":
@@ -45,7 +45,7 @@ def bound_asset_lifecycle_service(
 
 
 def bound_asset_operation_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     library_root: Path | None = None,
 ) -> "LibraryAssetOperationService | None":
@@ -60,7 +60,7 @@ def bound_asset_operation_service(
 
 
 def bound_asset_query_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     library_root: Path | None = None,
 ) -> "LibraryAssetQueryService | None":
@@ -75,7 +75,7 @@ def bound_asset_query_service(
 
 
 def bound_scan_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     library_root: Path | None = None,
 ) -> "LibraryScanService | None":
@@ -90,7 +90,7 @@ def bound_scan_service(
 
 
 def _bound_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     attr: str,
     library_root: Path | None,

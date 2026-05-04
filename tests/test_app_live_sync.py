@@ -4,15 +4,15 @@ from unittest.mock import patch
 
 import pytest
 
-from iPhoto import app as backend
-from iPhoto.app import _sync_live_roles_to_db
+from iPhoto.legacy import app as backend
+from iPhoto.legacy.app import _sync_live_roles_to_db
 from iPhoto.cache.index_store import (
     IndexStore,
     get_global_repository,
     reset_global_repository,
 )
 from iPhoto.config import WORK_DIR_NAME
-from iPhoto.models.types import LiveGroup
+from iPhoto.domain.models.core import LiveGroup
 
 
 @pytest.fixture(autouse=True)

@@ -32,7 +32,7 @@ from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.people.repository import AssetFaceAnnotation
 from iPhoto.people.service import PeopleService
 from maps.osmand_search import OsmAndSearchService, SearchSuggestion
@@ -97,7 +97,7 @@ class PlaybackCoordinator(QObject):
         face_name_overlay: FaceNameOverlayWidget | None = None,
         people_service: PeopleService | None = None,
         people_dashboard_refresh_callback: Callable[[], None] | None = None,
-        library_manager: LibraryManager | None = None,
+        library_manager: LibraryRuntimeController | None = None,
         location_session_invalidator: Callable[[], None] | None = None,
         map_runtime: MapRuntimePort | None = None,
     ) -> None:

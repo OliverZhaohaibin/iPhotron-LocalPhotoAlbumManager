@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..widgets import dialogs
 from ....errors import LibraryError
-from ....library.manager import LibraryManager
+from ....library.runtime_controller import LibraryRuntimeController
 from ....library.tree import AlbumNode
 from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, NodeType
 from .style import apply_menu_style
@@ -102,7 +102,7 @@ class AlbumSidebarContextMenu(QMenu):
         parent: QWidget,
         tree: QTreeView,
         model: AlbumTreeModel,
-        library: LibraryManager,
+        library: LibraryRuntimeController,
         item: AlbumTreeItem,
         set_pending_selection: Callable[[Path | None], None],
         on_bind_library: Callable[[], None],
@@ -304,7 +304,7 @@ def show_context_menu(
     point: QPoint,
     tree: QTreeView,
     model: AlbumTreeModel,
-    library: LibraryManager,
+    library: LibraryRuntimeController,
     set_pending_selection: Callable[[Path | None], None],
     on_bind_library: Callable[[], None],
 ) -> None:

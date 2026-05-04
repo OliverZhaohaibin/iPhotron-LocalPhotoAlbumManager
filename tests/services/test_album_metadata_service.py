@@ -92,7 +92,7 @@ def test_set_album_cover_delegates_to_bound_service_and_refreshes_view(
     assert album.cover == "cover.jpg"
 
 
-def test_set_album_cover_falls_back_to_standalone_service_when_library_is_unbound(
+def test_set_album_cover_reports_error_when_library_is_unbound(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -106,10 +106,16 @@ def test_set_album_cover_falls_back_to_standalone_service_when_library_is_unboun
         library_manager_getter=lambda: None,
         refresh_view=refresh,
     )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
 
-    assert service.set_album_cover(album, "cover.jpg") is True
-    refresh.assert_called_once_with(album_root)
-    assert album.cover == "cover.jpg"
+    assert service.set_album_cover(album, "cover.jpg") is False
+    refresh.assert_not_called()
+    assert album.cover is None
+    assert errors == [
+        "Active library session is unavailable; album metadata writes require "
+        "a bound LibrarySession."
+    ]
 
 
 def test_toggle_featured_delegates_to_bound_service_and_updates_album_state(

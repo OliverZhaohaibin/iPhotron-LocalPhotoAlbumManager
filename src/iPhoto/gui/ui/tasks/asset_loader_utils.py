@@ -13,9 +13,6 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
-from ....bootstrap.standalone_album_services import (
-    create_standalone_asset_query_service,
-)
 from ....config import RECENTLY_DELETED_DIR_NAME
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
@@ -124,13 +121,14 @@ def require_query_service(
 ) -> LibraryAssetQueryService:
     """Return a query service for *effective_index_root*.
 
-    Standalone ``Open Album...`` flows still need a per-folder query surface when
-    no library session is active, or when the selected album lives outside the
-    currently bound library root.
+    Asset loading is session-only in the vNext runtime.
     """
 
     if asset_query_service is None:
-        return create_standalone_asset_query_service(effective_index_root)
+        raise RuntimeError(
+            "Active library session is unavailable; asset loading requires a "
+            "bound LibrarySession."
+        )
 
     try:
         bound_root = Path(asset_query_service.library_root)
@@ -140,7 +138,9 @@ def require_query_service(
         ) from exc
 
     if not _paths_equal(bound_root, effective_index_root):
-        return create_standalone_asset_query_service(effective_index_root)
+        raise RuntimeError(
+            "Bound asset query service does not match the requested library root."
+        )
 
     return asset_query_service
 

@@ -42,7 +42,7 @@ from ..utils.logging import get_logger
 from ..utils.pathutils import ensure_work_dir, resolve_work_dir
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..models.types import LiveGroup
+    from ..domain.models.core import LiveGroup
 
 LOGGER = get_logger()
 

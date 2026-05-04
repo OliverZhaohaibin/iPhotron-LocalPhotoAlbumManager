@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from iPhoto import app as backend
+from iPhoto.legacy import app as backend
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 
 

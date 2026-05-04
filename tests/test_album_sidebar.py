@@ -14,7 +14,7 @@ from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.menus.album_sidebar_menu import AlbumSidebarContextMenu
 from iPhoto.gui.ui.models.album_tree_model import NodeType
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -38,7 +38,7 @@ def test_programmatic_selection_suppresses_signals(tmp_path: Path, qapp: QApplic
     album_dir = root / "Trip"
     album_dir.mkdir(parents=True)
     _write_manifest(album_dir, "Trip")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -74,7 +74,7 @@ def test_programmatic_selection_can_emit_signals(tmp_path: Path, qapp: QApplicat
     """Verify that programmatic selection can optionally emit signals."""
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -93,7 +93,7 @@ def test_programmatic_selection_can_emit_signals(tmp_path: Path, qapp: QApplicat
 def test_programmatic_pinned_selection_can_emit_signal(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -124,7 +124,7 @@ def test_sidebar_album_context_menu_offers_pin_and_unpin(tmp_path: Path, qapp: Q
     album_dir.mkdir(parents=True)
     _write_manifest(album_dir, "Trip")
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -174,7 +174,7 @@ def test_sidebar_pinned_album_survives_album_rename(tmp_path: Path, qapp: QAppli
     album_dir.mkdir(parents=True)
     _write_manifest(album_dir, "Trip")
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -222,7 +222,7 @@ def test_sidebar_pinned_album_rename_updates_album_tree(
     album_dir.mkdir(parents=True)
     _write_manifest(album_dir, "Trip")
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -290,7 +290,7 @@ def test_sidebar_pinned_album_rename_updates_album_tree(
 def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -331,7 +331,7 @@ def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QAp
 def test_sidebar_pinned_item_context_menu_can_rename(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 

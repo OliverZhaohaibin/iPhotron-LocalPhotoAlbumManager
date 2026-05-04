@@ -13,7 +13,7 @@ from PySide6.QtGui import QPixmap
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.map_renderer import CityAnnotation
 
-from ....library.manager import GeotaggedAsset
+from ....library.runtime_controller import GeotaggedAsset
 from ..tasks.thumbnail_loader import ThumbnailLoader
 
 

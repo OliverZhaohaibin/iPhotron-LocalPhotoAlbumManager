@@ -50,7 +50,7 @@ class _PairingWorker(QRunnable):
 
 
 class ScanCoordinatorMixin:
-    """Mixin providing scan scheduling and progress for LibraryManager."""
+    """Mixin providing scan scheduling and progress for LibraryRuntimeController."""
 
     def start_session_scan(
         self,
@@ -59,7 +59,7 @@ class ScanCoordinatorMixin:
         include: Iterable[str],
         exclude: Iterable[str],
     ) -> None:
-        """Start a scan through the session-facing LibraryManager surface."""
+        """Start a scan through the session-facing runtime controller surface."""
 
         self.start_scanning(root, include, exclude)
 

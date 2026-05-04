@@ -1,2 +1,1 @@
-"""Legacy GUI compatibility artifacts."""
-
+"""Legacy GUI compatibility artifacts scheduled for next-major removal."""

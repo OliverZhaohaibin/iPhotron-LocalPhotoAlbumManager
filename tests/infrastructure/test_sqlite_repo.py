@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from iPhoto.infrastructure.db.pool import ConnectionPool
-from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from iPhoto.legacy.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery, SortOrder
 

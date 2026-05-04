@@ -334,6 +334,18 @@ class _SimpleQtBot:
 
 
 @pytest.fixture()
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+    app.processEvents()
+
+
+@pytest.fixture()
 def qtbot():
     from PySide6.QtWidgets import QApplication
 

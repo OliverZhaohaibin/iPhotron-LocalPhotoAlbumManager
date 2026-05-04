@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal
 from ...errors import AlbumOperationError
 
 if TYPE_CHECKING:
-    from ...library.manager import LibraryManager
+    from ...library.runtime_controller import LibraryRuntimeController
     from .asset_move_service import AssetMoveService
 
 
@@ -23,7 +23,7 @@ class DeletionService(QObject):
         self,
         *,
         move_service: "AssetMoveService",
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
+        library_manager_getter: Callable[[], Optional["LibraryRuntimeController"]],
         model_provider_getter: Callable[[], Optional[Callable[[], Any]]],
         parent: Optional[QObject] = None,
     ) -> None:

@@ -46,19 +46,16 @@ def test_geo_aggregator_skips_hidden_live_motion_rows(monkeypatch, tmp_path: Pat
     ]
 
     class _Repo:
-        def read_geotagged(self):
+        def __init__(self, root: Path) -> None:
+            self.library_root = root
+
+        def read_geotagged_rows(self):
             return iter(rows)
 
-    monkeypatch.setattr(
-        "iPhoto.library.geo_aggregator.get_global_repository",
-        lambda root: _Repo(),
-    )
-    monkeypatch.setattr(
-        "iPhoto.library.geo_aggregator.resolve_location_name",
-        lambda gps: "Beijing",
-    )
+    library = _DummyLibrary(library_root)
+    library.asset_query_service = _Repo(library_root)
 
-    assets = _DummyLibrary(library_root).get_geotagged_assets()
+    assets = library.get_geotagged_assets()
     assert len(assets) == 1
     assert assets[0].library_relative == "a.heic"
     assert assets[0].live_photo_group_id == "group-1"

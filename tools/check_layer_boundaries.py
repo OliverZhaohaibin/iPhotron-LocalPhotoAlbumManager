@@ -17,17 +17,7 @@ LOWER_LAYER_GUI_FORBIDDEN_ROOTS = {
     "people",
 }
 
-LEGACY_MODEL_IMPORT_EXCEPTIONS = {
-    "app.py",
-    "cli.py",
-    "core/pairing.py",
-    "gui/facade.py",
-    "gui/services/asset_move_service.py",
-    "gui/ui/tasks/incremental_refresh_worker.py",
-    "gui/ui/widgets/albums_dashboard.py",
-    "index_sync_service.py",
-    "library/album_operations.py",
-}
+LEGACY_MODEL_IMPORT_EXCEPTIONS: set[str] = set()
 
 PEOPLE_INDEX_STORE_FORBIDDEN_FILES = {
     "library/workers/face_scan_worker.py",
@@ -204,6 +194,24 @@ GUI_COMPAT_FACTORY_CALLS = LIBRARY_COMPAT_FACTORY_CALLS
 GUI_SCAN_ENTRY_FORBIDDEN_CALLS = {"start_scanning"}
 
 LEGACY_RUNTIME_IMPORT_FORBIDDEN = "iPhoto.legacy"
+
+LEGACY_QUARANTINED_OLD_PATHS = {
+    "iPhoto.app",
+    "iPhoto.appctx",
+    "iPhoto.bootstrap.container",
+    "iPhoto.bootstrap.service_factories",
+    "iPhoto.bootstrap.standalone_album_services",
+    "iPhoto.application.services.album_service",
+    "iPhoto.application.services.asset_service",
+    "iPhoto.application.services.library_service",
+    "iPhoto.application.services.parallel_scanner",
+    "iPhoto.application.services.paginated_loader",
+    "iPhoto.domain.repositories",
+    "iPhoto.infrastructure.repositories.sqlite_album_repository",
+    "iPhoto.infrastructure.repositories.sqlite_asset_repository",
+    "iPhoto.infrastructure.repositories.index_store_asset_repository",
+    "iPhoto.library.manager",
+}
 
 
 def _is_type_checking_guard(node: ast.If) -> bool:
@@ -520,6 +528,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: runtime imports legacy quarantine module {module}"
+                )
+
+            if top_level != "legacy" and any(
+                _is_or_under(module, legacy_module)
+                for legacy_module in LEGACY_QUARANTINED_OLD_PATHS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: runtime imports quarantined legacy path {module}"
                 )
 
         for lineno, call_name in calls:

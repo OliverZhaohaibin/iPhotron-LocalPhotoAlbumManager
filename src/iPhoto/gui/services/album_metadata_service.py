@@ -9,14 +9,11 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from ...bootstrap.library_album_metadata_service import LibraryAlbumMetadataService
-from ...bootstrap.standalone_album_services import (
-    create_standalone_album_metadata_service,
-)
 from .session_service_resolver import bound_album_metadata_service
 
 if TYPE_CHECKING:
-    from ...library.manager import LibraryManager
-    from ...models.album import Album
+    from ...library.runtime_controller import LibraryRuntimeController
+    from ...application.services.album_manifest_service import Album
 
 
 class AlbumMetadataService(QObject):
@@ -28,7 +25,7 @@ class AlbumMetadataService(QObject):
         self,
         *,
         current_album_getter: Callable[[], "Album | None"],
-        library_manager_getter: Callable[[], "LibraryManager | None"],
+        library_manager_getter: Callable[[], "LibraryRuntimeController | None"],
         refresh_view: Callable[[Path], None],
         parent: QObject | None = None,
     ) -> None:
@@ -107,7 +104,7 @@ class AlbumMetadataService(QObject):
 
     def _metadata_service(
         self,
-        library_manager: "LibraryManager | None",
+        library_manager: "LibraryRuntimeController | None",
     ) -> LibraryAlbumMetadataService:
         if library_manager is not None:
             library_root = library_manager.root()
@@ -124,16 +121,9 @@ class AlbumMetadataService(QObject):
             if candidate is not None:
                 return candidate
 
-        state_repository = (
-            getattr(library_manager, "state_repository", None)
-            if library_manager is not None
-            else None
-        )
-        if self._is_unconfigured_mock(state_repository):
-            state_repository = None
-        return create_standalone_album_metadata_service(
-            library_root,
-            state_repository=state_repository,
+        raise RuntimeError(
+            "Active library session is unavailable; album metadata writes require "
+            "a bound LibrarySession."
         )
 
     def _run_with_watcher_pause(

@@ -9,7 +9,7 @@ import pytest
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery, SortOrder
-from iPhoto.infrastructure.repositories.index_store_asset_repository import (
+from iPhoto.legacy.infrastructure.repositories.index_store_asset_repository import (
     IndexStoreAssetRepositoryAdapter,
 )
 

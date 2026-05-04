@@ -10,7 +10,7 @@ from .cache.lock import FileLock
 from .config import RECENTLY_DELETED_DIR_NAME
 from .core.pairing import pair_live
 from .errors import IndexCorruptedError, ManifestInvalidError
-from .models.types import LiveGroup
+from .domain.models.core import LiveGroup
 from .path_normalizer import compute_album_path, normalise_rel_key
 from .utils.jsonio import read_json, write_json
 from .utils.logging import get_logger

@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ....library.manager import LibraryManager
+from ....library.runtime_controller import LibraryRuntimeController
 from ....config import ALL_PHOTOS_TITLE as _ALL_PHOTOS_TITLE
 from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from ..models.album_tree_model import AlbumTreeModel, NodeType
@@ -170,7 +170,7 @@ class AlbumSidebar(QWidget):
 
     ALL_PHOTOS_TITLE = _ALL_PHOTOS_TITLE
 
-    def __init__(self, library: LibraryManager, parent: QWidget | None = None) -> None:
+    def __init__(self, library: LibraryRuntimeController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._updating_style = False
         self._library = library

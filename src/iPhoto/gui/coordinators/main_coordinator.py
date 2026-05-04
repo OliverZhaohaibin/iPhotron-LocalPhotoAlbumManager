@@ -440,7 +440,7 @@ class MainCoordinator(QObject):
         updates = self._facade.library_updates
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
         self._context.library.albumRenamed.connect(self._on_album_renamed)
-        # Library watcher rescans still emit through the bound LibraryManager,
+        # Library watcher rescans still emit through the bound LibraryRuntimeController,
         # while facade-initiated rescans emit through LibraryUpdateService.
         self._context.library.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
         self._context.library.scanFinished.connect(self._gallery_store.handle_scan_finished)
@@ -823,7 +823,41 @@ class MainCoordinator(QObject):
         self._view_router.show_gallery()
 
     def open_album_from_path(self, path: Path):
-        self._navigation.open_album(path)
+        target = Path(path).expanduser()
+        if not self._ensure_session_for_open_album(target):
+            return
+        self._navigation.open_album(target)
+
+    def _ensure_session_for_open_album(self, path: Path) -> bool:
+        """Ensure standalone album opens have a session-bound query surface."""
+
+        if not path.exists() or not path.is_dir():
+            return True
+
+        current_root = self._library_root()
+        if current_root is not None and self._path_is_descendant(path, current_root):
+            return True
+
+        open_library = getattr(self._context, "open_library", None)
+        if not callable(open_library):
+            return True
+
+        try:
+            open_library(path)
+        except Exception as exc:
+            self._facade.errorRaised.emit(str(exc))
+            return False
+
+        self._on_library_tree_updated()
+        return True
+
+    @staticmethod
+    def _path_is_descendant(path: Path, root: Path) -> bool:
+        try:
+            Path(path).resolve().relative_to(Path(root).resolve())
+        except (OSError, ValueError):
+            return False
+        return True
 
     def _restore_preferences(self) -> None:
         """Restore UI preferences for wheel action and volume."""

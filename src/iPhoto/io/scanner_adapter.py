@@ -2,7 +2,9 @@
 
 from pathlib import Path
 from typing import Iterator, Dict, Any, List, Optional, Callable, Iterable
+import os
 import queue
+import threading
 import unicodedata
 from datetime import datetime, timezone
 import logging
@@ -14,8 +16,12 @@ from ..infrastructure.services.thumbnail_generator import PillowThumbnailGenerat
 from ..people import initial_face_status
 from ..utils.hashutils import compute_file_id
 from ..utils.pathutils import should_include
-from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
-from ..application.use_cases.scan_album import FileDiscoveryThread
+from ..config import (
+    ALL_WORK_DIR_NAMES,
+    DEFAULT_EXCLUDE,
+    DEFAULT_INCLUDE,
+    EXPORT_DIR_NAME,
+)
 
 # Instantiate services directly for the adapter (stateless)
 _metadata_provider = ExifToolMetadataProvider()
@@ -23,6 +29,56 @@ _thumbnail_generator = PillowThumbnailGenerator()
 _IMAGE_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_IMAGE_EXTENSIONS", ()))
 _VIDEO_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_VIDEO_EXTENSIONS", ()))
 LOGGER = logging.getLogger(__name__)
+
+
+class FileDiscoveryThread(threading.Thread):
+    """Discover media paths for the filesystem scanner."""
+
+    def __init__(
+        self,
+        root: Path,
+        queue_obj: queue.Queue,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+    ) -> None:
+        super().__init__(name=f"ScannerDiscovery-{root.name}")
+        self._root = Path(root)
+        self._queue = queue_obj
+        self._include = include or list(DEFAULT_INCLUDE)
+        self._exclude = exclude or list(DEFAULT_EXCLUDE)
+        self._stop_event = threading.Event()
+        self.total_found = 0
+        self.daemon = True
+
+    def run(self) -> None:
+        try:
+            reserved_names = {
+                *[name.casefold() for name in ALL_WORK_DIR_NAMES],
+                EXPORT_DIR_NAME.casefold(),
+            }
+            for dirpath, dirnames, filenames in os.walk(self._root):
+                if self._stop_event.is_set():
+                    break
+                dirnames[:] = [
+                    name for name in dirnames if name.casefold() not in reserved_names
+                ]
+                for name in filenames:
+                    if self._stop_event.is_set():
+                        break
+                    candidate = Path(dirpath) / name
+                    if should_include(
+                        candidate,
+                        self._include,
+                        self._exclude,
+                        root=self._root,
+                    ):
+                        self._queue.put(candidate)
+                        self.total_found += 1
+        finally:
+            self._queue.put(None)
+
+    def stop(self) -> None:
+        self._stop_event.set()
 
 
 def _fallback_row_for_path(root: Path, path: Path) -> Dict[str, Any]:

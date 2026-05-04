@@ -7,9 +7,7 @@ from pathlib import Path
 from ...application.ports import AssetRepositoryPort, EditServicePort
 from ...config import WORK_DIR_NAME
 from ...cache.index_store import get_global_repository
-from ...domain.repositories import IAssetRepository
 from ...utils.pathutils import ensure_work_dir
-from ..repositories.index_store_asset_repository import IndexStoreAssetRepositoryAdapter
 from .thumbnail_cache_service import ThumbnailCacheService
 
 
@@ -18,7 +16,6 @@ class LibraryAssetRuntime:
 
     def __init__(self, library_root: Path | None = None) -> None:
         self._assets: AssetRepositoryPort
-        self._repository: IAssetRepository
         self._thumbnail_service = ThumbnailCacheService(self._cache_root(library_root))
         self.bind_library_root(library_root)
 
@@ -27,8 +24,8 @@ class LibraryAssetRuntime:
         return self._assets
 
     @property
-    def repository(self) -> IAssetRepository:
-        return self._repository
+    def repository(self) -> AssetRepositoryPort:
+        return self._assets
 
     @property
     def thumbnail_service(self) -> ThumbnailCacheService:
@@ -46,7 +43,6 @@ class LibraryAssetRuntime:
 
         next_assets = get_global_repository(self._repository_root(library_root))
         self._assets = next_assets
-        self._repository = IndexStoreAssetRepositoryAdapter(next_assets)
         self._thumbnail_service.set_disk_cache_path(self._cache_root(library_root))
 
     def shutdown(self) -> None:

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.marker_controller import MarkerController
 from maps.map_widget.map_renderer import CityAnnotation
-from iPhoto.library.manager import GeotaggedAsset
+from iPhoto.library.runtime_controller import GeotaggedAsset
 
 
 @pytest.fixture

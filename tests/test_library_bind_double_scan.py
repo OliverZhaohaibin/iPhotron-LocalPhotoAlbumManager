@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -26,7 +26,7 @@ def test_watcher_active_during_init_deleted_dir(tmp_path, qapp):
     root = tmp_path / "Library"
     root.mkdir()
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
 
     # After first bind, the root should be watched
@@ -58,7 +58,7 @@ def test_bind_path_cancels_scans_on_rebind(tmp_path, qapp):
     root = tmp_path / "Library"
     root.mkdir()
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
 
     with patch.object(manager, "stop_scanning") as stop_scanning:
@@ -77,7 +77,7 @@ def test_bind_path_emits_tree_updated_for_empty_library(tmp_path, qapp):
     # Create only a regular file – no album subdirectories.
     (root / "photo.jpg").write_bytes(b"fake")
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     spy = QSignalSpy(manager.treeUpdated)
     manager.bind_path(root)
     assert spy.count() >= 1, "treeUpdated must be emitted when binding an empty library"
@@ -103,7 +103,7 @@ def test_watcher_debounce_scans_changed_scope_through_session_service(
             self.filter_roots.append(Path(path))
             return ["*.jpg"], []
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     scan_service = FakeScanService()
     manager.bind_scan_service(scan_service)
@@ -123,7 +123,7 @@ def test_root_watcher_event_for_new_album_uses_new_album_filters(
     root = tmp_path / "Library"
     root.mkdir()
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
 
     album = root / "NewAlbum"
@@ -182,7 +182,7 @@ def test_watcher_scans_multiple_changed_scopes_with_each_album_filter(
             self.filter_roots.append(path)
             return [f"*.{path.name.lower()}"], [f"skip-{path.name.lower()}"]
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     scan_service = FakeScanService()
     manager.bind_scan_service(scan_service)
@@ -212,7 +212,7 @@ def test_watcher_scans_multiple_changed_scopes_with_each_album_filter(
 def test_watcher_pause_drops_previously_queued_paths(tmp_path, qapp):
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
 
     with patch.object(manager, "start_scanning") as start_scanning:
@@ -230,7 +230,7 @@ def test_watcher_pause_drops_previously_queued_paths(tmp_path, qapp):
 def test_watcher_pause_suppresses_session_scan(tmp_path, qapp):
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
 
     with patch.object(manager, "start_scanning") as start_scanning:

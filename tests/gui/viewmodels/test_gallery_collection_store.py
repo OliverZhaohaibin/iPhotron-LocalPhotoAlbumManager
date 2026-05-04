@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
-from iPhoto.library.manager import GeotaggedAsset
+from iPhoto.library.runtime_controller import GeotaggedAsset
 
 
 class _FakeQueryService:

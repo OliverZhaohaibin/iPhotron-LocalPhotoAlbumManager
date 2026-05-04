@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from iPhoto.domain.models.core import Asset, MediaType
-from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from iPhoto.legacy.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
 from iPhoto.infrastructure.db.pool import ConnectionPool
 
 

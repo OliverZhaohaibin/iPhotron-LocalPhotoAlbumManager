@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication
 from iPhoto.errors import AlbumOperationError
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.settings.manager import SettingsManager
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.gui.ui.widgets.albums_dashboard import (
     AlbumCard,
     AlbumsDashboard,
@@ -183,7 +183,7 @@ def test_albums_dashboard_rename_album_calls_library(qapp, mock_library, tmp_pat
 def test_albums_dashboard_successful_rename_refreshes_card_paths(qapp, tmp_path):
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     album = manager.create_album("Trips")
 

@@ -225,7 +225,7 @@ def to_dto(asset: Asset, library_root: Optional[Path]) -> AssetDTO:
 
 def geotagged_asset_to_dto(asset: object, library_root: Path) -> Optional[AssetDTO]:
     """Convert a *GeotaggedAsset* to an *AssetDTO* for display."""
-    from iPhoto.library.manager import GeotaggedAsset
+    from iPhoto.library.runtime_controller import GeotaggedAsset
 
     if not isinstance(asset, GeotaggedAsset):
         return None

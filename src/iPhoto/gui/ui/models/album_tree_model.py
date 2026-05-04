@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, QObject, Qt
 from PySide6.QtGui import QIcon
 
-from ....library.manager import LibraryManager
+from ....library.runtime_controller import LibraryRuntimeController
 from ....library.tree import AlbumNode
 from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from ...services.people_service_resolver import resolve_people_service
@@ -107,7 +107,7 @@ class AlbumTreeModel(QAbstractItemModel):
         "recently deleted": "trash",
     }
 
-    def __init__(self, library: LibraryManager, parent: QObject | None = None) -> None:
+    def __init__(self, library: LibraryRuntimeController, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._library = library
         self._pinned_service: PinnedItemsService | None = None

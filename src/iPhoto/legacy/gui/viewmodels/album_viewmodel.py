@@ -1,10 +1,16 @@
+"""Legacy-only album view model scheduled for next-major removal.
+
+The production GUI runtime must use session-backed view models instead. This
+class remains quarantined for compatibility tests until the next major release.
+"""
+
 import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from iPhoto.application.services.album_service import AlbumService
-from iPhoto.application.services.asset_service import AssetService
+from iPhoto.legacy.application.services.album_service import AlbumService
+from iPhoto.legacy.application.services.asset_service import AssetService
 from iPhoto.domain.models.query import AssetQuery
 
 
@@ -47,4 +53,3 @@ class AlbumViewModel(QObject):
             self._album_service.scan_album(self._current_album_id)
             self.refresh_assets()
             self.scanFinished.emit()
-

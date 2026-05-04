@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..application.ports import (
@@ -41,7 +41,7 @@ class LibrarySession:
     """Own library-scoped adapters and expose the application-facing surface."""
 
     library_root: Path
-    asset_runtime: LibraryAssetRuntime = field(default_factory=LibraryAssetRuntime)
+    asset_runtime: LibraryAssetRuntime | None = None
     state_repository: LibraryStateRepositoryPort | None = None
     asset_state: AssetStateServicePort | None = None
     album_metadata: LibraryAlbumMetadataService | None = None
@@ -58,6 +58,9 @@ class LibrarySession:
 
     def __post_init__(self) -> None:
         self.library_root = Path(self.library_root)
+        if self.asset_runtime is None:
+            self.asset_runtime = LibraryAssetRuntime(self.library_root)
+            self.bind_asset_runtime = False
         if self.bind_asset_runtime:
             self.asset_runtime.bind_library_root(self.library_root)
         if self.state_repository is None:

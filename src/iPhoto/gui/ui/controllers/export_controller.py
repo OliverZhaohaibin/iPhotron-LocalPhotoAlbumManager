@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QWidget, QFileDialog
 from ....application.ports import EditServicePort
 from ....core.export import export_asset, DEFAULT_EXPORT_FORMAT
 from ....config import EXPORT_DIR_NAME
-from ....library.manager import LibraryManager
+from ....library.runtime_controller import LibraryRuntimeController
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
 from ...ui.widgets.dialogs import show_error
@@ -70,7 +70,7 @@ class LibraryExportWorker(QRunnable):
 
     def __init__(
         self,
-        library: LibraryManager,
+        library: LibraryRuntimeController,
         export_root: Path,
         export_format: str = DEFAULT_EXPORT_FORMAT,
     ):
@@ -145,7 +145,7 @@ class ExportController(QObject):
         self,
         *,
         settings,
-        library: LibraryManager,
+        library: LibraryRuntimeController,
         status_bar: StatusBarController,
         toast: NotificationToast,
         export_all_action: QAction,

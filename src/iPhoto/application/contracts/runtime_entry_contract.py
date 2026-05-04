@@ -11,7 +11,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ...gui.facade import AppFacade
     from ...gui.ui.theme_manager import ThemeManager
     from ...infrastructure.services.library_asset_runtime import LibraryAssetRuntime
-    from ...library.manager import LibraryManager
+    from ...library.runtime_controller import LibraryRuntimeController
     from ...settings.manager import SettingsManager
     from ...bootstrap.library_session import LibrarySession
 
@@ -21,7 +21,7 @@ class RuntimeEntryContract(Protocol):
     """Small runtime surface shared by RuntimeContext and AppContext."""
 
     settings: "SettingsManager"
-    library: "LibraryManager"
+    library: "LibraryRuntimeController"
     facade: "AppFacade"
     theme: "ThemeManager"
     event_bus: "EventBus"

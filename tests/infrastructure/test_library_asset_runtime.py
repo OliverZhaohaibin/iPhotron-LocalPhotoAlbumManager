@@ -7,9 +7,7 @@ from pathlib import Path
 import pytest
 
 from iPhoto.cache.index_store import reset_global_repository
-from iPhoto.infrastructure.repositories.index_store_asset_repository import (
-    IndexStoreAssetRepositoryAdapter,
-)
+from iPhoto.cache.index_store.repository import AssetRepository
 from iPhoto.infrastructure.services.library_asset_runtime import LibraryAssetRuntime
 
 
@@ -34,8 +32,8 @@ def test_bind_library_root_rebuilds_repo_and_cache_path(tmp_path: Path) -> None:
 
     assert runtime.repository is not initial_repository
     assert runtime.assets is not initial_assets
-    assert isinstance(runtime.repository, IndexStoreAssetRepositoryAdapter)
-    assert runtime.repository.index_store is runtime.assets
+    assert runtime.repository is runtime.assets
+    assert isinstance(runtime.repository, AssetRepository)
     assert runtime.thumbnail_service._disk_cache_path == (
         library_root / ".iPhoto" / "cache" / "thumbs"
     )
@@ -57,6 +55,6 @@ def test_bind_library_root_uses_existing_legacy_work_dir(tmp_path: Path) -> None
         legacy_work_dir / "cache" / "thumbs"
     )
     assert runtime.assets.path == legacy_work_dir / "global_index.db"
-    assert runtime.repository.index_store is runtime.assets
+    assert runtime.repository is runtime.assets
 
     runtime.shutdown()

@@ -14,7 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..gui.facade import AppFacade
     from ..gui.ui.theme_manager import ThemeManager
     from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
-    from ..library.manager import LibraryManager
+    from ..library.runtime_controller import LibraryRuntimeController
     from ..settings.manager import SettingsManager
     from .library_session import LibrarySession
 
@@ -29,10 +29,10 @@ def _create_settings_manager() -> "SettingsManager":
     return manager
 
 
-def _create_library_manager() -> "LibraryManager":
-    from ..library.manager import LibraryManager
+def _create_library_manager() -> "LibraryRuntimeController":
+    from ..library.runtime_controller import LibraryRuntimeController
 
-    return LibraryManager()
+    return LibraryRuntimeController()
 
 
 def _create_facade() -> "AppFacade":
@@ -64,7 +64,7 @@ class RuntimeContext:
     """Authoritative runtime dependency bundle for GUI startup."""
 
     settings: "SettingsManager" = field(default_factory=_create_settings_manager)
-    library: "LibraryManager" = field(default_factory=_create_library_manager)
+    library: "LibraryRuntimeController" = field(default_factory=_create_library_manager)
     facade: "AppFacade" = field(default_factory=_create_facade)
     event_bus: EventBus = field(default_factory=_create_event_bus)
     asset_runtime: "LibraryAssetRuntime" = field(default_factory=_create_asset_runtime)
@@ -108,12 +108,12 @@ class RuntimeContext:
 
     @property
     def container(self) -> "DependencyContainer":
-        """Return the compatibility DI container on demand."""
+        """Return an empty DI container for callers that still inspect it."""
 
         if self._container is None:
-            from .container import build_container
+            from ..di.container import DependencyContainer
 
-            self._container = build_container()
+            self._container = DependencyContainer()
         return self._container
 
     def resume_startup_tasks(self) -> None:

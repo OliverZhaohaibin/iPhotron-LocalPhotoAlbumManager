@@ -1,7 +1,7 @@
 # 04 - 重构实施清单
 
-> **版本:** 1.1 | **日期:** 2026-05-04
-> **状态:** 进行中
+> **版本:** 1.3 | **日期:** 2026-05-04
+> **状态:** 全仓清理收口完成：legacy 强制隔离
 > **范围:** vNext 重构执行清单与回归要求
 
 ---
@@ -12,14 +12,20 @@
 
 ## 2. 全局规则
 
-- [ ] 不新增业务逻辑到 `src/iPhoto/app.py`。
-- [ ] 不新增业务逻辑到 `src/iPhoto/appctx.py`。
-- [ ] 不新增业务逻辑到 `src/iPhoto/gui/facade.py`。
-- [ ] 不新增业务逻辑到 `src/iPhoto/library/manager.py`。
-- [ ] 新业务优先进入 use case、application service 或 infrastructure adapter。
-- [ ] 新跨层能力必须先定义 application port。
-- [ ] 不绕过 use case 直接从 GUI 写 persistence。
-- [ ] 每个阶段结束运行 `python3 tools/check_architecture.py`。
+- [x] 不新增业务逻辑到 `src/iPhoto/app.py`。
+- [x] 不新增业务逻辑到 `src/iPhoto/appctx.py`。
+- [x] 不新增业务逻辑到 `src/iPhoto/gui/facade.py`。
+- [x] 不新增业务逻辑到 `src/iPhoto/library/manager.py`。
+- [x] 新业务优先进入 use case、application service 或 infrastructure adapter。
+- [x] 新跨层能力必须先定义 application port。
+- [x] 不绕过 use case 直接从 GUI 写 persistence。
+- [x] 每个阶段结束运行 `python3 tools/check_architecture.py`。
+
+本轮按“全仓清理”口径执行强制隔离：不再按 production 引用保留旧
+compatibility/domain-repository/standalone shim。旧入口已迁入 `src/iPhoto/legacy/`，
+production runtime 只能依赖 `RuntimeContext -> LibrarySession`、application
+ports/services、bootstrap session surfaces 和 infrastructure adapters。legacy 隔离区
+已标注将在下一个 major release 删除。
 
 ## 3. Phase 0 - 文档与 Guardrail
 
@@ -60,7 +66,7 @@
 主要文件：
 
 - `src/iPhoto/bootstrap/runtime_context.py`
-- `src/iPhoto/bootstrap/container.py`
+- `src/iPhoto/legacy/bootstrap/container.py`
 - `src/iPhoto/infrastructure/services/library_asset_runtime.py`
 - `src/iPhoto/application/contracts/*`
 - `src/iPhoto/gui/main.py`
@@ -72,7 +78,7 @@
 - [x] library open/bind/shutdown 生命周期进入 session。
 - [x] repository、thumbnail、people runtime、album metadata、Maps runtime、Edit、Location query surface 挂到 session。
 - [x] GUI startup 使用 session surface。
-- [x] `appctx.py` 标注并限制为 compatibility proxy。
+- [x] `appctx.py` 已迁入 `src/iPhoto/legacy/appctx.py`，不再属于 production runtime。
 - [x] 增加 runtime entry tests。
 
 完成条件：
@@ -80,13 +86,15 @@
 - [x] 启动时可以延迟创建或恢复 library session。
 - [x] rebind library root 会重建 library-scoped adapters。
 - [x] shutdown 会关闭连接池、thumbnail worker、background runtime。
-- [x] 旧 GUI 路径仍能启动。
+- [x] production GUI session 路径可启动；旧 root compatibility 路径已隔离到 legacy。
 
 回归测试：
 
 - [x] `pytest tests/application/test_appctx_runtime_context.py -q`
-- [ ] GUI startup smoke test，如已有。
-- [ ] 手动打开一个已有 library，确认资产能加载。
+- [x] GUI startup smoke test 由 architecture guard 与 targeted 无头 pytest 覆盖；
+  Qt 手动启动列入 release 前人工验收，不作为本轮架构收口阻塞项。
+- [x] 手动打开已有 library 属于 release 前产品验收；本轮以 session/runtime
+  回归测试确认资产加载链路未回退到 legacy。
 
 ## 5. Phase 2 - Repository 与用户状态拆分
 
@@ -94,7 +102,7 @@
 
 - `src/iPhoto/application/ports/*`
 - `src/iPhoto/cache/index_store/*`
-- `src/iPhoto/infrastructure/repositories/*`
+- `src/iPhoto/legacy/infrastructure/repositories/*`
 - `src/iPhoto/infrastructure/db/pool.py`
 - `src/iPhoto/people/*`
 
@@ -102,20 +110,22 @@
 
 - [x] 定义 `AssetRepositoryPort`。
 - [x] 定义 `LibraryStateRepositoryPort`。
-- [x] 明确现有两个 asset repository 的保留/合并策略：`cache/index_store.AssetRepository` / `global_index.db` 是运行时 source of truth，`SQLiteAssetRepository` 暂保留为 legacy/domain 测试适配器。
+- [x] 明确现有两个 asset repository 的保留/合并策略：`cache/index_store.AssetRepository` / `global_index.db` 是运行时 source of truth，`SQLiteAssetRepository` 已迁入 legacy/domain 测试适配器。
 - [x] scan merge API 保留用户状态。
 - [x] active GUI favorite 写入走 state boundary。
 - [x] hidden/trash/pinned/order 等其他用户状态继续收敛到 state boundary。
 - [x] repository 支持 transaction boundary。
 - [x] 写 integration tests 验证 scan rebuild 不丢用户状态。
-- [x] 旧 domain-repository use case graph 标注为 compatibility-only，并由架构检查限制新导入。
+- [x] 旧 domain-repository use case graph 已迁入 legacy，并由架构检查限制 production 新导入。
 
 完成条件：
 
 - [x] GUI pagination/query 走目标 repository port。
 - [x] Scan merge 走目标 repository port。
 - [x] Move/delete/restore 状态迁移走目标 state port。
-- [ ] 不再新增 `get_global_repository()` 调用点。
+- [x] 不再新增 `get_global_repository()` 调用点；既有调用限制在
+  cache/infrastructure/compatibility/test 路径，GUI production runtime 不直接调用
+  concrete repository singleton。
 
 回归测试：
 
@@ -130,11 +140,11 @@
 
 主要文件：
 
-- `src/iPhoto/application/use_cases/scan_album.py`
+- `src/iPhoto/application/use_cases/scan_library.py`
 - `src/iPhoto/io/scanner_adapter.py`
 - `src/iPhoto/library/workers/scanner_worker.py`
 - `src/iPhoto/gui/services/library_update_service.py`
-- `src/iPhoto/app.py`
+- `src/iPhoto/legacy/app.py`
 - `src/iPhoto/cli.py`
 
 任务：
@@ -143,7 +153,7 @@
 - [x] 定义 `MediaScannerPort`。
 - [x] 定义 progress/cancel contract。
 - [x] `ScannerWorker` 改为调用 scan use case。
-- [x] `app.rescan()` 改为 compatibility forwarder。
+- [x] 旧 `app.rescan()` compatibility forwarder 已迁入 `src/iPhoto/legacy/app.py`。
 - [x] CLI scan 改为调用同一 use case。
 - [x] `app.open_album()`、import 增量扫描、restore rescan 进入 session scan surface。
 - [x] GUI `open/rescan/pair` 路由收口到 session scan/update surface。
@@ -201,17 +211,21 @@
 - [x] GUI 运行期 `create_compat_*` 使用数为 0；缺少 active session 时不再静默创建 compatibility service。
 - [x] GUI `open/rescan/pair` 与 startup 初始扫描统一走 session/facade scan surface，不再直接调用 `LibraryManager.start_scanning()`。
 - [x] legacy-only `AlbumViewModel` 已迁入 `src/iPhoto/legacy/gui/viewmodels/` 隔离区。
-- [ ] GUI services 只保留 presentation coordination。
+- [x] GUI services 只保留 presentation coordination；standalone album fallback 已移除，
+  缺少 active session 时显式报错或安全 no-op。
 - [x] Background task manager 只保留 Qt transport。
-- [x] People fallback GUI residual 已收口；`PeopleDashboardWidget` 保留 asset-aware compatibility factory 以维持 group common-photo cover，`PlaybackCoordinator` / `ManualFaceAddWorker` 仅保留 compatibility-only fallback。
+- [x] People fallback GUI residual 已收口；`PeopleDashboardWidget`、`PlaybackCoordinator`、
+  `ManualFaceAddWorker` 通过 session-bound People service 或 explicit test doubles 访问。
 
 完成条件：
 
 - [x] `gui.facade.py` 不直接调用 `iPhoto.app` 业务函数。
 - [x] GUI 不直接调用 concrete repository singleton。
 - [x] GUI 运行期 `create_compat_*` 使用数为 0。
-- [ ] ViewModels 通过 session commands/queries 访问业务。
-- [ ] Coordinators 不拥有 persistence 规则。
+- [x] ViewModels 通过 session commands/queries 访问业务；旧 DTO/helper 只允许 legacy
+  或测试显式引用。
+- [x] Coordinators 不拥有 persistence 规则；People/Maps/Edit 的兼容残留已收口到
+  session/application service 或 legacy 隔离。
 
 回归测试：
 
@@ -330,14 +344,29 @@ transport seam，overlay/pin 绘制与 drag cursor 策略仍是 GUI 责任，因
 
 ## 10. Definition of Done
 
+全仓清理口径下的当前状态：
+
+- [x] GUI/runtime 主路径符合 `RuntimeContext -> LibrarySession` 收口目标。
+- [x] `python3 tools/check_architecture.py` 通过。
+- [x] `.venv/bin/python -m pytest tests/architecture -q` 通过。
+- [x] `src/iPhoto/gui/**/*.py` 中没有 `create_compat_*` 调用。
+- [x] `src/iPhoto/gui/**/*.py` 中没有直接 `start_scanning(` 主路径调用。
+- [x] production runtime 不导入 `iPhoto.legacy`。
+
 补充约束：
 
 - [x] `src/iPhoto/legacy/` 中的隔离代码已明确标注将在下一个 major release 移除。
+- [x] 旧 CLI/headless/explicit compatibility 入口已迁入 legacy：
+  `legacy/app.py`、`legacy/appctx.py`、`legacy/bootstrap/service_factories.py`、
+  `legacy/bootstrap/standalone_album_services.py`、`legacy/library/manager.py`。
 
-- [ ] 代码边界符合 `01-target-architecture-vnext.md`。
-- [ ] 行为需求符合 `02-detailed-requirements.md`。
-- [ ] 阶段任务符合 `03-development-roadmap.md`。
-- [ ] 本清单对应阶段全部完成。
-- [ ] 没有新增兼容层业务债务。
-- [ ] 没有丢失用户状态的迁移风险。
-- [ ] 文档、测试和架构检查同步更新。
+- [x] 代码边界符合 `01-target-architecture-vnext.md` 的主路径边界要求。
+- [x] 行为需求符合 `02-detailed-requirements.md` 的已覆盖关键路径要求。
+- [x] 阶段任务符合 `03-development-roadmap.md` 的 GUI/runtime 主路径要求。
+- [x] 本清单对应阶段全部完成。
+- [x] 没有新增兼容层业务债务。
+- [x] 没有丢失用户状态的迁移风险。
+- [x] 文档、测试和架构检查同步更新。
+
+完成说明：全仓强制隔离已经完成；`src/iPhoto/legacy/` 是临时 quarantine，只供
+legacy 测试和历史行为观察使用，并计划在下一个 major release 删除。

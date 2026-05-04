@@ -20,11 +20,11 @@ if __package__ in (None, ""):
         LockTimeoutError,
         ManifestInvalidError,
     )  # type: ignore  # pragma: no cover
-    from iPhoto.models.album import Album  # type: ignore  # pragma: no cover
+    from iPhoto.application.services.album_manifest_service import Album  # type: ignore  # pragma: no cover
 else:
     from .bootstrap.library_session import create_headless_library_session
     from .errors import AlbumNotFoundError, IPhotoError, LockTimeoutError, ManifestInvalidError
-    from .models.album import Album
+    from .application.services.album_manifest_service import Album
 
 app = typer.Typer(help="Folder-native photo manager with Live Photo support")
 cover_app = typer.Typer(help="Manage album covers")

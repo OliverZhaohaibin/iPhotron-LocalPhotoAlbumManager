@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Tuple
 from dateutil import parser
 
 from ..config import LIVE_DURATION_PREFERRED, PAIR_TIME_DELTA_SEC
-from ..models.types import LiveGroup
+from ..domain.models.core import LiveGroup
 
 
 def _parse_dt(value: str | None) -> datetime | None:

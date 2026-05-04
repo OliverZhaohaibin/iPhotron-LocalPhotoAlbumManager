@@ -71,7 +71,7 @@ class IncrementalRefreshWorker(QRunnable):
         """Merge fresh rows from the descendant album into the parent's row set."""
         # Import Album locally to avoid circular dependencies.
 
-        from ....models.album import Album
+        from ....application.services.album_manifest_service import Album
         from ....errors import IPhotoError
         from ....utils.pathutils import normalise_rel_value
 

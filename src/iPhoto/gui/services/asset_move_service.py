@@ -13,16 +13,13 @@ from ...bootstrap.library_asset_operation_service import (
     LibraryAssetOperationService,
     MetadataLookup,
 )
-from ...bootstrap.standalone_album_services import (
-    create_standalone_asset_operation_service,
-)
 from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.move_worker import MoveSignals, MoveWorker
 from .session_service_resolver import bound_asset_operation_service
 
 if TYPE_CHECKING:
-    from ...library.manager import LibraryManager
-    from ...models.album import Album
+    from ...library.runtime_controller import LibraryRuntimeController
+    from ...application.services.album_manifest_service import Album
 
 
 class AssetMoveService(QObject):
@@ -45,7 +42,7 @@ class AssetMoveService(QObject):
         *,
         task_manager: BackgroundTaskManager,
         current_album_getter: Callable[[], Optional["Album"]],
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
+        library_manager_getter: Callable[[], Optional["LibraryRuntimeController"]],
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -71,6 +68,9 @@ class AssetMoveService(QObject):
         """
 
         album = self._current_album_getter()
+        if album is None and operation.lower() == "move":
+            self.errorRaised.emit("No album is currently open.")
+            return False
         library_manager = self._library_manager_getter()
         try:
             operation_service = self._operation_service(
@@ -157,7 +157,7 @@ class AssetMoveService(QObject):
 
     def _operation_service(
         self,
-        library_manager: Optional["LibraryManager"],
+        library_manager: Optional["LibraryRuntimeController"],
         *,
         current_album_root: Path | None,
         destination: Path,
@@ -183,22 +183,14 @@ class AssetMoveService(QObject):
             if candidate is not None:
                 return candidate
 
-        lifecycle_service = (
-            getattr(library_manager, "asset_lifecycle_service", None)
-            if library_manager is not None
-            else None
-        )
-        if self._is_unconfigured_mock(lifecycle_service):
-            lifecycle_service = None
-        service_root = library_root if use_bound_library else None
-        return create_standalone_asset_operation_service(
-            service_root,
-            lifecycle_service=lifecycle_service if use_bound_library else None,
+        raise RuntimeError(
+            "Active library session is unavailable; asset moves require a bound "
+            "LibrarySession."
         )
 
     def _deleted_directory(
         self,
-        library_manager: Optional["LibraryManager"],
+        library_manager: Optional["LibraryRuntimeController"],
     ) -> Path | None:
         if library_manager is None:
             return None

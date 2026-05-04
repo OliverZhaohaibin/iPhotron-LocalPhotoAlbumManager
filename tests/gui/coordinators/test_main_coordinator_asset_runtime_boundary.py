@@ -62,6 +62,49 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     )
 
 
+def test_open_album_from_path_creates_session_when_no_library_is_bound(
+    tmp_path: Path,
+) -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    album_root = tmp_path / "Album"
+    album_root.mkdir()
+
+    coordinator._context = MagicMock()
+    coordinator._context.library_session = None
+    coordinator._context.library.root.return_value = None
+    coordinator._facade = MagicMock()
+    coordinator._navigation = MagicMock()
+    coordinator._on_library_tree_updated = MagicMock()
+
+    coordinator.open_album_from_path(album_root)
+
+    coordinator._context.open_library.assert_called_once_with(album_root)
+    coordinator._on_library_tree_updated.assert_called_once_with()
+    coordinator._navigation.open_album.assert_called_once_with(album_root)
+
+
+def test_open_album_from_path_reuses_session_for_album_inside_library(
+    tmp_path: Path,
+) -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Album"
+    album_root.mkdir(parents=True)
+
+    coordinator._context = MagicMock()
+    coordinator._context.library_session = None
+    coordinator._context.library.root.return_value = library_root
+    coordinator._facade = MagicMock()
+    coordinator._navigation = MagicMock()
+    coordinator._on_library_tree_updated = MagicMock()
+
+    coordinator.open_album_from_path(album_root)
+
+    coordinator._context.open_library.assert_not_called()
+    coordinator._on_library_tree_updated.assert_not_called()
+    coordinator._navigation.open_album.assert_called_once_with(album_root)
+
+
 def test_on_library_tree_updated_skips_selection_reload_in_location_context() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")

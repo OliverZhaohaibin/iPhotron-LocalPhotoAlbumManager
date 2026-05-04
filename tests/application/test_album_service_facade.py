@@ -6,8 +6,8 @@ from iPhoto.application.dtos import (
     ScanAlbumResponse,
     PairLivePhotosResponse,
 )
-from iPhoto.application.services.album_service import AlbumService
-from iPhoto.application.services.asset_service import AssetService
+from iPhoto.legacy.application.services.album_service import AlbumService
+from iPhoto.legacy.application.services.asset_service import AssetService
 from iPhoto.domain.models import Asset, MediaType
 
 

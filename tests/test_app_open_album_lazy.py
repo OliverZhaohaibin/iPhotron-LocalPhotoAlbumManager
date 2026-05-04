@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from iPhoto import app
+from iPhoto.legacy import app
 from iPhoto.config import ALBUM_MANIFEST_NAMES
 
 

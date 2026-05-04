@@ -28,7 +28,7 @@ from iPhoto.gui.services.asset_move_service import AssetMoveService
 from iPhoto.gui.services.deletion_service import DeletionService
 from iPhoto.gui.ui.tasks import move_worker as move_worker_module
 from iPhoto.gui.ui.tasks.move_worker import MoveSignals, MoveWorker
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 
 @pytest.fixture()
@@ -121,9 +121,9 @@ def test_move_assets_submits_worker_and_emits_completion(
     album.root = source_root
     lifecycle_service = _LifecycleRecorder()
     library_manager = mocker.MagicMock()
-    library_manager.root.return_value = source_root
+    library_manager.root.return_value = tmp_path
     library_manager.asset_operation_service = _build_operation_service(
-        source_root,
+        tmp_path,
         lifecycle_service=lifecycle_service,  # type: ignore[arg-type]
     )
 
@@ -179,12 +179,12 @@ def test_move_assets_submits_worker_and_emits_completion(
     assert is_restore is False
 
 
-def test_move_assets_falls_back_to_standalone_service_when_library_is_unbound(
+def test_move_assets_requires_session_when_library_is_unbound(
     mocker,
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
-    """Standalone album moves should still queue a worker without a library session."""
+    """Standalone album moves are rejected without a library session."""
 
     source_root = tmp_path / "Source"
     destination_root = tmp_path / "Destination"
@@ -206,14 +206,13 @@ def test_move_assets_falls_back_to_standalone_service_when_library_is_unbound(
 
     accepted = service.move_assets([asset], destination_root)
 
-    assert accepted is True
-    assert task_manager.submit_task.call_count == 1
-    worker = task_manager.submit_task.call_args.kwargs["worker"]
-    assert isinstance(worker, MoveWorker)
-    assert errors == []
+    assert accepted is False
+    assert task_manager.submit_task.call_count == 0
+    assert errors
+    assert "bound LibrarySession" in errors[0]
 
 
-def test_move_assets_uses_standalone_service_for_album_outside_bound_library(
+def test_move_assets_rejects_album_outside_bound_library(
     mocker,
     tmp_path: Path,
     qapp: QApplication,
@@ -248,10 +247,8 @@ def test_move_assets_uses_standalone_service_for_album_outside_bound_library(
 
     accepted = service.move_assets([asset], destination_root)
 
-    assert accepted is True
-    worker = task_manager.submit_task.call_args.kwargs["worker"]
-    assert worker._library_root is None
-    assert worker.asset_lifecycle_service.library_root is None
+    assert accepted is False
+    assert task_manager.submit_task.call_count == 0
     assert bound_lifecycle.calls == []
 
 
@@ -309,7 +306,7 @@ def test_delete_service_acceptance_runs_move_worker(
     asset = album_root / "photo.jpg"
     asset.write_bytes(b"data")
 
-    library_manager = LibraryManager()
+    library_manager = LibraryRuntimeController()
     library_manager.bind_path(library_root)
     trash_root = library_manager.ensure_deleted_directory()
     assert trash_root is not None
@@ -512,7 +509,7 @@ def test_restore_repopulates_library_index(
     library_root.mkdir()
     album_root.mkdir(parents=True)
 
-    library_manager = LibraryManager()
+    library_manager = LibraryRuntimeController()
     library_manager.bind_path(library_root)
     resolved_trash = library_manager.ensure_deleted_directory()
     assert resolved_trash is not None
@@ -568,7 +565,7 @@ def test_restore_moves_ipo_sidecar_with_renamed_media(
     library_root.mkdir()
     album_root.mkdir(parents=True)
 
-    library_manager = LibraryManager()
+    library_manager = LibraryRuntimeController()
     library_manager.bind_path(library_root)
     trash_root = library_manager.ensure_deleted_directory()
     assert trash_root is not None
@@ -634,7 +631,7 @@ def test_delete_records_original_path_for_restore(
     edit_sidecar = album_root / "IMG_0002.ipo"
     edit_sidecar.write_text("edits")
 
-    library_manager = LibraryManager()
+    library_manager = LibraryRuntimeController()
     library_manager.bind_path(library_root)
     trash_root = library_manager.ensure_deleted_directory()
     assert trash_root is not None
@@ -741,7 +738,7 @@ def test_delete_collision_assigns_unique_trash_paths(
     asset_a.write_bytes(b"a")
     asset_b.write_bytes(b"b")
 
-    library_manager = LibraryManager()
+    library_manager = LibraryRuntimeController()
     library_manager.bind_path(library_root)
     trash_root = library_manager.ensure_deleted_directory()
     assert trash_root is not None

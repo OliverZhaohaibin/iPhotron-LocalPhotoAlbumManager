@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.models.album_tree_model import AlbumTreeModel, AlbumTreeRole, NodeType
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -47,7 +47,7 @@ def _find_child(model: AlbumTreeModel, parent_index, title: str):
 
 
 def test_placeholder_when_unbound(qapp: QApplication) -> None:
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     model = AlbumTreeModel(manager)
     qapp.processEvents()
     assert model.rowCount() == 1
@@ -60,7 +60,7 @@ def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
     album_dir = _create_album(root, "Trip", child="Day1")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
     model = AlbumTreeModel(manager)
@@ -107,7 +107,7 @@ def test_model_inserts_pinned_section_between_library_and_albums(tmp_path: Path,
     root = tmp_path / "Library"
     root.mkdir()
     album_dir = _create_album(root, "Trips")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -143,7 +143,7 @@ def test_model_pinned_album_uses_current_album_title_over_custom_label(
     root = tmp_path / "Library"
     root.mkdir()
     album_dir = _create_album(root, "Trips")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -177,7 +177,7 @@ def test_model_omits_pinned_section_when_empty(tmp_path: Path, qapp: QApplicatio
     root = tmp_path / "Library"
     root.mkdir()
     _create_album(root, "Trips")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -194,7 +194,7 @@ def test_model_keeps_missing_pinned_entities_visible_until_clicked(
 ) -> None:
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 

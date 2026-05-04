@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class FileSystemWatcherMixin:
-    """Mixin providing file-system watch management for LibraryManager."""
+    """Mixin providing file-system watch management for LibraryRuntimeController."""
 
     def pause_watcher(self) -> None:
         """Temporarily suppress change notifications during internal writes."""

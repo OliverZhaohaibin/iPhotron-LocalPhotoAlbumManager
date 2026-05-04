@@ -9,10 +9,6 @@ from typing import Callable, Iterable, List, Optional, Sequence
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ...bootstrap.standalone_album_services import (
-    create_standalone_asset_lifecycle_service,
-    create_standalone_scan_service,
-)
 from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.import_worker import ImportSignals, ImportWorker
 from .album_metadata_service import AlbumMetadataService
@@ -39,7 +35,7 @@ class AssetImportService(QObject):
         update_service: Optional[LibraryUpdateService] = None,
         refresh_callback: Optional[Callable[[Path], None]] = None,
         metadata_service: AlbumMetadataService,
-        library_manager_getter: Optional[Callable[[], "LibraryManager | None"]] = None,
+        library_manager_getter: Optional[Callable[[], "LibraryRuntimeController | None"]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -186,12 +182,10 @@ class AssetImportService(QObject):
             if scan_service is not None and lifecycle_service is not None:
                 return library_root, scan_service, lifecycle_service
 
-        scan_service = create_standalone_scan_service(target_root)
-        lifecycle_service = create_standalone_asset_lifecycle_service(
-            target_root,
-            scan_service=scan_service,
+        raise RuntimeError(
+            "Active library session is unavailable; imports require a bound "
+            "LibrarySession target."
         )
-        return target_root, scan_service, lifecycle_service
 
     def _copy_into_album(self, source: Path, destination: Path) -> Path:
         """Copy *source* into *destination* using collision-safe filenames."""

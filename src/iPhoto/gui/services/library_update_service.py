@@ -10,10 +10,6 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CH
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from ...bootstrap.library_scan_service import LibraryScanService
-from ...bootstrap.standalone_album_services import (
-    create_standalone_asset_lifecycle_service,
-    create_standalone_scan_service,
-)
 from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ...errors import IPhotoError
 from ...utils.pathutils import resolve_work_dir
@@ -25,8 +21,8 @@ from .session_service_resolver import (
 )
 
 if TYPE_CHECKING:
-    from ...library.manager import LibraryManager
-    from ...models.album import Album
+    from ...library.runtime_controller import LibraryRuntimeController
+    from ...application.services.album_manifest_service import Album
 
 
 @dataclass
@@ -76,7 +72,7 @@ class LibraryUpdateService(QObject):
         *,
         task_manager: BackgroundTaskManager,
         current_album_getter: Callable[[], Optional["Album"]],
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
+        library_manager_getter: Callable[[], Optional["LibraryRuntimeController"]],
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -163,9 +159,10 @@ class LibraryUpdateService(QObject):
             self.errorRaised.emit(str(exc))
             return
 
-        # Bound Basic Library scans still need the legacy LibraryManager path
-        # because it owns additional side effects such as face-index workers and
-        # scanFinished subscribers that have not been migrated to this service.
+        # Compatibility quarantine: bound LibraryRuntimeController still owns the Qt
+        # scanner/face-worker transport for full-library scans. GUI callers enter
+        # through this session-facing method and must not call the legacy scan
+        # entry directly.
         library = self._library_manager()
         if library is not None and library_root is not None:
             start_session_scan = getattr(library, "start_session_scan", None)
@@ -251,10 +248,11 @@ class LibraryUpdateService(QObject):
                 or not self._paths_equal(Path(lifecycle_root), repair_root)
             )
         ):
-            lifecycle_service = create_standalone_asset_lifecycle_service(
-                repair_root,
-                scan_service=scan_service,
+            self.errorRaised.emit(
+                "Active library session is unavailable; media repair requires "
+                "a bound LibrarySession."
             )
+            return None
 
         refresh_root = lifecycle_service.repair_missing_asset(target)
         if refresh_root is not None and not uses_bound_library:
@@ -346,7 +344,8 @@ class LibraryUpdateService(QObject):
         )
         self.moveOperationCompleted.emit(result)
 
-        # --- Legacy signal cascade (kept for backward compatibility) ---
+        # Compatibility quarantine: this signal cascade preserves older GUI
+        # listeners while newer paths consume moveOperationCompleted above.
         current_album = self._current_album_getter()
         current_root = current_album.root if current_album is not None else None
 
@@ -515,7 +514,10 @@ class LibraryUpdateService(QObject):
         if library is not None:
             library_root = library.root()
         if library_root is None or not self._path_is_descendant(scan_root, library_root):
-            return None, create_standalone_scan_service(scan_root)
+            raise RuntimeError(
+                "Active library session is unavailable; scans require a bound "
+                "LibrarySession."
+            )
         scan_service = bound_scan_service(
             library,
             library_root=library_root,
@@ -568,7 +570,7 @@ class LibraryUpdateService(QObject):
                 return Path(target).parent
             current = current.parent
 
-    def _library_manager(self) -> Optional["LibraryManager"]:
+    def _library_manager(self) -> Optional["LibraryRuntimeController"]:
         return self._library_manager_getter()
 
     def _mark_album_stale(self, path: Path) -> None:

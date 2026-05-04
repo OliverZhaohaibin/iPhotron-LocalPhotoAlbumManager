@@ -14,7 +14,7 @@ from ...bootstrap.library_asset_operation_service import (
 from .session_service_resolver import bound_asset_operation_service
 
 if TYPE_CHECKING:
-    from ...library.manager import LibraryManager
+    from ...library.runtime_controller import LibraryRuntimeController
     from .asset_move_service import AssetMoveService
 
 
@@ -27,7 +27,7 @@ class RestorationService(QObject):
         self,
         *,
         move_service: "AssetMoveService",
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
+        library_manager_getter: Callable[[], Optional["LibraryRuntimeController"]],
         model_provider_getter: Callable[[], Optional[Callable[[], Any]]],
         restore_prompt_getter: Callable[[], Optional[Callable[[str], bool]]],
         parent: Optional[QObject] = None,
@@ -106,7 +106,7 @@ class RestorationService(QObject):
 
     def _operation_service(
         self,
-        library: "LibraryManager",
+        library: "LibraryRuntimeController",
         library_root: Path,
     ) -> LibraryAssetOperationService:
         candidate = bound_asset_operation_service(

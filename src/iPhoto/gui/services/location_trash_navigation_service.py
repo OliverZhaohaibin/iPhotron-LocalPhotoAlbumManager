@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 if TYPE_CHECKING:
-    from ...library.manager import LibraryManager
+    from ...library.runtime_controller import LibraryRuntimeController
 
 
 class _LocationAssetsSignals(QObject):
@@ -78,7 +78,7 @@ class LocationTrashNavigationService(QObject):
     def __init__(
         self,
         *,
-        library_manager_getter: Callable[[], "LibraryManager | None"],
+        library_manager_getter: Callable[[], "LibraryRuntimeController | None"],
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -159,7 +159,7 @@ class LocationTrashNavigationService(QObject):
 
     def _schedule_trash_cleanup(
         self,
-        library: "LibraryManager",
+        library: "LibraryRuntimeController",
         trash_root: Path,
     ) -> None:
         with self._trash_cleanup_lock:
@@ -196,7 +196,7 @@ class LocationTrashNavigationService(QObject):
             time.monotonic() - self._last_trash_cleanup_at
         ) >= self._TRASH_CLEANUP_THROTTLE_SEC
 
-    def _load_location_assets(self, library: "LibraryManager") -> list:
+    def _load_location_assets(self, library: "LibraryRuntimeController") -> list:
         location_service = getattr(library, "location_service", None)
         list_geotagged_assets = getattr(
             location_service,
@@ -205,9 +205,12 @@ class LocationTrashNavigationService(QObject):
         )
         if callable(list_geotagged_assets):
             return list(list_geotagged_assets())
-        return list(library.get_geotagged_assets())
+        raise RuntimeError(
+            "Active library session is unavailable; location queries require "
+            "a bound LibrarySession."
+        )
 
-    def _cleanup_deleted_index(self, library: "LibraryManager", trash_root: Path) -> int:
+    def _cleanup_deleted_index(self, library: "LibraryRuntimeController", trash_root: Path) -> int:
         lifecycle_service = getattr(library, "asset_lifecycle_service", None)
         cleanup_deleted_index = getattr(
             lifecycle_service,
@@ -216,7 +219,10 @@ class LocationTrashNavigationService(QObject):
         )
         if callable(cleanup_deleted_index):
             return int(cleanup_deleted_index(trash_root))
-        return int(library.cleanup_deleted_index())
+        raise RuntimeError(
+            "Active library session is unavailable; trash cleanup requires "
+            "a bound LibrarySession."
+        )
 
-    def _library_manager(self) -> "LibraryManager | None":
+    def _library_manager(self) -> "LibraryRuntimeController | None":
         return self._library_manager_getter()

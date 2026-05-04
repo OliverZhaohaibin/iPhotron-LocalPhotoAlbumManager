@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.cache.index_store import IndexStore
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 
 @pytest.fixture()
@@ -45,7 +45,7 @@ def test_cleanup_deleted_index_removes_missing_rows(tmp_path: Path, qapp: QAppli
     library_root = tmp_path / "Library"
     library_root.mkdir()
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(library_root)
     trash_root = manager.ensure_deleted_directory()
 
@@ -76,7 +76,7 @@ def test_cleanup_deleted_index_delegates_to_session_lifecycle(
     library_root = tmp_path / "Library"
     library_root.mkdir()
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(library_root)
     trash_root = manager.ensure_deleted_directory()
     lifecycle = _LifecycleRecorder(result=3)

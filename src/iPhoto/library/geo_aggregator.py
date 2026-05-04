@@ -12,7 +12,7 @@ from ..utils.geocoding import resolve_location_name  # compatibility patch targe
 
 
 class GeoAggregatorMixin:
-    """Mixin preserving the legacy LibraryManager geotagged asset API."""
+    """Mixin preserving the LibraryRuntimeController geotagged asset API."""
 
     def get_geotagged_assets(self) -> List[GeotaggedAsset]:
         """Return every visible asset in the library with GPS coordinates."""

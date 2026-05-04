@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from iPhoto.appctx import AppContext
+from iPhoto.legacy.appctx import AppContext
 
 
 def test_appctx_proxies_runtime_context(monkeypatch) -> None:

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 class TrashManagerMixin:
-    """Mixin providing trash/deleted items management for LibraryManager."""
+    """Mixin providing trash/deleted items management for LibraryRuntimeController."""
 
     def ensure_deleted_directory(self) -> Path:
         """Create the dedicated trash directory when missing and return it."""

@@ -43,7 +43,7 @@ from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ....errors import LibraryError
 from ....media_classifier import get_media_type, MediaType
-from ....models.album import Album
+from ....application.services.album_manifest_service import Album
 from ....utils.pathutils import ensure_work_dir
 from ..menus.album_sidebar_menu import _create_styled_input_dialog
 from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path, stat_mtime_ns
@@ -55,7 +55,7 @@ from . import dialogs
 from .flow_layout import FlowLayout
 
 if TYPE_CHECKING:
-    from ....library.manager import LibraryManager
+    from ....library.runtime_controller import LibraryRuntimeController
     from ....library.tree import AlbumNode
 
 
@@ -509,7 +509,7 @@ class AlbumsDashboard(QWidget):
 
     albumSelected = Signal(Path)
 
-    def __init__(self, library: LibraryManager, parent: QWidget | None = None) -> None:
+    def __init__(self, library: LibraryRuntimeController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._library = library
         self._pinned_service: PinnedItemsService | None = None

@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING
 from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ...library.manager import LibraryManager
+    from ...library.runtime_controller import LibraryRuntimeController
 
 
 def resolve_people_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     library_root: Path | None = None,
     allow_root_fallback: bool = False,
@@ -31,7 +31,7 @@ def resolve_people_service(
 
 
 def bound_people_service(
-    library_manager: "LibraryManager | None",
+    library_manager: "LibraryRuntimeController | None",
     *,
     library_root: Path | None = None,
 ) -> PeopleService | None:

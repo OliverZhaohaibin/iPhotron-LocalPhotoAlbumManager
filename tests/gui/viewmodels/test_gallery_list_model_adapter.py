@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -128,14 +129,20 @@ def test_size_role_returns_trimmed_duration_for_video(adapter, mock_store):
         duration=10.0,
     )
 
-    with patch(
-        "iPhoto.gui.viewmodels.gallery_list_model_adapter._io_sidecar.load_adjustments",
-        return_value={"Video_Trim_In_Sec": 2.0, "Video_Trim_Out_Sec": 7.0},
-    ):
-        index = adapter.index(0, 0)
-        result = adapter.data(index, Roles.SIZE)
+    edit_service = MagicMock()
+    edit_service.describe_adjustments.return_value = SimpleNamespace(
+        effective_duration_sec=5.0,
+    )
+    adapter._edit_service_getter = lambda: edit_service
+
+    index = adapter.index(0, 0)
+    result = adapter.data(index, Roles.SIZE)
 
     assert result["duration"] == pytest.approx(5.0)
+    edit_service.describe_adjustments.assert_called_once_with(
+        Path("/videos/clip.mp4"),
+        duration_hint=10.0,
+    )
 
 
 def test_invalid_index_returns_none(adapter):

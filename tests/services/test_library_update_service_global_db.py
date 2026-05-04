@@ -143,39 +143,25 @@ def test_rescan_album_uses_session_scan_service(tmp_path: Path) -> None:
     assert lifecycle_service.reconciled == []
 
 
-def test_rescan_album_fallback_syncs_manifest_favorites(
-    monkeypatch,
+def test_rescan_album_requires_bound_session(
     tmp_path: Path,
 ) -> None:
     album_root = tmp_path / "Album"
     album_root.mkdir()
-    FakeFallbackScanService.instances.clear()
-    monkeypatch.setattr(
-        lus,
-        "create_standalone_scan_service",
-        lambda root: FakeFallbackScanService(root),
-    )
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: None,
         library_manager_getter=lambda: None,
     )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
 
     rows = service.rescan_album(DummyAlbum(album_root))
 
-    assert rows == [{"rel": "a.jpg"}]
-    assert len(FakeFallbackScanService.instances) == 1
-    fallback = FakeFallbackScanService.instances[0]
-    assert fallback.root == album_root
-    assert fallback.rescanned == [
-        {
-            "root": album_root,
-            "sync_manifest_favorites": True,
-            "pair_live": True,
-        }
-    ]
-    assert fallback.synced == [album_root]
+    assert rows == []
+    assert errors
+    assert "bound LibrarySession" in errors[0]
 
 
 def test_prepare_album_open_uses_session_scan_service(tmp_path: Path) -> None:
@@ -288,12 +274,9 @@ def test_rescan_album_async_routes_bound_library_scans_via_library_manager(
     ]
 
 
-def test_rescan_album_async_fallback_uses_standalone_scan_service(
-    monkeypatch,
+def test_rescan_album_async_requires_bound_session(
     tmp_path: Path,
 ) -> None:
-    scan_service = FakeFallbackScanService(tmp_path / "Album")
-
     class FakeTaskRunner:
         def __init__(self) -> None:
             self.calls: list[dict] = []
@@ -310,33 +293,23 @@ def test_rescan_album_async_fallback_uses_standalone_scan_service(
         current_album_getter=lambda: None,
         library_manager_getter=lambda: None,
     )
-    monkeypatch.setattr(
-        lus,
-        "create_standalone_scan_service",
-        lambda root: scan_service,
-    )
     runner = FakeTaskRunner()
     service._task_runner = runner
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
 
     album_root = tmp_path / "Album"
     album_root.mkdir()
     service.rescan_album_async(DummyAlbum(album_root))
 
-    assert runner.calls
-    call = runner.calls[0]
-    assert call["root"] == album_root
-    assert list(call["include"]) == list(DEFAULT_INCLUDE)
-    assert list(call["exclude"]) == list(DEFAULT_EXCLUDE)
-    assert call["library_root"] is None
-    assert call["scan_service"] is scan_service
+    assert runner.calls == []
+    assert errors
+    assert "bound LibrarySession" in errors[0]
 
 
-def test_scan_root_async_fallback_relays_batch_failures(
-    monkeypatch,
+def test_scan_root_async_requires_bound_session(
     tmp_path: Path,
 ) -> None:
-    scan_service = FakeFallbackScanService(tmp_path / "Album")
-
     class FakeTaskRunner:
         def __init__(self) -> None:
             self.calls: list[dict] = []
@@ -352,18 +325,13 @@ def test_scan_root_async_fallback_relays_batch_failures(
         current_album_getter=lambda: None,
         library_manager_getter=lambda: None,
     )
-    monkeypatch.setattr(
-        lus,
-        "create_standalone_scan_service",
-        lambda root: scan_service,
-    )
     runner = FakeTaskRunner()
     service._task_runner = runner
 
     album_root = tmp_path / "Album"
     album_root.mkdir()
-    failures: list[tuple[Path, int]] = []
-    service.scanBatchFailed.connect(lambda root, count: failures.append((root, count)))
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
 
     service.scan_root_async(
         album_root,
@@ -371,9 +339,9 @@ def test_scan_root_async_fallback_relays_batch_failures(
         exclude=DEFAULT_EXCLUDE,
     )
 
-    assert runner.calls
-    runner.calls[0]["on_batch_failed"](album_root, 2)
-    assert failures == [(album_root, 2)]
+    assert runner.calls == []
+    assert errors
+    assert "bound LibrarySession" in errors[0]
 
 
 def test_restore_rescan_worker_receives_session_scan_service(
@@ -435,21 +403,13 @@ def test_handle_media_load_failure_uses_lifecycle_service(tmp_path: Path) -> Non
     assert lifecycle_service.media_failures == [asset_path]
 
 
-def test_handle_media_load_failure_falls_back_to_standalone_lifecycle_service(
-    monkeypatch,
+def test_handle_media_load_failure_requires_bound_session(
     tmp_path: Path,
 ) -> None:
     album_root = tmp_path / "album"
     nested_root = album_root / "nested"
     asset_path = nested_root / "missing.mov"
     nested_root.mkdir(parents=True)
-    fallback_lifecycle = FakeLifecycleService(album_root)
-    created: list[tuple[Path, object | None]] = []
-
-    def _create_lifecycle(root: Path, *, scan_service=None):
-        created.append((Path(root), scan_service))
-        return fallback_lifecycle
-
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: DummyAlbum(album_root),
@@ -457,24 +417,17 @@ def test_handle_media_load_failure_falls_back_to_standalone_lifecycle_service(
             None,
         ),
     )
-    monkeypatch.setattr(
-        lus,
-        "create_standalone_asset_lifecycle_service",
-        _create_lifecycle,
-    )
     errors: list[str] = []
     service.errorRaised.connect(errors.append)
 
     refreshed = service.handle_media_load_failure(asset_path)
 
-    assert refreshed == album_root
-    assert created == [(album_root, None)]
-    assert fallback_lifecycle.media_failures == [asset_path]
-    assert errors == []
+    assert refreshed is None
+    assert errors
+    assert "bound LibrarySession" in errors[0]
 
 
-def test_handle_media_load_failure_uses_standalone_for_album_outside_bound_library(
-    monkeypatch,
+def test_handle_media_load_failure_rejects_album_outside_bound_library(
     tmp_path: Path,
 ) -> None:
     lib_root = tmp_path / "Library"
@@ -484,13 +437,6 @@ def test_handle_media_load_failure_uses_standalone_for_album_outside_bound_libra
     lib_root.mkdir()
     nested_root.mkdir(parents=True)
     bound_lifecycle = FakeLifecycleService(lib_root)
-    fallback_lifecycle = FakeLifecycleService(album_root)
-    created: list[tuple[Path, object | None]] = []
-
-    def _create_lifecycle(root: Path, *, scan_service=None):
-        created.append((Path(root), scan_service))
-        return fallback_lifecycle
-
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: DummyAlbum(album_root),
@@ -499,17 +445,14 @@ def test_handle_media_load_failure_uses_standalone_for_album_outside_bound_libra
             lifecycle_service=bound_lifecycle,
         ),
     )
-    monkeypatch.setattr(
-        lus,
-        "create_standalone_asset_lifecycle_service",
-        _create_lifecycle,
-    )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
 
     refreshed = service.handle_media_load_failure(asset_path)
 
-    assert refreshed == album_root
-    assert created == [(album_root, None)]
-    assert fallback_lifecycle.media_failures == [asset_path]
+    assert refreshed is None
+    assert errors
+    assert "bound LibrarySession" in errors[0]
     assert bound_lifecycle.media_failures == []
 
 

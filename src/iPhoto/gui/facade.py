@@ -8,7 +8,7 @@ from typing import Callable, Iterable, List, Optional, Set, TYPE_CHECKING, Any
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..errors import IPhotoError
-from ..models.album import Album
+from ..application.services.album_manifest_service import Album
 from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
 from .services import (
@@ -21,7 +21,7 @@ from .services import (
 )
 
 if TYPE_CHECKING:
-    from ..library.manager import LibraryManager
+    from ..library.runtime_controller import LibraryRuntimeController
 
 import logging
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class AppFacade(QObject):
         self._logger = get_logger()
         self._current_album: Optional[Album] = None
         self._pending_index_announcements: Set[Path] = set()
-        self._library_manager: Optional["LibraryManager"] = None
+        self._library_manager: Optional["LibraryRuntimeController"] = None
         self._restore_prompt_handler: Optional[Callable[[str], bool]] = None
         self._model_provider: Optional[Callable[[], Any]] = None
 
@@ -177,7 +177,7 @@ class AppFacade(QObject):
         return self._library_update_service
 
     @property
-    def library_manager(self) -> Optional["LibraryManager"]:
+    def library_manager(self) -> Optional["LibraryRuntimeController"]:
         """Expose the underlying library manager."""
 
         return self._library_manager
@@ -250,7 +250,7 @@ class AppFacade(QObject):
     def _inject_scan_dependencies_for_tests(
         self,
         *,
-        library_manager: Optional["LibraryManager"] = None,
+        library_manager: Optional["LibraryRuntimeController"] = None,
         library_update_service: Optional[LibraryUpdateService] = None,
     ) -> None:
         """Override scan collaborators during testing."""
@@ -299,7 +299,7 @@ class AppFacade(QObject):
             self.albumCoverUpdated.emit(album.root, album.root / rel)
         return success
 
-    def bind_library(self, library: "LibraryManager") -> None:
+    def bind_library(self, library: "LibraryRuntimeController") -> None:
         """Remember the library manager so static collections stay in sync."""
 
         if self._library_manager is not None:
@@ -415,7 +415,7 @@ class AppFacade(QObject):
         except OSError:
             return False
 
-    def _get_library_manager(self) -> Optional["LibraryManager"]:
+    def _get_library_manager(self) -> Optional["LibraryRuntimeController"]:
         return self._library_manager
 
     @Slot(Path, Path, list, bool, bool, bool, bool)

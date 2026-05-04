@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from iPhoto.application.services.paginated_loader import (
+from iPhoto.legacy.application.services.paginated_loader import (
     DEFAULT_PAGE_SIZE,
     PageResult,
     PaginatedAssetLoader,

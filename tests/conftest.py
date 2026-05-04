@@ -2,7 +2,7 @@ import sys
 import os
 from types import ModuleType
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -230,3 +230,132 @@ def pytest_ignore_collect(collection_path, config):
     if "/ui/" in path_str or "/gui/" in path_str:
         return True
     return None
+
+
+class _PatchProxy:
+    def __init__(self, owner):
+        self._owner = owner
+
+    def __call__(self, target, *args, **kwargs):
+        return self._owner._start_patch(patch(target, *args, **kwargs))
+
+    def object(self, target, attribute, *args, **kwargs):
+        return self._owner._start_patch(
+            patch.object(target, attribute, *args, **kwargs)
+        )
+
+    def dict(self, in_dict, values=(), clear=False, **kwargs):
+        return self._owner._start_patch(
+            patch.dict(in_dict, values=values, clear=clear, **kwargs)
+        )
+
+
+class _SimpleMocker:
+    Mock = Mock
+    MagicMock = MagicMock
+    ANY = ANY
+    call = call
+
+    def __init__(self):
+        self._patchers = []
+        self.patch = _PatchProxy(self)
+
+    def _start_patch(self, patcher):
+        started = patcher.start()
+        self._patchers.append(patcher)
+        return started
+
+    def stopall(self):
+        while self._patchers:
+            self._patchers.pop().stop()
+
+
+import pytest
+
+
+@pytest.fixture()
+def mocker():
+    helper = _SimpleMocker()
+    try:
+        yield helper
+    finally:
+        helper.stopall()
+
+
+class _SignalBlocker:
+    def __init__(self, signal):
+        self.args = None
+        self._signal = signal
+
+    def __enter__(self):
+        if hasattr(self._signal, "connect"):
+            self._signal.connect(self._capture)
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def _capture(self, *args):
+        self.args = list(args)
+
+
+class _SimpleQtBot:
+    def __init__(self):
+        self._widgets = []
+
+    def addWidget(self, widget):
+        self._widgets.append(widget)
+
+    def waitSignal(self, signal, *args, **kwargs):
+        return _SignalBlocker(signal)
+
+    def mouseClick(self, widget, button, *args, **kwargs):
+        from PySide6.QtTest import QTest
+
+        QTest.mouseClick(widget, button, *args, **kwargs)
+
+    def mouseMove(self, widget, pos=None, *args, **kwargs):
+        from PySide6.QtTest import QTest
+
+        if pos is None:
+            QTest.mouseMove(widget, *args, **kwargs)
+            return
+        QTest.mouseMove(widget, pos, *args, **kwargs)
+
+    def close_widgets(self):
+        while self._widgets:
+            widget = self._widgets.pop()
+            close = getattr(widget, "close", None)
+            if callable(close):
+                close()
+            delete_later = getattr(widget, "deleteLater", None)
+            if callable(delete_later):
+                delete_later()
+
+
+@pytest.fixture()
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+    app.processEvents()
+
+
+@pytest.fixture()
+def qtbot():
+    from PySide6.QtWidgets import QApplication
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    helper = _SimpleQtBot()
+    try:
+        yield helper
+    finally:
+        helper.close_widgets()
+        app.processEvents()

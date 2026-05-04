@@ -13,7 +13,6 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-import iPhoto.gui.services.pinned_items_service as pinned_items_service_module
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.settings.manager import SettingsManager
 
@@ -179,12 +178,22 @@ def test_pinned_child_album_path_remaps_when_parent_is_renamed(tmp_path: Path) -
 def test_prune_missing_people_entities_removes_only_stale_items(
     tmp_path: Path,
     qapp: QApplication,
-    monkeypatch,
 ) -> None:
     settings_path = tmp_path / "settings.json"
     manager = SettingsManager(path=settings_path)
+
+    class _StubPeopleService:
+        def has_cluster(self, person_id: str) -> bool:
+            return person_id != "person-stale"
+
+        def has_group(self, group_id: str) -> bool:
+            return group_id != "group-stale"
+
     manager.load()
-    service = PinnedItemsService(manager)
+    service = PinnedItemsService(
+        manager,
+        people_service_getter=lambda library_root: _StubPeopleService(),
+    )
     spy = QSignalSpy(service.changed)
 
     library_root = tmp_path / "Library"
@@ -194,18 +203,6 @@ def test_prune_missing_people_entities_removes_only_stale_items(
     service.pin_group("group-stale", "Old Group", library_root=library_root)
     service.pin_group("group-ok", "New Group", library_root=library_root)
     qapp.processEvents()
-
-    class _StubPeopleService:
-        def __init__(self, library_root: Path) -> None:
-            self.library_root = library_root
-
-        def has_cluster(self, person_id: str) -> bool:
-            return person_id != "person-stale"
-
-        def has_group(self, group_id: str) -> bool:
-            return group_id != "group-stale"
-
-    monkeypatch.setattr(pinned_items_service_module, "PeopleService", _StubPeopleService)
 
     assert service.prune_missing_people_entities(
         library_root,
@@ -225,30 +222,28 @@ def test_prune_missing_people_entities_removes_only_stale_items(
 def test_prune_missing_people_entities_remaps_redirected_pins(
     tmp_path: Path,
     qapp: QApplication,
-    monkeypatch,
 ) -> None:
     settings_path = tmp_path / "settings.json"
     manager = SettingsManager(path=settings_path)
-    manager.load()
-    service = PinnedItemsService(manager)
-
-    library_root = tmp_path / "Library"
-    library_root.mkdir()
-    service.pin_person("person-old", "Alice", library_root=library_root)
-    service.pin_group("group-old", "Group 1", library_root=library_root)
-    qapp.processEvents()
 
     class _StubPeopleService:
-        def __init__(self, library_root: Path) -> None:
-            self.library_root = library_root
-
         def has_cluster(self, person_id: str) -> bool:
             return person_id == "person-new"
 
         def has_group(self, group_id: str) -> bool:
             return False
 
-    monkeypatch.setattr(pinned_items_service_module, "PeopleService", _StubPeopleService)
+    manager.load()
+    service = PinnedItemsService(
+        manager,
+        people_service_getter=lambda library_root: _StubPeopleService(),
+    )
+
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    service.pin_person("person-old", "Alice", library_root=library_root)
+    service.pin_group("group-old", "Group 1", library_root=library_root)
+    qapp.processEvents()
 
     assert service.prune_missing_people_entities(
         library_root,

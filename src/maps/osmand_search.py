@@ -320,8 +320,13 @@ class SearchSuggestion:
 class NativeOsmAndSearchService:
     """Thin ctypes wrapper around the native OsmAnd search bridge."""
 
-    def __init__(self, map_source: MapSourceSpec | None = None) -> None:
-        package_root = Path(__file__).resolve().parent
+    def __init__(
+        self,
+        map_source: MapSourceSpec | None = None,
+        *,
+        package_root: Path | None = None,
+    ) -> None:
+        package_root = (package_root or Path(__file__).resolve().parent).resolve()
         self._map_source = (map_source or MapSourceSpec.osmand_default(package_root)).resolved(package_root)
         library_path = resolve_osmand_native_widget_library(package_root)
         if library_path is None:
@@ -408,8 +413,13 @@ class NativeOsmAndSearchService:
 class GeoNamesSearchService:
     """Search the bundled GeoNames SQLite database with schema-aware query selection."""
 
-    def __init__(self, database_path: Path | None = None) -> None:
-        package_root = Path(__file__).resolve().parent
+    def __init__(
+        self,
+        database_path: Path | None = None,
+        *,
+        package_root: Path | None = None,
+    ) -> None:
+        package_root = (package_root or Path(__file__).resolve().parent).resolve()
         self._database_path = (database_path or default_osmand_search_database(package_root)).resolve()
         if not self._database_path.is_file():
             raise FileNotFoundError(f"GeoNames database not found: {self._database_path}")
@@ -581,7 +591,13 @@ class GeoNamesSearchService:
 class OsmAndSearchService:
     """Prefer GeoNames SQLite search and fall back to the native OsmAnd search bridge."""
 
-    def __init__(self, map_source: MapSourceSpec | None = None) -> None:
+    def __init__(
+        self,
+        map_source: MapSourceSpec | None = None,
+        *,
+        package_root: Path | None = None,
+    ) -> None:
+        self._package_root = (package_root or Path(__file__).resolve().parent).resolve()
         self._map_source = map_source
         self._geonames_service: GeoNamesSearchService | None = None
         self._native_service: NativeOsmAndSearchService | None = None
@@ -589,13 +605,16 @@ class OsmAndSearchService:
 
         geonames_error: Exception | None = None
         try:
-            self._geonames_service = GeoNamesSearchService()
+            self._geonames_service = GeoNamesSearchService(package_root=self._package_root)
         except Exception as exc:
             geonames_error = exc
 
         if self._geonames_service is None:
             try:
-                self._native_service = NativeOsmAndSearchService(self._map_source)
+                self._native_service = NativeOsmAndSearchService(
+                    self._map_source,
+                    package_root=self._package_root,
+                )
             except Exception as exc:
                 detail = f"GeoNames search unavailable: {geonames_error}" if geonames_error else "GeoNames search unavailable"
                 raise TileLoadingError(f"{detail}; native fallback unavailable: {exc}") from exc
@@ -607,7 +626,10 @@ class OsmAndSearchService:
             raise self._native_init_error
 
         try:
-            self._native_service = NativeOsmAndSearchService(self._map_source)
+            self._native_service = NativeOsmAndSearchService(
+                self._map_source,
+                package_root=self._package_root,
+            )
         except Exception as exc:
             self._native_init_error = exc
             raise

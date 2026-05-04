@@ -40,6 +40,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           NUMBA_DISABLE_JIT: "1"
         run: |
+          python tools/check_architecture.py
           python -m pytest tests/ \
             --ignore=tests/gui \
             --ignore=tests/ui \

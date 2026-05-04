@@ -9,11 +9,10 @@ from PySide6.QtCore import QObject, QThreadPool, QRunnable, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QWidget, QFileDialog
 
+from ....application.ports import EditServicePort
 from ....core.export import export_asset, DEFAULT_EXPORT_FORMAT
 from ....config import EXPORT_DIR_NAME
-from ....library.manager import LibraryManager
-from ....io import sidecar
-from ....cache.index_store import get_global_repository
+from ....library.runtime_controller import LibraryRuntimeController
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
 from ...ui.widgets.dialogs import show_error
@@ -35,12 +34,14 @@ class ExportWorker(QRunnable):
         export_root: Path,
         library_root: Path,
         export_format: str = DEFAULT_EXPORT_FORMAT,
+        edit_service: EditServicePort | None = None,
     ):
         super().__init__()
         self._paths = paths
         self._export_root = export_root
         self._library_root = library_root
         self._export_format = export_format
+        self._edit_service = edit_service
         self.signals = ExportSignals()
 
     def run(self) -> None:
@@ -50,7 +51,13 @@ class ExportWorker(QRunnable):
         for i, path in enumerate(self._paths):
             if not path.exists():
                 continue
-            if export_asset(path, self._export_root, self._library_root, self._export_format):
+            if export_asset(
+                path,
+                self._export_root,
+                self._library_root,
+                self._export_format,
+                edit_service=self._edit_service,
+            ):
                 success += 1
             else:
                 fail += 1
@@ -63,7 +70,7 @@ class LibraryExportWorker(QRunnable):
 
     def __init__(
         self,
-        library: LibraryManager,
+        library: LibraryRuntimeController,
         export_root: Path,
         export_format: str = DEFAULT_EXPORT_FORMAT,
     ):
@@ -79,19 +86,19 @@ class LibraryExportWorker(QRunnable):
         if not root:
             self.signals.finished.emit(0, 0)
             return
-
-        # Collect all album paths (Root + Level 1 + Level 2)
-        album_paths = {root}
-        top_albums = self._library.list_albums()
-        for album in top_albums:
-            album_paths.add(album.path)
-            for child in self._library.list_children(album):
-                album_paths.add(child.path)
+        edit_service = getattr(self._library, "edit_service", None)
 
         to_export = []
-        # Use single global database at library root
+        query_service = getattr(self._library, "asset_query_service", None)
+        if query_service is None:
+            self.signals.message.emit(
+                "Active library session is unavailable; export requires a bound LibrarySession."
+            )
+            self.signals.finished.emit(0, 0)
+            return
+
         try:
-            rows = get_global_repository(root).read_all()
+            rows = query_service.read_asset_rows(root, filter_hidden=False)
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -99,7 +106,7 @@ class LibraryExportWorker(QRunnable):
                 if not rel or not isinstance(rel, str):
                     continue
                 abs_path = (root / rel).resolve()
-                if sidecar.sidecar_path_for_asset(abs_path).exists():
+                if edit_service is not None and edit_service.sidecar_exists(abs_path):
                     to_export.append(abs_path)
         except Exception:
             # If we cannot read from the database (e.g. corrupted, missing, or
@@ -116,7 +123,13 @@ class LibraryExportWorker(QRunnable):
         success = 0
         fail = 0
         for i, path in enumerate(to_export):
-            if export_asset(path, self._export_root, root, self._export_format):
+            if export_asset(
+                path,
+                self._export_root,
+                root,
+                self._export_format,
+                edit_service=edit_service,
+            ):
                 success += 1
             else:
                 fail += 1
@@ -132,7 +145,7 @@ class ExportController(QObject):
         self,
         *,
         settings,
-        library: LibraryManager,
+        library: LibraryRuntimeController,
         status_bar: StatusBarController,
         toast: NotificationToast,
         export_all_action: QAction,
@@ -239,7 +252,13 @@ class ExportController(QObject):
             return
 
         fmt = self._settings.get("ui.export_format", DEFAULT_EXPORT_FORMAT)
-        worker = ExportWorker(paths, export_root, library_root, fmt)
+        worker = ExportWorker(
+            paths,
+            export_root,
+            library_root,
+            fmt,
+            edit_service=getattr(self._library, "edit_service", None),
+        )
         self._start_worker(worker)
 
     def _handle_export_all_edited(self) -> None:

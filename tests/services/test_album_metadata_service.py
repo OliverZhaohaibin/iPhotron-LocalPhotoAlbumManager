@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,8 +28,6 @@ from iPhoto.gui.services.album_metadata_service import AlbumMetadataService
 
 @pytest.fixture()
 def qapp() -> QApplication:
-    """Ensure a QApplication instance exists for QObject-based services."""
-
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
@@ -37,437 +36,198 @@ def qapp() -> QApplication:
 
 
 class DummyAlbum:
-    """Simple stand-in for :class:`Album` capturing manifest mutations."""
-
     def __init__(self, root: Path) -> None:
         self.root = root
         self.manifest: dict[str, list[str]] = {"featured": []}
         self.cover: str | None = None
-        self.saved = 0
 
     def set_cover(self, rel: str) -> None:
-        """Record the last requested cover path."""
-
         self.cover = rel
 
     def add_featured(self, ref: str) -> None:
-        """Append a featured entry if it is not already present."""
-
         if ref not in self.manifest["featured"]:
             self.manifest["featured"].append(ref)
 
     def remove_featured(self, ref: str) -> None:
-        """Remove a featured entry when it exists."""
-
         if ref in self.manifest["featured"]:
             self.manifest["featured"].remove(ref)
 
-    def save(self) -> None:
-        """Simulate a successful manifest write."""
 
-        self.saved += 1
-
-
-def _build_service(
-    *,
-    current_album: Callable[[], DummyAlbum | None],
-    library_manager_getter: Callable[[], object | None],
-    refresh,
-) -> AlbumMetadataService:
-    """Create a service instance with timer scheduling patched for tests."""
+def test_set_album_cover_delegates_to_bound_service_and_refreshes_view(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    album = DummyAlbum(tmp_path / "Album")
+    session_service = SimpleNamespace(
+        library_root=album.root,
+        set_cover=MagicMock(),
+        toggle_featured=MagicMock(),
+        ensure_featured_entries=MagicMock(),
+    )
+    manager = SimpleNamespace(
+        album_metadata_service=session_service,
+        root=lambda: album.root,
+        state_repository=None,
+        pause_watcher=MagicMock(),
+        resume_watcher=MagicMock(),
+    )
+    refresh = MagicMock()
+    monkeypatch.setattr(
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
 
     service = AlbumMetadataService(
-        current_album_getter=current_album,
-        library_manager_getter=library_manager_getter,
+        current_album_getter=lambda: album,
+        library_manager_getter=lambda: manager,
         refresh_view=refresh,
     )
-    return service
+
+    assert service.set_album_cover(album, "cover.jpg") is True
+    session_service.set_cover.assert_called_once_with(album.root, "cover.jpg")
+    manager.pause_watcher.assert_called_once()
+    manager.resume_watcher.assert_called_once()
+    refresh.assert_called_once_with(album.root)
+    assert album.cover == "cover.jpg"
 
 
-def test_toggle_featured_updates_current_and_library_album(
-    monkeypatch: pytest.MonkeyPatch,
-    mocker,
+def test_set_album_cover_reports_error_when_library_is_unbound(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
-    """Toggling an asset should update both the active album and the library root."""
-
-    album_root = tmp_path / "Albums" / "Trip"
-    library_root = tmp_path / "Albums"
-    album_root.mkdir(parents=True)
-    dummy_album = DummyAlbum(album_root)
-    root_album = DummyAlbum(library_root)
-
-    # Patch ``Album.open`` to return the dummy root album when invoked.
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.Album.open",
-        lambda path: root_album if Path(path) == library_root else dummy_album,
-    )
-    # Avoid waiting for Qt timers in tests by executing callbacks immediately.
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
-        lambda _delay, callback: callback(),
-    )
-    
-    # Mock repository access to avoid DB operations in tests
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
-
-    manager = mocker.MagicMock()
-    manager.root.return_value = library_root
-    refresh = mocker.MagicMock()
-
-    service = _build_service(
-        current_album=lambda: dummy_album,
-        library_manager_getter=lambda: manager,
-        refresh=refresh,
-    )
-
-    result = service.toggle_featured(dummy_album, "photo.jpg")
-
-    # The current album must mark the asset as featured and persist the change.
-    assert result is True
-    assert dummy_album.manifest["featured"] == ["photo.jpg"]
-    assert dummy_album.saved == 1
-
-    # The library root receives the fully qualified path for shared favorites.
-    assert root_album.manifest["featured"] == ["Trip/photo.jpg"]
-    assert root_album.saved == 1
-    refresh.assert_not_called()
-
-
-def test_toggle_featured_rolls_back_on_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    mocker,
-    tmp_path: Path,
-    qapp: QApplication,
-) -> None:
-    """Errors when saving should keep the manifest and model unchanged."""
-
     album_root = tmp_path / "Album"
     album_root.mkdir()
-    dummy_album = DummyAlbum(album_root)
-    dummy_album.manifest["featured"] = ["photo.jpg"]
+    album = DummyAlbum(album_root)
+    refresh = MagicMock()
 
-    def failing_save() -> None:
-        raise IPhotoError("boom")
+    service = AlbumMetadataService(
+        current_album_getter=lambda: album,
+        library_manager_getter=lambda: None,
+        refresh_view=refresh,
+    )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
 
-    dummy_album.save = failing_save  # type: ignore[assignment]
+    assert service.set_album_cover(album, "cover.jpg") is False
+    refresh.assert_not_called()
+    assert album.cover is None
+    assert errors == [
+        "Active library session is unavailable; album metadata writes require "
+        "a bound LibrarySession."
+    ]
 
+
+def test_toggle_featured_delegates_to_bound_service_and_updates_album_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    album = DummyAlbum(tmp_path / "Album")
+    session_service = SimpleNamespace(
+        library_root=album.root,
+        set_cover=MagicMock(),
+        toggle_featured=MagicMock(
+            return_value=SimpleNamespace(is_featured=True, errors=[]),
+        ),
+        ensure_featured_entries=MagicMock(),
+    )
+    manager = SimpleNamespace(
+        album_metadata_service=session_service,
+        root=lambda: album.root,
+        state_repository=None,
+        pause_watcher=MagicMock(),
+        resume_watcher=MagicMock(),
+    )
     monkeypatch.setattr(
         "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
 
-    refresh = mocker.MagicMock()
-    errors: list[str] = []
+    service = AlbumMetadataService(
+        current_album_getter=lambda: album,
+        library_manager_getter=lambda: manager,
+        refresh_view=MagicMock(),
+    )
 
-    service = _build_service(
-        current_album=lambda: dummy_album,
-        library_manager_getter=lambda: None,
-        refresh=refresh,
+    assert service.toggle_featured(album, "photo.jpg") is True
+    session_service.toggle_featured.assert_called_once_with(album.root, "photo.jpg")
+    assert album.manifest["featured"] == ["photo.jpg"]
+    manager.pause_watcher.assert_called_once()
+    manager.resume_watcher.assert_called_once()
+
+
+def test_toggle_featured_emits_error_and_preserves_original_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    album = DummyAlbum(tmp_path / "Album")
+    album.manifest["featured"] = ["photo.jpg"]
+    session_service = SimpleNamespace(
+        library_root=album.root,
+        set_cover=MagicMock(),
+        toggle_featured=MagicMock(side_effect=IPhotoError("boom")),
+        ensure_featured_entries=MagicMock(),
+    )
+    manager = SimpleNamespace(
+        album_metadata_service=session_service,
+        root=lambda: album.root,
+        state_repository=None,
+        pause_watcher=MagicMock(),
+        resume_watcher=MagicMock(),
+    )
+    errors: list[str] = []
+    monkeypatch.setattr(
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+
+    service = AlbumMetadataService(
+        current_album_getter=lambda: album,
+        library_manager_getter=lambda: manager,
+        refresh_view=MagicMock(),
     )
     service.errorRaised.connect(errors.append)
 
-    result = service.toggle_featured(dummy_album, "photo.jpg")
-
-    # The method should report the original state and avoid touching the model.
-    assert result is True
-    assert dummy_album.manifest["featured"] == ["photo.jpg"]
+    assert service.toggle_featured(album, "photo.jpg") is True
+    assert album.manifest["featured"] == ["photo.jpg"]
     assert errors == ["boom"]
-    refresh.assert_not_called()
 
 
-def test_toggle_featured_from_library_root_updates_sub_album(
+def test_ensure_featured_entries_updates_current_album_cache(
     monkeypatch: pytest.MonkeyPatch,
-    mocker,
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
-    """Toggling from Library Root should propagate to the physical sub-album."""
-
-    library_root = tmp_path / "Library"
-    album_root = library_root / "Trip"
-    album_root.mkdir(parents=True)
-    
-    # Create manifest file so the service can identify it as a physical album
-    (album_root / ".iphoto.album.json").touch()
-
-    # Create a dummy physical file to make path resolution work
-    photo_path = album_root / "photo.jpg"
-    photo_path.touch()
-    
-    root_album = DummyAlbum(library_root)
-    sub_album = DummyAlbum(album_root)
-
-    # Patch ``Album.open`` to return the appropriate album based on path
-    def album_opener(path):
-        path = Path(path)
-        if path == library_root:
-            return root_album
-        elif path == album_root:
-            return sub_album
-        return None
-
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.Album.open",
-        album_opener,
+    album_root = tmp_path / "Album"
+    album = DummyAlbum(album_root)
+    imported = [album_root / "a.jpg", album_root / "nested" / "b.jpg"]
+    session_service = SimpleNamespace(
+        library_root=album_root,
+        set_cover=MagicMock(),
+        toggle_featured=MagicMock(),
+        ensure_featured_entries=MagicMock(),
+    )
+    manager = SimpleNamespace(
+        album_metadata_service=session_service,
+        root=lambda: album_root,
+        state_repository=None,
+        pause_watcher=MagicMock(),
+        resume_watcher=MagicMock(),
     )
     monkeypatch.setattr(
         "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
-    
-    # Mock repository access to avoid DB operations in tests
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
 
-    manager = mocker.MagicMock()
-    manager.root.return_value = library_root
-    refresh = mocker.MagicMock()
-
-    service = _build_service(
-        current_album=lambda: root_album,
+    service = AlbumMetadataService(
+        current_album_getter=lambda: album,
         library_manager_getter=lambda: manager,
-        refresh=refresh,
-    )
-
-    # Toggle favorite from the Library Root perspective
-    result = service.toggle_featured(root_album, "Trip/photo.jpg")
-
-    # The library root should mark the asset as featured
-    assert result is True
-    assert root_album.manifest["featured"] == ["Trip/photo.jpg"]
-    assert root_album.saved == 1
-
-    # The physical sub-album should also be updated
-    assert sub_album.manifest["featured"] == ["photo.jpg"]
-    assert sub_album.saved == 1
-    
-    # Repository should be called twice (once for root, once for sub-album)
-    assert index_store_mock.set_favorite_status.call_count == 2
-    
-    refresh.assert_not_called()
-
-
-def test_toggle_featured_from_library_root_for_root_asset(
-    monkeypatch: pytest.MonkeyPatch,
-    mocker,
-    tmp_path: Path,
-    qapp: QApplication,
-) -> None:
-    """Toggling an asset directly in Library Root (not in sub-album) should update root only."""
-
-    library_root = tmp_path / "Library"
-    library_root.mkdir(parents=True)
-    
-    # Create manifest file so the service can identify it as a physical album
-    (library_root / ".iphoto.album.json").touch()
-
-    # Create a file directly in library root
-    photo_path = library_root / "photo.jpg"
-    photo_path.touch()
-    
-    root_album = DummyAlbum(library_root)
-
-    open_count = 0
-    def album_opener(path):
-        nonlocal open_count
-        open_count += 1
-        if Path(path) == library_root:
-            return root_album
-        return None
-
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.Album.open",
-        album_opener,
-    )
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
-        lambda _delay, callback: callback(),
-    )
-    
-    # Mock repository access to avoid DB operations in tests
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
-
-    manager = mocker.MagicMock()
-    manager.root.return_value = library_root
-    refresh = mocker.MagicMock()
-
-    service = _build_service(
-        current_album=lambda: root_album,
-        library_manager_getter=lambda: manager,
-        refresh=refresh,
-    )
-
-    # Toggle favorite for an asset directly in the library root
-    result = service.toggle_featured(root_album, "photo.jpg")
-
-    # The library root should be updated
-    assert result is True
-    assert root_album.manifest["featured"] == ["photo.jpg"]
-    # Root album should be saved once (as primary album). Redundant update to itself is skipped.
-    assert root_album.saved == 1
-    
-    # Album.open should not be called as we skip reopening the library root
-    assert open_count == 0
-    
-    # Repository should be called once (for root as primary)
-    assert index_store_mock.set_favorite_status.call_count == 1
-    
-    refresh.assert_not_called()
-
-
-def test_ensure_featured_entries_updates_album(
-    monkeypatch: pytest.MonkeyPatch,
-    mocker,
-    tmp_path: Path,
-    qapp: QApplication,
-) -> None:
-    """Recently imported files should be promoted to featured assets when requested."""
-
-    library_root = tmp_path / "Library"
-    album_root = library_root / "Hike"
-    album_root.mkdir(parents=True)
-    imported = [album_root / "a.jpg", album_root / "b.jpg", library_root / "skip.txt"]
-
-    current_album: DummyAlbum | None = None
-    dummy_album = DummyAlbum(album_root)
-
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.Album.open",
-        lambda path: dummy_album if Path(path) == album_root else None,
-    )
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
-        lambda _delay, callback: callback(),
-    )
-
-    refresh = mocker.MagicMock()
-
-    service = _build_service(
-        current_album=lambda: current_album,
-        library_manager_getter=lambda: None,
-        refresh=refresh,
+        refresh_view=MagicMock(),
     )
 
     service.ensure_featured_entries(album_root, imported)
 
-    # Only paths located inside the album should be recorded.
-    assert sorted(dummy_album.manifest["featured"]) == ["a.jpg", "b.jpg"]
-    assert dummy_album.saved == 1
-    refresh.assert_not_called()
-
-
-def test_toggle_featured_identifies_correct_physical_root_nested(
-    monkeypatch: pytest.MonkeyPatch,
-    mocker,
-    tmp_path: Path,
-    qapp: QApplication,
-) -> None:
-    """
-    Test that toggling a file in a subfolder of a physical album correctly identifies
-    the physical album root, instead of treating the subfolder as the album.
-
-    Structure:
-    Library/
-      album.json (Library Root)
-      Events/
-        album.json (Physical Album)
-        2023/
-          photo.jpg (Asset)
-
-    Action: Toggle "featured" on "Events/2023/photo.jpg" from Library Root.
-
-    Expected:
-      - Library Root manifest updated with "Events/2023/photo.jpg"
-      - Events album manifest updated with "2023/photo.jpg"
-      - NO ghost album created in Events/2023/
-    """
-
-    # 1. Setup filesystem structure
-    library_root = tmp_path / "Library"
-    events_root = library_root / "Events"
-    sub_dir = events_root / "2023"
-
-    sub_dir.mkdir(parents=True)
-
-    # Create manifest files so `exists()` checks pass
-    (library_root / ".iphoto.album.json").touch()
-    (events_root / ".iphoto.album.json").touch()
-
-    # Asset file
-    photo_path = sub_dir / "photo.jpg"
-    photo_path.touch()
-
-    # 2. Setup Mock Albums
-    root_album = DummyAlbum(library_root)
-    events_album = DummyAlbum(events_root)
-    ghost_album = DummyAlbum(sub_dir)  # Should NOT be touched
-
-    # Map paths to albums for Album.open
-    albums_by_path = {
-        library_root: root_album,
-        events_root: events_album,
-        sub_dir: ghost_album,
-    }
-
-    def album_opener(path):
-        return albums_by_path.get(Path(path))
-
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.Album.open",
-        album_opener,
-    )
-
-    # Mock other dependencies
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
-        lambda _delay, callback: callback(),
-    )
-
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
-
-    manager = mocker.MagicMock()
-    manager.root.return_value = library_root
-    refresh = mocker.MagicMock()
-
-    service = _build_service(
-        current_album=lambda: root_album,  # We are in Library Root view
-        library_manager_getter=lambda: manager,
-        refresh=refresh,
-    )
-
-    # 3. Perform Action
-    # Ref is relative to library root
-    ref = "Events/2023/photo.jpg"
-
-    result = service.toggle_featured(root_album, ref)
-
-    assert result is True
-
-    # 4. Assertions
-
-    # Library root should be updated (unchanged behavior)
-    assert root_album.manifest["featured"] == [ref]
-
-    # Events album SHOULD be updated (Desired Behavior)
-    # Ref in events album should be relative to events root: "2023/photo.jpg"
-    assert events_album.manifest["featured"] == ["2023/photo.jpg"]
-
-    # Ghost album should NOT be updated
-    assert ghost_album.manifest["featured"] == []
+    session_service.ensure_featured_entries.assert_called_once_with(album_root, imported)
+    assert sorted(album.manifest["featured"]) == ["a.jpg", "nested/b.jpg"]

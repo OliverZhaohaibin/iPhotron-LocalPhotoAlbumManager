@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
+from ....application.ports import MapRuntimePort
 
 from ..icons import load_icon
 from ..menus.core import MenuActionSpec, MenuContext, populate_menu
@@ -393,12 +394,14 @@ class InfoPanel(QWidget):
         self._post_show_reflow_queued = False
         self._post_show_reflow_recenter = False
         self._location_capability_enabled = False
+        self._location_preview_enabled = False
         self._location_fallback_text = "Install the map extension to use Assign a Location."
         self._location_suggestions: list[object] = []
         self._selected_location_suggestion: object | None = None
         self._updating_location_ui = False
         self._location_dirty = False
         self._location_confirm_queued = False
+        self._last_location_map_target: tuple[float, float] | None = None
 
         # -- title bar -----------------------------------------------------
         self._title_bar = QWidget(self)
@@ -595,16 +598,12 @@ class InfoPanel(QWidget):
             )
             self._exposure_label.setText(fallback)
         self._apply_location_metadata(metadata, previous_rel=previous_rel)
-        self._refresh_panel_geometry()
-        if self.isVisible():
-            self._schedule_post_show_reflow(recenter=False)
+        self._refresh_or_schedule_panel_geometry()
 
     def set_asset_faces(self, annotations: list[AssetFaceAnnotation]) -> None:
         self._asset_faces = list(annotations)
         self._rebuild_face_strip()
-        self._refresh_panel_geometry()
-        if self.isVisible():
-            self._schedule_post_show_reflow(recenter=False)
+        self._refresh_or_schedule_panel_geometry()
 
     def set_face_action_candidates(self, candidates: list[PersonSummary]) -> None:
         self._face_action_candidates = list(candidates)
@@ -628,9 +627,9 @@ class InfoPanel(QWidget):
         self._exposure_label.setText("No metadata available for this item.")
         self._clear_location_results()
         self._location_map.clear_location()
-        self._location_map.hide()
-        self._location_fallback_label.hide()
-        self._location_download_button.hide()
+        self._set_widget_explicitly_visible(self._location_map, False)
+        self._set_widget_explicitly_visible(self._location_fallback_label, False)
+        self._set_widget_explicitly_visible(self._location_download_button, False)
         self._location_editor_row.setVisible(self._location_capability_enabled)
         self._location_editor.clear()
         self._location_editor.setPlaceholderText("Assign a Location")
@@ -640,10 +639,9 @@ class InfoPanel(QWidget):
         self._location_confirm_button.setText("Confirm")
         self._location_dirty = False
         self._location_confirm_queued = False
+        self._last_location_map_target = None
         self.set_asset_faces([])
-        self._refresh_panel_geometry()
-        if self.isVisible():
-            self._schedule_post_show_reflow(recenter=False)
+        self._refresh_or_schedule_panel_geometry()
 
     def current_rel(self) -> Optional[str]:
         """Return the relative path associated with the displayed asset."""
@@ -656,21 +654,39 @@ class InfoPanel(QWidget):
 
         return self._close_button
 
-    def set_location_capability(self, *, enabled: bool, fallback_text: str | None = None) -> None:
+    def set_location_capability(
+        self,
+        *,
+        enabled: bool,
+        preview_enabled: bool | None = None,
+        fallback_text: str | None = None,
+    ) -> None:
         self._location_capability_enabled = bool(enabled)
+        self._location_preview_enabled = (
+            bool(preview_enabled)
+            if preview_enabled is not None
+            else self._location_capability_enabled
+        )
         if isinstance(fallback_text, str) and fallback_text.strip():
             self._location_fallback_text = fallback_text.strip()
         self._apply_location_metadata(self._metadata or {}, previous_rel=self._current_rel)
-        self._refresh_panel_geometry()
+        self._refresh_or_schedule_panel_geometry()
+
+    def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
+        """Forward the active session map runtime to the embedded mini-map."""
+
+        self._location_map.set_map_runtime(map_runtime)
+        self._apply_location_metadata(self._metadata or {}, previous_rel=self._current_rel)
+        self._refresh_or_schedule_panel_geometry()
 
     def set_location_suggestions(self, suggestions: list[object]) -> None:
         self._location_suggestions = list(suggestions)
         self._location_results.clear()
         if not self._location_capability_enabled or not self._location_suggestions:
             self._selected_location_suggestion = None
-            self._location_results.hide()
+            self._set_widget_explicitly_visible(self._location_results, False)
             self._location_confirm_button.setEnabled(False)
-            self._refresh_panel_geometry()
+            self._refresh_or_schedule_panel_geometry()
             return
 
         for index, suggestion in enumerate(self._location_suggestions):
@@ -685,15 +701,15 @@ class InfoPanel(QWidget):
 
         if self._location_results.count() <= 0:
             self._selected_location_suggestion = None
-            self._location_results.hide()
+            self._set_widget_explicitly_visible(self._location_results, False)
             self._location_confirm_button.setEnabled(False)
-            self._refresh_panel_geometry()
+            self._refresh_or_schedule_panel_geometry()
             return
 
         self._location_results.setCurrentRow(0)
-        self._location_results.show()
+        self._set_widget_explicitly_visible(self._location_results, True)
         self._location_confirm_button.setEnabled(True)
-        self._refresh_panel_geometry()
+        self._refresh_or_schedule_panel_geometry()
 
     def set_location_busy(self, busy: bool) -> None:
         self._location_editor.setEnabled(self._location_capability_enabled)
@@ -721,9 +737,8 @@ class InfoPanel(QWidget):
         self._location_dirty = False
         self._location_editor.setPlaceholderText("")
         self._clear_location_results()
-        self._location_map.set_location(float(latitude), float(longitude))
-        self._location_map.show()
-        self._refresh_panel_geometry()
+        self._show_location_map(float(latitude), float(longitude))
+        self._refresh_or_schedule_panel_geometry()
 
     def shutdown(self) -> None:
         self._location_map.shutdown()
@@ -784,20 +799,35 @@ class InfoPanel(QWidget):
         if previous_rel != self._current_rel:
             self._clear_location_results()
             self._location_dirty = False
+        gps = metadata.get("gps")
+        has_valid_gps = False
+        if isinstance(gps, dict):
+            latitude = gps.get("lat")
+            longitude = gps.get("lon")
+            has_valid_gps = isinstance(latitude, (int, float)) and isinstance(longitude, (int, float))
+
         if not self._location_capability_enabled:
             self._clear_location_results()
-            self._location_editor_row.hide()
-            self._location_results.hide()
-            self._location_map.hide()
-            self._location_fallback_label.setText(self._location_fallback_text)
-            self._location_fallback_label.show()
-            self._location_download_button.show()
+            self._set_widget_explicitly_visible(self._location_editor_row, False)
+            self._set_widget_explicitly_visible(self._location_results, False)
+            if self._location_preview_enabled:
+                self._set_widget_explicitly_visible(self._location_fallback_label, False)
+                self._set_widget_explicitly_visible(self._location_download_button, False)
+                if has_valid_gps:
+                    assert isinstance(gps, dict)
+                    self._show_location_map(float(gps["lat"]), float(gps["lon"]))
+                else:
+                    self._hide_location_map(clear=True)
+            else:
+                self._hide_location_map(clear=False)
+                self._location_fallback_label.setText(self._location_fallback_text)
+                self._set_widget_explicitly_visible(self._location_fallback_label, True)
+                self._set_widget_explicitly_visible(self._location_download_button, True)
             return
 
-        self._location_fallback_label.hide()
-        self._location_download_button.hide()
-        self._location_editor_row.show()
-        gps = metadata.get("gps")
+        self._set_widget_explicitly_visible(self._location_fallback_label, False)
+        self._set_widget_explicitly_visible(self._location_download_button, False)
+        self._set_widget_explicitly_visible(self._location_editor_row, True)
         location_text = metadata.get("location") or metadata.get("place")
         normalized_location = (
             str(location_text).strip()
@@ -819,18 +849,11 @@ class InfoPanel(QWidget):
             "Assign a Location" if not normalized_location else ""
         )
 
-        if isinstance(gps, dict):
-            latitude = gps.get("lat")
-            longitude = gps.get("lon")
-            if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
-                self._location_map.set_location(float(latitude), float(longitude))
-                self._location_map.show()
-            else:
-                self._location_map.clear_location()
-                self._location_map.hide()
+        if has_valid_gps:
+            assert isinstance(gps, dict)
+            self._show_location_map(float(gps["lat"]), float(gps["lon"]))
         else:
-            self._location_map.clear_location()
-            self._location_map.hide()
+            self._hide_location_map(clear=True)
 
     def _handle_location_text_edited(self, text: str) -> None:
         if self._updating_location_ui:
@@ -908,8 +931,41 @@ class InfoPanel(QWidget):
         self._location_suggestions = []
         self._selected_location_suggestion = None
         self._location_results.clear()
-        self._location_results.hide()
+        self._set_widget_explicitly_visible(self._location_results, False)
         self._location_confirm_button.setEnabled(False)
+
+    @staticmethod
+    def _set_widget_explicitly_visible(widget: QWidget, visible: bool) -> None:
+        if visible:
+            if widget.isHidden():
+                widget.show()
+            return
+        if not widget.isHidden():
+            widget.hide()
+
+    def _show_location_map(self, latitude: float, longitude: float) -> None:
+        target = (float(latitude), float(longitude))
+        current_lat, current_lon = self._location_map.current_location()
+        should_update_location = (
+            self._location_map.map_widget() is None
+            or self._last_location_map_target is None
+            or current_lat is None
+            or current_lon is None
+            or abs(self._last_location_map_target[0] - target[0]) > 1e-6
+            or abs(self._last_location_map_target[1] - target[1]) > 1e-6
+            or abs(float(current_lat) - target[0]) > 1e-6
+            or abs(float(current_lon) - target[1]) > 1e-6
+        )
+        if should_update_location:
+            self._location_map.set_location(target[0], target[1])
+            self._last_location_map_target = target
+        self._set_widget_explicitly_visible(self._location_map, True)
+
+    def _hide_location_map(self, *, clear: bool) -> None:
+        if clear:
+            self._location_map.clear_location()
+            self._last_location_map_target = None
+        self._set_widget_explicitly_visible(self._location_map, False)
 
     def _handle_location_editor_key_press(self, event: QKeyEvent) -> bool:
         key = event.key()
@@ -1002,6 +1058,14 @@ class InfoPanel(QWidget):
                 self.resize(target_size)
         if recenter:
             self._center_over_parent()
+
+    def _refresh_or_schedule_panel_geometry(self, *, recenter: bool = False) -> None:
+        """Refresh hidden layouts immediately, but coalesce visible reflows."""
+
+        if self.isVisible():
+            self._schedule_post_show_reflow(recenter=recenter)
+            return
+        self._refresh_panel_geometry(recenter=recenter)
 
     def _center_over_parent(self) -> None:
         """Center the panel over its parent using the current widget size."""

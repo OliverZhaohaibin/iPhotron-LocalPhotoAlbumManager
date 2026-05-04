@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Iterator, List, Optional, TYPE_CHECKING
+from typing import Iterable, List, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from ...app import load_incremental_index_cache
-from ...cache.index_store import get_global_repository
-from ...io.scanner_adapter import scan_album
+from ...bootstrap.library_scan_service import (
+    LibraryScanService,
+    merge_scan_chunk_with_repository,
+)
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
 
@@ -47,6 +48,7 @@ class ScannerWorker(QRunnable):
         exclude: Iterable[str],
         signals: ScannerSignals,
         library_root: Optional[Path] = None,
+        scan_service: Optional[LibraryScanService] = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -56,6 +58,7 @@ class ScannerWorker(QRunnable):
         self._signals = signals
         # Use library_root for database if provided, otherwise use root
         self._library_root = library_root if library_root else root
+        self._scan_service = scan_service
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
@@ -79,6 +82,14 @@ class ScannerWorker(QRunnable):
         return self._library_root
 
     @property
+    def scan_service(self) -> LibraryScanService:
+        """Return the session scan service used by this worker."""
+
+        if self._scan_service is None:
+            self._scan_service = LibraryScanService(self._library_root)
+        return self._scan_service
+
+    @property
     def cancelled(self) -> bool:
         """Return ``True`` if the scan has been cancelled."""
 
@@ -100,89 +111,41 @@ class ScannerWorker(QRunnable):
         """Perform the scan and emit progress as files are processed."""
 
         rows: List[dict] = []
-        scanner: Optional[Iterator[dict]] = None
-        store: Optional["AssetRepository"] = None
-
         try:
             ensure_work_dir(self._root)
 
             # Emit an initial indeterminate update
             self._signals.progressUpdated.emit(self._root, 0, -1)
 
-            # Initialize repository at library root (single global database)
-            try:
-                store = get_global_repository(self._library_root)
-            except Exception as e:
-                LOGGER.error(
-                    "Failed to initialize AssetRepository for %s: %s",
-                    self._library_root,
-                    e,
-                )
-                raise
-
             def progress_callback(processed: int, total: int) -> None:
                 if not self._is_cancelled:
                     self._signals.progressUpdated.emit(self._root, processed, total)
 
-            chunk: List[dict] = []
-
-            # Load existing index for incremental scanning
-            existing_index = load_incremental_index_cache(
+            result = self.scan_service.scan_album(
                 self._root,
-                library_root=self._library_root,
+                include=self._include,
+                exclude=self._exclude,
+                progress_callback=progress_callback,
+                is_cancelled=lambda: self._is_cancelled,
+                chunk_callback=lambda chunk: self._signals.chunkReady.emit(
+                    self._root,
+                    chunk,
+                ),
+                batch_failed_callback=lambda count: self._signals.batchFailed.emit(
+                    self._root,
+                    count,
+                ),
+                chunk_size=self.SCAN_CHUNK_SIZE,
+                persist_chunks=True,
             )
-
-            # The new scan_album implementation handles parallel discovery and processing.
-            # We initialize the generator but execution (and thread starting) happens on iteration.
-            scanner = scan_album(
-                self._root,
-                self._include,
-                self._exclude,
-                existing_index=existing_index,
-                progress_callback=progress_callback
-            )
-
-            # Compute prefix for library-relative paths (once, before the loop)
-            scan_prefix = ""
-            scan_prefix_with_slash = ""
-            try:
-                if self._library_root.resolve() != self._root.resolve():
-                    scan_prefix = self._root.relative_to(self._library_root).as_posix()
-                    scan_prefix_with_slash = scan_prefix + "/"
-            except ValueError:
-                pass  # root is not under library_root, keep empty prefix
-
-            for row in scanner:
-                if self._is_cancelled:
-                    break
-
-                # Adjust rel path to be library-relative if scanning a subfolder
-                if scan_prefix and "rel" in row:
-                    # Use string concatenation for efficiency (avoiding Path object creation per row)
-                    row["rel"] = scan_prefix_with_slash + row["rel"]
-
-                rows.append(row)
-                chunk.append(row)
-
-                if len(chunk) >= self.SCAN_CHUNK_SIZE:
-                    self._process_chunk(store, chunk)
-                    chunk = []
-
-            if chunk and not self._is_cancelled:
-                self._process_chunk(store, chunk)
+            rows = result.rows
+            self._failed_count += result.failed_count
 
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:
                 self._had_error = True
                 self._signals.error.emit(self._root, str(exc))
         finally:
-            # Ensure the scanner generator is closed to trigger its cleanup logic (stopping threads)
-            if scanner is not None:
-                scanner.close()
-
-            # NOTE: do not close the global repository here. The repository is a
-            # process-wide singleton and is closed during app shutdown.
-
             if not self._is_cancelled and not self._had_error:
                 # Consumers should use `chunkReady` for progressive UI updates.
                 # The `finished` signal provides the complete dataset for
@@ -192,27 +155,23 @@ class ScannerWorker(QRunnable):
                 self._signals.finished.emit(self._root, [])
 
     def _process_chunk(self, store: "AssetRepository", chunk: List[dict]) -> None:
-        """
-        Attempt to persist a chunk of items to the store and emit readiness signals.
+        """Compatibility wrapper for tests and legacy worker internals."""
 
-        This method tries to append the given chunk to the provided AssetRepository. If
-        persistence fails, it logs the error, increments the failed count, and emits
-        the `batchFailed` signal with the number of items in the failed chunk.
-
-        `chunkReady` is emitted only for rows that were durably merged into the
-        repository. Downstream consumers such as `FaceScanWorker` treat the emitted
-        rows as authoritative persisted state, so failed batches must not leak
-        through this signal.
-        """
-        try:
-            emitted_chunk = store.merge_scan_rows(chunk)
-        except Exception as e:
-            LOGGER.error(f"Failed to persist chunk of {len(chunk)} items: {e}")
-            self._failed_count += len(chunk)
-            self._signals.batchFailed.emit(self._root, len(chunk))
-            return
-
-        self._signals.chunkReady.emit(self._root, emitted_chunk)
+        self._failed_count += merge_scan_chunk_with_repository(
+            store,
+            root=self._root,
+            include=self._include,
+            exclude=self._exclude,
+            chunk=chunk,
+            chunk_callback=lambda emitted: self._signals.chunkReady.emit(
+                self._root,
+                emitted,
+            ),
+            batch_failed_callback=lambda count: self._signals.batchFailed.emit(
+                self._root,
+                count,
+            ),
+        )
 
     def cancel(self) -> None:
         """Request cancellation of the in-progress scan."""

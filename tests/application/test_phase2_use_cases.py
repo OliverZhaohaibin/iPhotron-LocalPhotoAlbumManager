@@ -10,13 +10,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from iPhoto.domain.models import Album, Asset, MediaType
-from iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
-from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from iPhoto.legacy.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
+from iPhoto.legacy.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
 from iPhoto.infrastructure.db.pool import ConnectionPool
 from iPhoto.events.bus import EventBus
-from iPhoto.application.use_cases.open_album import OpenAlbumUseCase
-from iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
-from iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
+from iPhoto.legacy.application.use_cases.open_album import OpenAlbumUseCase
+from iPhoto.legacy.application.use_cases.scan_album import ScanAlbumUseCase
+from iPhoto.legacy.application.use_cases.pair_live_photos import PairLivePhotosUseCase
 from iPhoto.application.dtos import OpenAlbumRequest, ScanAlbumRequest, PairLivePhotosRequest
 from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
 
@@ -209,7 +209,7 @@ def test_open_album_with_library_root_preserves_favorites(tmp_path):
     architecture the DB is the source of truth, so the sync must be skipped
     when a library_root is provided (global DB mode).
     """
-    from iPhoto.app import open_album
+    from iPhoto.legacy.app import open_album
     from iPhoto.cache.index_store.repository import (
         get_global_repository,
         reset_global_repository,

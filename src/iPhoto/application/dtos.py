@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 
 @dataclass
@@ -69,3 +69,35 @@ class PairLivePhotosRequest:
 @dataclass
 class PairLivePhotosResponse:
     paired_count: int
+
+
+@dataclass(slots=True, frozen=True)
+class GeotaggedAsset:
+    """Lightweight descriptor describing an asset with GPS metadata."""
+
+    library_relative: str
+    album_relative: str
+    absolute_path: Path
+    album_path: Path
+    asset_id: str
+    latitude: float
+    longitude: float
+    is_image: bool
+    is_video: bool
+    still_image_time: Optional[float]
+    duration: Optional[float]
+    location_name: Optional[str]
+    live_photo_group_id: Optional[str]
+    live_partner_rel: Optional[str]
+
+
+MapMarkerActivationKind = Literal["none", "asset", "cluster"]
+
+
+@dataclass(slots=True, frozen=True)
+class MapMarkerActivation:
+    """Application-level routing decision for a clicked map marker."""
+
+    kind: MapMarkerActivationKind
+    asset_relative: Optional[str] = None
+    assets: tuple[GeotaggedAsset, ...] = ()

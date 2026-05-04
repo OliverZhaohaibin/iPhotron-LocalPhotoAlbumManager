@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -13,12 +11,12 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import ALL_PHOTOS_TITLE
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
+from iPhoto.gui.services.people_service_resolver import resolve_people_service
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.facade import AppFacade
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
-from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
     from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
@@ -28,8 +26,6 @@ class NavigationCoordinator(QObject):
     """Thin binder around gallery navigation and location flows."""
 
     bindLibraryRequested = Signal()
-
-    _TRASH_CLEANUP_THROTTLE_SEC = 300.0
     _logger = logging.getLogger(__name__)
 
     def __init__(
@@ -51,9 +47,6 @@ class NavigationCoordinator(QObject):
 
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
 
-        self._trash_cleanup_running = False
-        self._trash_cleanup_lock = threading.Lock()
-        self._last_trash_cleanup_at: Optional[float] = None
         self._suppress_tree_refresh = False
         self._tree_refresh_suppression_reason: Optional[Literal["edit", "operation"]] = None
 
@@ -101,7 +94,17 @@ class NavigationCoordinator(QObject):
             self.bindLibraryRequested.emit()
             return
 
-        people_service = PeopleService(library_root)
+        people_service = resolve_people_service(
+            self._context.library,
+            library_root=library_root,
+        )
+        if people_service is None:
+            self._logger.warning(
+                "Pinned %s '%s' requested without an active People service",
+                pinned_item.kind,
+                pinned_item.item_id,
+            )
+            return
         if pinned_item.kind == "person":
             try:
                 query = people_service.build_cluster_query(pinned_item.item_id)
@@ -181,7 +184,6 @@ class NavigationCoordinator(QObject):
 
     def open_recently_deleted(self) -> None:
         self._reset_playback()
-        self._schedule_trash_cleanup()
         self._gallery_vm.open_recently_deleted()
 
     def open_location_view(self) -> None:
@@ -279,28 +281,6 @@ class NavigationCoordinator(QObject):
     def _reset_playback(self) -> None:
         if self._playback_coordinator is not None:
             self._playback_coordinator.reset_for_gallery()
-
-    def _schedule_trash_cleanup(self) -> None:
-        def _cleanup() -> None:
-            try:
-                self._context.library.cleanup_deleted_index()
-            finally:
-                with self._trash_cleanup_lock:
-                    self._trash_cleanup_running = False
-
-        with self._trash_cleanup_lock:
-            should_start = not self._trash_cleanup_running and self._should_run_trash_cleanup()
-            if should_start:
-                self._trash_cleanup_running = True
-                self._last_trash_cleanup_at = time.monotonic()
-
-        if should_start:
-            threading.Thread(target=_cleanup, daemon=True, name="trash-cleanup").start()
-
-    def _should_run_trash_cleanup(self) -> bool:
-        if self._last_trash_cleanup_at is None:
-            return True
-        return (time.monotonic() - self._last_trash_cleanup_at) >= self._TRASH_CLEANUP_THROTTLE_SEC
 
     def suppress_tree_refresh_for_edit(self) -> None:
         self._suppress_tree_refresh = True

@@ -29,6 +29,6 @@ def test_gl_image_viewer_queues_one_post_load_view_transform(qapp) -> None:
     viewer._schedule_post_load_view_transform()
     qapp.processEvents()
 
-    assert len(spy) == 1
+    assert spy.count() == 1
     assert viewer._pending_post_load_view_transform is False
     assert viewer._post_load_view_transform_scheduled is False

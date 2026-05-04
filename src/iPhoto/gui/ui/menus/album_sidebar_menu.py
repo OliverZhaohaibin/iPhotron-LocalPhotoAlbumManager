@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..widgets import dialogs
 from ....errors import LibraryError
-from ....library.manager import LibraryManager
+from ....library.runtime_controller import LibraryRuntimeController
 from ....library.tree import AlbumNode
 from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, NodeType
 from .style import apply_menu_style
@@ -102,7 +102,7 @@ class AlbumSidebarContextMenu(QMenu):
         parent: QWidget,
         tree: QTreeView,
         model: AlbumTreeModel,
-        library: LibraryManager,
+        library: LibraryRuntimeController,
         item: AlbumTreeItem,
         set_pending_selection: Callable[[Path | None], None],
         on_bind_library: Callable[[], None],
@@ -150,8 +150,17 @@ class AlbumSidebarContextMenu(QMenu):
                 "Show in File Manager",
                 lambda: self._reveal_path(self._item.album),
             )
+        if self._item.node_type == NodeType.PINNED_ALBUM:
+            if self._item.album is not None:
+                self.addAction(
+                    "Rename Album…",
+                    lambda: self._prompt_rename_album(self._item),
+                )
+            else:
+                self.addAction("Rename…", self._prompt_rename_pinned_item)
+            self.addSeparator()
+            self.addAction("Unpin", self._unpin_sidebar_item)
         if self._item.node_type in {
-            NodeType.PINNED_ALBUM,
             NodeType.PINNED_PERSON,
             NodeType.PINNED_GROUP,
         }:
@@ -295,7 +304,7 @@ def show_context_menu(
     point: QPoint,
     tree: QTreeView,
     model: AlbumTreeModel,
-    library: LibraryManager,
+    library: LibraryRuntimeController,
     set_pending_selection: Callable[[Path | None], None],
     on_bind_library: Callable[[], None],
 ) -> None:

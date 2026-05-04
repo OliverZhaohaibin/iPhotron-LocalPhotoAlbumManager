@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from ... import app as backend
+from ...bootstrap.library_scan_service import LibraryScanService
 from ...errors import IPhotoError
 
 
@@ -19,7 +19,7 @@ class RescanSignals(QObject):
 
 
 class RescanWorker(QRunnable):
-    """Execute a blocking ``backend.rescan`` call on a worker thread."""
+    """Execute a blocking session rescan on a worker thread."""
 
     def __init__(
         self,
@@ -27,12 +27,14 @@ class RescanWorker(QRunnable):
         signals: RescanSignals,
         *,
         library_root: Path | None = None,
+        scan_service: LibraryScanService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
         self._root = Path(root)
         self._signals = signals
         self._library_root = library_root
+        self._scan_service = scan_service
 
     @property
     def root(self) -> Path:
@@ -52,6 +54,16 @@ class RescanWorker(QRunnable):
 
         return self._signals
 
+    @property
+    def scan_service(self) -> LibraryScanService:
+        """Return the session scan service used by the worker."""
+
+        if self._scan_service is None:
+            self._scan_service = LibraryScanService(
+                self._library_root or self._root
+            )
+        return self._scan_service
+
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         """Perform the rescan and emit the outcome back to the GUI thread."""
 
@@ -60,10 +72,10 @@ class RescanWorker(QRunnable):
             def progress_callback(processed: int, total: int) -> None:
                 self._signals.progressUpdated.emit(self._root, processed, total)
 
-            backend.rescan(
+            self.scan_service.refresh_restored_album(
                 self._root,
                 progress_callback=progress_callback,
-                library_root=self._library_root,
+                pair_live=True,
             )
         except IPhotoError as exc:
             # Surface domain-specific failures with the album path attached so the

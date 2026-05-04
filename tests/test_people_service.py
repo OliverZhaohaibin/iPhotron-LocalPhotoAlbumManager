@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,10 @@ import pytest
 from PIL import Image
 
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
+from iPhoto.bootstrap.library_people_service import (
+    create_people_asset_repository,
+    create_people_service,
+)
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.library.workers.face_scan_worker import FaceScanWorker
 from iPhoto.people.index_coordinator import (
@@ -18,7 +23,7 @@ from iPhoto.people.index_coordinator import (
     reset_people_index_coordinators,
 )
 from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
-from iPhoto.people.pipeline import DetectedAssetFaces
+from iPhoto.people.pipeline import DetectedAssetFaces, FaceClusterPipeline
 from iPhoto.people.records import AssetFaceAnnotation
 from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
@@ -196,7 +201,7 @@ def test_people_service_rename_merge_and_build_query(tmp_path: Path) -> None:
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
 
@@ -247,7 +252,7 @@ def test_people_service_creates_groups_and_queries_common_assets(tmp_path: Path)
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
 
@@ -340,7 +345,7 @@ def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
     faces = [
@@ -405,7 +410,7 @@ def test_people_service_can_delete_group(tmp_path: Path) -> None:
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
     repository.replace_all(
@@ -447,7 +452,7 @@ def test_people_service_load_dashboard_reuses_cluster_snapshot_for_groups(tmp_pa
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
     faces = [
@@ -503,7 +508,7 @@ def test_people_service_can_hide_people_and_optionally_include_them(tmp_path: Pa
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
     repository.replace_all(
@@ -538,7 +543,7 @@ def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
     repository.replace_all(
@@ -568,7 +573,7 @@ def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:
         [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"}]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
 
     assert service.mark_asset_retry("asset-a") is True
     assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
@@ -585,7 +590,7 @@ def test_people_service_lists_asset_face_annotations_and_preserves_names(tmp_pat
         [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
 
@@ -616,7 +621,7 @@ def test_add_manual_face_updates_cover_without_changing_ai_profile(tmp_path: Pat
         [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
     auto_face = _face_record(
@@ -679,7 +684,7 @@ def test_add_manual_face_creates_manual_only_person(tmp_path: Path) -> None:
         [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     result = service.add_manual_face(
         asset_id="asset-a",
         requested_box=(40, 50, 80, 80),
@@ -719,7 +724,7 @@ def test_merge_manual_only_people_keeps_profiles_embedding_free(tmp_path: Path) 
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     source = service.add_manual_face(
         asset_id="asset-a",
         requested_box=(40, 50, 80, 80),
@@ -767,7 +772,7 @@ def test_merge_manual_person_into_auto_person_preserves_auto_profile_decision(
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
     auto_face = _face_record(
@@ -822,7 +827,7 @@ def test_people_service_lists_person_name_suggestions_for_named_people_only(tmp_
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
 
@@ -868,7 +873,7 @@ def test_people_service_dashboard_stays_stable_until_face_scan_session_commits(t
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
 
@@ -959,17 +964,14 @@ def test_people_service_dashboard_stays_stable_until_face_scan_session_commits(t
 
 
 def test_people_service_face_mutation_methods_delegate_to_coordinator(tmp_path: Path) -> None:
-    service = PeopleService(tmp_path)
     coordinator = Mock(
         delete_face=Mock(return_value=object()),
         move_face_to_person=Mock(return_value=object()),
         move_face_to_new_person=Mock(return_value=object()),
     )
+    service = PeopleService(tmp_path, coordinator=coordinator)
 
-    with (
-        patch("iPhoto.people.service.get_people_index_coordinator", return_value=coordinator),
-        patch("iPhoto.people.service.uuid.uuid4", return_value=SimpleNamespace(hex="person-new")),
-    ):
+    with patch("iPhoto.people.service.uuid.uuid4", return_value=SimpleNamespace(hex="person-new")):
         assert service.delete_face("face-1") is True
         assert service.move_face_to_person("face-1", "person-b") is True
         assert service.move_face_to_new_person("face-1", "Alice 2") == "person-new"
@@ -1051,7 +1053,7 @@ def test_people_index_coordinator_commits_realtime_dashboard_snapshot(tmp_path: 
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
 
@@ -1097,7 +1099,10 @@ def test_people_index_coordinator_commits_realtime_dashboard_snapshot(tmp_path: 
     group = service.create_group(["person-a", "person-b"])
     assert group is not None
 
-    coordinator = get_people_index_coordinator(library_root)
+    coordinator = get_people_index_coordinator(
+        library_root,
+        asset_repository=create_people_asset_repository(library_root),
+    )
     event = coordinator.submit_detected_batch(
         [
             DetectedAssetFaces(
@@ -1218,6 +1223,36 @@ def test_face_scan_worker_marks_retry_error_failed_on_second_attempt(tmp_path: P
     assert coordinator.submit_detected_batch.call_args.args[0] == []
 
 
+def test_face_pipeline_suppresses_missing_file_after_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pipeline = FaceClusterPipeline(model_root=tmp_path / "models")
+    monkeypatch.setattr(
+        pipeline,
+        "_ensure_face_analysis",
+        lambda: SimpleNamespace(get=Mock(return_value=[])),
+    )
+    cancel_checks = 0
+
+    def is_cancelled() -> bool:
+        nonlocal cancel_checks
+        cancel_checks += 1
+        return cancel_checks >= 2
+
+    with caplog.at_level(logging.ERROR, logger="iPhoto.people.pipeline"):
+        results = pipeline.detect_faces_for_rows(
+            [{"id": "asset-a", "rel": "album/missing.jpg"}],
+            library_root=tmp_path,
+            thumbnail_dir=tmp_path / "thumbs",
+            is_cancelled=is_cancelled,
+        )
+
+    assert results == []
+    assert "Face detection failed" not in caplog.text
+
+
 def test_face_scan_worker_logs_asset_retry_reason(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     global_repo = get_global_repository(tmp_path)
     global_repo.write_rows(
@@ -1260,19 +1295,19 @@ def test_people_index_coordinator_retries_done_status_bookkeeping(
     library_root = tmp_path / "Library"
     library_root.mkdir()
 
-    coordinator = get_people_index_coordinator(library_root)
+    coordinator = get_people_index_coordinator(
+        library_root,
+        asset_repository=create_people_asset_repository(library_root),
+    )
     calls: list[tuple[tuple[str, ...], str]] = []
 
     class FlakyStore:
-        def update_face_statuses(self, asset_ids: list[str], status: str) -> None:
+        def update_face_statuses(self, asset_ids, status: str) -> None:
             calls.append((tuple(asset_ids), status))
             if status == "done" and len(calls) == 1:
                 raise RuntimeError("temporary lock")
 
-    monkeypatch.setattr(
-        "iPhoto.people.index_coordinator.get_global_repository",
-        lambda _root: FlakyStore(),
-    )
+    coordinator.set_asset_repository(FlakyStore())
     event = coordinator.submit_detected_batch(
         [
             DetectedAssetFaces(
@@ -1307,7 +1342,7 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
         ]
     )
 
-    service = PeopleService(library_root)
+    service = create_people_service(library_root)
     repository = service.repository()
     assert repository is not None
 
@@ -1345,7 +1380,10 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
 
     monkeypatch.setattr(global_repo, "update_face_statuses", fail_done_status_once)
 
-    coordinator = get_people_index_coordinator(library_root)
+    coordinator = get_people_index_coordinator(
+        library_root,
+        asset_repository=create_people_asset_repository(library_root),
+    )
     with pytest.raises(
         PeopleSnapshotCommittedError,
         match="Face scan committed, but updating scan bookkeeping failed.",
@@ -1394,7 +1432,17 @@ def test_face_scan_worker_does_not_mark_retry_after_committed_snapshot_error(
             {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"},
         ]
     )
-    worker = FaceScanWorker(tmp_path)
+    people_service_with_failing_coordinator = create_people_service(
+        tmp_path,
+        coordinator=Mock(
+            submit_detected_batch=Mock(
+                side_effect=PeopleSnapshotCommittedError(
+                    "Face scan committed, but updating scan bookkeeping failed."
+                )
+            )
+        ),
+    )
+    worker = FaceScanWorker(tmp_path, people_service=people_service_with_failing_coordinator)
     worker.finish_input()
     messages: list[str] = []
     worker.statusChanged.connect(messages.append)
@@ -1427,17 +1475,6 @@ def test_face_scan_worker_does_not_mark_retry_after_committed_snapshot_error(
         "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
         FakePipeline,
     )
-    monkeypatch.setattr(
-        "iPhoto.library.workers.face_scan_worker.get_people_index_coordinator",
-        lambda _root: Mock(
-            submit_detected_batch=Mock(
-                side_effect=PeopleSnapshotCommittedError(
-                    "Face scan committed, but updating scan bookkeeping failed."
-                )
-            )
-        ),
-    )
-
     worker.run()
 
     assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "pending"

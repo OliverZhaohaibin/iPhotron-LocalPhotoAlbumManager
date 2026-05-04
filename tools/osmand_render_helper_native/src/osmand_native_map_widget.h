@@ -69,6 +69,8 @@ private:
     void beginInteractiveRendering();
     void scheduleInteractiveRenderingFinish();
     void finishInteractiveRendering();
+    void setDragCursor();
+    void resetDragCursor();
     void wrapCenter();
     double worldSize() const;
 
@@ -81,6 +83,7 @@ private:
     QString _initError;
     bool _resourcesReady = false;
     bool _dragging = false;
+    bool _dragOverrideCursorActive = false;
     QPointF _lastMousePosition;
     double _centerX = 0.5;
     double _centerY = 0.5;

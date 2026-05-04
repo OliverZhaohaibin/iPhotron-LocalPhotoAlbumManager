@@ -1,5 +1,19 @@
 
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
+
+
+class _QueryService:
+    def __init__(self, library_root, rows):
+        self.library_root = library_root
+        self.rows = rows
+        self.query_roots = []
+
+    def read_library_relative_asset_rows(self, root, *, sort_by_date=True, filter_hidden=True):
+        self.query_roots.append(root)
+        assert sort_by_date is True
+        assert filter_hidden is True
+        return iter(self.rows)
+
 
 def test_get_live_scan_results_scanning_child_viewing_parent(tmp_path):
     """
@@ -11,7 +25,7 @@ def test_get_live_scan_results_scanning_child_viewing_parent(tmp_path):
     child = root / "Vacation"
     child.mkdir(parents=True)
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
 
     # Manually setup the scan state
     # Scanning inside "Vacation"
@@ -43,7 +57,7 @@ def test_get_live_scan_results_scanning_parent_viewing_child(tmp_path):
     other = root / "Other"
     other.mkdir(parents=True)
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
 
     # Scanning "root"
     manager._live_scan_root = root
@@ -72,7 +86,7 @@ def test_get_live_scan_results_same_path(tmp_path):
     root = tmp_path / "Library"
     root.mkdir()
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager._live_scan_root = root
     manager._live_scan_buffer = [{"rel": "photo.jpg", "id": "1"}]
 
@@ -92,7 +106,7 @@ def test_get_live_scan_results_disjoint_paths(tmp_path):
     a.mkdir(parents=True)
     b.mkdir(parents=True)
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager._live_scan_root = a
     manager._live_scan_buffer = [{"rel": "photo.jpg"}]
 
@@ -105,10 +119,28 @@ def test_scan_chunk_does_not_accumulate_live_buffer(tmp_path):
     root = tmp_path / "Library"
     root.mkdir()
 
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager._live_scan_root = root
     manager._live_scan_buffer = [{"rel": "existing.jpg", "id": "1"}]
 
     manager._on_scan_chunk(root, [{"rel": "new.jpg", "id": "2"}])
 
     assert manager._live_scan_buffer == [{"rel": "existing.jpg", "id": "1"}]
+
+
+def test_get_live_scan_results_reads_database_snapshot_through_query_service(tmp_path):
+    root = tmp_path / "Library"
+    child = root / "Vacation"
+    child.mkdir(parents=True)
+
+    manager = LibraryRuntimeController()
+    manager._root = root
+    manager._live_scan_root = child
+    manager._live_scan_buffer = []
+    query_service = _QueryService(root, [{"rel": "Vacation/photo.jpg", "id": "1"}])
+    manager.bind_asset_query_service(query_service)
+
+    results = manager.get_live_scan_results(relative_to=root)
+
+    assert query_service.query_roots == [child]
+    assert results == [{"rel": "Vacation/photo.jpg", "id": "1"}]

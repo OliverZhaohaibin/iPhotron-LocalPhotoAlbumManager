@@ -6,14 +6,14 @@ from unittest.mock import Mock, MagicMock, patch
 from datetime import datetime
 
 from iPhoto.domain.models import Album, Asset, MediaType
-from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
+from iPhoto.legacy.domain.repositories import IAlbumRepository, IAssetRepository
 from iPhoto.events.bus import EventBus
-from iPhoto.application.use_cases.create_album import CreateAlbumUseCase, CreateAlbumRequest
-from iPhoto.application.use_cases.delete_album import DeleteAlbumUseCase, DeleteAlbumRequest
-from iPhoto.application.use_cases.import_assets import ImportAssetsUseCase, ImportAssetsRequest
-from iPhoto.application.use_cases.move_assets import MoveAssetsUseCase, MoveAssetsRequest
-from iPhoto.application.use_cases.update_metadata import UpdateMetadataUseCase, UpdateMetadataRequest
-from iPhoto.application.use_cases.generate_thumbnail import GenerateThumbnailUseCase, GenerateThumbnailRequest
+from iPhoto.legacy.application.use_cases.create_album import CreateAlbumUseCase, CreateAlbumRequest
+from iPhoto.legacy.application.use_cases.delete_album import DeleteAlbumUseCase, DeleteAlbumRequest
+from iPhoto.legacy.application.use_cases.import_assets import ImportAssetsUseCase, ImportAssetsRequest
+from iPhoto.legacy.application.use_cases.move_assets import MoveAssetsUseCase, MoveAssetsRequest
+from iPhoto.legacy.application.use_cases.update_metadata import UpdateMetadataUseCase, UpdateMetadataRequest
+from iPhoto.legacy.application.use_cases.generate_thumbnail import GenerateThumbnailUseCase, GenerateThumbnailRequest
 from iPhoto.application.interfaces import IThumbnailGenerator
 from iPhoto.domain.services.manifest_service import ManifestService
 
@@ -105,7 +105,7 @@ class TestDeleteAlbumUseCase:
 # ===========================================================================
 
 class TestImportAssetsUseCase:
-    @patch("iPhoto.application.use_cases.import_assets.shutil")
+    @patch("iPhoto.legacy.application.use_cases.import_assets.shutil")
     def test_import_assets_success(self, mock_shutil):
         asset_repo = Mock(spec=IAssetRepository)
         asset_repo.get_by_path.return_value = None
@@ -153,7 +153,7 @@ class TestImportAssetsUseCase:
 # ===========================================================================
 
 class TestMoveAssetsUseCase:
-    @patch("iPhoto.application.use_cases.move_assets.shutil")
+    @patch("iPhoto.legacy.application.use_cases.move_assets.shutil")
     def test_move_assets_success(self, mock_shutil):
         asset = _make_asset()
         source_album = _make_album(album_id="a1", path=Path("/tmp/src"))

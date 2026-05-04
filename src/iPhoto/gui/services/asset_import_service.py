@@ -13,7 +13,10 @@ from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.import_worker import ImportSignals, ImportWorker
 from .album_metadata_service import AlbumMetadataService
 from .library_update_service import LibraryUpdateService
-
+from .session_service_resolver import (
+    bound_asset_lifecycle_service,
+    bound_scan_service,
+)
 
 
 class AssetImportService(QObject):
@@ -32,7 +35,7 @@ class AssetImportService(QObject):
         update_service: Optional[LibraryUpdateService] = None,
         refresh_callback: Optional[Callable[[Path], None]] = None,
         metadata_service: AlbumMetadataService,
-        library_manager_getter: Optional[Callable[[], "LibraryManager | None"]] = None,
+        library_manager_getter: Optional[Callable[[], "LibraryRuntimeController | None"]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -79,18 +82,18 @@ class AssetImportService(QObject):
         signals.started.connect(self._on_import_started)
         signals.progress.connect(self._on_import_progress)
 
-        library_root: Optional[Path] = None
-        if self._library_manager_getter is not None:
-            manager = self._library_manager_getter()
-            if manager is not None:
-                library_root = manager.root()
+        service_root, scan_service, lifecycle_service = self._import_services_for_target(
+            target_root,
+        )
 
         worker = ImportWorker(
             normalized,
             target_root,
             self._copy_into_album,
             signals,
-            library_root=library_root,
+            library_root=service_root,
+            scan_service=scan_service,
+            asset_lifecycle_service=lifecycle_service,
         )
         unique_task_id = f"import:{target_root}:{uuid.uuid4().hex}"
         # The BackgroundTaskManager refuses duplicate task identifiers so we append a
@@ -158,6 +161,31 @@ class AssetImportService(QObject):
             self.errorRaised.emit(f"Import destination is not a directory: {target}")
             return None
         return target
+
+    def _import_services_for_target(self, target_root: Path):
+        manager = (
+            self._library_manager_getter()
+            if self._library_manager_getter is not None
+            else None
+        )
+        library_root: Optional[Path] = manager.root() if manager is not None else None
+        if (
+            manager is not None
+            and library_root is not None
+            and self._path_is_descendant(target_root, library_root)
+        ):
+            scan_service = bound_scan_service(manager, library_root=library_root)
+            lifecycle_service = bound_asset_lifecycle_service(
+                manager,
+                library_root=library_root,
+            )
+            if scan_service is not None and lifecycle_service is not None:
+                return library_root, scan_service, lifecycle_service
+
+        raise RuntimeError(
+            "Active library session is unavailable; imports require a bound "
+            "LibrarySession target."
+        )
 
     def _copy_into_album(self, source: Path, destination: Path) -> Path:
         """Copy *source* into *destination* using collision-safe filenames."""
@@ -237,6 +265,22 @@ class AssetImportService(QObject):
         """Emit :attr:`importProgress` for worker updates via a dedicated slot."""
 
         self.importProgress.emit(root, current, total)
+
+    @staticmethod
+    def _path_is_descendant(candidate: Path, ancestor: Path) -> bool:
+        try:
+            candidate_norm = Path(candidate).resolve()
+            ancestor_norm = Path(ancestor).resolve()
+        except OSError:
+            candidate_norm = Path(candidate)
+            ancestor_norm = Path(ancestor)
+        if candidate_norm == ancestor_norm:
+            return True
+        try:
+            candidate_norm.relative_to(ancestor_norm)
+        except ValueError:
+            return False
+        return True
 
 
 __all__ = ["AssetImportService"]

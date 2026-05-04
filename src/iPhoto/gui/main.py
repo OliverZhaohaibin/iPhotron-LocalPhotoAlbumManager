@@ -32,17 +32,22 @@ def _bootstrap_macos_external_tool_path() -> None:
     if sys.platform != "darwin":
         return
 
+    # Use the target platform's PATH separator rather than the host process
+    # separator so darwin-specific normalization also behaves correctly in
+    # cross-platform tests that monkeypatch ``sys.platform``.
+    path_separator = ":"
+
     existing_tool_paths: list[str] = []
     for candidate in _MACOS_EXTERNAL_TOOL_PATHS:
         try:
             if candidate.is_dir():
-                existing_tool_paths.append(str(candidate))
+                existing_tool_paths.append(candidate.as_posix())
         except OSError:
             continue
 
     current_paths = [
         entry
-        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        for entry in os.environ.get("PATH", "").split(path_separator)
         if entry
     ]
     merged_paths: list[str] = []
@@ -53,7 +58,7 @@ def _bootstrap_macos_external_tool_path() -> None:
         seen.add(entry)
         merged_paths.append(entry)
     if merged_paths:
-        os.environ["PATH"] = os.pathsep.join(merged_paths)
+        os.environ["PATH"] = path_separator.join(merged_paths)
 
 
 def _configure_qt_shader_disk_cache() -> None:

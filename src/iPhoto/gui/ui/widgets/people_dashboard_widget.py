@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.people.service import PeopleService
@@ -46,7 +47,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         *,
         generation: int,
         index_version: int,
-        library_root: Path | None,
+        people_service: PeopleService,
         status_message: str | None,
         show_hidden_people: bool,
         signals: _PeopleDashboardLoaderSignals,
@@ -54,13 +55,13 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         super().__init__()
         self._generation = generation
         self._index_version = index_version
-        self._library_root = library_root
+        self._people_service = people_service
         self._status_message = status_message
         self._show_hidden_people = bool(show_hidden_people)
         self._signals = signals
 
     def run(self) -> None:
-        if self._library_root is None:
+        if self._people_service.library_root() is None:
             self._signals.loaded.emit(
                 self._generation,
                 self._index_version,
@@ -71,8 +72,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
                 self._status_message,
             )
             return
-        service = PeopleService(self._library_root)
-        summaries, groups, pending = service.load_dashboard(
+        summaries, groups, pending = self._people_service.load_dashboard(
             include_hidden=self._show_hidden_people
         )
         self._signals.loaded.emit(
@@ -212,11 +212,19 @@ class PeopleDashboardWidget(QWidget):
         self._show_hidden_people = self._load_show_hidden_people_setting()
         self._apply_theme_styles()
 
+    def set_people_service(self, service: PeopleService | None) -> None:
+        self._service = service or PeopleService()
+        self._current_library_root = self._service.library_root()
+        configure_people_cover_cache(self._current_library_root)
+        self.reload()
+
     def set_library_root(self, library_root: Path | None) -> None:
-        if self._current_library_root == library_root:
+        service_matches_root = self._service.library_root() == library_root
+        service_has_asset_boundary = library_root is None or self._service.asset_repository is not None
+        if self._current_library_root == library_root and service_matches_root and service_has_asset_boundary:
             return
         self._current_library_root = library_root
-        self._service.set_library_root(library_root)
+        self._service = create_people_service(library_root) if library_root is not None else PeopleService()
         configure_people_cover_cache(library_root)
         self.reload()
 
@@ -273,7 +281,7 @@ class PeopleDashboardWidget(QWidget):
         worker = _PeopleDashboardLoaderWorker(
             generation=generation,
             index_version=index_version,
-            library_root=library_root,
+            people_service=self._service,
             status_message=self._status_message,
             show_hidden_people=self._show_hidden_people,
             signals=self._load_signals,

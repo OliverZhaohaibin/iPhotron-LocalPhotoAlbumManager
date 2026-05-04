@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QImage, QPixmap
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iPhoto.application.ports import EditServicePort
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.events.bus import EventBus
 from iPhoto.gui.ui.models.edit_session import EditSession
@@ -38,7 +39,6 @@ from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import (
 from iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
 from iPhoto.gui.ui.palette import viewer_surface_color
 from iPhoto.gui.ui.media import MediaRestoreRequest
-from iPhoto.io import sidecar
 from iPhoto.io.metadata import read_video_meta
 from iPhoto.media_classifier import VIDEO_EXTENSIONS
 from iPhoto.utils.logging import get_logger
@@ -80,6 +80,7 @@ class EditCoordinator(QObject):
         navigation: "NavigationCoordinator | None" = None,
         media_session: "MediaSelectionSession | None" = None,
         adjustment_committer: "MediaAdjustmentCommitter | None" = None,
+        edit_service_getter: Callable[[], EditServicePort | None] | None = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -91,6 +92,7 @@ class EditCoordinator(QObject):
         self._navigation = navigation
         self._media_session = media_session
         self._adjustment_committer = adjustment_committer
+        self._edit_service_getter = edit_service_getter
 
         self._transition_manager = EditViewTransitionManager(
             self._ui,
@@ -358,7 +360,12 @@ class EditCoordinator(QObject):
         )
 
         # Load Adjustments
-        adjustments = sidecar.load_adjustments(asset_path)
+        edit_service = self._edit_service()
+        adjustments = (
+            edit_service.read_adjustments(asset_path)
+            if edit_service is not None
+            else {}
+        )
 
         # Setup Session
         session = EditSession(self)
@@ -603,7 +610,10 @@ class EditCoordinator(QObject):
             if navigation:
                 navigation.pause_library_watcher()
             try:
-                sidecar.save_adjustments(source, self._session.values())
+                edit_service = self._edit_service()
+                if edit_service is None:
+                    raise RuntimeError("Edit service is unavailable")
+                edit_service.write_adjustments(source, self._session.values())
                 self._asset_vm.invalidate_thumbnail(str(source))
             finally:
                 if navigation:
@@ -649,6 +659,11 @@ class EditCoordinator(QObject):
         self._history_manager.redo()
 
     # --- Helpers ---
+
+    def _edit_service(self) -> EditServicePort | None:
+        if self._edit_service_getter is None:
+            return None
+        return self._edit_service_getter()
 
     def _handle_session_changed(self, values: dict):
         """Buffer session updates to avoid spamming the preview pipeline."""

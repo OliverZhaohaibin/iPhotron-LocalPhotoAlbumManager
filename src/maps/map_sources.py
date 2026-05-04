@@ -416,6 +416,10 @@ def default_osmand_extension_root(package_root: Path | None = None) -> Path:
     managed_root = _managed_osmand_extension_root(root)
     if managed_root == bundled_root:
         return bundled_root
+    if validate_osmand_extension_root(managed_root, platform=sys.platform):
+        return managed_root
+    if validate_osmand_extension_root(bundled_root, platform=sys.platform):
+        return bundled_root
     if managed_root.exists() or not bundled_root.exists():
         return managed_root
     return bundled_root
@@ -480,7 +484,7 @@ def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
 
 def _default_external_osmand_extension_root() -> Path:
     data_home = os.environ.get("XDG_DATA_HOME", "").strip()
-    if os.name == "nt":
+    if sys.platform == "win32":
         base = os.environ.get("APPDATA", "").strip()
         if base:
             return (Path(base) / "iPhoto" / "maps" / "tiles" / "extension").resolve()

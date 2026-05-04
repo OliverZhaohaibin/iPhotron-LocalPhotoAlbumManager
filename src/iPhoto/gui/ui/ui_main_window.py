@@ -172,7 +172,10 @@ class Ui_MainWindow(object):
 
         self.sidebar = AlbumSidebar(library, MainWindow)
         self.preview_window = PreviewWindow(MainWindow)
-        self.map_view = PhotoMapView()
+        self.map_view = PhotoMapView(
+            map_runtime=getattr(library, "map_runtime", None),
+            map_interaction_service=getattr(library, "map_interaction_service", None),
+        )
 
         self.gallery_page = GalleryPageWidget()
         self.grid_view = self.gallery_page.grid_view
@@ -274,6 +277,7 @@ class Ui_MainWindow(object):
         MainWindow.setCentralWidget(self.window_shell)
 
         self.info_panel = InfoPanel(MainWindow)
+        self.info_panel.set_map_runtime(getattr(library, "map_runtime", None))
         self.notification_toast = NotificationToast(MainWindow)
 
         if self.player_container is not None:

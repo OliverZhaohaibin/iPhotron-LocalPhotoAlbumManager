@@ -13,6 +13,7 @@ from maps.map_sources import MapBackendMetadata, MapSourceSpec
 from maps.style_resolver import StyleLoadError, StyleResolver
 from maps.tile_backend import FallbackTileBackend, LegacyVectorBackend, OsmAndRasterBackend
 
+from .drag_cursor import DragCursorManager
 from .input_handler import InputHandler
 from .layer import LayerPlan
 from .map_renderer import CityAnnotation, MapRenderer
@@ -124,6 +125,7 @@ class MapWidgetController:
         self._view_listeners: list[Callable[[float, float, float], None]] = []
         self._pan_listeners: list[Callable[[QPointF], None]] = []
         self._pan_finished_listeners: list[Callable[[], None]] = []
+        self._drag_cursor = DragCursorManager()
 
         package_root = Path(__file__).resolve().parent.parent
 
@@ -189,8 +191,8 @@ class MapWidgetController:
         self._input_handler.pan_requested.connect(self._notify_pan_delta)
         self._input_handler.pan_finished.connect(self._notify_pan_finished)
         self._input_handler.zoom_requested.connect(self._on_zoom_requested)
-        self._input_handler.cursor_changed.connect(self._widget.setCursor)
-        self._input_handler.cursor_reset.connect(self._widget.unsetCursor)
+        self._input_handler.cursor_changed.connect(self._set_drag_cursor)
+        self._input_handler.cursor_reset.connect(self._reset_drag_cursor)
 
         self._update_timer = QTimer(self._widget)
         self._update_timer.setSingleShot(True)
@@ -262,6 +264,7 @@ class MapWidgetController:
     def shutdown(self) -> None:
         """Stop the tile loader thread so the application can exit cleanly."""
 
+        self._reset_drag_cursor()
         self._tile_manager.shutdown()
 
     # ------------------------------------------------------------------
@@ -407,6 +410,18 @@ class MapWidgetController:
 
         if not self._update_timer.isActive():
             self._update_timer.start()
+
+    # ------------------------------------------------------------------
+    def _set_drag_cursor(self, cursor_shape) -> None:
+        """Show the drag cursor even when the map lives in an embedded window."""
+
+        self._drag_cursor.set_cursor(cursor_shape, (self._widget,))
+
+    # ------------------------------------------------------------------
+    def _reset_drag_cursor(self) -> None:
+        """Restore the cursor after a drag gesture or controller shutdown."""
+
+        self._drag_cursor.reset((self._widget,))
 
     # ------------------------------------------------------------------
     def _on_pan_requested(self, delta: QPointF) -> None:

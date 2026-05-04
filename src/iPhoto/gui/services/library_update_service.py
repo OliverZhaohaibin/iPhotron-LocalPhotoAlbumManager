@@ -5,23 +5,24 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from ... import app as backend
-from ...cache.index_store import get_global_repository
-from ...config import RECENTLY_DELETED_DIR_NAME
+from ...bootstrap.library_scan_service import LibraryScanService
+from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ...errors import IPhotoError
 from ...utils.pathutils import resolve_work_dir
 from ..background_task_manager import BackgroundTaskManager
-# Updated imports to new location
-from ...library.workers.rescan_worker import RescanSignals, RescanWorker
-from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
+from .library_update_tasks import LibraryUpdateTaskRunner, ScanTaskCompletion
+from .session_service_resolver import (
+    bound_asset_lifecycle_service,
+    bound_scan_service,
+)
 
 if TYPE_CHECKING:
-    from ...library.manager import LibraryManager
-    from ...models.album import Album
+    from ...library.runtime_controller import LibraryRuntimeController
+    from ...application.services.album_manifest_service import Album
 
 
 @dataclass
@@ -43,12 +44,21 @@ class MoveOperationResult:
     destination_ok: bool = True
 
 
+@dataclass(frozen=True)
+class AlbumOpenRouting:
+    """Session-backed album-open preparation result for GUI callers."""
+
+    asset_count: int
+    should_rescan_async: bool = False
+
+
 class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
     scanProgress = Signal(Path, int, int)
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
+    scanBatchFailed = Signal(Path, int)
     indexUpdated = Signal(Path)
     linksUpdated = Signal(Path)
     assetReloadRequested = Signal(Path, bool, bool)
@@ -62,15 +72,13 @@ class LibraryUpdateService(QObject):
         *,
         task_manager: BackgroundTaskManager,
         current_album_getter: Callable[[], Optional["Album"]],
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
+        library_manager_getter: Callable[[], Optional["LibraryRuntimeController"]],
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
-        self._task_manager = task_manager
+        self._task_runner = LibraryUpdateTaskRunner(task_manager=task_manager)
         self._current_album_getter = current_album_getter
         self._library_manager_getter = library_manager_getter
-        self._scanner_worker: Optional[ScannerWorker] = None
-        self._scan_pending = False
         self._stale_album_roots: Dict[str, Path] = {}
         self._album_root_cache: Dict[str, Optional[Path]] = {}
         self._model_loading_due_to_scan = False
@@ -78,17 +86,47 @@ class LibraryUpdateService(QObject):
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
     # ------------------------------------------------------------------
+    def prepare_album_open(
+        self,
+        root: Path,
+        *,
+        autoscan: bool = False,
+        hydrate_index: bool = False,
+        sync_manifest_favorites: bool = False,
+    ) -> AlbumOpenRouting:
+        """Prepare one album open through the active session scan surface."""
+
+        scan_root = Path(root)
+        _library_root, scan_service = self._require_scan_dependencies(scan_root)
+        preparation = scan_service.prepare_album_open(
+            scan_root,
+            autoscan=autoscan,
+            hydrate_index=hydrate_index,
+            sync_manifest_favorites=sync_manifest_favorites,
+        )
+
+        is_already_scanning = self._is_scan_active_for(scan_root)
+        should_rescan_async = (
+            preparation.asset_count == 0
+            and not preparation.scanned
+            and not is_already_scanning
+        )
+        return AlbumOpenRouting(
+            asset_count=preparation.asset_count,
+            should_rescan_async=should_rescan_async,
+        )
+
     def rescan_album(self, album: "Album") -> List[dict]:
         """Synchronously rebuild the album index and emit cache updates."""
 
-        library_root = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
-
         try:
-            rows = backend.rescan(album.root, library_root=library_root)
-        except IPhotoError as exc:
+            library_root, scan_service = self._require_scan_dependencies(album.root)
+            rows = scan_service.rescan_album(
+                album.root,
+                sync_manifest_favorites=library_root is None,
+                pair_live=True,
+            )
+        except (IPhotoError, RuntimeError) as exc:
             self.errorRaised.emit(str(exc))
             return []
 
@@ -99,79 +137,130 @@ class LibraryUpdateService(QObject):
     def rescan_album_async(self, album: "Album") -> None:
         """Start an asynchronous rescan for *album* using the background pool."""
 
-        library_root = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
+        include, exclude = self._scan_filters(album)
+        self.scan_root_async(album.root, include=include, exclude=exclude)
 
-        if self._scanner_worker is not None:
-            self._scanner_worker.cancel()
-            self._scan_pending = True
+    def scan_root_async(
+        self,
+        root: Path,
+        *,
+        include: Iterable[str],
+        exclude: Iterable[str],
+    ) -> None:
+        """Start an asynchronous scan for *root* through the bound session."""
+
+        scan_root = Path(root)
+        if self._is_scan_active_for(scan_root):
             return
 
-        filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
-        include: Iterable[str] = filters.get("include", backend.DEFAULT_INCLUDE)
-        exclude: Iterable[str] = filters.get("exclude", backend.DEFAULT_EXCLUDE)
+        try:
+            library_root, scan_service = self._require_scan_dependencies(scan_root)
+        except RuntimeError as exc:
+            self.errorRaised.emit(str(exc))
+            return
 
-        signals = ScannerSignals()
-        signals.progressUpdated.connect(self._relay_scan_progress)
-        signals.chunkReady.connect(self._relay_scan_chunk_ready)
+        # Compatibility quarantine: bound LibraryRuntimeController still owns the Qt
+        # scanner/face-worker transport for full-library scans. GUI callers enter
+        # through this session-facing method and must not call the legacy scan
+        # entry directly.
+        library = self._library_manager()
+        if library is not None and library_root is not None:
+            start_session_scan = getattr(library, "start_session_scan", None)
+            if callable(start_session_scan):
+                start_session_scan(
+                    scan_root,
+                    include=include,
+                    exclude=exclude,
+                )
+                return
 
-        worker = ScannerWorker(
-            album.root,
-            include,
-            exclude,
-            signals,
+        self._task_runner.start_scan(
+            root=scan_root,
+            include=include,
+            exclude=exclude,
             library_root=library_root,
-        )
-        self._scanner_worker = worker
-        self._scan_pending = False
-
-        self._task_manager.submit_task(
-            task_id=f"scan:{album.root}",
-            worker=worker,
-            progress=signals.progressUpdated,
-            finished=signals.finished,
-            error=signals.error,
-            pause_watcher=False,
-            on_finished=lambda root, rows, captured_library_root=library_root: self._on_scan_finished(
-                worker,
-                root,
-                rows,
-                library_root=captured_library_root,
-            ),
-            on_error=lambda root, message: self._on_scan_error(worker, root, message),
-            result_payload=lambda root, rows: rows,
+            scan_service=scan_service,
+            on_progress=self._relay_scan_progress,
+            on_chunk=self._relay_scan_chunk_ready,
+            on_batch_failed=self._relay_scan_batch_failed,
+            on_cancelled=self._on_scan_cancelled,
+            on_completed=self._on_scan_completed,
+            on_error=self._on_scan_error,
         )
 
     def cancel_active_scan(self) -> None:
         """Request cancellation of the active scan without scheduling retries."""
 
-        if self._scanner_worker is None:
-            return
-
-        self._scanner_worker.cancel()
-        # Cancelling a scan should not schedule immediate retry attempts.
-        self._scan_pending = False
+        self._task_runner.cancel_active_scan()
 
     def pair_live(self, album: "Album") -> List[dict]:
         """Rebuild Live Photo pairings for *album* and refresh related views."""
-        
-        # Get library root for global database access
-        library_root = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
 
         try:
-            groups = backend.pair(album.root, library_root=library_root)
-        except IPhotoError as exc:
+            _library_root, scan_service = self._require_scan_dependencies(album.root)
+            groups = scan_service.pair_album(album.root)
+        except (IPhotoError, RuntimeError) as exc:
             self.errorRaised.emit(str(exc))
             return []
 
         self.linksUpdated.emit(album.root)
         self.assetReloadRequested.emit(album.root, False, False)
         return [group.__dict__ for group in groups]
+
+    def handle_media_load_failure(self, path: Path) -> Path | None:
+        """Repair index/link state after an asset can no longer be decoded."""
+
+        target = Path(path)
+        library = self._library_manager()
+        library_root = library.root() if library is not None else None
+        uses_bound_library = (
+            library is not None
+            and library_root is not None
+            and self._path_is_descendant(target, library_root)
+        )
+        repair_root = (
+            library_root
+            if uses_bound_library
+            else self._standalone_missing_asset_root(target)
+        )
+        scan_service = (
+            bound_scan_service(
+                library,
+                library_root=library_root,
+            )
+            if uses_bound_library
+            else None
+        )
+
+        lifecycle_service = (
+            bound_asset_lifecycle_service(
+                library,
+                library_root=library_root,
+            )
+            if uses_bound_library
+            else None
+        )
+        lifecycle_root = getattr(lifecycle_service, "library_root", None)
+        if lifecycle_service is None or (
+            library_root is None
+            and (
+                lifecycle_root is None
+                or not self._paths_equal(Path(lifecycle_root), repair_root)
+            )
+        ):
+            self.errorRaised.emit(
+                "Active library session is unavailable; media repair requires "
+                "a bound LibrarySession."
+            )
+            return None
+
+        refresh_root = lifecycle_service.repair_missing_asset(target)
+        if refresh_root is not None and not uses_bound_library:
+            refresh_root = repair_root
+        if refresh_root is not None:
+            self.indexUpdated.emit(refresh_root)
+            self.linksUpdated.emit(refresh_root)
+        return refresh_root
 
     def announce_album_refresh(
         self,
@@ -255,7 +344,8 @@ class LibraryUpdateService(QObject):
         )
         self.moveOperationCompleted.emit(result)
 
-        # --- Legacy signal cascade (kept for backward compatibility) ---
+        # Compatibility quarantine: this signal cascade preserves older GUI
+        # listeners while newer paths consume moveOperationCompleted above.
         current_album = self._current_album_getter()
         current_root = current_album.root if current_album is not None else None
 
@@ -362,153 +452,94 @@ class LibraryUpdateService(QObject):
 
         self.scanChunkReady.emit(root, chunk)
 
-    def _on_scan_finished(
+    def _relay_scan_batch_failed(self, root: Path, count: int) -> None:
+        """Forward partial persistence failures to listeners."""
+
+        self.scanBatchFailed.emit(root, count)
+
+    def _on_scan_cancelled(self, root: Path, restart_requested: bool) -> None:
+        self.scanFinished.emit(root, True)
+        if restart_requested:
+            self._schedule_scan_retry()
+
+    def _on_scan_completed(
         self,
-        worker: ScannerWorker,
-        root: Path,
-        rows: Sequence[dict],
-        *,
-        library_root: Path | None = None,
+        completion: ScanTaskCompletion,
     ) -> None:
-        if self._scanner_worker is not worker:
-            return
-
-        if worker.cancelled:
-            self.scanFinished.emit(root, True)
-            should_restart = self._scan_pending
-            self._cleanup_scan_worker()
-            if should_restart:
-                self._schedule_scan_retry()
-            return
-
-        if worker.failed:
-            self.scanFinished.emit(root, False)
-            should_restart = self._scan_pending
-            self._cleanup_scan_worker()
-            if should_restart:
-                self._schedule_scan_retry()
-            return
-
-        if library_root is None:
-            library_root = getattr(worker, "library_root", None)
-
-        materialised_rows = list(rows)
-
-        if root.name == RECENTLY_DELETED_DIR_NAME:
-            # When the Recently Deleted album is rescanned we must not lose the
-            # restore metadata that was captured at deletion time.  The
-            # ``original_rel_path`` value powers quick restores, while the
-            # album UUID and subpath pair allows the application to recover from
-            # album renames or deletions.  Merge any of those fields back into
-            # the freshly scanned rows so the trash index remains authoritative.
-            preserved_rows: Dict[str, dict] = {}
-            preserved_fields = (
-                "original_rel_path",
-                "original_album_id",
-                "original_album_subpath",
-            )
-            try:
-                db_root = library_root if library_root else root
-                album_path: str | None = None
-                # Only allow read_all() when we are directly indexing the Recently
-                # Deleted root. If album_path resolution fails relative to a
-                # library_root, we must not fall back to a global read.
-                allow_read_all = not bool(library_root)
-                if library_root:
-                    try:
-                        album_path = root.resolve().relative_to(library_root.resolve()).as_posix()
-                    except (OSError, ValueError):
-                        # Resolution failed: do not attempt a global read_all().
-                        album_path = None
-                        allow_read_all = False
-                store = get_global_repository(db_root)
-                if album_path:
-                    row_iter = store.read_album_assets(album_path, include_subalbums=True)
-                elif allow_read_all:
-                    row_iter = store.read_all()
-                else:
-                    # No safe way to scope the read; skip merging preserved rows.
-                    row_iter = ()
-                for old_row in row_iter:
-                    rel_value = old_row.get("rel")
-                    if rel_value is None:
-                        continue
-                    if not any(field in old_row for field in preserved_fields):
-                        continue
-                    preserved_rows[str(rel_value)] = old_row
-            except IPhotoError:
-                # If the old index is unavailable (missing or corrupted) we have
-                # nothing to merge, therefore the rescan falls back to fresh
-                # metadata produced by the worker.
-                preserved_rows = {}
-
-            if preserved_rows:
-                for new_row in materialised_rows:
-                    rel_value = new_row.get("rel")
-                    if rel_value is None:
-                        continue
-                    cached_row = preserved_rows.get(str(rel_value))
-                    if cached_row is None:
-                        continue
-                    for field in preserved_fields:
-                        if field in cached_row:
-                            new_row[field] = cached_row[field]
-
         try:
-            # Persist the freshly computed index snapshot immediately so future
-            # reloads observe the new metadata rather than the stale cache that
-            # existed before the rescan.  The worker keeps the result in memory,
-            # therefore we flush the global index and ``links.json`` here to
-            # mirror the historical facade behaviour before notifying listeners.
-            backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
-            backend._prune_index_scope(root, materialised_rows, library_root=library_root)
-            # Use backend.pair() so that library-relative rows produced by the
-            # worker are converted to album-relative before being passed to
-            # _ensure_links.  Calling _ensure_links directly with library-relative
-            # rows when library_root is set causes sync_live_roles_to_db to
-            # double-prefix the rel paths (e.g. "album/album/photo.heic").
-            backend.pair(root, library_root=library_root)
+            completion.scan_service.finalize_scan_result(
+                completion.root,
+                completion.rows,
+                pair_live=True,
+            )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
-            self.scanFinished.emit(root, False)
+            self.scanFinished.emit(completion.root, False)
         else:
-            self.indexUpdated.emit(root)
-            self.linksUpdated.emit(root)
+            self.indexUpdated.emit(completion.root)
+            self.linksUpdated.emit(completion.root)
             # Ensure the view reloads if this scan was triggered for the current album
             # (e.g. initial auto-scan on startup).
             # Only emit assetReloadRequested if the model is not already loading due to this scan
             if not self._model_loading_due_to_scan:
-                self.assetReloadRequested.emit(root, False, False)
+                self.assetReloadRequested.emit(completion.root, False, False)
             self._model_loading_due_to_scan = False
-            self.scanFinished.emit(root, True)
+            self.scanFinished.emit(completion.root, True)
 
-        should_restart = self._scan_pending
-        self._cleanup_scan_worker()
-
-        if should_restart:
+        if completion.restart_requested:
             self._schedule_scan_retry()
 
     def _on_scan_error(
         self,
-        worker: ScannerWorker,
         root: Path,
         message: str,
+        restart_requested: bool,
     ) -> None:
-        if self._scanner_worker is not worker:
-            return
-
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
 
-        should_restart = self._scan_pending
-        self._cleanup_scan_worker()
-
-        if should_restart:
+        if restart_requested:
             self._schedule_scan_retry()
 
-    def _cleanup_scan_worker(self) -> None:
-        self._scanner_worker = None
-        self._scan_pending = False
+    def _require_scan_dependencies(
+        self,
+        root: Path,
+    ) -> tuple[
+        Path | None,
+        LibraryScanService,
+    ]:
+        scan_root = Path(root)
+        library_root: Path | None = None
+        library = self._library_manager()
+        if library is not None:
+            library_root = library.root()
+        if library_root is None or not self._path_is_descendant(scan_root, library_root):
+            raise RuntimeError(
+                "Active library session is unavailable; scans require a bound "
+                "LibrarySession."
+            )
+        scan_service = bound_scan_service(
+            library,
+            library_root=library_root,
+        )
+        if scan_service is None:
+            raise RuntimeError(
+                "Active library session is unavailable; scans require a bound "
+                "LibrarySession."
+            )
+        return library_root, scan_service
+
+    def _is_scan_active_for(self, path: Path) -> bool:
+        library = self._library_manager()
+        if library is not None and library.is_scanning_path(path):
+            return True
+        return self._task_runner.is_scanning_path(path)
+
+    def _scan_filters(self, album: "Album") -> tuple[Iterable[str], Iterable[str]]:
+        filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
+        include: Iterable[str] = filters.get("include", DEFAULT_INCLUDE)
+        exclude: Iterable[str] = filters.get("exclude", DEFAULT_EXCLUDE)
+        return include, exclude
 
     def _schedule_scan_retry(self) -> None:
         QTimer.singleShot(0, self._retry_scan_if_album_available)
@@ -526,7 +557,20 @@ class LibraryUpdateService(QObject):
         album = self._current_album_getter()
         return album.root if album is not None else None
 
-    def _library_manager(self) -> Optional["LibraryManager"]:
+    def _standalone_missing_asset_root(self, target: Path) -> Path:
+        current_root = self._current_album_root()
+        if current_root is not None and self._path_is_descendant(target, current_root):
+            return current_root
+
+        current = Path(target).parent
+        while True:
+            if resolve_work_dir(current) is not None:
+                return current
+            if current.parent == current:
+                return Path(target).parent
+            current = current.parent
+
+    def _library_manager(self) -> Optional["LibraryRuntimeController"]:
         return self._library_manager_getter()
 
     def _mark_album_stale(self, path: Path) -> None:
@@ -601,8 +645,8 @@ class LibraryUpdateService(QObject):
         if not album_root.exists():
             return
 
-        signals = RescanSignals()
-        worker = RescanWorker(album_root, signals, library_root=library_root)
+        library = self._library_manager()
+        scan_service = getattr(library, "scan_service", None) if library is not None else None
         task_id = self._build_restore_rescan_task_id(album_root)
 
         def _on_finished(path: Path, succeeded: bool) -> None:
@@ -631,15 +675,13 @@ class LibraryUpdateService(QObject):
         def _on_error(path: Path, message: str) -> None:
             self.errorRaised.emit(f"Failed to refresh '{path.name}': {message}")
 
-        self._task_manager.submit_task(
+        self._task_runner.start_restore_refresh(
+            root=album_root,
             task_id=task_id,
-            worker=worker,
-            finished=signals.finished,
-            error=signals.error,
-            pause_watcher=False,
+            library_root=library_root,
+            scan_service=scan_service,
             on_finished=_on_finished,
             on_error=_on_error,
-            result_payload=lambda path, succeeded: (path, succeeded),
         )
 
     def _build_restore_rescan_task_id(self, album_root: Path) -> str:

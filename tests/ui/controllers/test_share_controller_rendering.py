@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Optional
+from unittest.mock import Mock, patch
 
 import pytest
 from PySide6.QtGui import QImage, QAction, QActionGroup, QGuiApplication
 from PySide6.QtWidgets import QApplication, QPushButton
 
+from iPhoto.application.ports import EditRenderingState
 from iPhoto.gui.ui.controllers.share_controller import ShareController, RenderClipboardWorker
 
 @pytest.fixture()
@@ -71,143 +73,125 @@ def controller_factory(qapp: QApplication):
         return controller
     return factory
 
-def test_copy_file_no_sidecar(controller_factory, mocker, tmp_path):
+def test_copy_file_no_sidecar(controller_factory, tmp_path):
     """If no sidecar exists, standard file copy is used."""
     path = tmp_path / "photo.jpg"
     path.touch()
 
-    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=path.with_suffix(".ipo"))
-    # Ensure sidecar does not exist
-
     settings = StubSettings("copy_file")
     path_provider = StubPathProvider(path)
     controller = controller_factory(settings=settings, current_path_provider=path_provider)
+    controller._edit_service_getter = lambda: Mock(sidecar_exists=Mock(return_value=False))
 
-    # Mock clipboard
-    clipboard_mock = mocker.patch.object(QGuiApplication, "clipboard")
-    mock_clipboard_inst = clipboard_mock.return_value
-
-    controller._copy_file_to_clipboard(path)
+    with patch.object(QGuiApplication, "clipboard") as clipboard_mock:
+        mock_clipboard_inst = clipboard_mock.return_value
+        controller._copy_file_to_clipboard(path)
 
     mock_clipboard_inst.setMimeData.assert_called()
     assert "Copied to Clipboard" in controller._toast.messages
 
-def test_copy_file_with_sidecar_success(controller_factory, mocker, tmp_path, qapp):
+def test_copy_file_with_sidecar_success(controller_factory, tmp_path, qapp):
     """If sidecar exists, render worker is started and success sets image."""
     path = tmp_path / "photo.jpg"
     path.touch()
-    sidecar_path = path.with_suffix(".ipo")
-    sidecar_path.touch()
-
-    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
 
     settings = StubSettings("copy_file")
     path_provider = StubPathProvider(path)
     controller = controller_factory(settings=settings, current_path_provider=path_provider)
-
-    clipboard_mock = mocker.patch.object(QGuiApplication, "clipboard")
-    mock_clipboard_inst = clipboard_mock.return_value
-
-    # Mock ThreadPool to run worker synchronously or we just verify worker start
-    # But we want to test success callback.
-    # We can mock QThreadPool.start to execute run() immediately?
+    edit_service = Mock()
+    edit_service.sidecar_exists.return_value = True
+    controller._edit_service_getter = lambda: edit_service
 
     def mock_start(worker):
         worker.run()
 
-    mocker.patch("PySide6.QtCore.QThreadPool.globalInstance").return_value.start.side_effect = mock_start
-
-    # Mock RenderClipboardWorker to emit success immediately
-    # We can patch the class in the module
-
-    # Instead of patching class, let's patch _do_work or dependencies to make it succeed.
-    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={"Crop_W": 1.0})
-    mocker.patch("iPhoto.utils.image_loader.load_qimage", return_value=QImage(100, 100, QImage.Format_ARGB32))
-    mocker.patch("iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
-    mocker.patch("iPhoto.gui.ui.controllers.share_controller.apply_adjustments", return_value=QImage(100, 100, QImage.Format_ARGB32))
-
-    controller._copy_file_to_clipboard(path)
+    with patch.object(QGuiApplication, "clipboard") as clipboard_mock, patch(
+        "PySide6.QtCore.QThreadPool.globalInstance"
+    ) as pool_mock, patch(
+        "iPhoto.gui.ui.controllers.share_controller.render_image",
+        return_value=QImage(100, 100, QImage.Format_ARGB32),
+    ):
+        pool_mock.return_value.start.side_effect = mock_start
+        mock_clipboard_inst = clipboard_mock.return_value
+        controller._copy_file_to_clipboard(path)
 
     mock_clipboard_inst.setImage.assert_called()
     assert "Preparing image..." in controller._toast.messages
     assert "Copied to Clipboard" in controller._toast.messages
 
-def test_copy_file_with_sidecar_failure(controller_factory, mocker, tmp_path, qapp):
+def test_copy_file_with_sidecar_failure(controller_factory, tmp_path, qapp):
     """If rendering fails, fallback to file copy."""
     path = tmp_path / "photo.jpg"
     path.touch()
-    sidecar_path = path.with_suffix(".ipo")
-    sidecar_path.touch()
-
-    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
 
     settings = StubSettings("copy_file")
     path_provider = StubPathProvider(path)
     controller = controller_factory(settings=settings, current_path_provider=path_provider)
-
-    clipboard_mock = mocker.patch.object(QGuiApplication, "clipboard")
-    mock_clipboard_inst = clipboard_mock.return_value
+    edit_service = Mock()
+    edit_service.sidecar_exists.return_value = True
+    controller._edit_service_getter = lambda: edit_service
 
     def mock_start(worker):
         worker.run()
 
-    mocker.patch("PySide6.QtCore.QThreadPool.globalInstance").return_value.start.side_effect = mock_start
-
-    # Force failure by making load_adjustments return empty
-    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={})
-
-    controller._copy_file_to_clipboard(path)
+    with patch.object(QGuiApplication, "clipboard") as clipboard_mock, patch(
+        "PySide6.QtCore.QThreadPool.globalInstance"
+    ) as pool_mock, patch(
+        "iPhoto.gui.ui.controllers.share_controller.render_image",
+        return_value=None,
+    ):
+        pool_mock.return_value.start.side_effect = mock_start
+        mock_clipboard_inst = clipboard_mock.return_value
+        controller._copy_file_to_clipboard(path)
 
     # Should fallback to setMimeData
     mock_clipboard_inst.setMimeData.assert_called()
     assert "Copied Original File" in controller._toast.messages
 
 
-def test_copy_file_with_video_sidecar_uses_video_render(controller_factory, mocker, tmp_path):
+def test_copy_file_with_video_sidecar_uses_video_render(controller_factory, tmp_path):
     path = tmp_path / "clip.mov"
     path.touch()
-    sidecar_path = path.with_suffix(".ipo")
-    sidecar_path.touch()
-
-    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
-    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={"Video_Trim_In_Sec": 1.0})
-    mocker.patch("iPhoto.io.sidecar.video_has_visible_edits", return_value=True)
 
     settings = StubSettings("copy_file")
     path_provider = StubPathProvider(path)
     controller = controller_factory(settings=settings, current_path_provider=path_provider)
+    edit_service = Mock()
+    edit_service.sidecar_exists.return_value = True
+    edit_service.describe_adjustments.return_value = EditRenderingState(
+        sidecar_exists=True,
+        raw_adjustments={"Video_Trim_In_Sec": 1.0},
+        resolved_adjustments={},
+        adjusted_preview=False,
+        has_visible_edits=True,
+        trim_range_ms=(1000, 4000),
+        effective_duration_sec=3.0,
+    )
+    controller._edit_service_getter = lambda: edit_service
 
-    render_spy = mocker.patch.object(controller, "_copy_rendered_video_to_clipboard")
+    with patch.object(controller, "_copy_rendered_video_to_clipboard") as render_spy:
+        controller._copy_file_to_clipboard(path)
 
-    controller._copy_file_to_clipboard(path)
+        render_spy.assert_called_once_with(path)
 
-    render_spy.assert_called_once_with(path)
-
-def test_worker_logic(mocker, tmp_path):
+def test_worker_logic(tmp_path):
     """Test RenderClipboardWorker internal logic."""
     path = tmp_path / "test.jpg"
     path.touch()
+    edit_service = Mock()
 
-    worker = RenderClipboardWorker(path)
+    worker = RenderClipboardWorker(path, edit_service=edit_service)
 
-    # Mock dependencies
-    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={
-        "Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.5, "Crop_H": 0.5, "Crop_Rotate90": 1.0, "Crop_FlipH": True
-    })
-
-    original_image = QImage(100, 100, QImage.Format.Format_ARGB32)
-    original_image.fill(0xFF000000) # Black
-
-    mocker.patch("iPhoto.utils.image_loader.load_qimage", return_value=original_image)
-    mocker.patch("iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
-    mocker.patch("iPhoto.gui.ui.controllers.share_controller.apply_adjustments", side_effect=lambda img, adj: img)
-
-    success_spy = mocker.Mock()
-    fail_spy = mocker.Mock()
+    success_spy = Mock()
+    fail_spy = Mock()
     worker.signals.success.connect(success_spy)
     worker.signals.failed.connect(fail_spy)
 
-    worker.run()
+    with patch(
+        "iPhoto.gui.ui.controllers.share_controller.render_image",
+        return_value=QImage(100, 100, QImage.Format.Format_ARGB32),
+    ):
+        worker.run()
 
     if fail_spy.called:
         pytest.fail(f"Worker failed with: {fail_spy.call_args[0][0]}")
@@ -215,10 +199,6 @@ def test_worker_logic(mocker, tmp_path):
     success_spy.assert_called_once()
     result_image = success_spy.call_args[0][0]
 
-    # Original 100x100.
-    # Crop 0.5 W/H (50x50) at Center.
-    # Flip H.
-    # Rotate 90.
-    # Result should be 50x50.
-    assert result_image.width() == 50
-    assert result_image.height() == 50
+    assert not result_image.isNull()
+    assert result_image.width() == 100
+    assert result_image.height() == 100

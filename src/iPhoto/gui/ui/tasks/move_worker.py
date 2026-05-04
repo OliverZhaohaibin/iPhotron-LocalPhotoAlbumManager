@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import shutil
-import sqlite3
-import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from .... import app as backend
-from ....app import LOGGER
-from ....errors import IPhotoError
-from ....cache.index_store import get_global_repository
-from ....io.scanner_adapter import process_media_paths
-from ....media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
-from ....config import RECENTLY_DELETED_DIR_NAME
-from ....utils.pathutils import resolve_work_dir
+from ....bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
+from ....io import sidecar
+from ....utils.logging import get_logger
+
+LOGGER = get_logger()
 
 
 class MoveSignals(QObject):
@@ -49,6 +44,7 @@ class MoveWorker(QRunnable):
         library_root: Optional[Path] = None,
         trash_root: Optional[Path] = None,
         is_restore: bool = False,
+        asset_lifecycle_service: LibraryAssetLifecycleService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -60,6 +56,7 @@ class MoveWorker(QRunnable):
         self._library_root = self._resolve_optional(library_root)
         self._trash_root = self._resolve_optional(trash_root)
         self._destination_resolved = self._resolve_optional(self._destination_root)
+        self._asset_lifecycle_service = asset_lifecycle_service
         # ``_is_restore`` distinguishes restore workflows (moving files out of the
         # trash) from ordinary moves and deletions.  The worker needs this flag to
         # avoid annotating the destination index with ``original_rel_path`` during
@@ -71,11 +68,6 @@ class MoveWorker(QRunnable):
             and self._trash_root
             and self._destination_resolved == self._trash_root
         )
-        # ``_album_root_cache`` maps arbitrary directories to the album root that owns
-        # them.  Walking the filesystem for every moved asset would impose a
-        # noticeable overhead on large moves, therefore the cache stores positive and
-        # negative lookups alike.
-        self._album_root_cache: Dict[str, Optional[Path]] = {}
 
     @property
     def signals(self) -> MoveSignals:
@@ -135,7 +127,10 @@ class MoveWorker(QRunnable):
                     source_path = source
                 target = self._move_into_destination(source_path)
             except FileNotFoundError:
-                self._signals.error.emit(f"File not found: {source}")
+                if self._is_trash_destination and not self._is_restore:
+                    LOGGER.debug("Skipping already-missing delete source: %s", source)
+                else:
+                    self._signals.error.emit(f"File not found: {source}")
             except OSError as exc:
                 self._signals.error.emit(f"Could not move '{source}': {exc}")
             else:
@@ -146,28 +141,17 @@ class MoveWorker(QRunnable):
         source_index_ok = True
         destination_index_ok = True
         if moved and not self._cancel_requested:
-            cached_source_rows: Dict[str, Dict] = {}
-            try:
-                cached_source_rows = self._update_source_index(moved)
-            except IPhotoError as exc:
-                source_index_ok = False
-                self._signals.error.emit(str(exc))
-            try:
-                self._update_destination_index(moved, cached_source_rows)
-            except IPhotoError as exc:
-                destination_index_ok = False
-                self._signals.error.emit(str(exc))
-
-            # Consolidated pair() call: execute once at the library-root level
-            # instead of separately in _update_source_index and
-            # _update_destination_index (Plan 2 §6.2.2).
-            try:
-                if self._library_root:
-                    backend.pair(self._library_root, library_root=self._library_root)
-                else:
-                    backend.pair(self._source_root)
-            except IPhotoError as exc:
-                self._signals.error.emit(f"Failed to pair Live Photos: {exc}")
+            result = self.asset_lifecycle_service.apply_move(
+                moved=moved,
+                source_root=self._source_root,
+                destination_root=self._destination_root,
+                trash_root=self._trash_root,
+                is_restore=self._is_restore,
+            )
+            source_index_ok = result.source_index_ok
+            destination_index_ok = result.destination_index_ok
+            for message in result.errors:
+                self._signals.error.emit(message)
 
         self._signals.finished.emit(
             self._source_root,
@@ -178,282 +162,110 @@ class MoveWorker(QRunnable):
         )
 
     def _move_into_destination(self, source: Path) -> Path:
-        """Move *source* into the destination album avoiding name collisions."""
+        """Move *source* and its edit sidecar as one destination bundle."""
 
         if not source.exists():
             raise FileNotFoundError(source)
+        source_sidecar = self._sidecar_for_asset(source)
+        target, target_sidecar = self._destination_bundle_paths(
+            source,
+            include_sidecar=source_sidecar is not None,
+        )
+
+        moved_sidecar: Path | None = None
+        try:
+            if source_sidecar is not None:
+                moved_sidecar = self._move_single_path(source_sidecar, target_sidecar)
+            moved_path = self._move_single_path(source, target)
+        except OSError:
+            if moved_sidecar is not None and source_sidecar is not None:
+                self._rollback_sidecar_move(moved_sidecar, source_sidecar)
+            raise
+        return moved_path
+
+    def _sidecar_for_asset(self, source: Path) -> Path | None:
+        candidate = sidecar.sidecar_path_for_asset(source)
+        if candidate == source:
+            return None
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except OSError:
+            return None
+        return None
+
+    def _destination_bundle_paths(
+        self,
+        source: Path,
+        *,
+        include_sidecar: bool,
+    ) -> tuple[Path, Path]:
         target_dir = self._destination_root
-        base_name = source.name
-        target = target_dir / base_name
+        target = target_dir / source.name
         stem = target.stem
         suffix = target.suffix
         counter = 1
-        while target.exists():
+        while self._destination_bundle_exists(target, include_sidecar=include_sidecar):
             target = target_dir / f"{stem} ({counter}){suffix}"
             counter += 1
+        return target, sidecar.sidecar_path_for_asset(target)
+
+    def _destination_bundle_exists(self, target: Path, *, include_sidecar: bool) -> bool:
+        if target.exists():
+            return True
+        if not include_sidecar:
+            return False
+        target_sidecar = sidecar.sidecar_path_for_asset(target)
+        if target_sidecar == target:
+            return False
+        return target_sidecar.exists()
+
+    def _move_single_path(self, source: Path, target: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             moved_path = shutil.move(str(source), str(target))
         except OSError:
-            if source.exists() and target.exists():
-                try:
-                    target.unlink()
-                except OSError:
-                    LOGGER.warning("Failed to clean up partially moved target %s", target, exc_info=True)
+            self._cleanup_partial_target(source, target)
             raise
-        return Path(moved_path).resolve()
+        return self._resolve_path(Path(moved_path))
 
-    def _update_source_index(self, moved: List[Tuple[Path, Path]]) -> Dict[str, Dict]:
-        """Remove moved assets from the global index, returning cached rows.
-
-        The returned mapping (keyed by the *original* absolute path string)
-        allows :meth:`_update_destination_index` to reuse existing metadata
-        instead of re-extracting it with ExifTool (Plan 2 §6.2.1).
-        """
-
-        # Use library root for global database
-        index_root = self._library_root if self._library_root else self._source_root
-        store = get_global_repository(index_root)
-        rels: List[str] = []
-        rel_to_original: Dict[str, str] = {}
-        for original, _ in moved:
-            try:
-                # Compute library-relative path for global database
-                if self._library_root:
-                    rel = original.resolve().relative_to(self._library_root).as_posix()
-                else:
-                    rel = original.resolve().relative_to(self._source_root).as_posix()
-            except (OSError, ValueError):
-                continue
-            rels.append(rel)
-            rel_to_original[rel] = str(original)
-
-        # Cache source rows before deletion so the destination index can reuse
-        # the metadata (avoids redundant ExifTool calls).
-        cached_source_rows: Dict[str, Dict] = {}
-        if rels:
-            rows_by_rel = store.get_rows_by_rels(rels)
-            for rel, row_data in rows_by_rel.items():
-                original_str = rel_to_original.get(rel)
-                if original_str:
-                    cached_source_rows[original_str] = row_data
-
-        if rels:
-            store.remove_rows(rels)
-
-        # pair() is no longer called here; it is consolidated in run().
-        return cached_source_rows
-
-    def _update_destination_index(
-        self,
-        moved: List[Tuple[Path, Path]],
-        cached_source_rows: Optional[Dict[str, Dict]] = None,
-    ) -> None:
-        """Append moved assets to the global index and links.
-
-        When *cached_source_rows* is provided (keyed by the original absolute
-        path string), the method reuses existing metadata and only updates the
-        ``rel`` / ``parent_album_path`` fields.  ExifTool is invoked only for
-        files that have no cached row (Plan 2 §6.2.1).
-        """
-
-        # Use library root for global database
-        index_root = self._library_root if self._library_root else self._destination_root
-        store = get_global_repository(index_root)
-
-        # Process media relative to the library root for global database
-        process_root = self._library_root if self._library_root else self._destination_root
-
-        if self._is_trash_destination:
-            try:
-                existing_trash_rows = list(
-                    store.read_album_assets(
-                        RECENTLY_DELETED_DIR_NAME,
-                        include_subalbums=True,
-                        filter_hidden=False,
-                    )
-                )
-                missing_rels = [
-                    row_rel
-                    for row_rel in (row.get("rel") for row in existing_trash_rows)
-                    if isinstance(row_rel, str)
-                    and not (process_root / row_rel).exists()
-                ]
-                if missing_rels:
-                    store.remove_rows(missing_rels)
-            except (IPhotoError, sqlite3.Error, OSError) as exc:
-                # Best-effort cleanup; continue with insertion even if pruning fails.
-                LOGGER.debug("Trash cleanup during move skipped: %s", exc)
-
-        # --- Build destination rows, reusing cached metadata when available ---
-        reused_rows: List[Dict[str, object]] = []
-        uncached_images: List[Path] = []
-        uncached_videos: List[Path] = []
-
-        for original, target in moved:
-            cached = (
-                cached_source_rows.get(str(original))
-                if cached_source_rows
-                else None
-            )
-            if cached:
-                row = dict(cached)
-                try:
-                    new_rel = target.relative_to(process_root).as_posix()
-                except (OSError, ValueError):
-                    new_rel = target.name
-                row["rel"] = new_rel
-                row["parent_album_path"] = (
-                    Path(new_rel).parent.as_posix()
-                    if Path(new_rel).parent != Path(".")
-                    else ""
-                )
-                reused_rows.append(row)
-            else:
-                suffix = target.suffix.lower()
-                if suffix in IMAGE_EXTENSIONS:
-                    uncached_images.append(target)
-                elif suffix in VIDEO_EXTENSIONS:
-                    uncached_videos.append(target)
-                else:
-                    uncached_images.append(target)
-
-        # Only invoke ExifTool for files that had no cached metadata.
-        freshly_scanned: List[Dict[str, object]] = []
-        if uncached_images or uncached_videos:
-            freshly_scanned = list(
-                process_media_paths(process_root, uncached_images, uncached_videos)
-            )
-
-        new_rows = reused_rows + freshly_scanned
-
-        if self._is_trash_destination and not self._is_restore:
-            if self._library_root is None:
-                raise IPhotoError(
-                    "Library root is required to annotate trash index entries."
-                )
-            source_lookup: Dict[str, Path] = {}
-            for original, target in moved:
-                target_key = self._normalised_string(target)
-                if target_key:
-                    source_lookup[target_key] = original
-
-            annotated_rows: List[Dict[str, object]] = []
-            library_root_key = self._normalised_string(self._library_root)
-            album_uuid_cache: Dict[str, Optional[str]] = {}
-            for row in new_rows:
-                rel_value = row.get("rel") if isinstance(row, dict) else None
-                if not isinstance(rel_value, str):
-                    annotated_rows.append(row)
-                    continue
-                base_for_lookup: Path = process_root
-                absolute_target = base_for_lookup / rel_value
-                target_key = self._normalised_string(absolute_target)
-                original_path = source_lookup.get(target_key) if target_key else None
-                if original_path is None:
-                    annotated_rows.append(row)
-                    continue
-                original_relative = self._library_relative(original_path)
-                original_album_id: Optional[str] = None
-                original_album_subpath: Optional[str] = None
-                if library_root_key is not None:
-                    album_root = self._discover_album_root(
-                        original_path.parent, library_root_key
-                    )
-                else:
-                    album_root = None
-                if album_root is not None:
-                    album_key = self._normalised_string(album_root)
-                    if album_key is not None:
-                        cached_uuid = album_uuid_cache.get(album_key, ...)
-                        if cached_uuid is ...:
-                            try:
-                                manifest = backend.Album.open(album_root)
-                            except IPhotoError:
-                                album_uuid_cache[album_key] = None
-                            else:
-                                manifest_id = manifest.manifest.get("id")
-                                if isinstance(manifest_id, str) and manifest_id:
-                                    album_uuid_cache[album_key] = manifest_id
-                                else:
-                                    album_uuid_cache[album_key] = None
-                            cached_uuid = album_uuid_cache.get(album_key)
-                        if isinstance(cached_uuid, str) and cached_uuid:
-                            original_album_id = cached_uuid
-                    try:
-                        relative_to_album = original_path.relative_to(album_root)
-                    except ValueError:
-                        try:
-                            relative_to_album = original_path.resolve().relative_to(
-                                album_root
-                            )
-                        except (OSError, ValueError):
-                            relative_to_album = None
-                    if relative_to_album is not None:
-                        original_album_subpath = relative_to_album.as_posix()
-                # Persist the original metadata so restore operations can recover the
-                # asset's previous context even when albums are renamed or reorganised.
-                enriched = dict(row)
-                if original_relative is not None:
-                    enriched["original_rel_path"] = original_relative
-                enriched["original_album_id"] = original_album_id
-                enriched["original_album_subpath"] = original_album_subpath
-                annotated_rows.append(enriched)
-            new_rows = annotated_rows
-        store.append_rows(new_rows)
-
-        # pair() is no longer called here; it is consolidated in run().
-
-    def _synchronise_library_index(
-        self,
-        moved: List[Tuple[Path, Path]],
-        destination_images: List[Path],
-        destination_videos: List[Path],
-    ) -> None:
-        """Keep the Basic Library index aligned with the latest move results."""
-
-        library_root = self._library_root
-        if library_root is None:
+    def _cleanup_partial_target(self, source: Path, target: Path) -> None:
+        if not source.exists() or not target.exists():
             return
-
-        removals: List[str] = []
-        for original, _ in moved:
-            original_rel = self._library_relative(original)
-            if original_rel is not None:
-                removals.append(original_rel)
-
-        if self._is_trash_destination and not self._is_restore:
-            additions_images: List[Path] = []
-            additions_videos: List[Path] = []
-        else:
-            additions_images = [
-                path
-                for path in destination_images
-                if self._library_relative(path) is not None
-            ]
-            additions_videos = [
-                path
-                for path in destination_videos
-                if self._library_relative(path) is not None
-            ]
-
-        if not removals and not additions_images and not additions_videos:
-            return
-
-        store = get_global_repository(library_root)
-        if removals:
-            store.remove_rows(removals)
-
-        if additions_images or additions_videos:
-            library_rows = list(
-                process_media_paths(library_root, additions_images, additions_videos)
+        try:
+            target.unlink()
+        except OSError:
+            LOGGER.warning(
+                "Failed to clean up partially moved target %s",
+                target,
+                exc_info=True,
             )
-            store.append_rows(library_rows)
 
-        # Pairing the Basic Library after each update keeps library-wide Live Photo metadata
-        # consistent with the concrete album indices, ensuring that aggregated views present
-        # fresh still/motion relationships immediately after moves or restores complete.
-        backend.pair(library_root, library_root=library_root)
+    def _rollback_sidecar_move(self, moved_sidecar: Path, original_sidecar: Path) -> None:
+        if not moved_sidecar.exists():
+            return
+        if original_sidecar.exists():
+            self._signals.error.emit(
+                f"Could not roll back sidecar '{moved_sidecar}': original path already exists."
+            )
+            return
+        try:
+            shutil.move(str(moved_sidecar), str(original_sidecar))
+        except OSError as exc:
+            self._signals.error.emit(
+                f"Could not roll back sidecar '{moved_sidecar}': {exc}"
+            )
+
+    @property
+    def asset_lifecycle_service(self) -> LibraryAssetLifecycleService:
+        """Return the bound lifecycle service for this move operation."""
+
+        if self._asset_lifecycle_service is None:
+            raise RuntimeError(
+                "Active library session is unavailable; file moves require a bound "
+                "lifecycle service."
+            )
+        return self._asset_lifecycle_service
 
     def _resolve_optional(self, path: Optional[Path]) -> Optional[Path]:
         """Resolve *path* defensively, returning ``None`` when unavailable."""
@@ -465,114 +277,11 @@ class MoveWorker(QRunnable):
         except OSError:
             return path
 
-    def _group_album_relatives(
-        self, moved: List[Tuple[Path, Path]]
-    ) -> Dict[Path, List[str]]:
-        """Return album-relative removal lists for every path in *moved*.
-
-        The helper discovers the concrete album root for each moved source path
-        and expresses the original file location relative to that album.  The
-        resulting mapping allows :meth:`_update_source_index` to prune the
-        correct global index rows when the move originated from a
-        library-wide virtual view.
-        """
-
-        results: Dict[Path, List[str]] = {}
-        library_root = self._library_root
-        if library_root is None:
-            return results
-
-        library_root_str = self._normalised_string(library_root)
-        for original, _ in moved:
-            album_root = self._discover_album_root(original.parent, library_root_str)
-            if album_root is None:
-                continue
-            try:
-                relative = original.resolve().relative_to(album_root).as_posix()
-            except (OSError, ValueError):
-                continue
-            results.setdefault(album_root, []).append(relative)
-        return results
-
-    def _discover_album_root(
-        self, start: Path, library_root_key: Optional[str]
-    ) -> Optional[Path]:
-        """Return the album root that owns *start*, caching lookups aggressively."""
-
-        key = self._normalised_string(start)
-        if key is None:
-            return None
-        cached = self._album_root_cache.get(key, ...)
-        if cached is not ...:
-            return cached
-
+    def _resolve_path(self, path: Path) -> Path:
         try:
-            current = start.resolve()
+            return path.resolve()
         except OSError:
-            current = start
-
-        visited: List[Path] = []
-        while True:
-            visited.append(current)
-            if resolve_work_dir(current) is not None:
-                album_root: Optional[Path] = current
-                break
-            parent = current.parent
-            if parent == current:
-                album_root = None
-                break
-            if library_root_key is not None and self._normalised_string(parent) == library_root_key:
-                if resolve_work_dir(parent) is not None:
-                    album_root = parent
-                else:
-                    album_root = None
-                visited.append(parent)
-                break
-            current = parent
-
-        for candidate in visited:
-            candidate_key = self._normalised_string(candidate)
-            if candidate_key is not None:
-                self._album_root_cache[candidate_key] = album_root
-
-        return album_root
-
-    def _normalised_string(self, path: Path) -> Optional[str]:
-        """Return a stable string identifier for *path* suitable for lookups."""
-
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
-        return str(resolved)
-
-    def _library_relative(self, original_path: Path) -> Optional[str]:
-        """Compute the original path relative to the library root when possible."""
-
-        library_root = self._library_root
-        if library_root is None:
-            return None
-        try:
-            relative = original_path.resolve().relative_to(library_root)
-        except (OSError, ValueError):
-            try:
-                relative = original_path.relative_to(library_root)
-            except ValueError:
-                try:
-                    relative_str = os.path.relpath(original_path, library_root)
-                except Exception:
-                    return None
-                else:
-                    if relative_str.startswith(".."):
-                        return None
-                    try:
-                        candidate = (library_root / relative_str).resolve()
-                        root_resolved = library_root.resolve()
-                        candidate.relative_to(root_resolved)
-                    except (OSError, ValueError):
-                        return None
-                    return Path(relative_str).as_posix()
-        return relative.as_posix()
+            return path
 
 
 __all__ = ["MoveSignals", "MoveWorker"]

@@ -8,15 +8,15 @@ from typing import Any, Dict, List, Optional
 
 from iPhoto.domain.models import Album, Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery, SortOrder
-from iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
-from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from iPhoto.legacy.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
+from iPhoto.legacy.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
 from iPhoto.infrastructure.db.pool import ConnectionPool
 from iPhoto.events.bus import EventBus
-from iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
+from iPhoto.legacy.application.use_cases.scan_album import ScanAlbumUseCase
 from iPhoto.application.dtos import ScanAlbumRequest
 from iPhoto.di.container import DependencyContainer
-from iPhoto.application.services.album_service import AlbumService
-from iPhoto.application.services.asset_service import AssetService
+from iPhoto.legacy.application.services.album_service import AlbumService
+from iPhoto.legacy.application.services.asset_service import AssetService
 from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
 
 

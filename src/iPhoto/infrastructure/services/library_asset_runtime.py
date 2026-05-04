@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...application.ports import AssetRepositoryPort, EditServicePort
 from ...config import WORK_DIR_NAME
-from ...domain.repositories import IAssetRepository
+from ...cache.index_store import get_global_repository
 from ...utils.pathutils import ensure_work_dir
-from ..db.pool import ConnectionPool
-from ..repositories.sqlite_asset_repository import SQLiteAssetRepository
 from .thumbnail_cache_service import ThumbnailCacheService
 
 
@@ -16,46 +15,46 @@ class LibraryAssetRuntime:
     """Own library-bound asset services so GUI code only rebinds roots."""
 
     def __init__(self, library_root: Path | None = None) -> None:
-        self._pool: ConnectionPool | None = None
-        self._repository: IAssetRepository
+        self._assets: AssetRepositoryPort
         self._thumbnail_service = ThumbnailCacheService(self._cache_root(library_root))
         self.bind_library_root(library_root)
 
     @property
-    def repository(self) -> IAssetRepository:
-        return self._repository
+    def assets(self) -> AssetRepositoryPort:
+        return self._assets
+
+    @property
+    def repository(self) -> AssetRepositoryPort:
+        return self._assets
 
     @property
     def thumbnail_service(self) -> ThumbnailCacheService:
         return self._thumbnail_service
 
+    def bind_edit_service(self, edit_service: EditServicePort | None) -> None:
+        """Bind the current library session edit surface into thumbnail rendering."""
+
+        setter = getattr(self._thumbnail_service, "set_edit_service", None)
+        if callable(setter):
+            setter(edit_service)
+
     def bind_library_root(self, library_root: Path | None) -> None:
         """Rebuild the asset repository and cache path for *library_root*."""
 
-        db_path = self._database_path(library_root)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        next_pool = ConnectionPool(db_path)
-        next_repository = SQLiteAssetRepository(next_pool)
-
-        previous_pool = self._pool
-        self._pool = next_pool
-        self._repository = next_repository
+        next_assets = get_global_repository(self._repository_root(library_root))
+        self._assets = next_assets
         self._thumbnail_service.set_disk_cache_path(self._cache_root(library_root))
-
-        if previous_pool is not None:
-            previous_pool.close_all()
 
     def shutdown(self) -> None:
         self._thumbnail_service.shutdown()
-        if self._pool is not None:
-            self._pool.close_all()
-            self._pool = None
+        close = getattr(self._assets, "close", None)
+        if callable(close):
+            close()
 
-    def _database_path(self, library_root: Path | None) -> Path:
+    def _repository_root(self, library_root: Path | None) -> Path:
         if library_root is None:
-            return Path.home() / ".iPhoto" / "global_index.db"
-        return ensure_work_dir(library_root) / "global_index.db"
+            return Path.home()
+        return Path(library_root)
 
     def _cache_root(self, library_root: Path | None) -> Path:
         if library_root is None:

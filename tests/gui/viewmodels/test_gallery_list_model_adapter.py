@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -95,13 +96,13 @@ def test_prioritize_rows_delegates_to_store(adapter, mock_store):
     mock_store.prioritize_rows.assert_called_once_with(10, 25)
 
 
-def test_rebind_repository_updates_store(adapter, mock_store):
-    repo = MagicMock()
+def test_rebind_asset_query_service_updates_store(adapter, mock_store):
+    query_service = MagicMock()
     root = Path("/library")
 
-    adapter.rebind_repository(repo, root)
+    adapter.rebind_asset_query_service(query_service, root)
 
-    mock_store.rebind_repository.assert_called_once_with(repo, root)
+    mock_store.rebind_asset_query_service.assert_called_once_with(query_service, root)
 
 
 def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter, mock_store):
@@ -128,14 +129,20 @@ def test_size_role_returns_trimmed_duration_for_video(adapter, mock_store):
         duration=10.0,
     )
 
-    with patch(
-        "iPhoto.gui.viewmodels.gallery_list_model_adapter._io_sidecar.load_adjustments",
-        return_value={"Video_Trim_In_Sec": 2.0, "Video_Trim_Out_Sec": 7.0},
-    ):
-        index = adapter.index(0, 0)
-        result = adapter.data(index, Roles.SIZE)
+    edit_service = MagicMock()
+    edit_service.describe_adjustments.return_value = SimpleNamespace(
+        effective_duration_sec=5.0,
+    )
+    adapter._edit_service_getter = lambda: edit_service
+
+    index = adapter.index(0, 0)
+    result = adapter.data(index, Roles.SIZE)
 
     assert result["duration"] == pytest.approx(5.0)
+    edit_service.describe_adjustments.assert_called_once_with(
+        Path("/videos/clip.mp4"),
+        duration_hint=10.0,
+    )
 
 
 def test_invalid_index_returns_none(adapter):

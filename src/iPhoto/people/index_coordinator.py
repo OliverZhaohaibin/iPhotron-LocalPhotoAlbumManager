@@ -10,7 +10,7 @@ from typing import Iterable
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, Slot
 
-from iPhoto.cache.index_store import get_global_repository
+from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
@@ -46,9 +46,15 @@ class PeopleIndexCoordinator(QObject):
     # from a background worker thread.
     _scheduleEmit = Signal(object)
 
-    def __init__(self, library_root: Path) -> None:
+    def __init__(
+        self,
+        library_root: Path,
+        *,
+        asset_repository: PeopleAssetRepositoryPort | None = None,
+    ) -> None:
         super().__init__()
         self._library_root = Path(library_root)
+        self._asset_repository = asset_repository
         self._lock = threading.RLock()
         self._revision = 0
         self._shutdown_requested = False
@@ -63,6 +69,15 @@ class PeopleIndexCoordinator(QObject):
     @property
     def library_root(self) -> Path:
         return self._library_root
+
+    def set_asset_repository(
+        self,
+        asset_repository: PeopleAssetRepositoryPort | None,
+    ) -> None:
+        """Bind the current library asset-index adapter."""
+
+        with self._lock:
+            self._asset_repository = asset_repository
 
     def submit_detected_batch(
         self,
@@ -81,9 +96,10 @@ class PeopleIndexCoordinator(QObject):
             repository = self._repository()
             session = FaceScanSession()
             done_ids, retry_ids = session.stage_detection_results(detected_batch)
-            store = get_global_repository(self._library_root)
+            store = self._asset_repository
             if retry_ids:
-                store.update_face_statuses(retry_ids, FACE_STATUS_RETRY)
+                if store is not None:
+                    store.update_face_statuses(retry_ids, FACE_STATUS_RETRY)
             if not done_ids:
                 return None
 
@@ -125,7 +141,7 @@ class PeopleIndexCoordinator(QObject):
         # rename/merge/group operations are not blocked during transient DB
         # retries on the global asset-status store.
         try:
-            self._mark_done_asset_ids(store, done_ids)
+            self._mark_done_asset_ids(done_ids)
             return event
         except Exception as exc:
             LOGGER.error(
@@ -423,8 +439,11 @@ class PeopleIndexCoordinator(QObject):
         self._scheduleEmit.emit(event)
         return event
 
-    def _mark_done_asset_ids(self, store: object, done_ids: list[str]) -> None:
+    def _mark_done_asset_ids(self, done_ids: list[str]) -> None:
         if not done_ids:
+            return
+        store = self._asset_repository
+        if store is None:
             return
         last_error: Exception | None = None
         for attempt in range(3):
@@ -444,12 +463,19 @@ _COORDINATORS: dict[Path, PeopleIndexCoordinator] = {}
 _COORDINATORS_LOCK = threading.Lock()
 
 
-def get_people_index_coordinator(library_root: Path) -> PeopleIndexCoordinator:
+def get_people_index_coordinator(
+    library_root: Path,
+    *,
+    asset_repository: PeopleAssetRepositoryPort | None = None,
+) -> PeopleIndexCoordinator:
     resolved = Path(library_root).resolve()
     with _COORDINATORS_LOCK:
         coordinator = _COORDINATORS.get(resolved)
         if coordinator is None:
-            coordinator = PeopleIndexCoordinator(resolved)
+            coordinator = PeopleIndexCoordinator(
+                resolved,
+                asset_repository=asset_repository,
+            )
             # Ensure the coordinator lives on the Qt main thread so that the
             # QueuedConnection on _scheduleEmit can deliver events via the GUI
             # event loop regardless of which thread first calls this function.
@@ -458,6 +484,8 @@ def get_people_index_coordinator(library_root: Path) -> PeopleIndexCoordinator:
                 coordinator.moveToThread(app.thread())
             _COORDINATORS[resolved] = coordinator
         else:
+            if asset_repository is not None:
+                coordinator.set_asset_repository(asset_repository)
             coordinator.resume()
         return coordinator
 

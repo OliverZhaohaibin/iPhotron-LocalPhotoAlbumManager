@@ -5,19 +5,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from iPhoto.application.use_cases.manage_trash import (
+from iPhoto.legacy.application.use_cases.manage_trash import (
     ManageTrashUseCase, ManageTrashRequest, ManageTrashResponse,
 )
-from iPhoto.application.use_cases.aggregate_geo_data import (
+from iPhoto.legacy.application.use_cases.aggregate_geo_data import (
     AggregateGeoDataUseCase, AggregateGeoDataRequest, AggregateGeoDataResponse,
 )
-from iPhoto.application.use_cases.watch_filesystem import (
+from iPhoto.legacy.application.use_cases.watch_filesystem import (
     WatchFilesystemUseCase, WatchFilesystemRequest, WatchFilesystemResponse,
 )
-from iPhoto.application.use_cases.export_assets import (
+from iPhoto.legacy.application.use_cases.export_assets import (
     ExportAssetsUseCase, ExportAssetsRequest, ExportAssetsResponse,
 )
-from iPhoto.application.use_cases.apply_edit import (
+from iPhoto.legacy.application.use_cases.apply_edit import (
     ApplyEditUseCase, ApplyEditRequest, ApplyEditResponse,
 )
 from iPhoto.domain.models.core import Album, Asset, MediaType

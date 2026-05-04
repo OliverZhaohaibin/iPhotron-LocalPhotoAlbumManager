@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -10,9 +11,14 @@ from iPhoto.utils.exiftool import get_metadata_batch
 
 
 def _make_executable(path: Path) -> Path:
-    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    candidate = path
+    if os.name == "nt" and not candidate.suffix:
+        candidate = candidate.with_suffix(".exe")
+        candidate.write_bytes(b"MZ")
+    else:
+        candidate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    candidate.chmod(0o755)
+    return candidate
 
 
 def test_resolve_exiftool_prefers_explicit_env_path(

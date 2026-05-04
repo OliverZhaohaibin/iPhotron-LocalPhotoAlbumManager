@@ -6,6 +6,8 @@ __pycache__/
 
 # C extensions
 *.so
+*.dylib
+*.dll
 *.lib
 *.obj
 *.exp
@@ -53,6 +55,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+tools/testbase/
 
 # Translations
 *.mo
@@ -226,6 +229,7 @@ __marimo__/
 /.codex
 /PySide6-OsmAnd-SDK/
 /src/maps/tiles/World_basemap_2.obf
+/src/maps/tiles/*.tar*
 /src/maps/tiles/extension/
 /src/extension/models/
 /demo/face-cluster/runtime/

@@ -101,7 +101,7 @@ class QueryBuilder:
             normalized = normalize_path(prefix)
             escaped_prefix = escape_like_pattern(normalized)
             where_clauses.append(
-                f"(parent_album_path IS NOT NULL AND parent_album_path != ? AND parent_album_path NOT LIKE ? {ESCAPE_CLAUSE})"
+                f"(parent_album_path IS NULL OR (parent_album_path != ? AND parent_album_path NOT LIKE ? {ESCAPE_CLAUSE}))"
             )
             params.extend([normalized, f"{escaped_prefix}/%"])
 
@@ -177,6 +177,7 @@ class QueryBuilder:
         cursor_id: Optional[str] = None,
         sort_by_date: bool = True,
         limit: Optional[int] = None,
+        offset: int = 0,
     ) -> Tuple[str, List[Any]]:
         """Build a complete paginated query with all filters.
         
@@ -191,6 +192,7 @@ class QueryBuilder:
             cursor_id: Cursor ID for pagination.
             sort_by_date: Sort results by date descending.
             limit: Maximum number of results to return.
+            offset: Number of sorted rows to skip when using limit.
         
         Returns:
             Tuple of (query_string, params) ready for execution.
@@ -231,5 +233,8 @@ class QueryBuilder:
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
+            if offset > 0:
+                query += " OFFSET ?"
+                params.append(offset)
 
         return query, params

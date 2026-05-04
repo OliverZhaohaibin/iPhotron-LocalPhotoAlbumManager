@@ -26,6 +26,7 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
 )
 from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.people.service import PeopleService
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -204,6 +205,53 @@ def test_people_card_requests_thumbnail_artwork_immediately(
             (
                 people_dashboard_cards.CARD_WIDTH * 2,
                 people_dashboard_cards.CARD_HEIGHT * 2,
+            ),
+        )
+    ]
+
+
+def test_group_card_requests_group_cover_before_collage(
+    monkeypatch, qapp: QApplication, tmp_path: Path
+) -> None:
+    widget = PeopleDashboardWidget()
+    cover_path = tmp_path / "group.jpg"
+    alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    bob = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+    widget._groups = [
+        PeopleGroupSummary(
+            group_id="group-ab",
+            name="Alice and Bob",
+            member_person_ids=("person-a", "person-b"),
+            members=(alice, bob),
+            asset_count=1,
+            cover_asset_path=cover_path,
+            created_at="2024-01-01T00:00:02Z",
+        )
+    ]
+
+    cover_calls: list[tuple[Path, tuple[int, int]]] = []
+
+    def _fake_request(path: Path, size: tuple[int, int]) -> tuple[str, QPixmap]:
+        cover_calls.append((path, size))
+        pixmap = QPixmap(size[0], size[1])
+        pixmap.fill(QColor("#FF0000"))
+        return "group-cover", pixmap
+
+    def _fake_collage(**_kwargs) -> tuple[str, QPixmap | None]:
+        raise AssertionError("group cover should be used before collage fallback")
+
+    monkeypatch.setattr(people_dashboard_cards, "request_cover_pixmap", _fake_request)
+    monkeypatch.setattr(people_dashboard_cards, "request_rendered_cover_pixmap", _fake_collage)
+
+    widget._populate_groups()
+
+    assert not widget._groups_board.visible_cards()[0]._cover_pixmap().isNull()
+    assert cover_calls == [
+        (
+            cover_path,
+            (
+                people_dashboard_cards.GROUP_CARD_WIDTH * 2,
+                people_dashboard_cards.GROUP_CARD_HEIGHT * 2,
             ),
         )
     ]
@@ -488,6 +536,32 @@ def test_status_message_updates_without_reloading_cards(qapp: QApplication) -> N
     assert "Click a cluster or group card" in widget._message.text()
 
 
+def test_set_library_root_uses_asset_aware_people_service_factory(
+    monkeypatch, qapp: QApplication, tmp_path: Path
+) -> None:
+    widget = PeopleDashboardWidget()
+    service = PeopleService(tmp_path)
+    reloads: list[bool] = []
+    created_roots: list[Path] = []
+
+    def _fake_create_people_service(root: Path) -> PeopleService:
+        created_roots.append(root)
+        return service
+
+    monkeypatch.setattr(people_dashboard_widget, "create_people_service", _fake_create_people_service)
+    monkeypatch.setattr(
+        widget,
+        "reload",
+        lambda *, preserve_content=False: reloads.append(bool(preserve_content)),
+    )
+
+    widget.set_library_root(tmp_path)
+
+    assert widget._service is service
+    assert created_roots == [tmp_path]
+    assert reloads == [False]
+
+
 def test_person_menu_shows_pin_action_when_pinned_service_is_available(
     tmp_path: Path, qapp: QApplication
 ) -> None:
@@ -653,6 +727,11 @@ def test_toggle_person_hidden_updates_service_and_reloads(
         widget._service,
         "set_cluster_hidden",
         lambda person_id, hidden: toggles.append((person_id, hidden)) or True,
+    )
+    monkeypatch.setattr(
+        MergeConfirmDialog,
+        "confirm_action",
+        classmethod(lambda cls, **_kwargs: True),
     )
     monkeypatch.setattr(
         widget,

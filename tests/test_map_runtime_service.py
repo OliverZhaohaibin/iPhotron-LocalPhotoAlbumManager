@@ -12,11 +12,7 @@ def test_map_runtime_service_keeps_native_widget_available_when_macos_python_gl_
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        map_runtime_service_module.QGuiApplication,
-        "instance",
-        staticmethod(lambda: object()),
-    )
+    monkeypatch.setattr(map_runtime_service_module, "_has_qt_application", lambda: True)
     monkeypatch.setattr(map_runtime_service_module, "check_opengl_support", lambda: False)
     monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: True)
     monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_native_widget", lambda root: root == tmp_path)
@@ -44,11 +40,7 @@ def test_map_runtime_service_falls_back_to_legacy_when_osmand_extension_is_unava
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        map_runtime_service_module.QGuiApplication,
-        "instance",
-        staticmethod(lambda: object()),
-    )
+    monkeypatch.setattr(map_runtime_service_module, "_has_qt_application", lambda: True)
     monkeypatch.setattr(map_runtime_service_module, "check_opengl_support", lambda: True)
     monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: True)
     monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_native_widget", lambda root: False)
@@ -76,11 +68,7 @@ def test_map_runtime_service_checks_search_extension_against_bound_package_root(
 ) -> None:
     probed_roots: list[Path] = []
 
-    monkeypatch.setattr(
-        map_runtime_service_module.QGuiApplication,
-        "instance",
-        staticmethod(lambda: object()),
-    )
+    monkeypatch.setattr(map_runtime_service_module, "_has_qt_application", lambda: True)
     monkeypatch.setattr(map_runtime_service_module, "check_opengl_support", lambda: True)
     monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: False)
     monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_native_widget", lambda root: False)

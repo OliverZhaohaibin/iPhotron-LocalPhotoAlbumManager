@@ -24,6 +24,10 @@ def _opengl_explicitly_disabled() -> bool:
     return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in _TRUE_ENV_VALUES
 
 
+def _has_qt_application() -> bool:
+    return QGuiApplication.instance() is not None
+
+
 class SessionMapRuntimeService(MapRuntimePort):
     """Compute one capability snapshot shared by the active GUI session."""
 
@@ -48,7 +52,7 @@ class SessionMapRuntimeService(MapRuntimePort):
 
     def _detect_capabilities(self) -> MapRuntimeCapabilities:
         opengl_disabled = _opengl_explicitly_disabled()
-        has_qt_app = QGuiApplication.instance() is not None
+        has_qt_app = _has_qt_application()
         python_gl_available = (
             False
             if opengl_disabled or not has_qt_app

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from iPhoto.application.services.parallel_scanner import ParallelScanner, ScanResult
+from iPhoto.legacy.application.services.parallel_scanner import ParallelScanner, ScanResult
 from iPhoto.domain.models.core import Asset, MediaType
 from iPhoto.events.bus import EventBus
 from iPhoto.events.album_events import ScanProgressEvent

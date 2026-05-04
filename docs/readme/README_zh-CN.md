@@ -94,16 +94,17 @@ iphoto-gui /photos/LondonTrip
 ## 🌟 概述
 
 **iPhotron** 是一款受 macOS *照片* 启发的**文件夹原生照片管理器**。  
-它使用轻量级 JSON 清单和缓存文件来组织您的媒体文件 ——  
-提供丰富的相册功能，同时让编辑操作保持非破坏性，不覆盖原始媒体内容。
+它保留文件夹作为相册结构，将文件夹本地清单与 library 级
+`.iPhoto/global_index.db` 结合使用，并区分可重建缓存事实与不可丢失的用户选择，
+同时让编辑操作保持非破坏性，不覆盖原始媒体内容。
 
 核心亮点：
 - 🗂 文件夹原生设计 —— 每个文件夹*就是*一个相册，无需导入。
-- ⚙️ 基于 JSON 的清单记录"人工决策"（封面、精选、排序）。
-- ⚡ **SQLite 驱动的全局数据库**，为海量图库提供闪电般快速的查询。
+- ⚙️ 文件夹本地清单记录封面、精选、排序等相册元数据。
+- ⚡ **SQLite 驱动的全局数据库**，为海量图库提供基于 session 的高速查询。
 - 🧠 智能增量扫描，使用持久化 SQLite 索引。
 - 🎥 完整的**实况照片**配对和播放支持。
-- 🗺 地图视图，可视化所有照片和视频的 GPS 元数据。
+- 🗺 可选地图视图，可视化所有照片和视频的 GPS 元数据；缺少 maps extension 时会优雅降级。
 - 👥 可选的 People 人脸扫描，支持 face cluster、人物命名、封面、隐藏人物与多人 group。
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
@@ -114,6 +115,8 @@ iphoto-gui /photos/LondonTrip
 iPhotron 的离线 OBF 地图运行时以自包含的 **maps extension** 形式提供，
 根目录位于 `src/maps/tiles/extension/`。本项目源码运行、Nuitka 打包产物、
 以及各平台安装产物都以这套目录结构作为运行时约定。
+即使缺少这套 extension，应用的图库浏览、编辑、People 和 Live Photo 功能仍可使用；
+地图相关视图和面板会通过运行时可用性边界显示优雅降级状态。
 
 当前 extension 主要包含：
 - `World_basemap_2.obf` 离线地图数据
@@ -168,7 +171,9 @@ Nuitka 打包、runtime 同步与安装器说明请参阅
 您可以为人物命名、合并重复 cluster、隐藏或重新显示隐藏人物，并让选定封面在重新扫描后继续保留。
 
 将多个人物组成 group 后，可以查看这些人物共同出现的照片。Group 卡片支持设置封面、拖拽排序，
-未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，核心照片管理功能仍可使用。
+未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，
+核心照片管理功能仍可使用。People 状态通过 library session 边界持久化，人物命名、封面、
+隐藏状态、group 和手动人脸标注都会在重新扫描后保留。
 ![People and groups interface](<../picture/People & Group.png>)
 
 ### 🖼 沉浸式详细视图
@@ -197,7 +202,7 @@ macOS 默认 QRhi/Metal，Windows 与 Linux 使用 OpenGL-backed QRhi。
 - **黑边防止：** 自动验证确保透视变换后不出现黑边
   
 ![crop interface](../picture/cropview.png)
-所有编辑都存储在 `.ipo` 附属文件中，保持原始照片不被触动。
+所有编辑都通过编辑 session surface 存储在 `.ipo` 附属文件中，保持原始照片不被触动。
 
 ### ℹ️ 浮动信息面板
 切换浮动元数据面板，查看 EXIF、相机/镜头信息、曝光、光圈、焦距、尺寸、文件大小和拍摄时间等。
@@ -232,7 +237,7 @@ ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回
 
 | 文档 | 说明 |
 |------|------|
-| [Architecture](../architecture.md) | 整体架构、模块边界、数据流、关键设计决策 |
+| [Architecture](../architecture.md) | 当前 vNext library-scoped modular monolith 架构、模块边界、legacy 隔离策略、数据流和关键设计决策 |
 | [Development](../development.md) | 开发环境、依赖、调试，以及面向 Windows / Linux / macOS 的 maps extension 构建流程 |
 | [Executable Build](../misc/BUILD_EXE.md) | Nuitka 打包、AOT、QRhi shader 资源、maps extension 同步与平台运行时说明 |
 | [Security](../security.md) | 权限、加密、数据存储位置、威胁模型 |

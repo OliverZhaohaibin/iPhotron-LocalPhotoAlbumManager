@@ -7,11 +7,8 @@ from typing import Callable, Iterable, List, Optional, Set, TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from .. import app as backend
-from ..cache.index_store import get_global_repository
-from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ..errors import IPhotoError
-from ..models.album import Album
+from ..application.services.album_manifest_service import Album
 from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
 from .services import (
@@ -24,7 +21,7 @@ from .services import (
 )
 
 if TYPE_CHECKING:
-    from ..library.manager import LibraryManager
+    from ..library.runtime_controller import LibraryRuntimeController
 
 import logging
 logger = logging.getLogger(__name__)
@@ -52,7 +49,7 @@ class AppFacade(QObject):
         self._logger = get_logger()
         self._current_album: Optional[Album] = None
         self._pending_index_announcements: Set[Path] = set()
-        self._library_manager: Optional["LibraryManager"] = None
+        self._library_manager: Optional["LibraryRuntimeController"] = None
         self._restore_prompt_handler: Optional[Callable[[str], bool]] = None
         self._model_provider: Optional[Callable[[], Any]] = None
 
@@ -94,6 +91,9 @@ class AppFacade(QObject):
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
         self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
+        self._library_update_service.scanBatchFailed.connect(
+            self._relay_scan_batch_failed
+        )
         self._library_update_service.indexUpdated.connect(self._relay_index_updated)
         self._library_update_service.linksUpdated.connect(self._relay_links_updated)
         self._library_update_service.assetReloadRequested.connect(
@@ -177,7 +177,7 @@ class AppFacade(QObject):
         return self._library_update_service
 
     @property
-    def library_manager(self) -> Optional["LibraryManager"]:
+    def library_manager(self) -> Optional["LibraryRuntimeController"]:
         """Expose the underlying library manager."""
 
         return self._library_manager
@@ -185,17 +185,19 @@ class AppFacade(QObject):
     def open_album(self, root: Path) -> Optional[Album]:
         """Open *root* and trigger background work as needed."""
 
-        # Get library root first for global database access
-        library_root = self._library_manager.root() if self._library_manager else None
-        
         try:
-            album = backend.open_album(
+            album = Album.open(root)
+            library_manager = self._library_manager
+            library_root = (
+                library_manager.root() if library_manager is not None else None
+            )
+            open_routing = self._library_update_service.prepare_album_open(
                 root,
                 autoscan=False,
-                library_root=library_root,
                 hydrate_index=False,
+                sync_manifest_favorites=library_root is None,
             )
-        except IPhotoError as exc:
+        except (IPhotoError, RuntimeError) as exc:
             self.errorRaised.emit(str(exc))
             return None
 
@@ -204,23 +206,8 @@ class AppFacade(QObject):
 
         self.albumOpened.emit(album_root)
 
-        # Check if the index is empty (likely because it's a new or cleaned album)
-        # and trigger a background scan if necessary.
-        index_root = library_root if library_root else album_root
-        has_assets = False
-        try:
-            store = get_global_repository(index_root)
-            next(store.read_all())
-            has_assets = True
-        except (StopIteration, IPhotoError):
-            pass
-
-        is_already_scanning = False
-        if self._library_manager and self._library_manager.is_scanning_path(album_root):
-            is_already_scanning = True
-
-        if not has_assets and not is_already_scanning:
-            self.rescan_current_async()
+        if open_routing.should_rescan_async:
+            self._library_update_service.rescan_album_async(album)
 
         # Legacy reload signals - might be needed for status bar
         self.loadStarted.emit(album_root)
@@ -243,19 +230,27 @@ class AppFacade(QObject):
         if album is None:
             return
 
-        if self._library_manager:
-            filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
-            include = filters.get("include", DEFAULT_INCLUDE)
-            exclude = filters.get("exclude", DEFAULT_EXCLUDE)
+        self._library_update_service.rescan_album_async(album)
 
-            self._library_manager.start_scanning(album.root, include, exclude)
-        else:
-            self._library_update_service.rescan_album_async(album)
+    def scan_root_async(
+        self,
+        root: Path,
+        *,
+        include: Iterable[str],
+        exclude: Iterable[str],
+    ) -> None:
+        """Start a background scan for *root* through the bound session surface."""
+
+        self._library_update_service.scan_root_async(
+            root,
+            include=include,
+            exclude=exclude,
+        )
 
     def _inject_scan_dependencies_for_tests(
         self,
         *,
-        library_manager: Optional["LibraryManager"] = None,
+        library_manager: Optional["LibraryRuntimeController"] = None,
         library_update_service: Optional[LibraryUpdateService] = None,
     ) -> None:
         """Override scan collaborators during testing."""
@@ -304,7 +299,7 @@ class AppFacade(QObject):
             self.albumCoverUpdated.emit(album.root, album.root / rel)
         return success
 
-    def bind_library(self, library: "LibraryManager") -> None:
+    def bind_library(self, library: "LibraryRuntimeController") -> None:
         """Remember the library manager so static collections stay in sync."""
 
         if self._library_manager is not None:
@@ -360,15 +355,15 @@ class AppFacade(QObject):
             mark_featured=mark_featured,
         )
 
-    def move_assets(self, sources: Iterable[Path], destination: Path) -> None:
+    def move_assets(self, sources: Iterable[Path], destination: Path) -> bool:
         """Move *sources* into *destination* and refresh the relevant albums."""
 
-        self._move_service.move_assets(sources, destination)
+        return self._move_service.move_assets(sources, destination)
 
-    def delete_assets(self, sources: Iterable[Path]) -> None:
+    def delete_assets(self, sources: Iterable[Path]) -> bool:
         """Move *sources* into the dedicated deleted-items folder."""
 
-        self._deletion_service.delete_assets(sources)
+        return self._deletion_service.delete_assets(sources)
 
     def restore_assets(self, sources: Iterable[Path]) -> bool:
         """Return ``True`` when at least one trashed asset restore is scheduled."""
@@ -420,7 +415,7 @@ class AppFacade(QObject):
         except OSError:
             return False
 
-    def _get_library_manager(self) -> Optional["LibraryManager"]:
+    def _get_library_manager(self) -> Optional["LibraryRuntimeController"]:
         return self._library_manager
 
     @Slot(Path, Path, list, bool, bool, bool, bool)

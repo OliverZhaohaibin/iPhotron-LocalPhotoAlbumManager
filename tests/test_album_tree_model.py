@@ -10,10 +10,9 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 from PySide6.QtCore import QModelIndex
 from PySide6.QtWidgets import QApplication
 
-import iPhoto.gui.ui.models.album_tree_model as album_tree_model_module
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.models.album_tree_model import AlbumTreeModel, AlbumTreeRole, NodeType
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -48,7 +47,7 @@ def _find_child(model: AlbumTreeModel, parent_index, title: str):
 
 
 def test_placeholder_when_unbound(qapp: QApplication) -> None:
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     model = AlbumTreeModel(manager)
     qapp.processEvents()
     assert model.rowCount() == 1
@@ -61,7 +60,7 @@ def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
     album_dir = _create_album(root, "Trip", child="Day1")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
     model = AlbumTreeModel(manager)
@@ -108,7 +107,7 @@ def test_model_inserts_pinned_section_between_library_and_albums(tmp_path: Path,
     root = tmp_path / "Library"
     root.mkdir()
     album_dir = _create_album(root, "Trips")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -137,11 +136,48 @@ def test_model_inserts_pinned_section_between_library_and_albums(tmp_path: Path,
     assert model.data(trips_index, AlbumTreeRole.NODE_TYPE) == NodeType.PINNED_ALBUM
 
 
+def test_model_pinned_album_uses_current_album_title_over_custom_label(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    album_dir = _create_album(root, "Trips")
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_album(album_dir, "Trips", library_root=root)
+    assert pinned_service.rename_item(
+        kind="album",
+        item_id=album_dir,
+        label="Best Trips",
+        library_root=root,
+    )
+
+    model = AlbumTreeModel(manager)
+    model.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    pinned_item = pinned_service.items_for_library(root)[0]
+    pinned_index = model.index_for_pinned_item(pinned_item)
+    pinned_tree_item = model.item_from_index(pinned_index)
+
+    assert pinned_index.isValid()
+    assert pinned_tree_item is not None
+    assert pinned_tree_item.album is not None
+    assert pinned_tree_item.album.path == album_dir
+    assert model.data(pinned_index) == "Trips"
+
+
 def test_model_omits_pinned_section_when_empty(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
     _create_album(root, "Trips")
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -155,11 +191,10 @@ def test_model_omits_pinned_section_when_empty(tmp_path: Path, qapp: QApplicatio
 def test_model_keeps_missing_pinned_entities_visible_until_clicked(
     tmp_path: Path,
     qapp: QApplication,
-    monkeypatch,
 ) -> None:
     root = tmp_path / "Library"
     root.mkdir()
-    manager = LibraryManager()
+    manager = LibraryRuntimeController()
     manager.bind_path(root)
     qapp.processEvents()
 
@@ -169,18 +204,6 @@ def test_model_keeps_missing_pinned_entities_visible_until_clicked(
     pinned_service.pin_album(root / "Missing Album", "Missing Album", library_root=root)
     pinned_service.pin_person("missing-person", "Ghost", library_root=root)
     pinned_service.pin_group("missing-group", "Group 1", library_root=root)
-
-    class _StubPeopleService:
-        def __init__(self, library_root: Path) -> None:
-            self.library_root = library_root
-
-        def list_clusters(self, *, include_hidden: bool = False):
-            return []
-
-        def list_groups(self, *, repository=None, summaries=None):
-            return []
-
-    monkeypatch.setattr(album_tree_model_module, "PeopleService", _StubPeopleService)
 
     model = AlbumTreeModel(manager)
     model.set_pinned_service(pinned_service)

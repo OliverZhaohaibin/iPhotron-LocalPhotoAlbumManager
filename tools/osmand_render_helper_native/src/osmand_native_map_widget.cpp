@@ -9,6 +9,8 @@
 #include <memory>
 #include <mutex>
 
+#include <QApplication>
+#include <QCursor>
 #include <QDir>
 #include <QCryptographicHash>
 #include <QCoreApplication>
@@ -391,6 +393,7 @@ OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration,
 
 OsmAndNativeMapWidget::~OsmAndNativeMapWidget()
 {
+    resetDragCursor();
     cleanupRenderer();
     if (_resourcesReady)
         CoreRuntime::instance().release();
@@ -564,7 +567,7 @@ void OsmAndNativeMapWidget::mousePressEvent(QMouseEvent* event)
         scheduleInteractiveRenderingFinish();
         _dragging = true;
         _lastMousePosition = event->position();
-        setCursor(Qt::ClosedHandCursor);
+        setDragCursor();
         setFocus(Qt::MouseFocusReason);
         event->accept();
         return;
@@ -577,6 +580,7 @@ void OsmAndNativeMapWidget::mouseMoveEvent(QMouseEvent* event)
 {
     if (_dragging && (event->buttons() & Qt::LeftButton))
     {
+        setDragCursor();
         const auto currentPosition = event->position();
         const auto delta = currentPosition - _lastMousePosition;
         _lastMousePosition = currentPosition;
@@ -594,7 +598,7 @@ void OsmAndNativeMapWidget::mouseReleaseEvent(QMouseEvent* event)
     if (_dragging && event->button() == Qt::LeftButton)
     {
         _dragging = false;
-        unsetCursor();
+        resetDragCursor();
         scheduleInteractiveRenderingFinish();
         event->accept();
         return;
@@ -1067,6 +1071,7 @@ void OsmAndNativeMapWidget::cleanupRenderer()
 {
     if (_interactionTimer.isActive())
         _interactionTimer.stop();
+    resetDragCursor();
 
     _coldStartBootstrapPending = false;
 
@@ -1097,6 +1102,29 @@ void OsmAndNativeMapWidget::cleanupRenderer()
 
     if (hadContext)
         doneCurrent();
+}
+
+void OsmAndNativeMapWidget::setDragCursor()
+{
+    setCursor(Qt::ClosedHandCursor);
+    const QCursor cursor(Qt::ClosedHandCursor);
+    if (_dragOverrideCursorActive)
+        QApplication::changeOverrideCursor(cursor);
+    else
+    {
+        QApplication::setOverrideCursor(cursor);
+        _dragOverrideCursorActive = true;
+    }
+}
+
+void OsmAndNativeMapWidget::resetDragCursor()
+{
+    unsetCursor();
+    if (_dragOverrideCursorActive)
+    {
+        QApplication::restoreOverrideCursor();
+        _dragOverrideCursorActive = false;
+    }
 }
 
 void OsmAndNativeMapWidget::wrapCenter()

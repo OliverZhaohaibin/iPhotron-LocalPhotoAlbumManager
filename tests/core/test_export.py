@@ -130,7 +130,7 @@ def test_export_asset(mock_sidecar, mock_shutil, mock_render, mock_render_video,
     mock_render.return_value = mock_qimage
 
     assert export_asset(source, export_root, library_root)
-    mock_render.assert_called_with(source)
+    mock_render.assert_called_with(source, edit_service=None)
     mock_qimage.save.assert_called()
 
 

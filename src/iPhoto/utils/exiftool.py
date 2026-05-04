@@ -24,9 +24,25 @@ _MACOS_EXIFTOOL_CANDIDATES = (
 )
 
 
+def _windows_executable_suffixes() -> tuple[str, ...]:
+    raw_value = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    suffixes = tuple(
+        entry.strip().lower()
+        for entry in raw_value.split(os.pathsep)
+        if entry.strip()
+    )
+    if suffixes:
+        return suffixes
+    return (".com", ".exe", ".bat", ".cmd")
+
+
 def _is_executable_file(path: Path) -> bool:
     try:
-        return path.is_file() and os.access(path, os.X_OK)
+        if not path.is_file():
+            return False
+        if os.name == "nt":
+            return path.suffix.lower() in _windows_executable_suffixes()
+        return os.access(path, os.X_OK)
     except OSError:
         return False
 

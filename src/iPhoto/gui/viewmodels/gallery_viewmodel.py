@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-from iPhoto.application.services.asset_service import AssetService
+from iPhoto.application.ports import AssetStateServicePort
+from iPhoto.application.services.location_asset_service import (
+    geotagged_asset_from_row,
+)
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import ALL_PHOTOS_TITLE, DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
@@ -13,7 +16,10 @@ from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.ui.menus.core import MenuContext
 from iPhoto.gui.coordinators.location_selection_session import LocationSelectionSession
 from iPhoto.gui.facade import AppFacade
-from iPhoto.library.geo_aggregator import geotagged_asset_from_row
+from iPhoto.gui.services.location_trash_navigation_service import (
+    LocationTrashNavigationService,
+)
+from iPhoto.gui.services.people_service_resolver import resolve_people_service
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -29,15 +35,19 @@ class GalleryViewModel(BaseViewModel):
         store: GalleryCollectionStore,
         context: RuntimeEntryContract,
         facade: AppFacade,
-        asset_service: AssetService,
+        asset_state_service: AssetStateServicePort | None,
         location_session: LocationSelectionSession | None = None,
+        location_trash_service: LocationTrashNavigationService | None = None,
     ) -> None:
         super().__init__()
         self._store = store
         self._context = context
         self._facade = facade
-        self._asset_service = asset_service
+        self._asset_state_service = asset_state_service
         self._location_session = location_session or LocationSelectionSession()
+        self._location_trash_service = location_trash_service or LocationTrashNavigationService(
+            library_manager_getter=lambda: self._context.library,
+        )
         self._cluster_gallery_origin: Literal["location", "people", None] = None
         self._people_cluster_kind: Literal["person", "group", None] = None
         self._people_cluster_id: str | None = None
@@ -58,9 +68,22 @@ class GalleryViewModel(BaseViewModel):
         self.sidebar_path_requested = Signal()
         self.message_requested = Signal()
 
+        self._location_trash_service.locationAssetsLoaded.connect(
+            self._handle_location_assets_loaded
+        )
+        self._location_trash_service.errorRaised.connect(
+            lambda message: self.message_requested.emit(message, 3000)
+        )
+
     @property
     def location_session(self) -> LocationSelectionSession:
         return self._location_session
+
+    def bind_asset_state_service(
+        self,
+        asset_state_service: AssetStateServicePort | None,
+    ) -> None:
+        self._asset_state_service = asset_state_service
 
     def open_album(self, path: Path, *, select_sidebar_path: bool = True) -> None:
         album = self._facade.open_album(path)
@@ -120,7 +143,9 @@ class GalleryViewModel(BaseViewModel):
         if root is None:
             self.bind_library_requested.emit()
             return
-        deleted_root = self._context.library.ensure_deleted_directory()
+        deleted_root = self._location_trash_service.prepare_recently_deleted()
+        if deleted_root is None:
+            return
         self._facade.open_album(deleted_root)
         self._clear_location_context()
         self._clear_cluster_gallery_context()
@@ -203,10 +228,7 @@ class GalleryViewModel(BaseViewModel):
             self.map_assets_changed.emit(self._location_session.full_assets(), root)
             return
 
-        request_serial = self._location_session.begin_load(root)
-        assets = list(self._context.library.get_geotagged_assets())
-        self._location_session.accept_loaded(request_serial, root, assets)
-        self.map_assets_changed.emit(self._location_session.full_assets(), root)
+        self._request_location_assets(root)
 
     def open_location_asset(self, rel: str) -> None:
         root = self._context.library.root()
@@ -341,9 +363,12 @@ class GalleryViewModel(BaseViewModel):
             self.return_from_cluster_gallery()
             return
 
-        from iPhoto.people.service import PeopleService
-
-        service = PeopleService(root)
+        service = resolve_people_service(
+            self._context.library,
+            library_root=root,
+        )
+        if service is None:
+            return
         if self._people_cluster_kind == "person":
             query = service.build_cluster_query(current_id)
         else:
@@ -371,7 +396,7 @@ class GalleryViewModel(BaseViewModel):
 
         changed = False
         for row in chunk:
-            asset = geotagged_asset_from_row(root, row)
+            asset = self._location_asset_from_row(row, root)
             if asset is not None:
                 changed = self._location_session.upsert_asset(asset) or changed
                 continue
@@ -393,7 +418,32 @@ class GalleryViewModel(BaseViewModel):
                 self._location_session.invalidate()
             return
 
-        self._location_session.replace_assets(list(self._context.library.get_geotagged_assets()))
+        self._request_location_assets(root)
+
+    def _request_location_assets(self, root: Path) -> None:
+        request = self._location_trash_service.request_location_assets()
+        if request is None:
+            return
+        serial, request_root = request
+        if request_root != root:
+            root = request_root
+        self._location_session.begin_load_with_serial(root, serial)
+
+    def _location_asset_from_row(self, row: object, root: Path):
+        location_service = getattr(self._context.library, "location_service", None)
+        asset_from_row = getattr(location_service, "asset_from_row", None)
+        if callable(asset_from_row):
+            return asset_from_row(row)
+        return geotagged_asset_from_row(root, row)
+
+    def _handle_location_assets_loaded(
+        self,
+        serial: int,
+        root: Path,
+        assets: list,
+    ) -> None:
+        if not self._location_session.accept_loaded(serial, root, list(assets)):
+            return
         if self._location_session.mode == "map":
             self.map_assets_changed.emit(self._location_session.full_assets(), root)
 
@@ -462,10 +512,10 @@ class GalleryViewModel(BaseViewModel):
             self.message_requested.emit("No album is currently open.", 3000)
             return
 
-        self._context.library.start_scanning(
+        self._facade.scan_root_async(
             library_root,
-            DEFAULT_INCLUDE,
-            DEFAULT_EXCLUDE,
+            include=DEFAULT_INCLUDE,
+            exclude=DEFAULT_EXCLUDE,
         )
 
     def path_for_row(self, row: int) -> Optional[Path]:
@@ -524,9 +574,9 @@ class GalleryViewModel(BaseViewModel):
 
     def toggle_favorite_row(self, row: int) -> Optional[bool]:
         path = self.path_for_row(row)
-        if path is None:
+        if path is None or self._asset_state_service is None:
             return None
-        new_state = self._asset_service.toggle_favorite_by_path(path)
+        new_state = self._asset_state_service.toggle_favorite(path)
         self._store.update_favorite_status(row, new_state)
         return new_state
 

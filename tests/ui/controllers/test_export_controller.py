@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtGui import QAction, QActionGroup
 
 from iPhoto.gui.ui.controllers.export_controller import ExportController
-from iPhoto.library.manager import LibraryManager
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def mock_settings():
 
 @pytest.fixture
 def mock_library(tmp_path):
-    lib = MagicMock(spec=LibraryManager)
+    lib = MagicMock(spec=LibraryRuntimeController)
     lib.root.return_value = tmp_path
     return lib
 

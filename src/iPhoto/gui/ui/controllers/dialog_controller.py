@@ -50,7 +50,7 @@ class DialogController:
             if self._context.library.root() is not None:
                 _logger.info("bind_library_dialog: cancelling active scans before rebind")
                 self._context.facade.cancel_active_scans()
-            self._context.library.bind_path(root)
+            self._context.open_library(root)
             _logger.info("bind_library_dialog: bind_path succeeded, root=%s", self._context.library.root())
         except LibraryError as exc:
             _logger.error("bind_library_dialog: bind_path failed: %s", exc)
@@ -83,10 +83,10 @@ class DialogController:
             return
         if self._context.library.is_scanning_path(bound_root):
             return
-        self._context.library.start_scanning(
+        self._context.facade.scan_root_async(
             bound_root,
-            DEFAULT_INCLUDE,
-            DEFAULT_EXCLUDE,
+            include=DEFAULT_INCLUDE,
+            exclude=DEFAULT_EXCLUDE,
         )
 
     def show_error(self, message: str) -> None:

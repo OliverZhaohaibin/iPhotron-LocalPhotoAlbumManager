@@ -1,0 +1,55 @@
+"""Legacy-only album view model scheduled for next-major removal.
+
+The production GUI runtime must use session-backed view models instead. This
+class remains quarantined for compatibility tests until the next major release.
+"""
+
+import logging
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Signal
+
+from iPhoto.legacy.application.services.album_service import AlbumService
+from iPhoto.legacy.application.services.asset_service import AssetService
+from iPhoto.domain.models.query import AssetQuery
+
+
+class AlbumViewModel(QObject):
+    albumLoaded = Signal(object)  # Payload: Album DTO or similar
+    assetsLoaded = Signal(list)
+    scanFinished = Signal()
+
+    def __init__(self, album_service: AlbumService, asset_service: AssetService):
+        super().__init__()
+        self._album_service = album_service
+        self._asset_service = asset_service
+        self._logger = logging.getLogger(__name__)
+        self._current_album_id = None
+
+    def load_album(self, path: Path):
+        try:
+            response = self._album_service.open_album(path)
+            if hasattr(response, "album_id"):
+                self._current_album_id = response.album_id
+            elif hasattr(response, "id"):
+                self._current_album_id = response.id
+
+            self.albumLoaded.emit(response)
+            self.refresh_assets()
+
+        except Exception as e:
+            self._logger.error(f"Failed to load album: {e}")
+
+    def refresh_assets(self):
+        if not self._current_album_id:
+            return
+
+        query = AssetQuery().with_album_id(self._current_album_id)
+        assets = self._asset_service.find_assets(query)
+        self.assetsLoaded.emit(assets)
+
+    def scan_current_album(self):
+        if self._current_album_id:
+            self._album_service.scan_album(self._current_album_id)
+            self.refresh_assets()
+            self.scanFinished.emit()

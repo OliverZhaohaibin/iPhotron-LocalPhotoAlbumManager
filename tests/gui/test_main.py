@@ -14,9 +14,10 @@ from iPhoto.gui.main import (
 
 def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeypatch) -> None:
     existing_paths = {"/opt/homebrew/bin", "/usr/local/bin"}
+    darwin_pathsep = ":"
 
     def fake_is_dir(path: Path) -> bool:
-        return str(path) in existing_paths
+        return path.as_posix() in existing_paths
 
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "darwin")
     monkeypatch.setattr("iPhoto.gui.main.Path.is_dir", fake_is_dir)
@@ -24,7 +25,7 @@ def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeyp
 
     _bootstrap_macos_external_tool_path()
 
-    assert os.environ["PATH"].split(os.pathsep) == [
+    assert os.environ["PATH"].split(darwin_pathsep) == [
         "/opt/homebrew/bin",
         "/usr/local/bin",
         "/usr/bin",
@@ -33,7 +34,7 @@ def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeyp
 
     _bootstrap_macos_external_tool_path()
 
-    assert os.environ["PATH"].split(os.pathsep) == [
+    assert os.environ["PATH"].split(darwin_pathsep) == [
         "/opt/homebrew/bin",
         "/usr/local/bin",
         "/usr/bin",

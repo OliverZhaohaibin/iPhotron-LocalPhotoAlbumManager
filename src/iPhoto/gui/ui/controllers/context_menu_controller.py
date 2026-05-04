@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QMenu
 from iPhoto.gui.ui.menus.core import MenuContext, populate_menu
 from iPhoto.gui.ui.menus.gallery_menu import GalleryMenuHandlers, gallery_action_specs
 from iPhoto.gui.ui.menus.style import apply_menu_style
-from iPhoto.people.service import PeopleService
+from ...services.people_service_resolver import resolve_people_service
 
 from ...facade import AppFacade
 from ..widgets.asset_grid import AssetGrid
@@ -133,12 +133,13 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to delete first.", 3000)
             return False
 
-        if not self._apply_optimistic_move(paths, is_delete=True):
-            self._remove_selection_rows(selected_indexes)
-
         try:
             self._prepare_file_mutation(paths)
-            self._facade.delete_assets(paths)
+            queued_delete = self._facade.delete_assets(paths)
+            if not queued_delete:
+                return False
+            if not self._apply_optimistic_move(paths, is_delete=True):
+                self._remove_selection_rows(selected_indexes)
         except Exception:
             # Rescanning the album restores the rows we removed optimistically.
             self._facade.rescan_current()
@@ -274,16 +275,24 @@ class ContextMenuController(QObject):
     def _execute_move_to_album(self, target: Path) -> None:
         """Move the currently selected assets to ``target`` while updating the view."""
 
+        selection_model = self._grid_view.selectionModel()
+        selected_indexes = (
+            list(selection_model.selectedIndexes()) if selection_model else []
+        )
         paths = self._selected_asset_paths()
         if not paths:
             self._status_bar.show_message("Select items to move first.", 3000)
             return
 
-        self._apply_optimistic_move(paths, destination_root=target)
-
         try:
             self._prepare_file_mutation(paths)
-            self._facade.move_assets(paths, target)
+            queued_move = self._facade.move_assets(paths, target)
+            if not queued_move:
+                return
+            if selected_indexes and not self._apply_optimistic_move(
+                paths, destination_root=target
+            ):
+                self._remove_selection_rows(selected_indexes)
         except Exception:
             rollback = getattr(self._asset_model, "rollback_pending_moves", None)
             if callable(rollback):
@@ -399,16 +408,20 @@ class ContextMenuController(QObject):
         if context.entity_kind == "album":
             return context.gallery_section in {"album", "pinned_album"}
         if context.entity_kind == "person" and context.entity_id:
-            return (
-                self._people_service_for_context(context).resolve_cluster_cover_face(
+            service = self._people_service_for_context(context)
+            return bool(
+                service is not None
+                and service.resolve_cluster_cover_face(
                     context.entity_id,
                     asset.id,
                 )
                 is not None
             )
         if context.entity_kind == "group" and context.entity_id:
-            return (
-                self._people_service_for_context(context).resolve_group_cover_asset(
+            service = self._people_service_for_context(context)
+            return bool(
+                service is not None
+                and service.resolve_group_cover_asset(
                     context.entity_id,
                     asset.id,
                 )
@@ -426,15 +439,17 @@ class ContextMenuController(QObject):
             success = self._facade.set_cover(self._album_cover_rel_path(context, asset))
         elif context.entity_kind == "person" and context.entity_id:
             service = self._people_service_for_context(context)
-            face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
-            success = bool(face_id) and service.set_cluster_cover(context.entity_id, face_id)
+            if service is not None:
+                face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
+                success = bool(face_id) and service.set_cluster_cover(context.entity_id, face_id)
         elif context.entity_kind == "group" and context.entity_id:
             service = self._people_service_for_context(context)
-            group_asset_id = service.resolve_group_cover_asset(context.entity_id, asset.id)
-            success = bool(group_asset_id) and service.set_group_cover(
-                context.entity_id,
-                group_asset_id,
-            )
+            if service is not None:
+                group_asset_id = service.resolve_group_cover_asset(context.entity_id, asset.id)
+                success = bool(group_asset_id) and service.set_group_cover(
+                    context.entity_id,
+                    group_asset_id,
+                )
 
         if success:
             self._toast.show_toast("Cover Updated")
@@ -453,8 +468,13 @@ class ContextMenuController(QObject):
                 pass
         return asset.rel_path.as_posix()
 
-    def _people_service_for_context(self, context: MenuContext) -> PeopleService:
-        return PeopleService(context.active_root)
+    def _people_service_for_context(self, context: MenuContext):
+        if context.active_root is None:
+            return None
+        return resolve_people_service(
+            self._facade.library_manager,
+            library_root=context.active_root,
+        )
 
     def _remove_selection_rows(self, selected_indexes: list) -> None:
         if not selected_indexes:

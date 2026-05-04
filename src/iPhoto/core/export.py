@@ -12,6 +12,7 @@ from typing import Any
 
 from PySide6.QtGui import QImage, QTransform
 
+from ..application.ports import EditServicePort
 from ..errors import ExternalToolError
 from ..io import sidecar
 from ..media_classifier import VIDEO_EXTENSIONS
@@ -55,23 +56,31 @@ EXPORT_FORMATS: dict[str, tuple[str, str]] = {
 DEFAULT_EXPORT_FORMAT = "jpg"
 
 
-def render_image(path: Path) -> QImage | None:
+def render_image(path: Path, *, edit_service: EditServicePort | None = None) -> QImage | None:
     """Render the asset at *path* with adjustments applied."""
-
-    # 1. Load adjustments
-    raw_adjustments = sidecar.load_adjustments(path)
-    if not raw_adjustments:
-        # Prompt implies we only render if adjustments exist (Case A).
-        # If this function is called, caller expects rendering.
-        return None
 
     # 2. Load original image
     image = image_loader.load_qimage(path)
     if image is None or image.isNull():
         return None
 
+    if edit_service is not None:
+        state = edit_service.describe_adjustments(
+            path,
+            color_stats=compute_color_statistics(image),
+        )
+        raw_adjustments = state.raw_adjustments
+        resolved_adjustments = state.resolved_adjustments
+    else:
+        raw_adjustments = sidecar.load_adjustments(path)
+        resolved_adjustments = sidecar.resolve_render_adjustments(raw_adjustments)
+
+    if not raw_adjustments:
+        # Prompt implies we only render if adjustments exist (Case A).
+        # If this function is called, caller expects rendering.
+        return None
+
     # 3. Apply Filters
-    resolved_adjustments = sidecar.resolve_render_adjustments(raw_adjustments)
     filtered_image = apply_adjustments(image, resolved_adjustments)
 
     # 4. Apply Geometry
@@ -116,7 +125,12 @@ def render_image(path: Path) -> QImage | None:
     return filtered_image
 
 
-def render_video(path: Path, destination: Path) -> bool:
+def render_video(
+    path: Path,
+    destination: Path,
+    *,
+    edit_service: EditServicePort | None = None,
+) -> bool:
     """Render *path* to *destination* as MP4 with trim and adjustments applied."""
 
     av_module = _load_av()
@@ -124,7 +138,6 @@ def render_video(path: Path, destination: Path) -> bool:
         _LOGGER.error("Video export requires PyAV for frame decoding")
         return False
 
-    raw_adjustments = sidecar.load_adjustments(path)
     try:
         probe = probe_media(path)
     except ExternalToolError:
@@ -132,6 +145,14 @@ def render_video(path: Path, destination: Path) -> bool:
         return False
 
     duration_sec = probe_duration_seconds(probe)
+    if edit_service is not None:
+        initial_state = edit_service.describe_adjustments(
+            path,
+            duration_hint=duration_sec,
+        )
+        raw_adjustments = initial_state.raw_adjustments
+    else:
+        raw_adjustments = sidecar.load_adjustments(path)
     trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
     rotation_cw, _, _ = probe_video_rotation(path)
 
@@ -157,10 +178,17 @@ def render_video(path: Path, destination: Path) -> bool:
             except Exception:
                 _LOGGER.exception("Failed to compute video export color statistics")
                 color_stats = None
-            resolved_adjustments = sidecar.resolve_render_adjustments(
-                raw_adjustments,
-                color_stats=color_stats,
-            )
+            if edit_service is not None:
+                resolved_adjustments = edit_service.describe_adjustments(
+                    path,
+                    duration_hint=duration_sec,
+                    color_stats=color_stats,
+                ).resolved_adjustments
+            else:
+                resolved_adjustments = sidecar.resolve_render_adjustments(
+                    raw_adjustments,
+                    color_stats=color_stats,
+                )
 
             first_rendered = _render_video_frame(first_source, raw_adjustments, resolved_adjustments, color_stats)
             if first_rendered is None or first_rendered.isNull():
@@ -245,6 +273,8 @@ def export_asset(
     export_root: Path,
     library_root: Path,
     export_format: str = DEFAULT_EXPORT_FORMAT,
+    *,
+    edit_service: EditServicePort | None = None,
 ) -> bool:
     """Export the asset at *source_path* to *export_root* mirroring directory structure.
 
@@ -264,8 +294,16 @@ def export_asset(
 
         is_video = source_path.suffix.lower() in VIDEO_EXTENSIONS
         is_raw = source_path.suffix.lower() in RAW_EXTENSIONS
-        has_sidecar = sidecar.sidecar_path_for_asset(source_path).exists()
-        raw_adjustments = sidecar.load_adjustments(source_path) if is_video and has_sidecar else {}
+        has_sidecar = (
+            edit_service.sidecar_exists(source_path)
+            if edit_service is not None
+            else sidecar.sidecar_path_for_asset(source_path).exists()
+        )
+        raw_adjustments = (
+            edit_service.read_adjustments(source_path)
+            if is_video and has_sidecar and edit_service is not None
+            else (sidecar.load_adjustments(source_path) if is_video and has_sidecar else {})
+        )
         video_duration = None
         if is_video and has_sidecar:
             try:
@@ -281,7 +319,7 @@ def export_asset(
         should_render_video = is_video and has_sidecar and sidecar.video_has_visible_edits(raw_adjustments, video_duration)
 
         if should_render:
-            image = render_image(source_path)
+            image = render_image(source_path, edit_service=edit_service)
             if image is None and is_raw:
                 # render_image returns None when there are no sidecar adjustments;
                 # for RAW we still need to produce a viewable file.
@@ -301,7 +339,7 @@ def export_asset(
         if should_render_video:
             final_dest = destination_path.with_suffix(".mp4")
             final_dest = get_unique_destination(final_dest)
-            return render_video(source_path, final_dest)
+            return render_video(source_path, final_dest, edit_service=edit_service)
 
         # Case B: Unedited raster or Video -> Copy
         final_dest = get_unique_destination(destination_path)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from iPhoto import app as backend
+from iPhoto.legacy import app as backend
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.core.pairing import pair_live
 from iPhoto.utils.jsonio import read_json

@@ -153,7 +153,11 @@ def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> Non
     helper_path = extension_root / DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(Path("tiles") / "extension")
     helper_path.unlink()
     monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
+    if map_sources.os.name == "nt":
+        monkeypatch.setenv("APPDATA", str(tmp_path / "empty-appdata"))
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
+    monkeypatch.delenv("APPIMAGE", raising=False)
     monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
 
     assert has_usable_osmand_default(package_root) is False
@@ -288,9 +292,18 @@ def test_win32_runtime_candidates_ignore_sdk_and_keep_windows_filenames(
     assert widget_candidates == tuple((package_root / rel).resolve() for rel in widget_rels)
 
 
-def test_has_installed_osmand_extension_requires_search_database_and_helper(tmp_path) -> None:
+def test_has_installed_osmand_extension_requires_search_database_and_helper(
+    tmp_path,
+    monkeypatch,
+) -> None:
     package_root = tmp_path / "maps"
     _create_extension_assets(package_root)
+    if map_sources.os.name == "nt":
+        monkeypatch.setenv("APPDATA", str(tmp_path / "empty-appdata"))
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
 
     assert has_installed_osmand_extension(package_root) is True
 
@@ -353,6 +366,25 @@ def test_default_osmand_extension_root_prefers_override_env(tmp_path, monkeypatc
     monkeypatch.setenv(ENV_OSMAND_EXTENSION_ROOT, str(override_root))
 
     assert default_osmand_extension_root(package_root) == override_root.resolve()
+
+
+def test_default_osmand_extension_root_falls_back_to_valid_bundled_extension_when_managed_copy_is_incomplete(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package_root = tmp_path / "maps"
+    bundled_root = _create_extension_assets(package_root)
+    override_root = tmp_path / "runtime" / "extension"
+    override_root.mkdir(parents=True)
+    (override_root / "marker.txt").write_text("partial", encoding="utf-8")
+    monkeypatch.setenv(ENV_OSMAND_EXTENSION_ROOT, str(override_root))
+
+    source = MapSourceSpec.default(package_root)
+
+    assert default_osmand_extension_root(package_root) == bundled_root.resolve()
+    assert has_usable_osmand_default(package_root) is True
+    assert source.kind == "osmand_obf"
+    assert Path(source.data_path) == bundled_root / "World_basemap_2.obf"
 
 
 def test_default_pending_osmand_extension_root_uses_external_runtime_path_for_appimage_when_bundled_exists(

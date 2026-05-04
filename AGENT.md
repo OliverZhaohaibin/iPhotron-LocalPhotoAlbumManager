@@ -1,561 +1,265 @@
-# `AGENT.md` – iPhoto Development Principles
+# AGENT.md - iPhotron Development Principles
 
-## 1. Core Philosophy
+This file is the working guide for coding agents and contributors. It reflects
+the current vNext state: the production runtime has converged on
+`RuntimeContext -> LibrarySession -> application ports/services`, and legacy
+compatibility code is quarantined under `src/iPhoto/legacy/`.
 
-* **Album = Folder**: Any folder can be an album; no database dependency for structure.
-* **Edits Are Non-Destructive**: Never bake crop/color/video edits into originals. The explicit exception is the user-confirmed Assign Location flow, which saves GPS to the local index and best-effort writes GPS metadata back to the original file through ExifTool.
-* **Human Decisions in Manifest**: Cover photos, featured items, sorting, tags, etc. are written to `manifest.json` and other sidecar files.
-* **Cache Is Disposable, User State Is Not**: Thumbnails, runtime scan facts (`global_index.db`), pairing results (`links.json`), and the runtime People face snapshot must be repairable or rebuildable. People names, covers, hidden flags, groups, group order, pinned state, and group covers are human decisions and must not be discarded as cache.
-* **Live Photo Pairing**: Strong pairing based on `content.identifier` first, weak pairing (same name/time proximity) second; results written to `links.json`.
-* **Optional People AI Runtime**: Face clustering depends on the optional `ai-demo` dependencies. The app must still manage albums, maps, Live Photos, and edits when InsightFace/ONNXRuntime are unavailable.
+## 1. Current Architecture Status
 
----
+- The vNext cleanup is complete for production source code.
+- Production runtime code must not import `iPhoto.legacy` or `iPhoto.models.*`.
+- Legacy compatibility and old domain-repository code live only in
+  `src/iPhoto/legacy/`. That subtree is temporary quarantine for historical
+  behavior tests and is planned for removal in the next major release.
+- GUI, CLI, file watchers, Qt workers, and future automation entry points must
+  enter library behavior through `RuntimeContext`, `LibrarySession`, and
+  application-level surfaces.
+- New business logic belongs in application use cases/services, session
+  surfaces, domain values/pure services, or infrastructure adapters. GUI code
+  is presentation and Qt transport only.
 
-## 2. File & Directory Conventions
+The authoritative refactor status is tracked in:
 
-* **Marker Files**
+- `docs/refactor/04-implementation-checklist.md`
+- `docs/refactor/05-current-progress.md`
 
-  * `.iphoto.album.json`: Complete manifest (recommended)
-  * `.iphoto.album`: Minimal marker (empty file, represents "this is an album")
+## 2. Product Invariants
 
-* **Hidden Work Directory** (deletable):
+- **Folder-native library.** A folder is an album. Users can browse folders
+  without an import step.
+- **Local-first.** Core library, browsing, editing, Live Photo, People, and Maps
+  behavior is local. Optional runtimes must degrade gracefully when unavailable.
+- **Non-destructive editing.** Visual edits are stored in `.ipo` sidecars.
+  Original media is not overwritten by normal editing.
+- **Explicit metadata write-back only.** Assign Location is the explicit
+  exception: it persists the location locally first, then best-effort writes GPS
+  metadata to the original file through ExifTool and reports warnings on
+  failure.
+- **Rebuildable facts vs durable choices.** Scan facts, thumbnails, Live Photo
+  materialization, and People runtime snapshots can be rebuilt. Favorites,
+  hidden/trash state, pinned items, album order, manual metadata, People names,
+  covers, groups, group order, hidden flags, and manual faces must survive
+  rescans and rebuilds.
+- **Cross-platform desktop first.** macOS, Windows, and Linux remain supported.
+  Platform-specific rendering, maps, ExifTool, FFmpeg, and AI behavior must be
+  isolated behind adapters or runtime discovery.
 
-  ```
-  /<LibraryRoot>/.iPhoto/
-    global_index.db    # Global SQLite database (metadata for entire library)
-    manifest.json      # Optional manifest location
-    links.json         # Live Photo pairing and logical groups
-    featured.json      # Featured UI cards
-    thumbs/            # Thumbnail cache
-    faces/
-      face_index.db    # Rebuildable runtime People snapshot
-      face_state.db    # Stable People decisions: names, covers, hidden flags, groups
-      thumbnails/      # Cropped face thumbnail cache
-    manifest.bak/      # Historical backups
-    locks/             # Concurrency locks
-  ```
+## 3. Runtime And Layering Rules
 
-  **Note:** Since v3.00, `index.jsonl` has been replaced by `global_index.db`. The global SQLite database stores all album asset metadata.
+The production dependency direction is:
 
-* **Maps Extension Runtime** (packaged/local runtime):
-
-  ```
-  src/maps/tiles/extension/
-    World_basemap_2.obf
-    rendering_styles/
-    misc/
-    poi/
-    routing/
-    search/geonames.sqlite3
-    bin/
-      osmand_render_helper(.exe)
-      osmand_native_widget.(dll|so|dylib)
-  ```
-
-  Windows uses `dist-msvc`, Linux uses `dist-linux`, and macOS uses
-  `dist-macosx` plus `scripts/sync_macos_map_extension.py` to copy and patch
-  Mach-O dependencies.
-
-* **Original Photos/Videos**
-
-  * Remain in album directory, not moved or renamed.
-  * Supports HEIC/JPEG/PNG/MOV/MP4, etc.
-
----
-
-## 3. Data & Schema
-
-* **Manifest (`album`)**: Authoritative data source, must comply with `schemas/album.schema.json`.
-* **Global Index (`global_index.db`)**: Global SQLite database storing all asset metadata; can be rebuilt if deleted, but requires re-scanning.
-* **Links (`links.json`)**: Live Photo pairing cache; can be rebuilt if deleted.
-* **Featured (`featured.json`)**: Featured photo UI layout (crop box, titles, etc.), optional.
-* **People Runtime Snapshot (`faces/face_index.db`)**: Rebuildable face/person snapshot produced by scanning and clustering.
-* **People Stable State (`faces/face_state.db`)**: Persistent user decisions for People: names, canonical identities, covers, hidden flags, person/group order, group metadata, pinned state, group covers, and group asset caches.
-
-**v3.00 Architecture Changes:**
-- Migrated from distributed `index.jsonl` files to a single global SQLite database
-- Database located at library root `.iPhoto/global_index.db`
-- Supports cross-album queries and high-performance indexing
-- WAL mode ensures concurrent safety and crash recovery
-
----
-
-## 4. Coding Rules
-
-* **Fixed Directory Structure** (see `src/iPhoto/…`, modules divided into `domain/`, `application/`, `infrastructure/`, `models/`, `io/`, `core/`, `cache/`, `people/`, `utils/`).
-* **Data Classes**: Uniformly defined with `dataclass` (see `models/types.py`).
-* **Error Handling**: Must throw custom errors (see `errors.py`), no bare `Exception`.
-* **File Writing**: Must use atomic operations (`*.tmp` → `replace()`), manifest must be backed up to `.iPhoto/manifest.bak/` before writing.
-* **Database Operations**:
-  * Use `IAssetRepository` / `IAlbumRepository` interfaces for all database CRUD operations
-  * Inject Repository instances via `DependencyContainer`
-  * Use transaction context manager `with repo.transaction():` to ensure atomicity
-  * Write operations use idempotent upsert (INSERT OR REPLACE)
-* **Locks**: Check `.iPhoto/locks/` before writing `manifest/links` to avoid concurrency conflicts. Database concurrency handled via WAL mode.
-
----
-
-## 5. AI Code Generation Principles
-
-* **No Hardcoded Paths**: Always use `Path` composition.
-* **No Hardcoded JSON**: Must use `jsonschema` validation; provide defaults when necessary.
-* **No Implicit Original Modification**: Original media write-back must happen only through an explicit user action or an explicit repair/organize mode. Assign Location may write GPS metadata through `AssignLocationService`; if ExifTool is missing or write-back fails, the app must preserve the local database assignment and warn the user.
-* **Output Must Be Runnable**: Complete functions/classes, not fragments.
-* **Clear Comments**: Document inputs, outputs, boundary conditions.
-* **Cross-Platform**: Works on Windows/macOS/Linux.
-* **External Dependencies**: Only call dependencies declared in `pyproject.toml`. For ffmpeg/exiftool, must use wrappers (`utils/ffmpeg.py`, `utils/exiftool.py`) and handle missing tools without corrupting local state.
-* **Caching Strategy**:
-  * Global database uses idempotent upsert operations (INSERT OR REPLACE)
-  * Incremental scanning: Only processes new/modified files
-  * Database automatically handles deduplication and updates
-  * Thumbnails and pairing information also support incremental updates
-  * People scan commits may rebuild `face_index.db`, but must preserve and repair `face_state.db`
-* **People / Groups Safety**:
-  * Route face scan commits and UI mutations through `PeopleIndexCoordinator` / repository APIs
-  * Preserve names, covers, hidden flags, person order, groups, group order, pinned state, and group covers across rescans
-  * Refresh group asset caches after scan commits, merges, manual face edits, person deletion, or group membership changes
-  * Do not merge people with different hidden states; enforce this in both UI and service/repository layers
-
----
-
-## 6. Architecture Overview (MVVM + DDD)
-
-This project adopts **MVVM + DDD (Domain-Driven Design)** layered architecture:
-
-### 6.1 Domain Layer (`domain/`)
-* **`models/`**: Domain entities (`Album`, `Asset`, `MediaType`, `LiveGroup`)
-* **`models/query.py`**: Query object pattern (filtering, sorting, pagination)
-* **`repositories.py`**: Repository interfaces (`IAlbumRepository`, `IAssetRepository`)
-
-### 6.2 Application Layer (`application/`)
-* **`use_cases/`**: Business use case encapsulation
-  * `open_album.py`: Open album use case
-  * `scan_album.py`: Scan album use case
-  * `pair_live_photos.py`: Live Photo pairing use case
-* **`services/`**: Application services
-  * `album_service.py`: Album business logic
-  * `asset_service.py`: Asset business logic
-* **`interfaces.py`**: Abstract interfaces (`IMetadataProvider`, `IThumbnailGenerator`)
-* **`dtos.py`**: Data Transfer Objects
-
-### 6.3 Infrastructure Layer (`infrastructure/`)
-* **`repositories/`**: Repository implementations
-  * `sqlite_asset_repository.py`: SQLite asset repository
-  * `sqlite_album_repository.py`: SQLite album repository
-* **`db/pool.py`**: Thread-safe database connection pool
-* **`services/`**: Infrastructure services
-
-### 6.4 GUI Layer (`gui/`)
-* **`coordinators/`**: MVVM coordinators
-  * `main_coordinator.py`: Main window coordination
-  * `navigation_coordinator.py`: Navigation coordination
-  * `playback_coordinator.py`: Playback coordination
-  * `edit_coordinator.py`: Edit coordination
-  * `view_router.py`: View routing
-* **`viewmodels/`**: View models
-  * `asset_list_viewmodel.py`: Asset list ViewModel
-  * `album_viewmodel.py`: Album ViewModel
-  * `asset_data_source.py`: Data source abstraction
-
-### 6.5 Core Infrastructure
-* **`di/container.py`**: Dependency Injection container
-* **`events/bus.py`**: Event bus (publish-subscribe)
-* **`errors/handler.py`**: Unified error handling
-
----
-
-## 7. Module Responsibilities
-
-* **domain/**: Pure domain models and repository interfaces, framework-independent.
-* **application/**: Business use cases and application services, coordinating domain logic.
-* **infrastructure/**: Concrete implementations (SQLite, ExifTool, etc.).
-* **models/**: Legacy data classes + loading and saving of manifest/links.
-* **io/**: File system scanning, metadata reading, thumbnail generation, sidecar writing.
-* **core/**: Algorithmic logic (pairing, sorting, featured management, image adjustments).
-  * `light_resolver.py`: Light adjustment parameter resolution (Brilliance/Exposure/Highlights/Shadows/Brightness/Contrast/BlackPoint)
-  * `color_resolver.py`: Color adjustment parameter resolution (Saturation/Vibrance/Cast) + image statistics analysis
-  * `bw_resolver.py`: Black & White parameter resolution (Intensity/Neutrals/Tone/Grain)
-  * `curve_resolver.py`: Color curve adjustments with Bezier interpolation and LUT generation
-  * `selective_color_resolver.py`: Selective color adjustments targeting six hue ranges with HSL processing
-  * `levels_resolver.py`: Levels adjustments with 5-handle input-output tone mapping
-  * `filters/`: High-performance image processing (NumPy vectorized + Numba JIT + QColor fallback)
-* **cache/**: Global SQLite database management and lock implementation.
-  * `index_store/engine.py`: Database connection and transaction management
-  * `index_store/migrations.py`: Schema evolution and version management
-  * `index_store/recovery.py`: Database auto-repair and salvage
-  * `index_store/queries.py`: Parameterized SQL query construction
-  * `index_store/repository.py`: High-level CRUD API
-  * `lock.py`: File-level lock implementation
-* **people/**: Face detection, clustering, snapshot/state repositories, manual face annotations, People service API, and group membership/cache logic.
-* **utils/**: General utilities (hash, json, logging, external tool wrappers).
-* **schemas/**: JSON Schema definitions.
-* **cli.py**: Typer command-line entry point.
-* **app.py**: High-level facade coordinating all modules.
-
----
-
-## 8. Code Style
-
-* Follow **PEP8**, line width 100.
-* Type hints must be complete (`Optional[str]`, `list[Path]`, etc.).
-* Function naming: Start with verbs (`scan_album`, `pair_live`).
-* Class naming: Capitalized (`Album`, `IndexStore`).
-* Exception naming: `XxxError`.
-
----
-
-## 9. Testing & Robustness
-
-* All modules must have `pytest` unit tests.
-* Must handle missing/corrupted input files with errors, not crashes.
-* `global_index.db`, `links.json` must auto-rebuild if missing.
-* `faces/face_index.db` may be rebuilt, but `faces/face_state.db` must preserve People user decisions.
-* People/group changes must cover cluster queries, group common-photo caches, covers, hidden-state filtering, merge guards, and dashboard/context-menu behavior.
-* Multi-endpoint sync conflicts handled per manifest's `conflict.strategy`.
-
----
-
-## 10. Safety Switches
-
-* Default:
-
-  * Don't bake edits into originals
-  * Don't organize directories
-  * Don't write EXIF/QuickTime metadata implicitly
-* When user explicitly allows:
-
-  * Use `exiftool`/`ffmpeg` in `repair.py` to write back
-  * Use `AssignLocationService` to persist location in the DB and best-effort write GPS metadata
-  * Must generate `.backup` first
-
----
-
-## 11. Minimal Command Set
-
-* `iphoto init`: Initialize album
-* `iphoto scan`: Generate/update index
-* `iphoto pair`: Generate/update pairing
-* `iphoto cover set`: Set cover
-* `iphoto feature add/rm`: Manage featured items
-* `iphoto report`: Output album statistics and anomalies
-
----
-
-## 12. Edit System Architecture
-
-### 1. Overview
-
-The edit system provides **non-destructive** image adjustment capabilities, divided into two modes:
-
-* **Adjust Mode**: Light / Color / Black & White / Curves / Selective Color / Levels parameter adjustments
-* **Crop Mode**: Perspective correction / straighten / crop box adjustments
-
-### 2. Core Components
-
-#### GUI Layer (`src/iPhoto/gui/ui/widgets/`)
-
-| Component | Responsibility |
-|-----------|---------------|
-| `edit_sidebar.py` | Edit sidebar container, manages Adjust/Crop page switching |
-| `edit_light_section.py` | Light adjustment panel (7 sub-sliders + Master slider) |
-| `edit_color_section.py` | Color adjustment panel (Saturation/Vibrance/Cast) |
-| `edit_bw_section.py` | Black & White adjustment panel (Intensity/Neutrals/Tone/Grain) |
-| `edit_curve_section.py` | Color curves panel with RGB and per-channel curve editing |
-| `edit_selective_color_section.py` | Selective color panel targeting six hue ranges with HSL controls |
-| `edit_levels_section.py` | Levels panel with 5-handle tone mapping and histogram display |
-| `edit_perspective_controls.py` | Perspective correction controls (Vertical/Horizontal/Straighten) |
-| `thumbnail_strip_slider.py` | Slider component with real-time thumbnail preview |
-| `gl_crop/` | Crop interaction module (Model/Controller/HitTester/Animator/Strategies) |
-
-#### Core Layer (`src/iPhoto/core/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `light_resolver.py` | Master slider → 7 Light parameters mapping algorithm |
-| `color_resolver.py` | Master slider → Color parameters mapping + image color statistics analysis |
-| `bw_resolver.py` | Master slider → B&W parameters mapping (three-anchor Gaussian interpolation) |
-| `curve_resolver.py` | Color curve data structures and LUT generation for GPU-accelerated rendering |
-| `selective_color_resolver.py` | HSL-based selective color adjustments with hue-distance masking |
-| `levels_resolver.py` | 5-handle tone mapping with smooth interpolation |
-| `image_filters.py` | Image adjustment application entry point |
-| `filters/` | High-performance image processing executors (layered strategy pattern) |
-
-### 3. Data Flow
-
-```
-User drags slider
-     ↓
-EditSession.set_value(key, value)  # State update
-     ↓
-valueChanged signal → Controller
-     ↓
-GLRenderer.set_uniform(...)  # GPU real-time preview
-     ↓
-EditSession.save() → .ipo file  # Persistence
+```text
+gui -> bootstrap/runtime -> application -> domain
+infrastructure -> application ports / domain values
+bounded contexts -> application ports / domain values
 ```
 
-### 4. Parameter Range Conventions
+Forbidden directions:
 
-| Category | Parameter | Range | Default |
-|----------|-----------|-------|---------|
-| Light | Brilliance/Exposure/Highlights/Shadows/Brightness/Contrast/BlackPoint | [-1.0, 1.0] | 0.0 |
-| Color | Saturation/Vibrance | [-1.0, 1.0] | 0.0 |
-| Color | Cast | [0.0, 1.0] | 0.0 |
-| B&W | Intensity/Master | [0.0, 1.0] | 0.5 |
-| B&W | Neutrals/Tone/Grain | [0.0, 1.0] | 0.0 |
-| Curves | Control Points | [0.0, 1.0] x [0.0, 1.0] | Identity |
-| Selective Color | Hue/Saturation/Luminance per range | [-1.0, 1.0] | 0.0 |
-| Levels | 5 Handles | [0.0, 1.0] → [0.0, 1.0] | Identity |
-| Crop | Perspective_Vertical/Horizontal | [-1.0, 1.0] | 0.0 |
-| Crop | Crop_Straighten | [-45.0, 45.0]° | 0.0 |
-| Crop | Crop_CX/CY/W/H | [0.0, 1.0] | 0.5/0.5/1.0/1.0 |
-
-### 5. Crop Module Layering
-
-```
-gl_crop/
-├── model.py          # State model (CropSessionModel)
-├── controller.py     # Interaction coordinator (CropInteractionController)
-├── hit_tester.py     # Hit testing (edges/corners/interior)
-├── animator.py       # Animation management (zoom/bounce)
-├── strategies/       # Interaction strategies (drag/zoom)
-└── utils.py          # Utility functions (CropBoxState/CropHandle)
+```text
+domain -> application/gui/infrastructure
+application -> gui/concrete cache/concrete infrastructure
+infrastructure/cache/core/io/library/people -> gui
+production runtime -> iPhoto.legacy
+production runtime -> iPhoto.models.*
 ```
 
-### 6. Development Standards
-
-* **All edit parameters must be read/written via `EditSession`**, direct `.ipo` file manipulation is prohibited
-* **Slider interactions must emit `interactionStarted/Finished` signals**, used to pause file monitoring
-* **Thumbnail generation must execute in background threads**, avoid blocking UI
-* **Perspective transform matrix calculation uses logical aspect ratio**, see OpenGL Development Standards Section 12.5
-* **New edit tools (Curves/Selective Color/Levels) follow the same non-destructive pattern**, all stored in `.ipo` sidecars
-
----
-
-## 13. OpenGL Development Standards
-
-### 1. File Inventory
-
-Files currently involved with direct OpenGL calls or GL context management:
-
-* **Core Image Viewer (Pure GL)**
-
-  * `src/iPhoto/gui/ui/widgets/gl_image_viewer/` (GL image viewer module directory)
-    * `widget.py` (Widget host and event handling)
-    * `components.py` (GL rendering components)
-    * `resources.py` (GL resource management)
-    * `geometry.py` (Geometric calculations)
-    * `input_handler.py` (Input event handling)
-
-* **Map Component (GL-accelerated)**
-
-  * `src/maps/map_widget/map_gl_widget.py` (GL-based map tile rendering)
-    * `MapGLWidget` remains the `QOpenGLWidget` path for non-macOS GL maps
-    * `MapGLWindowWidget` wraps `QOpenGLWindow + createWindowContainer()` for macOS legacy maps
-  * `src/maps/map_widget/native_osmand_widget.py` hosts the native OsmAnd widget when the extension runtime is available
-
-* **Edit Preview Renderer**
-
-  * `src/iPhoto/gui/ui/widgets/gl_renderer.py` (Core OpenGL renderer for edit preview)
-  * Handles texture upload, shader uniforms, and real-time adjustment preview
-  * `src/iPhoto/gui/ui/widgets/rhi_image_renderer.py` is the QRhi renderer used by macOS/Metal media previews
-
-### 2. OpenGL Version & Profile
-
-* **OpenGL target**: OpenGL 3.3 Core Profile where the raw GL path is active
-* **QRhi target**: macOS should default to Metal through `IPHOTO_RHI_BACKEND=auto`; use `IPHOTO_RHI_BACKEND=opengl` only for diagnostics or compatibility
-* **Shading Language**: GLSL 3.30 plus packaged QSB shader assets for QRhi paths
-* **Rationale**: Preserve compatibility across Windows and Linux OpenGL while avoiding raw GL interop problems on modern macOS
-
-### 3. Resource Management
-
-* **Texture Lifecycle**: 
-  * Upload textures on demand
-  * Cache frequently used textures
-  * Explicit cleanup on widget destruction
-  
-* **Shader Compilation**:
-  * Compile shaders once at initialization
-  * Cache compiled programs
-  * Validate shader compilation with error reporting
-
-* **Buffer Objects**:
-  * Use VBOs for vertex data
-  * Reuse buffers when geometry doesn't change
-  * Delete buffers in cleanup phase
-
-### 4. Coordinate Systems
-
-See Section 12.4 for detailed coordinate system definitions used in crop and perspective transformations.
-
-### 5. Error Handling
-
-* **GL Error Checking**: Use `glGetError()` in debug builds
-* **Shader Compilation**: Check compilation status and log errors
-* **Context Loss**: Handle context loss gracefully with resource recreation
-* **Packaged Shader Assets**: Keep `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` QSB files bundled with Nuitka builds
-* **macOS Map Surface**: Do not replace `MapGLWindowWidget` with `QOpenGLWidget` for the legacy map unless transparent-window composition has been revalidated
-
----
-
-## 14. Testing Strategy
-
-### 1. Unit Tests
-
-* **Domain Layer**: Test pure business logic without dependencies
-* **Application Layer**: Test use cases with mocked repositories
-* **Core Algorithms**: Test resolvers, filters, and pairing logic with known inputs/outputs
-
-### 2. Integration Tests
-
-* **Database Operations**: Test repository implementations with real SQLite
-* **File Operations**: Test scanner and metadata extraction with sample files
-* **Edit Pipeline**: Test end-to-end adjustment application
-
-### 3. GUI Tests
-
-* **ViewModel Logic**: Test state management and data binding
-* **Controller Actions**: Test user interaction handling
-* **Widget Rendering**: Visual regression testing for critical UI components
-
----
-
-## 15. Performance Guidelines
-
-### 1. Database Optimization
-
-* **Indexing**: Multi-column indexes on frequently queried fields (`parent_album_path`, `ts`, `media_type`, `is_favorite`)
-* **WAL Mode**: Enable Write-Ahead Logging for concurrent read/write
-* **Connection Pooling**: Reuse connections across operations
-* **Batch Operations**: Use transactions for bulk inserts/updates
-
-### 2. Image Processing
-
-* **Lazy Loading**: Load full images only when needed
-* **Thumbnail Generation**: Generate thumbnails asynchronously in background
-* **GPU Acceleration**: Offload adjustments to GPU shaders where possible
-* **LUT Caching**: Cache lookup tables for curve adjustments
-
-### 3. UI Responsiveness
-
-* **Background Tasks**: Use `QThreadPool` for long-running operations
-* **Incremental Rendering**: Render thumbnails progressively
-* **Debouncing**: Debounce slider value changes to reduce redundant updates
-* **Lazy ViewModel Updates**: Update only visible items in large lists
-
----
-
-## 16. Security Considerations
-
-### 1. File System Safety
-
-* **Atomic Writes**: Always write to `.tmp` then rename
-* **Backup Before Modify**: Back up manifest before modifications
-* **Permission Checks**: Verify write permissions before operations
-* **Path Validation**: Sanitize and validate all file paths
-
-### 2. Database Safety
-
-* **Prepared Statements**: Use parameterized queries to prevent injection
-* **Transaction Rollback**: Roll back on errors to maintain consistency
-* **Schema Validation**: Validate schema version before operations
-* **Recovery Mechanisms**: Auto-repair corrupted databases when possible
-
-### 3. External Tool Safety
-
-* **Command Injection**: Sanitize arguments passed to exiftool/ffmpeg
-* **Output Validation**: Validate external tool outputs before use
-* **Error Handling**: Handle tool failures gracefully
-* **Version Compatibility**: Check tool versions for compatibility
-
----
-
-## 17. Dependency Management
-
-### 1. Python Dependencies
-
-Managed via `pyproject.toml`:
-* **Core**: PySide6, Pillow, numpy
-* **Optional People AI**: `insightface` and `onnxruntime` through the `ai-demo` extra
-* **Database**: Built-in sqlite3
-* **Processing**: numba (optional JIT acceleration)
-* **Utilities**: reverse-geocoder, jsonschema
-
-### 2. External Tools
-
-* **ExifTool**: Metadata extraction and modification
-* **FFmpeg/FFprobe**: Video processing and thumbnail generation
-
-### 3. Dependency Updates
-
-* **Semantic Versioning**: Respect version constraints
-* **Testing After Updates**: Run full test suite after dependency updates
-* **Security Patches**: Apply security patches promptly
-* **Compatibility**: Verify cross-platform compatibility after updates
-
----
-
-## 18. Localization
-
-### 1. String Management
-
-* **UI Strings**: Centralize in translation files
-* **Error Messages**: Provide user-friendly localized messages
-* **Date/Time Formatting**: Use locale-aware formatting
-
-### 2. Supported Languages
-
-* English (primary)
-* Chinese (secondary)
-* Extensible for additional languages
-
----
-
-## 19. Documentation Standards
-
-### 1. Code Documentation
-
-* **Docstrings**: Use Google-style docstrings for all public APIs
-* **Type Hints**: Include comprehensive type annotations
-* **Comments**: Explain "why", not "what"
-
-### 2. User Documentation
-
-* **Version Docs**: Maintain changelog in `docs/V*.md`
-* **README**: Keep README.md updated with current features
-* **Architecture Docs**: Document major architectural decisions
-
-### 3. Developer Documentation
-
-* **AGENT.md**: This file - core principles and standards
-* **Architecture Diagrams**: Visual representations in `docs/referactor/`
-* **API Documentation**: Auto-generated from docstrings
-
----
-
-## 20. Release Process
-
-### 1. Version Numbering
-
-* **Format**: `vX.YY` (e.g., v4.00)
-* **Major Versions**: Significant architectural changes or new major features
-* **Minor Updates**: Bug fixes, performance improvements, minor features
-
-### 2. Release Checklist
-
-* [ ] All tests passing
-* [ ] Documentation updated
-* [ ] Changelog prepared
-* [ ] Version number bumped
-* [ ] Build artifacts generated
-* [ ] Release notes written
-
-### 3. Deployment
-
-* **Binary Distribution**: Packaged executables for Windows/macOS
-* **Source Distribution**: Available via GitHub
-* **Update Mechanism**: In-app update notifications (future)
-
----
-
-*This document is the authoritative guide for iPhoto development. All contributors must follow these principles to maintain code quality, consistency, and architectural integrity.*
+Key runtime objects:
+
+- `RuntimeContext`: process composition root, current settings/theme/recent
+  libraries, active `LibrarySession` lifecycle.
+- `LibrarySession`: library-scoped adapters and surfaces for assets, state,
+  scanning, album metadata, People, Maps, thumbnails, edit sidecars, location,
+  asset lifecycle, and file operations.
+- `LibraryRuntimeController`: GUI/runtime controller bound to the active
+  session; it should not re-create standalone compatibility services.
+
+Compatibility code is not a production extension point. Do not add new features
+to `src/iPhoto/legacy/app.py`, `src/iPhoto/legacy/appctx.py`,
+`src/iPhoto/legacy/bootstrap/*`, or other quarantine modules.
+
+## 4. Files And State
+
+Album markers:
+
+- `.iphoto.album.json`: folder-local album manifest.
+- `.iphoto.album`: minimal marker for folder-native album discovery.
+- `.iPhoto/manifest.json`: compatibility manifest location supported by the
+  current manifest repository.
+
+Library workspace:
+
+```text
+/<LibraryRoot>/.iPhoto/
+  global_index.db       # SQLite index and current asset/state repository store
+  links.json            # Live Photo compatibility materialization
+  cache/thumbs/         # Rebuildable thumbnail cache
+  faces/
+    face_index.db       # Rebuildable People runtime snapshot
+    face_state.db       # Durable People user decisions
+    thumbnails/         # Rebuildable cropped face thumbnails
+  manifest.bak/         # Manifest/links backup area
+  locks/                # File-level locks for JSON sidecars
+```
+
+State rules:
+
+- `global_index.db` is the current source of truth for asset scan rows,
+  pagination, Live Photo roles, trash/favorite/hidden flags, face scan status,
+  and the repository-backed user-state boundary.
+- `links.json` is derived compatibility materialization for Live Photo payloads;
+  target runtime behavior should read roles through repository/session surfaces.
+- `cache/thumbs/` and People thumbnails are disposable.
+- `faces/face_index.db` is rebuildable; `faces/face_state.db` is durable.
+- `.ipo` sidecars are the durable source of non-destructive edit parameters.
+- Scan merge must be idempotent and must not implicitly clear durable user
+  state.
+
+## 5. Module Responsibilities
+
+- `bootstrap/`: `RuntimeContext`, `LibrarySession`, and session-bound services
+  that wire application behavior to the current library root.
+- `application/ports/`: public application boundary protocols, including
+  `AssetRepositoryPort`, `LibraryStateRepositoryPort`, `MediaScannerPort`,
+  `PeopleIndexPort`, `MapRuntimePort`, `EditSidecarPort`,
+  `LocationAssetServicePort`, and `MapInteractionServicePort`.
+- `application/use_cases/`: owning use cases for workflows such as scanning.
+- `application/services/`: application-level services for album manifests,
+  pinned state, location queries, map interaction, and explicit location
+  assignment.
+- `domain/`: dataclasses, value objects, query models, and pure domain services.
+  Domain code must not perform IO or import Qt/SQLite/runtime adapters.
+- `infrastructure/`: concrete adapters for SQLite-backed state, manifests,
+  `.ipo` sidecars, ExifTool, FFmpeg, maps runtime discovery, thumbnail caches,
+  filesystem scanning, and runtime services.
+- `cache/index_store/`: current SQLite global index implementation used behind
+  repository/session surfaces. GUI and application code must not bypass the
+  session boundary to call it directly.
+- `gui/`: PySide6 views, widgets, controllers, viewmodels, coordinators, menus,
+  and Qt task/signal adapters. It owns presentation state, not durable workflow
+  rules.
+- `library/`: runtime controller, tree/watch/scan coordination, trash and album
+  filesystem shell code bound to session services.
+- `people/`: optional People runtime, scan coordination, repositories, manual
+  faces, stable People state, groups, covers, hidden flags, and service API.
+- `maps/`: optional offline Maps runtime, tile parsing, OBF/native widget/helper
+  integration, search, and map rendering internals.
+- `core/`: pure or rendering-oriented algorithms for Live Photo pairing,
+  adjustment math, geometry, export transforms, filters, raw loading, and
+  preview backends.
+- `io/`: metadata extraction, scanner adapters, and sidecar parsing helpers.
+- `legacy/`: quarantine only. No production imports and no new functionality.
+
+## 6. Coding Rules
+
+- Prefer existing session/application patterns over adding new facades.
+- Use application ports before introducing cross-layer behavior.
+- Keep GUI workers thin: they adapt Qt threading/progress and call session or
+  application services.
+- Use `Path` and shared path normalizers for filesystem paths. Never string-build
+  paths.
+- Use schema validation for album/link JSON payloads where a schema exists.
+- Use atomic writes for manifest, links, settings, sidecars, and user state
+  files.
+- Use SQLite transactions for multi-row writes and scan merges.
+- Use ExifTool/FFmpeg wrappers from `utils/`; never shell-concatenate user
+  paths.
+- Return warnings for recoverable external-tool failures without corrupting
+  local state.
+- Keep comments focused on non-obvious intent, boundaries, or failure modes.
+
+## 7. Bounded Context Rules
+
+### People
+
+- InsightFace/ONNXRuntime are optional. Missing AI runtime must not break
+  browsing, editing, Live Photo, Maps, or library state.
+- Scan commits may rebuild `face_index.db`, but must preserve and repair
+  `face_state.db`.
+- Names, covers, hidden flags, person order, groups, group order, pinned state,
+  group covers, manual faces, and group caches are durable user state.
+- Do not merge people with incompatible hidden state.
+- UI mutations must route through the session-bound People service or explicit
+  test doubles.
+
+### Maps
+
+- Maps are optional. Missing native OBF/helper/widget runtime must show graceful
+  fallback.
+- Runtime availability belongs behind `MapRuntimePort`.
+- Location asset aggregation and marker-click semantics belong behind session
+  location/map interaction surfaces.
+- Qt overlay painting, pointer hit testing, drag cursors, and widget event
+  filters remain GUI transport details.
+
+### Thumbnails
+
+- Thumbnail generation and cache lookup must not block the UI thread.
+- Memory/disk cache hits must avoid re-running generators.
+- Thumbnail rendering may apply `.ipo` edit state, but durable edit persistence
+  belongs behind edit sidecar/session services.
+
+### Edit
+
+- All normal edits are non-destructive and stored in `.ipo` sidecars.
+- Editing math belongs in `core/`; persistence belongs behind `EditSidecarPort`
+  or session edit services.
+- QRhi/Metal/OpenGL backend choice must not leak into product workflow rules.
+
+## 8. Rendering And Maps Platform Rules
+
+- macOS media preview should default to QRhi/Metal when available; OpenGL is a
+  diagnostic or compatibility fallback.
+- Windows/Linux may use QRhi/OpenGL-backed paths depending on runtime support.
+- Legacy OpenGL maps use the `QOpenGLWindow + createWindowContainer()` surface
+  where required to avoid transparent-window composition issues.
+- Native OsmAnd widget/helper selection belongs to maps runtime adapters and
+  widget factories.
+- Packaged builds must include required QSB shaders and maps extension runtime
+  assets when those features are enabled.
+
+## 9. Testing And Verification
+
+Run architecture checks after boundary changes:
+
+```bash
+python3 tools/check_architecture.py
+.venv/bin/python -m pytest tests/architecture -q
+```
+
+Use targeted regression tests for changed behavior:
+
+```bash
+.venv/bin/python -m pytest tests/application/test_runtime_context.py tests/application/test_library_session.py tests/application/test_scan_library_use_case.py -q
+.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py -q
+.venv/bin/python -m pytest tests/performance -q
+```
+
+Required guardrail expectations:
+
+- `application/` has no GUI or concrete persistence imports.
+- `infrastructure/` has no GUI imports.
+- production source has no `iPhoto.legacy` or `iPhoto.models.*` imports.
+- GUI runtime has no compatibility service factory fallback.
+- Architecture checks are part of CI.
+
+Known non-blocking warning currently documented by the refactor notes:
+
+- `PytestConfigWarning: Unknown config option: env`
+
+## 10. Release And Documentation Rules
+
+- Keep `README.md` product-facing and concise.
+- Keep `docs/architecture.md` as the current architecture entry point.
+- Keep `docs/refactor/*` as the detailed vNext migration record and verification
+  log.
+- Do not treat archived refactor documents under `docs/finished/` as current
+  implementation instructions.
+- Release validation may include manual Qt GUI smoke testing and opening an
+  existing library, but these are product acceptance checks rather than
+  architecture guardrail replacements.
+
+This guide is authoritative for new production work. When it conflicts with old
+examples, follow the vNext runtime/session boundary and update the stale
+example as part of the change.

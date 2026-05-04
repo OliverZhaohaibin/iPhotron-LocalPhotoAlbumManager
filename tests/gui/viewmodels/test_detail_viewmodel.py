@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
+from iPhoto.application.ports import EditRenderingState
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
+
+_UNSET = object()
 
 
 def _make_dto(path: str, *, is_video: bool = False, is_favorite: bool = False) -> AssetDTO:
@@ -24,17 +27,19 @@ def _make_dto(path: str, *, is_video: bool = False, is_favorite: bool = False) -
     )
 
 
-def _make_vm():
+def _make_vm(*, edit_service=None, asset_state_service=_UNSET):
     store = Mock()
     session = Mock()
-    asset_service = Mock()
+    if asset_state_service is _UNSET:
+        asset_state_service = Mock()
     vm = DetailViewModel(
         collection_store=store,
         media_session=session,
-        asset_service=asset_service,
+        asset_state_service=asset_state_service,
         adjustment_commit_port=None,
+        edit_service_getter=(lambda: edit_service) if edit_service is not None else None,
     )
-    return vm, store, session, asset_service
+    return vm, store, session, asset_state_service
 
 
 def test_show_row_builds_presentation_and_requests_detail_route():
@@ -75,31 +80,59 @@ def test_next_and_previous_delegate_to_session():
 
 
 def test_toggle_favorite_updates_store_and_presentation():
-    vm, store, session, asset_service = _make_vm()
+    vm, store, session, asset_state_service = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")
     store.asset_at.return_value = dto
     session.set_current_row.return_value = dto.abs_path
     vm.show_row(0)
-    asset_service.toggle_favorite_by_path.return_value = True
+    asset_state_service.toggle_favorite.return_value = True
 
     vm.toggle_favorite()
 
-    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    asset_state_service.toggle_favorite.assert_called_once_with(dto.abs_path)
     store.update_favorite_status.assert_called_once_with(0, True)
 
 
 def test_toggle_favorite_uses_visible_asset_path_not_playback_source():
-    vm, store, session, asset_service = _make_vm()
+    vm, store, session, asset_state_service = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")
     store.asset_at.return_value = dto
     session.set_current_row.return_value = Path("/tmp/photo.mov")
     vm.show_row(0)
-    asset_service.toggle_favorite_by_path.return_value = True
+    asset_state_service.toggle_favorite.return_value = True
 
     vm.toggle_favorite()
 
-    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    asset_state_service.toggle_favorite.assert_called_once_with(dto.abs_path)
     store.update_favorite_status.assert_called_once_with(0, True)
+
+
+def test_show_row_disables_favorite_action_without_asset_state_service():
+    vm, store, session, _ = _make_vm(asset_state_service=None)
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+
+    assert vm.presentation.value.can_toggle_favorite is False
+
+
+def test_binding_asset_state_service_refreshes_favorite_action_state():
+    vm, store, session, _ = _make_vm(asset_state_service=None)
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+    assert vm.presentation.value.can_toggle_favorite is False
+
+    asset_state_service = Mock()
+    vm.bind_asset_state_service(asset_state_service)
+    assert vm.presentation.value.can_toggle_favorite is True
+
+    vm.bind_asset_state_service(None)
+    assert vm.presentation.value.can_toggle_favorite is False
 
 
 def test_toggle_info_flips_presentation_flag():
@@ -190,28 +223,22 @@ def test_restore_after_adjustment_rebinds_current_path():
 
 
 def test_show_row_builds_video_state_from_sidecar():
-    vm, store, session, _ = _make_vm()
+    edit_service = Mock()
+    edit_service.describe_adjustments.return_value = EditRenderingState(
+        sidecar_exists=True,
+        raw_adjustments={"Exposure": 0.2},
+        resolved_adjustments={"Exposure": 0.3},
+        adjusted_preview=True,
+        has_visible_edits=True,
+        trim_range_ms=(1000, 4000),
+        effective_duration_sec=3.0,
+    )
+    vm, store, session, _ = _make_vm(edit_service=edit_service)
     dto = _make_dto("/tmp/video.mp4", is_video=True)
     store.asset_at.return_value = dto
     session.set_current_row.return_value = dto.abs_path
 
-    with patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.load_adjustments",
-        return_value={"Exposure": 0.2},
-    ), patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.video_requires_adjusted_preview",
-        return_value=True,
-    ), patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.trim_is_non_default",
-        return_value=True,
-    ), patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.normalise_video_trim",
-        return_value=(1.0, 4.0),
-    ), patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.resolve_render_adjustments",
-        return_value={"Exposure": 0.3},
-    ):
-        vm.show_row(0)
+    vm.show_row(0)
 
     presentation = vm.presentation.value
     assert presentation.video_adjusted_preview is True
@@ -220,33 +247,30 @@ def test_show_row_builds_video_state_from_sidecar():
 
 
 def test_restore_request_prefers_duration_hint_for_video_trim():
-    vm, store, session, _ = _make_vm()
+    edit_service = Mock()
+    edit_service.describe_adjustments.return_value = EditRenderingState(
+        sidecar_exists=True,
+        raw_adjustments={},
+        resolved_adjustments={},
+        adjusted_preview=False,
+        has_visible_edits=True,
+        trim_range_ms=(2000, 7250),
+        effective_duration_sec=5.25,
+    )
+    vm, store, session, _ = _make_vm(edit_service=edit_service)
     dto = _make_dto("/tmp/video.mp4", is_video=True)
     store.asset_at.return_value = dto
     session.current_row.return_value = 0
     session.set_current_by_path.return_value = True
     session.set_current_row.return_value = dto.abs_path
 
-    with patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.load_adjustments",
-        return_value={},
-    ), patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.video_requires_adjusted_preview",
-        return_value=False,
-    ), patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.trim_is_non_default",
-        side_effect=lambda _adjustments, duration: duration == 7.25,
-    ), patch(
-        "iPhoto.gui.viewmodels.detail_viewmodel.sidecar.normalise_video_trim",
-        side_effect=lambda _adjustments, duration: (2.0, duration or 0.0),
-    ):
-        vm._handle_restore_requested(
-            MediaRestoreRequest(
-                path=dto.abs_path,
-                reason="edit_done",
-                duration_sec=7.25,
-            )
+    vm._handle_restore_requested(
+        MediaRestoreRequest(
+            path=dto.abs_path,
+            reason="edit_done",
+            duration_sec=7.25,
         )
+    )
 
     presentation = vm.presentation.value
     assert presentation.video_trim_range_ms == (2000, 7250)

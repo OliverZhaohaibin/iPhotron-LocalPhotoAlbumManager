@@ -5,11 +5,11 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QModelIndex, QObject, QRect
 
-from ....io import sidecar
+from ....application.ports import EditServicePort
 from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.preview_window import PreviewWindow
@@ -18,11 +18,17 @@ from ..widgets.preview_window import PreviewWindow
 class PreviewController(QObject):
     """Manage preview requests originating from gallery widgets."""
 
-    def __init__(self, preview_window: PreviewWindow, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        preview_window: PreviewWindow,
+        edit_service_getter: Callable[[], EditServicePort | None] | None = None,
+        parent: QObject | None = None,
+    ) -> None:
         """Store the shared preview window instance."""
 
         super().__init__(parent)
         self._preview_window = preview_window
+        self._edit_service_getter = edit_service_getter
 
     def bind_view(self, view: AssetGrid) -> None:
         """Attach preview signal handlers to *view*."""
@@ -134,48 +140,27 @@ class PreviewController(QObject):
         """Return render adjustments, trim range, and preview mode for *preview_path*."""
 
         duration_sec = self._extract_duration_hint(info)
-        try:
-            raw_adjustments = sidecar.load_adjustments(preview_path)
-        except Exception:  # noqa: BLE001 - preview should gracefully fall back to raw playback
-            raw_adjustments = {}
+        edit_service = self._edit_service_getter() if self._edit_service_getter else None
+        if edit_service is None:
+            return None, None, False
 
-        has_visible_adjustments = sidecar.has_non_default_adjustments(raw_adjustments)
-        adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
-        if sys.platform == "darwin" and has_visible_adjustments:
+        try:
+            state = edit_service.describe_adjustments(
+                preview_path,
+                duration_hint=duration_sec,
+            )
+        except Exception:  # noqa: BLE001 - preview should gracefully fall back to raw playback
+            return None, None, False
+        adjusted_preview = state.adjusted_preview
+        if sys.platform == "darwin" and state.has_visible_edits:
             # The non-adjusted long-press popup uses Qt's plain video item,
             # not our VideoRendererWidget path. On macOS that means even
             # "native-renderer-safe" edits such as rotate-only sidecars would
             # be skipped unless we route the popup through the adjusted RHI
             # preview surface.
             adjusted_preview = True
-        adjustments: dict[str, object] | None = None
-        if adjusted_preview:
-            try:
-                adjustments = sidecar.resolve_render_adjustments(raw_adjustments)
-            except Exception:  # noqa: BLE001 - preview should gracefully fall back to raw playback
-                adjustments = None
-                adjusted_preview = False
-
-        trim_range_ms: tuple[int, int] | None = None
-        try:
-            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
-        except Exception:  # noqa: BLE001 - preview trim is optional metadata
-            has_trim = False
-        if has_trim:
-            try:
-                trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(
-                    raw_adjustments,
-                    duration_sec,
-                )
-            except Exception:  # noqa: BLE001 - preview trim is optional metadata
-                trim_range_ms = None
-            else:
-                trim_range_ms = (
-                    round(trim_in_sec * 1000.0),
-                    round(trim_out_sec * 1000.0),
-                )
-
-        return adjustments, trim_range_ms, adjusted_preview
+        adjustments = state.resolved_adjustments if adjusted_preview else None
+        return adjustments, state.trim_range_ms, adjusted_preview
 
     def _extract_duration_hint(self, info: Any) -> float | None:
         """Return a best-effort duration hint from model metadata."""

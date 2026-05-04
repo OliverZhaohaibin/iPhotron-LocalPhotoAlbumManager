@@ -12,23 +12,71 @@ from iPhoto.cache.index_store import get_global_repository, reset_global_reposit
 from iPhoto.domain.models.core import MediaType
 from iPhoto.people.index_coordinator import PeopleSnapshotEvent, reset_people_index_coordinators
 from iPhoto.people.repository import FaceRecord, FaceRepository, PersonRecord
+from iPhoto.people.service import PeopleService
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.domain.models.query import AssetQuery
 
 
-def _make_vm(*, library_root: Path | None = None):
+class _FakeSignal:
+    def __init__(self) -> None:
+        self._handlers: list = []
+
+    def connect(self, handler) -> None:
+        self._handlers.append(handler)
+
+    def emit(self, *args) -> None:
+        for handler in list(self._handlers):
+            handler(*args)
+
+
+class FakeLocationTrashService:
+    def __init__(self, library_root: Path | None = None) -> None:
+        self._library_root = library_root
+        self.deleted_root = (
+            library_root / RECENTLY_DELETED_DIR_NAME if library_root is not None else None
+        )
+        self.locationAssetsLoaded = _FakeSignal()
+        self.errorRaised = _FakeSignal()
+        self.prepared_calls = 0
+        self.location_requests = 0
+
+    def prepare_recently_deleted(self) -> Path | None:
+        self.prepared_calls += 1
+        return self.deleted_root
+
+    def request_location_assets(self) -> tuple[int, Path] | None:
+        if self._library_root is None:
+            return None
+        self.location_requests += 1
+        return self.location_requests, self._library_root
+
+
+def _make_vm(
+    *,
+    library_root: Path | None = None,
+    location_trash_service: FakeLocationTrashService | None = None,
+    people_service=None,
+    return_service: bool = False,
+):
     store = MagicMock()
     context = MagicMock()
     context.library.root.return_value = library_root
+    context.library.people_service = people_service
+    context.library.location_service = None
     facade = MagicMock()
-    asset_service = MagicMock()
+    asset_state_service = MagicMock()
+    nav_service = location_trash_service or FakeLocationTrashService(library_root)
     vm = GalleryViewModel(
         store=store,
         context=context,
         facade=facade,
-        asset_service=asset_service,
+        asset_state_service=asset_state_service,
+        location_trash_service=nav_service,
     )
-    return vm, store, context, facade, asset_service
+    result = (vm, store, context, facade, asset_state_service, nav_service)
+    if return_service:
+        return result
+    return result[:-1]
 
 
 def _face_repository(library_root: Path) -> FaceRepository:
@@ -128,8 +176,13 @@ def test_open_all_photos_loads_root_query(tmp_path: Path) -> None:
 def test_open_recently_deleted_uses_deleted_root(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     deleted_root = library_root / RECENTLY_DELETED_DIR_NAME
-    vm, store, context, _facade, _asset_service = _make_vm(library_root=library_root)
-    context.library.ensure_deleted_directory.return_value = deleted_root
+    location_service = FakeLocationTrashService(library_root)
+    location_service.deleted_root = deleted_root
+    vm, store, context, _facade, _asset_service, nav_service = _make_vm(
+        library_root=library_root,
+        location_trash_service=location_service,
+        return_service=True,
+    )
 
     vm.open_recently_deleted()
 
@@ -138,6 +191,8 @@ def test_open_recently_deleted_uses_deleted_root(tmp_path: Path) -> None:
     query = store.load_selection.call_args.kwargs["query"]
     assert active_root == deleted_root
     assert query.album_path == RECENTLY_DELETED_DIR_NAME
+    assert nav_service.prepared_calls == 1
+    context.library.ensure_deleted_directory.assert_not_called()
 
 
 def test_open_filtered_collection_sets_media_types(tmp_path: Path) -> None:
@@ -147,6 +202,19 @@ def test_open_filtered_collection_sets_media_types(tmp_path: Path) -> None:
 
     query = store.load_selection.call_args.kwargs["query"]
     assert query.media_types == [MediaType.VIDEO]
+
+
+def test_open_location_map_requests_assets_through_navigation_service(tmp_path: Path) -> None:
+    vm, _store, context, _facade, _asset_service, nav_service = _make_vm(
+        library_root=tmp_path,
+        return_service=True,
+    )
+
+    vm.open_location_map()
+
+    assert nav_service.location_requests == 1
+    assert vm.location_session.request_serial == 1
+    context.library.get_geotagged_assets.assert_not_called()
 
 
 def test_open_location_asset_opens_singleton_cluster_gallery(tmp_path: Path) -> None:
@@ -229,6 +297,35 @@ def test_location_scan_chunk_updates_map_snapshot_incrementally(tmp_path: Path) 
     assert payloads[-1] == (snapshot, tmp_path)
 
 
+def test_location_scan_chunk_uses_session_location_service(tmp_path: Path) -> None:
+    vm, _store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    serial = vm.location_session.begin_load(tmp_path)
+    assert vm.location_session.accept_loaded(serial, tmp_path, [])
+    vm.location_session.set_mode("map")
+    converted = SimpleNamespace(
+        library_relative="Album/from-session.jpg",
+        absolute_path=tmp_path / "Album" / "from-session.jpg",
+    )
+    context.library.location_service = MagicMock()
+    context.library.location_service.asset_from_row.return_value = converted
+
+    vm.handle_location_scan_chunk(
+        tmp_path / "Album",
+        [
+            {
+                "rel": "Album/new.jpg",
+                "id": "asset-2",
+                "gps": {"lat": 52.5, "lon": 13.4},
+                "mime": "image/jpeg",
+                "parent_album_path": "Album",
+            }
+        ],
+    )
+
+    context.library.location_service.asset_from_row.assert_called_once()
+    assert vm.location_session.full_assets() == [converted]
+
+
 def test_location_scan_chunk_removes_assets_that_no_longer_qualify(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     existing = SimpleNamespace(library_relative="Album/new.jpg", absolute_path=tmp_path / "Album" / "new.jpg")
@@ -276,18 +373,22 @@ def test_location_scan_chunk_updates_snapshot_without_refreshing_cluster_gallery
 
 
 def test_location_scan_finished_rebuilds_snapshot_and_refreshes_map(tmp_path: Path) -> None:
-    vm, _store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    vm, _store, _context, _facade, _asset_service, nav_service = _make_vm(
+        library_root=tmp_path,
+        return_service=True,
+    )
     existing = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
     refreshed = SimpleNamespace(library_relative="Album/final.jpg", absolute_path=tmp_path / "Album" / "final.jpg")
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, [existing])
     vm.location_session.set_mode("map")
-    context.library.get_geotagged_assets.return_value = [refreshed]
 
     payloads = []
     vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
 
     vm.handle_location_scan_finished(tmp_path / "Album", True)
+    assert nav_service.location_requests == 1
+    nav_service.locationAssetsLoaded.emit(1, tmp_path, [refreshed])
 
     snapshot = vm.location_session.full_assets()
     assert snapshot == [refreshed]
@@ -295,11 +396,10 @@ def test_location_scan_finished_rebuilds_snapshot_and_refreshes_map(tmp_path: Pa
 
 
 def test_location_scan_updates_ignore_unrelated_scan_roots(tmp_path: Path) -> None:
-    vm, _store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, [])
     vm.location_session.set_mode("map")
-    context.library.get_geotagged_assets.return_value = [SimpleNamespace(library_relative="x.jpg")]
 
     payloads = []
     vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
@@ -339,19 +439,23 @@ def test_location_scan_chunk_invalidates_cached_snapshot_while_location_is_inact
 
 
 def test_open_location_map_reloads_after_inactive_snapshot_was_invalidated_by_scan(tmp_path: Path) -> None:
-    vm, _store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    vm, _store, _context, _facade, _asset_service, nav_service = _make_vm(
+        library_root=tmp_path,
+        return_service=True,
+    )
     stale = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
     refreshed = SimpleNamespace(library_relative="Album/new.jpg", absolute_path=tmp_path / "Album" / "new.jpg")
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, [stale])
     vm.location_session.set_mode("inactive")
-    context.library.get_geotagged_assets.return_value = [refreshed]
 
     payloads = []
     vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
 
     vm.handle_location_scan_finished(tmp_path / "Album", True)
     vm.open_location_map()
+    assert nav_service.location_requests == 1
+    nav_service.locationAssetsLoaded.emit(1, tmp_path, [refreshed])
 
     assert vm.location_session.invalidated is False
     assert vm.location_session.full_assets() == [refreshed]
@@ -463,8 +567,12 @@ def test_pinned_group_context_menu_state_exposes_group_gallery_semantics(tmp_pat
 def test_recently_deleted_context_menu_state_marks_deleted_surface(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     deleted_root = library_root / RECENTLY_DELETED_DIR_NAME
-    vm, _store, context, _facade, _asset_service = _make_vm(library_root=library_root)
-    context.library.ensure_deleted_directory.return_value = deleted_root
+    location_service = FakeLocationTrashService(library_root)
+    location_service.deleted_root = deleted_root
+    vm, _store, _context, _facade, _asset_service = _make_vm(
+        library_root=library_root,
+        location_trash_service=location_service,
+    )
 
     vm.open_recently_deleted()
 
@@ -572,7 +680,10 @@ def test_people_cluster_gallery_retargets_after_snapshot_redirect(tmp_path: Path
             ),
         ],
     )
-    vm, store, _context, _facade, _asset_service = _make_vm(library_root=library_root)
+    vm, store, _context, _facade, _asset_service = _make_vm(
+        library_root=library_root,
+        people_service=PeopleService(library_root),
+    )
     vm.open_people_cluster_gallery(
         AssetQuery(asset_ids=["asset-a"]),
         kind="person",
@@ -669,7 +780,10 @@ def test_pinned_people_gallery_retargets_after_snapshot_redirect(tmp_path: Path)
             ),
         ],
     )
-    vm, store, _context, _facade, _asset_service = _make_vm(library_root=library_root)
+    vm, store, _context, _facade, _asset_service = _make_vm(
+        library_root=library_root,
+        people_service=PeopleService(library_root),
+    )
     vm.open_pinned_people_query(
         AssetQuery(asset_ids=["asset-a"]),
         kind="person",
@@ -693,15 +807,15 @@ def test_pinned_people_gallery_retargets_after_snapshot_redirect(tmp_path: Path)
 
 
 def test_toggle_favorite_row_updates_store_via_asset_service(tmp_path: Path) -> None:
-    vm, store, _context, _facade, asset_service = _make_vm(library_root=tmp_path)
+    vm, store, _context, _facade, asset_state_service = _make_vm(library_root=tmp_path)
     dto = SimpleNamespace(abs_path=tmp_path / "photo.jpg")
     store.asset_at.return_value = dto
-    asset_service.toggle_favorite_by_path.return_value = True
+    asset_state_service.toggle_favorite.return_value = True
 
     result = vm.toggle_favorite_row(3)
 
     assert result is True
-    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    asset_state_service.toggle_favorite.assert_called_once_with(dto.abs_path)
     store.update_favorite_status.assert_called_once_with(3, True)
 
 
@@ -714,4 +828,4 @@ def test_rescan_current_emits_message_without_open_library() -> None:
     vm.rescan_current()
 
     assert messages == [("No album is currently open.", 3000)]
-    context.library.start_scanning.assert_not_called()
+    facade.scan_root_async.assert_not_called()

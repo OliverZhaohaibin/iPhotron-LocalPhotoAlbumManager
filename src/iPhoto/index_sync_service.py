@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 
-from .cache.index_store import get_global_repository
 from .cache.lock import FileLock
+from .config import RECENTLY_DELETED_DIR_NAME
 from .core.pairing import pair_live
 from .errors import IndexCorruptedError, ManifestInvalidError
-from .models.types import LiveGroup
+from .domain.models.core import LiveGroup
 from .path_normalizer import compute_album_path, normalise_rel_key
 from .utils.jsonio import read_json, write_json
 from .utils.logging import get_logger
@@ -18,9 +18,15 @@ from .utils.pathutils import ensure_work_dir
 
 LOGGER = get_logger()
 
+if TYPE_CHECKING:  # pragma: no cover
+    from .application.ports import AssetRepositoryPort
+
 
 def load_incremental_index_cache(
-    root: Path, library_root: Optional[Path] = None
+    root: Path,
+    library_root: Optional[Path] = None,
+    *,
+    repository: "AssetRepositoryPort",
 ) -> Dict[str, dict]:
     """Load the existing index into a dictionary for incremental scanning.
 
@@ -32,8 +38,6 @@ def load_incremental_index_cache(
         root: The album root directory.
         library_root: If provided, use this as the database root (global database).
     """
-    db_root = library_root if library_root else root
-    store = get_global_repository(db_root)
     existing_index = {}
     
     # If using global DB, filter by album path
@@ -41,9 +45,9 @@ def load_incremental_index_cache(
     
     try:
         if album_path:
-            rows = store.read_album_assets(album_path, include_subalbums=True)
+            rows = repository.read_album_assets(album_path, include_subalbums=True)
         else:
-            rows = store.read_all()
+            rows = repository.read_all()
         for row in rows:
             rel_key = normalise_rel_key(row.get("rel"))
             if rel_key:
@@ -57,6 +61,8 @@ def update_index_snapshot(
     root: Path,
     materialised_rows: List[dict],
     library_root: Optional[Path] = None,
+    *,
+    repository: "AssetRepositoryPort",
 ) -> None:
     """Apply *materialised_rows* to the global database using additive-only updates.
 
@@ -73,13 +79,10 @@ def update_index_snapshot(
         materialised_rows: List of rows to update/insert.
         library_root: If provided, use this as the database root (global database).
     """
-    db_root = library_root if library_root else root
-    store = get_global_repository(db_root)
-
     corrupted_during_read = False
     try:
         # Just verify we can read the database
-        list(store.read_all())
+        list(repository.read_all())
     except IndexCorruptedError:
         corrupted_during_read = True
 
@@ -94,7 +97,11 @@ def update_index_snapshot(
 
     if corrupted_during_read:
         # On corruption, write all rows to rebuild the database
-        store.write_rows(materialised_snapshot)
+        write_rows = getattr(repository, "write_rows", None)
+        if callable(write_rows):
+            write_rows(materialised_snapshot)
+        else:
+            repository.append_rows(materialised_snapshot)
         return
 
     if not fresh_rows:
@@ -103,13 +110,21 @@ def update_index_snapshot(
     # Additive-only: only append new/updated rows, never delete.
     # Scan merges preserve persisted state fields such as face_status.
     try:
-        store.merge_scan_rows(materialised_snapshot)
+        repository.merge_scan_rows(materialised_snapshot)
     except IndexCorruptedError:
-        store.write_rows(materialised_snapshot)
+        write_rows = getattr(repository, "write_rows", None)
+        if callable(write_rows):
+            write_rows(materialised_snapshot)
+        else:
+            repository.append_rows(materialised_snapshot)
 
 
 def ensure_links(
-    root: Path, rows: List[dict], library_root: Optional[Path] = None
+    root: Path,
+    rows: List[dict],
+    library_root: Optional[Path] = None,
+    *,
+    repository: "AssetRepositoryPort",
 ) -> List[LiveGroup]:
     """Ensure DB live-role state is current and refresh the derived links snapshot.
     
@@ -119,7 +134,12 @@ def ensure_links(
         library_root: If provided, use this as the database root.
     """
     groups, payload = compute_links_payload(rows)
-    sync_live_roles_to_db(root, groups, library_root=library_root)
+    sync_live_roles_to_db(
+        root,
+        groups,
+        library_root=library_root,
+        repository=repository,
+    )
 
     work_dir = ensure_work_dir(root)
     links_path = work_dir / "links.json"
@@ -156,7 +176,11 @@ def write_links(root: Path, payload: Dict[str, object]) -> None:
 
 
 def sync_live_roles_to_db(
-    root: Path, groups: List[LiveGroup], library_root: Optional[Path] = None
+    root: Path,
+    groups: List[LiveGroup],
+    library_root: Optional[Path] = None,
+    *,
+    repository: "AssetRepositoryPort",
 ) -> None:
     """Propagate live photo roles from computed groups to the repository.
     
@@ -186,18 +210,19 @@ def sync_live_roles_to_db(
         # Motion component: Role 1 (Hidden), Partner = Still
         updates.append((motion_rel, 1, still_rel))
 
-    db_root = library_root if library_root else root
-    store = get_global_repository(db_root)
     if album_prefix:
-        store.apply_live_role_updates_for_prefix(album_prefix, updates)
+        repository.apply_live_role_updates_for_prefix(album_prefix, updates)
     else:
-        store.apply_live_role_updates(updates)
+        repository.apply_live_role_updates(updates)
 
 
 def prune_index_scope(
     root: Path,
     materialised_rows: Iterable[dict],
     library_root: Optional[Path] = None,
+    *,
+    repository: "AssetRepositoryPort",
+    exclude_globs: Iterable[str] | None = None,
 ) -> int:
     """Delete rows under *root* that were not rediscovered by the completed scan.
 
@@ -206,8 +231,6 @@ def prune_index_scope(
     completed scan root so sibling albums remain untouched.
     """
 
-    db_root = library_root if library_root else root
-    store = get_global_repository(db_root)
     album_path = compute_album_path(root, library_root)
 
     fresh_rels = {
@@ -220,19 +243,27 @@ def prune_index_scope(
     }
 
     if album_path:
-        scoped_rows = store.read_album_assets(
+        scoped_rows = repository.read_album_assets(
             album_path,
             include_subalbums=True,
             sort_by_date=False,
             filter_hidden=False,
         )
     else:
-        scoped_rows = store.read_all(sort_by_date=False, filter_hidden=False)
+        scoped_rows = repository.read_all(sort_by_date=False, filter_hidden=False)
 
+    preserve_existing_trash_rows = (
+        root.name != RECENTLY_DELETED_DIR_NAME
+        and library_root is not None
+        and any(RECENTLY_DELETED_DIR_NAME in pattern for pattern in (exclude_globs or ()))
+    )
+    trash_prefix = f"{RECENTLY_DELETED_DIR_NAME}/"
     removable: List[str] = []
     for row in scoped_rows:
         rel_key = normalise_rel_key(row.get("rel"))
         if rel_key is None:
+            continue
+        if preserve_existing_trash_rows and rel_key.startswith(trash_prefix):
             continue
         if rel_key not in fresh_rels:
             removable.append(rel_key)
@@ -240,7 +271,7 @@ def prune_index_scope(
     if not removable:
         return 0
 
-    store.remove_rows(removable)
+    repository.remove_rows(removable)
     return len(removable)
 
 

@@ -43,6 +43,36 @@ This installs all runtime dependencies plus dev tools (`pytest`, `ruff`, `black`
 
 ---
 
+## Architecture Guardrails
+
+Current production development follows the vNext runtime boundary:
+
+- `RuntimeContext` owns the active `LibrarySession`.
+- GUI, CLI, file watchers, and Qt workers must use session/application
+  surfaces instead of legacy compatibility facades.
+- Production source must not import `iPhoto.legacy` or `iPhoto.models.*`.
+- New business behavior belongs in application use cases/services, session
+  services, domain values/pure services, or infrastructure adapters.
+- GUI code should remain presentation and Qt transport.
+
+Read these before architecture-sensitive work:
+
+- [AGENT.md](../AGENT.md)
+- [Architecture](architecture.md)
+- [Refactor current progress](refactor/05-current-progress.md)
+
+Run the architecture guard before or with focused tests:
+
+```bash
+python3 tools/check_architecture.py
+.venv/bin/python -m pytest tests/architecture -q
+```
+
+The GitHub Actions test workflow runs `python tools/check_architecture.py`
+before the Python test suite.
+
+---
+
 ## Dependencies
 
 ### Runtime Dependencies
@@ -395,7 +425,7 @@ python src\maps\main.py --backend legacy
 Recommended additional checks:
 
 ```powershell
-pytest tests\test_maps_main.py tests\test_photo_map_view.py -q
+python -m pytest tests\test_maps_main.py tests\test_photo_map_view.py -q
 iphoto-gui
 ```
 
@@ -662,14 +692,14 @@ at least one asset failed during detection/embedding.
 After changing People scanning, run the focused tests:
 
 ```powershell
-pytest tests\test_people_pipeline.py tests\test_people_service.py tests\cache\test_global_repository.py tests\test_face_cluster_pipeline.py
+python -m pytest tests\test_people_pipeline.py tests\test_people_service.py tests\cache\test_global_repository.py tests\test_face_cluster_pipeline.py
 ```
 
 When changing People UI, groups, covers, hidden-state filtering, merges, or
 popup/menu behavior, also run:
 
 ```powershell
-pytest tests\gui\widgets\test_people_dashboard_widget.py tests\test_people_repository.py tests\test_people_service.py tests\test_information_popup.py tests\ui\controllers\test_context_menu_cover.py
+python -m pytest tests\gui\widgets\test_people_dashboard_widget.py tests\test_people_repository.py tests\test_people_service.py tests\test_information_popup.py tests\ui\controllers\test_context_menu_cover.py
 ```
 
 For a local smoke test against a real image:
@@ -754,22 +784,35 @@ See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and
 ## Running Tests
 
 ```bash
+# Architecture guardrail
+python3 tools/check_architecture.py
+
 # Run all tests
-pytest
+python -m pytest
 
 # Run with verbose output
-pytest -v
+python -m pytest -v
 
 # Run a specific test file
-pytest tests/test_example.py
+python -m pytest tests/application/test_library_session.py
 
 # Run tests matching a pattern
-pytest -k "test_scan"
+python -m pytest -k "test_scan"
+
+# Run architecture tests explicitly
+python -m pytest tests/architecture -q
 ```
 
 Test configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`:
 - Test paths: `tests/`
 - GUI tests (`tests/ui`, `tests/gui`) are excluded by default.
+
+Use the project virtual environment explicitly when the shell does not have
+`pytest` on `PATH`:
+
+```bash
+.venv/bin/python -m pytest tests/architecture -q
+```
 
 ---
 
@@ -956,3 +999,12 @@ test(core): add unit tests for curve resolver
 | Command | Entry Point | Description |
 |---------|-------------|-------------|
 | `iphoto-gui` | `iPhoto.gui.main:main` | GUI application |
+| `iphoto` | `iPhoto.cli:app` | Typer CLI, using headless `LibrarySession` surfaces |
+
+Important runtime entry classes:
+
+| Class / Function | Module | Description |
+|------------------|--------|-------------|
+| `RuntimeContext` | `iPhoto.bootstrap.runtime_context` | Process composition root and active library lifecycle |
+| `LibrarySession` | `iPhoto.bootstrap.library_session` | Library-scoped assets, state, scans, People, Maps, edit, thumbnails, and location surfaces |
+| `create_headless_library_session()` | `iPhoto.bootstrap.library_session` | CLI/non-GUI session construction |

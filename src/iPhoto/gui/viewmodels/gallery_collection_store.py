@@ -5,21 +5,18 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Protocol
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.domain.models import Asset
 from iPhoto.domain.models.query import AssetQuery
-from iPhoto.domain.repositories import IAssetRepository
 from iPhoto.gui.viewmodels.signal import Signal
 
 from iPhoto.gui.viewmodels.asset_dto_converter import (
     geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
     is_legacy_thumb_path as _is_legacy_thumb_path_fn,
-    is_thumbnail_asset as _is_thumbnail_asset_fn,
     resolve_abs_path as _resolve_abs_path_fn,
     scan_row_is_thumbnail as _scan_row_is_thumbnail_fn,
-    to_dto as _to_dto_fn,
+    scan_row_to_dto as _scan_row_to_dto_fn,
 )
 from iPhoto.gui.viewmodels.asset_paging import (
     should_validate_paths as _should_validate_paths_fn,
@@ -29,6 +26,22 @@ from iPhoto.gui.viewmodels.pending_move_buffer import (
     _PendingMove,
     should_include_pending as _should_include_pending_fn,
 )
+
+
+class GalleryAssetQuerySurface(Protocol):
+    """Session-owned query surface used by the gallery collection store."""
+
+    library_root: Path
+
+    def count_query_assets(self, query: AssetQuery) -> int:
+        """Return the number of assets matching *query*."""
+
+    def read_query_asset_rows(
+        self,
+        root: Path,
+        query: AssetQuery,
+    ) -> Iterable[dict]:
+        """Yield rows matching *query*, scoped to *root*."""
 
 
 class GalleryCollectionStore:
@@ -44,7 +57,7 @@ class GalleryCollectionStore:
 
     def __init__(
         self,
-        repository: IAssetRepository,
+        asset_query_service: GalleryAssetQuerySurface | None,
         library_root: Optional[Path] = None,
     ) -> None:
         self.data_changed = Signal()
@@ -52,8 +65,8 @@ class GalleryCollectionStore:
         self.count_changed = Signal()
         self.row_changed = Signal()
 
-        self._repo = repository
-        self._library_root = library_root
+        self._asset_query_service = asset_query_service
+        self._library_root = library_root or getattr(asset_query_service, "library_root", None)
         self._current_query: Optional[AssetQuery] = None
         self._selection_query: Optional[AssetQuery] = None
         self._selection_direct_assets: Optional[list] = None
@@ -79,15 +92,22 @@ class GalleryCollectionStore:
         self._reset_window_state()
         self.data_changed.emit()
 
-    def set_repository(self, repo: IAssetRepository) -> None:
-        if self._repo is repo:
+    def set_asset_query_service(
+        self,
+        asset_query_service: GalleryAssetQuerySurface | None,
+    ) -> None:
+        if self._asset_query_service is asset_query_service:
             return
-        self._repo = repo
+        self._asset_query_service = asset_query_service
         self._reset_window_state()
         self.data_changed.emit()
 
-    def rebind_repository(self, repo: IAssetRepository, library_root: Optional[Path]) -> None:
-        self.set_repository(repo)
+    def rebind_asset_query_service(
+        self,
+        asset_query_service: GalleryAssetQuerySurface | None,
+        library_root: Optional[Path],
+    ) -> None:
+        self.set_asset_query_service(asset_query_service)
         self.set_library_root(library_root)
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -475,7 +495,10 @@ class GalleryCollectionStore:
             return
 
         count_query = self._count_query(self._current_query)
-        new_total = self._repo.count(count_query)
+        if self._asset_query_service is None:
+            new_total = 0
+        else:
+            new_total = self._asset_query_service.count_query_assets(count_query)
         if new_total <= 0:
             old_total = self._total_count
             self._reset_window_state()
@@ -567,14 +590,24 @@ class GalleryCollectionStore:
         query = self._slice_query(self._current_query, first, last - first + 1)
         validate_paths = self._should_validate_paths(self._current_query)
         rows: Dict[int, AssetDTO] = {}
-        for offset, asset in enumerate(self._repo.find_by_query(query)):
+        active_root = self._active_root or self._library_root
+        if active_root is None or self._asset_query_service is None:
+            return {}
+        for offset, row in enumerate(
+            self._asset_query_service.read_query_asset_rows(active_root, query)
+        ):
             row_index = first + offset
-            if self._is_thumbnail_asset(asset):
+            view_rel = row.get("rel") if isinstance(row, dict) else None
+            if not isinstance(view_rel, str) or not view_rel:
                 continue
-            abs_path = self._resolve_abs_path(asset.path)
-            if validate_paths and not self._path_exists_cached(abs_path):
+            if self._scan_row_is_thumbnail(view_rel, row):
                 continue
-            rows[row_index] = self._to_dto(asset)
+            dto = self._scan_row_to_dto(active_root, view_rel, row)
+            if dto is None:
+                continue
+            if validate_paths and not self._path_exists_cached(dto.abs_path):
+                continue
+            rows[row_index] = dto
         return rows
 
     def _fetch_single_row(self, row: int) -> Optional[AssetDTO]:
@@ -723,8 +756,13 @@ class GalleryCollectionStore:
     def _geotagged_asset_to_dto(self, asset: object, library_root: Path) -> Optional[AssetDTO]:
         return _geotagged_asset_to_dto_fn(asset, library_root)
 
-    def _to_dto(self, asset: Asset) -> AssetDTO:
-        return _to_dto_fn(asset, self._library_root)
+    def _scan_row_to_dto(
+        self,
+        view_root: Path,
+        view_rel: str,
+        row: dict,
+    ) -> Optional[AssetDTO]:
+        return _scan_row_to_dto_fn(view_root, view_rel, row)
 
     def _normalize_abs_key(self, path: Path) -> str:
         try:
@@ -744,9 +782,6 @@ class GalleryCollectionStore:
 
     def _is_legacy_thumb_path(self, rel_path: Path) -> bool:
         return _is_legacy_thumb_path_fn(rel_path)
-
-    def _is_thumbnail_asset(self, asset: Asset) -> bool:
-        return _is_thumbnail_asset_fn(asset)
 
     def _scan_row_is_thumbnail(self, rel: str, row: dict) -> bool:
         return _scan_row_is_thumbnail_fn(rel, row)

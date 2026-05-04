@@ -1,0 +1,598 @@
+#!/usr/bin/env python3
+"""Check vNext layer import boundaries."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import sys
+from pathlib import Path
+
+LOWER_LAYER_GUI_FORBIDDEN_ROOTS = {
+    "cache",
+    "core",
+    "infrastructure",
+    "io",
+    "library",
+    "people",
+}
+
+LEGACY_MODEL_IMPORT_EXCEPTIONS: set[str] = set()
+
+PEOPLE_INDEX_STORE_FORBIDDEN_FILES = {
+    "library/workers/face_scan_worker.py",
+}
+
+INDEX_SYNC_FORBIDDEN_FILES = {
+    "index_sync_service.py",
+}
+
+ASSET_RUNTIME_SQLITE_FORBIDDEN_FILES = {
+    "infrastructure/services/library_asset_runtime.py",
+}
+
+ASSET_RUNTIME_SQLITE_FORBIDDEN_IMPORTS = {
+    "iPhoto.infrastructure.db.pool",
+    "iPhoto.infrastructure.repositories.sqlite_asset_repository",
+}
+
+GUI_DOMAIN_REPOSITORY_FORBIDDEN_PREFIXES = (
+    "gui/viewmodels/",
+    "gui/ui/models/",
+)
+
+GUI_FILE_OPERATION_SERVICE_FORBIDDEN_FILES = {
+    "gui/services/deletion_service.py",
+    "gui/services/restoration_service.py",
+}
+
+GUI_FILE_OPERATION_SERVICE_FORBIDDEN_IMPORTS = {
+    "iPhoto.bootstrap.library_asset_lifecycle_service",
+    "iPhoto.media_classifier",
+}
+
+GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_FILES = {
+    "gui/services/album_metadata_service.py",
+}
+
+GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_IMPORTS = {
+    "iPhoto.bootstrap.library_session",
+    "iPhoto.config",
+    "iPhoto.models.album",
+    "iPhoto.utils.jsonio",
+}
+
+GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_FILES = {
+    "gui/services/library_update_service.py",
+}
+
+GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_IMPORTS = {
+    "iPhoto.library.workers",
+}
+
+GUI_RUNTIME_BACKEND_FORBIDDEN = {
+    "iPhoto.app",
+}
+
+GUI_BOOTSTRAP_PEOPLE_FORBIDDEN_PREFIXES = (
+    "gui/coordinators/",
+    "gui/services/",
+    "gui/ui/controllers/",
+    "gui/ui/models/",
+    "gui/viewmodels/",
+)
+
+GUI_BOOTSTRAP_PEOPLE_FORBIDDEN = {
+    "iPhoto.bootstrap.library_people_service",
+}
+
+GUI_SIDECAR_FORBIDDEN_PREFIXES = (
+    "gui/coordinators/",
+    "gui/services/",
+    "gui/ui/controllers/",
+    "gui/ui/models/",
+    "gui/viewmodels/",
+)
+
+GUI_SIDECAR_FORBIDDEN = {
+    "iPhoto.io.sidecar",
+}
+
+GUI_LOCATION_HELPER_FORBIDDEN_PREFIXES = (
+    "gui/coordinators/",
+    "gui/services/",
+    "gui/ui/controllers/",
+    "gui/ui/models/",
+    "gui/viewmodels/",
+)
+
+GUI_LOCATION_HELPER_FORBIDDEN = {
+    "iPhoto.library.geo_aggregator",
+}
+
+GUI_MAP_WIDGET_FACTORY_ONLY_FILES = {
+    "gui/ui/widgets/photo_map_view.py",
+    "gui/ui/widgets/info_location_map.py",
+}
+
+GUI_MAP_WIDGET_FACTORY_ONLY_IMPORTS = {
+    "maps.map_widget.map_gl_widget",
+    "maps.map_widget.map_widget",
+    "maps.map_widget.native_osmand_widget",
+    "maps.map_widget.qt_location_map_widget",
+}
+
+GUI_LEGACY_APP_SERVICE_FORBIDDEN_PREFIXES = (
+    "gui/coordinators/",
+    "gui/viewmodels/",
+)
+
+GUI_LEGACY_APP_SERVICE_ALLOWED_FILES = set()
+
+GUI_LEGACY_APP_SERVICE_FORBIDDEN = {
+    "iPhoto.application.services.asset_service",
+    "iPhoto.application.services.album_service",
+}
+
+LEGACY_DOMAIN_USE_CASE_MODULES = {
+    "iPhoto.application.use_cases.aggregate_geo_data",
+    "iPhoto.application.use_cases.apply_edit",
+    "iPhoto.application.use_cases.export_assets",
+    "iPhoto.application.use_cases.generate_thumbnail",
+    "iPhoto.application.use_cases.import_assets",
+    "iPhoto.application.use_cases.manage_trash",
+    "iPhoto.application.use_cases.move_assets",
+    "iPhoto.application.use_cases.open_album",
+    "iPhoto.application.use_cases.pair_live_photos",
+    "iPhoto.application.use_cases.scan_album",
+    "iPhoto.application.use_cases.update_metadata",
+}
+
+LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS = {
+    "application/services/album_service.py",
+    "application/services/asset_service.py",
+    "application/use_cases/__init__.py",
+    "bootstrap/container.py",
+    "io/scanner_adapter.py",
+}
+
+LEGACY_DOMAIN_USE_CASE_PACKAGE = "iPhoto.application.use_cases"
+
+SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS = {"gui"}
+
+SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS = {
+    "LibraryAlbumMetadataService",
+    "LibraryAssetLifecycleService",
+    "LibraryAssetOperationService",
+    "LibraryAssetQueryService",
+    "LibraryLocationService",
+    "LibraryScanService",
+}
+
+LIBRARY_COMPAT_FACTORY_FORBIDDEN = {
+    "iPhoto.bootstrap.service_factories",
+    "iPhoto.bootstrap.service_factories.create_compat_album_metadata_service",
+    "iPhoto.bootstrap.service_factories.create_compat_asset_lifecycle_service",
+    "iPhoto.bootstrap.service_factories.create_compat_asset_operation_service",
+    "iPhoto.bootstrap.service_factories.create_compat_asset_query_service",
+    "iPhoto.bootstrap.service_factories.create_compat_location_service",
+    "iPhoto.bootstrap.service_factories.create_compat_scan_service",
+}
+
+LIBRARY_COMPAT_FACTORY_CALLS = {
+    "create_compat_album_metadata_service",
+    "create_compat_asset_lifecycle_service",
+    "create_compat_asset_operation_service",
+    "create_compat_asset_query_service",
+    "create_compat_location_service",
+    "create_compat_scan_service",
+}
+
+GUI_COMPAT_FACTORY_FORBIDDEN = LIBRARY_COMPAT_FACTORY_FORBIDDEN
+GUI_COMPAT_FACTORY_CALLS = LIBRARY_COMPAT_FACTORY_CALLS
+
+GUI_SCAN_ENTRY_FORBIDDEN_CALLS = {"start_scanning"}
+
+LEGACY_RUNTIME_IMPORT_FORBIDDEN = "iPhoto.legacy"
+
+LEGACY_QUARANTINED_OLD_PATHS = {
+    "iPhoto.app",
+    "iPhoto.appctx",
+    "iPhoto.bootstrap.container",
+    "iPhoto.bootstrap.service_factories",
+    "iPhoto.bootstrap.standalone_album_services",
+    "iPhoto.application.services.album_service",
+    "iPhoto.application.services.asset_service",
+    "iPhoto.application.services.library_service",
+    "iPhoto.application.services.parallel_scanner",
+    "iPhoto.application.services.paginated_loader",
+    "iPhoto.domain.repositories",
+    "iPhoto.infrastructure.repositories.sqlite_album_repository",
+    "iPhoto.infrastructure.repositories.sqlite_asset_repository",
+    "iPhoto.infrastructure.repositories.index_store_asset_repository",
+    "iPhoto.library.manager",
+}
+
+
+def _is_type_checking_guard(node: ast.If) -> bool:
+    test = node.test
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    return False
+
+
+def _module_for_file(py_file: Path, src_root: Path) -> str:
+    rel = py_file.relative_to(src_root).with_suffix("")
+    parts = ["iPhoto", *rel.parts]
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _resolve_import_from(
+    *,
+    current_module: str,
+    is_package: bool,
+    level: int,
+    module: str | None,
+) -> str:
+    if level == 0:
+        return module or ""
+
+    package_parts = current_module.split(".") if is_package else current_module.split(".")[:-1]
+    base_len = max(0, len(package_parts) - level + 1)
+    parts = package_parts[:base_len]
+    if module:
+        parts.extend(module.split("."))
+    return ".".join(parts)
+
+
+def _is_or_under(module: str, prefix: str) -> bool:
+    return module == prefix or module.startswith(prefix + ".")
+
+
+class _ImportCollector(ast.NodeVisitor):
+    def __init__(self, current_module: str, is_package: bool) -> None:
+        self.current_module = current_module
+        self.is_package = is_package
+        self.imports: list[tuple[int, str]] = []
+        self._in_type_checking = False
+
+    def visit_If(self, node: ast.If) -> None:
+        previous = self._in_type_checking
+        if _is_type_checking_guard(node):
+            self._in_type_checking = True
+            for child in node.body:
+                self.visit(child)
+            self._in_type_checking = previous
+            for child in node.orelse:
+                self.visit(child)
+            return
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        if self._in_type_checking:
+            return
+        for alias in node.names:
+            self.imports.append((node.lineno, alias.name))
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if self._in_type_checking:
+            return
+        resolved = _resolve_import_from(
+            current_module=self.current_module,
+            is_package=self.is_package,
+            level=node.level,
+            module=node.module,
+        )
+        self.imports.append((node.lineno, resolved))
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            if resolved:
+                self.imports.append((node.lineno, f"{resolved}.{alias.name}"))
+
+
+class _CallCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str]] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        name = self._call_name(node.func)
+        if name is not None:
+            self.calls.append((node.lineno, name))
+        self.generic_visit(node)
+
+    def _call_name(self, node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return None
+
+
+def _runtime_imports(py_file: Path, src_root: Path) -> list[tuple[int, str]]:
+    source = py_file.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    collector = _ImportCollector(
+        _module_for_file(py_file, src_root),
+        py_file.name == "__init__.py",
+    )
+    collector.visit(tree)
+    return collector.imports
+
+
+def _runtime_calls(py_file: Path) -> list[tuple[int, str]]:
+    source = py_file.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    collector = _CallCollector()
+    collector.visit(tree)
+    return collector.calls
+
+
+def _relative_key(py_file: Path, src_root: Path) -> str:
+    return py_file.relative_to(src_root).as_posix()
+
+
+def check(src_root: Path) -> list[str]:
+    violations: list[str] = []
+    for py_file in sorted(src_root.rglob("*.py")):
+        rel = _relative_key(py_file, src_root)
+        top_level = rel.split("/", 1)[0]
+        try:
+            imports = _runtime_imports(py_file, src_root)
+            calls = _runtime_calls(py_file)
+        except SyntaxError as exc:
+            violations.append(f"{py_file}: PARSE_ERROR - {exc}")
+            continue
+
+        for lineno, module in imports:
+            if top_level == "application" and any(
+                _is_or_under(module, forbidden)
+                for forbidden in (
+                    "iPhoto.gui",
+                    "iPhoto.cache",
+                    "iPhoto.infrastructure",
+                )
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: application imports concrete layer {module}"
+                )
+
+            if top_level in LOWER_LAYER_GUI_FORBIDDEN_ROOTS and _is_or_under(
+                module,
+                "iPhoto.gui",
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: lower layer imports GUI module {module}"
+                )
+
+            if top_level == "gui" and (
+                module == "iPhoto.cache"
+                or _is_or_under(module, "iPhoto.cache.index_store")
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI imports concrete index store {module}"
+                )
+
+            if top_level == "gui" and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_RUNTIME_BACKEND_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports compatibility backend {module}"
+                )
+
+            if top_level == "gui" and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_COMPAT_FACTORY_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports compatibility service factory {module}"
+                )
+
+            if rel.startswith(GUI_BOOTSTRAP_PEOPLE_FORBIDDEN_PREFIXES) and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_BOOTSTRAP_PEOPLE_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports People bootstrap factory {module}"
+                )
+
+            if rel.startswith(GUI_SIDECAR_FORBIDDEN_PREFIXES) and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_SIDECAR_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports edit sidecar implementation {module}"
+                )
+
+            if rel.startswith(GUI_LOCATION_HELPER_FORBIDDEN_PREFIXES) and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_LOCATION_HELPER_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports legacy location helper {module}"
+                )
+
+            if rel in GUI_MAP_WIDGET_FACTORY_ONLY_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_MAP_WIDGET_FACTORY_ONLY_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: map widget construction must go "
+                    f"through map_widget_factory, not {module}"
+                )
+
+            if (
+                rel.startswith(GUI_LEGACY_APP_SERVICE_FORBIDDEN_PREFIXES)
+                and rel not in GUI_LEGACY_APP_SERVICE_ALLOWED_FILES
+                and any(
+                    _is_or_under(module, forbidden)
+                    for forbidden in GUI_LEGACY_APP_SERVICE_FORBIDDEN
+                )
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports legacy app service {module}"
+                )
+
+            if (
+                (top_level == "people" or rel in PEOPLE_INDEX_STORE_FORBIDDEN_FILES)
+                and (
+                    module == "iPhoto.cache"
+                    or _is_or_under(module, "iPhoto.cache.index_store")
+                )
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: People runtime imports concrete index store {module}"
+                )
+
+            if rel in INDEX_SYNC_FORBIDDEN_FILES and (
+                module == "iPhoto.cache"
+                or _is_or_under(module, "iPhoto.cache.index_store")
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: index sync imports concrete index store {module}"
+                )
+
+            if rel in ASSET_RUNTIME_SQLITE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in ASSET_RUNTIME_SQLITE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: asset runtime imports retired SQLite repository path {module}"
+                )
+
+            if (
+                rel not in LEGACY_MODEL_IMPORT_EXCEPTIONS
+                and not rel.startswith("models/")
+                and _is_or_under(module, "iPhoto.models")
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: runtime imports legacy model shim {module}"
+                )
+
+            if rel.startswith(GUI_DOMAIN_REPOSITORY_FORBIDDEN_PREFIXES) and _is_or_under(
+                module,
+                "iPhoto.domain.repositories",
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI collection/viewmodel imports legacy domain repository {module}"
+                )
+
+            if rel in GUI_FILE_OPERATION_SERVICE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_FILE_OPERATION_SERVICE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI file-operation service imports session planning dependency {module}"
+                )
+
+            if rel in GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_ALBUM_METADATA_SERVICE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI album metadata service imports retired implementation detail {module}"
+                )
+
+            if rel in GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_LIBRARY_UPDATE_SERVICE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI library update service imports worker implementation detail {module}"
+                )
+
+            if rel not in LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS and (
+                module == LEGACY_DOMAIN_USE_CASE_PACKAGE
+                or any(
+                    _is_or_under(module, legacy_module)
+                    for legacy_module in LEGACY_DOMAIN_USE_CASE_MODULES
+                )
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: runtime imports legacy domain-repository use case {module}"
+                )
+
+            if top_level == "library" and module in LIBRARY_COMPAT_FACTORY_FORBIDDEN:
+                violations.append(
+                    f"{py_file}:{lineno}: library runtime imports compatibility service factory {module}"
+                )
+
+            if top_level != "legacy" and _is_or_under(
+                module,
+                LEGACY_RUNTIME_IMPORT_FORBIDDEN,
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: runtime imports legacy quarantine module {module}"
+                )
+
+            if top_level != "legacy" and any(
+                _is_or_under(module, legacy_module)
+                for legacy_module in LEGACY_QUARANTINED_OLD_PATHS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: runtime imports quarantined legacy path {module}"
+                )
+
+        for lineno, call_name in calls:
+            if top_level == "gui" and call_name in GUI_COMPAT_FACTORY_CALLS:
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime constructs "
+                    f"compatibility service factory {call_name}; "
+                    "use an active LibrarySession surface instead"
+                )
+            if top_level == "gui" and call_name in GUI_SCAN_ENTRY_FORBIDDEN_CALLS:
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime calls legacy scan entry "
+                    f"{call_name}; use a session-bound scan surface instead"
+                )
+            if (
+                top_level in SESSION_SERVICE_FALLBACK_FORBIDDEN_TOP_LEVELS
+                and call_name in SESSION_SERVICE_FALLBACK_FORBIDDEN_CALLS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI/library runtime constructs "
+                    f"session service fallback directly via {call_name}; "
+                    "use an active LibrarySession surface or an explicit compatibility factory"
+                )
+            if top_level == "library" and call_name in LIBRARY_COMPAT_FACTORY_CALLS:
+                violations.append(
+                    f"{py_file}:{lineno}: library runtime constructs "
+                    f"compatibility service factory {call_name}; "
+                    "bind an active LibrarySession instead"
+                )
+
+    return violations
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--src",
+        default=str(Path(__file__).parent.parent / "src" / "iPhoto"),
+        help="Root of the iPhoto source tree to scan.",
+    )
+    args = parser.parse_args(argv)
+
+    src_root = Path(args.src)
+    if not src_root.exists():
+        print(f"ERROR: source directory not found: {src_root}", file=sys.stderr)
+        return 2
+
+    found = check(src_root)
+    if found:
+        print("Layer boundary violations found:\n")
+        for violation in found:
+            print(f"  {violation}")
+        return 1
+
+    print("OK - vNext layer boundaries are respected.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

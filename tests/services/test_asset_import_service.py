@@ -41,6 +41,7 @@ def _create_service(
     current_album_root,
     refresh,
     metadata_service,
+    library_manager=None,
 ) -> AssetImportService:
     """Create a service instance suitable for isolated unit tests."""
 
@@ -49,7 +50,49 @@ def _create_service(
         current_album_root=current_album_root,
         refresh_callback=refresh,
         metadata_service=metadata_service,
+        library_manager_getter=(lambda: library_manager),
     )
+
+
+class _FakeLibraryRuntimeController:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        scan_service: object | None = None,
+        lifecycle_service: object | None = None,
+    ) -> None:
+        self._root = Path(root)
+        self.scan_service = (
+            scan_service if scan_service is not None else _FakeScanService(root)
+        )
+        self.asset_lifecycle_service = (
+            lifecycle_service
+            if lifecycle_service is not None
+            else _FakeLifecycleService(root)
+        )
+
+    def root(self) -> Path:
+        return self._root
+
+
+class _FakeScanService:
+    def __init__(self, root: Path) -> None:
+        self.library_root = Path(root)
+
+    def prepare_album_open(self, *args, **kwargs):
+        return None
+
+    def rescan_album(self, *args, **kwargs):
+        return None
+
+    def pair_album(self, *args, **kwargs):
+        return None
+
+
+class _FakeLifecycleService:
+    def __init__(self, root: Path) -> None:
+        self.library_root = Path(root)
 
 
 def test_import_files_submits_background_task(
@@ -67,12 +110,14 @@ def test_import_files_submits_background_task(
     task_manager = mocker.MagicMock()
     metadata_service = mocker.MagicMock()
     refresh = mocker.MagicMock()
+    library_manager = _FakeLibraryRuntimeController(album_root)
 
     service = _create_service(
         task_manager=task_manager,
         current_album_root=lambda: album_root,
         refresh=refresh,
         metadata_service=metadata_service,
+        library_manager=library_manager,
     )
 
     service.import_files([asset])
@@ -83,6 +128,71 @@ def test_import_files_submits_background_task(
     assert kwargs["task_id"].startswith(f"import:{album_root}:")
     worker = kwargs["worker"]
     assert isinstance(worker, ImportWorker)
+
+
+def test_import_files_requires_bound_session_when_library_is_unbound(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Open Album workflows no longer create standalone import services."""
+
+    album_root = tmp_path / "Album"
+    album_root.mkdir()
+    asset = tmp_path / "photo.jpg"
+    asset.write_bytes(b"data")
+
+    task_manager = mocker.MagicMock()
+    metadata_service = mocker.MagicMock()
+    refresh = mocker.MagicMock()
+
+    service = _create_service(
+        task_manager=task_manager,
+        current_album_root=lambda: album_root,
+        refresh=refresh,
+        metadata_service=metadata_service,
+        library_manager=None,
+    )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
+
+    with pytest.raises(RuntimeError, match="Active library session is unavailable"):
+        service.import_files([asset])
+
+    task_manager.submit_task.assert_not_called()
+    assert errors == []
+
+
+def test_import_files_requires_bound_session_for_album_outside_bound_library(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """A standalone album is rejected instead of building fallback services."""
+
+    library_root = tmp_path / "Library"
+    album_root = tmp_path / "StandaloneAlbum"
+    library_root.mkdir()
+    album_root.mkdir()
+    asset = tmp_path / "photo.jpg"
+    asset.write_bytes(b"data")
+
+    task_manager = mocker.MagicMock()
+    metadata_service = mocker.MagicMock()
+    refresh = mocker.MagicMock()
+
+    service = _create_service(
+        task_manager=task_manager,
+        current_album_root=lambda: album_root,
+        refresh=refresh,
+        metadata_service=metadata_service,
+        library_manager=_FakeLibraryRuntimeController(library_root),
+    )
+
+    with pytest.raises(RuntimeError, match="Active library session is unavailable"):
+        service.import_files([asset])
+
+    task_manager.submit_task.assert_not_called()
 
 
 def test_handle_import_finished_updates_models(

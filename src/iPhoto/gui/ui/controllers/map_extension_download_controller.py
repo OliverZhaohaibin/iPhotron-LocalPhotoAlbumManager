@@ -135,6 +135,13 @@ class MapExtensionDownloadController:
         if do_not_show_checkbox.isChecked():
             self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
 
+    def set_package_root(self, package_root: Path | None) -> None:
+        """Update the active maps package root used for prompt/download checks."""
+
+        if package_root is None:
+            return
+        self._package_root = Path(package_root).resolve()
+
     def start_download(self, *, source: str) -> None:
         del source
         if self._download_inflight:

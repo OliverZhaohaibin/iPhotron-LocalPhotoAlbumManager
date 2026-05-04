@@ -264,18 +264,20 @@ def test_preserve_live_presentation_keeps_existing_motion_during_same_asset_refr
 def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator._library_manager = SimpleNamespace(
+        edit_service=Mock(read_adjustments=Mock(return_value={"Exposure": 0.2}))
+    )
     coordinator._player_view = SimpleNamespace(
         video_area=Mock(rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})),
         image_viewer=Mock(rotate_image_ccw=Mock()),
     )
 
-    with patch(
-        "iPhoto.gui.coordinators.playback_coordinator.sidecar.load_adjustments",
-        return_value={"Exposure": 0.2},
-    ):
-        PlaybackCoordinator._handle_rotate_requested(coordinator, Path("/fake/video.mp4"), True)
+    PlaybackCoordinator._handle_rotate_requested(coordinator, Path("/fake/video.mp4"), True)
 
     coordinator._player_view.video_area.rotate_image_ccw.assert_called_once_with()
+    coordinator._library_manager.edit_service.read_adjustments.assert_called_once_with(
+        Path("/fake/video.mp4")
+    )
     coordinator._adjustment_committer.commit.assert_called_once_with(
         Path("/fake/video.mp4"),
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},
@@ -395,6 +397,110 @@ def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:
 
     assert coordinator._show_face_names is True
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+
+
+def test_set_people_library_root_prefers_bound_library_manager_service() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = playback_coordinator_module.PeopleService()
+    library_root = Path("/fake/library")
+    recreated_service = playback_coordinator_module.PeopleService(
+        library_root,
+        asset_repository=Mock(),
+    )
+    coordinator._library_manager = SimpleNamespace(people_service=recreated_service)
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+
+    PlaybackCoordinator.set_people_library_root(coordinator, library_root)
+
+    assert coordinator._people_service is recreated_service
+    assert coordinator._people_service.asset_repository is not None
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+
+
+def test_refresh_location_extension_state_uses_bound_map_runtime_capabilities() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    location_search_service = object()
+    coordinator._map_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(location_search_available=True),
+        package_root=lambda: Path("/fake/maps"),
+    )
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = location_search_service
+
+    enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
+
+    assert enabled is True
+    assert coordinator._location_search_service is location_search_service
+
+
+def test_refresh_location_extension_state_initializes_search_service_with_runtime_package_root(
+    monkeypatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._map_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(location_search_available=True),
+        package_root=lambda: Path("/fake/maps"),
+    )
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = None
+
+    created_kwargs: dict[str, object] = {}
+
+    class _FakeSearchService:
+        def __init__(self, *args, **kwargs) -> None:
+            del args
+            created_kwargs.update(kwargs)
+
+    monkeypatch.setattr(playback_coordinator_module, "OsmAndSearchService", _FakeSearchService)
+
+    enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
+
+    assert enabled is True
+    assert created_kwargs["package_root"] == Path("/fake/maps")
+
+
+def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unbound(
+    monkeypatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._map_runtime = None
+    coordinator._library_manager = SimpleNamespace(map_runtime=None)
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = None
+
+    fallback_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(location_search_available=True),
+        package_root=lambda: Path("/fallback/maps"),
+    )
+    monkeypatch.setattr(
+        playback_coordinator_module,
+        "SessionMapRuntimeService",
+        lambda: fallback_runtime,
+    )
+
+    created_kwargs: dict[str, object] = {}
+
+    class _FakeSearchService:
+        def __init__(self, *args, **kwargs) -> None:
+            del args
+            created_kwargs.update(kwargs)
+
+    monkeypatch.setattr(playback_coordinator_module, "OsmAndSearchService", _FakeSearchService)
+
+    enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
+
+    assert enabled is True
+    assert coordinator._map_runtime is fallback_runtime
+    assert created_kwargs["package_root"] == Path("/fallback/maps")
 
 
 def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
@@ -687,6 +793,41 @@ def test_refresh_info_panel_does_not_retry_after_session_attempt() -> None:
     coordinator._queue_info_panel_metadata_enrichment.assert_not_called()
 
 
+def test_refresh_info_panel_keeps_download_prompt_when_only_legacy_map_runtime_is_available() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock()
+    coordinator._map_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(
+            display_available=True,
+            location_search_available=False,
+            osmand_extension_available=False,
+        ),
+        package_root=lambda: Path("/fake/maps"),
+    )
+    coordinator._location_search_cache = {}
+    coordinator._location_search_timer = Mock(stop=Mock())
+    coordinator._pending_location_query = ""
+    coordinator._location_search_target_path = None
+    coordinator._location_search_service = None
+    coordinator._queue_info_panel_metadata_enrichment = Mock()
+
+    PlaybackCoordinator._refresh_info_panel(
+        coordinator,
+        {
+            "abs": "/fake/image.jpg",
+            "rel": "image.jpg",
+            "name": "image.jpg",
+            "is_video": False,
+        },
+    )
+
+    coordinator._info_panel.set_location_capability.assert_called_once_with(
+        enabled=False,
+        preview_enabled=False,
+        fallback_text=playback_coordinator_module._LOCATION_EXTENSION_PROMPT,
+    )
+
+
 def test_ready_enrichment_updates_visible_panel_for_current_asset() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._info_panel = Mock(isVisible=Mock(return_value=True))
@@ -886,6 +1027,7 @@ def test_handle_manual_face_submitted_queues_background_worker() -> None:
         requested_box=(10, 20, 30, 40),
         name_or_none="Alice",
         person_id="person-a",
+        people_service=coordinator._people_service,
     )
     fake_pool.start.assert_called_once_with(fake_worker, -1)
 

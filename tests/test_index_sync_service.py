@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.index_sync_service import ensure_links, prune_index_scope
 
 
@@ -36,11 +37,101 @@ def test_prune_index_scope_removes_only_rows_within_scan_prefix(tmp_path: Path) 
         album_a,
         [{"rel": "album-a/keep.jpg", "id": "keep"}],
         library_root=library_root,
+        repository=store,
     )
 
     assert removed == 2
     remaining = {row["rel"] for row in store.read_all(filter_hidden=False)}
     assert remaining == {"album-a/keep.jpg", "album-b/other.jpg"}
+
+
+def test_prune_index_scope_keeps_excluded_trash_rows_during_library_rescan(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    trash_asset = library_root / RECENTLY_DELETED_DIR_NAME / "photo.jpg"
+    trash_asset.parent.mkdir(parents=True)
+    trash_asset.write_bytes(b"trash")
+
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {"rel": "AlbumA/keep.jpg", "id": "keep"},
+            {"rel": "AlbumA/stale.jpg", "id": "stale"},
+            {"rel": f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg", "id": "trash"},
+        ]
+    )
+
+    removed = prune_index_scope(
+        library_root,
+        [{"rel": "AlbumA/keep.jpg", "id": "keep"}],
+        library_root=library_root,
+        repository=store,
+        exclude_globs=[f"**/{RECENTLY_DELETED_DIR_NAME}/**"],
+    )
+
+    assert removed == 1
+    remaining = {row["rel"] for row in store.read_all(filter_hidden=False)}
+    assert remaining == {"AlbumA/keep.jpg", f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"}
+
+
+def test_prune_index_scope_keeps_missing_trash_rows_during_library_rescan(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {"rel": "AlbumA/keep.jpg", "id": "keep"},
+            {"rel": "AlbumA/stale.jpg", "id": "stale"},
+            {"rel": f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg", "id": "trash"},
+        ]
+    )
+
+    removed = prune_index_scope(
+        library_root,
+        [{"rel": "AlbumA/keep.jpg", "id": "keep"}],
+        library_root=library_root,
+        repository=store,
+        exclude_globs=[f"**/{RECENTLY_DELETED_DIR_NAME}/**"],
+    )
+
+    assert removed == 1
+    remaining = {row["rel"] for row in store.read_all(filter_hidden=False)}
+    assert remaining == {"AlbumA/keep.jpg", f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"}
+
+
+def test_prune_index_scope_removes_rows_under_non_trash_excludes_during_library_rescan(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    secret_asset = library_root / "secret" / "photo.jpg"
+    secret_asset.parent.mkdir(parents=True)
+    secret_asset.write_bytes(b"secret")
+
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {"rel": "AlbumA/keep.jpg", "id": "keep"},
+            {"rel": "secret/photo.jpg", "id": "secret"},
+        ]
+    )
+
+    removed = prune_index_scope(
+        library_root,
+        [{"rel": "AlbumA/keep.jpg", "id": "keep"}],
+        library_root=library_root,
+        repository=store,
+        exclude_globs=["secret/**"],
+    )
+
+    assert removed == 1
+    remaining = {row["rel"] for row in store.read_all(filter_hidden=False)}
+    assert remaining == {"AlbumA/keep.jpg"}
 
 
 def test_ensure_links_keeps_db_live_roles_when_derived_snapshot_write_fails(
@@ -80,7 +171,7 @@ def test_ensure_links_keeps_db_live_roles_when_derived_snapshot_write_fails(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
     )
 
-    ensure_links(album_root, rows)
+    ensure_links(album_root, rows, repository=store)
 
     data = {row["rel"]: row for row in store.read_all(filter_hidden=False)}
     assert data["photo.heic"]["live_partner_rel"] == "motion.mov"

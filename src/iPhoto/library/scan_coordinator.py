@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
-from ..cache.index_store import get_global_repository
+from ..bootstrap.library_scan_service import LibraryScanService
 from ..utils.logging import get_logger
 from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
@@ -21,15 +21,25 @@ LOGGER = get_logger()
 class _PairingWorker(QRunnable):
     """Run live-photo pairing off the main thread after a scan completes."""
 
-    def __init__(self, scan_root: Path, library_root: Optional[Path]) -> None:
+    def __init__(
+        self,
+        scan_root: Path,
+        scan_service: LibraryScanService | None = None,
+    ) -> None:
         super().__init__()
         self._scan_root = scan_root
-        self._library_root = library_root
+        self._scan_service = scan_service
 
     def run(self) -> None:
         try:
-            from .. import app as backend  # noqa: PLC0415
-            backend.pair(self._scan_root, library_root=self._library_root)
+            scan_service = self._scan_service
+            if scan_service is None:
+                LOGGER.warning(
+                    "Skipping live photo pairing for %s because no bound scan service is available",
+                    self._scan_root,
+                )
+                return
+            scan_service.pair_album(self._scan_root)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
                 "Failed to persist live photo pairings after scan of %s "
@@ -40,7 +50,18 @@ class _PairingWorker(QRunnable):
 
 
 class ScanCoordinatorMixin:
-    """Mixin providing scan scheduling and progress for LibraryManager."""
+    """Mixin providing scan scheduling and progress for LibraryRuntimeController."""
+
+    def start_session_scan(
+        self,
+        root: Path,
+        *,
+        include: Iterable[str],
+        exclude: Iterable[str],
+    ) -> None:
+        """Start a scan through the session-facing runtime controller surface."""
+
+        self.start_scanning(root, include, exclude)
 
     def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
         """Start a background scan for the given root directory.
@@ -72,12 +93,23 @@ class ScanCoordinatorMixin:
         self._live_scan_buffer.clear()
 
         # Pass library root to scanner so all assets go to global database
-        worker = ScannerWorker(root, include, exclude, signals, library_root=self._root)
+        worker = ScannerWorker(
+            root,
+            include,
+            exclude,
+            signals,
+            library_root=self._root,
+            scan_service=getattr(self, "_scan_service", None),
+        )
         self._current_scanner_worker = worker
         self._face_scan_status_message = None
         self.faceScanStatusChanged.emit("")
         face_library_root = self._root if self._root is not None else root
-        face_worker = FaceScanWorker(face_library_root, self)
+        face_worker = FaceScanWorker(
+            face_library_root,
+            self,
+            people_service=getattr(self, "_people_service", None),
+        )
         face_worker.statusChanged.connect(self._on_face_scan_status_changed)
         face_worker.finished.connect(self._on_face_scan_finished)
         self._current_face_scanner = face_worker
@@ -151,7 +183,7 @@ class ScanCoordinatorMixin:
         if query_root is None:
             return []
 
-        db_rows = self._read_live_rows_from_store(query_root, library_root)
+        db_rows = self._read_live_rows_from_query_service(query_root, library_root)
         if not db_rows:
             return []
         return self._rewrite_rows_relative_to(db_rows, query_root, base_root)
@@ -177,33 +209,23 @@ class ScanCoordinatorMixin:
             return relative_to
         return None
 
-    def _read_live_rows_from_store(
+    def _read_live_rows_from_query_service(
         self,
         query_root: Path,
         library_root: Path,
     ) -> List[Dict]:
         try:
-            store = get_global_repository(library_root)
-            try:
-                album_path = query_root.resolve().relative_to(library_root.resolve()).as_posix()
-            except (OSError, ValueError):
-                try:
-                    album_path = query_root.relative_to(library_root).as_posix()
-                except ValueError:
-                    album_path = None
-
-            if album_path in (None, "", "."):
-                rows = store.read_all(sort_by_date=True, filter_hidden=True)
-            else:
-                rows = store.read_album_assets(
-                    album_path,
-                    include_subalbums=True,
-                    sort_by_date=True,
-                    filter_hidden=True,
-                )
+            query_service = getattr(self, "asset_query_service", None)
+            if query_service is None:
+                return []
+            rows = query_service.read_library_relative_asset_rows(
+                query_root,
+                sort_by_date=True,
+                filter_hidden=True,
+            )
             return [dict(row) for row in rows]
         except Exception:
-            LOGGER.debug("Failed to read live scan rows from store", exc_info=True)
+            LOGGER.debug("Failed to read live scan rows from query service", exc_info=True)
             return []
 
     def _rewrite_rows_relative_to(
@@ -287,15 +309,13 @@ class ScanCoordinatorMixin:
         if not chunk:
             return
 
-        self._geotagged_assets_cache = None
-        self._geotagged_assets_cache_root = None
+        self.invalidate_geotagged_assets_cache()
         if self._current_face_scanner is not None:
             self._current_face_scanner.enqueue_rows(chunk)
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
-        self._geotagged_assets_cache = None
-        self._geotagged_assets_cache_root = None
+        self.invalidate_geotagged_assets_cache()
 
         # Clear worker reference before downstream listeners react so a completed
         # scan does not still appear in-flight while final post-processing runs.
@@ -321,12 +341,11 @@ class ScanCoordinatorMixin:
 
         # Persist Live Photo pairings once a scan completes so the database and
         # links.json reflect the latest scan results.
+        scan_service = worker.scan_service
         try:
-            from .. import app as backend
-            backend._prune_index_scope(root, rows, library_root=self._root)
-            backend.pair(root, library_root=self._root)
+            scan_service.finalize_scan_result(root, rows, pair_live=False)
         except Exception as exc:
-            LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
+            LOGGER.warning("Failed to persist scan finalization for %s: %s", root, exc)
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.
@@ -334,7 +353,7 @@ class ScanCoordinatorMixin:
 
         # Persist live-photo pairings in the background to avoid blocking the
         # main thread while downstream listeners start refreshing.
-        self._scan_thread_pool.start(_PairingWorker(root, self._root))
+        self._scan_thread_pool.start(_PairingWorker(root, scan_service))
 
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

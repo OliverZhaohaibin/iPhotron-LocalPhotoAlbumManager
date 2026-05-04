@@ -10,17 +10,14 @@ import copy
 import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from ....cache.index_store import get_global_repository
+from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ....config import RECENTLY_DELETED_DIR_NAME
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
 from ....utils.pathutils import ensure_work_dir
 from ....utils.image_loader import qimage_from_bytes
-
-if TYPE_CHECKING:
-    from ....cache.index_store.repository import AssetRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -116,6 +113,36 @@ def adjust_rel_for_album(row: Dict[str, object], album_path: Optional[str]) -> D
 
 def normalize_featured(featured: Iterable[str]) -> Set[str]:
     return {str(entry) for entry in featured}
+
+
+def require_query_service(
+    effective_index_root: Path,
+    asset_query_service: LibraryAssetQueryService | None,
+) -> LibraryAssetQueryService:
+    """Return a query service for *effective_index_root*.
+
+    Asset loading is session-only in the vNext runtime.
+    """
+
+    if asset_query_service is None:
+        raise RuntimeError(
+            "Active library session is unavailable; asset loading requires a "
+            "bound LibrarySession."
+        )
+
+    try:
+        bound_root = Path(asset_query_service.library_root)
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError(
+            "Bound asset query service is misconfigured for the active LibrarySession."
+        ) from exc
+
+    if not _paths_equal(bound_root, effective_index_root):
+        raise RuntimeError(
+            "Bound asset query service does not match the requested library root."
+        )
+
+    return asset_query_service
 
 
 def _determine_size(row: Dict[str, object], is_image: bool) -> object:
@@ -265,7 +292,7 @@ def build_asset_entry(
     root: Path,
     row: Dict[str, object],
     featured: Set[str],
-    store: Optional["AssetRepository"] = None,
+    store: object | None = None,
     path_exists: Optional[Callable[[Path], bool]] = None,
 ) -> Optional[Dict[str, object]]:
     rel = str(row.get("rel"))
@@ -392,6 +419,7 @@ def compute_asset_rows(
     featured: Iterable[str],
     filter_params: Optional[Dict[str, object]] = None,
     library_root: Optional[Path] = None,
+    asset_query_service: LibraryAssetQueryService | None = None,
 ) -> Tuple[List[Dict[str, object]], int]:
     """
     Assemble asset entries for grid views, applying optional filtering.
@@ -426,30 +454,41 @@ def compute_asset_rows(
     featured_set = normalize_featured(featured)
 
     # Determine the effective index root and album filter using helper
-    effective_index_root, album_path = compute_album_path(root, library_root)
+    query_library_root = library_root
+    if query_library_root is None and asset_query_service is not None:
+        query_library_root = asset_query_service.library_root
+    effective_index_root, album_path = compute_album_path(root, query_library_root)
 
-    if album_path is None and library_root is not None:
+    if album_path is None and query_library_root is not None:
         params.setdefault("exclude_path_prefix", RECENTLY_DELETED_DIR_NAME)
 
-    store = get_global_repository(effective_index_root)
+    query_service = require_query_service(
+        effective_index_root,
+        asset_query_service,
+    )
+
+    location_writer = query_service.location_cache_writer(root)
     dir_cache: Dict[Path, Optional[Set[str]]] = {}
 
     def _path_exists(path: Path) -> bool:
         return _cached_path_exists(path, dir_cache)
 
-    index_rows = list(store.read_geometry_only(
+    index_rows = list(query_service.read_geometry_rows(
+        root,
         filter_params=params,
         sort_by_date=True,
-        album_path=album_path,
-        include_subalbums=True,
     ))
     entries: List[Dict[str, object]] = []
     # Filtering for videos, live photos, and favorites is now performed at the database query level
     # via filter_params in store.read_geometry_only, so no post-processing is needed here.
     for row in index_rows:
-        # Adjust rel path to be relative to the album root
-        adjusted_row = adjust_rel_for_album(row, album_path)
-        entry = build_asset_entry(root, adjusted_row, featured_set, store, path_exists=_path_exists)
+        entry = build_asset_entry(
+            root,
+            row,
+            featured_set,
+            location_writer,
+            path_exists=_path_exists,
+        )
         if entry is not None:
             entries.append(entry)
     return entries, len(entries)
@@ -476,3 +515,10 @@ def _safe_signal_emit(signal_func: Callable, *args) -> bool:
     except RuntimeError:
         # Signal source has been deleted - this is expected during rapid switching
         return False
+
+
+def _paths_equal(first: Path, second: Path) -> bool:
+    try:
+        return Path(first).resolve() == Path(second).resolve()
+    except OSError:
+        return Path(first) == Path(second)

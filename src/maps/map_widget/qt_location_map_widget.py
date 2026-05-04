@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QWidget
 
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
+from .drag_cursor import DragCursorManager
 from .map_renderer import CityAnnotation
 
 TILE_SIZE = 256
@@ -83,6 +84,7 @@ class QtLocationMapWidget(QQuickWidget):
         self._center_y = 0.5
         self._dragging = False
         self._last_mouse_pos = QPointF()
+        self._drag_cursor = DragCursorManager()
 
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         self.setMouseTracking(True)
@@ -143,7 +145,7 @@ class QtLocationMapWidget(QQuickWidget):
         return normalized_to_lonlat(self._center_x, self._center_y)
 
     def shutdown(self) -> None:
-        return None
+        self._reset_drag_cursor()
 
     def map_backend_metadata(self) -> MapBackendMetadata:
         return self.BACKEND_METADATA
@@ -208,7 +210,7 @@ class QtLocationMapWidget(QQuickWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self._last_mouse_pos = event.position()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._set_drag_cursor()
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             event.accept()
             return
@@ -216,6 +218,7 @@ class QtLocationMapWidget(QQuickWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
+            self._set_drag_cursor()
             current_pos = event.position()
             delta = current_pos - self._last_mouse_pos
             self._last_mouse_pos = current_pos
@@ -234,7 +237,7 @@ class QtLocationMapWidget(QQuickWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
             self._dragging = False
-            self.unsetCursor()
+            self._reset_drag_cursor()
             self.panFinished.emit()
             event.accept()
             return
@@ -276,6 +279,12 @@ class QtLocationMapWidget(QQuickWidget):
     def _emit_view_change(self) -> None:
         self.viewChanged.emit(float(self._center_x), float(self._center_y), float(self._zoom))
 
+    def _set_drag_cursor(self) -> None:
+        self._drag_cursor.set_cursor(Qt.CursorShape.ClosedHandCursor, (self,))
+
+    def _reset_drag_cursor(self) -> None:
+        self._drag_cursor.reset((self,))
+
     def _sync_map_camera(self) -> None:
         if self._map_object is None:
             return
@@ -306,4 +315,3 @@ __all__ = [
     "lonlat_to_normalized",
     "normalized_to_lonlat",
 ]
-

@@ -10,10 +10,10 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, QObject, Qt
 from PySide6.QtGui import QIcon
 
-from ....library.manager import LibraryManager
+from ....library.runtime_controller import LibraryRuntimeController
 from ....library.tree import AlbumNode
-from ....people.service import PeopleService
 from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
+from ...services.people_service_resolver import resolve_people_service
 from ..icon import load_icon
 from ..palette import SIDEBAR_ICON_COLOR_HEX
 
@@ -107,7 +107,7 @@ class AlbumTreeModel(QAbstractItemModel):
         "recently deleted": "trash",
     }
 
-    def __init__(self, library: LibraryManager, parent: QObject | None = None) -> None:
+    def __init__(self, library: LibraryRuntimeController, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._library = library
         self._pinned_service: PinnedItemsService | None = None
@@ -354,15 +354,19 @@ class AlbumTreeModel(QAbstractItemModel):
         needs_people = any(pinned_item.kind == "person" for pinned_item in pinned_items)
         needs_groups = any(pinned_item.kind == "group" for pinned_item in pinned_items)
         if needs_people or needs_groups:
-            people_service = PeopleService(library_root)
-            cluster_summaries = people_service.list_clusters()
-            if needs_people:
-                person_lookup = {summary.person_id: summary for summary in cluster_summaries}
-            if needs_groups:
-                group_lookup = {
-                    summary.group_id: summary
-                    for summary in people_service.list_groups(summaries=cluster_summaries)
-                }
+            people_service = resolve_people_service(
+                self._library,
+                library_root=library_root,
+            )
+            if people_service is not None:
+                cluster_summaries = people_service.list_clusters()
+                if needs_people:
+                    person_lookup = {summary.person_id: summary for summary in cluster_summaries}
+                if needs_groups:
+                    group_lookup = {
+                        summary.group_id: summary
+                        for summary in people_service.list_groups(summaries=cluster_summaries)
+                    }
 
         for pinned_item in pinned_items:
             item = self._create_pinned_item(
@@ -390,11 +394,7 @@ class AlbumTreeModel(QAbstractItemModel):
             except (TypeError, ValueError):
                 return None
             album = album_lookup.get(album_path)
-            title = (
-                pinned_item.label
-                if pinned_item.custom_label
-                else (album.title if album is not None else pinned_item.label)
-            )
+            title = album.title if album is not None else pinned_item.label
             return AlbumTreeItem(
                 title,
                 NodeType.PINNED_ALBUM,

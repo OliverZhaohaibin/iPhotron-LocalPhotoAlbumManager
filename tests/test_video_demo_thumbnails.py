@@ -550,7 +550,8 @@ class TestExtractSingleFrame:
 
     def test_windows_low_priority(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """On Windows, BELOW_NORMAL_PRIORITY_CLASS is passed to Popen."""
-        out_path = str(tmp_path / "thumb_0000.jpg")
+        output_file = tmp_path / "thumb_0000.jpg"
+        out_path = str(output_file)
         monkeypatch.setattr(os, "name", "nt")
 
         mock_startupinfo = MagicMock()
@@ -563,7 +564,7 @@ class TestExtractSingleFrame:
             proc_mock = MagicMock()
             proc_mock.wait.return_value = 0
             mock_popen.return_value = proc_mock
-            Path(out_path).write_bytes(b"\xff\xd8\xff")
+            output_file.write_bytes(b"\xff\xd8\xff")
 
             args = ("video.mp4", 0.0, 42, out_path, 80)
             _extract_single_frame(args)

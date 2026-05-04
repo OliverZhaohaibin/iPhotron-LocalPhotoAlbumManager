@@ -20,12 +20,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QAction
 
-from iPhoto import app as backend
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
-from iPhoto.application.services.asset_service import AssetService
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
-from iPhoto.di.container import DependencyContainer
-from iPhoto.events.bus import EventBus
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
@@ -45,11 +41,15 @@ from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeControl
 from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.services.location_trash_navigation_service import (
+    LocationTrashNavigationService,
+)
+from iPhoto.gui.services.people_service_resolver import resolve_people_service
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
-from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.service import PeopleService
 from maps.map_sources import supports_map_extension_download
 
@@ -67,12 +67,10 @@ class MainCoordinator(QObject):
         self,
         window: MainWindow,
         context: RuntimeEntryContract,
-        container: DependencyContainer | None = None,
     ) -> None:
         super().__init__(window)
         self._window = window
         self._context = context
-        self._container = container if container is not None else context.container
         # facade reference kept for signal wiring as some systems still emit through it
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
@@ -80,37 +78,42 @@ class MainCoordinator(QObject):
         self._map_extension_download = MapExtensionDownloadController(
             window,
             context,
-            package_root=Path(__file__).resolve().parents[3] / "maps",
+            package_root=self._resolve_map_package_root(self._map_runtime()),
         )
         if hasattr(window.ui, "download_map_extension_action"):
             window.ui.download_map_extension_action.setEnabled(supports_map_extension_download())
 
-        # Resolve Services
-        if self._container:
-            self._event_bus = self._container.resolve(EventBus)
-            self._asset_service = self._container.resolve(AssetService)
-        else:
-            raise RuntimeError("DependencyContainer is required for MainCoordinator")
+        self._event_bus = context.event_bus
+        edit_service_getter = self._edit_service
+        asset_state_service = self._asset_state_service()
 
         # --- ViewModels Setup ---
-        lib_root = context.library.root()
+        lib_root = self._library_root()
         self._context.asset_runtime.bind_library_root(lib_root)
         self._asset_list_vm = GalleryListModelAdapter.create(
-            repository=self._context.asset_runtime.repository,
+            asset_query_service=self._asset_query_service(),
             thumbnail_service=self._context.asset_runtime.thumbnail_service,
+            edit_service_getter=edit_service_getter,
             library_root=lib_root,
             parent=window.ui.grid_view,
         )
         self._gallery_store = self._asset_list_vm.store
         self._media_session = MediaSelectionSession()
         self._media_session.bind_collection(self._gallery_store)
-        self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
+        bound_people_service = self._people_service(library_root=lib_root)
+        self._playback_people_service = bound_people_service or PeopleService()
         if hasattr(window.ui, "people_page"):
-            window.ui.people_page.set_library_root(lib_root)
+            if bound_people_service is not None and hasattr(window.ui.people_page, "set_people_service"):
+                window.ui.people_page.set_people_service(self._playback_people_service)
+            else:
+                window.ui.people_page.set_library_root(lib_root)
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
-        self._playback_people_service = PeopleService(lib_root)
-        self._pinned_items_service = PinnedItemsService(context.settings, self)
+        self._pinned_items_service = PinnedItemsService(
+            context.settings,
+            people_service_getter=self._people_service,
+            parent=self,
+        )
         window.ui.sidebar.set_pinned_service(self._pinned_items_service)
         if hasattr(window.ui, "people_page"):
             window.ui.people_page.set_pinned_service(self._pinned_items_service)
@@ -128,12 +131,17 @@ class MainCoordinator(QObject):
 
         # 1. View Router
         self._view_router = ViewRouter(window.ui)
+        self._location_trash_navigation_service = LocationTrashNavigationService(
+            library_manager_getter=lambda: context.library,
+            parent=self,
+        )
 
         self._gallery_vm = GalleryViewModel(
             store=self._gallery_store,
             context=context,
             facade=context.facade,
-            asset_service=self._asset_service,
+            asset_state_service=asset_state_service,
+            location_trash_service=self._location_trash_navigation_service,
         )
 
         # 2. Navigation Coordinator
@@ -149,13 +157,15 @@ class MainCoordinator(QObject):
             asset_vm=self._asset_list_vm,
             pause_watcher=self._navigation.pause_library_watcher,
             resume_watcher=self._navigation.resume_library_watcher,
+            edit_service_getter=edit_service_getter,
             parent=self,
         )
         self._detail_vm = DetailViewModel(
             collection_store=self._gallery_store,
             media_session=self._media_session,
-            asset_service=self._asset_service,
+            asset_state_service=asset_state_service,
             adjustment_commit_port=self._adjustment_committer,
+            edit_service_getter=edit_service_getter,
         )
 
         # 3. Playback Coordinator
@@ -167,6 +177,7 @@ class MainCoordinator(QObject):
             window.ui.video_area,
             window.ui.player_placeholder,
             window.ui.live_badge,
+            edit_service_getter=edit_service_getter,
         )
         self._header_controller = HeaderController(
             window.ui.location_label,
@@ -198,6 +209,7 @@ class MainCoordinator(QObject):
             people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
+            map_runtime=self._map_runtime(),
         )
 
         # Inject optional dependencies into Playback
@@ -208,9 +220,15 @@ class MainCoordinator(QObject):
         )
         # Manually attach info panel if available
         if hasattr(window.ui, "info_panel"):
+            window.ui.info_panel.set_map_runtime(self._map_runtime())
             self._playback.set_info_panel(window.ui.info_panel)
             window.ui.info_panel.downloadMapExtensionRequested.connect(
                 lambda: self._map_extension_download.start_download(source="info_panel")
+            )
+        if hasattr(window.ui, "map_view"):
+            window.ui.map_view.set_map_runtime(self._map_runtime())
+            window.ui.map_view.set_map_interaction_service(
+                self._map_interaction_service()
             )
 
         # 4. Theme Controller
@@ -227,10 +245,12 @@ class MainCoordinator(QObject):
             self._navigation,
             self._media_session,
             self._adjustment_committer,
+            edit_service_getter,
         )
 
         # --- Legacy Controllers ---
         self._dialog = DialogController(window, context, window.ui.status_bar)
+        self._facade.register_restore_prompt(self._dialog.prompt_restore_to_root)
         self._status_bar = StatusBarController(
             window.ui.status_bar,
             window.ui.progress_bar,
@@ -248,6 +268,7 @@ class MainCoordinator(QObject):
             copy_file_action=window.ui.share_action_copy_file,
             copy_path_action=window.ui.share_action_copy_path,
             reveal_action=window.ui.share_action_reveal_file,
+            edit_service_getter=edit_service_getter,
         )
         self._share_controller.restore_preference()
 
@@ -287,7 +308,10 @@ class MainCoordinator(QObject):
         self._filmstrip_delegate = AssetGridDelegate(window.ui.filmstrip_view, filmstrip_mode=True)
         window.ui.filmstrip_view.setItemDelegate(self._filmstrip_delegate)
 
-        self._preview_controller = PreviewController(window.ui.preview_window)
+        self._preview_controller = PreviewController(
+            window.ui.preview_window,
+            edit_service_getter=edit_service_getter,
+        )
         self._preview_controller.bind_view(window.ui.grid_view)
 
         self._selection_controller = SelectionController(
@@ -378,6 +402,8 @@ class MainCoordinator(QObject):
             self._facade.cancel_active_scans()
         if self._context and self._context.library:
             self._context.library.shutdown()
+        if self._context:
+            self._context.close_library()
 
         # 2. Stop playback (video/audio)
         if self._playback:
@@ -386,8 +412,6 @@ class MainCoordinator(QObject):
         # 3. Shutdown other coordinators if they have cleanup logic
         if self._edit:
             self._edit.shutdown()
-
-        self._context.asset_runtime.shutdown()
 
         if hasattr(self._window.ui, "preview_window"):
             try:
@@ -413,12 +437,19 @@ class MainCoordinator(QObject):
     def _connect_signals(self) -> None:
         """Connect application signals."""
         ui = self._window.ui
+        updates = self._facade.library_updates
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
         self._context.library.albumRenamed.connect(self._on_album_renamed)
-        self._facade.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
-        self._facade.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        # Library watcher rescans still emit through the bound LibraryRuntimeController,
+        # while facade-initiated rescans emit through LibraryUpdateService.
+        self._context.library.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
+        self._context.library.scanFinished.connect(self._gallery_store.handle_scan_finished)
         self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
         self._context.library.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
+        updates.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
+        updates.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        updates.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
+        updates.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
         self._gallery_vm.message_requested.connect(self._status_bar.show_message)
 
         # Grid interactions
@@ -500,7 +531,6 @@ class MainCoordinator(QObject):
         # Status Bar Connections (Restored)
         # Facade Signals -> Status Bar
         # Note: AppFacade exposes library_updates (ScannerSignals)
-        updates = self._facade.library_updates
         updates.scanProgress.connect(self._status_bar.handle_scan_progress)
         updates.scanFinished.connect(self._status_bar.handle_scan_finished)
         self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)
@@ -544,21 +574,111 @@ class MainCoordinator(QObject):
         # coordinators are initialised.  Do not add QShortcut instances here.
 
     def _on_library_tree_updated(self) -> None:
-        root = self._context.library.root()
+        root = self._library_root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
         self._context.asset_runtime.bind_library_root(root)
-        self._asset_service.set_repository(self._context.asset_runtime.repository)
-        self._asset_list_vm.rebind_repository(self._context.asset_runtime.repository, root)
+        self._asset_list_vm.rebind_asset_query_service(
+            self._asset_query_service(),
+            root,
+        )
+        asset_state_service = self._asset_state_service()
+        self._gallery_vm.bind_asset_state_service(asset_state_service)
+        self._detail_vm.bind_asset_state_service(asset_state_service)
         self._gallery_vm.on_library_tree_updated()
         window = getattr(self, "_window", None)
         ui = getattr(window, "ui", None)
         people_page = getattr(ui, "people_page", None)
+        bound_people_service = self._people_service(library_root=root)
+        if bound_people_service is not None:
+            self._playback_people_service = bound_people_service
         if people_page is not None:
-            people_page.set_library_root(root)
+            if bound_people_service is not None and hasattr(people_page, "set_people_service"):
+                people_page.set_people_service(bound_people_service)
+            else:
+                people_page.set_library_root(root)
             people_page.set_status_message(self._context.library.face_scan_status_message())
+        map_runtime = self._map_runtime()
+        map_interaction_service = self._map_interaction_service()
+        self._map_extension_download.set_package_root(
+            self._resolve_map_package_root(map_runtime)
+        )
+        if ui is not None and hasattr(ui, "map_view"):
+            ui.map_view.set_map_runtime(map_runtime)
+            ui.map_view.set_map_interaction_service(map_interaction_service)
+        if ui is not None and hasattr(ui, "info_panel"):
+            ui.info_panel.set_map_runtime(map_runtime)
         playback = getattr(self, "_playback", None)
         if playback is not None:
-            playback.set_people_library_root(root)
+            playback.set_map_runtime(map_runtime)
+            if bound_people_service is not None and hasattr(playback, "set_people_service"):
+                playback.set_people_service(bound_people_service)
+            else:
+                playback.set_people_library_root(root)
+
+    def _active_session(self):
+        return getattr(self._context, "library_session", None)
+
+    def _library_root(self) -> Path | None:
+        session = self._active_session()
+        if session is not None:
+            return getattr(session, "library_root", None)
+        return self._context.library.root()
+
+    def _asset_query_service(self):
+        session = self._active_session()
+        if session is not None:
+            return getattr(session, "asset_queries", None)
+        return getattr(self._context.library, "asset_query_service", None)
+
+    def _asset_state_service(self):
+        session = self._active_session()
+        if session is not None:
+            return getattr(session, "asset_state", None)
+        return getattr(self._context.library, "asset_state_service", None)
+
+    def _edit_service(self):
+        session = self._active_session()
+        if session is not None:
+            return getattr(session, "edit", None)
+        return getattr(self._context.library, "edit_service", None)
+
+    def _people_service(self, library_root: Path | None = None):
+        session = self._active_session()
+        session_root = getattr(session, "library_root", None) if session is not None else None
+        if session is not None and (library_root is None or session_root == library_root):
+            return getattr(session, "people", None)
+        return resolve_people_service(
+            self._context.library,
+            library_root=library_root,
+        )
+
+    def _map_runtime(self):
+        session = self._active_session()
+        if session is not None:
+            return getattr(session, "maps", None)
+        return getattr(self._context.library, "map_runtime", None)
+
+    def _map_interaction_service(self):
+        session = self._active_session()
+        if session is not None:
+            return getattr(session, "map_interactions", None)
+        return getattr(self._context.library, "map_interaction_service", None)
+
+    @staticmethod
+    def _resolve_map_package_root(map_runtime: object | None) -> Path:
+        package_root_getter = getattr(map_runtime, "package_root", None)
+        if callable(package_root_getter):
+            try:
+                package_root = package_root_getter()
+            except Exception:
+                package_root = None
+            if package_root is not None:
+                return Path(package_root).resolve()
+
+        package_root = getattr(map_runtime, "_package_root", None)
+        if package_root is not None:
+            return Path(package_root).resolve()
+        return Path(__file__).resolve().parents[3] / "maps"
 
     def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
         self._pinned_items_service.remap_album_path(
@@ -635,34 +755,14 @@ class MainCoordinator(QObject):
         self._media_failure_cleanup_paths.add(path_key)
         try:
             self._dialog.show_error(f"File not found or unreadable: {path.name}\n\n{message}")
-
-            repository = self._context.asset_runtime.repository
-            asset = repository.get_by_path(path)
-            if asset is None:
+            facade = getattr(self, "_facade", None)
+            updates = getattr(facade, "library_updates", None)
+            if updates is None:
                 return
 
-            repository.delete(asset.id)
-
-            library_root = self._context.library.root()
-            pair_root: Path | None = None
-            if library_root is not None:
-                try:
-                    path.resolve().relative_to(library_root.resolve())
-                except (OSError, ValueError):
-                    pair_root = None
-                else:
-                    pair_root = path.parent if path.parent != library_root else library_root
-            if pair_root is not None and library_root is not None:
-                try:
-                    backend.pair(pair_root, library_root=library_root)
-                except Exception:  # noqa: BLE001 - best-effort derived snapshot refresh
-                    self._logger.warning(
-                        "Failed to refresh live pairing after removing %s",
-                        path,
-                        exc_info=True,
-                    )
-
-            self._gallery_store.reload_current_selection()
+            refresh_root = updates.handle_media_load_failure(path)
+            if refresh_root is not None:
+                self._gallery_store.reload_current_selection()
         finally:
             self._media_failure_cleanup_paths.discard(path_key)
 
@@ -723,7 +823,41 @@ class MainCoordinator(QObject):
         self._view_router.show_gallery()
 
     def open_album_from_path(self, path: Path):
-        self._navigation.open_album(path)
+        target = Path(path).expanduser()
+        if not self._ensure_session_for_open_album(target):
+            return
+        self._navigation.open_album(target)
+
+    def _ensure_session_for_open_album(self, path: Path) -> bool:
+        """Ensure standalone album opens have a session-bound query surface."""
+
+        if not path.exists() or not path.is_dir():
+            return True
+
+        current_root = self._library_root()
+        if current_root is not None and self._path_is_descendant(path, current_root):
+            return True
+
+        open_library = getattr(self._context, "open_library", None)
+        if not callable(open_library):
+            return True
+
+        try:
+            open_library(path)
+        except Exception as exc:
+            self._facade.errorRaised.emit(str(exc))
+            return False
+
+        self._on_library_tree_updated()
+        return True
+
+    @staticmethod
+    def _path_is_descendant(path: Path, root: Path) -> bool:
+        try:
+            Path(path).resolve().relative_to(Path(root).resolve())
+        except (OSError, ValueError):
+            return False
+        return True
 
     def _restore_preferences(self) -> None:
         """Restore UI preferences for wheel action and volume."""

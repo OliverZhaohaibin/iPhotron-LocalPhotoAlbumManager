@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional, Set
+from typing import Callable, Optional, Set
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QStackedWidget, QWidget
 
+from ....application.ports import EditServicePort
 from ....gui.detail_profile import log_detail_profile
 from ....utils import image_loader
 from ....core.color_resolver import compute_color_statistics
-from ....io import sidecar
 from ..widgets.gl_image_viewer import GLImageViewer
 from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
@@ -36,11 +36,13 @@ class _AdjustedImageWorker(QRunnable):
         self,
         source: Path,
         signals: _AdjustedImageSignals,
+        edit_service: EditServicePort | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
         self._source = source
         self._signals = signals
+        self._edit_service = edit_service
         # The worker always decodes the original frame at full fidelity.  The
         # GUI thread performs any downscaling so zooming and full-screen views
         # can leverage every available pixel.
@@ -72,18 +74,19 @@ class _AdjustedImageWorker(QRunnable):
 
         try:
             adjustments_started = time.perf_counter()
-            raw_adjustments = sidecar.load_adjustments(self._source)
-            stats = compute_color_statistics(image) if raw_adjustments else None
-            adjustments = sidecar.resolve_render_adjustments(
-                raw_adjustments,
-                color_stats=stats,
-            )
+            adjustments = {}
+            if self._edit_service is not None and self._edit_service.sidecar_exists(self._source):
+                stats = compute_color_statistics(image)
+                adjustments = self._edit_service.describe_adjustments(
+                    self._source,
+                    color_stats=stats,
+                ).resolved_adjustments
             log_detail_profile(
                 "still_worker",
                 "adjustments",
                 (time.perf_counter() - adjustments_started) * 1000.0,
                 path=self._source.name,
-                adjustments=len(raw_adjustments),
+                adjustments=len(adjustments),
             )
         except Exception as exc:  # pragma: no cover - filesystem errors are rare
             self._signals.failed.emit(self._source, str(exc))
@@ -118,6 +121,7 @@ class PlayerViewController(QObject):
         video_area: VideoArea,
         placeholder: QWidget,
         live_badge: LiveBadge,
+        edit_service_getter: Callable[[], EditServicePort | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         """Store references to the widgets composing the player area."""
@@ -128,6 +132,7 @@ class PlayerViewController(QObject):
         self._video_area = video_area
         self._placeholder = placeholder
         self._live_badge = live_badge
+        self._edit_service_getter = edit_service_getter
         self._image_viewer_index = player_stack.indexOf(image_viewer)
         self._image_viewer.replayRequested.connect(self.liveReplayRequested)
         self._pool = QThreadPool.globalInstance()
@@ -277,7 +282,8 @@ class PlayerViewController(QObject):
             self._image_viewer.set_image(None, {})
 
         signals = _AdjustedImageSignals()
-        worker = _AdjustedImageWorker(source, signals)
+        edit_service = self._edit_service_getter() if self._edit_service_getter else None
+        worker = _AdjustedImageWorker(source, signals, edit_service=edit_service)
         self._active_workers.add(worker)
 
         signals.completed.connect(self._on_adjusted_image_ready)

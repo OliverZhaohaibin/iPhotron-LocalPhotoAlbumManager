@@ -36,6 +36,9 @@ class DummyLibrary:
     def start_scanning(self, root: Path, include, exclude) -> None:
         self.started.append((Path(root), list(include), list(exclude)))
 
+    def start_session_scan(self, root: Path, *, include, exclude) -> None:
+        self.start_scanning(root, include, exclude)
+
 
 class FakeScanService:
     def __init__(self, library_root: Path | None = None) -> None:
@@ -468,6 +471,46 @@ def test_handle_media_load_failure_falls_back_to_standalone_lifecycle_service(
     assert created == [(album_root, None)]
     assert fallback_lifecycle.media_failures == [asset_path]
     assert errors == []
+
+
+def test_handle_media_load_failure_uses_standalone_for_album_outside_bound_library(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    lib_root = tmp_path / "Library"
+    album_root = tmp_path / "Standalone"
+    nested_root = album_root / "nested"
+    asset_path = nested_root / "missing.mov"
+    lib_root.mkdir()
+    nested_root.mkdir(parents=True)
+    bound_lifecycle = FakeLifecycleService(lib_root)
+    fallback_lifecycle = FakeLifecycleService(album_root)
+    created: list[tuple[Path, object | None]] = []
+
+    def _create_lifecycle(root: Path, *, scan_service=None):
+        created.append((Path(root), scan_service))
+        return fallback_lifecycle
+
+    service = lus.LibraryUpdateService(
+        task_manager=DummyTaskManager(),
+        current_album_getter=lambda: DummyAlbum(album_root),
+        library_manager_getter=lambda: DummyLibrary(
+            lib_root,
+            lifecycle_service=bound_lifecycle,
+        ),
+    )
+    monkeypatch.setattr(
+        lus,
+        "create_standalone_asset_lifecycle_service",
+        _create_lifecycle,
+    )
+
+    refreshed = service.handle_media_load_failure(asset_path)
+
+    assert refreshed == album_root
+    assert created == [(album_root, None)]
+    assert fallback_lifecycle.media_failures == [asset_path]
+    assert bound_lifecycle.media_failures == []
 
 
 def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:

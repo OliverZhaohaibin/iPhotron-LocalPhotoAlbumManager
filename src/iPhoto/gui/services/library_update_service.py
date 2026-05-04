@@ -168,9 +168,13 @@ class LibraryUpdateService(QObject):
         # scanFinished subscribers that have not been migrated to this service.
         library = self._library_manager()
         if library is not None and library_root is not None:
-            start_scanning = getattr(library, "start_scanning", None)
-            if callable(start_scanning):
-                start_scanning(scan_root, include, exclude)
+            start_session_scan = getattr(library, "start_session_scan", None)
+            if callable(start_session_scan):
+                start_session_scan(
+                    scan_root,
+                    include=include,
+                    exclude=exclude,
+                )
                 return
 
         self._task_runner.start_scan(
@@ -212,15 +216,31 @@ class LibraryUpdateService(QObject):
         target = Path(path)
         library = self._library_manager()
         library_root = library.root() if library is not None else None
-        scan_service = getattr(library, "scan_service", None) if library is not None else None
-        repair_root = library_root or self._standalone_missing_asset_root(target)
+        uses_bound_library = (
+            library is not None
+            and library_root is not None
+            and self._path_is_descendant(target, library_root)
+        )
+        repair_root = (
+            library_root
+            if uses_bound_library
+            else self._standalone_missing_asset_root(target)
+        )
+        scan_service = (
+            bound_scan_service(
+                library,
+                library_root=library_root,
+            )
+            if uses_bound_library
+            else None
+        )
 
         lifecycle_service = (
             bound_asset_lifecycle_service(
                 library,
                 library_root=library_root,
             )
-            if library_root is not None
+            if uses_bound_library
             else None
         )
         lifecycle_root = getattr(lifecycle_service, "library_root", None)
@@ -237,7 +257,7 @@ class LibraryUpdateService(QObject):
             )
 
         refresh_root = lifecycle_service.repair_missing_asset(target)
-        if refresh_root is not None and library_root is None:
+        if refresh_root is not None and not uses_bound_library:
             refresh_root = repair_root
         if refresh_root is not None:
             self.indexUpdated.emit(refresh_root)

@@ -17,7 +17,10 @@ from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.import_worker import ImportSignals, ImportWorker
 from .album_metadata_service import AlbumMetadataService
 from .library_update_service import LibraryUpdateService
-
+from .session_service_resolver import (
+    bound_asset_lifecycle_service,
+    bound_scan_service,
+)
 
 
 class AssetImportService(QObject):
@@ -83,28 +86,9 @@ class AssetImportService(QObject):
         signals.started.connect(self._on_import_started)
         signals.progress.connect(self._on_import_progress)
 
-        manager = (
-            self._library_manager_getter() if self._library_manager_getter is not None else None
+        service_root, scan_service, lifecycle_service = self._import_services_for_target(
+            target_root,
         )
-        library_root: Optional[Path] = manager.root() if manager is not None else None
-        scan_service = (
-            getattr(manager, "scan_service", None)
-            if manager is not None and library_root is not None
-            else None
-        )
-        lifecycle_service = (
-            getattr(manager, "asset_lifecycle_service", None)
-            if manager is not None and library_root is not None
-            else None
-        )
-        service_root = library_root or target_root
-        if scan_service is None:
-            scan_service = create_standalone_scan_service(service_root)
-        if lifecycle_service is None:
-            lifecycle_service = create_standalone_asset_lifecycle_service(
-                service_root,
-                scan_service=scan_service,
-            )
 
         worker = ImportWorker(
             normalized,
@@ -181,6 +165,33 @@ class AssetImportService(QObject):
             self.errorRaised.emit(f"Import destination is not a directory: {target}")
             return None
         return target
+
+    def _import_services_for_target(self, target_root: Path):
+        manager = (
+            self._library_manager_getter()
+            if self._library_manager_getter is not None
+            else None
+        )
+        library_root: Optional[Path] = manager.root() if manager is not None else None
+        if (
+            manager is not None
+            and library_root is not None
+            and self._path_is_descendant(target_root, library_root)
+        ):
+            scan_service = bound_scan_service(manager, library_root=library_root)
+            lifecycle_service = bound_asset_lifecycle_service(
+                manager,
+                library_root=library_root,
+            )
+            if scan_service is not None and lifecycle_service is not None:
+                return library_root, scan_service, lifecycle_service
+
+        scan_service = create_standalone_scan_service(target_root)
+        lifecycle_service = create_standalone_asset_lifecycle_service(
+            target_root,
+            scan_service=scan_service,
+        )
+        return target_root, scan_service, lifecycle_service
 
     def _copy_into_album(self, source: Path, destination: Path) -> Path:
         """Copy *source* into *destination* using collision-safe filenames."""
@@ -260,6 +271,22 @@ class AssetImportService(QObject):
         """Emit :attr:`importProgress` for worker updates via a dedicated slot."""
 
         self.importProgress.emit(root, current, total)
+
+    @staticmethod
+    def _path_is_descendant(candidate: Path, ancestor: Path) -> bool:
+        try:
+            candidate_norm = Path(candidate).resolve()
+            ancestor_norm = Path(ancestor).resolve()
+        except OSError:
+            candidate_norm = Path(candidate)
+            ancestor_norm = Path(ancestor)
+        if candidate_norm == ancestor_norm:
+            return True
+        try:
+            candidate_norm.relative_to(ancestor_norm)
+        except ValueError:
+            return False
+        return True
 
 
 __all__ = ["AssetImportService"]

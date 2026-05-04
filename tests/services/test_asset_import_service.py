@@ -171,6 +171,67 @@ def test_import_files_falls_back_to_standalone_services_when_library_is_unbound(
     assert errors == []
 
 
+def test_import_files_uses_standalone_services_for_album_outside_bound_library(
+    mocker,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """A standalone album should not write imports into the bound library index."""
+
+    library_root = tmp_path / "Library"
+    album_root = tmp_path / "StandaloneAlbum"
+    library_root.mkdir()
+    album_root.mkdir()
+    asset = tmp_path / "photo.jpg"
+    asset.write_bytes(b"data")
+
+    task_manager = mocker.MagicMock()
+    metadata_service = mocker.MagicMock()
+    refresh = mocker.MagicMock()
+    fallback_scan = object()
+    fallback_lifecycle = object()
+    scan_roots: list[Path] = []
+    lifecycle_calls: list[tuple[Path, object]] = []
+
+    def _create_scan(root: Path):
+        scan_roots.append(Path(root))
+        return fallback_scan
+
+    def _create_lifecycle(root: Path, *, scan_service=None):
+        lifecycle_calls.append((Path(root), scan_service))
+        return fallback_lifecycle
+
+    monkeypatch.setattr(
+        asset_import_module,
+        "create_standalone_scan_service",
+        _create_scan,
+    )
+    monkeypatch.setattr(
+        asset_import_module,
+        "create_standalone_asset_lifecycle_service",
+        _create_lifecycle,
+    )
+
+    service = _create_service(
+        task_manager=task_manager,
+        current_album_root=lambda: album_root,
+        refresh=refresh,
+        metadata_service=metadata_service,
+        library_manager=_FakeLibraryManager(library_root),
+    )
+
+    service.import_files([asset])
+
+    assert task_manager.submit_task.call_count == 1
+    worker = task_manager.submit_task.call_args.kwargs["worker"]
+    assert worker._library_root == album_root
+    assert scan_roots == [album_root]
+    assert lifecycle_calls == [(album_root, fallback_scan)]
+    assert worker._scan_service is fallback_scan
+    assert worker._asset_lifecycle_service is fallback_lifecycle
+
+
 def test_handle_import_finished_updates_models(
     mocker,
     tmp_path: Path,

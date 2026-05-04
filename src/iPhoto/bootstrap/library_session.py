@@ -130,7 +130,12 @@ class LibrarySession:
 def create_headless_library_session(root: Path) -> LibrarySession:
     """Create a library session for non-GUI entry points such as the CLI."""
 
-    return LibrarySession(Path(root))
+    library_root = Path(root)
+    return LibrarySession(
+        library_root,
+        asset_runtime=LibraryAssetRuntime(library_root),
+        bind_asset_runtime=False,
+    )
 
 
 def create_library_state_repository(root: Path) -> LibraryStateRepositoryPort:

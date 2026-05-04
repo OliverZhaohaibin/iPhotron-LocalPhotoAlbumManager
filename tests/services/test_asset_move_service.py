@@ -213,6 +213,48 @@ def test_move_assets_falls_back_to_standalone_service_when_library_is_unbound(
     assert errors == []
 
 
+def test_move_assets_uses_standalone_service_for_album_outside_bound_library(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """A standalone album move should not write through the bound library service."""
+
+    library_root = tmp_path / "Library"
+    source_root = tmp_path / "StandaloneSource"
+    destination_root = tmp_path / "StandaloneDestination"
+    library_root.mkdir()
+    source_root.mkdir()
+    destination_root.mkdir()
+    asset = source_root / "photo.jpg"
+    asset.write_bytes(b"data")
+
+    task_manager = mocker.MagicMock()
+    album = mocker.MagicMock()
+    album.root = source_root
+    bound_lifecycle = _LifecycleRecorder()
+    library_manager = mocker.MagicMock()
+    library_manager.root.return_value = library_root
+    library_manager.asset_operation_service = _build_operation_service(
+        library_root,
+        lifecycle_service=bound_lifecycle,  # type: ignore[arg-type]
+    )
+
+    service = _create_service(
+        task_manager=task_manager,
+        current_album=lambda: album,
+        library_manager=library_manager,
+    )
+
+    accepted = service.move_assets([asset], destination_root)
+
+    assert accepted is True
+    worker = task_manager.submit_task.call_args.kwargs["worker"]
+    assert worker._library_root is None
+    assert worker.asset_lifecycle_service.library_root is None
+    assert bound_lifecycle.calls == []
+
+
 def test_delete_assets_skips_already_missing_sources(
     mocker,
     tmp_path: Path,

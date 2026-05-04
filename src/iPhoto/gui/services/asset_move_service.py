@@ -73,7 +73,12 @@ class AssetMoveService(QObject):
         album = self._current_album_getter()
         library_manager = self._library_manager_getter()
         try:
-            operation_service = self._operation_service(library_manager)
+            operation_service = self._operation_service(
+                library_manager,
+                current_album_root=album.root if album is not None else None,
+                destination=destination,
+                operation=operation,
+            )
         except RuntimeError as exc:
             self.errorRaised.emit(str(exc))
             return False
@@ -153,11 +158,24 @@ class AssetMoveService(QObject):
     def _operation_service(
         self,
         library_manager: Optional["LibraryManager"],
+        *,
+        current_album_root: Path | None,
+        destination: Path,
+        operation: str,
     ) -> LibraryAssetOperationService:
         library_root = library_manager.root() if library_manager is not None else None
         if self._is_unconfigured_mock(library_root):
             library_root = None
-        if library_root is not None:
+        use_bound_library = (
+            library_root is not None
+            and self._operation_targets_bound_library(
+                operation=operation,
+                current_album_root=current_album_root,
+                destination=destination,
+                library_root=library_root,
+            )
+        )
+        if use_bound_library:
             candidate = bound_asset_operation_service(
                 library_manager,
                 library_root=library_root,
@@ -172,9 +190,10 @@ class AssetMoveService(QObject):
         )
         if self._is_unconfigured_mock(lifecycle_service):
             lifecycle_service = None
+        service_root = library_root if use_bound_library else None
         return create_standalone_asset_operation_service(
-            library_root,
-            lifecycle_service=lifecycle_service,
+            service_root,
+            lifecycle_service=lifecycle_service if use_bound_library else None,
         )
 
     def _deleted_directory(
@@ -200,6 +219,42 @@ class AssetMoveService(QObject):
     @staticmethod
     def _is_unconfigured_mock(candidate: object) -> bool:
         return candidate.__class__.__module__.startswith("unittest.mock")
+
+    def _operation_targets_bound_library(
+        self,
+        *,
+        operation: str,
+        current_album_root: Path | None,
+        destination: Path,
+        library_root: Path,
+    ) -> bool:
+        operation_normalized = operation.lower()
+        if operation_normalized == "delete":
+            return True
+        if operation_normalized == "restore":
+            return self._path_is_descendant(destination, library_root)
+        if current_album_root is None:
+            return False
+        return self._path_is_descendant(
+            current_album_root,
+            library_root,
+        ) and self._path_is_descendant(destination, library_root)
+
+    @staticmethod
+    def _path_is_descendant(candidate: Path, ancestor: Path) -> bool:
+        try:
+            candidate_norm = Path(candidate).resolve()
+            ancestor_norm = Path(ancestor).resolve()
+        except OSError:
+            candidate_norm = Path(candidate)
+            ancestor_norm = Path(ancestor)
+        if candidate_norm == ancestor_norm:
+            return True
+        try:
+            candidate_norm.relative_to(ancestor_norm)
+        except ValueError:
+            return False
+        return True
 
     def _handle_move_finished(
         self,

@@ -112,7 +112,12 @@ def _fallback_row_for_path(root: Path, path: Path) -> Dict[str, Any]:
     return row
 
 def process_media_paths(
-    root: Path, image_paths: List[Path], video_paths: List[Path]
+    root: Path,
+    image_paths: List[Path],
+    video_paths: List[Path],
+    *,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    generate_micro_thumbnails: bool | Callable[[], bool] = True,
 ) -> Iterator[Dict[str, Any]]:
     """Yield populated index rows for the provided media paths."""
 
@@ -123,6 +128,8 @@ def process_media_paths(
     # Process in batches
     BATCH_SIZE = 50
     for i in range(0, len(all_paths), BATCH_SIZE):
+        if is_cancelled is not None and is_cancelled():
+            return
         batch = all_paths[i : i + BATCH_SIZE]
 
         # Get metadata
@@ -138,6 +145,8 @@ def process_media_paths(
                 meta_lookup[unicodedata.normalize('NFD', src)] = m
 
         for path in batch:
+            if is_cancelled is not None and is_cancelled():
+                return
             try:
                 raw_meta = meta_lookup.get(path.as_posix())
                 if not raw_meta:
@@ -165,7 +174,12 @@ def process_media_paths(
                     exc_info=True,
                 )
 
-            if row.get("media_type") == 0:
+            allow_micro = (
+                bool(generate_micro_thumbnails())
+                if callable(generate_micro_thumbnails)
+                else bool(generate_micro_thumbnails)
+            )
+            if allow_micro and row.get("media_type") == 0:
                 try:
                     mt = _thumbnail_generator.generate_micro_thumbnail(path)
                 except Exception as exc:
@@ -187,6 +201,9 @@ def scan_album(
     exclude_globs: Iterable[str],
     existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    existing_rows_resolver: Optional[Callable[[List[str]], Dict[str, Dict[str, Any]]]] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    generate_micro_thumbnails: bool | Callable[[], bool] = True,
 ) -> Iterator[Dict[str, Any]]:
     """Yield index rows for all matching assets in *root*, scanning in parallel."""
 
@@ -202,12 +219,22 @@ def scan_album(
     def process_batch_rows(paths: List[Path]) -> Iterator[Dict[str, Any]]:
         # Check cache first to avoid expensive metadata extraction
         paths_to_process = []
+        cached_rows: Dict[str, Dict[str, Any]] = {}
+        if existing_rows_resolver is not None:
+            rels = [p.relative_to(root).as_posix() for p in paths]
+            cached_rows = existing_rows_resolver(rels)
         for p in paths:
+            if is_cancelled is not None and is_cancelled():
+                return
             rel = p.relative_to(root).as_posix()
 
             # Check existing index
             cached = None
-            if existing_index:
+            if cached_rows:
+                cached = cached_rows.get(rel)
+                if not cached:
+                    cached = cached_rows.get(unicodedata.normalize('NFC', rel))
+            elif existing_index:
                 cached = existing_index.get(rel)
                 if not cached:
                     cached = existing_index.get(unicodedata.normalize('NFC', rel))
@@ -228,15 +255,23 @@ def scan_album(
 
         # Process remaining
         if paths_to_process:
-             # Reuse process_media_paths logic but we need to split images/videos if we strictly followed signature,
-             # but process_media_paths just joins them.
-             yield from process_media_paths(root, paths_to_process, [])
+            # Reuse process_media_paths logic but we need to split images/videos if we strictly followed signature,
+            # but process_media_paths just joins them.
+            yield from process_media_paths(
+                root,
+                paths_to_process,
+                [],
+                is_cancelled=is_cancelled,
+                generate_micro_thumbnails=generate_micro_thumbnails,
+            )
 
     try:
         if progress_callback:
             progress_callback(0, 0)
 
         while True:
+            if is_cancelled is not None and is_cancelled():
+                break
             try:
                 path = path_queue.get(timeout=0.5)
             except queue.Empty:

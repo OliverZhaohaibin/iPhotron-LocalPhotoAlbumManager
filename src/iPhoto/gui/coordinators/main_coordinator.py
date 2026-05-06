@@ -532,9 +532,11 @@ class MainCoordinator(QObject):
         # Facade Signals -> Status Bar
         # Note: AppFacade exposes library_updates (ScannerSignals)
         updates.scanProgress.connect(self._status_bar.handle_scan_progress)
+        updates.scanStatusChanged.connect(self._status_bar.handle_scan_status)
         updates.scanFinished.connect(self._status_bar.handle_scan_finished)
         self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)
         self._facade.scanProgress.connect(self._status_bar.handle_scan_progress)
+        self._facade.scanStatusChanged.connect(self._status_bar.handle_scan_status)
         self._facade.scanFinished.connect(self._status_bar.handle_scan_finished)
 
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)

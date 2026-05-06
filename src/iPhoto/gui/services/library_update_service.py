@@ -9,6 +9,12 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CH
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
+from ...application.use_cases.scan_models import (
+    ScanCompletion,
+    ScanMode,
+    ScanProgressPhase,
+    ScanStatusUpdate,
+)
 from ...bootstrap.library_scan_service import LibraryScanService
 from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ...errors import IPhotoError
@@ -56,6 +62,7 @@ class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
     scanProgress = Signal(Path, int, int)
+    scanStatusChanged = Signal(object)
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
@@ -146,6 +153,7 @@ class LibraryUpdateService(QObject):
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        mode: ScanMode = ScanMode.BACKGROUND,
     ) -> None:
         """Start an asynchronous scan for *root* through the bound session."""
 
@@ -167,11 +175,19 @@ class LibraryUpdateService(QObject):
         if library is not None and library_root is not None:
             start_session_scan = getattr(library, "start_session_scan", None)
             if callable(start_session_scan):
-                start_session_scan(
-                    scan_root,
-                    include=include,
-                    exclude=exclude,
-                )
+                try:
+                    start_session_scan(
+                        scan_root,
+                        include=include,
+                        exclude=exclude,
+                        mode=mode,
+                    )
+                except TypeError:
+                    start_session_scan(
+                        scan_root,
+                        include=include,
+                        exclude=exclude,
+                    )
                 return
 
         self._task_runner.start_scan(
@@ -180,7 +196,9 @@ class LibraryUpdateService(QObject):
             exclude=exclude,
             library_root=library_root,
             scan_service=scan_service,
+            scan_mode=mode,
             on_progress=self._relay_scan_progress,
+            on_status=self._relay_scan_status_changed,
             on_chunk=self._relay_scan_chunk_ready,
             on_batch_failed=self._relay_scan_batch_failed,
             on_cancelled=self._on_scan_cancelled,
@@ -447,6 +465,9 @@ class LibraryUpdateService(QObject):
 
         self.scanProgress.emit(root, current, total)
 
+    def _relay_scan_status_changed(self, update: object) -> None:
+        self.scanStatusChanged.emit(update)
+
     def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
         """Forward worker chunks to listeners."""
 
@@ -458,6 +479,15 @@ class LibraryUpdateService(QObject):
         self.scanBatchFailed.emit(root, count)
 
     def _on_scan_cancelled(self, root: Path, restart_requested: bool) -> None:
+        self.scanStatusChanged.emit(
+            ScanStatusUpdate(
+                root=Path(root),
+                scan_id="",
+                mode=ScanMode.BACKGROUND,
+                phase=ScanProgressPhase.CANCELLED_RESUMABLE,
+                message="Scan cancelled. Indexed chunks remain resumable.",
+            )
+        )
         self.scanFinished.emit(root, True)
         if restart_requested:
             self._schedule_scan_retry()
@@ -467,24 +497,57 @@ class LibraryUpdateService(QObject):
         completion: ScanTaskCompletion,
     ) -> None:
         try:
-            completion.scan_service.finalize_scan_result(
-                completion.root,
-                completion.rows,
-                pair_live=True,
+            finalized = completion.scan_service.complete_scan(
+                completion.completion,
+                pair_live=not completion.completion.defer_live_pairing,
             )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
-            self.scanFinished.emit(completion.root, False)
+            self.scanFinished.emit(completion.completion.root, False)
         else:
-            self.indexUpdated.emit(completion.root)
-            self.linksUpdated.emit(completion.root)
-            # Ensure the view reloads if this scan was triggered for the current album
-            # (e.g. initial auto-scan on startup).
-            # Only emit assetReloadRequested if the model is not already loading due to this scan
-            if not self._model_loading_due_to_scan:
-                self.assetReloadRequested.emit(completion.root, False, False)
+            if not finalized.success:
+                self.scanStatusChanged.emit(
+                    ScanStatusUpdate(
+                        root=finalized.root,
+                        scan_id=finalized.scan_id,
+                        mode=finalized.mode,
+                        phase=finalized.phase,
+                        processed=finalized.processed_count,
+                        failed_count=finalized.failed_count,
+                        message="Scan failed. Some scanned items could not be saved.",
+                    )
+                )
+                failed_count = max(1, int(finalized.failed_count or 0))
+                self.errorRaised.emit(
+                    f"Scan failed: {failed_count} scanned items could not be saved."
+                )
+                self.scanFinished.emit(finalized.root, False)
+                if completion.restart_requested:
+                    self._schedule_scan_retry()
+                return
+
+            self.scanStatusChanged.emit(
+                ScanStatusUpdate(
+                    root=finalized.root,
+                    scan_id=finalized.scan_id,
+                    mode=finalized.mode,
+                    phase=finalized.phase,
+                    processed=finalized.processed_count,
+                    failed_count=finalized.failed_count,
+                    message=(
+                        "Initial scan indexed safely. Live Photo pairing is deferred."
+                        if finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+                        else "Scan complete."
+                    ),
+                )
+            )
+            self.indexUpdated.emit(finalized.root)
+            if finalized.phase != ScanProgressPhase.DEFERRED_PAIRING:
+                self.linksUpdated.emit(finalized.root)
+            if not finalized.safe_mode and not self._model_loading_due_to_scan:
+                self.assetReloadRequested.emit(finalized.root, False, False)
             self._model_loading_due_to_scan = False
-            self.scanFinished.emit(completion.root, True)
+            self.scanFinished.emit(finalized.root, True)
 
         if completion.restart_requested:
             self._schedule_scan_retry()

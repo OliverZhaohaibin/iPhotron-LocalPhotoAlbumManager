@@ -80,9 +80,28 @@ class SchemaMigrator:
                 is_favorite INTEGER DEFAULT 0,
                 location TEXT,
                 micro_thumbnail BLOB,
-                face_status TEXT
+                face_status TEXT,
+                last_seen_scan_id TEXT
             )
         """)
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scan_runs (
+                scan_id TEXT PRIMARY KEY,
+                scope_root TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                state TEXT NOT NULL,
+                safe_mode INTEGER DEFAULT 0,
+                phase TEXT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                discovered_count INTEGER DEFAULT 0,
+                failed_count INTEGER DEFAULT 0,
+                last_processed_rel TEXT
+            )
+            """
+        )
 
         # Perform incremental schema migration (add columns if missing)
         SchemaMigrator._migrate_columns(conn)
@@ -116,6 +135,7 @@ class SchemaMigrator:
             "location": "ALTER TABLE assets ADD COLUMN location TEXT",
             "parent_album_path": "ALTER TABLE assets ADD COLUMN parent_album_path TEXT",
             "face_status": "ALTER TABLE assets ADD COLUMN face_status TEXT",
+            "last_seen_scan_id": "ALTER TABLE assets ADD COLUMN last_seen_scan_id TEXT",
         }
 
         # Add missing columns
@@ -170,6 +190,8 @@ class SchemaMigrator:
              "ON assets (parent_album_path, dt DESC, id DESC)"),
 
             "CREATE INDEX IF NOT EXISTS idx_assets_face_status ON assets (face_status)",
+            "CREATE INDEX IF NOT EXISTS idx_assets_last_seen_scan_id ON assets (last_seen_scan_id)",
+            "CREATE INDEX IF NOT EXISTS idx_scan_runs_scope_state ON scan_runs (scope_root, state, started_at DESC)",
 
             # Global view index (all photos sorted by date)
             ("CREATE INDEX IF NOT EXISTS idx_assets_global_sort "

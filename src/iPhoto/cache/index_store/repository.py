@@ -19,6 +19,7 @@ import json
 import sqlite3
 import threading
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -27,7 +28,7 @@ from ...utils.logging import get_logger
 from ...utils.pathutils import ensure_work_dir
 from .engine import DatabaseManager
 from .migrations import SchemaMigrator
-from .queries import QueryBuilder
+from .queries import QueryBuilder, escape_like_pattern
 from .recovery import RecoveryService
 from .row_mapper import db_row_to_dict, insert_rows, row_to_db_params
 from .scan_merge import merge_scan_rows as merge_scan_rows_payload
@@ -47,6 +48,10 @@ _OMIT_METADATA_VALUE = object()
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
 _global_lock = threading.Lock()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _coerce_json_metadata_value(value: Any) -> Any:
@@ -213,7 +218,104 @@ class AssetRepository:
         with self.transaction() as conn:
             self._insert_rows(conn, rows)
 
-    def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def create_scan_run(
+        self,
+        scan_id: str,
+        *,
+        scope_root: str,
+        mode: str,
+        safe_mode: bool,
+        phase: str,
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scan_runs (
+                    scan_id, scope_root, mode, state, safe_mode, phase, started_at,
+                    completed_at, discovered_count, failed_count, last_processed_rel
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, NULL)
+                """,
+                (
+                    scan_id,
+                    scope_root,
+                    mode,
+                    "running",
+                    1 if safe_mode else 0,
+                    phase,
+                    _utc_now_iso(),
+                ),
+            )
+
+    def update_scan_run(
+        self,
+        scan_id: str,
+        *,
+        mode: str | None = None,
+        safe_mode: bool | None = None,
+        state: str | None = None,
+        phase: str | None = None,
+        discovered_count: int | None = None,
+        failed_count: int | None = None,
+        last_processed_rel: str | None = None,
+        completed_at: str | None = None,
+    ) -> None:
+        update_parts: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("mode", mode),
+            ("safe_mode", 1 if safe_mode else 0 if safe_mode is not None else None),
+            ("state", state),
+            ("phase", phase),
+            ("discovered_count", discovered_count),
+            ("failed_count", failed_count),
+            ("last_processed_rel", last_processed_rel),
+            ("completed_at", completed_at),
+        ):
+            if value is None:
+                continue
+            update_parts.append(f"{column} = ?")
+            params.append(value)
+        if not update_parts:
+            return
+        params.append(scan_id)
+        with self.transaction() as conn:
+            conn.execute(
+                f"UPDATE scan_runs SET {', '.join(update_parts)} WHERE scan_id = ?",
+                params,
+            )
+
+    def latest_incomplete_scan_run(
+        self,
+        *,
+        scope_root: str,
+    ) -> dict[str, Any] | None:
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT *
+                FROM scan_runs
+                WHERE scope_root = ? AND state IN ('running', 'paused')
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (scope_root,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.row_factory = None
+            if should_close:
+                conn.close()
+
+    def merge_scan_rows(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        *,
+        scan_id: str | None = None,
+    ) -> List[Dict[str, Any]]:
         """Merge scanned rows while preserving persisted library-managed state.
 
         The SELECT for existing rows and the subsequent INSERT are performed
@@ -256,9 +358,55 @@ class AssetRepository:
                 conn.row_factory = None
 
             merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)
+            if scan_id:
+                for row in merged_rows:
+                    row["last_seen_scan_id"] = scan_id
             self._insert_rows(conn, merged_rows)
 
         return merged_rows
+
+    def prune_missing_rows_for_scan(
+        self,
+        *,
+        album_path: str | None,
+        scan_id: str,
+        preserve_prefixes: Iterable[str] | None = None,
+    ) -> int:
+        where_clauses = ["COALESCE(last_seen_scan_id, '') != ?"]
+        params: list[Any] = [scan_id]
+
+        if album_path is not None:
+            if album_path == "":
+                where_clauses.append("parent_album_path = ?")
+                params.append("")
+            else:
+                escaped = escape_like_pattern(album_path)
+                where_clauses.append(
+                    "(parent_album_path = ? OR parent_album_path LIKE ? ESCAPE '\\')"
+                )
+                params.extend([album_path, f"{escaped}/%"])
+
+        for prefix in preserve_prefixes or ():
+            normalized = str(prefix).strip("/")
+            if not normalized:
+                continue
+            escaped = escape_like_pattern(normalized)
+            where_clauses.append(
+                "NOT (rel = ? OR rel LIKE ? ESCAPE '\\')"
+            )
+            params.extend([normalized, f"{escaped}/%"])
+
+        predicate = " AND ".join(where_clauses)
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                f"SELECT COUNT(*) FROM assets WHERE {predicate}",
+                params,
+            )
+            removable = int(cursor.fetchone()[0])
+            if removable <= 0:
+                return 0
+            conn.execute(f"DELETE FROM assets WHERE {predicate}", params)
+        return removable
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""
@@ -845,6 +993,21 @@ class AssetRepository:
                 "ORDER BY parent_album_path"
             )
             return [row[0] for row in cursor if row[0]]
+        finally:
+            if should_close:
+                conn.close()
+
+    def list_pairing_prefixes(self) -> List[str]:
+        """Return distinct directory prefixes, including library-root assets."""
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            cursor = conn.execute(
+                "SELECT DISTINCT COALESCE(parent_album_path, '') AS prefix "
+                "FROM assets ORDER BY prefix"
+            )
+            return [str(row[0] or "") for row in cursor]
         finally:
             if should_close:
                 conn.close()

@@ -9,6 +9,7 @@ from typing import Optional
 from PySide6.QtWidgets import QWidget
 
 from typing import TYPE_CHECKING
+from ....application.use_cases.scan_models import ScanMode
 from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
 from ....errors import LibraryError
 from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
@@ -87,6 +88,7 @@ class DialogController:
             bound_root,
             include=DEFAULT_INCLUDE,
             exclude=DEFAULT_EXCLUDE,
+            mode=ScanMode.INITIAL_SAFE,
         )
 
     def show_error(self, message: str) -> None:

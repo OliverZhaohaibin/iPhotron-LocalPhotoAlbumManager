@@ -2,8 +2,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
+from iPhoto.application.use_cases.scan_models import (
+    ScanCompletion,
+    ScanMode,
+    ScanProgressPhase,
+)
 import iPhoto.gui.services.library_update_service as lus
 from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
+from iPhoto.gui.services.library_update_tasks import LibraryUpdateTaskRunner
 
 
 class DummyAlbum:
@@ -462,11 +468,11 @@ def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:
 
     class FinalizeScanService:
         def __init__(self) -> None:
-            self.completed: list[tuple[Path, list[dict], bool]] = []
+            self.completed: list[tuple[Path, str, bool]] = []
 
-        def finalize_scan_result(self, root: Path, rows: list[dict], *, pair_live: bool):
-            self.completed.append((Path(root), list(rows), pair_live))
-            return list(rows)
+        def complete_scan(self, completion: ScanCompletion, *, pair_live: bool):
+            self.completed.append((Path(completion.root), completion.scan_id, pair_live))
+            return completion
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
@@ -475,8 +481,19 @@ def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:
     )
     scan_service = FinalizeScanService()
     completion = lus.ScanTaskCompletion(
-        root=album_root,
-        rows=[{"rel": "a.jpg"}],
+        completion=ScanCompletion(
+            root=album_root,
+            scan_id="scan-1",
+            mode=ScanMode.BACKGROUND,
+            processed_count=1,
+            failed_count=0,
+            success=True,
+            cancelled=False,
+            safe_mode=False,
+            defer_live_pairing=False,
+            allow_face_scan=True,
+            phase=ScanProgressPhase.COMPLETED,
+        ),
         scan_service=scan_service,
         library_root=None,
     )
@@ -490,7 +507,105 @@ def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:
 
     service._on_scan_completed(completion)
 
-    assert scan_service.completed == [(album_root, [{"rel": "a.jpg"}], True)]
+    assert scan_service.completed == [(album_root, "scan-1", True)]
     assert index_updates == [album_root]
     assert link_updates == [album_root]
     assert finished == [(album_root, True)]
+
+
+def test_scan_completion_failure_emits_terminal_failure_state(tmp_path: Path) -> None:
+    album_root = tmp_path / "Album"
+    album_root.mkdir()
+
+    class FinalizeScanService:
+        def complete_scan(self, completion: ScanCompletion, *, pair_live: bool):
+            return ScanCompletion(
+                root=completion.root,
+                scan_id=completion.scan_id,
+                mode=completion.mode,
+                processed_count=completion.processed_count,
+                failed_count=3,
+                success=False,
+                cancelled=False,
+                safe_mode=False,
+                defer_live_pairing=False,
+                allow_face_scan=True,
+                phase=ScanProgressPhase.FAILED,
+            )
+
+    service = lus.LibraryUpdateService(
+        task_manager=DummyTaskManager(),
+        current_album_getter=lambda: None,
+        library_manager_getter=lambda: None,
+    )
+    completion = lus.ScanTaskCompletion(
+        completion=ScanCompletion(
+            root=album_root,
+            scan_id="scan-1",
+            mode=ScanMode.BACKGROUND,
+            processed_count=10,
+            failed_count=3,
+            success=False,
+            cancelled=False,
+            safe_mode=False,
+            defer_live_pairing=False,
+            allow_face_scan=True,
+            phase=ScanProgressPhase.FAILED,
+        ),
+        scan_service=FinalizeScanService(),
+        library_root=None,
+    )
+
+    errors: list[str] = []
+    finished: list[tuple[Path, bool]] = []
+    service.errorRaised.connect(errors.append)
+    service.scanFinished.connect(lambda root, ok: finished.append((root, ok)))
+
+    service._on_scan_completed(completion)
+
+    assert errors == ["Scan failed: 3 scanned items could not be saved."]
+    assert finished == [(album_root, False)]
+
+
+def test_task_runner_forwards_partial_failures_to_completion_handler(tmp_path: Path) -> None:
+    runner = LibraryUpdateTaskRunner(task_manager=DummyTaskManager())
+
+    class _Worker:
+        def __init__(self) -> None:
+            self.root = tmp_path / "Album"
+            self.failed = False
+            self.cancelled = False
+            self._scan_service = FakeScanService(tmp_path)
+
+        @property
+        def scan_service(self):
+            return self._scan_service
+
+    worker = _Worker()
+    runner._scanner_worker = worker
+    completed: list[lus.ScanTaskCompletion] = []
+    cancelled: list[tuple[Path, bool]] = []
+
+    runner._handle_scan_finished(
+        worker,
+        ScanCompletion(
+            root=worker.root,
+            scan_id="scan-1",
+            mode=ScanMode.BACKGROUND,
+            processed_count=5,
+            failed_count=2,
+            success=False,
+            cancelled=False,
+            safe_mode=False,
+            defer_live_pairing=False,
+            allow_face_scan=True,
+            phase=ScanProgressPhase.FAILED,
+        ),
+        library_root=None,
+        on_cancelled=lambda root, restart: cancelled.append((root, restart)),
+        on_completed=completed.append,
+    )
+
+    assert cancelled == []
+    assert len(completed) == 1
+    assert completed[0].completion.success is False

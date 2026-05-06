@@ -127,6 +127,10 @@ class QueryBuilder:
         if album_path is None:
             return where_clauses, params
 
+        if album_path == "":
+            where_clauses.append("(parent_album_path = '' OR parent_album_path IS NULL)")
+            return where_clauses, params
+
         if include_subalbums:
             # Match exact album or any sub-album
             where_clauses.append(

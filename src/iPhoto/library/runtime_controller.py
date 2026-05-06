@@ -72,6 +72,7 @@ class LibraryRuntimeController(
 
     # Scanner signals exposed for the facade
     scanProgress = Signal(Path, int, int)
+    scanStatusChanged = Signal(object)
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)

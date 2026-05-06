@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...application.use_cases.scan_models import ScanCompletion, ScanMode, ScanPlan
 from ...bootstrap.library_scan_service import LibraryScanService
 from ..background_task_manager import BackgroundTaskManager
 from ...library.workers.rescan_worker import RescanSignals, RescanWorker
@@ -16,8 +17,7 @@ from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
 class ScanTaskCompletion:
     """Normalized scan completion payload for GUI presentation adapters."""
 
-    root: Path
-    rows: list[dict]
+    completion: ScanCompletion
     scan_service: LibraryScanService
     library_root: Path | None
     restart_requested: bool = False
@@ -39,7 +39,9 @@ class LibraryUpdateTaskRunner:
         exclude: Iterable[str],
         library_root: Path | None,
         scan_service: LibraryScanService | None,
+        scan_mode: ScanMode = ScanMode.BACKGROUND,
         on_progress: Callable[[Path, int, int], None],
+        on_status: Callable[[object], None],
         on_chunk: Callable[[Path, list[dict]], None],
         on_batch_failed: Callable[[Path, int], None],
         on_cancelled: Callable[[Path, bool], None],
@@ -57,8 +59,29 @@ class LibraryUpdateTaskRunner:
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(on_progress)
+        signals.statusChanged.connect(on_status)
         signals.chunkReady.connect(on_chunk)
         signals.batchFailed.connect(on_batch_failed)
+        if scan_service is not None and hasattr(scan_service, "resume_scan"):
+            scan_plan = (
+                scan_service.resume_scan(root, include=include, exclude=exclude)
+                if scan_mode == ScanMode.INITIAL_SAFE
+                else scan_service.plan_scan(root, include=include, exclude=exclude, mode=scan_mode)
+            )
+        else:
+            scan_plan = ScanPlan(
+                root=Path(root),
+                include=tuple(include),
+                exclude=tuple(exclude),
+                mode=scan_mode,
+                scan_id="",
+                persist_chunks=True,
+                collect_rows=False,
+                safe_mode=scan_mode == ScanMode.INITIAL_SAFE,
+                generate_micro_thumbnails=True,
+                allow_face_scan=scan_mode != ScanMode.INITIAL_SAFE,
+                defer_live_pairing=scan_mode == ScanMode.INITIAL_SAFE,
+            )
 
         worker = ScannerWorker(
             root,
@@ -67,6 +90,7 @@ class LibraryUpdateTaskRunner:
             signals,
             library_root=library_root,
             scan_service=scan_service,
+            scan_plan=scan_plan,
         )
         self._scanner_worker = worker
         self._scan_pending = False
@@ -78,10 +102,9 @@ class LibraryUpdateTaskRunner:
             finished=signals.finished,
             error=signals.error,
             pause_watcher=False,
-            on_finished=lambda emitted_root, rows, captured_library_root=library_root: self._handle_scan_finished(
+            on_finished=lambda completion, captured_library_root=library_root: self._handle_scan_finished(
                 worker,
-                emitted_root,
-                rows,
+                completion,
                 library_root=captured_library_root,
                 on_cancelled=on_cancelled,
                 on_completed=on_completed,
@@ -92,7 +115,7 @@ class LibraryUpdateTaskRunner:
                 message,
                 on_error=on_error,
             ),
-            result_payload=lambda _root, rows: rows,
+            result_payload=lambda completion: completion,
         )
 
     def cancel_active_scan(self) -> None:
@@ -160,8 +183,7 @@ class LibraryUpdateTaskRunner:
     def _handle_scan_finished(
         self,
         worker: ScannerWorker,
-        root: Path,
-        rows: list[dict],
+        completion: ScanCompletion,
         *,
         library_root: Path | None,
         on_cancelled: Callable[[Path, bool], None],
@@ -171,24 +193,19 @@ class LibraryUpdateTaskRunner:
             return
 
         restart_requested = self._scan_pending
-        if worker.cancelled:
+        if worker.cancelled or completion.cancelled:
             self._cleanup_scan_worker()
-            on_cancelled(root, restart_requested)
+            on_cancelled(completion.root, restart_requested)
             return
 
-        if worker.failed:
-            self._cleanup_scan_worker()
-            return
-
-        completion = ScanTaskCompletion(
-            root=Path(root),
-            rows=[dict(row) for row in rows],
+        task_completion = ScanTaskCompletion(
+            completion=completion,
             scan_service=worker.scan_service,
             library_root=library_root,
             restart_requested=restart_requested,
         )
         self._cleanup_scan_worker()
-        on_completed(completion)
+        on_completed(task_completion)
 
     def _handle_scan_error(
         self,
@@ -215,4 +232,3 @@ class LibraryUpdateTaskRunner:
             return Path(left).resolve() == Path(right).resolve()
         except OSError:
             return Path(left) == Path(right)
-

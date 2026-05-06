@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import Mock
 
+from iPhoto.application.use_cases.scan_models import ScanMode
 from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from iPhoto.gui.ui.controllers.dialog_controller import DialogController
 
@@ -76,6 +77,7 @@ def test_bind_library_dialog_uses_runtime_open_library(
         selected_root,
         include=DEFAULT_INCLUDE,
         exclude=DEFAULT_EXCLUDE,
+        mode=ScanMode.INITIAL_SAFE,
     )
     status_bar.showMessage.assert_called_once_with(
         f"Basic Library bound to {selected_root}"

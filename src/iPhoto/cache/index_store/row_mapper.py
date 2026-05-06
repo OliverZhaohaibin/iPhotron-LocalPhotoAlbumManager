@@ -31,7 +31,8 @@ def insert_rows(
         "content_id", "frame_rate", "codec", "still_image_time", "dur",
         "original_rel_path", "original_album_id", "original_album_subpath",
         "live_role", "live_partner_rel", "aspect_ratio", "year", "month",
-        "media_type", "is_favorite", "location", "micro_thumbnail", "face_status"
+        "media_type", "is_favorite", "location", "micro_thumbnail", "face_status",
+        "last_seen_scan_id",
     ]
     placeholders = ", ".join(["?"] * len(columns))
     query = (
@@ -92,6 +93,7 @@ def row_to_db_params(row: Dict[str, Any]) -> List[Any]:
         row.get("location"),
         row.get("micro_thumbnail"),
         row.get("face_status"),
+        row.get("last_seen_scan_id"),
     ]
 
 

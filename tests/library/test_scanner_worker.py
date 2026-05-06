@@ -13,6 +13,11 @@ pytest.importorskip("PySide6.QtCore", reason="Qt core not available", exc_type=I
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtTest import QSignalSpy
 
+from iPhoto.application.use_cases.scan_models import (
+    ScanCompletion,
+    ScanMode,
+    ScanPlan,
+)
 from iPhoto.library.workers.scanner_worker import ScannerWorker, ScannerSignals
 
 
@@ -51,7 +56,7 @@ def _patch_scan_and_repo(fake_rows, repo_side_effect=None):
     ``repo_side_effect`` is assigned to ``store.merge_scan_rows.side_effect``.
     """
     mock_store = Mock()
-    mock_store.merge_scan_rows.side_effect = lambda chunk: list(chunk)
+    mock_store.merge_scan_rows.side_effect = lambda chunk, **_kwargs: list(chunk)
     if repo_side_effect is not None:
         mock_store.merge_scan_rows.side_effect = repo_side_effect
 
@@ -64,7 +69,6 @@ def _patch_scan_and_repo(fake_rows, repo_side_effect=None):
             side_effect=fake_scan_album,
         ),
         patch('iPhoto.bootstrap.library_scan_service.get_global_repository', return_value=mock_store),
-        patch('iPhoto.bootstrap.library_scan_service.load_incremental_index_cache', return_value={}),
         mock_store,
     )
 
@@ -79,9 +83,9 @@ def test_scanner_worker_batch_success(temp_album, qapp):
     batch_failed_spy = QSignalSpy(signals.batchFailed)
     
     rows = _fake_rows(15)
-    p_scan, p_repo, p_cache, mock_store = _patch_scan_and_repo(rows)
+    p_scan, p_repo, mock_store = _patch_scan_and_repo(rows)
 
-    with p_scan, p_repo, p_cache:
+    with p_scan, p_repo:
         worker.run()
     
     qapp.processEvents()
@@ -98,13 +102,32 @@ def test_scanner_worker_uses_injected_scan_service(temp_album, qapp):
     class FakeScanService:
         def __init__(self) -> None:
             self.calls = []
+            self.plans = []
 
-        def scan_album(self, root: Path, **kwargs):
-            self.calls.append((root, kwargs))
+        def plan_scan(self, root: Path, **kwargs):
+            self.plans.append((Path(root), kwargs))
+            return ScanPlan(
+                root=Path(root),
+                include=("*.jpg",),
+                exclude=(),
+                mode=ScanMode.BACKGROUND,
+                scan_id="scan-1",
+                persist_chunks=True,
+                collect_rows=False,
+                safe_mode=False,
+                generate_micro_thumbnails=True,
+                allow_face_scan=True,
+                defer_live_pairing=False,
+            )
+
+        def start_scan(self, plan: ScanPlan, **kwargs):
+            self.calls.append((plan, kwargs))
             kwargs["chunk_callback"]([{"rel": "test_0.jpg"}])
             return SimpleNamespace(
-                rows=[{"rel": "test_0.jpg"}],
                 failed_count=0,
+                processed_count=1,
+                cancelled=False,
+                rows=[],
             )
 
     signals = ScannerSignals()
@@ -123,12 +146,15 @@ def test_scanner_worker_uses_injected_scan_service(temp_album, qapp):
     qapp.processEvents()
 
     assert service.calls
-    root, kwargs = service.calls[0]
-    assert root == temp_album
-    assert kwargs["include"] == ["*.jpg"]
-    assert kwargs["persist_chunks"] is True
+    plan, kwargs = service.calls[0]
+    assert plan.root == temp_album
+    assert plan.mode == ScanMode.BACKGROUND
     assert chunk_ready_spy.count() == 1
     assert finished_spy.count() == 1
+    emitted_completion = finished_spy.at(0)[0]
+    assert isinstance(emitted_completion, ScanCompletion)
+    assert emitted_completion.scan_id == "scan-1"
+    assert emitted_completion.processed_count == 1
 
 
 def test_scanner_worker_batch_failure_handling(temp_album, qapp):
@@ -141,11 +167,11 @@ def test_scanner_worker_batch_failure_handling(temp_album, qapp):
     finished_spy = QSignalSpy(signals.finished)
     
     rows = _fake_rows(15)
-    p_scan, p_repo, p_cache, mock_store = _patch_scan_and_repo(
+    p_scan, p_repo, mock_store = _patch_scan_and_repo(
         rows, repo_side_effect=Exception("Database write failed"),
     )
 
-    with p_scan, p_repo, p_cache:
+    with p_scan, p_repo:
         worker.run()
     
     qapp.processEvents()
@@ -166,7 +192,7 @@ def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):
     finished_spy = QSignalSpy(signals.finished)
     
     call_count = 0
-    def mock_merge_scan_rows(chunk):
+    def mock_merge_scan_rows(chunk, **_kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -174,11 +200,11 @@ def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):
         return list(chunk)
 
     rows = _fake_rows(25)  # enough for multiple chunks
-    p_scan, p_repo, p_cache, mock_store = _patch_scan_and_repo(
+    p_scan, p_repo, mock_store = _patch_scan_and_repo(
         rows, repo_side_effect=mock_merge_scan_rows,
     )
 
-    with p_scan, p_repo, p_cache:
+    with p_scan, p_repo:
         worker.run()
     
     qapp.processEvents()
@@ -187,6 +213,10 @@ def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):
     assert batch_failed_spy.count() >= 1
     assert finished_spy.count() == 1
     assert worker.failed_count > 0
+    emitted_completion = finished_spy.at(0)[0]
+    assert isinstance(emitted_completion, ScanCompletion)
+    assert emitted_completion.success is False
+    assert emitted_completion.phase.name == "FAILED"
 
 
 def test_scanner_worker_failed_count_property(temp_album, qapp):
@@ -197,11 +227,11 @@ def test_scanner_worker_failed_count_property(temp_album, qapp):
     assert worker.failed_count == 0
     
     rows = _fake_rows(15)
-    p_scan, p_repo, p_cache, mock_store = _patch_scan_and_repo(
+    p_scan, p_repo, mock_store = _patch_scan_and_repo(
         rows, repo_side_effect=Exception("All writes fail"),
     )
 
-    with p_scan, p_repo, p_cache:
+    with p_scan, p_repo:
         worker.run()
     
     qapp.processEvents()
@@ -216,7 +246,6 @@ def test_scanner_worker_cleanup_on_error(temp_album, qapp):
     worker = ScannerWorker(temp_album, ["*.jpg"], [], signals)
     
     with patch('iPhoto.infrastructure.services.filesystem_media_scanner.scan_album') as mock_scan, \
-         patch('iPhoto.bootstrap.library_scan_service.load_incremental_index_cache', return_value={}), \
          patch('iPhoto.bootstrap.library_scan_service.get_global_repository'):
         mock_generator = Mock()
         mock_generator.close = Mock()
@@ -235,10 +264,10 @@ def test_scanner_worker_global_repo_not_closed(temp_album, qapp):
     worker = ScannerWorker(temp_album, ["*.jpg"], [], signals)
     
     rows = _fake_rows(5)
-    p_scan, p_repo, p_cache, mock_store = _patch_scan_and_repo(rows)
+    p_scan, p_repo, mock_store = _patch_scan_and_repo(rows)
     mock_store.close = Mock()
 
-    with p_scan, p_repo, p_cache:
+    with p_scan, p_repo:
         worker.run()
     
     qapp.processEvents()

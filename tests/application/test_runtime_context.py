@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from iPhoto.application.use_cases.scan_models import ScanMode, ScanProgressPhase
 from iPhoto.bootstrap.runtime_context import RuntimeContext
+from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.events.bus import EventBus
 
 
@@ -26,7 +28,7 @@ class _FakeAssetRuntime:
 
 class _FakeFacade:
     def __init__(self) -> None:
-        self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
+        self.scan_requests: list[tuple[Path, list[str], list[str], ScanMode | None]] = []
 
     def scan_root_async(
         self,
@@ -34,8 +36,9 @@ class _FakeFacade:
         *,
         include,
         exclude,
+        mode: ScanMode | None = None,
     ) -> None:
-        self.scan_requests.append((Path(root), list(include), list(exclude)))
+        self.scan_requests.append((Path(root), list(include), list(exclude), mode))
 
 
 class _FakeLibrary:
@@ -177,6 +180,14 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     return context, library, asset_runtime
 
 
+def setup_function() -> None:
+    reset_global_repository()
+
+
+def teardown_function() -> None:
+    reset_global_repository()
+
+
 def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     tmp_path: Path,
 ) -> None:
@@ -204,6 +215,7 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
     assert [request[0] for request in context.facade.scan_requests] == [library_root]
+    assert context.facade.scan_requests[0][3] == ScanMode.INITIAL_SAFE
 
 
 def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) -> None:
@@ -230,6 +242,35 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
     assert context.facade.scan_requests == []
+
+
+def test_resume_startup_tasks_resumes_incomplete_scan_when_index_preexists(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    work_dir = library_root / ".iPhoto"
+    work_dir.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    store.create_scan_run(
+        "scan-1",
+        scope_root=library_root.resolve().as_posix(),
+        mode=ScanMode.INITIAL_SAFE.value,
+        safe_mode=True,
+        phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+    )
+    store.update_scan_run(
+        "scan-1",
+        state="paused",
+        phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+    )
+    context, library, asset_runtime = _runtime_context(library_root)
+
+    context.resume_startup_tasks()
+
+    assert asset_runtime.bound_roots == [library_root]
+    assert library.bound_scan_services[-1] is not None
+    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+    assert context.facade.scan_requests[0][3] == ScanMode.INITIAL_SAFE
 
 
 def test_close_library_unbinds_map_interaction_service(tmp_path: Path) -> None:

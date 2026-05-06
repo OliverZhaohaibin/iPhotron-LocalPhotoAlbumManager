@@ -24,8 +24,52 @@ class AssetRepositoryPort(Protocol):
     def merge_scan_rows(
         self,
         rows: Iterable[dict[str, Any]],
+        *,
+        scan_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Merge scanned facts while preserving durable user state."""
+
+    def create_scan_run(
+        self,
+        scan_id: str,
+        *,
+        scope_root: str,
+        mode: str,
+        safe_mode: bool,
+        phase: str,
+    ) -> None:
+        """Persist a scan-run record before background chunk merges begin."""
+
+    def update_scan_run(
+        self,
+        scan_id: str,
+        *,
+        mode: str | None = None,
+        safe_mode: bool | None = None,
+        state: str | None = None,
+        phase: str | None = None,
+        discovered_count: int | None = None,
+        failed_count: int | None = None,
+        last_processed_rel: str | None = None,
+        completed_at: str | None = None,
+    ) -> None:
+        """Update a previously created scan-run record."""
+
+    def latest_incomplete_scan_run(
+        self,
+        *,
+        scope_root: str,
+    ) -> dict[str, Any] | None:
+        """Return the latest running/paused scan for one scope."""
+
+    def prune_missing_rows_for_scan(
+        self,
+        *,
+        album_path: str | None,
+        scan_id: str,
+        preserve_prefixes: Iterable[str] | None = None,
+    ) -> int:
+        """Delete rows within one scope that were not observed in *scan_id*."""
 
     def append_rows(self, rows: Iterable[dict[str, Any]]) -> None:
         """Append or replace already-materialized asset rows."""
@@ -87,6 +131,9 @@ class AssetRepositoryPort(Protocol):
         updates: Iterable[tuple[str, int, str | None]],
     ) -> None:
         """Replace Live Photo role state only inside a library-relative prefix."""
+
+    def list_pairing_prefixes(self) -> list[str]:
+        """Return distinct directory prefixes for partitioned Live Photo pairing."""
 
 
 class AlbumRepositoryPort(Protocol):

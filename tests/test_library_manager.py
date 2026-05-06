@@ -14,6 +14,11 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.application.use_cases.scan_models import (
+    ScanCompletion,
+    ScanMode,
+    ScanProgressPhase,
+)
 from iPhoto.bootstrap.library_session import LibrarySession
 from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.runtime_controller import LibraryRuntimeController
@@ -273,3 +278,58 @@ def test_scan_finished_skips_prune_when_worker_failed(tmp_path: Path, qapp: QApp
     start_mock.assert_not_called()
     assert spy.count() == 1
     assert spy.at(0)[1] is False
+
+
+def test_scan_finished_pairs_live_photos_before_success_signal(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+
+    call_order: list[str] = []
+
+    class _ScanService:
+        def complete_scan(self, completion, *, pair_live: bool):
+            call_order.append("complete_scan")
+            assert pair_live is False
+            return completion
+
+        def pair_album(self, pair_root: Path):
+            call_order.append("pair_album")
+            assert pair_root == root
+            return []
+
+    class _Worker:
+        cancelled = False
+        failed = False
+        scan_service = _ScanService()
+
+    completion = ScanCompletion(
+        root=root,
+        scan_id="scan-1",
+        mode=ScanMode.BACKGROUND,
+        processed_count=2,
+        failed_count=0,
+        success=True,
+        cancelled=False,
+        safe_mode=False,
+        defer_live_pairing=False,
+        allow_face_scan=True,
+        phase=ScanProgressPhase.COMPLETED,
+    )
+
+    spy = QSignalSpy(manager.scanFinished)
+    manager.scanFinished.connect(lambda *_args: call_order.append("scanFinished"))
+    manager._current_scanner_worker = _Worker()
+
+    with patch.object(manager._scan_thread_pool, "start") as start_mock:
+        manager._on_scan_finished(completion)
+        qapp.processEvents()
+
+    start_mock.assert_not_called()
+    assert spy.count() == 1
+    assert spy.at(0)[1] is True
+    assert call_order == ["complete_scan", "pair_album", "scanFinished"]

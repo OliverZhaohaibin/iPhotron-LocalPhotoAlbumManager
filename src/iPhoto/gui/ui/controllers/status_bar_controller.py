@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QProgressBar
 
+from ....application.use_cases.scan_models import ScanProgressPhase, ScanStatusUpdate
 from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
 from ....config import RECENTLY_DELETED_DIR_NAME
 
@@ -84,6 +85,34 @@ class StatusBarController(QObject):
             self._progress_bar.setValue(max(0, min(current, total)))
             self.show_message(f"Scanning… ({current}/{total})")
         self._progress_bar.setVisible(True)
+
+    def handle_scan_status(self, update: object) -> None:
+        """Show higher-level scan phase messages."""
+
+        if not isinstance(update, ScanStatusUpdate):
+            return
+        if self._progress_context not in {"scan", None}:
+            return
+        if self._progress_context is None:
+            self.begin_scan()
+
+        if update.phase == ScanProgressPhase.DISCOVERING:
+            self.show_message(update.message or "Discovering files…")
+            return
+        if update.phase == ScanProgressPhase.INDEXING and update.message:
+            self.show_message(update.message)
+            return
+        if update.phase == ScanProgressPhase.PAUSED_FOR_MEMORY:
+            self.show_message(update.message or "Scan paused because memory is high.", 5000)
+            return
+        if update.phase == ScanProgressPhase.CANCELLED_RESUMABLE:
+            self.show_message(update.message or "Scan cancelled. You can resume later.", 5000)
+            return
+        if update.phase == ScanProgressPhase.DEFERRED_PAIRING:
+            self.show_message(
+                update.message or "Initial scan finished. Live Photo pairing is deferred.",
+                5000,
+            )
 
     def handle_scan_finished(self, _root: Path, success: bool) -> None:
         """Restore the status bar once a scan completes."""

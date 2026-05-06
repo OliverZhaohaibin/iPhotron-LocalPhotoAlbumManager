@@ -17,8 +17,10 @@ class MediaScannerPort(Protocol):
         include: Iterable[str],
         exclude: Iterable[str],
         *,
-        existing_index: dict[str, dict[str, Any]] | None = None,
+        existing_rows_resolver: Callable[[list[str]], dict[str, dict[str, Any]]] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        generate_micro_thumbnails: bool | Callable[[], bool] = True,
     ) -> Iterator[dict[str, Any]]:
         """Yield normalized scan rows."""
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..application.use_cases.scan_models import ScanMode
 from ..events.bus import EventBus
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -144,14 +145,22 @@ class RuntimeContext:
                     "resume_startup_tasks: bind_path succeeded, root=%s",
                     self.library.root(),
                 )
+                scan_root = self.library.root() or candidate
+                should_resume_scan = False
+                if self.library_session is not None:
+                    scan_service = getattr(self.library_session, "scans", None)
+                    has_incomplete_scan = getattr(scan_service, "has_incomplete_scan", None)
+                    if callable(has_incomplete_scan):
+                        should_resume_scan = bool(has_incomplete_scan(scan_root))
                 if (
-                    not had_existing_index
-                    and not self.library.is_scanning_path(candidate)
+                    (not had_existing_index or should_resume_scan)
+                    and not self.library.is_scanning_path(scan_root)
                 ):
                     self.facade.scan_root_async(
-                        candidate,
+                        scan_root,
                         include=DEFAULT_INCLUDE,
                         exclude=DEFAULT_EXCLUDE,
+                        mode=ScanMode.INITIAL_SAFE,
                     )
             except LibraryError as exc:
                 _logger.error("resume_startup_tasks: bind_path failed: %s", exc)

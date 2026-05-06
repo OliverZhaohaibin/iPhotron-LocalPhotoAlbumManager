@@ -8,6 +8,11 @@ from typing import Any
 import pytest
 
 import iPhoto.bootstrap.library_scan_service as scan_service_module
+from iPhoto.application.use_cases.scan_models import (
+    ScanCompletion,
+    ScanMode,
+    ScanProgressPhase,
+)
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 
@@ -58,7 +63,7 @@ class _CountingRepository:
         self.read_album_assets_called = True
         raise AssertionError("lazy open must not hydrate read_album_assets")
 
-    def merge_scan_rows(self, rows):
+    def merge_scan_rows(self, rows, **_kwargs):
         return list(rows)
 
 
@@ -191,6 +196,129 @@ def test_finalize_scan_preserves_subalbum_live_pairs_across_repeated_rescans(
     assert indexed["album/IMG_0001.HEIC"]["live_partner_rel"] == "album/IMG_0001.MOV"
     assert indexed["album/IMG_0001.MOV"]["live_role"] == 1
     assert indexed["album/IMG_0001.MOV"]["live_partner_rel"] == "album/IMG_0001.HEIC"
+
+
+def test_pair_album_library_root_preserves_live_pairs_across_prefixes(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    service = LibraryScanService(library_root)
+    rows = [
+        {
+            "rel": "album-a/IMG_0001.HEIC",
+            "id": "still-a",
+            "mime": "image/heic",
+            "dt": "2024-01-01T00:00:00Z",
+            "ts": 1,
+            "bytes": 1,
+            "content_id": "live-a",
+        },
+        {
+            "rel": "album-a/IMG_0001.MOV",
+            "id": "motion-a",
+            "mime": "video/quicktime",
+            "dt": "2024-01-01T00:00:00Z",
+            "ts": 1,
+            "bytes": 1,
+            "content_id": "live-a",
+        },
+        {
+            "rel": "album-b/IMG_0002.HEIC",
+            "id": "still-b",
+            "mime": "image/heic",
+            "dt": "2024-01-02T00:00:00Z",
+            "ts": 2,
+            "bytes": 1,
+            "content_id": "live-b",
+        },
+        {
+            "rel": "album-b/IMG_0002.MOV",
+            "id": "motion-b",
+            "mime": "video/quicktime",
+            "dt": "2024-01-02T00:00:00Z",
+            "ts": 2,
+            "bytes": 1,
+            "content_id": "live-b",
+        },
+    ]
+
+    service.finalize_scan(library_root, rows)
+    groups = service.pair_album(library_root)
+
+    store = get_global_repository(library_root)
+    indexed = {
+        row["rel"]: row
+        for row in store.read_all(filter_hidden=False)
+    }
+    assert {(group.still, group.motion) for group in groups} == {
+        ("album-a/IMG_0001.HEIC", "album-a/IMG_0001.MOV"),
+        ("album-b/IMG_0002.HEIC", "album-b/IMG_0002.MOV"),
+    }
+    assert indexed["album-a/IMG_0001.HEIC"]["live_role"] == 0
+    assert indexed["album-a/IMG_0001.HEIC"]["live_partner_rel"] == "album-a/IMG_0001.MOV"
+    assert indexed["album-a/IMG_0001.MOV"]["live_role"] == 1
+    assert indexed["album-a/IMG_0001.MOV"]["live_partner_rel"] == "album-a/IMG_0001.HEIC"
+    assert indexed["album-b/IMG_0002.HEIC"]["live_role"] == 0
+    assert indexed["album-b/IMG_0002.HEIC"]["live_partner_rel"] == "album-b/IMG_0002.MOV"
+    assert indexed["album-b/IMG_0002.MOV"]["live_role"] == 1
+    assert indexed["album-b/IMG_0002.MOV"]["live_partner_rel"] == "album-b/IMG_0002.HEIC"
+
+
+def test_pair_album_library_root_includes_legacy_null_prefix_rows(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    store = get_global_repository(library_root)
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO assets (
+                rel, id, parent_album_path, mime, dt, ts, bytes, content_id
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+            """,
+            (
+                "IMG_0001.HEIC",
+                "still",
+                "image/heic",
+                "2024-01-01T00:00:00Z",
+                1,
+                1,
+                "live-a",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO assets (
+                rel, id, parent_album_path, mime, dt, ts, bytes, content_id
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+            """,
+            (
+                "IMG_0001.MOV",
+                "motion",
+                "video/quicktime",
+                "2024-01-01T00:00:00Z",
+                1,
+                1,
+                "live-a",
+            ),
+        )
+
+    service = LibraryScanService(library_root)
+    groups = service.pair_album(library_root)
+
+    indexed = {
+        row["rel"]: row
+        for row in store.read_all(filter_hidden=False)
+    }
+    assert {(group.still, group.motion) for group in groups} == {
+        ("IMG_0001.HEIC", "IMG_0001.MOV"),
+    }
+    assert indexed["IMG_0001.HEIC"]["live_role"] == 0
+    assert indexed["IMG_0001.HEIC"]["live_partner_rel"] == "IMG_0001.MOV"
+    assert indexed["IMG_0001.MOV"]["live_role"] == 1
+    assert indexed["IMG_0001.MOV"]["live_partner_rel"] == "IMG_0001.HEIC"
 
 
 def test_report_album_uses_session_repository_and_links(tmp_path: Path) -> None:
@@ -404,3 +532,351 @@ def test_scan_specific_files_prefixes_subalbum_rows(
     assert [row["rel"] for row in store.read_album_assets("album")] == [
         "album/a.jpg"
     ]
+
+
+def test_plan_scan_initial_safe_defers_face_scan_and_live_pairing(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    service = LibraryScanService(library_root, scanner=_Scanner([]))
+
+    plan = service.plan_scan(library_root, mode=ScanMode.INITIAL_SAFE)
+
+    assert plan.safe_mode is True
+    assert plan.allow_face_scan is False
+    assert plan.defer_live_pairing is True
+    assert plan.persist_chunks is True
+    assert plan.collect_rows is False
+
+
+def test_complete_scan_prunes_by_last_seen_scan_id(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {
+                "rel": "album/keep.jpg",
+                "id": "keep",
+                "last_seen_scan_id": "scan-1",
+            },
+            {
+                "rel": "album/stale.jpg",
+                "id": "stale",
+                "last_seen_scan_id": "old-scan",
+            },
+        ]
+    )
+    service = LibraryScanService(library_root, scanner=_Scanner([]))
+    store.create_scan_run(
+        "scan-1",
+        scope_root=album_root.resolve().as_posix(),
+        mode=ScanMode.BACKGROUND.value,
+        safe_mode=False,
+        phase=ScanProgressPhase.INDEXING.value,
+    )
+
+    finalized = service.complete_scan(
+        ScanCompletion(
+            root=album_root,
+            scan_id="scan-1",
+            mode=ScanMode.BACKGROUND,
+            processed_count=1,
+            failed_count=0,
+            success=True,
+            cancelled=False,
+            safe_mode=False,
+            defer_live_pairing=True,
+            allow_face_scan=True,
+            phase=ScanProgressPhase.COMPLETED,
+        ),
+        pair_live=False,
+    )
+
+    rows = list(
+        store.read_album_assets(
+            "album",
+            include_subalbums=True,
+            filter_hidden=False,
+        )
+    )
+    assert [row["rel"] for row in rows] == ["album/keep.jpg"]
+    assert finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+    assert service.has_incomplete_scan(album_root) is True
+
+
+def test_resume_scan_promotes_deferred_pairing_runs_to_background(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    service = LibraryScanService(library_root, scanner=_Scanner([]))
+    store.create_scan_run(
+        "scan-1",
+        scope_root=album_root.resolve().as_posix(),
+        mode=ScanMode.INITIAL_SAFE.value,
+        safe_mode=True,
+        phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+    )
+    store.update_scan_run(
+        "scan-1",
+        state="paused",
+        phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+    )
+
+    plan = service.resume_scan(album_root)
+
+    assert plan.scan_id != "scan-1"
+    assert plan.resumed_from_scan_id == "scan-1"
+    assert plan.mode == ScanMode.BACKGROUND
+    assert plan.defer_live_pairing is False
+    assert plan.allow_face_scan is True
+
+
+def test_resumed_scan_uses_fresh_scan_id_for_pruning_and_clears_old_pause(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {
+                "rel": "album/keep.jpg",
+                "id": "keep",
+                "last_seen_scan_id": "scan-1",
+            },
+            {
+                "rel": "album/stale.jpg",
+                "id": "stale",
+                "last_seen_scan_id": "scan-1",
+            },
+        ]
+    )
+    service = LibraryScanService(
+        library_root,
+        scanner=_Scanner([{"rel": "keep.jpg", "id": "keep"}]),
+    )
+    store.create_scan_run(
+        "scan-1",
+        scope_root=album_root.resolve().as_posix(),
+        mode=ScanMode.BACKGROUND.value,
+        safe_mode=False,
+        phase=ScanProgressPhase.INDEXING.value,
+    )
+    store.update_scan_run(
+        "scan-1",
+        state="paused",
+        phase=ScanProgressPhase.CANCELLED_RESUMABLE.value,
+    )
+
+    plan = service.resume_scan(album_root)
+    result = service.start_scan(plan)
+    service.complete_scan(
+        ScanCompletion(
+            root=album_root,
+            scan_id=plan.scan_id,
+            mode=plan.mode,
+            processed_count=result.processed_count,
+            failed_count=result.failed_count,
+            success=True,
+            cancelled=False,
+            safe_mode=plan.safe_mode,
+            defer_live_pairing=plan.defer_live_pairing,
+            allow_face_scan=plan.allow_face_scan,
+            phase=ScanProgressPhase.COMPLETED,
+        ),
+        pair_live=False,
+    )
+
+    rows = list(
+        store.read_album_assets(
+            "album",
+            include_subalbums=True,
+            filter_hidden=False,
+        )
+    )
+    resumed_run = store.latest_incomplete_scan_run(
+        scope_root=album_root.resolve().as_posix(),
+    )
+
+    assert plan.scan_id != "scan-1"
+    assert plan.resumed_from_scan_id == "scan-1"
+    assert [row["rel"] for row in rows] == ["album/keep.jpg"]
+    assert rows[0]["last_seen_scan_id"] == plan.scan_id
+    assert resumed_run is None
+    assert service.has_incomplete_scan(album_root) is False
+
+
+def test_cancelled_resumed_background_scan_resumes_as_background_again(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    service = LibraryScanService(library_root, scanner=_Scanner([]))
+    store.create_scan_run(
+        "scan-1",
+        scope_root=album_root.resolve().as_posix(),
+        mode=ScanMode.INITIAL_SAFE.value,
+        safe_mode=True,
+        phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+    )
+    store.update_scan_run(
+        "scan-1",
+        state="paused",
+        phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+    )
+
+    first_resume = service.resume_scan(album_root)
+    service.start_scan(first_resume)
+    service.complete_scan(
+        ScanCompletion(
+            root=album_root,
+            scan_id=first_resume.scan_id,
+            mode=first_resume.mode,
+            processed_count=0,
+            failed_count=0,
+            success=True,
+            cancelled=True,
+            safe_mode=first_resume.safe_mode,
+            defer_live_pairing=first_resume.defer_live_pairing,
+            allow_face_scan=first_resume.allow_face_scan,
+            phase=ScanProgressPhase.CANCELLED_RESUMABLE,
+        ),
+        pair_live=False,
+    )
+
+    second_resume = service.resume_scan(album_root)
+
+    assert first_resume.mode == ScanMode.BACKGROUND
+    assert second_resume.mode == ScanMode.BACKGROUND
+    assert second_resume.resumed_from_scan_id == first_resume.scan_id
+    assert second_resume.scan_id != first_resume.scan_id
+
+
+def test_complete_scan_keeps_freshly_persisted_rows_for_same_scan_id(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    service = LibraryScanService(
+        library_root,
+        scanner=_Scanner([{"rel": "fresh.jpg", "id": "fresh"}]),
+    )
+    plan = service.plan_scan(
+        album_root,
+        mode=ScanMode.BACKGROUND,
+        persist_chunks=True,
+        collect_rows=False,
+        scan_id="scan-1",
+    )
+
+    result = service.start_scan(plan)
+    finalized = service.complete_scan(
+        ScanCompletion(
+            root=album_root,
+            scan_id=plan.scan_id,
+            mode=plan.mode,
+            processed_count=result.processed_count,
+            failed_count=result.failed_count,
+            success=True,
+            cancelled=False,
+            safe_mode=plan.safe_mode,
+            defer_live_pairing=plan.defer_live_pairing,
+            allow_face_scan=plan.allow_face_scan,
+            phase=ScanProgressPhase.COMPLETED,
+        ),
+        pair_live=False,
+    )
+
+    store = get_global_repository(library_root)
+    rows = list(
+        store.read_album_assets(
+            "album",
+            include_subalbums=True,
+            filter_hidden=False,
+        )
+    )
+    assert [row["rel"] for row in rows] == ["album/fresh.jpg"]
+    assert rows[0]["last_seen_scan_id"] == "scan-1"
+    assert finalized.phase == ScanProgressPhase.COMPLETED
+
+
+def test_complete_scan_deferred_pairing_hides_motion_components(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    service = LibraryScanService(
+        library_root,
+        scanner=_Scanner(
+            [
+                {
+                    "rel": "IMG_0001.HEIC",
+                    "id": "still",
+                    "mime": "image/heic",
+                    "dt": "2024-01-01T00:00:00Z",
+                    "ts": 1,
+                    "bytes": 1,
+                    "content_id": "live-a",
+                },
+                {
+                    "rel": "IMG_0001.MOV",
+                    "id": "motion",
+                    "mime": "video/quicktime",
+                    "dt": "2024-01-01T00:00:00Z",
+                    "ts": 1,
+                    "bytes": 1,
+                    "content_id": "live-a",
+                },
+            ]
+        ),
+    )
+    plan = service.plan_scan(album_root, mode=ScanMode.INITIAL_SAFE)
+
+    result = service.start_scan(plan)
+    finalized = service.complete_scan(
+        ScanCompletion(
+            root=album_root,
+            scan_id=plan.scan_id,
+            mode=plan.mode,
+            processed_count=result.processed_count,
+            failed_count=result.failed_count,
+            success=True,
+            cancelled=False,
+            safe_mode=plan.safe_mode,
+            defer_live_pairing=plan.defer_live_pairing,
+            allow_face_scan=plan.allow_face_scan,
+            phase=ScanProgressPhase.COMPLETED,
+        ),
+        pair_live=False,
+    )
+
+    store = get_global_repository(library_root)
+    visible_rows = list(
+        store.read_album_assets(
+            "album",
+            include_subalbums=True,
+            filter_hidden=True,
+        )
+    )
+    all_rows = {
+        row["rel"]: row
+        for row in store.read_album_assets(
+            "album",
+            include_subalbums=True,
+            filter_hidden=False,
+        )
+    }
+
+    assert finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+    assert [row["rel"] for row in visible_rows] == ["album/IMG_0001.HEIC"]
+    assert all_rows["album/IMG_0001.HEIC"]["live_partner_rel"] == "album/IMG_0001.MOV"
+    assert all_rows["album/IMG_0001.MOV"]["live_role"] == 1

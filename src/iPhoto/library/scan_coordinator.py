@@ -7,6 +7,12 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
+from ..application.use_cases.scan_models import (
+    ScanCompletion,
+    ScanMode,
+    ScanProgressPhase,
+    ScanStatusUpdate,
+)
 from ..bootstrap.library_scan_service import LibraryScanService
 from ..utils.logging import get_logger
 from .workers.face_scan_worker import FaceScanWorker
@@ -58,12 +64,20 @@ class ScanCoordinatorMixin:
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        mode: ScanMode = ScanMode.BACKGROUND,
     ) -> None:
         """Start a scan through the session-facing runtime controller surface."""
 
-        self.start_scanning(root, include, exclude)
+        self.start_scanning(root, include, exclude, mode=mode)
 
-    def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
+    def start_scanning(
+        self,
+        root: Path,
+        include: Iterable[str],
+        exclude: Iterable[str],
+        *,
+        mode: ScanMode = ScanMode.BACKGROUND,
+    ) -> None:
         """Start a background scan for the given root directory.
         
         All scanned assets are written to the global database at the library root.
@@ -71,6 +85,7 @@ class ScanCoordinatorMixin:
         # Prepare signals outside the lock
         signals = ScannerSignals()
         signals.progressUpdated.connect(self.scanProgress)
+        signals.statusChanged.connect(self.scanStatusChanged)
         signals.chunkReady.connect(self._on_scan_chunk)
         signals.finished.connect(self._on_scan_finished)
         signals.error.connect(self._on_scan_error)
@@ -91,6 +106,15 @@ class ScanCoordinatorMixin:
 
         self._live_scan_root = root
         self._live_scan_buffer.clear()
+        scan_service = getattr(self, "_scan_service", None)
+        if scan_service is not None and hasattr(scan_service, "resume_scan"):
+            scan_plan = (
+                scan_service.resume_scan(root, include=include, exclude=exclude)
+                if mode == ScanMode.INITIAL_SAFE
+                else scan_service.plan_scan(root, include=include, exclude=exclude, mode=mode)
+            )
+        else:
+            scan_plan = None
 
         # Pass library root to scanner so all assets go to global database
         worker = ScannerWorker(
@@ -99,24 +123,38 @@ class ScanCoordinatorMixin:
             exclude,
             signals,
             library_root=self._root,
-            scan_service=getattr(self, "_scan_service", None),
+            scan_service=scan_service,
+            scan_plan=scan_plan,
         )
         self._current_scanner_worker = worker
         self._face_scan_status_message = None
         self.faceScanStatusChanged.emit("")
-        face_library_root = self._root if self._root is not None else root
-        face_worker = FaceScanWorker(
-            face_library_root,
-            self,
-            people_service=getattr(self, "_people_service", None),
-        )
-        face_worker.statusChanged.connect(self._on_face_scan_status_changed)
-        face_worker.finished.connect(self._on_face_scan_finished)
-        self._current_face_scanner = face_worker
+        face_worker = None
+        if scan_plan is None or scan_plan.allow_face_scan:
+            face_library_root = self._root if self._root is not None else root
+            face_worker = FaceScanWorker(
+                face_library_root,
+                self,
+                people_service=getattr(self, "_people_service", None),
+            )
+            face_worker.statusChanged.connect(self._on_face_scan_status_changed)
+            face_worker.finished.connect(self._on_face_scan_finished)
+            self._current_face_scanner = face_worker
+        else:
+            self.scanStatusChanged.emit(
+                ScanStatusUpdate(
+                    root=Path(root),
+                    scan_id=scan_plan.scan_id,
+                    mode=scan_plan.mode,
+                    phase=ScanProgressPhase.DEFERRED_PAIRING,
+                    message="Initial safe scan defers People indexing.",
+                )
+            )
         # Release lock before starting the worker
         del locker
 
-        face_worker.start()
+        if face_worker is not None:
+            face_worker.start()
         self._scan_thread_pool.start(worker)
 
     def stop_scanning(self) -> None:
@@ -314,7 +352,12 @@ class ScanCoordinatorMixin:
             self._current_face_scanner.enqueue_rows(chunk)
         self.scanChunkReady.emit(root, chunk)
 
-    def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
+    def _on_scan_finished(
+        self,
+        completion: ScanCompletion | Path,
+        rows: List[dict] | None = None,
+    ) -> None:
+        completion = self._coerce_scan_completion(completion, rows)
         self.invalidate_geotagged_assets_cache()
 
         # Clear worker reference before downstream listeners react so a completed
@@ -327,33 +370,128 @@ class ScanCoordinatorMixin:
 
         if worker is None:
             if self._live_scan_root is None:
-                self.scanFinished.emit(root, True)
+                self.scanFinished.emit(completion.root, True)
             return
         if face_scanner is not None:
             face_scanner.finish_input()
 
-        if worker.cancelled:
-            self.scanFinished.emit(root, True)
+        if worker.cancelled or completion.cancelled:
+            scan_service = worker.scan_service
+            try:
+                completion = scan_service.complete_scan(
+                    completion,
+                    pair_live=False,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to persist cancelled scan state for %s: %s",
+                    completion.root,
+                    exc,
+                )
+            self.scanStatusChanged.emit(
+                ScanStatusUpdate(
+                    root=completion.root,
+                    scan_id=completion.scan_id,
+                    mode=completion.mode,
+                    phase=(
+                        completion.phase
+                        if completion.phase == ScanProgressPhase.PAUSED_FOR_MEMORY
+                        else ScanProgressPhase.CANCELLED_RESUMABLE
+                    ),
+                    processed=completion.processed_count,
+                    failed_count=completion.failed_count,
+                    message=(
+                        "Memory critical: scan paused and can be resumed."
+                        if completion.phase == ScanProgressPhase.PAUSED_FOR_MEMORY
+                        else "Scan cancelled. Indexed chunks remain resumable."
+                    ),
+                )
+            )
+            self.scanFinished.emit(completion.root, True)
             return
-        if worker.failed:
-            self.scanFinished.emit(root, False)
-            return
-
-        # Persist Live Photo pairings once a scan completes so the database and
-        # links.json reflect the latest scan results.
         scan_service = worker.scan_service
+        if worker.failed or not completion.success:
+            try:
+                completion = scan_service.complete_scan(
+                    completion,
+                    pair_live=False,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to persist failed scan state for %s: %s",
+                    completion.root,
+                    exc,
+                )
+            self.scanStatusChanged.emit(
+                ScanStatusUpdate(
+                    root=completion.root,
+                    scan_id=completion.scan_id,
+                    mode=completion.mode,
+                    phase=completion.phase,
+                    processed=completion.processed_count,
+                    failed_count=completion.failed_count,
+                    message="Scan failed. Some scanned items could not be saved.",
+                )
+            )
+            self.scanFinished.emit(completion.root, False)
+            return
+
         try:
-            scan_service.finalize_scan_result(root, rows, pair_live=False)
+            finalized = scan_service.complete_scan(
+                completion,
+                pair_live=False,
+            )
         except Exception as exc:
-            LOGGER.warning("Failed to persist scan finalization for %s: %s", root, exc)
+            LOGGER.warning("Failed to persist scan finalization for %s: %s", completion.root, exc)
+            self.scanFinished.emit(completion.root, False)
+            return
 
-        # Emit immediately so the UI (status bar, map refresh) can react without
-        # waiting for the potentially slow live-photo pairing step.
-        self.scanFinished.emit(root, True)
+        if not finalized.defer_live_pairing:
+            try:
+                scan_service.pair_album(finalized.root)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to persist live photo pairings after scan of %s "
+                    "(re-scanning the library will retry pairing): %s",
+                    finalized.root,
+                    exc,
+                )
 
-        # Persist live-photo pairings in the background to avoid blocking the
-        # main thread while downstream listeners start refreshing.
-        self._scan_thread_pool.start(_PairingWorker(root, scan_service))
+        # Only notify scan completion after live-role state is current so a
+        # gallery reload does not momentarily surface motion components.
+        self.scanStatusChanged.emit(
+            ScanStatusUpdate(
+                root=finalized.root,
+                scan_id=finalized.scan_id,
+                mode=finalized.mode,
+                phase=finalized.phase,
+                processed=finalized.processed_count,
+                failed_count=finalized.failed_count,
+                message=(
+                    "Initial scan indexed safely. Live Photo pairing is deferred."
+                    if finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+                    else "Scan complete."
+                ),
+            )
+        )
+        self.scanFinished.emit(finalized.root, True)
+
+    def _coerce_scan_completion(
+        self,
+        completion: ScanCompletion | Path,
+        rows: List[dict] | None,
+    ) -> ScanCompletion:
+        if isinstance(completion, ScanCompletion):
+            return completion
+        return ScanCompletion(
+            root=Path(completion),
+            scan_id="",
+            mode=ScanMode.BACKGROUND,
+            processed_count=len(rows or []),
+            failed_count=0,
+            success=True,
+            cancelled=False,
+        )
 
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

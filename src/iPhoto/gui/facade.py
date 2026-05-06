@@ -7,6 +7,7 @@ from typing import Callable, Iterable, List, Optional, Set, TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from ..application.use_cases.scan_models import ScanMode
 from ..errors import IPhotoError
 from ..application.services.album_manifest_service import Album
 from ..utils.logging import get_logger
@@ -36,6 +37,7 @@ class AppFacade(QObject):
     linksUpdated = Signal(Path)
     errorRaised = Signal(str)
     scanProgress = Signal(Path, int, int)
+    scanStatusChanged = Signal(object)
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
@@ -89,6 +91,9 @@ class AppFacade(QObject):
         )
 
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
+        self._library_update_service.scanStatusChanged.connect(
+            self._relay_scan_status_changed
+        )
         self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
         self._library_update_service.scanBatchFailed.connect(
@@ -238,6 +243,7 @@ class AppFacade(QObject):
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        mode: ScanMode = ScanMode.BACKGROUND,
     ) -> None:
         """Start a background scan for *root* through the bound session surface."""
 
@@ -245,6 +251,7 @@ class AppFacade(QObject):
             root,
             include=include,
             exclude=exclude,
+            mode=mode,
         )
 
     def _inject_scan_dependencies_for_tests(
@@ -306,6 +313,7 @@ class AppFacade(QObject):
             try:
                 self._library_manager.treeUpdated.disconnect(self._on_library_tree_updated)
                 self._library_manager.scanProgress.disconnect(self._relay_scan_progress)
+                self._library_manager.scanStatusChanged.disconnect(self._relay_scan_status_changed)
                 self._library_manager.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
                 self._library_manager.scanFinished.disconnect(self._relay_scan_finished)
             except (RuntimeError, TypeError):
@@ -317,12 +325,14 @@ class AppFacade(QObject):
 
         try:
             self._library_update_service.scanProgress.disconnect(self._relay_scan_progress)
+            self._library_update_service.scanStatusChanged.disconnect(self._relay_scan_status_changed)
             self._library_update_service.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
             self._library_update_service.scanFinished.disconnect(self._relay_scan_finished)
         except (RuntimeError, TypeError):
             pass
 
         self._library_manager.scanProgress.connect(self._relay_scan_progress)
+        self._library_manager.scanStatusChanged.connect(self._relay_scan_status_changed)
         self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_manager.scanFinished.connect(self._relay_scan_finished)
         self._library_manager.scanBatchFailed.connect(self._relay_scan_batch_failed)
@@ -449,6 +459,10 @@ class AppFacade(QObject):
     @Slot(Path, int, int)
     def _relay_scan_progress(self, root: Path, current: int, total: int) -> None:
         self.scanProgress.emit(root, current, total)
+
+    @Slot(object)
+    def _relay_scan_status_changed(self, update: object) -> None:
+        self.scanStatusChanged.emit(update)
 
     @Slot(Path, list)
     def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:

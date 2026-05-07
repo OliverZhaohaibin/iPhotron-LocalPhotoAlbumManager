@@ -724,11 +724,17 @@ def test_resume_scan_promotes_deferred_pairing_runs_to_background(
         mode=ScanMode.INITIAL_SAFE.value,
         safe_mode=True,
         phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+        pressure_level=ScanPressureLevel.CONSTRAINED.value,
+        degrade_reason="initial safe scan",
+        deferred_tasks="live_pairing,face_scan",
     )
     store.update_scan_run(
         "scan-1",
         state="paused",
         phase=ScanProgressPhase.DEFERRED_PAIRING.value,
+        pressure_level=ScanPressureLevel.CONSTRAINED.value,
+        degrade_reason="initial safe scan",
+        deferred_tasks="live_pairing,face_scan",
     )
 
     plan = service.resume_scan(album_root)
@@ -736,6 +742,7 @@ def test_resume_scan_promotes_deferred_pairing_runs_to_background(
     assert plan.scan_id != "scan-1"
     assert plan.resumed_from_scan_id == "scan-1"
     assert plan.mode == ScanMode.BACKGROUND
+    assert plan.pressure_level == ScanPressureLevel.NORMAL
     assert plan.defer_live_pairing is False
     assert plan.allow_face_scan is True
 
@@ -1095,7 +1102,7 @@ def test_complete_scan_constrained_background_defers_pairing(
     assert finalized.deferred_pairing_reason == "memory warning"
     assert run is not None
     assert run["pressure_level"] == ScanPressureLevel.CONSTRAINED.value
-    assert run["deferred_tasks"] == "live_pairing,face_scan"
+    assert run["deferred_tasks"] == "live_pairing"
 
 
 def test_rescan_scope_bounded_marks_cancelled_runs_unsuccessful(
@@ -1190,7 +1197,7 @@ def test_rescan_scope_bounded_degrades_when_discovery_exceeds_threshold(
     assert completion.phase == ScanProgressPhase.DEFERRED_PAIRING
     assert run is not None
     assert run["pressure_level"] == ScanPressureLevel.CONSTRAINED.value
-    assert run["deferred_tasks"] == "live_pairing,face_scan"
+    assert run["deferred_tasks"] == "live_pairing"
 
 
 def test_complete_scan_deferred_pairing_hides_motion_components(

@@ -505,6 +505,55 @@ class ScanCoordinatorMixin:
             )
         )
         self.scanFinished.emit(finalized.root, True)
+        self._start_deferred_face_scan_if_needed(
+            finalized.root,
+            finalized,
+            existing_face_scanner=face_scanner,
+        )
+
+    def _start_deferred_face_scan_if_needed(
+        self,
+        root: Path,
+        completion: ScanCompletion,
+        *,
+        existing_face_scanner: FaceScanWorker | None = None,
+    ) -> None:
+        if (
+            not completion.success
+            or completion.cancelled
+            or not completion.deferred_face_scan
+            or completion.phase
+            not in {
+                ScanProgressPhase.COMPLETED,
+                ScanProgressPhase.DEFERRED_PAIRING,
+            }
+            or existing_face_scanner is not None
+        ):
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if self._current_scanner_worker is not None or self._current_face_scanner is not None:
+            del locker
+            return
+
+        face_library_root = self._root if self._root is not None else Path(root)
+        face_worker = FaceScanWorker(
+            face_library_root,
+            self,
+            people_service=people_service,
+        )
+        face_worker.statusChanged.connect(self._on_face_scan_status_changed)
+        face_worker.finished.connect(self._on_face_scan_finished)
+        self._current_face_scanner = face_worker
+        del locker
+
+        if self._face_scan_status_message is not None:
+            self._face_scan_status_message = None
+            self.faceScanStatusChanged.emit("")
+        face_worker.start()
 
     def _coerce_scan_completion(
         self,

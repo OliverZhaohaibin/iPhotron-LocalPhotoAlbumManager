@@ -276,6 +276,10 @@ class LibraryScanService:
                 exclude=exclude,
                 mode=default_mode,
             )
+        resume_phase = str(run.get("phase") or "")
+        resuming_deferred_pairing = (
+            resume_phase == ScanProgressPhase.DEFERRED_PAIRING.value
+        )
         mode = self._resume_mode_for_run(run, default_mode=default_mode)
         previous_scan_id = str(run.get("scan_id") or "").strip() or None
         resumed_pressure = self._pressure_level_from_value(run.get("pressure_level"))
@@ -290,16 +294,28 @@ class LibraryScanService:
             scan_id=uuid4().hex,
             resumed_from_scan_id=previous_scan_id,
             scope_kind=resume_scope_kind,
-            pressure_level=resumed_pressure,
-            degrade_reason=resumed_degrade_reason,
+            pressure_level=(
+                ScanPressureLevel.NORMAL
+                if resuming_deferred_pairing
+                else resumed_pressure
+            ),
+            degrade_reason=(
+                None
+                if resuming_deferred_pairing
+                else resumed_degrade_reason
+            ),
             allow_face_scan=(
-                False
-                if "face_scan" in deferred_tasks
-                else None
+                True
+                if resuming_deferred_pairing
+                else (
+                    False
+                    if "face_scan" in deferred_tasks
+                    else None
+                )
             ),
             defer_live_pairing=(
                 False
-                if str(run.get("phase") or "") == ScanProgressPhase.DEFERRED_PAIRING.value
+                if resuming_deferred_pairing
                 else None
             ),
         )
@@ -1511,10 +1527,20 @@ class LibraryScanService:
         self,
         completion: ScanCompletion,
     ) -> list[str]:
+        incomplete_phases = {
+            ScanProgressPhase.PAUSED_FOR_MEMORY,
+            ScanProgressPhase.CANCELLED_RESUMABLE,
+            ScanProgressPhase.FAILED,
+        }
         tasks: list[str] = []
-        if completion.phase == ScanProgressPhase.DEFERRED_PAIRING or completion.defer_live_pairing:
+        if completion.phase == ScanProgressPhase.DEFERRED_PAIRING or (
+            completion.defer_live_pairing and completion.phase in incomplete_phases
+        ):
             tasks.append("live_pairing")
-        if completion.deferred_face_scan or not completion.allow_face_scan:
+        if (
+            completion.phase in incomplete_phases
+            and (completion.deferred_face_scan or not completion.allow_face_scan)
+        ):
             tasks.append("face_scan")
         return tasks
 

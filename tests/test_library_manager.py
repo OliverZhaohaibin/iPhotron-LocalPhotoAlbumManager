@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 from iPhoto.application.use_cases.scan_models import (
     ScanCompletion,
     ScanMode,
+    ScanPressureLevel,
     ScanProgressPhase,
 )
 from iPhoto.bootstrap.library_session import LibrarySession
@@ -333,3 +334,139 @@ def test_scan_finished_pairs_live_photos_before_success_signal(
     assert spy.count() == 1
     assert spy.at(0)[1] is True
     assert call_order == ["complete_scan", "pair_album", "scanFinished"]
+
+
+def test_scan_finished_starts_deferred_face_scan_after_success_signal(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+
+    call_order: list[str] = []
+    face_status_updates: list[str] = []
+
+    class _Signal:
+        def __init__(self) -> None:
+            self._callbacks = []
+
+        def connect(self, callback) -> None:
+            self._callbacks.append(callback)
+
+    class _FakeFaceScanWorker:
+        instances: list["_FakeFaceScanWorker"] = []
+
+        def __init__(self, library_root: Path, parent=None, *, people_service=None) -> None:
+            self.library_root = library_root
+            self.parent = parent
+            self.people_service = people_service
+            self.statusChanged = _Signal()
+            self.finished = _Signal()
+            self.started = False
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            self.started = True
+            call_order.append("faceStart")
+
+    class _ScanService:
+        def complete_scan(self, completion, *, pair_live: bool):
+            call_order.append("complete_scan")
+            assert pair_live is False
+            return completion
+
+    class _Worker:
+        cancelled = False
+        failed = False
+        scan_service = _ScanService()
+
+    completion = ScanCompletion(
+        root=root,
+        scan_id="scan-1",
+        mode=ScanMode.INITIAL_SAFE,
+        processed_count=2,
+        pressure_level=ScanPressureLevel.CONSTRAINED,
+        failed_count=0,
+        success=True,
+        cancelled=False,
+        safe_mode=True,
+        defer_live_pairing=True,
+        deferred_face_scan=True,
+        allow_face_scan=False,
+        phase=ScanProgressPhase.DEFERRED_PAIRING,
+    )
+
+    manager._current_scanner_worker = _Worker()
+    manager._face_scan_status_message = "People indexing deferred until scan pressure drops."
+    manager.scanFinished.connect(lambda *_args: call_order.append("scanFinished"))
+    manager.faceScanStatusChanged.connect(face_status_updates.append)
+
+    with patch("iPhoto.library.scan_coordinator.FaceScanWorker", _FakeFaceScanWorker):
+        manager._on_scan_finished(completion)
+        qapp.processEvents()
+
+    assert call_order == ["complete_scan", "scanFinished", "faceStart"]
+    assert face_status_updates == [""]
+    assert manager.face_scan_status_message() is None
+    assert len(_FakeFaceScanWorker.instances) == 1
+    face_worker = _FakeFaceScanWorker.instances[0]
+    assert face_worker.started is True
+    assert face_worker.library_root == root
+    assert face_worker.people_service is manager.people_service
+    assert manager._current_face_scanner is face_worker
+
+
+@pytest.mark.parametrize(
+    ("success", "cancelled", "phase"),
+    [
+        (False, False, ScanProgressPhase.FAILED),
+        (False, True, ScanProgressPhase.CANCELLED_RESUMABLE),
+        (False, True, ScanProgressPhase.PAUSED_FOR_MEMORY),
+    ],
+)
+def test_scan_finished_does_not_restart_deferred_face_scan_for_unsuccessful_states(
+    tmp_path: Path,
+    qapp: QApplication,
+    success: bool,
+    cancelled: bool,
+    phase: ScanProgressPhase,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+
+    class _ScanService:
+        def complete_scan(self, completion, *, pair_live: bool):
+            return completion
+
+    class _Worker:
+        cancelled = False
+        failed = not success
+        scan_service = _ScanService()
+
+    completion = ScanCompletion(
+        root=root,
+        scan_id="scan-1",
+        mode=ScanMode.BACKGROUND,
+        processed_count=1,
+        pressure_level=ScanPressureLevel.CONSTRAINED,
+        failed_count=0 if success else 1,
+        success=success,
+        cancelled=cancelled,
+        safe_mode=False,
+        defer_live_pairing=True,
+        deferred_face_scan=True,
+        allow_face_scan=False,
+        phase=phase,
+    )
+
+    manager._current_scanner_worker = _Worker()
+
+    with patch("iPhoto.library.scan_coordinator.FaceScanWorker") as face_worker_cls:
+        manager._on_scan_finished(completion)
+        qapp.processEvents()
+
+    face_worker_cls.assert_not_called()

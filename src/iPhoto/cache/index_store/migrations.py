@@ -219,11 +219,19 @@ class SchemaMigrator:
         cursor = conn.execute("PRAGMA table_info(scan_runs)")
         existing_columns: Set[str] = {row[1] for row in cursor}
         required_columns = {
+            "safe_mode": "ALTER TABLE scan_runs ADD COLUMN safe_mode INTEGER DEFAULT 0",
+            "phase": "ALTER TABLE scan_runs ADD COLUMN phase TEXT",
             "pressure_level": (
                 "ALTER TABLE scan_runs ADD COLUMN pressure_level TEXT DEFAULT 'normal'"
             ),
             "degrade_reason": "ALTER TABLE scan_runs ADD COLUMN degrade_reason TEXT",
             "deferred_tasks": "ALTER TABLE scan_runs ADD COLUMN deferred_tasks TEXT",
+            "completed_at": "ALTER TABLE scan_runs ADD COLUMN completed_at TEXT",
+            "discovered_count": (
+                "ALTER TABLE scan_runs ADD COLUMN discovered_count INTEGER DEFAULT 0"
+            ),
+            "failed_count": "ALTER TABLE scan_runs ADD COLUMN failed_count INTEGER DEFAULT 0",
+            "last_processed_rel": "ALTER TABLE scan_runs ADD COLUMN last_processed_rel TEXT",
         }
 
         for col_name, alter_sql in required_columns.items():
@@ -231,11 +239,22 @@ class SchemaMigrator:
                 logger.info("Adding missing scan_runs column: %s", col_name)
                 conn.execute(alter_sql)
 
+        # Older databases inferred "safe" behavior from the legacy mode value
+        # before the explicit safe_mode flag existed.
+        conn.execute(
+            """
+            UPDATE scan_runs
+            SET safe_mode = 1
+            WHERE mode = 'initial_safe'
+              AND (safe_mode IS NULL OR safe_mode = 0)
+            """
+        )
+
         conn.execute(
             """
             UPDATE scan_runs
             SET pressure_level = 'constrained'
-            WHERE safe_mode = 1
+            WHERE (safe_mode = 1 OR mode = 'initial_safe')
               AND (pressure_level IS NULL OR pressure_level = 'normal')
             """
         )

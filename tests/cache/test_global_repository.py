@@ -172,6 +172,50 @@ class TestGlobalRepositorySingleton:
         assert run is not None
         assert run["pressure_level"] == "constrained"
 
+    def test_global_repository_migrates_legacy_scan_runs_without_safe_mode(
+        self, tmp_path: Path
+    ) -> None:
+        library_root = tmp_path / "Library"
+        album_root = library_root / "Album"
+        album_root.mkdir(parents=True)
+        db_dir = library_root / WORK_DIR_NAME
+        db_dir.mkdir(parents=True)
+        db_path = db_dir / GLOBAL_INDEX_DB_NAME
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE scan_runs (
+                    scan_id TEXT PRIMARY KEY,
+                    scope_root TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    started_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO scan_runs (
+                    scan_id, scope_root, mode, state, started_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "scan-legacy",
+                    album_root.resolve().as_posix(),
+                    "initial_safe",
+                    "paused",
+                    "2026-05-07T00:00:00Z",
+                ),
+            )
+
+        repo = get_global_repository(library_root)
+        run = repo.latest_incomplete_scan_run(scope_root=album_root.resolve().as_posix())
+
+        assert run is not None
+        assert run["safe_mode"] == 1
+        assert run["pressure_level"] == "constrained"
+
     def test_face_status_helpers_round_trip(self, tmp_path: Path) -> None:
         repo = get_global_repository(tmp_path)
         repo.write_rows(

@@ -63,6 +63,7 @@ def _make_vm(
     context.library.root.return_value = library_root
     context.library.people_service = people_service
     context.library.location_service = None
+    context.resume_pending_startup_scan_now.return_value = False
     facade = MagicMock()
     asset_state_service = MagicMock()
     nav_service = location_trash_service or FakeLocationTrashService(library_root)
@@ -829,3 +830,15 @@ def test_rescan_current_emits_message_without_open_library() -> None:
 
     assert messages == [("No album is currently open.", 3000)]
     facade.scan_root_async.assert_not_called()
+
+
+def test_rescan_current_resumes_pending_startup_scan_before_starting_new_scan() -> None:
+    vm, _store, context, facade, _asset_service = _make_vm(library_root=Path("/library"))
+    facade.current_album = None
+    context.resume_pending_startup_scan_now.return_value = True
+
+    vm.rescan_current()
+
+    context.resume_pending_startup_scan_now.assert_called_once_with()
+    facade.scan_root_async.assert_not_called()
+    facade.rescan_current_async.assert_not_called()

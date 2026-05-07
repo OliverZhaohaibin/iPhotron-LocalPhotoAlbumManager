@@ -48,10 +48,11 @@ class ScannerWorker(QRunnable):
     When scanning a subfolder, the assets are stored with their library-relative paths.
     """
 
-    # Number of items to process before emitting a progressive update signal.
-    # A smaller chunk size makes the UI feel more responsive during the initial
-    # load, while a larger one reduces the overhead of signal emission.
-    SCAN_CHUNK_SIZE = 10
+    # Emit a small first batch for fast UI confirmation, then switch to larger
+    # chunks so huge scans do not thrash the foreground model.
+    INITIAL_SCAN_CHUNK_SIZE = 20
+    NORMAL_SCAN_CHUNK_SIZE = 100
+    CONSTRAINED_SCAN_CHUNK_SIZE = 200
 
     def __init__(
         self,
@@ -169,6 +170,7 @@ class ScannerWorker(QRunnable):
             self._scan_plan = plan
             self._micro_thumbnails_enabled = bool(plan.generate_micro_thumbnails)
             self._face_scan_deferred = not bool(plan.allow_face_scan)
+            chunk_size = self._chunk_size_for_plan(plan)
 
             memory_monitor = MemoryMonitor()
             memory_monitor.add_warning_callback(self._on_memory_warning)
@@ -222,7 +224,8 @@ class ScannerWorker(QRunnable):
                         self._root,
                         count,
                     ),
-                    chunk_size=self.SCAN_CHUNK_SIZE,
+                    chunk_size=chunk_size,
+                    initial_chunk_size=self.INITIAL_SCAN_CHUNK_SIZE,
                     status_callback=self._signals.statusChanged.emit,
                     generate_micro_thumbnails=lambda: self._micro_thumbnails_enabled
                     and bool(
@@ -247,7 +250,8 @@ class ScannerWorker(QRunnable):
                         self._root,
                         count,
                     ),
-                    chunk_size=self.SCAN_CHUNK_SIZE,
+                    chunk_size=chunk_size,
+                    initial_chunk_size=self.INITIAL_SCAN_CHUNK_SIZE,
                     persist_chunks=True,
                 )
             self._failed_count += result.failed_count
@@ -448,3 +452,11 @@ class ScannerWorker(QRunnable):
             ScanProgressPhase.INDEXING,
             message=message,
         )
+
+    def _chunk_size_for_plan(self, plan: ScanPlan) -> int:
+        if (
+            plan.mode == ScanMode.INITIAL_SAFE
+            or plan.pressure_level != ScanPressureLevel.NORMAL
+        ):
+            return self.CONSTRAINED_SCAN_CHUNK_SIZE
+        return self.NORMAL_SCAN_CHUNK_SIZE

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -15,11 +14,6 @@ from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCach
 from iPhoto.utils.geocoding import resolve_location_name
 
 from .gallery_collection_store import GalleryCollectionStore
-
-
-_SNAPSHOT_SEPARATOR = b"\x00"
-_SNAPSHOT_NULL_MARKER = b"\xff"
-
 
 class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
@@ -37,7 +31,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._edit_service_getter = edit_service_getter
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
-        self._last_snapshot: Optional[tuple[int, bytes]] = None
+        self._last_selection_revision = int(getattr(store, "selection_revision", 0))
+        self._last_count = int(store.count())
         self._duration_cache: dict[Path, float] = {}
 
         self._store.window_changed.connect(self._on_window_changed)
@@ -193,7 +188,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         asset_query_service,
         library_root: Optional[Path],
     ) -> None:
-        self._last_snapshot = None
+        self._last_selection_revision = -1
+        self._last_count = -1
         self._duration_cache.clear()
         self._store.rebind_asset_query_service(asset_query_service, library_root)
 
@@ -306,14 +302,17 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     def _on_source_changed(self) -> None:
         count = self._store.count()
-        current_hash = self._snapshot_hash(count)
-        current_snapshot = (count, current_hash)
-        if self._last_snapshot == current_snapshot:
+        selection_revision = int(getattr(self._store, "selection_revision", 0))
+        if (
+            selection_revision == self._last_selection_revision
+            and count == self._last_count
+        ):
             return
         self._duration_cache.clear()
         self.beginResetModel()
         self.endResetModel()
-        self._last_snapshot = current_snapshot
+        self._last_selection_revision = selection_revision
+        self._last_count = count
         if self._current_row >= count:
             self._current_row = -1
 
@@ -344,22 +343,6 @@ class GalleryListModelAdapter(QAbstractListModel):
                 idx,
                 [Roles.FEATURED, Roles.INFO, Roles.LOCATION, Roles.SIZE],
             )
-
-    def _snapshot_hash(self, count: int) -> bytes:
-        digest = hashlib.blake2b(digest_size=16)
-        for row in range(count):
-            asset = self._store.asset_at(row)
-            if asset is None:
-                digest.update(_SNAPSHOT_NULL_MARKER)
-            else:
-                digest.update(self._get_asset_path_bytes(asset))
-            digest.update(_SNAPSHOT_SEPARATOR)
-        return digest.digest()
-
-    @staticmethod
-    def _get_asset_path_bytes(asset: object) -> bytes:
-        abs_path = getattr(asset, "abs_path", None) or getattr(asset, "path", None)
-        return b"" if abs_path is None else str(abs_path).encode("utf-8")
 
     def _effective_video_duration(self, asset: AssetDTO) -> float:
         if not asset.is_video:

@@ -15,6 +15,7 @@ from PySide6.QtCore import (
     QItemSelectionModel,
     QModelIndex,
     QObject,
+    QTimer,
     Qt,
     QThreadPool,
 )
@@ -257,6 +258,14 @@ class MainCoordinator(QObject):
             window.ui.rescan_action,
             context,
         )
+        self._gallery_scan_idle_timer = QTimer(self)
+        self._gallery_scan_idle_timer.setSingleShot(True)
+        self._gallery_scan_idle_timer.setInterval(
+            self._gallery_store.IDLE_SCAN_REFRESH_INTERVAL_MS
+        )
+        self._gallery_scan_idle_timer.timeout.connect(
+            self._flush_idle_gallery_scan_refresh
+        )
 
         self._share_controller = ShareController(
             settings=context.settings,
@@ -444,17 +453,22 @@ class MainCoordinator(QObject):
         # while facade-initiated rescans emit through LibraryUpdateService.
         self._context.library.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
         self._context.library.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        self._context.library.scanStatusChanged.connect(self._gallery_store.handle_scan_status)
         self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
         self._context.library.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
         updates.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
         updates.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        updates.scanStatusChanged.connect(self._gallery_store.handle_scan_status)
         updates.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
         updates.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
+        self._gallery_store.scan_refresh_idle_requested.connect(
+            self._schedule_idle_gallery_scan_refresh
+        )
         self._gallery_vm.message_requested.connect(self._status_bar.show_message)
 
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
-        ui.grid_view.visibleRowsChanged.connect(self._asset_list_vm.prioritize_rows)
+        ui.grid_view.visibleRowsChanged.connect(self._on_grid_visible_rows_changed)
 
         # Filmstrip clicks are now handled by PlaybackCoordinator
 
@@ -538,6 +552,11 @@ class MainCoordinator(QObject):
         self._facade.scanProgress.connect(self._status_bar.handle_scan_progress)
         self._facade.scanStatusChanged.connect(self._status_bar.handle_scan_status)
         self._facade.scanFinished.connect(self._status_bar.handle_scan_finished)
+        startup_resume_pending = getattr(self._facade, "startupResumePending", None)
+        if startup_resume_pending is not None:
+            startup_resume_pending.connect(
+                lambda message: self._status_bar.show_message(message, 5000)
+            )
 
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)
@@ -769,12 +788,37 @@ class MainCoordinator(QObject):
             self._media_failure_cleanup_paths.discard(path_key)
 
     def _on_asset_clicked(self, index: QModelIndex):
+        self._note_user_interaction()
         if self._selection_controller and self._selection_controller.is_active():
             return
         self._gallery_vm.open_row(index.row())
 
     def _on_favorite_clicked(self, index: QModelIndex):
+        self._note_user_interaction()
         self._gallery_vm.toggle_favorite_row(index.row())
+
+    def _on_grid_visible_rows_changed(self, first: int, last: int) -> None:
+        self._note_user_interaction()
+        self._asset_list_vm.prioritize_rows(first, last)
+
+    def _schedule_idle_gallery_scan_refresh(self, restart: bool = False) -> None:
+        if restart or not self._gallery_scan_idle_timer.isActive():
+            self._gallery_scan_idle_timer.start(
+                self._gallery_store.IDLE_SCAN_REFRESH_INTERVAL_MS
+            )
+
+    def _flush_idle_gallery_scan_refresh(self) -> None:
+        flushed = self._gallery_store.flush_pending_scan_refresh(force=False)
+        if not flushed and self._gallery_store.pending_scan_refresh:
+            self._schedule_idle_gallery_scan_refresh()
+
+    def _note_user_interaction(self) -> None:
+        self._gallery_store.mark_user_interaction()
+        note_interaction = getattr(self._context, "note_user_interaction", None)
+        if callable(note_interaction):
+            note_interaction()
+        if self._gallery_store.pending_scan_refresh:
+            self._schedule_idle_gallery_scan_refresh(restart=True)
 
     def _sync_selection(self, row: int):
         """Syncs grid view selection when playback asset changes."""

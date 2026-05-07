@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Protocol
 
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.use_cases.scan_models import (
+    ScanMode,
+    ScanPressureLevel,
+    ScanStatusUpdate,
+)
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.signal import Signal
 
@@ -54,6 +60,8 @@ class GalleryCollectionStore:
     LOOKBEHIND_SCREENS = 1
     LOOKAHEAD_SCREENS = 2
     HYSTERESIS_RATIO = 0.25
+    SCAN_REFRESH_INTERVAL_MS = 1000
+    IDLE_SCAN_REFRESH_INTERVAL_MS = 2000
 
     def __init__(
         self,
@@ -64,6 +72,7 @@ class GalleryCollectionStore:
         self.window_changed = Signal()
         self.count_changed = Signal()
         self.row_changed = Signal()
+        self.scan_refresh_idle_requested = Signal()
 
         self._asset_query_service = asset_query_service
         self._library_root = library_root or getattr(asset_query_service, "library_root", None)
@@ -84,11 +93,32 @@ class GalleryCollectionStore:
         self._pending_scan_rels: set[str] = set()
         self._pending_scan_sort_keys: set[tuple[str, str]] = set()
         self._direct_mode = False
+        self._selection_revision = 0
+        self._window_revision = 0
+        self._cached_total_count: int | None = None
+        self._cached_total_count_key: tuple[str, str] | None = None
+        self._active_scan_mode = ScanMode.BACKGROUND
+        self._active_scan_pressure = ScanPressureLevel.NORMAL
+        self._last_scan_refresh_at = 0.0
+        self._last_user_interaction_at = time.monotonic()
+
+    @property
+    def selection_revision(self) -> int:
+        return self._selection_revision
+
+    @property
+    def window_revision(self) -> int:
+        return self._window_revision
+
+    @property
+    def pending_scan_refresh(self) -> bool:
+        return self._pending_scan_refresh
 
     def set_library_root(self, root: Optional[Path]) -> None:
         if self._library_root == root:
             return
         self._library_root = root
+        self._selection_revision += 1
         self._reset_window_state()
         self.data_changed.emit()
 
@@ -99,6 +129,7 @@ class GalleryCollectionStore:
         if self._asset_query_service is asset_query_service:
             return
         self._asset_query_service = asset_query_service
+        self._selection_revision += 1
         self._reset_window_state()
         self.data_changed.emit()
 
@@ -107,8 +138,18 @@ class GalleryCollectionStore:
         asset_query_service: GalleryAssetQuerySurface | None,
         library_root: Optional[Path],
     ) -> None:
-        self.set_asset_query_service(asset_query_service)
-        self.set_library_root(library_root)
+        changed = False
+        if self._asset_query_service is not asset_query_service:
+            self._asset_query_service = asset_query_service
+            changed = True
+        if self._library_root != library_root:
+            self._library_root = library_root
+            changed = True
+        if not changed:
+            return
+        self._selection_revision += 1
+        self._reset_window_state()
+        self.data_changed.emit()
 
     def set_active_root(self, root: Optional[Path]) -> None:
         self._active_root = root
@@ -160,6 +201,7 @@ class GalleryCollectionStore:
 
     def _load_query(self, query: AssetQuery) -> None:
         old_total = self._total_count
+        self._selection_revision += 1
         self._selection_query = self._clone_query(query)
         self._selection_direct_assets = None
         self._selection_library_root = self._library_root
@@ -171,6 +213,7 @@ class GalleryCollectionStore:
 
     def _load_direct_assets(self, assets: list, library_root: Path) -> None:
         old_total = self._total_count
+        self._selection_revision += 1
         stored_assets = list(assets)
         self._selection_query = None
         self._selection_direct_assets = stored_assets
@@ -197,6 +240,7 @@ class GalleryCollectionStore:
     def _emit_refresh(self, old_total: int) -> None:
         if old_total != self._total_count:
             self.count_changed.emit(old_total, self._total_count)
+        self._window_revision += 1
         self.data_changed.emit()
         if self._window_range is not None:
             self.window_changed.emit(*self._window_range)
@@ -327,6 +371,7 @@ class GalleryCollectionStore:
         self._total_count = max(0, old_total - len(removed))
         self._window_range = None
         self._visible_range = None if self._total_count == 0 else self._visible_range
+        self._invalidate_total_count_cache()
 
         if self._pinned_row is not None:
             if self._pinned_row in removed_set:
@@ -338,6 +383,7 @@ class GalleryCollectionStore:
         if emit:
             self.count_changed.emit(old_total, self._total_count)
             if self._total_count > 0:
+                self._window_revision += 1
                 self.window_changed.emit(max(0, removed[0] - 1), self._total_count - 1)
             self.data_changed.emit()
 
@@ -406,12 +452,14 @@ class GalleryCollectionStore:
             self._row_cache[start + offset] = dto
         old_total = self._total_count
         self._total_count += len(dtos)
+        self._invalidate_total_count_cache()
         self.count_changed.emit(old_total, self._total_count)
         self.data_changed.emit()
 
     def prioritize_rows(self, first: int, last: int) -> None:
         if self._direct_mode or self._current_query is None:
             return
+        self.mark_user_interaction()
         if self._total_count == 0 and self._window_range is None:
             self._load_initial_window()
             if self._total_count == 0:
@@ -423,11 +471,24 @@ class GalleryCollectionStore:
             last = min(last, self._total_count - 1)
         self._visible_range = (first, last)
 
-        should_refresh = self._pending_scan_refresh and (
-            first == 0 or self._window_rel_intersects_pending_scan(first, last)
+        should_refresh = (
+            not self._scan_refresh_is_idle_only()
+            and self._pending_scan_refresh
+            and self._pending_scan_affects_visible_window(first, last)
         )
-        if should_refresh or self._window_needs_reload(first, last):
+        if should_refresh:
+            self._reload_window_for_visible_range(
+                first,
+                last,
+                emit_signals=True,
+                refetch_window=True,
+                clear_pending_scan_refresh=True,
+            )
+            return
+        if self._window_needs_reload(first, last):
             self._reload_window_for_visible_range(first, last, emit_signals=True)
+            return
+        self.flush_pending_scan_refresh(force=False)
 
     def pin_row(self, row: int) -> None:
         if row < 0 or row >= self._total_count:
@@ -451,13 +512,22 @@ class GalleryCollectionStore:
             if sort_key is not None
         )
         self._pending_scan_refresh = True
+        self._invalidate_total_count_cache()
 
-        if self._visible_range is None:
+        if self._scan_refresh_is_idle_only():
+            self.scan_refresh_idle_requested.emit()
             return
+        self.flush_pending_scan_refresh(force=False)
 
-        visible_first, visible_last = self._visible_range
-        if visible_first == 0 or self._pending_scan_affects_visible_window(visible_first, visible_last):
-            self._flush_pending_scan_refresh()
+    def handle_scan_status(self, update: object) -> None:
+        if not isinstance(update, ScanStatusUpdate):
+            return
+        if self._current_query is None or self._active_root is None:
+            return
+        if not self._scan_root_matches_active_root(update.root):
+            return
+        self._active_scan_mode = update.mode
+        self._active_scan_pressure = update.pressure_level
 
     def handle_scan_finished(self, root: Path, success: bool) -> None:
         if not success or self._current_query is None or self._active_root is None:
@@ -465,40 +535,65 @@ class GalleryCollectionStore:
         if not self._scan_root_matches_active_root(root):
             return
         self._pending_scan_refresh = True
-        if self._visible_range is not None:
-            first, last = self._visible_range
-            self._reload_window_for_visible_range(first, last, emit_signals=True)
+        self._invalidate_total_count_cache()
+        self._active_scan_mode = ScanMode.BACKGROUND
+        self._active_scan_pressure = ScanPressureLevel.NORMAL
+        self.flush_pending_scan_refresh(force=True)
 
-    def _flush_pending_scan_refresh(self) -> None:
+    def mark_user_interaction(self) -> None:
+        self._last_user_interaction_at = time.monotonic()
+
+    def flush_pending_scan_refresh(self, *, force: bool) -> bool:
         if not self._pending_scan_refresh or self._current_query is None:
-            self._pending_scan_refresh = False
-            self._pending_scan_rels.clear()
-            self._pending_scan_sort_keys.clear()
-            return
+            self._clear_pending_scan_refresh()
+            return False
         if self._visible_range is None:
-            self._pending_scan_refresh = False
-            self._pending_scan_rels.clear()
-            self._pending_scan_sort_keys.clear()
-            return
+            return False
+        now = time.monotonic()
+        if not force:
+            if self._scan_refresh_is_idle_only():
+                idle_seconds = self.IDLE_SCAN_REFRESH_INTERVAL_MS / 1000.0
+                if now - self._last_user_interaction_at < idle_seconds:
+                    return False
+            else:
+                interval_seconds = self.SCAN_REFRESH_INTERVAL_MS / 1000.0
+                if now - self._last_scan_refresh_at < interval_seconds:
+                    return False
         first, last = self._visible_range
-        if first != 0 and not self._pending_scan_affects_visible_window(first, last):
-            return
-        self._reload_window_for_visible_range(first, last, emit_signals=True)
+        if (
+            not force
+            and not self._scan_refresh_is_idle_only()
+            and not self._pending_scan_affects_visible_window(first, last)
+        ):
+            return False
+        self._last_scan_refresh_at = now
+        self._reload_window_for_visible_range(
+            first,
+            last,
+            emit_signals=True,
+            refetch_window=True,
+            clear_pending_scan_refresh=True,
+        )
+        return True
 
     def _load_initial_window(self) -> None:
         visible_last = max(0, self.INITIAL_VISIBLE_ROWS - 1)
         self._visible_range = (0, visible_last)
         self._reload_window_for_visible_range(0, visible_last, emit_signals=False)
 
-    def _reload_window_for_visible_range(self, first: int, last: int, *, emit_signals: bool) -> None:
+    def _reload_window_for_visible_range(
+        self,
+        first: int,
+        last: int,
+        *,
+        emit_signals: bool,
+        refetch_window: bool = False,
+        clear_pending_scan_refresh: bool = False,
+    ) -> None:
         if self._current_query is None:
             return
 
-        count_query = self._count_query(self._current_query)
-        if self._asset_query_service is None:
-            new_total = 0
-        else:
-            new_total = self._asset_query_service.count_query_assets(count_query)
+        new_total = self._current_total_count()
         if new_total <= 0:
             old_total = self._total_count
             self._reset_window_state()
@@ -510,13 +605,28 @@ class GalleryCollectionStore:
         first = max(0, min(first, new_total - 1))
         last = max(first, min(last, new_total - 1))
         window_first, window_last = self._compute_target_window(first, last, new_total)
-        fetched_rows = self._fetch_rows(window_first, window_last)
+        fetched_rows = self._fetch_window_rows(
+            window_first,
+            window_last,
+            force_refetch=refetch_window,
+        )
 
         old_total = self._total_count
         previous_cache = self._row_cache
-        new_cache = dict(fetched_rows)
-
         pinned_row = self._pinned_row
+        new_cache = {
+            row: dto
+            for row, dto in previous_cache.items()
+            if self._should_keep_cached_row(
+                row,
+                window_first=window_first,
+                window_last=window_last,
+                pinned_row=pinned_row,
+                total_count=new_total,
+            )
+        }
+        new_cache.update(fetched_rows)
+
         if pinned_row is not None and pinned_row not in new_cache and 0 <= pinned_row < new_total:
             pinned_dto = previous_cache.get(pinned_row)
             if pinned_dto is None:
@@ -528,9 +638,9 @@ class GalleryCollectionStore:
         self._total_count = new_total
         self._window_range = (window_first, window_last)
         self._visible_range = (first, last)
-        self._pending_scan_refresh = False
-        self._pending_scan_rels.clear()
-        self._pending_scan_sort_keys.clear()
+        self._window_revision += 1
+        if clear_pending_scan_refresh:
+            self._clear_pending_scan_refresh()
 
         if emit_signals:
             if old_total != new_total:
@@ -582,6 +692,41 @@ class GalleryCollectionStore:
             if row not in self._row_cache:
                 return True
         return False
+
+    def _fetch_window_rows(
+        self,
+        first: int,
+        last: int,
+        *,
+        force_refetch: bool,
+    ) -> Dict[int, AssetDTO]:
+        if force_refetch:
+            return self._fetch_rows(first, last)
+
+        rows: Dict[int, AssetDTO] = {}
+        missing_ranges = self._missing_row_ranges(first, last)
+        for row in range(first, last + 1):
+            dto = self._row_cache.get(row)
+            if dto is not None:
+                rows[row] = dto
+        for start, end in missing_ranges:
+            rows.update(self._fetch_rows(start, end))
+        return rows
+
+    def _missing_row_ranges(self, first: int, last: int) -> list[tuple[int, int]]:
+        missing_ranges: list[tuple[int, int]] = []
+        range_start: int | None = None
+        for row in range(first, last + 1):
+            if row in self._row_cache:
+                if range_start is not None:
+                    missing_ranges.append((range_start, row - 1))
+                    range_start = None
+                continue
+            if range_start is None:
+                range_start = row
+        if range_start is not None:
+            missing_ranges.append((range_start, last))
+        return missing_ranges
 
     def _fetch_rows(self, first: int, last: int) -> Dict[int, AssetDTO]:
         if self._current_query is None or last < first:
@@ -727,6 +872,52 @@ class GalleryCollectionStore:
             or view_root_resolved in scan_root_resolved.parents
         )
 
+    def _scan_refresh_is_idle_only(self) -> bool:
+        return (
+            self._active_scan_mode == ScanMode.INITIAL_SAFE
+            or self._active_scan_pressure != ScanPressureLevel.NORMAL
+        )
+
+    def _current_total_count(self) -> int:
+        if self._current_query is None or self._asset_query_service is None:
+            return 0
+        count_query = self._count_query(self._current_query)
+        cache_key = (
+            str(self._active_root or ""),
+            repr(count_query),
+        )
+        if self._cached_total_count_key == cache_key and self._cached_total_count is not None:
+            return self._cached_total_count
+        total_count = self._asset_query_service.count_query_assets(count_query)
+        self._cached_total_count = total_count
+        self._cached_total_count_key = cache_key
+        return total_count
+
+    def _invalidate_total_count_cache(self) -> None:
+        self._cached_total_count = None
+        self._cached_total_count_key = None
+
+    def _clear_pending_scan_refresh(self) -> None:
+        self._pending_scan_refresh = False
+        self._pending_scan_rels.clear()
+        self._pending_scan_sort_keys.clear()
+
+    def _should_keep_cached_row(
+        self,
+        row: int,
+        *,
+        window_first: int,
+        window_last: int,
+        pinned_row: int | None,
+        total_count: int,
+    ) -> bool:
+        if pinned_row is not None and row == pinned_row:
+            return True
+        eviction_margin = max(self.MIN_WINDOW_SIZE, window_last - window_first + 1)
+        keep_first = max(0, window_first - eviction_margin)
+        keep_last = min(total_count - 1, window_last + eviction_margin)
+        return keep_first <= row <= keep_last
+
     def _resolve_view_rel(
         self,
         raw_rel: str,
@@ -840,6 +1031,5 @@ class GalleryCollectionStore:
         self._path_cache.clear()
         self._pending_moves.clear()
         self._pending_paths.clear()
-        self._pending_scan_refresh = False
-        self._pending_scan_rels.clear()
-        self._pending_scan_sort_keys.clear()
+        self._clear_pending_scan_refresh()
+        self._invalidate_total_count_cache()

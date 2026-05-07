@@ -70,12 +70,14 @@ class NavigationCoordinator(QObject):
         self._gallery_vm.sidebar_path_requested.connect(self._sidebar.select_path)
 
     def open_album(self, path: Path) -> None:
+        self._note_user_interaction()
         if self._should_treat_as_refresh(path):
             return
         self._reset_playback()
         self._gallery_vm.open_album(path)
 
     def open_pinned_item(self, pinned_item: PinnedSidebarItem) -> None:
+        self._note_user_interaction()
         self._reset_playback()
         library_root = self._context.library.root()
         if pinned_item.kind == "album":
@@ -179,36 +181,44 @@ class NavigationCoordinator(QObject):
         )
 
     def open_all_photos(self) -> None:
+        self._note_user_interaction()
         self._reset_playback()
         self._gallery_vm.open_all_photos()
 
     def open_recently_deleted(self) -> None:
+        self._note_user_interaction()
         self._reset_playback()
         self._gallery_vm.open_recently_deleted()
 
     def open_location_view(self) -> None:
+        self._note_user_interaction()
         self._reset_playback()
         self._gallery_vm.open_location_map()
 
     def open_people_view(self) -> None:
+        self._note_user_interaction()
         self._reset_playback()
         self._gallery_vm.open_people_dashboard()
 
     def open_cluster_gallery(self, assets: list) -> None:
+        self._note_user_interaction()
         self._reset_playback()
         self._gallery_vm.open_cluster_gallery(assets)
 
     def open_people_cluster_gallery(self, query) -> None:
+        self._note_user_interaction()
         self._reset_playback()
         self._gallery_vm.open_people_cluster_gallery(query)
 
     def return_from_cluster_gallery(self) -> None:
+        self._note_user_interaction()
         self._gallery_vm.return_from_cluster_gallery()
 
     def return_to_map_from_cluster_gallery(self) -> None:
         self.return_from_cluster_gallery()
 
     def open_location_asset(self, rel: str) -> None:
+        self._note_user_interaction()
         self._gallery_vm.open_location_asset(rel)
 
     def _handle_static_node(self, name: str) -> None:
@@ -277,6 +287,11 @@ class NavigationCoordinator(QObject):
         if self._facade.current_album and self._facade.current_album.root.resolve() == path.resolve():
             return self._router.is_gallery_view_active()
         return False
+
+    def _note_user_interaction(self) -> None:
+        note_interaction = getattr(self._context, "note_user_interaction", None)
+        if callable(note_interaction):
+            note_interaction()
 
     def _reset_playback(self) -> None:
         if self._playback_coordinator is not None:

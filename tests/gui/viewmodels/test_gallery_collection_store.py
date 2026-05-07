@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
+from iPhoto.application.use_cases.scan_models import (
+    ScanMode,
+    ScanPressureLevel,
+    ScanProgressPhase,
+    ScanStatusUpdate,
+)
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
@@ -394,3 +401,185 @@ def test_mid_scroll_rescan_updates_gallery_after_single_scan_finished(tmp_path: 
     top_dto = store.asset_at(0)
     assert top_dto is not None
     assert top_dto.rel_path == Path("new_asset.jpg")
+
+
+def test_handle_scan_chunk_defers_refresh_for_initial_safe_until_idle_flush(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    base_dt = datetime(2024, 1, 1, 12, 0, 0)
+    assets = [
+        Asset(
+            id=f"{1000 - i}",
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=base_dt - timedelta(minutes=i),
+        )
+        for i in range(240)
+    ]
+    store = GalleryCollectionStore(
+        _FakeQueryService(assets, library_root=root),
+        library_root=root,
+    )
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.set_active_root(root)
+    store.load_selection(root, query=AssetQuery())
+    store.prioritize_rows(120, 140)
+    visible_rows = [store._row_cache[row] for row in range(120, 141) if row in store._row_cache]
+    midpoint = visible_rows[len(visible_rows) // 2]
+
+    refreshed: list[bool] = []
+    store.data_changed.connect(lambda: refreshed.append(True))
+    refreshed.clear()
+
+    store.handle_scan_status(
+        ScanStatusUpdate(
+            root=root,
+            scan_id="scan-1",
+            mode=ScanMode.INITIAL_SAFE,
+            phase=ScanProgressPhase.INDEXING,
+            pressure_level=ScanPressureLevel.CONSTRAINED,
+        )
+    )
+    store.handle_scan_chunk(
+        root,
+        [{"rel": "new_idle.jpg", "id": "scan-idle", "dt": base_dt.isoformat()}],
+    )
+
+    assert refreshed == []
+    assert store.pending_scan_refresh is True
+
+    store._last_user_interaction_at -= 5.0
+
+    assert store.flush_pending_scan_refresh(force=False) is True
+    assert refreshed
+
+
+def test_normal_scan_chunks_are_throttled_to_one_refresh_per_interval(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    base_dt = datetime(2024, 1, 1, 12, 0, 0)
+    assets = [
+        Asset(
+            id=f"{1000 - i}",
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=base_dt - timedelta(minutes=i),
+        )
+        for i in range(240)
+    ]
+    store = GalleryCollectionStore(
+        _FakeQueryService(assets, library_root=root),
+        library_root=root,
+    )
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.set_active_root(root)
+    store.load_selection(root, query=AssetQuery())
+    store.prioritize_rows(120, 140)
+    visible_rows = [store._row_cache[row] for row in range(120, 141) if row in store._row_cache]
+    midpoint = visible_rows[len(visible_rows) // 2]
+
+    refreshed: list[bool] = []
+    store.data_changed.connect(lambda: refreshed.append(True))
+    refreshed.clear()
+
+    store.handle_scan_status(
+        ScanStatusUpdate(
+            root=root,
+            scan_id="scan-2",
+            mode=ScanMode.BACKGROUND,
+            phase=ScanProgressPhase.INDEXING,
+            pressure_level=ScanPressureLevel.NORMAL,
+        )
+    )
+    store.handle_scan_chunk(
+        root,
+        [{"rel": "first.jpg", "id": "scan-first", "dt": midpoint.created_at.isoformat()}],
+    )
+    first_refresh_count = len(refreshed)
+
+    store.handle_scan_chunk(
+        root,
+        [{"rel": "second.jpg", "id": "scan-second", "dt": midpoint.created_at.isoformat()}],
+    )
+
+    assert first_refresh_count == 1
+    assert len(refreshed) == first_refresh_count
+    assert store.pending_scan_refresh is True
+
+    store._last_scan_refresh_at -= 2.0
+    store.handle_scan_chunk(
+        root,
+        [{"rel": "third.jpg", "id": "scan-third", "dt": midpoint.created_at.isoformat()}],
+    )
+
+    assert len(refreshed) == first_refresh_count + 1
+
+
+def test_prioritize_rows_refetches_visible_window_when_throttled_scan_turns_visible(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    base_dt = datetime(2024, 1, 1, 12, 0, 0)
+    assets = [
+        Asset(
+            id=f"{1000 - i}",
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=base_dt - timedelta(minutes=i),
+        )
+        for i in range(240)
+    ]
+    query_service = _FakeQueryService(assets, library_root=root)
+    store = GalleryCollectionStore(
+        query_service,
+        library_root=root,
+    )
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.set_active_root(root)
+    store.load_selection(root, query=AssetQuery())
+    store.prioritize_rows(80, 100)
+
+    inserted = Asset(
+        id="scan-visible",
+        album_id="a",
+        path=Path("new_visible.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        created_at=base_dt - timedelta(minutes=124, seconds=30),
+    )
+    query_service.assets.insert(125, inserted)
+
+    store.handle_scan_status(
+        ScanStatusUpdate(
+            root=root,
+            scan_id="scan-visible",
+            mode=ScanMode.BACKGROUND,
+            phase=ScanProgressPhase.INDEXING,
+            pressure_level=ScanPressureLevel.NORMAL,
+        )
+    )
+    store._last_scan_refresh_at = time.monotonic()
+    store.handle_scan_chunk(
+        root,
+        [{"rel": "new_visible.jpg", "id": "scan-visible", "dt": inserted.created_at.isoformat()}],
+    )
+
+    assert store.pending_scan_refresh is True
+
+    store.prioritize_rows(120, 140)
+
+    refreshed = store.asset_at(125)
+    assert refreshed is not None
+    assert refreshed.rel_path == Path("new_visible.jpg")
+    assert store.pending_scan_refresh is False

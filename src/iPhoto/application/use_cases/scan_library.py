@@ -29,6 +29,7 @@ class ScanLibraryRequest:
     batch_failed_callback: Callable[[int], None] | None = None
     collect_rows: bool = True
     chunk_size: int = 50
+    initial_chunk_size: int | None = None
     persist_chunks: bool = True
     scan_id: str | None = None
     mode: ScanMode = ScanMode.BACKGROUND
@@ -60,6 +61,11 @@ class ScanLibraryUseCase:
         chunk: list[dict[str, Any]] = []
         failed_count = 0
         chunk_size = max(1, int(request.chunk_size))
+        initial_chunk_size = max(
+            1,
+            int(request.initial_chunk_size or request.chunk_size),
+        )
+        next_chunk_size = initial_chunk_size
         processed_count = 0
         cancelled = False
 
@@ -77,9 +83,10 @@ class ScanLibraryUseCase:
                 rows.append(row)
             if request.persist_chunks:
                 chunk.append(row)
-                if len(chunk) >= chunk_size:
+                if len(chunk) >= next_chunk_size:
                     failed_count += self._merge_chunk(chunk, request)
                     chunk = []
+                    next_chunk_size = chunk_size
 
         if request.persist_chunks and chunk:
             failed_count += self._merge_chunk(chunk, request)

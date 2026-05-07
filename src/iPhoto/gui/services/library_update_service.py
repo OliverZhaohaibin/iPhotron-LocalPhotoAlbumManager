@@ -155,6 +155,7 @@ class LibraryUpdateService(QObject):
         include: Iterable[str],
         exclude: Iterable[str],
         mode: ScanMode = ScanMode.BACKGROUND,
+        allow_face_scan: bool | None = None,
     ) -> None:
         """Start an asynchronous scan for *root* through the bound session."""
 
@@ -182,6 +183,7 @@ class LibraryUpdateService(QObject):
                         include=include,
                         exclude=exclude,
                         mode=mode,
+                        allow_face_scan=allow_face_scan,
                     )
                 except TypeError:
                     start_session_scan(
@@ -198,6 +200,7 @@ class LibraryUpdateService(QObject):
             library_root=library_root,
             scan_service=scan_service,
             scan_mode=mode,
+            allow_face_scan=allow_face_scan,
             on_progress=self._relay_scan_progress,
             on_status=self._relay_scan_status_changed,
             on_chunk=self._relay_scan_chunk_ready,

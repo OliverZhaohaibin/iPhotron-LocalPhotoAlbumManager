@@ -41,6 +41,7 @@ class LibraryUpdateTaskRunner:
         library_root: Path | None,
         scan_service: LibraryScanService | None,
         scan_mode: ScanMode = ScanMode.BACKGROUND,
+        allow_face_scan: bool | None = None,
         on_progress: Callable[[Path, int, int], None],
         on_status: Callable[[object], None],
         on_chunk: Callable[[Path, list[dict]], None],
@@ -65,9 +66,20 @@ class LibraryUpdateTaskRunner:
         signals.batchFailed.connect(on_batch_failed)
         if scan_service is not None and hasattr(scan_service, "resume_scan"):
             scan_plan = (
-                scan_service.resume_scan(root, include=include, exclude=exclude)
+                scan_service.resume_scan(
+                    root,
+                    include=include,
+                    exclude=exclude,
+                    allow_face_scan=allow_face_scan,
+                )
                 if scan_mode == ScanMode.INITIAL_SAFE
-                else scan_service.plan_scan(root, include=include, exclude=exclude, mode=scan_mode)
+                else scan_service.plan_scan(
+                    root,
+                    include=include,
+                    exclude=exclude,
+                    mode=scan_mode,
+                    allow_face_scan=allow_face_scan,
+                )
             )
         else:
             scan_plan = ScanPlan(
@@ -90,7 +102,11 @@ class LibraryUpdateTaskRunner:
                     "initial safe scan" if scan_mode == ScanMode.INITIAL_SAFE else None
                 ),
                 generate_micro_thumbnails=True,
-                allow_face_scan=scan_mode != ScanMode.INITIAL_SAFE,
+                allow_face_scan=(
+                    allow_face_scan
+                    if allow_face_scan is not None
+                    else scan_mode != ScanMode.INITIAL_SAFE
+                ),
                 defer_live_pairing=scan_mode == ScanMode.INITIAL_SAFE,
             )
 

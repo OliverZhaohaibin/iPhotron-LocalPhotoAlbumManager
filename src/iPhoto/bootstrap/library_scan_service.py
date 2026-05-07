@@ -264,6 +264,7 @@ class LibraryScanService:
         include: Iterable[str] | None = None,
         exclude: Iterable[str] | None = None,
         default_mode: ScanMode = ScanMode.INITIAL_SAFE,
+        allow_face_scan: bool | None = None,
     ) -> ScanPlan:
         scan_root = Path(root)
         run = self._repository().latest_incomplete_scan_run(
@@ -305,12 +306,16 @@ class LibraryScanService:
                 else resumed_degrade_reason
             ),
             allow_face_scan=(
-                True
-                if resuming_deferred_pairing
+                allow_face_scan
+                if allow_face_scan is not None
                 else (
-                    False
-                    if "face_scan" in deferred_tasks
-                    else None
+                    True
+                    if resuming_deferred_pairing
+                    else (
+                        False
+                        if "face_scan" in deferred_tasks
+                        else None
+                    )
                 )
             ),
             defer_live_pairing=(
@@ -337,6 +342,7 @@ class LibraryScanService:
         chunk_callback: Callable[[list[dict[str, Any]]], None] | None = None,
         batch_failed_callback: Callable[[int], None] | None = None,
         chunk_size: int = 50,
+        initial_chunk_size: int | None = None,
         status_callback: Callable[[ScanStatusUpdate], None] | None = None,
         generate_micro_thumbnails: bool | Callable[[], bool] | None = None,
         plan_state_resolver: Callable[[], ScanPlan] | None = None,
@@ -477,6 +483,7 @@ class LibraryScanService:
                 batch_failed_callback=batch_failed_callback,
                 collect_rows=plan.collect_rows,
                 chunk_size=chunk_size,
+                initial_chunk_size=initial_chunk_size,
                 persist_chunks=plan.persist_chunks,
                 scan_id=plan.scan_id,
                 mode=plan.mode,
@@ -720,6 +727,7 @@ class LibraryScanService:
         chunk_callback: Callable[[list[dict[str, Any]]], None] | None = None,
         batch_failed_callback: Callable[[int], None] | None = None,
         chunk_size: int = 50,
+        initial_chunk_size: int | None = None,
         persist_chunks: bool = False,
         mode: ScanMode | str | None = None,
     ) -> ScanLibraryResult:
@@ -745,6 +753,7 @@ class LibraryScanService:
             chunk_callback=chunk_callback,
             batch_failed_callback=batch_failed_callback,
             chunk_size=chunk_size,
+            initial_chunk_size=initial_chunk_size,
         )
 
     def rescan_album(

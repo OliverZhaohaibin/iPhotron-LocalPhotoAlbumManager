@@ -41,6 +41,7 @@ class AppFacade(QObject):
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
+    startupResumePending = Signal(str)
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
@@ -244,6 +245,7 @@ class AppFacade(QObject):
         include: Iterable[str],
         exclude: Iterable[str],
         mode: ScanMode = ScanMode.BACKGROUND,
+        allow_face_scan: bool | None = None,
     ) -> None:
         """Start a background scan for *root* through the bound session surface."""
 
@@ -252,6 +254,7 @@ class AppFacade(QObject):
             include=include,
             exclude=exclude,
             mode=mode,
+            allow_face_scan=allow_face_scan,
         )
 
     def _inject_scan_dependencies_for_tests(

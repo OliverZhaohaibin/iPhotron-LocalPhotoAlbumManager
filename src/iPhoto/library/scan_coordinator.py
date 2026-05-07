@@ -66,10 +66,17 @@ class ScanCoordinatorMixin:
         include: Iterable[str],
         exclude: Iterable[str],
         mode: ScanMode = ScanMode.BACKGROUND,
+        allow_face_scan: bool | None = None,
     ) -> None:
         """Start a scan through the session-facing runtime controller surface."""
 
-        self.start_scanning(root, include, exclude, mode=mode)
+        self.start_scanning(
+            root,
+            include,
+            exclude,
+            mode=mode,
+            allow_face_scan=allow_face_scan,
+        )
 
     def start_scanning(
         self,
@@ -78,6 +85,7 @@ class ScanCoordinatorMixin:
         exclude: Iterable[str],
         *,
         mode: ScanMode = ScanMode.BACKGROUND,
+        allow_face_scan: bool | None = None,
     ) -> None:
         """Start a background scan for the given root directory.
         
@@ -110,9 +118,20 @@ class ScanCoordinatorMixin:
         scan_service = getattr(self, "_scan_service", None)
         if scan_service is not None and hasattr(scan_service, "resume_scan"):
             scan_plan = (
-                scan_service.resume_scan(root, include=include, exclude=exclude)
+                scan_service.resume_scan(
+                    root,
+                    include=include,
+                    exclude=exclude,
+                    allow_face_scan=allow_face_scan,
+                )
                 if mode == ScanMode.INITIAL_SAFE
-                else scan_service.plan_scan(root, include=include, exclude=exclude, mode=mode)
+                else scan_service.plan_scan(
+                    root,
+                    include=include,
+                    exclude=exclude,
+                    mode=mode,
+                    allow_face_scan=allow_face_scan,
+                )
             )
         else:
             scan_plan = None

@@ -8,6 +8,19 @@ from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 from iPhoto.people.service import PeopleService
 
 
+class _FakeSingleShotTimer:
+    def __init__(self) -> None:
+        self._active = False
+        self.start_calls: list[int] = []
+
+    def isActive(self) -> bool:
+        return self._active
+
+    def start(self, interval: int) -> None:
+        self._active = True
+        self.start_calls.append(interval)
+
+
 def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
@@ -376,3 +389,33 @@ def test_handle_people_snapshot_sidebar_refresh_prunes_people_pins_before_refres
         group_redirects={"group-a": "group-b"},
     )
     coordinator._window.ui.sidebar.refresh_tree_model.assert_called_once_with()
+
+
+def test_schedule_idle_gallery_scan_refresh_does_not_restart_active_timer() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    timer = _FakeSingleShotTimer()
+    coordinator._gallery_scan_idle_timer = timer
+    coordinator._gallery_store = MagicMock()
+    coordinator._gallery_store.IDLE_SCAN_REFRESH_INTERVAL_MS = 2000
+
+    coordinator._schedule_idle_gallery_scan_refresh()
+    coordinator._schedule_idle_gallery_scan_refresh()
+
+    assert timer.start_calls == [2000]
+
+
+def test_note_user_interaction_restarts_idle_refresh_when_scan_pending() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    timer = _FakeSingleShotTimer()
+    timer.start(2000)
+    coordinator._gallery_scan_idle_timer = timer
+    coordinator._gallery_store = MagicMock()
+    coordinator._gallery_store.IDLE_SCAN_REFRESH_INTERVAL_MS = 2000
+    coordinator._gallery_store.pending_scan_refresh = True
+    coordinator._context = MagicMock()
+
+    coordinator._note_user_interaction()
+
+    coordinator._gallery_store.mark_user_interaction.assert_called_once_with()
+    coordinator._context.note_user_interaction.assert_called_once_with()
+    assert timer.start_calls == [2000, 2000]

@@ -40,5 +40,11 @@ class RuntimeEntryContract(Protocol):
     def resume_startup_tasks(self) -> None:
         """Run deferred startup work."""
 
+    def note_user_interaction(self) -> None:
+        """Record interactive activity that may defer background startup work."""
+
+    def resume_pending_startup_scan_now(self) -> bool:
+        """Start any queued startup scan immediately."""
+
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list."""

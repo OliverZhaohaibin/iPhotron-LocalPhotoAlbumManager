@@ -28,7 +28,9 @@ class _FakeAssetRuntime:
 
 class _FakeFacade:
     def __init__(self) -> None:
-        self.scan_requests: list[tuple[Path, list[str], list[str], ScanMode | None]] = []
+        self.scan_requests: list[
+            tuple[Path, list[str], list[str], ScanMode | None, bool | None]
+        ] = []
 
     def scan_root_async(
         self,
@@ -37,8 +39,11 @@ class _FakeFacade:
         include,
         exclude,
         mode: ScanMode | None = None,
+        allow_face_scan: bool | None = None,
     ) -> None:
-        self.scan_requests.append((Path(root), list(include), list(exclude), mode))
+        self.scan_requests.append(
+            (Path(root), list(include), list(exclude), mode, allow_face_scan)
+        )
 
 
 class _FakeLibrary:
@@ -214,8 +219,13 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
+    assert context.facade.scan_requests == []
+    assert context._pending_startup_scan_resume is not None
+    assert context._pending_startup_scan_resume.allow_face_scan is None
+    assert context.resume_pending_startup_scan_now() is True
     assert [request[0] for request in context.facade.scan_requests] == [library_root]
     assert context.facade.scan_requests[0][3] == ScanMode.INITIAL_SAFE
+    assert context.facade.scan_requests[0][4] is None
 
 
 def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) -> None:
@@ -242,6 +252,7 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
     assert context.facade.scan_requests == []
+    assert context._pending_startup_scan_resume is None
 
 
 def test_resume_startup_tasks_resumes_incomplete_scan_when_index_preexists(
@@ -269,8 +280,13 @@ def test_resume_startup_tasks_resumes_incomplete_scan_when_index_preexists(
 
     assert asset_runtime.bound_roots == [library_root]
     assert library.bound_scan_services[-1] is not None
+    assert context.facade.scan_requests == []
+    assert context._pending_startup_scan_resume is not None
+    assert context._pending_startup_scan_resume.allow_face_scan is None
+    assert context.resume_pending_startup_scan_now() is True
     assert [request[0] for request in context.facade.scan_requests] == [library_root]
     assert context.facade.scan_requests[0][3] == ScanMode.INITIAL_SAFE
+    assert context.facade.scan_requests[0][4] is None
 
 
 def test_close_library_unbinds_map_interaction_service(tmp_path: Path) -> None:

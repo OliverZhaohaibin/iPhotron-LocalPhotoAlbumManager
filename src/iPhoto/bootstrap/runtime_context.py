@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from PySide6.QtCore import QCoreApplication, QTimer
 
 from ..application.use_cases.scan_models import ScanMode
 from ..events.bus import EventBus
@@ -20,6 +23,15 @@ if TYPE_CHECKING:  # pragma: no cover
     from .library_session import LibrarySession
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PendingStartupScanResume:
+    root: Path
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+    mode: ScanMode
+    allow_face_scan: bool | None = None
 
 
 def _create_settings_manager() -> "SettingsManager":
@@ -79,10 +91,32 @@ class RuntimeContext:
         repr=False,
     )
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
+    _pending_startup_scan_resume: _PendingStartupScanResume | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _startup_resume_candidate_timer: QTimer | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _startup_resume_idle_timer: QTimer | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _startup_resume_busy: bool = field(init=False, default=False, repr=False)
+    _last_startup_resume_interaction_at: float = field(
+        init=False,
+        default_factory=time.monotonic,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self.theme = _create_theme_manager(self.settings)
         self.facade.bind_library(self.library)
+        self._bind_startup_resume_signals()
 
         basic_path = self.settings.get("basic_library_path")
         if isinstance(basic_path, str) and basic_path:
@@ -100,6 +134,14 @@ class RuntimeContext:
 
         if not self.defer_startup_tasks:
             self.resume_startup_tasks()
+
+    def _bind_startup_resume_signals(self) -> None:
+        load_started = getattr(self.facade, "loadStarted", None)
+        if load_started is not None:
+            load_started.connect(lambda _root: self._set_startup_resume_busy(True))
+        load_finished = getattr(self.facade, "loadFinished", None)
+        if load_finished is not None:
+            load_finished.connect(lambda _root, _success: self._set_startup_resume_busy(False))
 
     @classmethod
     def create(cls, *, defer_startup: bool = False) -> "RuntimeContext":
@@ -156,11 +198,14 @@ class RuntimeContext:
                     (not had_existing_index or should_resume_scan)
                     and not self.library.is_scanning_path(scan_root)
                 ):
-                    self.facade.scan_root_async(
+                    self._schedule_startup_scan_resume(
                         scan_root,
-                        include=DEFAULT_INCLUDE,
-                        exclude=DEFAULT_EXCLUDE,
+                        include=tuple(DEFAULT_INCLUDE),
+                        exclude=tuple(DEFAULT_EXCLUDE),
                         mode=ScanMode.INITIAL_SAFE,
+                        # Let resume_scan() decide whether deferred pairing
+                        # work should re-enable face indexing.
+                        allow_face_scan=None,
                     )
             except LibraryError as exc:
                 _logger.error("resume_startup_tasks: bind_path failed: %s", exc)
@@ -173,6 +218,138 @@ class RuntimeContext:
             self.library.errorRaised.emit(
                 f"Basic Library path is unavailable: {candidate}"
             )
+
+    def note_user_interaction(self) -> None:
+        """Record interactive activity that should defer startup resume work."""
+
+        self._last_startup_resume_interaction_at = time.monotonic()
+        idle_timer = getattr(self, "_startup_resume_idle_timer", None)
+        if (
+            self._pending_startup_scan_resume is not None
+            and idle_timer is not None
+            and idle_timer.isActive()
+        ):
+            idle_timer.start(self._startup_idle_delay_ms())
+
+    def resume_pending_startup_scan_now(self) -> bool:
+        """Start the deferred startup scan immediately when one is queued."""
+
+        pending = self._pending_startup_scan_resume
+        if pending is None:
+            return False
+        if self.library.is_scanning_path(pending.root):
+            self._pending_startup_scan_resume = None
+            return False
+        self._stop_startup_resume_timers()
+        try:
+            self.facade.scan_root_async(
+                pending.root,
+                include=pending.include,
+                exclude=pending.exclude,
+                mode=pending.mode,
+                allow_face_scan=pending.allow_face_scan,
+            )
+        except TypeError:
+            self.facade.scan_root_async(
+                pending.root,
+                include=pending.include,
+                exclude=pending.exclude,
+                mode=pending.mode,
+            )
+        self._pending_startup_scan_resume = None
+        return True
+
+    def _schedule_startup_scan_resume(
+        self,
+        root: Path,
+        *,
+        include: tuple[str, ...],
+        exclude: tuple[str, ...],
+        mode: ScanMode,
+        allow_face_scan: bool | None,
+    ) -> None:
+        self._pending_startup_scan_resume = _PendingStartupScanResume(
+            root=Path(root),
+            include=tuple(include),
+            exclude=tuple(exclude),
+            mode=mode,
+            allow_face_scan=allow_face_scan,
+        )
+        self._last_startup_resume_interaction_at = time.monotonic()
+        startup_notice = getattr(self.facade, "startupResumePending", None)
+        if startup_notice is not None:
+            startup_notice.emit(
+                "发现未完成扫描，界面空闲后会继续。需要立刻继续时可点击 Rescan。"
+            )
+        if QCoreApplication.instance() is None:
+            return
+        self._ensure_startup_resume_timers()
+        if self._startup_resume_candidate_timer is not None:
+            self._startup_resume_candidate_timer.start(self._startup_candidate_delay_ms())
+
+    def _ensure_startup_resume_timers(self) -> None:
+        if self._startup_resume_candidate_timer is None:
+            self._startup_resume_candidate_timer = QTimer()
+            self._startup_resume_candidate_timer.setSingleShot(True)
+            self._startup_resume_candidate_timer.timeout.connect(
+                self._on_startup_resume_candidate_timeout
+            )
+        if self._startup_resume_idle_timer is None:
+            self._startup_resume_idle_timer = QTimer()
+            self._startup_resume_idle_timer.setSingleShot(True)
+            self._startup_resume_idle_timer.timeout.connect(
+                self._on_startup_resume_idle_timeout
+            )
+
+    def _set_startup_resume_busy(self, busy: bool) -> None:
+        self._startup_resume_busy = bool(busy)
+        if not busy and self._pending_startup_scan_resume is not None:
+            candidate_timer = getattr(self, "_startup_resume_candidate_timer", None)
+            if candidate_timer is not None and not candidate_timer.isActive():
+                candidate_timer.start(self._startup_candidate_retry_ms())
+
+    def _on_startup_resume_candidate_timeout(self) -> None:
+        if self._pending_startup_scan_resume is None:
+            return
+        if self._startup_resume_busy or self._startup_resume_user_active():
+            if self._startup_resume_candidate_timer is not None:
+                self._startup_resume_candidate_timer.start(self._startup_candidate_retry_ms())
+            return
+        if self._startup_resume_idle_timer is not None:
+            self._startup_resume_idle_timer.start(self._startup_idle_delay_ms())
+
+    def _on_startup_resume_idle_timeout(self) -> None:
+        if self._pending_startup_scan_resume is None:
+            return
+        if self._startup_resume_busy or self._startup_resume_user_active():
+            if self._startup_resume_idle_timer is not None:
+                self._startup_resume_idle_timer.start(self._startup_idle_delay_ms())
+            return
+        self.resume_pending_startup_scan_now()
+
+    def _startup_resume_user_active(self) -> bool:
+        idle_seconds = self._startup_idle_delay_ms() / 1000.0
+        return time.monotonic() - self._last_startup_resume_interaction_at < idle_seconds
+
+    def _stop_startup_resume_timers(self) -> None:
+        candidate_timer = getattr(self, "_startup_resume_candidate_timer", None)
+        if candidate_timer is not None:
+            candidate_timer.stop()
+        idle_timer = getattr(self, "_startup_resume_idle_timer", None)
+        if idle_timer is not None:
+            idle_timer.stop()
+
+    @staticmethod
+    def _startup_candidate_delay_ms() -> int:
+        return 1500
+
+    @staticmethod
+    def _startup_candidate_retry_ms() -> int:
+        return 500
+
+    @staticmethod
+    def _startup_idle_delay_ms() -> int:
+        return 2000
 
     def open_library(self, root: Path) -> "LibrarySession":
         """Bind *root* as the active library and rebuild library-scoped adapters."""
@@ -273,6 +450,9 @@ class RuntimeContext:
 
     def close_library(self) -> None:
         """Close the active library-scoped session if one exists."""
+
+        self._pending_startup_scan_resume = None
+        self._stop_startup_resume_timers()
 
         bind_library_session = getattr(self.library, "bind_library_session", None)
         if callable(bind_library_session):

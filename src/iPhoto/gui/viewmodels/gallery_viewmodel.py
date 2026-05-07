@@ -503,6 +503,13 @@ class GalleryViewModel(BaseViewModel):
         self.detail_requested.emit(row)
 
     def rescan_current(self) -> None:
+        resume_pending_scan = getattr(
+            self._context,
+            "resume_pending_startup_scan_now",
+            None,
+        )
+        if callable(resume_pending_scan) and resume_pending_scan():
+            return
         if self._facade.current_album is not None:
             self._facade.rescan_current_async()
             return

@@ -21,6 +21,7 @@ def mock_store():
     store.window_changed = MagicMock()
     store.row_changed = MagicMock()
     store.count.return_value = 0
+    store.selection_revision = 0
     return store
 
 
@@ -159,3 +160,37 @@ def test_row_changed_emits_targeted_favorite_update(adapter, mock_store):
     adapter._on_row_changed(0)
 
     assert Roles.FEATURED in emitted_roles
+
+
+def test_source_changed_skips_reset_when_selection_and_count_are_unchanged(
+    adapter,
+    mock_store,
+):
+    mock_store.count.return_value = 0
+    mock_store.selection_revision = 0
+
+    with patch.object(adapter, "beginResetModel") as begin_reset, patch.object(
+        adapter,
+        "endResetModel",
+    ) as end_reset:
+        adapter._on_source_changed()
+
+    begin_reset.assert_not_called()
+    end_reset.assert_not_called()
+
+
+def test_source_changed_resets_when_selection_revision_changes(
+    adapter,
+    mock_store,
+):
+    mock_store.count.return_value = 3
+    mock_store.selection_revision = 1
+
+    with patch.object(adapter, "beginResetModel") as begin_reset, patch.object(
+        adapter,
+        "endResetModel",
+    ) as end_reset:
+        adapter._on_source_changed()
+
+    begin_reset.assert_called_once()
+    end_reset.assert_called_once()

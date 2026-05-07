@@ -616,12 +616,7 @@ class GalleryCollectionStore:
         last = max(first, min(last, max(0, self._total_count - 1)))
         window_first, window_last = self._compute_target_window(first, last, self._total_count)
 
-        if (
-            not refetch_window
-            and self._window_request_range is not None
-            and self._window_request_range[0] <= window_first
-            and self._window_request_range[1] >= window_last
-        ):
+        if not refetch_window and self._pending_window_request_covers(first, last):
             return
 
         if self.window_load_requested.handler_count == 0:
@@ -890,11 +885,19 @@ class GalleryCollectionStore:
             if emit_signals:
                 self.window_changed.emit(row, row)
             return
+        if self._pending_window_request_covers(row, row):
+            return
         self._request_window_load(
             row,
             row,
             refetch_window=False,
         )
+
+    def _pending_window_request_covers(self, first: int, last: int) -> bool:
+        if self._window_request_range is None:
+            return False
+        pending_first, pending_last = self._window_request_range
+        return pending_first <= first and pending_last >= last
 
     def _invalidate_pending_window_request(self) -> None:
         self._window_request_id += 1

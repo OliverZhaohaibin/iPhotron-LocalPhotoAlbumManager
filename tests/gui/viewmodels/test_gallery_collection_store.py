@@ -165,6 +165,49 @@ def test_prioritize_rows_requests_async_window_when_loader_connected() -> None:
     assert 900 not in store._row_cache
 
 
+def test_asset_at_does_not_replace_pending_window_request_for_covered_rows() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+    store.prioritize_rows(900, 940)
+
+    assert len(requests) == 1
+    request = requests[-1]
+
+    for row in (880, 900, 920, 940):
+        assert store.asset_at(row) is None
+
+    assert len(requests) == 1
+    assert requests[-1].request_id == request.request_id
+
+    fetched_rows = store._fetch_rows(request.first, request.last)
+    store.handle_window_load_result(
+        GalleryPageResult(
+            request_id=request.request_id,
+            selection_revision=request.selection_revision,
+            first=request.first,
+            last=request.last,
+            rows=fetched_rows,
+        )
+    )
+
+    for row in (880, 900, 920, 940):
+        assert store.asset_at(row) is not None
+
+
 def test_handle_window_load_result_applies_async_window_slice() -> None:
     assets = [
         Asset(

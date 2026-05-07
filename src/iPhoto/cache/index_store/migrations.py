@@ -94,6 +94,9 @@ class SchemaMigrator:
                 state TEXT NOT NULL,
                 safe_mode INTEGER DEFAULT 0,
                 phase TEXT,
+                pressure_level TEXT DEFAULT 'normal',
+                degrade_reason TEXT,
+                deferred_tasks TEXT,
                 started_at TEXT NOT NULL,
                 completed_at TEXT,
                 discovered_count INTEGER DEFAULT 0,
@@ -105,6 +108,7 @@ class SchemaMigrator:
 
         # Perform incremental schema migration (add columns if missing)
         SchemaMigrator._migrate_columns(conn)
+        SchemaMigrator._migrate_scan_run_columns(conn)
 
         # Create or update indexes for query optimization
         SchemaMigrator._create_indexes(conn)
@@ -207,3 +211,31 @@ class SchemaMigrator:
                 conn.execute(index_sql)
             except sqlite3.OperationalError as exc:
                 logger.warning("Failed to create index: %s", exc)
+
+    @staticmethod
+    def _migrate_scan_run_columns(conn: sqlite3.Connection) -> None:
+        """Add missing columns to the scan-runs table for schema evolution."""
+
+        cursor = conn.execute("PRAGMA table_info(scan_runs)")
+        existing_columns: Set[str] = {row[1] for row in cursor}
+        required_columns = {
+            "pressure_level": (
+                "ALTER TABLE scan_runs ADD COLUMN pressure_level TEXT DEFAULT 'normal'"
+            ),
+            "degrade_reason": "ALTER TABLE scan_runs ADD COLUMN degrade_reason TEXT",
+            "deferred_tasks": "ALTER TABLE scan_runs ADD COLUMN deferred_tasks TEXT",
+        }
+
+        for col_name, alter_sql in required_columns.items():
+            if col_name not in existing_columns:
+                logger.info("Adding missing scan_runs column: %s", col_name)
+                conn.execute(alter_sql)
+
+        conn.execute(
+            """
+            UPDATE scan_runs
+            SET pressure_level = 'constrained'
+            WHERE safe_mode = 1
+              AND (pressure_level IS NULL OR pressure_level = 'normal')
+            """
+        )

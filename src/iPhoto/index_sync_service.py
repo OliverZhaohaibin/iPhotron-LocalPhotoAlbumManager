@@ -190,6 +190,8 @@ def sync_live_roles_to_db(
         library_root: If provided, use this as the database root (global database).
     """
     updates: List[Tuple[str, int, Optional[str]]] = []
+    batch_size = 1_000
+    replace_scope = True
     
     # Compute album path for library-relative paths
     album_prefix = ""
@@ -197,6 +199,24 @@ def sync_live_roles_to_db(
         rel = compute_album_path(root, library_root)
         if rel:
             album_prefix = f"{rel}/"
+
+    def flush_updates() -> None:
+        nonlocal updates, replace_scope
+        if not updates and not replace_scope:
+            return
+        if album_prefix:
+            repository.apply_live_role_updates_for_prefix(
+                album_prefix,
+                updates,
+                replace_scope=replace_scope,
+            )
+        else:
+            repository.apply_live_role_updates(
+                updates,
+                replace_scope=replace_scope,
+            )
+        updates = []
+        replace_scope = False
 
     for group in groups:
         if not group.still or not group.motion:
@@ -209,11 +229,10 @@ def sync_live_roles_to_db(
 
         # Motion component: Role 1 (Hidden), Partner = Still
         updates.append((motion_rel, 1, still_rel))
+        if len(updates) >= batch_size:
+            flush_updates()
 
-    if album_prefix:
-        repository.apply_live_role_updates_for_prefix(album_prefix, updates)
-    else:
-        repository.apply_live_role_updates(updates)
+    flush_updates()
 
 
 def prune_index_scope(

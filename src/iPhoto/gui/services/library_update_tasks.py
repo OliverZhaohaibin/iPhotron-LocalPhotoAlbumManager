@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...application.use_cases.scan_models import ScanCompletion, ScanMode, ScanPlan
+from ...application.use_cases.scan_models import ScanPressureLevel, ScanScopeKind
 from ...bootstrap.library_scan_service import LibraryScanService
 from ..background_task_manager import BackgroundTaskManager
 from ...library.workers.rescan_worker import RescanSignals, RescanWorker
@@ -74,10 +75,20 @@ class LibraryUpdateTaskRunner:
                 include=tuple(include),
                 exclude=tuple(exclude),
                 mode=scan_mode,
+                scope_kind=ScanScopeKind.ALBUM_SUBTREE,
                 scan_id="",
                 persist_chunks=True,
                 collect_rows=False,
                 safe_mode=scan_mode == ScanMode.INITIAL_SAFE,
+                estimated_asset_count=None,
+                pressure_level=(
+                    ScanPressureLevel.CONSTRAINED
+                    if scan_mode == ScanMode.INITIAL_SAFE
+                    else ScanPressureLevel.NORMAL
+                ),
+                degrade_reason=(
+                    "initial safe scan" if scan_mode == ScanMode.INITIAL_SAFE else None
+                ),
                 generate_micro_thumbnails=True,
                 allow_face_scan=scan_mode != ScanMode.INITIAL_SAFE,
                 defer_live_pairing=scan_mode == ScanMode.INITIAL_SAFE,

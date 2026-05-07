@@ -5,7 +5,9 @@ from .scan_models import (
     ScanCompletion,
     ScanMode,
     ScanPlan,
+    ScanPressureLevel,
     ScanProgressPhase,
+    ScanScopeKind,
     ScanStatusUpdate,
 )
 
@@ -16,6 +18,8 @@ __all__ = [
     "ScanLibraryUseCase",
     "ScanMode",
     "ScanPlan",
+    "ScanPressureLevel",
     "ScanProgressPhase",
+    "ScanScopeKind",
     "ScanStatusUpdate",
 ]

@@ -138,6 +138,46 @@ def test_sync_live_roles_scoped_to_library_prefix(tmp_path):
     assert data["other/keep.jpg"]["live_role"] == 1
 
 
+def test_sync_live_roles_scoped_prefix_preserves_all_batches(tmp_path: Path) -> None:
+    """Ensure large scoped syncs do not wipe earlier flushed batches."""
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    album_root = library_root / "album"
+    album_root.mkdir()
+
+    store = IndexStore(library_root)
+    rows = []
+    groups = []
+    for index in range(1001):
+        still_rel = f"album/{index:04d}.jpg"
+        motion_rel = f"album/{index:04d}.mov"
+        rows.extend(
+            [
+                {"rel": still_rel},
+                {"rel": motion_rel},
+            ]
+        )
+        groups.append(
+            LiveGroup(
+                id=f"group-{index}",
+                still=f"{index:04d}.jpg",
+                motion=f"{index:04d}.mov",
+                confidence=1.0,
+                content_id=None,
+                still_image_time=None,
+            )
+        )
+    store.write_rows(rows)
+
+    _sync_live_roles_to_db(album_root, groups, library_root=library_root)
+
+    data = {r["rel"]: r for r in store.read_all(filter_hidden=False)}
+    assert data["album/0000.jpg"]["live_partner_rel"] == "album/0000.mov"
+    assert data["album/0000.mov"]["live_role"] == 1
+    assert data["album/1000.jpg"]["live_partner_rel"] == "album/1000.mov"
+    assert data["album/1000.mov"]["live_role"] == 1
+
+
 def test_pair_keeps_db_live_roles_when_derived_snapshot_write_fails(tmp_path: Path) -> None:
     album_root = tmp_path / "album"
     album_root.mkdir()

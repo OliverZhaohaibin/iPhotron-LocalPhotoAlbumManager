@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from ...application.use_cases.scan_models import ScanCompletion, ScanProgressPhase
 from ...bootstrap.library_scan_service import LibraryScanService
 from ...errors import IPhotoError
 
@@ -72,23 +73,33 @@ class RescanWorker(QRunnable):
             def progress_callback(processed: int, total: int) -> None:
                 self._signals.progressUpdated.emit(self._root, processed, total)
 
-            self.scan_service.refresh_restored_album(
+            completion = self.scan_service.refresh_restored_album(
                 self._root,
                 progress_callback=progress_callback,
                 pair_live=True,
             )
+            if isinstance(completion, ScanCompletion):
+                success = self._is_successful_completion(completion)
+            else:  # pragma: no cover - compatibility with legacy test doubles
+                success = True
         except IPhotoError as exc:
             # Surface domain-specific failures with the album path attached so the
             # facade can relay meaningful diagnostics to the user.
             self._signals.error.emit(self._root, str(exc))
         except Exception as exc:  # pragma: no cover - defensive safety net
             self._signals.error.emit(self._root, str(exc))
-        else:
-            success = True
         finally:
             # Always emit ``finished`` so the task manager can release bookkeeping
             # regardless of success or failure.
             self._signals.finished.emit(self._root, success)
+
+    @staticmethod
+    def _is_successful_completion(completion: ScanCompletion) -> bool:
+        return completion.success and completion.phase not in {
+            ScanProgressPhase.CANCELLED_RESUMABLE,
+            ScanProgressPhase.PAUSED_FOR_MEMORY,
+            ScanProgressPhase.FAILED,
+        }
 
 
 __all__ = ["RescanSignals", "RescanWorker"]

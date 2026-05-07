@@ -4,6 +4,7 @@
 > **状态:** 待排期  
 > **触发背景:** 用户反馈在超大相册初始扫描阶段容易闪退  
 > **关联模块:** 扫描管线、索引合并、Live Photo 配对、People 人脸扫描、GUI 初始绑定
+> **实施记录:** `docs/requirements/INITIAL_SCAN_LARGE_LIBRARY_STABILITY_IMPLEMENTATION_STATUS.md`
 
 ---
 
@@ -21,7 +22,8 @@
 2. 扫描主路径真正支持流式处理：发现、提取、落库、进度、最终清理都不依赖完整相册常驻内存。
 3. 初次绑定库时具备大库保护策略，包括预估、用户可见状态、附加任务延后、可取消和可恢复。
 4. People 人脸扫描不与初始整库扫描抢占峰值资源，并且不会在每个小批次触发全量聚类。
-5. 建立可复现的大库压力测试和内存观测基线，防止回归。
+5. 非首次的大 scope 重扫、恢复扫描和导入兜底重扫同样具备限流、降级、可暂停和可恢复能力。
+6. 建立可复现的大库压力测试和内存观测基线，防止回归。
 
 ---
 
@@ -117,6 +119,14 @@
 3. Safe Mode 下默认延后 People face scan、全量 Live Photo links 写入和非必要全库 GUI 刷新。
 4. Safe Mode 必须允许用户取消；取消后已成功落库的分块保持可恢复，下一次扫描继续补齐。
 5. Safe Mode 必须在状态栏或任务 UI 中展示扫描状态，避免用户误认为应用卡死。
+
+### P0: 非首次大 scope 扫描压力降级
+
+1. 非首次扫描默认仍以普通 `background` 语义启动，不增加额外确认弹窗。
+2. 当 scope 已知很大、发现数量持续升高，或 `MemoryMonitor` 进入 warning 时，扫描必须自动切换为 constrained 模式。
+3. constrained 模式下必须关闭新的 micro thumbnail、停止或不启动 `FaceScanWorker`、延后 Live Photo pairing，并降低非必要 GUI reload。
+4. constrained 模式完成后允许以 `deferred_pairing` 结束，避免把库级配对峰值压回扫描尾部。
+5. critical memory threshold 触发后，非首次扫描也必须以可恢复暂停结束，而不是继续盲跑到闪退。
 
 ### P0: 真正流式化扫描结果
 

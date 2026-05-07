@@ -13,10 +13,13 @@ pytest.importorskip("PySide6.QtCore", reason="Qt core not available", exc_type=I
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtTest import QSignalSpy
 
+import iPhoto.library.workers.scanner_worker as scanner_worker_module
 from iPhoto.application.use_cases.scan_models import (
     ScanCompletion,
     ScanMode,
     ScanPlan,
+    ScanPressureLevel,
+    ScanScopeKind,
 )
 from iPhoto.library.workers.scanner_worker import ScannerWorker, ScannerSignals
 
@@ -111,10 +114,14 @@ def test_scanner_worker_uses_injected_scan_service(temp_album, qapp):
                 include=("*.jpg",),
                 exclude=(),
                 mode=ScanMode.BACKGROUND,
+                scope_kind=ScanScopeKind.ALBUM_SUBTREE,
                 scan_id="scan-1",
                 persist_chunks=True,
                 collect_rows=False,
                 safe_mode=False,
+                estimated_asset_count=None,
+                pressure_level=ScanPressureLevel.NORMAL,
+                degrade_reason=None,
                 generate_micro_thumbnails=True,
                 allow_face_scan=True,
                 defer_live_pairing=False,
@@ -180,6 +187,98 @@ def test_scanner_worker_batch_failure_handling(temp_album, qapp):
     assert batch_failed_spy.count() > 0
     assert worker.failed_count > 0
     assert finished_spy.count() == 1
+
+
+def test_scanner_worker_degrades_to_constrained_mode_on_memory_warning(
+    temp_album,
+    qapp,
+    monkeypatch,
+):
+    class FakeMemoryMonitor:
+        def __init__(self) -> None:
+            self._warning_callbacks = []
+            self._warning_emitted = False
+
+        def add_warning_callback(self, cb) -> None:
+            self._warning_callbacks.append(cb)
+
+        def add_critical_callback(self, _cb) -> None:
+            return None
+
+        def check(self):
+            if not self._warning_emitted:
+                self._warning_emitted = True
+                for callback in list(self._warning_callbacks):
+                    callback(object())
+            return None
+
+    class FakeScanService:
+        def __init__(self) -> None:
+            self.marked = []
+
+        def plan_scan(self, root: Path, **_kwargs):
+            return ScanPlan(
+                root=Path(root),
+                include=("*.jpg",),
+                exclude=(),
+                mode=ScanMode.BACKGROUND,
+                scope_kind=ScanScopeKind.ALBUM_SUBTREE,
+                scan_id="scan-1",
+                persist_chunks=True,
+                collect_rows=False,
+                safe_mode=False,
+                estimated_asset_count=None,
+                pressure_level=ScanPressureLevel.NORMAL,
+                degrade_reason=None,
+                generate_micro_thumbnails=True,
+                allow_face_scan=True,
+                defer_live_pairing=False,
+            )
+
+        def mark_scan_constrained(self, scan_id: str, **kwargs) -> None:
+            self.marked.append((scan_id, kwargs))
+
+        def start_scan(self, plan: ScanPlan, **kwargs):
+            kwargs["progress_callback"](1, 1)
+            kwargs["chunk_callback"]([{"rel": "test_0.jpg"}])
+            return SimpleNamespace(
+                failed_count=0,
+                processed_count=1,
+                cancelled=False,
+                rows=[],
+            )
+
+    monkeypatch.setattr(scanner_worker_module, "MemoryMonitor", FakeMemoryMonitor)
+
+    signals = ScannerSignals()
+    service = FakeScanService()
+    worker = ScannerWorker(
+        temp_album,
+        ["*.jpg"],
+        [],
+        signals,
+        scan_service=service,
+    )
+    finished_spy = QSignalSpy(signals.finished)
+
+    worker.run()
+    qapp.processEvents()
+
+    completion = finished_spy.at(0)[0]
+    assert isinstance(completion, ScanCompletion)
+    assert completion.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert completion.defer_live_pairing is True
+    assert completion.deferred_face_scan is True
+    assert service.marked == [
+        (
+            "scan-1",
+            {
+                "reason": "memory warning",
+                "defer_live_pairing": True,
+                "defer_face_scan": True,
+            },
+        )
+    ]
 
 
 def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):

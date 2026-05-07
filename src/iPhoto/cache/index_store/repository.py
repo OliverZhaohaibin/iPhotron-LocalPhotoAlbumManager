@@ -226,14 +226,18 @@ class AssetRepository:
         mode: str,
         safe_mode: bool,
         phase: str,
+        pressure_level: str = "normal",
+        degrade_reason: str | None = None,
+        deferred_tasks: str | None = None,
     ) -> None:
         with self.transaction() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO scan_runs (
-                    scan_id, scope_root, mode, state, safe_mode, phase, started_at,
+                    scan_id, scope_root, mode, state, safe_mode, phase,
+                    pressure_level, degrade_reason, deferred_tasks, started_at,
                     completed_at, discovered_count, failed_count, last_processed_rel
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, NULL)
                 """,
                 (
                     scan_id,
@@ -242,6 +246,9 @@ class AssetRepository:
                     "running",
                     1 if safe_mode else 0,
                     phase,
+                    pressure_level,
+                    degrade_reason,
+                    deferred_tasks,
                     _utc_now_iso(),
                 ),
             )
@@ -254,6 +261,9 @@ class AssetRepository:
         safe_mode: bool | None = None,
         state: str | None = None,
         phase: str | None = None,
+        pressure_level: str | None = None,
+        degrade_reason: str | None = None,
+        deferred_tasks: str | None = None,
         discovered_count: int | None = None,
         failed_count: int | None = None,
         last_processed_rel: str | None = None,
@@ -266,6 +276,9 @@ class AssetRepository:
             ("safe_mode", 1 if safe_mode else 0 if safe_mode is not None else None),
             ("state", state),
             ("phase", phase),
+            ("pressure_level", pressure_level),
+            ("degrade_reason", degrade_reason),
+            ("deferred_tasks", deferred_tasks),
             ("discovered_count", discovered_count),
             ("failed_count", failed_count),
             ("last_processed_rel", last_processed_rel),
@@ -945,20 +958,26 @@ class AssetRepository:
     def apply_live_role_updates(
         self,
         updates: List[Tuple[str, int, Optional[str]]],
+        *,
+        replace_scope: bool = True,
     ) -> None:
         """Update live_role and live_partner_rel for a batch of assets.
         
         Args:
             updates: List of (rel, live_role, live_partner_rel) tuples.
         """
+        updates = list(updates)
         if not updates:
+            if not replace_scope:
+                return
             self._db_manager.execute_in_transaction(
                 "UPDATE assets SET live_role = 0, live_partner_rel = NULL"
             )
             return
 
         with self.transaction() as conn:
-            conn.execute("UPDATE assets SET live_role = 0, live_partner_rel = NULL")
+            if replace_scope:
+                conn.execute("UPDATE assets SET live_role = 0, live_partner_rel = NULL")
             query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
@@ -967,16 +986,22 @@ class AssetRepository:
         self,
         prefix: str,
         updates: List[Tuple[str, int, Optional[str]]],
+        *,
+        replace_scope: bool = True,
     ) -> None:
         """Update live_role/live_partner_rel for assets under *prefix* only."""
         prefix = prefix.rstrip("/")
         prefix_like = f"{prefix}/%"
+        updates = list(updates)
+        if not updates and not replace_scope:
+            return
         with self.transaction() as conn:
-            conn.execute(
-                "UPDATE assets SET live_role = 0, live_partner_rel = NULL "
-                "WHERE rel LIKE ?",
-                (prefix_like,),
-            )
+            if replace_scope:
+                conn.execute(
+                    "UPDATE assets SET live_role = 0, live_partner_rel = NULL "
+                    "WHERE rel LIKE ?",
+                    (prefix_like,),
+                )
             query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +12,15 @@ import iPhoto.bootstrap.library_scan_service as scan_service_module
 from iPhoto.application.use_cases.scan_models import (
     ScanCompletion,
     ScanMode,
+    ScanPressureLevel,
     ScanProgressPhase,
+    ScanScopeKind,
 )
-from iPhoto.bootstrap.library_scan_service import LibraryScanService
+from iPhoto.bootstrap.library_scan_service import (
+    LARGE_LIBRARY_CONSTRAINED_THRESHOLD,
+    LARGE_SUBTREE_CONSTRAINED_THRESHOLD,
+    LibraryScanService,
+)
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 
 
@@ -263,6 +270,57 @@ def test_pair_album_library_root_preserves_live_pairs_across_prefixes(
     assert indexed["album-b/IMG_0002.HEIC"]["live_partner_rel"] == "album-b/IMG_0002.MOV"
     assert indexed["album-b/IMG_0002.MOV"]["live_role"] == 1
     assert indexed["album-b/IMG_0002.MOV"]["live_partner_rel"] == "album-b/IMG_0002.HEIC"
+
+
+def test_pair_album_large_scope_keeps_content_id_pairing_global(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    service = LibraryScanService(library_root)
+    rows = [
+        {
+            "rel": "album-a/IMG_0001.HEIC",
+            "id": "still",
+            "mime": "image/heic",
+            "dt": "2024-01-01T00:00:00Z",
+            "ts": 1,
+            "bytes": 1,
+            "content_id": "live-cross",
+        },
+        {
+            "rel": "album-b/IMG_0001.MOV",
+            "id": "motion",
+            "mime": "video/quicktime",
+            "dt": "2024-01-01T00:00:00Z",
+            "ts": 1,
+            "bytes": 1,
+            "content_id": "live-cross",
+        },
+    ]
+
+    service.finalize_scan(library_root, rows)
+    monkeypatch.setattr(
+        service,
+        "_should_pair_scope_directly",
+        lambda _album_path, *, repository: False,
+    )
+
+    groups = service.pair_album(library_root)
+
+    store = get_global_repository(library_root)
+    indexed = {
+        row["rel"]: row
+        for row in store.read_all(filter_hidden=False)
+    }
+    assert {(group.still, group.motion) for group in groups} == {
+        ("album-a/IMG_0001.HEIC", "album-b/IMG_0001.MOV"),
+    }
+    assert indexed["album-a/IMG_0001.HEIC"]["live_role"] == 0
+    assert indexed["album-a/IMG_0001.HEIC"]["live_partner_rel"] == "album-b/IMG_0001.MOV"
+    assert indexed["album-b/IMG_0001.MOV"]["live_role"] == 1
+    assert indexed["album-b/IMG_0001.MOV"]["live_partner_rel"] == "album-a/IMG_0001.HEIC"
 
 
 def test_pair_album_library_root_includes_legacy_null_prefix_rows(
@@ -546,6 +604,53 @@ def test_plan_scan_initial_safe_defers_face_scan_and_live_pairing(tmp_path: Path
     assert plan.defer_live_pairing is True
     assert plan.persist_chunks is True
     assert plan.collect_rows is False
+    assert plan.pressure_level == ScanPressureLevel.CONSTRAINED
+
+
+def test_plan_scan_background_constrains_large_library_scope_estimate(
+    tmp_path: Path,
+) -> None:
+    repository = _CountingRepository(LARGE_LIBRARY_CONSTRAINED_THRESHOLD)
+    repository.library_root = tmp_path / "library"
+    repository.library_root.mkdir()
+    repository.path = repository.library_root / ".iPhoto" / "global_index.db"
+    service = LibraryScanService(
+        repository.library_root,
+        scanner=_Scanner([]),
+        repository_factory=lambda _root: repository,
+    )
+
+    plan = service.plan_scan(repository.library_root, mode=ScanMode.BACKGROUND)
+
+    assert plan.scope_kind == ScanScopeKind.LIBRARY_ROOT
+    assert plan.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert plan.generate_micro_thumbnails is False
+    assert plan.allow_face_scan is False
+    assert plan.defer_live_pairing is True
+    assert plan.degrade_reason is not None
+
+
+def test_plan_scan_repair_import_uses_library_threshold_for_library_root(
+    tmp_path: Path,
+) -> None:
+    repository = _CountingRepository(LARGE_LIBRARY_CONSTRAINED_THRESHOLD)
+    repository.library_root = tmp_path / "library"
+    repository.library_root.mkdir()
+    repository.path = repository.library_root / ".iPhoto" / "global_index.db"
+    service = LibraryScanService(
+        repository.library_root,
+        scanner=_Scanner([]),
+        repository_factory=lambda _root: repository,
+    )
+
+    plan = service.plan_scan(
+        repository.library_root,
+        mode=ScanMode.BACKGROUND,
+        scope_kind=ScanScopeKind.REPAIR_IMPORT,
+    )
+
+    assert plan.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert plan.defer_live_pairing is True
 
 
 def test_complete_scan_prunes_by_last_seen_scan_id(tmp_path: Path) -> None:
@@ -633,6 +738,71 @@ def test_resume_scan_promotes_deferred_pairing_runs_to_background(
     assert plan.mode == ScanMode.BACKGROUND
     assert plan.defer_live_pairing is False
     assert plan.allow_face_scan is True
+
+
+def test_resume_scan_inherits_constrained_pressure_and_deferred_tasks(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    service = LibraryScanService(library_root, scanner=_Scanner([]))
+    store.create_scan_run(
+        "scan-1",
+        scope_root=album_root.resolve().as_posix(),
+        mode=ScanMode.BACKGROUND.value,
+        safe_mode=False,
+        phase=ScanProgressPhase.INDEXING.value,
+        pressure_level=ScanPressureLevel.CONSTRAINED.value,
+        degrade_reason="memory warning",
+        deferred_tasks="live_pairing,face_scan",
+    )
+    store.update_scan_run(
+        "scan-1",
+        state="paused",
+        phase=ScanProgressPhase.CANCELLED_RESUMABLE.value,
+        pressure_level=ScanPressureLevel.CONSTRAINED.value,
+        degrade_reason="memory warning",
+        deferred_tasks="live_pairing,face_scan",
+    )
+
+    resumed = service.resume_scan(album_root)
+
+    assert resumed.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert resumed.allow_face_scan is False
+    assert resumed.defer_live_pairing is True
+    assert resumed.degrade_reason == "memory warning"
+
+
+def test_resume_scan_reconstrains_legacy_initial_safe_runs(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    service = LibraryScanService(library_root, scanner=_Scanner([]))
+    store.create_scan_run(
+        "scan-1",
+        scope_root=album_root.resolve().as_posix(),
+        mode=ScanMode.INITIAL_SAFE.value,
+        safe_mode=True,
+        phase=ScanProgressPhase.INDEXING.value,
+    )
+    store.update_scan_run(
+        "scan-1",
+        state="paused",
+        phase=ScanProgressPhase.CANCELLED_RESUMABLE.value,
+    )
+
+    resumed = service.resume_scan(album_root)
+
+    assert resumed.mode == ScanMode.INITIAL_SAFE
+    assert resumed.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert resumed.generate_micro_thumbnails is False
+    assert resumed.allow_face_scan is False
+    assert resumed.defer_live_pairing is True
 
 
 def test_resumed_scan_uses_fresh_scan_id_for_pruning_and_clears_old_pause(
@@ -806,6 +976,221 @@ def test_complete_scan_keeps_freshly_persisted_rows_for_same_scan_id(
     assert [row["rel"] for row in rows] == ["album/fresh.jpg"]
     assert rows[0]["last_seen_scan_id"] == "scan-1"
     assert finalized.phase == ScanProgressPhase.COMPLETED
+
+
+def test_start_scan_preserves_degraded_pressure_in_scan_run(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+
+    class _ProgressScanner:
+        def scan(
+            self,
+            _root: Path,
+            _include: Iterable[str],
+            _exclude: Iterable[str],
+            **kwargs: object,
+        ):
+            progress_callback = kwargs.get("progress_callback")
+            if callable(progress_callback):
+                progress_callback(1, 1)
+            yield {"rel": "fresh.jpg", "id": "fresh"}
+
+    service = LibraryScanService(library_root, scanner=_ProgressScanner())
+    plan = service.plan_scan(
+        album_root,
+        mode=ScanMode.BACKGROUND,
+        persist_chunks=True,
+        collect_rows=False,
+    )
+    current_plan = plan
+
+    def progress_callback(_processed: int, total: int) -> None:
+        nonlocal current_plan
+        if total <= 0 or current_plan.pressure_level != ScanPressureLevel.NORMAL:
+            return
+        current_plan = replace(
+            current_plan,
+            pressure_level=ScanPressureLevel.CONSTRAINED,
+            degrade_reason="memory warning",
+            generate_micro_thumbnails=False,
+            allow_face_scan=False,
+            defer_live_pairing=True,
+        )
+        service.mark_scan_constrained(
+            plan.scan_id,
+            reason="memory warning",
+            defer_live_pairing=True,
+            defer_face_scan=True,
+        )
+
+    service.start_scan(
+        plan,
+        progress_callback=progress_callback,
+        plan_state_resolver=lambda: current_plan,
+    )
+
+    run = store.latest_incomplete_scan_run(
+        scope_root=album_root.resolve().as_posix(),
+    )
+    assert run is not None
+    assert run["pressure_level"] == ScanPressureLevel.CONSTRAINED.value
+    assert run["deferred_tasks"] == "live_pairing,face_scan"
+    assert run["degrade_reason"] == "memory warning"
+
+
+def test_complete_scan_constrained_background_defers_pairing(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    service = LibraryScanService(
+        library_root,
+        scanner=_Scanner([{"rel": "fresh.jpg", "id": "fresh"}]),
+    )
+    plan = service.plan_scan(
+        album_root,
+        mode=ScanMode.BACKGROUND,
+        persist_chunks=True,
+        collect_rows=False,
+        pressure_level=ScanPressureLevel.CONSTRAINED,
+        degrade_reason="memory warning",
+        generate_micro_thumbnails=False,
+        allow_face_scan=False,
+        defer_live_pairing=True,
+    )
+
+    result = service.start_scan(plan)
+    finalized = service.complete_scan(
+        ScanCompletion(
+            root=album_root,
+            scan_id=plan.scan_id,
+            mode=plan.mode,
+            processed_count=result.processed_count,
+            pressure_level=plan.pressure_level,
+            failed_count=result.failed_count,
+            success=True,
+            cancelled=False,
+            safe_mode=plan.safe_mode,
+            defer_live_pairing=plan.defer_live_pairing,
+            deferred_face_scan=True,
+            degrade_reason=plan.degrade_reason,
+            deferred_pairing_reason="memory warning",
+            allow_face_scan=plan.allow_face_scan,
+            phase=ScanProgressPhase.COMPLETED,
+        ),
+        pair_live=False,
+    )
+
+    run = store.latest_incomplete_scan_run(
+        scope_root=album_root.resolve().as_posix(),
+    )
+    assert finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+    assert finalized.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert finalized.deferred_pairing_reason == "memory warning"
+    assert run is not None
+    assert run["pressure_level"] == ScanPressureLevel.CONSTRAINED.value
+    assert run["deferred_tasks"] == "live_pairing,face_scan"
+
+
+def test_rescan_scope_bounded_marks_cancelled_runs_unsuccessful(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    service = LibraryScanService(
+        library_root,
+        scanner=_Scanner([{"rel": "fresh.jpg", "id": "fresh"}]),
+    )
+
+    completion = service.rescan_scope_bounded(
+        album_root,
+        scope_kind=ScanScopeKind.REPAIR_IMPORT,
+        is_cancelled=lambda: True,
+    )
+
+    assert completion.success is False
+    assert completion.cancelled is True
+    assert completion.phase == ScanProgressPhase.CANCELLED_RESUMABLE
+
+
+def test_rescan_scope_bounded_defers_pairing_for_constrained_repair_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    service = LibraryScanService(
+        library_root,
+        scanner=_Scanner([{"rel": "fresh.jpg", "id": "fresh"}]),
+    )
+    monkeypatch.setattr(
+        service,
+        "_estimate_scope_asset_count",
+        lambda _root, *, scope_kind: LARGE_SUBTREE_CONSTRAINED_THRESHOLD,
+    )
+
+    completion = service.rescan_scope_bounded(
+        album_root,
+        pair_live=True,
+        scope_kind=ScanScopeKind.REPAIR_IMPORT,
+    )
+
+    assert completion.success is True
+    assert completion.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert completion.defer_live_pairing is True
+    assert completion.phase == ScanProgressPhase.DEFERRED_PAIRING
+
+
+def test_rescan_scope_bounded_degrades_when_discovery_exceeds_threshold(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+
+    class _ProgressScanner:
+        def scan(
+            self,
+            _root: Path,
+            _include: Iterable[str],
+            _exclude: Iterable[str],
+            **kwargs: object,
+        ):
+            progress_callback = kwargs.get("progress_callback")
+            if callable(progress_callback):
+                progress_callback(1, LARGE_SUBTREE_CONSTRAINED_THRESHOLD)
+            yield {"rel": "fresh.jpg", "id": "fresh"}
+
+    service = LibraryScanService(library_root, scanner=_ProgressScanner())
+
+    completion = service.rescan_scope_bounded(
+        album_root,
+        pair_live=True,
+        scope_kind=ScanScopeKind.REPAIR_IMPORT,
+    )
+
+    run = store.latest_incomplete_scan_run(
+        scope_root=album_root.resolve().as_posix(),
+    )
+
+    assert completion.success is True
+    assert completion.pressure_level == ScanPressureLevel.CONSTRAINED
+    assert completion.degrade_reason == (
+        f"large scope discovered: {LARGE_SUBTREE_CONSTRAINED_THRESHOLD} assets"
+    )
+    assert completion.phase == ScanProgressPhase.DEFERRED_PAIRING
+    assert run is not None
+    assert run["pressure_level"] == ScanPressureLevel.CONSTRAINED.value
+    assert run["deferred_tasks"] == "live_pairing,face_scan"
 
 
 def test_complete_scan_deferred_pairing_hides_motion_components(

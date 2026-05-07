@@ -21,6 +21,12 @@ pytest.importorskip(
 
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.application.use_cases.scan_models import (
+    ScanCompletion,
+    ScanMode,
+    ScanPressureLevel,
+    ScanProgressPhase,
+)
 from iPhoto.gui.ui.tasks.import_worker import ImportWorker, ImportSignals
 
 
@@ -156,3 +162,37 @@ def test_import_worker_falls_back_to_full_rescan_after_incremental_failure(
     assert scan_service.finalized == [(destination, [{"rel": "photo.jpg"}])]
     assert lifecycle_service.reconciled == [(destination, [{"rel": "photo.jpg"}])]
     assert finished[-1] == (destination, [destination / source.name], True)
+
+
+def test_full_rescan_rejects_resumable_bounded_completion(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "Album"
+    destination.mkdir()
+
+    class FakeBoundedScanService(FakeScanService):
+        def rescan_scope_bounded(self, root: Path, *, pair_live: bool, scope_kind):
+            return ScanCompletion(
+                root=Path(root),
+                scan_id="scan-1",
+                mode=ScanMode.BACKGROUND,
+                processed_count=1,
+                pressure_level=ScanPressureLevel.CONSTRAINED,
+                failed_count=0,
+                success=False,
+                cancelled=True,
+                phase=ScanProgressPhase.CANCELLED_RESUMABLE,
+            )
+
+    worker = ImportWorker(
+        [],
+        destination,
+        lambda src, dst: dst / src.name,
+        ImportSignals(),
+        scan_service=FakeBoundedScanService(),
+        asset_lifecycle_service=FakeLifecycleService(),
+    )
+
+    with pytest.raises(RuntimeError, match="Bounded rescan failed"):
+        worker._full_rescan()

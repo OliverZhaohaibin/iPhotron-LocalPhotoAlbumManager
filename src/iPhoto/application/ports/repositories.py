@@ -37,6 +37,9 @@ class AssetRepositoryPort(Protocol):
         mode: str,
         safe_mode: bool,
         phase: str,
+        pressure_level: str = "normal",
+        degrade_reason: str | None = None,
+        deferred_tasks: str | None = None,
     ) -> None:
         """Persist a scan-run record before background chunk merges begin."""
 
@@ -48,6 +51,9 @@ class AssetRepositoryPort(Protocol):
         safe_mode: bool | None = None,
         state: str | None = None,
         phase: str | None = None,
+        pressure_level: str | None = None,
+        degrade_reason: str | None = None,
+        deferred_tasks: str | None = None,
         discovered_count: int | None = None,
         failed_count: int | None = None,
         last_processed_rel: str | None = None,
@@ -122,6 +128,8 @@ class AssetRepositoryPort(Protocol):
     def apply_live_role_updates(
         self,
         updates: Iterable[tuple[str, int, str | None]],
+        *,
+        replace_scope: bool = True,
     ) -> None:
         """Replace Live Photo role state using library-relative updates."""
 
@@ -129,6 +137,8 @@ class AssetRepositoryPort(Protocol):
         self,
         prefix: str,
         updates: Iterable[tuple[str, int, str | None]],
+        *,
+        replace_scope: bool = True,
     ) -> None:
         """Replace Live Photo role state only inside a library-relative prefix."""
 

@@ -10,7 +10,11 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QProgressBar
 
-from ....application.use_cases.scan_models import ScanProgressPhase, ScanStatusUpdate
+from ....application.use_cases.scan_models import (
+    ScanPressureLevel,
+    ScanProgressPhase,
+    ScanStatusUpdate,
+)
 from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
 from ....config import RECENTLY_DELETED_DIR_NAME
 
@@ -39,6 +43,8 @@ class StatusBarController(QObject):
         # can use "Restore" focused language.
         self._move_context_restore: bool = False
         self._context = context
+        self._last_scan_phase: ScanProgressPhase | None = None
+        self._last_scan_message: str | None = None
 
     # Generic helpers -------------------------------------------------
     def show_message(self, message: str, timeout_ms: int | None = None) -> None:
@@ -59,6 +65,8 @@ class StatusBarController(QObject):
         self._progress_bar.setVisible(True)
         if self._rescan_action is not None:
             self._rescan_action.setEnabled(False)
+        self._last_scan_phase = None
+        self._last_scan_message = None
         self.show_message("Starting scan…")
 
     # Facade callbacks ------------------------------------------------
@@ -97,22 +105,43 @@ class StatusBarController(QObject):
             self.begin_scan()
 
         if update.phase == ScanProgressPhase.DISCOVERING:
+            self._last_scan_phase = update.phase
+            self._last_scan_message = update.message
             self.show_message(update.message or "Discovering files…")
             return
-        if update.phase == ScanProgressPhase.INDEXING and update.message:
-            self.show_message(update.message)
+        if update.phase == ScanProgressPhase.INDEXING:
+            self._last_scan_phase = update.phase
+            self._last_scan_message = update.message
+            if update.message:
+                self.show_message(update.message)
+            elif update.pressure_level == ScanPressureLevel.CONSTRAINED:
+                self.show_message("Constrained scan in progress…")
             return
         if update.phase == ScanProgressPhase.PAUSED_FOR_MEMORY:
-            self.show_message(update.message or "Scan paused because memory is high.", 5000)
+            self._last_scan_phase = update.phase
+            self._last_scan_message = update.message or "Scan paused because memory is high."
+            self.show_message(self._last_scan_message, 5000)
             return
         if update.phase == ScanProgressPhase.CANCELLED_RESUMABLE:
-            self.show_message(update.message or "Scan cancelled. You can resume later.", 5000)
+            self._last_scan_phase = update.phase
+            self._last_scan_message = update.message or "Scan cancelled. You can resume later."
+            self.show_message(self._last_scan_message, 5000)
             return
         if update.phase == ScanProgressPhase.DEFERRED_PAIRING:
-            self.show_message(
-                update.message or "Initial scan finished. Live Photo pairing is deferred.",
-                5000,
+            self._last_scan_phase = update.phase
+            self._last_scan_message = (
+                update.message
+                or "Scan finished. Live Photo pairing will complete later."
             )
+            self.show_message(self._last_scan_message, 5000)
+            return
+        if update.phase == ScanProgressPhase.COMPLETED:
+            self._last_scan_phase = update.phase
+            self._last_scan_message = update.message or "Scan complete."
+            return
+        if update.phase == ScanProgressPhase.FAILED:
+            self._last_scan_phase = update.phase
+            self._last_scan_message = update.message or "Scan failed."
 
     def handle_scan_finished(self, _root: Path, success: bool) -> None:
         """Restore the status bar once a scan completes."""
@@ -127,8 +156,12 @@ class StatusBarController(QObject):
             self._progress_context = None
         if self._rescan_action is not None:
             self._rescan_action.setEnabled(True)
-        message = "Scan complete." if success else "Scan failed."
+        message = self._last_scan_message
+        if not message:
+            message = "Scan complete." if success else "Scan failed."
         self.show_message(message, 5000)
+        self._last_scan_phase = None
+        self._last_scan_message = None
 
     def handle_scan_batch_failed(self, _root: Path, count: int) -> None:
         """Report a partial failure without interrupting the active scan."""

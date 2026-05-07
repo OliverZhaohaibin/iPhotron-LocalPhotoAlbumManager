@@ -8,6 +8,7 @@ import time
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from ....application.use_cases.scan_models import ScanProgressPhase, ScanScopeKind
 from ....bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ....bootstrap.library_scan_service import LibraryScanService
 
@@ -164,6 +165,23 @@ class ImportWorker(QRunnable):
 
     def _full_rescan(self) -> None:
         """Rebuild the destination index scope through the session scan service."""
+
+        if hasattr(self.scan_service, "rescan_scope_bounded"):
+            completion = self.scan_service.rescan_scope_bounded(
+                self._destination,
+                pair_live=True,
+                scope_kind=ScanScopeKind.REPAIR_IMPORT,
+            )
+            if (
+                not completion.success
+                or completion.phase
+                not in {
+                    ScanProgressPhase.COMPLETED,
+                    ScanProgressPhase.DEFERRED_PAIRING,
+                }
+            ):
+                raise RuntimeError("Bounded rescan failed while finalising import.")
+            return
 
         result = self.scan_service.scan_album(self._destination, persist_chunks=False)
         self.scan_service.finalize_scan(self._destination, result.rows)

@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from ...application.use_cases.scan_models import (
     ScanCompletion,
     ScanMode,
+    ScanPressureLevel,
     ScanProgressPhase,
     ScanStatusUpdate,
 )
@@ -512,8 +513,11 @@ class LibraryUpdateService(QObject):
                         scan_id=finalized.scan_id,
                         mode=finalized.mode,
                         phase=finalized.phase,
+                        pressure_level=finalized.pressure_level,
                         processed=finalized.processed_count,
                         failed_count=finalized.failed_count,
+                        deferred_face_scan=finalized.deferred_face_scan,
+                        deferred_pairing_reason=finalized.deferred_pairing_reason,
                         message="Scan failed. Some scanned items could not be saved.",
                     )
                 )
@@ -532,19 +536,31 @@ class LibraryUpdateService(QObject):
                     scan_id=finalized.scan_id,
                     mode=finalized.mode,
                     phase=finalized.phase,
+                    pressure_level=finalized.pressure_level,
                     processed=finalized.processed_count,
                     failed_count=finalized.failed_count,
+                    deferred_face_scan=finalized.deferred_face_scan,
+                    deferred_pairing_reason=finalized.deferred_pairing_reason,
                     message=(
-                        "Initial scan indexed safely. Live Photo pairing is deferred."
-                        if finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
-                        else "Scan complete."
+                        "Scan completed in constrained mode. Live Photo pairing is deferred."
+                        if finalized.pressure_level != ScanPressureLevel.NORMAL
+                        and finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+                        else (
+                            "Initial scan indexed safely. Live Photo pairing is deferred."
+                            if finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+                            else "Scan complete."
+                        )
                     ),
                 )
             )
             self.indexUpdated.emit(finalized.root)
             if finalized.phase != ScanProgressPhase.DEFERRED_PAIRING:
                 self.linksUpdated.emit(finalized.root)
-            if not finalized.safe_mode and not self._model_loading_due_to_scan:
+            if (
+                not finalized.safe_mode
+                and finalized.pressure_level == ScanPressureLevel.NORMAL
+                and not self._model_loading_due_to_scan
+            ):
                 self.assetReloadRequested.emit(finalized.root, False, False)
             self._model_loading_due_to_scan = False
             self.scanFinished.emit(finalized.root, True)

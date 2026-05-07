@@ -5,6 +5,7 @@ from typing import ClassVar
 from iPhoto.application.use_cases.scan_models import (
     ScanCompletion,
     ScanMode,
+    ScanPressureLevel,
     ScanProgressPhase,
 )
 import iPhoto.gui.services.library_update_service as lus
@@ -510,6 +511,74 @@ def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:
     assert scan_service.completed == [(album_root, "scan-1", True)]
     assert index_updates == [album_root]
     assert link_updates == [album_root]
+    assert finished == [(album_root, True)]
+
+
+def test_scan_completion_constrained_skips_full_reload(tmp_path: Path) -> None:
+    album_root = tmp_path / "Album"
+    album_root.mkdir()
+
+    class FinalizeScanService:
+        def complete_scan(self, completion: ScanCompletion, *, pair_live: bool):
+            return ScanCompletion(
+                root=completion.root,
+                scan_id=completion.scan_id,
+                mode=completion.mode,
+                processed_count=completion.processed_count,
+                pressure_level=ScanPressureLevel.CONSTRAINED,
+                failed_count=0,
+                success=True,
+                cancelled=False,
+                safe_mode=False,
+                defer_live_pairing=True,
+                deferred_face_scan=True,
+                degrade_reason="memory warning",
+                deferred_pairing_reason="memory warning",
+                allow_face_scan=False,
+                phase=ScanProgressPhase.DEFERRED_PAIRING,
+            )
+
+    service = lus.LibraryUpdateService(
+        task_manager=DummyTaskManager(),
+        current_album_getter=lambda: None,
+        library_manager_getter=lambda: None,
+    )
+    completion = lus.ScanTaskCompletion(
+        completion=ScanCompletion(
+            root=album_root,
+            scan_id="scan-1",
+            mode=ScanMode.BACKGROUND,
+            processed_count=5,
+            failed_count=0,
+            success=True,
+            cancelled=False,
+            safe_mode=False,
+            defer_live_pairing=True,
+            allow_face_scan=False,
+            phase=ScanProgressPhase.COMPLETED,
+        ),
+        scan_service=FinalizeScanService(),
+        library_root=None,
+    )
+
+    reloads: list[tuple[Path, bool, bool]] = []
+    index_updates: list[Path] = []
+    links_updates: list[Path] = []
+    finished: list[tuple[Path, bool]] = []
+    service.assetReloadRequested.connect(
+        lambda root, announce_index, force_reload: reloads.append(
+            (root, announce_index, force_reload)
+        )
+    )
+    service.indexUpdated.connect(index_updates.append)
+    service.linksUpdated.connect(links_updates.append)
+    service.scanFinished.connect(lambda root, ok: finished.append((root, ok)))
+
+    service._on_scan_completed(completion)
+
+    assert index_updates == [album_root]
+    assert links_updates == []
+    assert reloads == []
     assert finished == [(album_root, True)]
 
 

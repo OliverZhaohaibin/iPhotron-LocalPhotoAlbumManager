@@ -142,7 +142,7 @@ class ContextMenuController(QObject):
                 self._remove_selection_rows(selected_indexes)
         except Exception:
             # Rescanning the album restores the rows we removed optimistically.
-            self._facade.rescan_current()
+            self._facade.rescan_current_async()
             raise
         finally:
             if self._selection_controller is not None:
@@ -167,7 +167,7 @@ class ContextMenuController(QObject):
             self._prepare_file_mutation(paths)
             queued_restore = self._facade.restore_assets(paths)
         except Exception:
-            self._facade.rescan_current()
+            self._facade.rescan_current_async()
             raise
         finally:
             if self._selection_controller is not None:

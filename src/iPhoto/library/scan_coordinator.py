@@ -10,6 +10,7 @@ from PySide6.QtCore import QMutexLocker, QRunnable
 from ..application.use_cases.scan_models import (
     ScanCompletion,
     ScanMode,
+    ScanPressureLevel,
     ScanProgressPhase,
     ScanStatusUpdate,
 )
@@ -85,7 +86,7 @@ class ScanCoordinatorMixin:
         # Prepare signals outside the lock
         signals = ScannerSignals()
         signals.progressUpdated.connect(self.scanProgress)
-        signals.statusChanged.connect(self.scanStatusChanged)
+        signals.statusChanged.connect(self._on_scan_status_internal)
         signals.chunkReady.connect(self._on_scan_chunk)
         signals.finished.connect(self._on_scan_finished)
         signals.error.connect(self._on_scan_error)
@@ -147,7 +148,13 @@ class ScanCoordinatorMixin:
                     scan_id=scan_plan.scan_id,
                     mode=scan_plan.mode,
                     phase=ScanProgressPhase.DEFERRED_PAIRING,
-                    message="Initial safe scan defers People indexing.",
+                    pressure_level=scan_plan.pressure_level,
+                    deferred_face_scan=True,
+                    message=(
+                        "People indexing deferred until constrained scan work completes."
+                        if scan_plan.pressure_level != ScanPressureLevel.NORMAL
+                        else "Initial safe scan defers People indexing."
+                    ),
                 )
             )
         # Release lock before starting the worker
@@ -352,6 +359,21 @@ class ScanCoordinatorMixin:
             self._current_face_scanner.enqueue_rows(chunk)
         self.scanChunkReady.emit(root, chunk)
 
+    def _on_scan_status_internal(self, update: object) -> None:
+        if isinstance(update, ScanStatusUpdate):
+            if update.deferred_face_scan or update.pressure_level != ScanPressureLevel.NORMAL:
+                locker = QMutexLocker(self._scan_buffer_lock)
+                face_scanner = self._current_face_scanner
+                if face_scanner is not None:
+                    face_scanner.cancel()
+                    self._current_face_scanner = None
+                del locker
+                message = "People indexing deferred until scan pressure drops."
+                if self._face_scan_status_message != message:
+                    self._face_scan_status_message = message
+                    self.faceScanStatusChanged.emit(message)
+        self.scanStatusChanged.emit(update)
+
     def _on_scan_finished(
         self,
         completion: ScanCompletion | Path,
@@ -465,12 +487,20 @@ class ScanCoordinatorMixin:
                 scan_id=finalized.scan_id,
                 mode=finalized.mode,
                 phase=finalized.phase,
+                pressure_level=finalized.pressure_level,
                 processed=finalized.processed_count,
                 failed_count=finalized.failed_count,
+                deferred_face_scan=finalized.deferred_face_scan,
+                deferred_pairing_reason=finalized.deferred_pairing_reason,
                 message=(
-                    "Initial scan indexed safely. Live Photo pairing is deferred."
-                    if finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
-                    else "Scan complete."
+                    "Scan completed in constrained mode. Live Photo pairing is deferred."
+                    if finalized.pressure_level != ScanPressureLevel.NORMAL
+                    and finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+                    else (
+                        "Initial scan indexed safely. Live Photo pairing is deferred."
+                        if finalized.phase == ScanProgressPhase.DEFERRED_PAIRING
+                        else "Scan complete."
+                    )
                 ),
             )
         )
@@ -488,6 +518,7 @@ class ScanCoordinatorMixin:
             scan_id="",
             mode=ScanMode.BACKGROUND,
             processed_count=len(rows or []),
+            pressure_level=ScanPressureLevel.NORMAL,
             failed_count=0,
             success=True,
             cancelled=False,

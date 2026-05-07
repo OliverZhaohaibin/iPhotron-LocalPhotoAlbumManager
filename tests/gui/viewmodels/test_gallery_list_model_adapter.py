@@ -11,6 +11,8 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
+from iPhoto.gui.viewmodels.gallery_page_loader import GalleryPageRequest
+from iPhoto.gui.viewmodels.signal import Signal
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 
@@ -20,8 +22,11 @@ def mock_store():
     store.data_changed = MagicMock()
     store.window_changed = MagicMock()
     store.row_changed = MagicMock()
+    store.window_load_requested = Signal()
     store.count.return_value = 0
     store.selection_revision = 0
+    store.asset_query_service.return_value = MagicMock()
+    store.library_root.return_value = Path("/library")
     return store
 
 
@@ -194,3 +199,49 @@ def test_source_changed_resets_when_selection_revision_changes(
 
     begin_reset.assert_called_once()
     end_reset.assert_called_once()
+
+
+def test_window_load_requested_delegates_to_page_loader(adapter, mock_store):
+    request = GalleryPageRequest(
+        request_id=1,
+        selection_revision=1,
+        root=Path("/library"),
+        query=MagicMock(),
+        first=10,
+        last=50,
+    )
+
+    with patch.object(adapter._page_loader, "load") as load:
+        adapter._on_window_load_requested(request)
+        load.assert_called_once_with(
+            asset_query_service=mock_store.asset_query_service(),
+            library_root=mock_store.library_root(),
+            request=request,
+        )
+
+
+def test_window_load_failed_delegates_to_store(adapter, mock_store):
+    adapter._on_window_load_failed(5, 9)
+
+    mock_store.handle_window_load_failed.assert_called_once_with(5, 9)
+
+
+def test_resolve_live_motion_uses_sync_store_scan(adapter, mock_store):
+    asset = _make_dto(metadata={"live_photo_group_id": "group-1"})
+    candidate = _make_dto(
+        rel_path=Path("photo.mov"),
+        abs_path=Path("/library/photo.mov"),
+        media_type="video",
+        duration=5.0,
+        metadata={"live_photo_group_id": "group-1"},
+    )
+    mock_store.count.return_value = 2
+    mock_store.asset_at.return_value = None
+    mock_store.asset_at_sync.side_effect = [None, candidate]
+
+    motion_rel, motion_abs = adapter._resolve_live_motion(asset)
+
+    assert motion_rel == candidate.rel_path
+    assert motion_abs == candidate.abs_path
+    assert mock_store.asset_at_sync.call_count == 2
+    mock_store.asset_at.assert_not_called()

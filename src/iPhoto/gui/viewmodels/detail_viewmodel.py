@@ -109,7 +109,7 @@ class DetailViewModel(BaseViewModel):
         if source is None:
             return
         self._store.pin_row(row)
-        dto = self._store.asset_at(row)
+        dto = self._store.asset_at_sync(row)
         if dto is None:
             return
         self.current_row.value = row
@@ -211,7 +211,7 @@ class DetailViewModel(BaseViewModel):
         row = self.current_row.value
         if row is None or row < 0:
             return
-        dto = self._store.asset_at(row)
+        dto = self._store.asset_at_sync(row)
         if dto is None:
             return
         presentation = self._build_presentation(row, dto)
@@ -391,7 +391,9 @@ class DetailViewModel(BaseViewModel):
         if not group_id:
             return None, None
         for candidate_row in range(self._store.count()):
-            candidate = self._store.asset_at(candidate_row)
+            # Full-store scans must stay synchronous so live-photo resolution
+            # does not enqueue and cancel background paging requests.
+            candidate = self._store.asset_at_sync(candidate_row)
             if candidate is None or not candidate.is_video:
                 continue
             candidate_group = (candidate.metadata or {}).get("live_photo_group_id")

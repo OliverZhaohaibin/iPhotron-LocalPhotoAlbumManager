@@ -526,7 +526,9 @@ class GalleryViewModel(BaseViewModel):
         )
 
     def path_for_row(self, row: int) -> Optional[Path]:
-        dto = self._store.asset_at(row)
+        # Selection-driven actions must resolve rows inline so bulk operations
+        # do not silently drop uncached items while paging catches up.
+        dto = self._store.asset_at_sync(row)
         return dto.abs_path if dto is not None else None
 
     def paths_for_rows(self, rows: Iterable[int]) -> list[Path]:
@@ -547,7 +549,7 @@ class GalleryViewModel(BaseViewModel):
             if row in seen_rows or row < 0:
                 continue
             seen_rows.add(row)
-            dto = self._store.asset_at(row)
+            dto = self._store.asset_at_sync(row)
             if dto is not None:
                 items.append(dto)
         return items

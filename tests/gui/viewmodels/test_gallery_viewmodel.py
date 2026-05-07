@@ -252,6 +252,31 @@ def test_open_location_asset_opens_singleton_cluster_gallery(tmp_path: Path) -> 
     assert vm.location_session.mode == "cluster_gallery"
 
 
+def test_selection_accessors_resolve_uncached_rows_synchronously(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    first = SimpleNamespace(abs_path=tmp_path / "a.jpg")
+    second = SimpleNamespace(abs_path=tmp_path / "b.jpg")
+    store.asset_at.return_value = None
+    store.asset_at_sync.side_effect = lambda row: {
+        4: first,
+        7: second,
+        8: second,
+    }.get(row)
+
+    assert vm.path_for_row(4) == first.abs_path
+    assert vm.paths_for_rows([7, 8, 8]) == [second.abs_path]
+    assert vm.items_for_rows([7, 8, 8, -1]) == [second, second]
+    assert [call.args for call in store.asset_at_sync.call_args_list] == [
+        (4,),
+        (7,),
+        (8,),
+        (8,),
+        (7,),
+        (8,),
+    ]
+    store.asset_at.assert_not_called()
+
+
 def test_return_to_map_from_singleton_location_cluster_reuses_snapshot(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     assets = [SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")]
@@ -810,7 +835,7 @@ def test_pinned_people_gallery_retargets_after_snapshot_redirect(tmp_path: Path)
 def test_toggle_favorite_row_updates_store_via_asset_service(tmp_path: Path) -> None:
     vm, store, _context, _facade, asset_state_service = _make_vm(library_root=tmp_path)
     dto = SimpleNamespace(abs_path=tmp_path / "photo.jpg")
-    store.asset_at.return_value = dto
+    store.asset_at_sync.return_value = dto
     asset_state_service.toggle_favorite.return_value = True
 
     result = vm.toggle_favorite_row(3)
@@ -818,6 +843,7 @@ def test_toggle_favorite_row_updates_store_via_asset_service(tmp_path: Path) -> 
     assert result is True
     asset_state_service.toggle_favorite.assert_called_once_with(dto.abs_path)
     store.update_favorite_status.assert_called_once_with(3, True)
+    store.asset_at.assert_not_called()
 
 
 def test_rescan_current_emits_message_without_open_library() -> None:

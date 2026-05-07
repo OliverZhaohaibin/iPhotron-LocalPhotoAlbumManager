@@ -14,6 +14,7 @@ from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCach
 from iPhoto.utils.geocoding import resolve_location_name
 
 from .gallery_collection_store import GalleryCollectionStore
+from .gallery_page_loader import GalleryPageLoader, GalleryPageRequest, GalleryPageResult
 
 class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
@@ -34,11 +35,17 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_selection_revision = int(getattr(store, "selection_revision", 0))
         self._last_count = int(store.count())
         self._duration_cache: dict[Path, float] = {}
+        self._page_loader = GalleryPageLoader(self)
 
         self._store.window_changed.connect(self._on_window_changed)
         self._store.data_changed.connect(self._on_source_changed)
         self._store.row_changed.connect(self._on_row_changed)
+        window_load_requested = getattr(self._store, "window_load_requested", None)
+        if window_load_requested is not None:
+            window_load_requested.connect(self._on_window_load_requested)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
+        self._page_loader.pageLoaded.connect(self._on_window_load_result)
+        self._page_loader.pageFailed.connect(self._on_window_load_failed)
 
     @classmethod
     def create(
@@ -292,7 +299,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         if not group_id:
             return None, None
         for row in range(self._store.count()):
-            candidate = self._store.asset_at(row)
+            # Full-store scans must stay synchronous so live-photo resolution
+            # does not enqueue and cancel background paging requests.
+            candidate = self._store.asset_at_sync(row)
             if candidate is None or not candidate.is_video:
                 continue
             candidate_group = (candidate.metadata or {}).get("live_photo_group_id")
@@ -343,6 +352,19 @@ class GalleryListModelAdapter(QAbstractListModel):
                 idx,
                 [Roles.FEATURED, Roles.INFO, Roles.LOCATION, Roles.SIZE],
             )
+
+    def _on_window_load_requested(self, request: GalleryPageRequest) -> None:
+        self._page_loader.load(
+            asset_query_service=self._store.asset_query_service(),
+            library_root=self._store.library_root(),
+            request=request,
+        )
+
+    def _on_window_load_result(self, result: GalleryPageResult) -> None:
+        self._store.handle_window_load_result(result)
+
+    def _on_window_load_failed(self, request_id: int, selection_revision: int) -> None:
+        self._store.handle_window_load_failed(request_id, selection_revision)
 
     def _effective_video_duration(self, asset: AssetDTO) -> float:
         if not asset.is_video:

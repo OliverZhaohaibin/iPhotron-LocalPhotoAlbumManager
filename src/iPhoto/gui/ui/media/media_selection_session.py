@@ -45,7 +45,7 @@ class MediaSelectionSession:
             return None
         if row < 0 or row >= self._collection.count():
             return None
-        dto = self._collection.asset_at(row)
+        dto = self._asset_at(row)
         if dto is None:
             return None
         self._current_row = row
@@ -106,7 +106,7 @@ class MediaSelectionSession:
             self.currentChanged.emit(-1, None)
             return
         fallback_row = min(max(self._current_row, 0), count - 1)
-        dto = self._collection.asset_at(fallback_row)
+        dto = self._asset_at(fallback_row)
         if dto is None:
             self._current_row = -1
             self._current_source = None
@@ -115,3 +115,11 @@ class MediaSelectionSession:
         self._current_row = fallback_row
         self._current_source = dto.abs_path
         self.currentChanged.emit(fallback_row, dto.abs_path)
+
+    def _asset_at(self, row: int):
+        if self._collection is None:
+            return None
+        asset_at_sync = getattr(self._collection, "asset_at_sync", None)
+        if callable(asset_at_sync):
+            return asset_at_sync(row)
+        return self._collection.asset_at(row)

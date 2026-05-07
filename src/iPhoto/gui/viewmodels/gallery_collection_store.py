@@ -33,6 +33,8 @@ from iPhoto.gui.viewmodels.pending_move_buffer import (
     should_include_pending as _should_include_pending_fn,
 )
 
+from .gallery_page_loader import GalleryPageRequest, GalleryPageResult
+
 
 class GalleryAssetQuerySurface(Protocol):
     """Session-owned query surface used by the gallery collection store."""
@@ -54,6 +56,7 @@ class GalleryCollectionStore:
     """Pure Python gallery data store with viewport-aware caching."""
 
     INITIAL_VISIBLE_ROWS = 80
+    DEFAULT_PAGE_SIZE = 160
     MIN_WINDOW_SIZE = 300
     MAX_WINDOW_SIZE = 2000
     WINDOW_MULTIPLIER = 4
@@ -73,6 +76,7 @@ class GalleryCollectionStore:
         self.count_changed = Signal()
         self.row_changed = Signal()
         self.scan_refresh_idle_requested = Signal()
+        self.window_load_requested = Signal()
 
         self._asset_query_service = asset_query_service
         self._library_root = library_root or getattr(asset_query_service, "library_root", None)
@@ -82,6 +86,7 @@ class GalleryCollectionStore:
         self._selection_library_root: Optional[Path] = library_root
         self._total_count = 0
         self._row_cache: Dict[int, AssetDTO] = {}
+        self._cached_abs_rows: Dict[str, int] = {}
         self._window_range: Optional[tuple[int, int]] = None
         self._visible_range: Optional[tuple[int, int]] = None
         self._active_root: Optional[Path] = None
@@ -101,6 +106,8 @@ class GalleryCollectionStore:
         self._active_scan_pressure = ScanPressureLevel.NORMAL
         self._last_scan_refresh_at = 0.0
         self._last_user_interaction_at = time.monotonic()
+        self._window_request_id = 0
+        self._window_request_range: Optional[tuple[int, int]] = None
 
     @property
     def selection_revision(self) -> int:
@@ -160,6 +167,9 @@ class GalleryCollectionStore:
     def library_root(self) -> Optional[Path]:
         return self._library_root
 
+    def asset_query_service(self) -> GalleryAssetQuerySurface | None:
+        return self._asset_query_service
+
     def current_query(self) -> Optional[AssetQuery]:
         return self._clone_query(self._selection_query) if self._selection_query is not None else None
 
@@ -208,7 +218,11 @@ class GalleryCollectionStore:
         self._current_query = self._clone_query(query)
         self._direct_mode = False
         self._reset_window_state()
-        self._load_initial_window()
+        self._total_count = self._current_total_count()
+        if self._total_count > 0:
+            visible_last = min(self._total_count - 1, max(0, self.INITIAL_VISIBLE_ROWS - 1))
+            self._visible_range = (0, visible_last)
+            self._reload_window_for_visible_range(0, visible_last, emit_signals=False)
         self._emit_refresh(old_total)
 
     def _load_direct_assets(self, assets: list, library_root: Path) -> None:
@@ -230,6 +244,7 @@ class GalleryCollectionStore:
                 self._row_cache[next_index] = dto
                 next_index += 1
 
+        self._rebuild_cached_abs_rows()
         self._total_count = len(self._row_cache)
         if self._total_count > 0:
             self._window_range = (0, self._total_count - 1)
@@ -246,6 +261,12 @@ class GalleryCollectionStore:
             self.window_changed.emit(*self._window_range)
 
     def asset_at(self, index: int) -> Optional[AssetDTO]:
+        return self._asset_at(index, allow_async=True)
+
+    def asset_at_sync(self, index: int) -> Optional[AssetDTO]:
+        return self._asset_at(index, allow_async=False)
+
+    def _asset_at(self, index: int, *, allow_async: bool) -> Optional[AssetDTO]:
         dto = self._row_cache.get(index)
         if dto is not None or self._direct_mode:
             return dto
@@ -254,23 +275,23 @@ class GalleryCollectionStore:
         if self._visible_range is not None:
             visible_first, visible_last = self._visible_range
             if visible_first <= index <= visible_last:
-                self._ensure_row_loaded(index, emit_signals=False)
+                self._ensure_row_loaded(index, emit_signals=False, allow_async=allow_async)
                 return self._row_cache.get(index)
         if self._pinned_row == index:
-            self._ensure_row_loaded(index, emit_signals=False)
+            self._ensure_row_loaded(index, emit_signals=False, allow_async=allow_async)
             return self._row_cache.get(index)
         # Broad queries like All Photos may request rows outside the initial
         # paging window before the view emits a new visible-range signal.
         # Fetching on demand keeps those items interactive instead of
         # rendering as inert black cells.
-        self._ensure_row_loaded(index, emit_signals=False)
+        self._ensure_row_loaded(index, emit_signals=False, allow_async=allow_async)
         return self._row_cache.get(index)
 
     def find_dto_by_path(self, path: Path) -> Optional[AssetDTO]:
         target = self._normalize_abs_key(path)
-        for dto in self._row_cache.values():
-            if self._normalize_abs_key(dto.abs_path) == target:
-                return dto
+        cached_row = self._cached_abs_rows.get(target)
+        if cached_row is not None:
+            return self._row_cache.get(cached_row)
         if self._selection_direct_assets is not None:
             for asset in self._selection_direct_assets:
                 dto = self._geotagged_asset_to_dto(
@@ -283,9 +304,9 @@ class GalleryCollectionStore:
 
     def row_for_path(self, path: Path) -> Optional[int]:
         target = self._normalize_abs_key(path)
-        for row, dto in self._row_cache.items():
-            if self._normalize_abs_key(dto.abs_path) == target:
-                return row
+        cached_row = self._cached_abs_rows.get(target)
+        if cached_row is not None:
+            return cached_row
 
         if self._selection_direct_assets is not None:
             library_root = self._selection_library_root or self._library_root
@@ -301,16 +322,9 @@ class GalleryCollectionStore:
                 next_index += 1
             return None
 
-        if self._current_query is None or self._total_count <= 0:
-            return None
+        if self._current_query is not None:
+            return self._find_query_row_for_path(target)
 
-        batch_size = 200
-        for offset in range(0, self._total_count, batch_size):
-            batch = self._fetch_rows(offset, min(self._total_count - 1, offset + batch_size - 1))
-            for row, dto in batch.items():
-                if self._normalize_abs_key(dto.abs_path) == target:
-                    self._row_cache.setdefault(row, dto)
-                    return row
         return None
 
     def count(self) -> int:
@@ -368,7 +382,9 @@ class GalleryCollectionStore:
             new_cache[row - removed_before] = self._row_cache[row]
 
         self._row_cache = new_cache
+        self._rebuild_cached_abs_rows()
         self._total_count = max(0, old_total - len(removed))
+        self._invalidate_pending_window_request()
         self._window_range = None
         self._visible_range = None if self._total_count == 0 else self._visible_range
         self._invalidate_total_count_cache()
@@ -452,6 +468,8 @@ class GalleryCollectionStore:
             self._row_cache[start + offset] = dto
         old_total = self._total_count
         self._total_count += len(dtos)
+        self._rebuild_cached_abs_rows()
+        self._invalidate_pending_window_request()
         self._invalidate_total_count_cache()
         self.count_changed.emit(old_total, self._total_count)
         self.data_changed.emit()
@@ -461,8 +479,8 @@ class GalleryCollectionStore:
             return
         self.mark_user_interaction()
         if self._total_count == 0 and self._window_range is None:
-            self._load_initial_window()
-            if self._total_count == 0:
+            self._total_count = self._current_total_count()
+            if self._total_count <= 0:
                 return
 
         first = max(0, first)
@@ -477,16 +495,15 @@ class GalleryCollectionStore:
             and self._pending_scan_affects_visible_window(first, last)
         )
         if should_refresh:
-            self._reload_window_for_visible_range(
+            self._request_window_load(
                 first,
                 last,
-                emit_signals=True,
                 refetch_window=True,
                 clear_pending_scan_refresh=True,
             )
             return
         if self._window_needs_reload(first, last):
-            self._reload_window_for_visible_range(first, last, emit_signals=True)
+            self._request_window_load(first, last, refetch_window=False)
             return
         self.flush_pending_scan_refresh(force=False)
 
@@ -495,7 +512,7 @@ class GalleryCollectionStore:
             self._pinned_row = None
             return
         self._pinned_row = row
-        self._ensure_row_loaded(row, emit_signals=True)
+        self._ensure_row_loaded(row, emit_signals=True, allow_async=False)
 
     def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
         if not chunk or self._current_query is None or self._active_root is None:
@@ -536,6 +553,10 @@ class GalleryCollectionStore:
             return
         self._pending_scan_refresh = True
         self._invalidate_total_count_cache()
+        old_total = self._total_count
+        self._total_count = self._current_total_count()
+        if old_total != self._total_count:
+            self.count_changed.emit(old_total, self._total_count)
         self._active_scan_mode = ScanMode.BACKGROUND
         self._active_scan_pressure = ScanPressureLevel.NORMAL
         self.flush_pending_scan_refresh(force=True)
@@ -567,10 +588,9 @@ class GalleryCollectionStore:
         ):
             return False
         self._last_scan_refresh_at = now
-        self._reload_window_for_visible_range(
+        self._request_window_load(
             first,
             last,
-            emit_signals=True,
             refetch_window=True,
             clear_pending_scan_refresh=True,
         )
@@ -580,6 +600,102 @@ class GalleryCollectionStore:
         visible_last = max(0, self.INITIAL_VISIBLE_ROWS - 1)
         self._visible_range = (0, visible_last)
         self._reload_window_for_visible_range(0, visible_last, emit_signals=False)
+
+    def _request_window_load(
+        self,
+        first: int,
+        last: int,
+        *,
+        refetch_window: bool,
+        clear_pending_scan_refresh: bool = False,
+    ) -> None:
+        if self._current_query is None or self._active_root is None or self._total_count <= 0:
+            return
+
+        first = max(0, min(first, max(0, self._total_count - 1)))
+        last = max(first, min(last, max(0, self._total_count - 1)))
+        window_first, window_last = self._compute_target_window(first, last, self._total_count)
+
+        if (
+            not refetch_window
+            and self._window_request_range is not None
+            and self._window_request_range[0] <= window_first
+            and self._window_request_range[1] >= window_last
+        ):
+            return
+
+        if self.window_load_requested.handler_count == 0:
+            self._reload_window_for_visible_range(
+                first,
+                last,
+                emit_signals=True,
+                refetch_window=refetch_window,
+                clear_pending_scan_refresh=clear_pending_scan_refresh,
+            )
+            return
+
+        self._window_request_id += 1
+        self._window_request_range = (window_first, window_last)
+        request = GalleryPageRequest(
+            request_id=self._window_request_id,
+            selection_revision=self._selection_revision,
+            root=self._active_root,
+            query=self._clone_query(self._current_query),
+            first=window_first,
+            last=window_last,
+            refetch_window=refetch_window,
+            clear_pending_scan_refresh=clear_pending_scan_refresh,
+        )
+        self.window_load_requested.emit(request)
+
+    def handle_window_load_result(self, result: GalleryPageResult) -> None:
+        if result.selection_revision != self._selection_revision:
+            return
+        if result.request_id != self._window_request_id:
+            return
+        self._window_request_range = None
+
+        old_total = self._total_count
+        previous_cache = self._row_cache
+        pinned_row = self._pinned_row
+        new_cache = {
+            row: dto
+            for row, dto in previous_cache.items()
+            if self._should_keep_cached_row(
+                row,
+                window_first=result.first,
+                window_last=result.last,
+                pinned_row=pinned_row,
+                total_count=self._total_count,
+            )
+        }
+        new_cache.update(result.rows)
+
+        if pinned_row is not None and pinned_row not in new_cache and 0 <= pinned_row < self._total_count:
+            pinned_dto = previous_cache.get(pinned_row)
+            if pinned_dto is not None:
+                new_cache[pinned_row] = pinned_dto
+
+        self._row_cache = new_cache
+        self._rebuild_cached_abs_rows()
+        self._window_range = (result.first, result.last)
+        if result.clear_pending_scan_refresh:
+            self._clear_pending_scan_refresh()
+
+        if old_total != self._total_count:
+            self.count_changed.emit(old_total, self._total_count)
+        self._window_revision += 1
+        self.window_changed.emit(result.first, result.last)
+        if pinned_row is not None and pinned_row in self._row_cache:
+            self.window_changed.emit(pinned_row, pinned_row)
+        self.data_changed.emit()
+
+    def handle_window_load_failed(self, request_id: int, selection_revision: int) -> None:
+        if selection_revision != self._selection_revision:
+            return
+        if request_id != self._window_request_id:
+            return
+        self._window_request_range = None
 
     def _reload_window_for_visible_range(
         self,
@@ -635,6 +751,7 @@ class GalleryCollectionStore:
                 new_cache[pinned_row] = pinned_dto
 
         self._row_cache = new_cache
+        self._rebuild_cached_abs_rows()
         self._total_count = new_total
         self._window_range = (window_first, window_last)
         self._visible_range = (first, last)
@@ -761,15 +878,27 @@ class GalleryCollectionStore:
         fetched = self._fetch_rows(row, row)
         return fetched.get(row)
 
-    def _ensure_row_loaded(self, row: int, *, emit_signals: bool) -> None:
+    def _ensure_row_loaded(self, row: int, *, emit_signals: bool, allow_async: bool) -> None:
         if row in self._row_cache:
             return
-        dto = self._fetch_single_row(row)
-        if dto is None:
+        if not allow_async or self._direct_mode or self.window_load_requested.handler_count == 0:
+            dto = self._fetch_single_row(row)
+            if dto is None:
+                return
+            self._row_cache[row] = dto
+            self._rebuild_cached_abs_rows()
+            if emit_signals:
+                self.window_changed.emit(row, row)
             return
-        self._row_cache[row] = dto
-        if emit_signals:
-            self.window_changed.emit(row, row)
+        self._request_window_load(
+            row,
+            row,
+            refetch_window=False,
+        )
+
+    def _invalidate_pending_window_request(self) -> None:
+        self._window_request_id += 1
+        self._window_request_range = None
 
     def _map_scan_rows_to_active_entries(self, scan_root: Path, chunk: List[dict]) -> list[tuple[str, dict]]:
         if self._active_root is None:
@@ -1015,19 +1144,55 @@ class GalleryCollectionStore:
         counted.offset = 0
         return counted
 
+    def _find_query_row_for_path(self, target: str) -> Optional[int]:
+        active_root = self._active_root or self._library_root
+        if active_root is None or self._asset_query_service is None or self._current_query is None:
+            return None
+
+        validate_paths = self._should_validate_paths(self._current_query)
+        for row_index, row in enumerate(
+            self._asset_query_service.read_query_asset_rows(active_root, self._clone_query(self._current_query))
+        ):
+            view_rel = row.get("rel") if isinstance(row, dict) else None
+            if not isinstance(view_rel, str) or not view_rel:
+                continue
+            if self._scan_row_is_thumbnail(view_rel, row):
+                continue
+            dto = self._scan_row_to_dto(active_root, view_rel, row)
+            if dto is None:
+                continue
+            if validate_paths and not self._path_exists_cached(dto.abs_path):
+                continue
+            if self._normalize_abs_key(dto.abs_path) == target:
+                self._cache_row(row_index, dto)
+                return row_index
+        return None
+
+    def _cache_row(self, row: int, dto: AssetDTO) -> None:
+        self._row_cache[row] = dto
+        self._cached_abs_rows[self._normalize_abs_key(dto.abs_path)] = row
+
     @staticmethod
     def _clone_query(query: AssetQuery) -> AssetQuery:
         return copy.deepcopy(query)
+
+    def _rebuild_cached_abs_rows(self) -> None:
+        cached_abs_rows: Dict[str, int] = {}
+        for row, dto in self._row_cache.items():
+            cached_abs_rows[self._normalize_abs_key(dto.abs_path)] = row
+        self._cached_abs_rows = cached_abs_rows
 
     def _iter_cached_rows(self) -> List[tuple[int, AssetDTO]]:
         return sorted(self._row_cache.items(), key=lambda item: item[0])
 
     def _reset_window_state(self) -> None:
         self._row_cache.clear()
+        self._cached_abs_rows.clear()
         self._total_count = 0
         self._window_range = None
         self._visible_range = None
         self._pinned_row = None
+        self._window_request_range = None
         self._path_cache.clear()
         self._pending_moves.clear()
         self._pending_paths.clear()

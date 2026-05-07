@@ -48,9 +48,29 @@ class _Collection:
         self.data_changed.emit()
 
 
+class _SyncAwareCollection(_Collection):
+    def asset_at(self, row: int):
+        return None
+
+    def asset_at_sync(self, row: int):
+        return super().asset_at(row)
+
+
 def test_session_tracks_current_row_and_source() -> None:
     session = MediaSelectionSession()
     collection = _Collection([Path("/fake/a.jpg"), Path("/fake/b.jpg")])
+    session.bind_collection(collection)
+
+    source = session.set_current_row(1)
+
+    assert source == Path("/fake/b.jpg")
+    assert session.current_row() == 1
+    assert session.current_source() == Path("/fake/b.jpg")
+
+
+def test_session_uses_sync_asset_lookup_when_available() -> None:
+    session = MediaSelectionSession()
+    collection = _SyncAwareCollection([Path("/fake/a.jpg"), Path("/fake/b.jpg")])
     session.bind_collection(collection)
 
     source = session.set_current_row(1)

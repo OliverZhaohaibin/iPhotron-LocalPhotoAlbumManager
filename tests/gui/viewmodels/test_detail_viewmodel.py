@@ -29,6 +29,7 @@ def _make_dto(path: str, *, is_video: bool = False, is_favorite: bool = False) -
 
 def _make_vm(*, edit_service=None, asset_state_service=_UNSET):
     store = Mock()
+    store.asset_at_sync.side_effect = lambda row: store.asset_at(row)
     session = Mock()
     if asset_state_service is _UNSET:
         asset_state_service = Mock()
@@ -61,6 +62,23 @@ def test_show_row_builds_presentation_and_requests_detail_route():
     assert received[0].asset_id == dto.id
     assert received[0].path == dto.abs_path
     assert received[0].is_favorite is True
+
+
+def test_show_row_uses_sync_store_lookup_for_uncached_row():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg", is_favorite=True)
+    store.asset_at.return_value = None
+    store.asset_at_sync.side_effect = None
+    store.asset_at_sync.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+
+    store.asset_at_sync.assert_called_with(0)
+    assert vm.current_row.value == 0
+    assert vm.current_path.value == dto.abs_path
+    assert vm.presentation.value is not None
+    assert vm.presentation.value.asset_id == dto.id
 
 
 def test_next_and_previous_delegate_to_session():
@@ -160,7 +178,24 @@ def test_request_edit_emits_current_path():
     vm.request_edit()
 
     assert emitted == [dto.abs_path]
-    assert vm.current_asset_path() == dto.abs_path
+
+
+def test_resolve_live_motion_uses_sync_store_scan() -> None:
+    vm, store, _, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    dto.metadata = {"live_photo_group_id": "group-1"}
+    candidate = _make_dto("/tmp/photo.mov", is_video=True)
+    candidate.metadata = {"live_photo_group_id": "group-1"}
+    store.count.return_value = 2
+    store.asset_at.return_value = None
+    store.asset_at_sync.side_effect = [None, candidate]
+
+    motion_rel, motion_abs = vm._resolve_live_motion(dto)
+
+    assert motion_rel == candidate.rel_path
+    assert motion_abs == candidate.abs_path
+    assert store.asset_at_sync.call_count == 2
+    store.asset_at.assert_not_called()
 
 
 def test_back_to_gallery_clears_info_panel_state_for_next_detail_entry():

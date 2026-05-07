@@ -14,6 +14,7 @@ from iPhoto.application.use_cases.scan_models import (
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
+from iPhoto.gui.viewmodels.gallery_page_loader import GalleryPageResult
 from iPhoto.library.runtime_controller import GeotaggedAsset
 
 
@@ -139,6 +140,105 @@ def test_prioritize_rows_replaces_old_window_with_new_window() -> None:
     assert initial_keys != updated_keys
 
 
+def test_prioritize_rows_requests_async_window_when_loader_connected() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+    store.prioritize_rows(900, 940)
+
+    assert requests
+    request = requests[-1]
+    assert request.first <= 900 <= request.last
+    assert 900 not in store._row_cache
+
+
+def test_handle_window_load_result_applies_async_window_slice() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+    store.prioritize_rows(900, 940)
+    request = requests[-1]
+    fetched_rows = store._fetch_rows(request.first, request.last)
+
+    store.handle_window_load_result(
+        GalleryPageResult(
+            request_id=request.request_id,
+            selection_revision=request.selection_revision,
+            first=request.first,
+            last=request.last,
+            rows=fetched_rows,
+        )
+    )
+
+    assert 900 in store._row_cache
+    assert store.asset_at(900) is not None
+
+
+def test_handle_window_load_result_ignores_stale_async_slice_after_row_removal() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+    store.prioritize_rows(900, 940)
+    request = requests[-1]
+    fetched_rows = store._fetch_rows(request.first, request.last)
+
+    store.remove_rows([0], emit=False)
+    store.handle_window_load_result(
+        GalleryPageResult(
+            request_id=request.request_id,
+            selection_revision=request.selection_revision,
+            first=request.first,
+            last=request.last,
+            rows=fetched_rows,
+        )
+    )
+
+    assert store._window_range is None
+    assert 900 not in store._row_cache
+    store.prioritize_rows(900, 940)
+    assert len(requests) == 2
+    assert requests[-1].request_id > request.request_id
+
+
 def test_asset_at_lazily_fetches_row_outside_initial_window() -> None:
     assets = [
         Asset(
@@ -162,6 +262,174 @@ def test_asset_at_lazily_fetches_row_outside_initial_window() -> None:
     assert dto is not None
     assert dto.rel_path == Path("asset_360.jpg")
     assert 360 in store._row_cache
+
+
+def test_row_for_path_finds_uncached_query_row() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(600)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(Path("."), query=AssetQuery())
+
+    assert 500 not in store._row_cache
+    assert store.row_for_path(Path("asset_500.jpg").resolve()) == 500
+
+
+def test_row_for_path_caches_uncached_query_row_when_loader_connected() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(600)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+
+    row = store.row_for_path(Path("asset_500.jpg").resolve())
+
+    assert row == 500
+    assert store.asset_at(row) is not None
+    assert 500 in store._row_cache
+    assert not requests
+
+
+def test_asset_at_requests_missing_async_row_instead_of_visible_window() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+
+    dto = store.asset_at(900)
+
+    assert dto is None
+    assert requests
+    request = requests[-1]
+    assert request.first <= 900 <= request.last
+
+
+def test_asset_at_sync_fetches_missing_row_inline_when_loader_connected() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+
+    dto = store.asset_at_sync(900)
+
+    assert dto is not None
+    assert dto.rel_path == Path("asset_900.jpg")
+    assert 900 in store._row_cache
+    assert not requests
+
+
+def test_failed_async_window_load_can_be_retried() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+
+    assert store.asset_at(900) is None
+    assert len(requests) == 1
+
+    first_request = requests[-1]
+    store.handle_window_load_failed(first_request.request_id, first_request.selection_revision)
+
+    assert store.asset_at(900) is None
+    assert len(requests) == 2
+    assert requests[-1].request_id > first_request.request_id
+
+
+def test_successful_async_window_load_with_hole_can_be_retried() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+
+    assert store.asset_at(900) is None
+    assert len(requests) == 1
+
+    first_request = requests[-1]
+    fetched_rows = store._fetch_rows(first_request.first, first_request.last)
+    fetched_rows.pop(900, None)
+    store.handle_window_load_result(
+        GalleryPageResult(
+            request_id=first_request.request_id,
+            selection_revision=first_request.selection_revision,
+            first=first_request.first,
+            last=first_request.last,
+            rows=fetched_rows,
+        )
+    )
+
+    assert store._window_request_range is None
+    assert 900 not in store._row_cache
+    assert store.asset_at(900) is None
+    assert len(requests) == 2
+    assert requests[-1].request_id > first_request.request_id
 
 
 def test_reload_current_selection_replays_query_after_query_service_rebind(tmp_path: Path) -> None:

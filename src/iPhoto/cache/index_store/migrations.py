@@ -219,6 +219,10 @@ class SchemaMigrator:
         cursor = conn.execute("PRAGMA table_info(scan_runs)")
         existing_columns: Set[str] = {row[1] for row in cursor}
         required_columns = {
+            "scan_id": "ALTER TABLE scan_runs ADD COLUMN scan_id TEXT",
+            "scope_root": "ALTER TABLE scan_runs ADD COLUMN scope_root TEXT",
+            "mode": "ALTER TABLE scan_runs ADD COLUMN mode TEXT",
+            "state": "ALTER TABLE scan_runs ADD COLUMN state TEXT DEFAULT 'completed'",
             "safe_mode": "ALTER TABLE scan_runs ADD COLUMN safe_mode INTEGER DEFAULT 0",
             "phase": "ALTER TABLE scan_runs ADD COLUMN phase TEXT",
             "pressure_level": (
@@ -226,6 +230,7 @@ class SchemaMigrator:
             ),
             "degrade_reason": "ALTER TABLE scan_runs ADD COLUMN degrade_reason TEXT",
             "deferred_tasks": "ALTER TABLE scan_runs ADD COLUMN deferred_tasks TEXT",
+            "started_at": "ALTER TABLE scan_runs ADD COLUMN started_at TEXT",
             "completed_at": "ALTER TABLE scan_runs ADD COLUMN completed_at TEXT",
             "discovered_count": (
                 "ALTER TABLE scan_runs ADD COLUMN discovered_count INTEGER DEFAULT 0"
@@ -238,6 +243,23 @@ class SchemaMigrator:
             if col_name not in existing_columns:
                 logger.info("Adding missing scan_runs column: %s", col_name)
                 conn.execute(alter_sql)
+
+        conn.execute(
+            """
+            UPDATE scan_runs
+            SET state = 'completed'
+            WHERE state IS NULL OR TRIM(state) = ''
+            """
+        )
+
+        conn.execute(
+            """
+            UPDATE scan_runs
+            SET mode = 'initial_safe'
+            WHERE safe_mode = 1
+              AND (mode IS NULL OR TRIM(mode) = '')
+            """
+        )
 
         # Older databases inferred "safe" behavior from the legacy mode value
         # before the explicit safe_mode flag existed.

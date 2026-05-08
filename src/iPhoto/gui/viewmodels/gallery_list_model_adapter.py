@@ -370,9 +370,12 @@ class GalleryListModelAdapter(QAbstractListModel):
             row = self._store.row_for_path(path)
         if row is None:
             return
+        asset = self._store.asset_at(row)
+        if asset is not None and asset.micro_thumbnail is not None:
+            asset.micro_thumbnail = None
         idx = self.index(row, 0)
         if idx.isValid():
-            self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+            self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
 
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)

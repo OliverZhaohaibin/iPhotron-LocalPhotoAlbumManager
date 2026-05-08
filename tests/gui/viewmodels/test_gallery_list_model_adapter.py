@@ -121,6 +121,8 @@ def test_thumbnail_ready_ignores_stale_size_and_uses_cached_row_lookup(adapter, 
     mock_store.count.return_value = 1
     mock_store.cached_row_for_path.return_value = 0
     mock_store.row_for_path.side_effect = AssertionError("should use cached lookup")
+    dto = _make_dto()
+    mock_store.asset_at.return_value = dto
     adapter._thumb_size = QSize(384, 384)
 
     emitted_roles = []
@@ -133,6 +135,24 @@ def test_thumbnail_ready_ignores_stale_size_and_uses_cached_row_lookup(adapter, 
 
     mock_store.cached_row_for_path.assert_called_with(Path("/library/photo.jpg"))
     assert Qt.DecorationRole in emitted_roles
+
+
+def test_thumbnail_ready_clears_micro_preview_when_full_thumbnail_arrives(adapter, mock_store):
+    micro = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+    dto = _make_dto(abs_path=Path("/library/photo.jpg"), micro_thumbnail=micro)
+    mock_store.count.return_value = 1
+    mock_store.cached_row_for_path.return_value = 0
+    mock_store.asset_at.return_value = dto
+    adapter._thumb_size = QSize(512, 512)
+
+    emitted_roles = []
+    adapter.dataChanged.connect(lambda _top, _bottom, roles: emitted_roles.extend(roles))
+
+    adapter._on_thumbnail_ready(Path("/library/photo.jpg"), QSize(512, 512))
+
+    assert dto.micro_thumbnail is None
+    assert Qt.DecorationRole in emitted_roles
+    assert Roles.MICRO_THUMBNAIL in emitted_roles
 
 
 def test_micro_preview_backfill_decodes_only_visible_rows(adapter, mock_store):

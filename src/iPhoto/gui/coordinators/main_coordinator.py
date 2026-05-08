@@ -803,9 +803,9 @@ class MainCoordinator(QObject):
         self._note_user_interaction()
         self._gallery_vm.toggle_favorite_row(index.row())
 
-    def _on_grid_visible_rows_changed(self, first: int, last: int) -> None:
+    def _on_grid_visible_rows_changed(self, first: int, last: int, direction: str = "none") -> None:
         self._note_user_interaction()
-        self._asset_list_vm.prioritize_rows(first, last)
+        self._asset_list_vm.prioritize_rows(first, last, direction)
 
     def _schedule_idle_gallery_scan_refresh(self, restart: bool = False) -> None:
         if restart or not self._gallery_scan_idle_timer.isActive():

@@ -15,6 +15,58 @@ from ....utils.pathutils import ensure_work_dir
 
 LOGGER = logging.getLogger(__name__)
 
+# Current thumbnail pipeline version for cache invalidation
+THUMB_PIPELINE_VERSION = "thumb-v1"
+
+
+def build_thumb_key(
+    library_id: str,
+    asset_id: str | int,
+    normalized_rel_path: str,
+    file_size: int,
+    mtime_ns: int,
+    orientation: int = 0,
+    edit_version: int = 0,
+    pipeline_version: str = THUMB_PIPELINE_VERSION,
+) -> str:
+    """Generate a stable thumbnail key for cache lookups.
+
+    The key is based on:
+    - library_id: Library identity to avoid conflicts between libraries
+    - asset_id: Asset identifier for uniqueness
+    - normalized_rel_path: Normalized relative path
+    - file_size: File size to detect copies
+    - mtime_ns: Modification time in nanoseconds
+    - orientation: Image orientation
+    - edit_version: Edit sidecar version
+    - pipeline_version: Thumbnail generation pipeline version
+
+    This ensures:
+    - Parent/child albums with same filename don't conflict
+    - File moves within library are detected (if rel_path changes)
+    - Edits to original file are detected
+    - Thumbnail pipeline changes trigger regeneration
+
+    Args:
+        library_id: Library identity string
+        asset_id: Asset identifier
+        normalized_rel_path: Normalized relative path (POSIX style)
+        file_size: File size in bytes
+        mtime_ns: Modification time in nanoseconds
+        orientation: Image orientation (0-8)
+        edit_version: Edit sidecar version
+        pipeline_version: Pipeline version string
+
+    Returns:
+        SHA1 hex digest of the composite key
+    """
+    raw = (
+        f"{library_id}|{asset_id}|{normalized_rel_path}|"
+        f"{file_size}|{mtime_ns}|{orientation}|"
+        f"{edit_version}|{pipeline_version}"
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
 
 def safe_unlink(path: Path) -> None:
     """
@@ -33,10 +85,8 @@ def safe_unlink(path: Path) -> None:
         try:
             path.rename(path.with_suffix(path.suffix + ".stale"))
         except OSError:
-            # Ignore errors when renaming; file may be locked or already deleted.
             pass
     except OSError:
-        # Ignore errors when unlinking; file may not exist or be inaccessible.
         pass
 
 
@@ -67,6 +117,33 @@ def generate_cache_path(library_root: Path, abs_path: Path, size: QSize, stamp: 
     return ensure_work_dir(library_root) / "thumbs" / filename
 
 
+def generate_cache_path_from_thumb_key(
+    library_root: Path,
+    thumb_key: str,
+    size: QSize,
+) -> Path:
+    """
+    Generate the file path for a cached thumbnail using the thumb key.
+
+    Uses hash-based directory sharding for better filesystem performance
+    with large numbers of cached thumbnails.
+
+    Args:
+        library_root: The library root directory
+        thumb_key: The stable thumbnail key
+        size: The thumbnail size
+
+    Returns:
+        Path: The path to the cache file
+    """
+    # Create sharded path: thumbs/<first 2 chars>/<next 2 chars>/<thumb_key>.png
+    subdir1 = thumb_key[:2]
+    subdir2 = thumb_key[2:4]
+    filename = f"{thumb_key}_{size.width()}x{size.height()}.png"
+    thumb_dir = ensure_work_dir(library_root) / "thumbs" / subdir1 / subdir2
+    return thumb_dir / filename
+
+
 def write_cache(canvas: QImage, path: Path) -> bool:  # pragma: no cover - worker helper
     """Write a thumbnail *canvas* to *path* atomically via a temp file."""
     try:
@@ -79,7 +156,7 @@ def write_cache(canvas: QImage, path: Path) -> bool:  # pragma: no cover - worke
                 return True
             except OSError:
                 tmp_path.unlink(missing_ok=True)
-        else:  # pragma: no cover - Qt returns False on IO errors
+        else:
             tmp_path.unlink(missing_ok=True)
     except Exception:
         pass

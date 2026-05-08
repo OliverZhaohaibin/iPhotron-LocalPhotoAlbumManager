@@ -95,7 +95,7 @@ class ThumbnailCacheService(QObject):
 
         self._edit_service = edit_service
 
-    def get_thumbnail(self, path: Path, size: QSize) -> Optional[QPixmap]:
+    def get_thumbnail(self, path: Path, size: QSize, priority: str | None = None) -> Optional[QPixmap]:
         if self._is_shutting_down:
             return None
 

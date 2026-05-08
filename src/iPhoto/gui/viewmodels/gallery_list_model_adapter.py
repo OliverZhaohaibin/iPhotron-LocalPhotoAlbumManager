@@ -6,17 +6,27 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Optional
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, QTimer, Slot
+from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, QTimer, Slot, QThreadPool
 
 from iPhoto.application.ports import EditServicePort
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.models.roles import Roles, role_names
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 from iPhoto.utils.geocoding import resolve_location_name
-from iPhoto.utils import image_loader
 
 from .gallery_collection_store import GalleryCollectionStore
 from .gallery_page_loader import GalleryPageLoader, GalleryPageRequest, GalleryPageResult
+from .micro_thumbnail_worker import MicroThumbnailWorker
+from .scroll_constants import (
+    SCROLL_DOWN,
+    SCROLL_UP,
+    SCROLL_NONE,
+    PRIORITY_VISIBLE,
+    PRIORITY_HOT,
+    PRIORITY_WARM,
+    PRIORITY_PREFETCH,
+)
+
 
 class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
@@ -24,6 +34,11 @@ class GalleryListModelAdapter(QAbstractListModel):
     THUMBNAIL_TIERS = (256, 384, 512, 768)
     MICRO_PREVIEW_BATCH_SIZE = 8
     FULL_THUMBNAIL_PREFETCH_BATCH_SIZE = 24
+
+    # Expose scroll direction constants for use by other components
+    SCROLL_DOWN = SCROLL_DOWN
+    SCROLL_UP = SCROLL_UP
+    SCROLL_NONE = SCROLL_NONE
 
     def __init__(
         self,
@@ -42,11 +57,21 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_count = int(store.count())
         self._duration_cache: dict[Path, float] = {}
         self._visible_row_range: tuple[int, int] | None = None
+
+        # Scroll direction tracking
+        self._last_scroll_value = 0
+        self._scroll_direction = self.SCROLL_NONE
+
+        # Micro thumbnail processing
         self._pending_micro_rows: set[int] = set()
+        self._pending_micro_generations: dict[int, int] = {}  # row -> generation
         self._micro_preview_queue: Deque[int] = deque()
         self._micro_preview_timer = QTimer(self)
         self._micro_preview_timer.setSingleShot(True)
         self._micro_preview_timer.timeout.connect(self._drain_micro_preview_queue)
+        self._micro_generation = 0  # Generation counter for stale worker detection
+
+        # Full thumbnail prefetch with priority
         self._pending_full_thumbnail_rows: set[int] = set()
         self._full_thumbnail_prefetch_queue: Deque[int] = deque()
         self._full_thumbnail_prefetch_timer = QTimer(self)
@@ -54,7 +79,19 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._full_thumbnail_prefetch_timer.timeout.connect(
             self._drain_full_thumbnail_prefetch_queue
         )
+
+        # Batched dataChanged for thumbnail updates
+        self._pending_changed_rows: set[int] = set()
+        self._data_flush_timer = QTimer(self)
+        self._data_flush_timer.setSingleShot(True)
+        self._data_flush_timer.setInterval(16)  # ~60fps max
+        self._data_flush_timer.timeout.connect(self._flush_data_changed)
+
         self._page_loader = GalleryPageLoader(self)
+
+        # Thread pool for micro thumbnail decoding
+        self._micro_thread_pool = QThreadPool(self)
+        self._micro_thread_pool.setMaxThreadCount(2)  # Limit threads for I/O
 
         self._store.window_changed.connect(self._on_window_changed)
         self._store.data_changed.connect(self._on_source_changed)
@@ -115,10 +152,16 @@ class GalleryListModelAdapter(QAbstractListModel):
 
         if role_int == Qt.ItemDataRole.DisplayRole:
             return asset.rel_path.name
-        if role_int == Qt.DecorationRole:
-            return self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size)
         if role_int == Qt.ItemDataRole.ToolTipRole:
             return str(asset.abs_path)
+
+        if role_int == Qt.DecorationRole:
+            # Query thumbnail service for cached thumbnail
+            pixmap = self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size)
+            if pixmap is not None:
+                return pixmap
+            # Return None to show placeholder; thumbnail will be delivered via dataChanged
+            return None
 
         if role_int == Roles.REL:
             return str(asset.rel_path)
@@ -203,13 +246,90 @@ class GalleryListModelAdapter(QAbstractListModel):
     def row_for_path(self, path: Path) -> int | None:
         return self._store.row_for_path(path)
 
-    def prioritize_rows(self, first: int, last: int) -> None:
+    def prioritize_rows(self, first: int, last: int, direction: str = SCROLL_NONE) -> None:
+        """Prioritize thumbnail loading for the visible range.
+
+        Args:
+            first: First visible row
+            last: Last visible row
+            direction: Scroll direction ("up", "down", or "none")
+        """
         first = max(0, int(first))
         last = max(first, int(last))
+
+        # Update scroll direction
+        self._scroll_direction = direction
+
         self._visible_row_range = (first, last)
         self._store.prioritize_rows(first, last)
+
+        # Calculate viewport ranges for priority
+        visible_count = max(1, last - first + 1)
+        hot_size = visible_count * 3  # 3 screens
+        warm_size = visible_count * 5  # Additional 5 screens
+
+        # Calculate ranges based on scroll direction
+        if direction == self.SCROLL_DOWN:
+            # Scrolling down: prioritize rows below viewport
+            visible_first, visible_last = first, last
+            hot_first, hot_last = last + 1, min(last + hot_size, self._store.count() - 1)
+            warm_first, warm_last = hot_last + 1, min(hot_last + warm_size, self._store.count() - 1)
+        elif direction == self.SCROLL_UP:
+            # Scrolling up: prioritize rows above viewport
+            visible_first, visible_last = first, last
+            hot_first, hot_last = max(0, first - hot_size), first - 1
+            warm_first, warm_last = max(0, first - hot_size - warm_size), hot_first - 1
+        else:
+            # Initial load or stationary
+            visible_first, visible_last = first, last
+            hot_first, hot_last = first, last
+            warm_first, warm_last = first, last
+
+        # Clear pending queues and rebuild with priorities
+        self._pending_full_thumbnail_rows.clear()
+        self._full_thumbnail_prefetch_queue.clear()
+
+        # Add visible rows with VISIBLE priority
+        for row in range(visible_first, min(visible_last + 1, self._store.count())):
+            self._pending_full_thumbnail_rows.add(row)
+            self._full_thumbnail_prefetch_queue.append((row, PRIORITY_VISIBLE))
+
+        # Add hot rows with HOT priority
+        if hot_first <= hot_last:
+            for row in range(hot_first, min(hot_last + 1, self._store.count())):
+                if row not in self._pending_full_thumbnail_rows:
+                    self._pending_full_thumbnail_rows.add(row)
+                    self._full_thumbnail_prefetch_queue.append((row, PRIORITY_HOT))
+
+        # Add warm rows with WARM priority
+        if warm_first <= warm_last:
+            for row in range(warm_first, min(warm_last + 1, self._store.count())):
+                if row not in self._pending_full_thumbnail_rows:
+                    self._pending_full_thumbnail_rows.add(row)
+                    self._full_thumbnail_prefetch_queue.append((row, PRIORITY_WARM))
+
+        # Schedule prefetch
         self._schedule_visible_micro_preview_backfill()
-        self._schedule_visible_full_thumbnail_prefetch(first, last)
+        self._schedule_full_thumbnail_prefetch()
+
+    def update_scroll_direction(self, scroll_value: int) -> str:
+        """Update scroll direction based on scrollbar value.
+
+        Args:
+            scroll_value: Current scrollbar value
+
+        Returns:
+            Scroll direction ("up", "down", or "none")
+        """
+        if scroll_value > self._last_scroll_value:
+            direction = self.SCROLL_DOWN
+        elif scroll_value < self._last_scroll_value:
+            direction = self.SCROLL_UP
+        else:
+            direction = self.SCROLL_NONE
+        self._last_scroll_value = scroll_value
+        self._scroll_direction = direction
+        return direction
 
     def pin_row(self, row: int) -> None:
         self._store.pin_row(row)
@@ -225,7 +345,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             return
         self._thumb_size = next_size
         self._emit_visible_range_update([Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
-        self._schedule_visible_full_thumbnail_prefetch()
+        self._schedule_full_thumbnail_prefetch()
 
     def rebind_asset_query_service(
         self,
@@ -358,10 +478,13 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._visible_row_range = None
         self._micro_preview_timer.stop()
         self._pending_micro_rows.clear()
+        self._pending_micro_generations.clear()  # Clear stale generations
         self._micro_preview_queue.clear()
         self._full_thumbnail_prefetch_timer.stop()
         self._pending_full_thumbnail_rows.clear()
         self._full_thumbnail_prefetch_queue.clear()
+        self._data_flush_timer.stop()
+        self._pending_changed_rows.clear()
         self.beginResetModel()
         self.endResetModel()
         self._last_selection_revision = selection_revision
@@ -372,7 +495,7 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _on_window_changed(self, first: int, last: int) -> None:
         self._emit_range_update(first, last, [])
         self._schedule_visible_micro_preview_backfill()
-        self._schedule_visible_full_thumbnail_prefetch()
+        self._schedule_full_thumbnail_prefetch()
 
     def _on_thumbnail_ready(self, path: Path, size: QSize) -> None:
         if QSize(size) != self._thumb_size:
@@ -387,9 +510,32 @@ class GalleryListModelAdapter(QAbstractListModel):
         asset = self._store.asset_at(row)
         if asset is not None and asset.micro_thumbnail is not None:
             asset.micro_thumbnail = None
-        idx = self.index(row, 0)
-        if idx.isValid():
-            self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
+        # Queue the row for batched update
+        self._pending_changed_rows.add(row)
+        self._schedule_data_flush()
+
+    def _schedule_data_flush(self) -> None:
+        """Schedule a batched dataChanged emission."""
+        if not self._data_flush_timer.isActive():
+            self._data_flush_timer.start()
+
+    def _flush_data_changed(self) -> None:
+        """Emit dataChanged for all pending rows in a batched manner."""
+        if not self._pending_changed_rows:
+            return
+
+        # Convert to sorted list and merge consecutive ranges
+        sorted_rows = sorted(self._pending_changed_rows)
+        self._pending_changed_rows.clear()
+
+        if not sorted_rows:
+            return
+
+        # Emit dataChanged for each row (could be optimized to merge ranges)
+        for row in sorted_rows:
+            idx = self.index(row, 0)
+            if idx.isValid():
+                self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
 
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)
@@ -448,6 +594,9 @@ class GalleryListModelAdapter(QAbstractListModel):
             return
         first = max(0, min(first, count - 1))
         last = max(first, min(last, count - 1))
+        # Bump micro thumbnail generation for new visible range
+        self._micro_generation += 1
+        current_gen = self._micro_generation
         for row in range(first, last + 1):
             if row in self._pending_micro_rows:
                 continue
@@ -459,61 +608,76 @@ class GalleryListModelAdapter(QAbstractListModel):
             if not isinstance(raw, (bytes, bytearray, memoryview)):
                 continue
             self._pending_micro_rows.add(row)
+            self._pending_micro_generations[row] = current_gen
             self._micro_preview_queue.append(row)
         if self._micro_preview_queue and not self._micro_preview_timer.isActive():
             self._micro_preview_timer.start(0)
 
     def _drain_micro_preview_queue(self) -> None:
+        """Drain micro preview queue by submitting workers to thread pool."""
         processed = 0
         while self._micro_preview_queue and processed < self.MICRO_PREVIEW_BATCH_SIZE:
             row = self._micro_preview_queue.popleft()
-            self._pending_micro_rows.discard(row)
             processed += 1
             if not self._row_is_visible(row):
+                self._pending_micro_rows.discard(row)
                 continue
             asset = self._store.asset_at(row)
             if asset is None or asset.micro_thumbnail is not None:
+                self._pending_micro_rows.discard(row)
                 continue
             metadata = asset.metadata or {}
             raw = metadata.get("micro_thumbnail")
             if not isinstance(raw, (bytes, bytearray, memoryview)):
+                self._pending_micro_rows.discard(row)
+                self._pending_micro_generations.pop(row, None)
                 continue
-            image = image_loader.qimage_from_bytes(bytes(raw))
-            if image is None or image.isNull():
-                continue
-            asset.micro_thumbnail = image
-            idx = self.index(row, 0)
-            if idx.isValid():
-                self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
+
+            # Get generation for this row
+            expected_gen = self._pending_micro_generations.get(row, self._micro_generation)
+
+            # Submit to worker thread for async decoding
+            worker = MicroThumbnailWorker(row, bytes(raw), generation=expected_gen)
+            worker.signals.decoded.connect(self._on_micro_thumbnail_decoded)
+            worker.signals.failed.connect(self._on_micro_thumbnail_failed)
+            self._micro_thread_pool.start(worker)
+
         if self._micro_preview_queue:
             self._micro_preview_timer.start(0)
 
-    def _schedule_visible_full_thumbnail_prefetch(
-        self,
-        first: int | None = None,
-        last: int | None = None,
-    ) -> None:
-        visible = self._visible_row_range
-        if first is None or last is None:
-            if visible is None:
-                return
-            first, last = visible
-
-        count = self.rowCount()
-        if count <= 0:
+    def _on_micro_thumbnail_decoded(self, row: int, generation: int, image) -> None:
+        """Handle decoded micro thumbnail from worker thread."""
+        # Check if this generation is still current
+        if generation != self._micro_generation:
+            self._pending_micro_rows.discard(row)
+            self._pending_micro_generations.pop(row, None)
             return
-        first = max(0, min(int(first), count - 1))
-        last = max(first, min(int(last), count - 1))
+        self._pending_micro_rows.discard(row)
+        self._pending_micro_generations.pop(row, None)
+        if not self._row_is_visible(row):
+            return
+        asset = self._store.asset_at(row)
+        if asset is None or asset.micro_thumbnail is not None:
+            return
+        if image is None:
+            return
+        asset.micro_thumbnail = image
+        idx = self.index(row, 0)
+        if idx.isValid():
+            self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
 
-        for row in range(first, last + 1):
-            if row in self._pending_full_thumbnail_rows:
-                continue
-            asset = self._store.asset_at(row)
-            if asset is None:
-                continue
-            self._pending_full_thumbnail_rows.add(row)
-            self._full_thumbnail_prefetch_queue.append(row)
+    def _on_micro_thumbnail_failed(self, row: int, generation: int) -> None:
+        """Handle failed micro thumbnail decode."""
+        # Check if this generation is still current
+        if generation != self._micro_generation:
+            self._pending_micro_rows.discard(row)
+            self._pending_micro_generations.pop(row, None)
+            return
+        self._pending_micro_rows.discard(row)
+        self._pending_micro_generations.pop(row, None)
 
+    def _schedule_full_thumbnail_prefetch(self) -> None:
+        """Schedule thumbnail prefetch from the queue."""
         if (
             self._full_thumbnail_prefetch_queue
             and not self._full_thumbnail_prefetch_timer.isActive()
@@ -521,18 +685,26 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._full_thumbnail_prefetch_timer.start(0)
 
     def _drain_full_thumbnail_prefetch_queue(self) -> None:
+        """Drain thumbnail prefetch queue, processing items in priority order."""
         processed = 0
         while (
             self._full_thumbnail_prefetch_queue
             and processed < self.FULL_THUMBNAIL_PREFETCH_BATCH_SIZE
         ):
-            row = self._full_thumbnail_prefetch_queue.popleft()
+            item = self._full_thumbnail_prefetch_queue.popleft()
+            # Handle both tuple (row, priority) and single row
+            if isinstance(item, tuple):
+                row, priority = item
+            else:
+                row = item
+                priority = None
             self._pending_full_thumbnail_rows.discard(row)
             processed += 1
             asset = self._store.asset_at(row)
             if asset is None:
                 continue
-            self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size)
+            # Request thumbnail with priority - ThumbnailCacheService handles async delivery
+            self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size, priority=priority)
         if self._full_thumbnail_prefetch_queue:
             self._full_thumbnail_prefetch_timer.start(0)
 

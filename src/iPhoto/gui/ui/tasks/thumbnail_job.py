@@ -29,7 +29,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ThumbnailJob(QRunnable):
-    """Background task that renders a thumbnail ``QImage``."""
+    """Background task that renders a thumbnail ``QImage`` with generation tracking."""
 
     def __init__(
         self,
@@ -45,9 +45,11 @@ class ThumbnailJob(QRunnable):
         is_video: bool,
         still_image_time: Optional[float],
         duration: Optional[float],
+        generation: int = 0,
         cache_rel: Optional[str] = None,
     ) -> None:
         super().__init__()
+        self.setAutoDelete(True)
         self._loader = loader
         self._rel = rel
         self._abs_path = abs_path
@@ -59,6 +61,7 @@ class ThumbnailJob(QRunnable):
         self._is_video = is_video
         self._still_image_time = still_image_time
         self._duration = duration
+        self._generation = generation
         self._cache_rel = cache_rel
         self._job_root_str = str(album_root.resolve())
 
@@ -78,6 +81,17 @@ class ThumbnailJob(QRunnable):
             mem = psutil.virtual_memory()
             if mem.percent > 80.0:
                 time.sleep(0.5)
+
+        # Check generation - discard if stale
+        loader = getattr(self, "_loader", None)
+        if loader is not None:
+            current_gen = getattr(loader, "_generation", 0)
+            if current_gen != self._generation:
+                LOGGER.debug(
+                    "[ThumbnailJob] discarded stale job gen=%d current=%d rel=%s",
+                    self._generation, current_gen, self._rel
+                )
+                return
 
         # 1. Stat the file to get actual timestamp
         try:
@@ -99,10 +113,8 @@ class ThumbnailJob(QRunnable):
                         sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
                     stamp_ns = max(stamp_ns, sidecar_ns)
                 except OSError:
-                    # Ignore errors reading sidecar file; treat as if sidecar is missing or inaccessible.
                     pass
         except OSError:
-            # Ignore errors when checking for sidecar existence or stat; sidecar may not exist or be inaccessible.
             pass
 
         actual_stamp = int(stamp_ns)
@@ -117,6 +129,17 @@ class ThumbnailJob(QRunnable):
                 # Stale cache detected. Remove old file.
                 old_path = generate_cache_path(self._library_root, self._abs_path, self._size, self._known_stamp)
                 safe_unlink(old_path)
+
+        # Re-check generation after stat (user may have scrolled far away)
+        loader = getattr(self, "_loader", None)
+        if loader is not None:
+            current_gen = getattr(loader, "_generation", 0)
+            if current_gen != self._generation:
+                LOGGER.debug(
+                    "[ThumbnailJob] discarded after stat stale job gen=%d current=%d rel=%s",
+                    self._generation, current_gen, self._rel
+                )
+                return
 
         # 3. Calculate Cache Path
         cache_path = generate_cache_path(self._library_root, self._abs_path, self._size, actual_stamp)
@@ -137,6 +160,17 @@ class ThumbnailJob(QRunnable):
                 image = None
 
         if image is None:
+            # Final generation check before expensive decode
+            loader = getattr(self, "_loader", None)
+            if loader is not None:
+                current_gen = getattr(loader, "_generation", 0)
+                if current_gen != self._generation:
+                    LOGGER.debug(
+                        "[ThumbnailJob] discarded before decode stale job gen=%d current=%d rel=%s",
+                        self._generation, current_gen, self._rel
+                    )
+                    return
+
             rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
             try:
                 image = self._render_media()
@@ -159,11 +193,19 @@ class ThumbnailJob(QRunnable):
             if not loaded_from_cache:
                 success = write_cache(image, cache_path)
             else:
-                # Cache hit, so it's already written.
                 success = True
 
         loader = getattr(self, "_loader", None)
         if loader is None:
+            return
+
+        # Final generation check before emitting result
+        current_gen = getattr(loader, "_generation", 0)
+        if current_gen != self._generation:
+            LOGGER.debug(
+                "[ThumbnailJob] discarded result stale job gen=%d current=%d rel=%s",
+                self._generation, current_gen, self._rel
+            )
             return
 
         if success and not loaded_from_cache:
@@ -171,8 +213,7 @@ class ThumbnailJob(QRunnable):
                 loader.cache_written.emit(cache_path)
             except AttributeError:  # pragma: no cover - dummy loader in tests
                 pass
-            except RuntimeError:
-                # pragma: no cover - race with QObject deletion
+            except RuntimeError:  # pragma: no cover - race with QObject deletion
                 pass
 
         try:
@@ -188,7 +229,6 @@ class ThumbnailJob(QRunnable):
         loader = getattr(self, "_loader", None)
         if loader:
             try:
-                # Use 0 as stamp for missing files, though the loader will just use the base key
                 key = self._make_local_key(0)
                 loader._delivered.emit(key, None, self._rel)
             except RuntimeError:  # pragma: no cover - race with QObject deletion
@@ -200,11 +240,9 @@ class ThumbnailJob(QRunnable):
         if loader:
             try:
                 loader._validation_success.emit(self._make_local_key(stamp))
-            except RuntimeError:
-                # pragma: no cover - race with QObject deletion
+            except RuntimeError:  # pragma: no cover - race with QObject deletion
                 pass
-            except AttributeError:
-                # The loader may have been deleted or not fully initialized; safe to ignore.
+            except AttributeError:  # pragma: no cover - dummy loader in tests
                 pass
 
     def _render_media(self) -> Optional[QImage]:  # pragma: no cover - worker helper

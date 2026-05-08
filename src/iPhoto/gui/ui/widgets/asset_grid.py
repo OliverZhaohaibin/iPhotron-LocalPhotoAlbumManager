@@ -11,6 +11,7 @@ from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEve
 from PySide6.QtWidgets import QApplication, QListView
 
 from ....config import LONG_PRESS_THRESHOLD_MS
+from ...viewmodels.scroll_constants import SCROLL_DOWN, SCROLL_UP, SCROLL_NONE
 
 _IS_DARWIN = sys.platform == "darwin"
 _IS_LINUX = sys.platform == "linux"
@@ -26,7 +27,13 @@ class AssetGrid(QListView):
     requestPreview = Signal(QModelIndex)
     previewReleased = Signal()
     previewCancelled = Signal()
-    visibleRowsChanged = Signal(int, int)
+    # Signal includes scroll direction: "up", "down", or "none"
+    visibleRowsChanged = Signal(int, int, str)
+
+    # Scroll direction constants (imported from shared module)
+    SCROLL_DOWN = SCROLL_DOWN
+    SCROLL_UP = SCROLL_UP
+    SCROLL_NONE = SCROLL_NONE
 
     _DRAG_CANCEL_THRESHOLD = 6
     _VISIBLE_PROBE_OFFSETS = (0, 8, 24, 48, 96)
@@ -52,6 +59,8 @@ class AssetGrid(QListView):
         self._drop_handler: Optional[Callable[[List[Path]], None]] = None
         self._drop_validator: Optional[Callable[[List[Path]], bool]] = None
         self._preview_enabled = True
+        self._last_scroll_value = 0
+        self._scroll_direction = self.SCROLL_NONE
 
     # ------------------------------------------------------------------
     # Mouse event handling
@@ -374,7 +383,19 @@ class AssetGrid(QListView):
             return
 
         self._visible_range = visible_range
-        self.visibleRowsChanged.emit(first, last)
+
+        # Calculate scroll direction
+        scroll_bar = self.verticalScrollBar()
+        current_value = scroll_bar.value() if scroll_bar else 0
+        if current_value > self._last_scroll_value:
+            self._scroll_direction = self.SCROLL_DOWN
+        elif current_value < self._last_scroll_value:
+            self._scroll_direction = self.SCROLL_UP
+        else:
+            self._scroll_direction = self.SCROLL_NONE
+        self._last_scroll_value = current_value
+
+        self.visibleRowsChanged.emit(first, last, self._scroll_direction)
 
     def _find_index_near(self, point: QPoint, *, x_dir: int, y_dir: int) -> QModelIndex:
         """Probe inward from *point* until a visible index is found."""

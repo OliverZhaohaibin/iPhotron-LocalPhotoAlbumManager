@@ -13,6 +13,7 @@ pytest.importorskip(
 pytest.importorskip("PySide6.QtTest", reason="Qt test utilities unavailable", exc_type=ImportError)
 
 from PySide6.QtCore import QSize
+from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
@@ -351,6 +352,47 @@ def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -
     assert validation_spy.count() >= 1
     # Cache should NOT be written again since it's still valid
     assert cache_written_spy.count() == 0
+
+
+def test_thumbnail_loader_runs_validation_jobs_for_memory_hits(tmp_path: Path, monkeypatch) -> None:
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+
+    rel = "IMG_VALID.JPG"
+    image_path = tmp_path / rel
+    _create_image(image_path)
+    size = QSize(512, 512)
+    base_key = loader._base_key(rel, size)
+    loader._memory[base_key] = (123, QPixmap(1, 1))
+
+    started: list[tuple[tuple[str, str, int, int], object]] = []
+
+    def fake_start(job, key):
+        started.append((key, job))
+        loader._active_jobs_count += 1
+
+    monkeypatch.setattr(loader, "_start_job", fake_start)
+
+    job = loader._create_job_from_spec(
+        rel,
+        image_path,
+        size,
+        123,
+        tmp_path,
+        tmp_path,
+        True,
+        False,
+        None,
+        None,
+        loader.generation,
+    )
+
+    loader._schedule_job(base_key, job, loader.Priority.NORMAL)
+
+    assert started
+    started_key, started_job = started[0]
+    assert started_key == base_key
+    assert getattr(started_job, "_known_stamp") == 123
 def test_safe_unlink_successful_deletion(tmp_path: Path) -> None:
     """Test that safe_unlink successfully deletes a file when it exists."""
     test_file = tmp_path / "test_file.txt"

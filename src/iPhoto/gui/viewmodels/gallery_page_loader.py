@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
@@ -10,6 +9,7 @@ from typing import Dict
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.gallery_query_window import GalleryPageAnchor
 from iPhoto.domain.models.query import AssetQuery
 
 from .asset_dto_converter import (
@@ -29,6 +29,7 @@ class GalleryPageRequest:
     query: AssetQuery
     first: int
     last: int
+    anchor: GalleryPageAnchor | None = None
     refetch_window: bool = False
     clear_pending_scan_refresh: bool = False
 
@@ -71,18 +72,27 @@ class _GalleryPageTask(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - exercised through Qt worker dispatch
         try:
-            sliced_query = copy.deepcopy(self._request.query)
-            sliced_query.offset = self._request.first
-            sliced_query.limit = max(0, self._request.last - self._request.first + 1)
-            validate_paths = _should_validate_paths_fn(sliced_query, self._library_root)
-
-            rows: Dict[int, AssetDTO] = {}
-            for offset, row in enumerate(
-                self._asset_query_service.read_query_asset_rows(
+            validate_paths = _should_validate_paths_fn(self._request.query, self._library_root)
+            read_query_window = getattr(self._asset_query_service, "read_query_window", None)
+            if callable(read_query_window):
+                rows_iter = read_query_window(
+                    self._request.root,
+                    self._request.query,
+                    first=self._request.first,
+                    last=self._request.last,
+                    anchor=self._request.anchor,
+                )
+            else:
+                sliced_query = AssetQuery(**self._request.query.__dict__)
+                sliced_query.offset = self._request.first
+                sliced_query.limit = max(0, self._request.last - self._request.first + 1)
+                rows_iter = self._asset_query_service.read_query_asset_rows(
                     self._request.root,
                     sliced_query,
                 )
-            ):
+
+            rows: Dict[int, AssetDTO] = {}
+            for offset, row in enumerate(rows_iter):
                 view_rel = row.get("rel") if isinstance(row, dict) else None
                 if not isinstance(view_rel, str) or not view_rel:
                     continue

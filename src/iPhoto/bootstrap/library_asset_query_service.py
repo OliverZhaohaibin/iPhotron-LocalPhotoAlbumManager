@@ -14,6 +14,7 @@ from ..cache.index_store import get_global_repository
 from ..config import RECENTLY_DELETED_DIR_NAME
 from ..domain.models.core import MediaType
 from ..domain.models.query import AssetQuery, SortOrder
+from ..application.gallery_query_window import GalleryPageAnchor
 from ..path_normalizer import compute_album_path
 
 
@@ -175,6 +176,38 @@ class LibraryAssetQueryService:
 
         yield from self._scoped_rows(rows, album_path)
 
+    def read_query_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        *,
+        first: int,
+        last: int,
+        anchor: GalleryPageAnchor | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield rows for one absolute row window within *query*."""
+
+        if last < first:
+            return
+
+        window_query = self._unsliced_query(query)
+        album_path = self.album_path_for(root)
+        if self._requires_in_memory_query(window_query):
+            sliced_query = copy.deepcopy(window_query)
+            sliced_query.offset = max(0, int(first))
+            sliced_query.limit = max(0, int(last - first + 1))
+            rows = self._filtered_query_rows(sliced_query)
+        else:
+            filter_params = self._filter_params_for_query(window_query)
+            rows = self._read_simple_query_window(
+                window_query,
+                filter_params,
+                first=first,
+                last=last,
+                anchor=anchor,
+            )
+        yield from self._scoped_rows(rows, album_path)
+
     def read_geotagged_rows(self) -> Iterator[dict[str, Any]]:
         """Yield library-relative rows that contain GPS metadata."""
 
@@ -267,24 +300,6 @@ class LibraryAssetQueryService:
         filter_params: dict[str, Any] | None,
     ) -> Iterator[dict[str, Any]]:
         repository = self._repository()
-        page_offset = max(0, int(query.offset or 0))
-        page_limit = None if query.limit is None else max(0, int(query.limit))
-        get_assets_page = getattr(repository, "get_assets_page", None)
-        if (
-            callable(get_assets_page)
-            and page_limit is not None
-            and self._sort_by_date(query)
-        ):
-            rows = get_assets_page(
-                limit=page_limit,
-                album_path=query.album_path,
-                include_subalbums=query.include_subalbums,
-                filter_hidden=True,
-                filter_params=filter_params,
-                offset=page_offset,
-            )
-            return iter(rows)
-
         if query.album_path:
             rows = repository.read_album_assets(
                 query.album_path,
@@ -300,6 +315,47 @@ class LibraryAssetQueryService:
             filter_hidden=True,
         )
         return self._slice_rows(self._filter_rows(rows, query), query)
+
+    def _read_simple_query_window(
+        self,
+        query: AssetQuery,
+        filter_params: dict[str, Any] | None,
+        *,
+        first: int,
+        last: int,
+        anchor: GalleryPageAnchor | None,
+    ) -> Iterator[dict[str, Any]]:
+        repository = self._repository()
+        page_limit = max(0, int(last - first + 1))
+        get_assets_page = getattr(repository, "get_assets_page", None)
+        if callable(get_assets_page) and self._sort_by_date(query):
+            cursor_dt: str | None = None
+            cursor_id: str | None = None
+            page_offset = max(0, int(first))
+            if (
+                anchor is not None
+                and anchor.row < first
+                and self._sort_descending(query)
+            ):
+                cursor_dt = anchor.dt
+                cursor_id = anchor.asset_id
+                page_offset = max(0, int(first - anchor.row - 1))
+            rows = get_assets_page(
+                cursor_dt=cursor_dt,
+                cursor_id=cursor_id,
+                limit=page_limit,
+                album_path=query.album_path,
+                include_subalbums=query.include_subalbums,
+                filter_hidden=True,
+                filter_params=filter_params,
+                offset=page_offset,
+            )
+            return iter(rows)
+
+        sliced_query = copy.deepcopy(query)
+        sliced_query.offset = max(0, int(first))
+        sliced_query.limit = page_limit
+        return self._read_simple_query_rows(sliced_query, filter_params)
 
     def _row_matches_query(self, row: dict[str, Any], query: AssetQuery) -> bool:
         live_role = self._int_value(row.get("live_role"), default=0)
@@ -417,6 +473,11 @@ class LibraryAssetQueryService:
 
     @staticmethod
     def _count_query(query: AssetQuery) -> AssetQuery:
+        count_query = LibraryAssetQueryService._unsliced_query(query)
+        return count_query
+
+    @staticmethod
+    def _unsliced_query(query: AssetQuery) -> AssetQuery:
         count_query = copy.deepcopy(query)
         count_query.offset = 0
         count_query.limit = None

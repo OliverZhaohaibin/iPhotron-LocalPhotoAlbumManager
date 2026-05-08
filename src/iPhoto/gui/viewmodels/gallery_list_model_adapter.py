@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Deque, Dict, Optional
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, Slot
+from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, QTimer, Slot
 
 from iPhoto.application.ports import EditServicePort
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.models.roles import Roles, role_names
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 from iPhoto.utils.geocoding import resolve_location_name
+from iPhoto.utils import image_loader
 
 from .gallery_collection_store import GalleryCollectionStore
 from .gallery_page_loader import GalleryPageLoader, GalleryPageRequest, GalleryPageResult
 
 class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
+
+    THUMBNAIL_TIERS = (256, 384, 512, 768)
+    MICRO_PREVIEW_BATCH_SIZE = 8
 
     def __init__(
         self,
@@ -35,6 +40,12 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_selection_revision = int(getattr(store, "selection_revision", 0))
         self._last_count = int(store.count())
         self._duration_cache: dict[Path, float] = {}
+        self._visible_row_range: tuple[int, int] | None = None
+        self._pending_micro_rows: set[int] = set()
+        self._micro_preview_queue: Deque[int] = deque()
+        self._micro_preview_timer = QTimer(self)
+        self._micro_preview_timer.setSingleShot(True)
+        self._micro_preview_timer.timeout.connect(self._drain_micro_preview_queue)
         self._page_loader = GalleryPageLoader(self)
 
         self._store.window_changed.connect(self._on_window_changed)
@@ -185,10 +196,26 @@ class GalleryListModelAdapter(QAbstractListModel):
         return self._store.row_for_path(path)
 
     def prioritize_rows(self, first: int, last: int) -> None:
+        first = max(0, int(first))
+        last = max(first, int(last))
+        self._visible_row_range = (first, last)
         self._store.prioritize_rows(first, last)
+        self._schedule_visible_micro_preview_backfill()
 
     def pin_row(self, row: int) -> None:
         self._store.pin_row(row)
+
+    @Slot(QSize)
+    def set_thumbnail_target_size(self, size: QSize) -> None:
+        if not size.isValid() or size.isEmpty():
+            return
+        longest_edge = max(size.width(), size.height())
+        tier = self._thumbnail_tier_for_edge(longest_edge)
+        next_size = QSize(tier, tier)
+        if self._thumb_size == next_size:
+            return
+        self._thumb_size = next_size
+        self._emit_visible_range_update([Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
 
     def rebind_asset_query_service(
         self,
@@ -318,6 +345,10 @@ class GalleryListModelAdapter(QAbstractListModel):
         ):
             return
         self._duration_cache.clear()
+        self._visible_row_range = None
+        self._micro_preview_timer.stop()
+        self._pending_micro_rows.clear()
+        self._micro_preview_queue.clear()
         self.beginResetModel()
         self.endResetModel()
         self._last_selection_revision = selection_revision
@@ -326,18 +357,17 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._current_row = -1
 
     def _on_window_changed(self, first: int, last: int) -> None:
-        count = self.rowCount()
-        if count <= 0:
-            return
-        first = max(0, min(first, count - 1))
-        last = max(first, min(last, count - 1))
-        top = self.index(first, 0)
-        bottom = self.index(last, 0)
-        if top.isValid() and bottom.isValid():
-            self.dataChanged.emit(top, bottom, [])
+        self._emit_range_update(first, last, [])
+        self._schedule_visible_micro_preview_backfill()
 
-    def _on_thumbnail_ready(self, path: Path) -> None:
-        row = self._store.row_for_path(path)
+    def _on_thumbnail_ready(self, path: Path, size: QSize) -> None:
+        if QSize(size) != self._thumb_size:
+            return
+        cached_row_for_path = getattr(self._store, "cached_row_for_path", None)
+        if callable(cached_row_for_path):
+            row = cached_row_for_path(path)
+        else:
+            row = self._store.row_for_path(path)
         if row is None:
             return
         idx = self.index(row, 0)
@@ -365,6 +395,88 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     def _on_window_load_failed(self, request_id: int, selection_revision: int) -> None:
         self._store.handle_window_load_failed(request_id, selection_revision)
+
+    @classmethod
+    def _thumbnail_tier_for_edge(cls, edge: int) -> int:
+        required = max(1, int(edge))
+        for tier in cls.THUMBNAIL_TIERS:
+            if tier >= required:
+                return tier
+        return cls.THUMBNAIL_TIERS[-1]
+
+    def _emit_visible_range_update(self, roles: list[int]) -> None:
+        visible = self._visible_row_range
+        if visible is None:
+            return
+        self._emit_range_update(visible[0], visible[1], roles)
+
+    def _emit_range_update(self, first: int, last: int, roles: list[int]) -> None:
+        count = self.rowCount()
+        if count <= 0:
+            return
+        first = max(0, min(first, count - 1))
+        last = max(first, min(last, count - 1))
+        top = self.index(first, 0)
+        bottom = self.index(last, 0)
+        if top.isValid() and bottom.isValid():
+            self.dataChanged.emit(top, bottom, roles)
+
+    def _schedule_visible_micro_preview_backfill(self) -> None:
+        visible = self._visible_row_range
+        if visible is None:
+            return
+        first, last = visible
+        count = self.rowCount()
+        if count <= 0:
+            return
+        first = max(0, min(first, count - 1))
+        last = max(first, min(last, count - 1))
+        for row in range(first, last + 1):
+            if row in self._pending_micro_rows:
+                continue
+            asset = self._store.asset_at(row)
+            if asset is None or asset.micro_thumbnail is not None:
+                continue
+            metadata = asset.metadata or {}
+            raw = metadata.get("micro_thumbnail")
+            if not isinstance(raw, (bytes, bytearray, memoryview)):
+                continue
+            self._pending_micro_rows.add(row)
+            self._micro_preview_queue.append(row)
+        if self._micro_preview_queue and not self._micro_preview_timer.isActive():
+            self._micro_preview_timer.start(0)
+
+    def _drain_micro_preview_queue(self) -> None:
+        processed = 0
+        while self._micro_preview_queue and processed < self.MICRO_PREVIEW_BATCH_SIZE:
+            row = self._micro_preview_queue.popleft()
+            self._pending_micro_rows.discard(row)
+            processed += 1
+            if not self._row_is_visible(row):
+                continue
+            asset = self._store.asset_at(row)
+            if asset is None or asset.micro_thumbnail is not None:
+                continue
+            metadata = asset.metadata or {}
+            raw = metadata.get("micro_thumbnail")
+            if not isinstance(raw, (bytes, bytearray, memoryview)):
+                continue
+            image = image_loader.qimage_from_bytes(bytes(raw))
+            if image is None or image.isNull():
+                continue
+            asset.micro_thumbnail = image
+            idx = self.index(row, 0)
+            if idx.isValid():
+                self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
+        if self._micro_preview_queue:
+            self._micro_preview_timer.start(0)
+
+    def _row_is_visible(self, row: int) -> bool:
+        visible = self._visible_row_range
+        if visible is None:
+            return False
+        first, last = visible
+        return first <= row <= last
 
     def _effective_video_duration(self, asset: AssetDTO) -> float:
         if not asset.is_video:

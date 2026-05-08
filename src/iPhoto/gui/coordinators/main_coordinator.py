@@ -301,6 +301,12 @@ class MainCoordinator(QObject):
 
         # --- Binding Data to Views ---
         window.ui.grid_view.setModel(self._asset_list_vm)
+        window.ui.grid_view.thumbnailTargetSizeChanged.connect(
+            self._asset_list_vm.set_thumbnail_target_size
+        )
+        self._asset_list_vm.set_thumbnail_target_size(
+            window.ui.grid_view.thumbnail_target_size()
+        )
 
         # Assign Delegate for Grid View (Fixes text display and spacing)
         self._grid_delegate = AssetGridDelegate(window.ui.grid_view, filmstrip_mode=False)

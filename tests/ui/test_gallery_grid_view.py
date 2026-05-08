@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QSize, Qt
 from PySide6.QtGui import QStandardItem, QStandardItemModel, QPixmap
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
@@ -200,3 +200,27 @@ def test_favorite_badge_click_uses_viewport_coordinates(qapp_instance, monkeypat
 
     assert spy.count() == 1
     assert spy.at(0)[0].row() == 0
+
+
+def test_gallery_grid_view_emits_thumbnail_target_size(qapp_instance, monkeypatch):
+    patch_delegate_icons(monkeypatch)
+
+    view = GalleryGridView()
+    delegate = AssetGridDelegate(view)
+    view.setItemDelegate(delegate)
+    model = QStandardItemModel()
+    model.appendRow(QStandardItem())
+    view.setModel(model)
+
+    spy = QSignalSpy(view.thumbnailTargetSizeChanged)
+    view.resize(800, 600)
+    view.show()
+    qapp_instance.processEvents()
+    view.doItemsLayout()
+    qapp_instance.processEvents()
+
+    assert spy.count() >= 1
+    emitted = spy.at(spy.count() - 1)[0]
+    assert isinstance(emitted, QSize)
+    assert emitted.width() == view.iconSize().width()
+    assert emitted.height() == view.iconSize().height()

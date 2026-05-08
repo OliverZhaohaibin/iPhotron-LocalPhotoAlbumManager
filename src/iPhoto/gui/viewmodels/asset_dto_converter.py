@@ -353,7 +353,7 @@ def scan_row_to_dto(
         face_status=row.get("face_status"),
         is_live=is_live,
         is_pano=is_pano,
-        micro_thumbnail=row.get("micro_thumbnail"),
+        micro_thumbnail=None,
     )
 
 

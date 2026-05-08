@@ -7,6 +7,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
 from PySide6.QtCore import QSize, QThreadPool
 from PySide6.QtGui import QImage
+from PySide6.QtTest import QSignalSpy
 
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
@@ -62,3 +63,17 @@ def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> N
     assert rendered is not None
     edit_service.describe_adjustments.assert_not_called()
     compute_stats.assert_not_called()
+
+
+def test_thumbnail_cache_service_emits_ready_with_size(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(64, 64)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    spy = QSignalSpy(service.thumbnailReady)
+
+    service._handle_generation_result(path, size, image)
+
+    assert spy.count() == 1
+    assert spy.at(0)[0] == path
+    assert spy.at(0)[1] == size

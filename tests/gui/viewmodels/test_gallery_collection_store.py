@@ -22,6 +22,7 @@ class _FakeQueryService:
     def __init__(self, assets, *, library_root: Path = Path(".")):
         self.assets = list(assets)
         self.library_root = library_root
+        self.window_requests: list[tuple[int, int, object | None]] = []
 
     def count_query_assets(self, query: AssetQuery):
         return len(self._matching_assets(query))
@@ -33,6 +34,14 @@ class _FakeQueryService:
         return [
             self._row_for_asset(asset, root)
             for asset in matching[offset : offset + limit]
+        ]
+
+    def read_query_window(self, root: Path, query: AssetQuery, *, first: int, last: int, anchor=None):
+        matching = self._matching_assets(query)
+        self.window_requests.append((first, last, anchor))
+        return [
+            self._row_for_asset(asset, root)
+            for asset in matching[first : last + 1]
         ]
 
     def _matching_assets(self, query: AssetQuery):
@@ -164,6 +173,32 @@ def test_prioritize_rows_requests_async_window_when_loader_connected() -> None:
     assert request.first <= 900 <= request.last
     assert 900 in store._row_cache
     assert store.asset_at(900) is not None
+
+
+def test_prioritize_rows_attaches_nearby_anchor_to_async_window_request() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=datetime(2024, 1, 1, 12, 0, 0) - timedelta(minutes=i),
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+    store.prioritize_rows(400, 440)
+
+    assert requests
+    request = requests[-1]
+    assert request.anchor is not None
+    assert request.anchor.row < request.first
 
 
 def test_asset_at_does_not_replace_pending_window_request_for_covered_rows() -> None:

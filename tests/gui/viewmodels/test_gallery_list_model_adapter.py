@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtCore import QModelIndex, QSize, Qt
+from PySide6.QtGui import QImage
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.models.roles import Roles
@@ -27,6 +28,7 @@ def mock_store():
     store.selection_revision = 0
     store.asset_query_service.return_value = MagicMock()
     store.library_root.return_value = Path("/library")
+    store.cached_row_for_path.return_value = None
     return store
 
 
@@ -100,6 +102,61 @@ def test_row_for_path_delegates_to_store(adapter, mock_store):
 def test_prioritize_rows_delegates_to_store(adapter, mock_store):
     adapter.prioritize_rows(10, 25)
     mock_store.prioritize_rows.assert_called_once_with(10, 25)
+
+
+def test_set_thumbnail_target_size_selects_smallest_sufficient_tier(adapter, mock_store):
+    mock_store.count.return_value = 100
+    adapter._visible_row_range = (10, 20)
+
+    emitted_roles = []
+    adapter.dataChanged.connect(lambda _top, _bottom, roles: emitted_roles.extend(roles))
+
+    adapter.set_thumbnail_target_size(QSize(300, 300))
+
+    assert adapter._thumb_size == QSize(384, 384)
+    assert Qt.DecorationRole in emitted_roles
+
+
+def test_thumbnail_ready_ignores_stale_size_and_uses_cached_row_lookup(adapter, mock_store):
+    mock_store.count.return_value = 1
+    mock_store.cached_row_for_path.return_value = 0
+    mock_store.row_for_path.side_effect = AssertionError("should use cached lookup")
+    adapter._thumb_size = QSize(384, 384)
+
+    emitted_roles = []
+    adapter.dataChanged.connect(lambda _top, _bottom, roles: emitted_roles.extend(roles))
+
+    adapter._on_thumbnail_ready(Path("/library/photo.jpg"), QSize(256, 256))
+    assert emitted_roles == []
+
+    adapter._on_thumbnail_ready(Path("/library/photo.jpg"), QSize(384, 384))
+
+    mock_store.cached_row_for_path.assert_called_with(Path("/library/photo.jpg"))
+    assert Qt.DecorationRole in emitted_roles
+
+
+def test_micro_preview_backfill_decodes_only_visible_rows(adapter, mock_store):
+    visible_asset = _make_dto(metadata={"micro_thumbnail": b"visible"})
+    hidden_asset = _make_dto(id="2", abs_path=Path("hidden.jpg"), rel_path=Path("hidden.jpg"), metadata={"micro_thumbnail": b"hidden"})
+    mock_store.count.return_value = 2
+    mock_store.asset_at.side_effect = lambda row: {0: visible_asset, 1: hidden_asset}.get(row)
+    adapter._visible_row_range = (0, 0)
+
+    emitted_roles = []
+    adapter.dataChanged.connect(lambda _top, _bottom, roles: emitted_roles.extend(roles))
+
+    decoded = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+    with patch(
+        "iPhoto.gui.viewmodels.gallery_list_model_adapter.image_loader.qimage_from_bytes",
+        return_value=decoded,
+    ) as decode:
+        adapter._schedule_visible_micro_preview_backfill()
+        adapter._drain_micro_preview_queue()
+
+    decode.assert_called_once_with(b"visible")
+    assert visible_asset.micro_thumbnail is decoded
+    assert hidden_asset.micro_thumbnail is None
+    assert Roles.MICRO_THUMBNAIL in emitted_roles
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

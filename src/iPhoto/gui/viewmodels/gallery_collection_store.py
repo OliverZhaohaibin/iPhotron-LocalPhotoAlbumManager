@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Protocol
 
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.gallery_query_window import GalleryPageAnchor
 from iPhoto.application.use_cases.scan_models import (
     ScanMode,
     ScanPressureLevel,
@@ -33,9 +34,10 @@ from iPhoto.gui.viewmodels.pending_move_buffer import (
     should_include_pending as _should_include_pending_fn,
 )
 
-from .gallery_page_loader import GalleryPageRequest, GalleryPageResult
-
-
+from .gallery_page_loader import (
+    GalleryPageRequest,
+    GalleryPageResult,
+)
 class GalleryAssetQuerySurface(Protocol):
     """Session-owned query surface used by the gallery collection store."""
 
@@ -51,6 +53,17 @@ class GalleryAssetQuerySurface(Protocol):
     ) -> Iterable[dict]:
         """Yield rows matching *query*, scoped to *root*."""
 
+    def read_query_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        *,
+        first: int,
+        last: int,
+        anchor: GalleryPageAnchor | None = None,
+    ) -> Iterable[dict]:
+        """Yield one absolute row window for *query*, scoped to *root*."""
+
 
 class GalleryCollectionStore:
     """Pure Python gallery data store with viewport-aware caching."""
@@ -65,6 +78,8 @@ class GalleryCollectionStore:
     HYSTERESIS_RATIO = 0.25
     SCAN_REFRESH_INTERVAL_MS = 1000
     IDLE_SCAN_REFRESH_INTERVAL_MS = 2000
+    ANCHOR_STRIDE = 64
+    MAX_KEYSET_ANCHOR_DISTANCE_MULTIPLIER = 2
 
     def __init__(
         self,
@@ -87,6 +102,7 @@ class GalleryCollectionStore:
         self._total_count = 0
         self._row_cache: Dict[int, AssetDTO] = {}
         self._cached_abs_rows: Dict[str, int] = {}
+        self._row_anchors: Dict[int, GalleryPageAnchor] = {}
         self._window_range: Optional[tuple[int, int]] = None
         self._visible_range: Optional[tuple[int, int]] = None
         self._active_root: Optional[Path] = None
@@ -304,7 +320,7 @@ class GalleryCollectionStore:
 
     def row_for_path(self, path: Path) -> Optional[int]:
         target = self._normalize_abs_key(path)
-        cached_row = self._cached_abs_rows.get(target)
+        cached_row = self.cached_row_for_path(path)
         if cached_row is not None:
             return cached_row
 
@@ -326,6 +342,12 @@ class GalleryCollectionStore:
             return self._find_query_row_for_path(target)
 
         return None
+
+    def cached_row_for_path(self, path: Path) -> Optional[int]:
+        """Return a cached row for *path* without scanning the backing query."""
+
+        target = self._normalize_abs_key(path)
+        return self._cached_abs_rows.get(target)
 
     def count(self) -> int:
         return self._total_count
@@ -383,6 +405,7 @@ class GalleryCollectionStore:
 
         self._row_cache = new_cache
         self._rebuild_cached_abs_rows()
+        self._rebuild_row_anchors_from_cache()
         self._total_count = max(0, old_total - len(removed))
         self._invalidate_pending_window_request()
         self._window_range = None
@@ -469,6 +492,7 @@ class GalleryCollectionStore:
         old_total = self._total_count
         self._total_count += len(dtos)
         self._rebuild_cached_abs_rows()
+        self._rebuild_row_anchors_from_cache()
         self._invalidate_pending_window_request()
         self._invalidate_total_count_cache()
         self.count_changed.emit(old_total, self._total_count)
@@ -637,6 +661,7 @@ class GalleryCollectionStore:
 
         self._window_request_id += 1
         self._window_request_range = (window_first, window_last)
+        request_anchor = self._best_window_anchor(window_first, window_last)
         request = GalleryPageRequest(
             request_id=self._window_request_id,
             selection_revision=self._selection_revision,
@@ -644,6 +669,7 @@ class GalleryCollectionStore:
             query=self._clone_query(self._current_query),
             first=window_first,
             last=window_last,
+            anchor=request_anchor,
             refetch_window=refetch_window,
             clear_pending_scan_refresh=clear_pending_scan_refresh,
         )
@@ -679,6 +705,7 @@ class GalleryCollectionStore:
 
         self._row_cache = new_cache
         self._rebuild_cached_abs_rows()
+        self._remember_anchors_for_rows(result.rows)
         self._window_range = (result.first, result.last)
         if result.clear_pending_scan_refresh:
             self._clear_pending_scan_refresh()
@@ -753,6 +780,7 @@ class GalleryCollectionStore:
 
         self._row_cache = new_cache
         self._rebuild_cached_abs_rows()
+        self._remember_anchors_for_rows(fetched_rows)
         self._total_count = new_total
         self._window_range = (window_first, window_last)
         self._visible_range = (first, last)
@@ -850,15 +878,25 @@ class GalleryCollectionStore:
         if self._current_query is None or last < first:
             return {}
 
-        query = self._slice_query(self._current_query, first, last - first + 1)
-        validate_paths = self._should_validate_paths(self._current_query)
         rows: Dict[int, AssetDTO] = {}
         active_root = self._active_root or self._library_root
         if active_root is None or self._asset_query_service is None:
             return {}
-        for offset, row in enumerate(
-            self._asset_query_service.read_query_asset_rows(active_root, query)
-        ):
+        read_query_window = getattr(self._asset_query_service, "read_query_window", None)
+        anchor = self._best_window_anchor(first, last)
+        if callable(read_query_window):
+            row_iter = read_query_window(
+                active_root,
+                self._clone_query(self._current_query),
+                first=first,
+                last=last,
+                anchor=anchor,
+            )
+        else:
+            query = self._slice_query(self._current_query, first, last - first + 1)
+            row_iter = self._asset_query_service.read_query_asset_rows(active_root, query)
+        validate_paths = self._should_validate_paths(self._current_query)
+        for offset, row in enumerate(row_iter):
             row_index = first + offset
             view_rel = row.get("rel") if isinstance(row, dict) else None
             if not isinstance(view_rel, str) or not view_rel:
@@ -915,6 +953,7 @@ class GalleryCollectionStore:
             return False
 
         self._rebuild_cached_abs_rows()
+        self._remember_anchors_for_rows(fetched_rows)
         self._window_revision += 1
         if emit_signals:
             self.window_changed.emit(first, last)
@@ -929,6 +968,7 @@ class GalleryCollectionStore:
                 return
             self._row_cache[row] = dto
             self._rebuild_cached_abs_rows()
+            self._remember_row_anchor(row, dto)
             if emit_signals:
                 self.window_changed.emit(row, row)
             return
@@ -1221,6 +1261,53 @@ class GalleryCollectionStore:
     def _cache_row(self, row: int, dto: AssetDTO) -> None:
         self._row_cache[row] = dto
         self._cached_abs_rows[self._normalize_abs_key(dto.abs_path)] = row
+        self._remember_row_anchor(row, dto)
+
+    def _best_window_anchor(self, first: int, last: int) -> GalleryPageAnchor | None:
+        if first <= 0:
+            return None
+        max_distance = max(1, (last - first + 1) * self.MAX_KEYSET_ANCHOR_DISTANCE_MULTIPLIER)
+        nearest_row: int | None = None
+        for row in self._row_anchors:
+            if row >= first:
+                continue
+            if first - row > max_distance:
+                continue
+            if nearest_row is None or row > nearest_row:
+                nearest_row = row
+        if nearest_row is None:
+            return None
+        return self._row_anchors.get(nearest_row)
+
+    def _remember_anchors_for_rows(self, rows: Dict[int, AssetDTO]) -> None:
+        if not rows:
+            return
+        for row, dto in rows.items():
+            if row % self.ANCHOR_STRIDE == 0:
+                self._remember_row_anchor(row, dto)
+        first = min(rows)
+        last = max(rows)
+        first_dto = rows.get(first)
+        last_dto = rows.get(last)
+        if first_dto is not None:
+            self._remember_row_anchor(first, first_dto)
+        if last_dto is not None:
+            self._remember_row_anchor(last, last_dto)
+
+    def _remember_row_anchor(self, row: int, dto: AssetDTO) -> None:
+        created_at = dto.created_at
+        asset_id = str(dto.id or "")
+        if created_at is None or not asset_id:
+            return
+        self._row_anchors[row] = GalleryPageAnchor(
+            row=row,
+            dt=created_at.isoformat(),
+            asset_id=asset_id,
+        )
+
+    def _rebuild_row_anchors_from_cache(self) -> None:
+        self._row_anchors.clear()
+        self._remember_anchors_for_rows(self._row_cache)
 
     @staticmethod
     def _clone_query(query: AssetQuery) -> AssetQuery:
@@ -1238,6 +1325,7 @@ class GalleryCollectionStore:
     def _reset_window_state(self) -> None:
         self._row_cache.clear()
         self._cached_abs_rows.clear()
+        self._row_anchors.clear()
         self._total_count = 0
         self._window_range = None
         self._visible_range = None

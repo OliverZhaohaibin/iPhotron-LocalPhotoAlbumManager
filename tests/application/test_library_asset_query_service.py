@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from iPhoto.application.gallery_query_window import GalleryPageAnchor
 from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
@@ -15,6 +16,7 @@ class _Repository:
         self.count_calls: list[dict[str, Any]] = []
         self.geometry_calls: list[dict[str, Any]] = []
         self.album_read_calls: list[dict[str, Any]] = []
+        self.get_assets_page_calls: list[dict[str, Any]] = []
         self.location_updates: list[tuple[str, str]] = []
         self.geometry_rows = [{"rel": "Trip/a.jpg", "id": "a"}]
         self.album_rows = [{"rel": "Trip/a.jpg", "id": "a"}]
@@ -42,6 +44,22 @@ class _Repository:
 
     def read_all(self, **_kwargs):
         return list(self.all_rows)
+
+    def get_assets_page(self, **kwargs):
+        self.get_assets_page_calls.append(dict(kwargs))
+        rows = list(self.album_rows if kwargs.get("album_path") else self.all_rows)
+        cursor_dt = kwargs.get("cursor_dt")
+        cursor_id = kwargs.get("cursor_id")
+        if cursor_dt is not None and cursor_id is not None:
+            rows = [
+                row
+                for row in rows
+                if (str(row.get("dt") or ""), str(row.get("id") or ""))
+                < (str(cursor_dt), str(cursor_id))
+            ]
+        offset = int(kwargs.get("offset") or 0)
+        limit = int(kwargs.get("limit") or len(rows))
+        return rows[offset : offset + limit]
 
     def read_geotagged(self):
         return list(self.geotagged_rows)
@@ -183,6 +201,51 @@ def test_read_query_asset_rows_scopes_album_rows_and_applies_paging(tmp_path: Pa
             "album_path": "Trip",
         }
     ]
+
+
+def test_read_query_window_uses_repository_pagination_and_anchor(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    repo = _Repository()
+    repo.all_rows = [
+        {"rel": f"asset-{index}.jpg", "id": f"id-{index}", "dt": f"2024-01-0{5-index}T00:00:00", "live_role": 0}
+        for index in range(5)
+    ]
+    service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
+    anchor = GalleryPageAnchor(row=1, dt="2024-01-04T00:00:00", asset_id="id-1")
+
+    rows = list(service.read_query_window(library_root, AssetQuery(), first=3, last=4, anchor=anchor))
+
+    assert [row["id"] for row in rows] == ["id-3", "id-4"]
+    assert repo.get_assets_page_calls == [
+        {
+            "cursor_dt": "2024-01-04T00:00:00",
+            "cursor_id": "id-1",
+            "limit": 2,
+            "album_path": None,
+            "include_subalbums": False,
+            "filter_hidden": True,
+            "filter_params": {"exclude_path_prefix": RECENTLY_DELETED_DIR_NAME},
+            "offset": 1,
+        }
+    ]
+
+
+def test_read_query_window_falls_back_to_in_memory_slice_for_special_query(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    repo = _Repository()
+    service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
+
+    rows = list(
+        service.read_query_window(
+            library_root,
+            AssetQuery(asset_ids=["a", "b"]),
+            first=1,
+            last=1,
+        )
+    )
+
+    assert [row["id"] for row in rows] == ["a"]
+    assert repo.get_assets_page_calls == []
 
 
 def test_asset_id_query_uses_rows_by_id_and_keeps_library_relative_rows(tmp_path: Path) -> None:

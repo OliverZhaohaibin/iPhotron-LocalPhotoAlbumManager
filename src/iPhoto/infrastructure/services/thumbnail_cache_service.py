@@ -53,7 +53,7 @@ class ThumbnailCacheService(QObject):
     Manages thumbnail caching (Memory + Disk) and asynchronous generation.
     """
 
-    thumbnailReady = Signal(Path)
+    thumbnailReady = Signal(Path, QSize)
 
     def __init__(self, disk_cache_path: Path, memory_limit_mb: int = 500):
         super().__init__()
@@ -152,7 +152,7 @@ class ThumbnailCacheService(QObject):
             self._add_to_memory(key, pixmap)
             self._pending_tasks.discard(key)
 
-            self.thumbnailReady.emit(path)
+            self.thumbnailReady.emit(path, QSize(size))
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
         """Removes the thumbnail from cache to force regeneration."""

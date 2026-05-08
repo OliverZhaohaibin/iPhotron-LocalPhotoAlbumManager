@@ -14,6 +14,8 @@ from ..models.roles import Roles
 class GalleryGridView(AssetGrid):
     """Dense icon-mode grid tuned for album browsing."""
 
+    thumbnailTargetSizeChanged = Signal(QSize)
+
     # Minimum width (and height) for grid items in pixels
     MIN_ITEM_WIDTH = 192
 
@@ -29,6 +31,7 @@ class GalleryGridView(AssetGrid):
         super().__init__(parent)
         self._selection_mode_enabled = False
         self._empty_label = None
+        self._thumbnail_target_size = QSize()
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setLayoutMode(QListView.LayoutMode.Batched)
@@ -196,6 +199,11 @@ class GalleryGridView(AssetGrid):
             delegate = self.itemDelegate()
             if hasattr(delegate, "set_base_size"):
                 delegate.set_base_size(new_item_width)
+        self._emit_thumbnail_target_size()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._emit_thumbnail_target_size()
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
@@ -258,6 +266,24 @@ class GalleryGridView(AssetGrid):
             model.rowsInserted.connect(self._update_empty_state)
             model.rowsRemoved.connect(self._update_empty_state)
         self._update_empty_state()
+        self._emit_thumbnail_target_size()
+
+    def thumbnail_target_size(self) -> QSize:
+        return QSize(self._thumbnail_target_size)
+
+    def _emit_thumbnail_target_size(self) -> None:
+        icon_size = self.iconSize()
+        if icon_size.isEmpty() or not icon_size.isValid():
+            return
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        target = QSize(
+            max(1, int(round(icon_size.width() * dpr))),
+            max(1, int(round(icon_size.height() * dpr))),
+        )
+        if self._thumbnail_target_size == target:
+            return
+        self._thumbnail_target_size = QSize(target)
+        self.thumbnailTargetSizeChanged.emit(QSize(target))
 
     def _update_empty_state(self) -> None:
         model = self.model()

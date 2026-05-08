@@ -9,6 +9,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for gallery page load
 import shiboken6
 from PySide6.QtCore import QThreadPool
 
+from iPhoto.application.gallery_query_window import GalleryPageAnchor
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.gallery_page_loader import (
@@ -22,6 +23,7 @@ from iPhoto.gui.viewmodels.gallery_page_loader import (
 class _FakeQueryService:
     def __init__(self, assets) -> None:
         self.assets = list(assets)
+        self.window_requests = []
 
     def read_query_asset_rows(self, root: Path, query: AssetQuery):
         offset = query.offset
@@ -37,6 +39,13 @@ class _FakeQueryService:
             }
             for asset in self.assets[offset : offset + limit]
         ]
+
+    def read_query_window(self, root: Path, query: AssetQuery, *, first: int, last: int, anchor=None):
+        self.window_requests.append((first, last, anchor))
+        return self.read_query_asset_rows(
+            root,
+            AssetQuery(**{**query.__dict__, "offset": first, "limit": last - first + 1}),
+        )
 
 
 def test_gallery_page_task_skips_thumbnail_rows() -> None:
@@ -85,6 +94,45 @@ def test_gallery_page_task_skips_thumbnail_rows() -> None:
     assert loaded
     result = loaded[0]
     assert [dto.rel_path.name for dto in result.rows.values()] == ["photo.jpg"]
+
+
+def test_gallery_page_task_forwards_anchor_to_query_window() -> None:
+    service = _FakeQueryService(
+        [
+            Asset(
+                id="real",
+                album_id="a",
+                path=Path("photo.jpg"),
+                media_type=MediaType.IMAGE,
+                width=4000,
+                height=3000,
+                size_bytes=1_000_000,
+            ),
+        ]
+    )
+    request = GalleryPageRequest(
+        request_id=7,
+        selection_revision=1,
+        root=Path("."),
+        query=AssetQuery(),
+        first=0,
+        last=0,
+        anchor=GalleryPageAnchor(row=3, dt="2024-01-01T00:00:00", asset_id="anchor-id"),
+    )
+    signals = _GalleryPageLoaderSignals()
+    loaded = []
+    signals.pageLoaded.connect(loaded.append)
+
+    task = _GalleryPageTask(
+        asset_query_service=service,
+        library_root=Path("."),
+        request=request,
+        signals=signals,
+    )
+    task.run()
+
+    assert loaded
+    assert service.window_requests == [(0, 0, request.anchor)]
 
 
 def test_gallery_page_loader_emits_page_failed_for_latest_request() -> None:

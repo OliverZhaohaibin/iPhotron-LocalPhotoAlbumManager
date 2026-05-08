@@ -23,6 +23,7 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     THUMBNAIL_TIERS = (256, 384, 512, 768)
     MICRO_PREVIEW_BATCH_SIZE = 8
+    FULL_THUMBNAIL_PREFETCH_BATCH_SIZE = 24
 
     def __init__(
         self,
@@ -46,6 +47,13 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._micro_preview_timer = QTimer(self)
         self._micro_preview_timer.setSingleShot(True)
         self._micro_preview_timer.timeout.connect(self._drain_micro_preview_queue)
+        self._pending_full_thumbnail_rows: set[int] = set()
+        self._full_thumbnail_prefetch_queue: Deque[int] = deque()
+        self._full_thumbnail_prefetch_timer = QTimer(self)
+        self._full_thumbnail_prefetch_timer.setSingleShot(True)
+        self._full_thumbnail_prefetch_timer.timeout.connect(
+            self._drain_full_thumbnail_prefetch_queue
+        )
         self._page_loader = GalleryPageLoader(self)
 
         self._store.window_changed.connect(self._on_window_changed)
@@ -201,6 +209,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._visible_row_range = (first, last)
         self._store.prioritize_rows(first, last)
         self._schedule_visible_micro_preview_backfill()
+        self._schedule_visible_full_thumbnail_prefetch(first, last)
 
     def pin_row(self, row: int) -> None:
         self._store.pin_row(row)
@@ -216,6 +225,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             return
         self._thumb_size = next_size
         self._emit_visible_range_update([Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
+        self._schedule_visible_full_thumbnail_prefetch()
 
     def rebind_asset_query_service(
         self,
@@ -349,6 +359,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._micro_preview_timer.stop()
         self._pending_micro_rows.clear()
         self._micro_preview_queue.clear()
+        self._full_thumbnail_prefetch_timer.stop()
+        self._pending_full_thumbnail_rows.clear()
+        self._full_thumbnail_prefetch_queue.clear()
         self.beginResetModel()
         self.endResetModel()
         self._last_selection_revision = selection_revision
@@ -359,6 +372,7 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _on_window_changed(self, first: int, last: int) -> None:
         self._emit_range_update(first, last, [])
         self._schedule_visible_micro_preview_backfill()
+        self._schedule_visible_full_thumbnail_prefetch()
 
     def _on_thumbnail_ready(self, path: Path, size: QSize) -> None:
         if QSize(size) != self._thumb_size:
@@ -473,6 +487,54 @@ class GalleryListModelAdapter(QAbstractListModel):
                 self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.MICRO_THUMBNAIL])
         if self._micro_preview_queue:
             self._micro_preview_timer.start(0)
+
+    def _schedule_visible_full_thumbnail_prefetch(
+        self,
+        first: int | None = None,
+        last: int | None = None,
+    ) -> None:
+        visible = self._visible_row_range
+        if first is None or last is None:
+            if visible is None:
+                return
+            first, last = visible
+
+        count = self.rowCount()
+        if count <= 0:
+            return
+        first = max(0, min(int(first), count - 1))
+        last = max(first, min(int(last), count - 1))
+
+        for row in range(first, last + 1):
+            if row in self._pending_full_thumbnail_rows:
+                continue
+            asset = self._store.asset_at(row)
+            if asset is None:
+                continue
+            self._pending_full_thumbnail_rows.add(row)
+            self._full_thumbnail_prefetch_queue.append(row)
+
+        if (
+            self._full_thumbnail_prefetch_queue
+            and not self._full_thumbnail_prefetch_timer.isActive()
+        ):
+            self._full_thumbnail_prefetch_timer.start(0)
+
+    def _drain_full_thumbnail_prefetch_queue(self) -> None:
+        processed = 0
+        while (
+            self._full_thumbnail_prefetch_queue
+            and processed < self.FULL_THUMBNAIL_PREFETCH_BATCH_SIZE
+        ):
+            row = self._full_thumbnail_prefetch_queue.popleft()
+            self._pending_full_thumbnail_rows.discard(row)
+            processed += 1
+            asset = self._store.asset_at(row)
+            if asset is None:
+                continue
+            self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size)
+        if self._full_thumbnail_prefetch_queue:
+            self._full_thumbnail_prefetch_timer.start(0)
 
     def _row_is_visible(self, row: int) -> bool:
         visible = self._visible_row_range

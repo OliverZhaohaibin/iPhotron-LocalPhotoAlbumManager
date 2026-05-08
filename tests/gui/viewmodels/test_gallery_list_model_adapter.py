@@ -104,6 +104,20 @@ def test_prioritize_rows_delegates_to_store(adapter, mock_store):
     mock_store.prioritize_rows.assert_called_once_with(10, 25)
 
 
+def test_prioritize_rows_eagerly_prefetches_full_thumbnails(adapter, mock_store, mock_thumb_service):
+    first = _make_dto(abs_path=Path("/library/first.jpg"))
+    second = _make_dto(id="2", abs_path=Path("/library/second.jpg"), rel_path=Path("second.jpg"))
+    mock_store.count.return_value = 2
+    mock_store.asset_at.side_effect = lambda row: {0: first, 1: second}.get(row)
+    adapter._thumb_size = QSize(512, 512)
+
+    adapter.prioritize_rows(0, 1)
+    adapter._drain_full_thumbnail_prefetch_queue()
+
+    mock_thumb_service.get_thumbnail.assert_any_call(Path("/library/first.jpg"), QSize(512, 512))
+    mock_thumb_service.get_thumbnail.assert_any_call(Path("/library/second.jpg"), QSize(512, 512))
+
+
 def test_set_thumbnail_target_size_selects_smallest_sufficient_tier(adapter, mock_store):
     mock_store.count.return_value = 100
     adapter._visible_row_range = (10, 20)
@@ -115,6 +129,25 @@ def test_set_thumbnail_target_size_selects_smallest_sufficient_tier(adapter, moc
 
     assert adapter._thumb_size == QSize(384, 384)
     assert Qt.DecorationRole in emitted_roles
+
+
+def test_set_thumbnail_target_size_prefetches_visible_rows_at_new_tier(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    dto = _make_dto(abs_path=Path("/library/photo.jpg"))
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = dto
+    adapter._visible_row_range = (0, 0)
+
+    adapter.set_thumbnail_target_size(QSize(300, 300))
+    adapter._drain_full_thumbnail_prefetch_queue()
+
+    mock_thumb_service.get_thumbnail.assert_called_with(
+        Path("/library/photo.jpg"),
+        QSize(384, 384),
+    )
 
 
 def test_thumbnail_ready_ignores_stale_size_and_uses_cached_row_lookup(adapter, mock_store):

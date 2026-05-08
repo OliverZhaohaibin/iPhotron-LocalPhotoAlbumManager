@@ -162,7 +162,8 @@ def test_prioritize_rows_requests_async_window_when_loader_connected() -> None:
     assert requests
     request = requests[-1]
     assert request.first <= 900 <= request.last
-    assert 900 not in store._row_cache
+    assert 900 in store._row_cache
+    assert store.asset_at(900) is not None
 
 
 def test_asset_at_does_not_replace_pending_window_request_for_covered_rows() -> None:
@@ -187,8 +188,9 @@ def test_asset_at_does_not_replace_pending_window_request_for_covered_rows() -> 
     assert len(requests) == 1
     request = requests[-1]
 
-    for row in (880, 900, 920, 940):
-        assert store.asset_at(row) is None
+    assert store.asset_at(880) is None
+    for row in (900, 920, 940):
+        assert store.asset_at(row) is not None
 
     assert len(requests) == 1
     assert requests[-1].request_id == request.request_id
@@ -243,6 +245,31 @@ def test_handle_window_load_result_applies_async_window_slice() -> None:
     assert store.asset_at(900) is not None
 
 
+def test_prioritize_rows_primes_visible_rows_before_async_window_result() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(1200)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    requests = []
+    store.window_load_requested.connect(requests.append)
+
+    store.prioritize_rows(900, 940)
+
+    assert requests
+    assert all(store.asset_at(row) is not None for row in (900, 920, 940))
+    assert 880 not in store._row_cache
+
+
 def test_handle_window_load_result_ignores_stale_async_slice_after_row_removal() -> None:
     assets = [
         Asset(
@@ -263,6 +290,7 @@ def test_handle_window_load_result_ignores_stale_async_slice_after_row_removal()
     store.prioritize_rows(900, 940)
     request = requests[-1]
     fetched_rows = store._fetch_rows(request.first, request.last)
+    stale_row = request.first
 
     store.remove_rows([0], emit=False)
     store.handle_window_load_result(
@@ -276,7 +304,7 @@ def test_handle_window_load_result_ignores_stale_async_slice_after_row_removal()
     )
 
     assert store._window_range is None
-    assert 900 not in store._row_cache
+    assert stale_row not in store._row_cache
     store.prioritize_rows(900, 940)
     assert len(requests) == 2
     assert requests[-1].request_id > request.request_id

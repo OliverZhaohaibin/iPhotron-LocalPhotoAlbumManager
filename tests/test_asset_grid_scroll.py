@@ -12,6 +12,9 @@ from PySide6.QtGui import QResizeEvent, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.asset_grid import AssetGrid
+from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
+from iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
+from iPhoto.gui.ui.models.roles import Roles
 
 
 @pytest.fixture(scope="module")
@@ -112,3 +115,65 @@ def test_resize_non_linux_no_forced_repaint(qapp: QApplication) -> None:
         event = QResizeEvent(QSize(800, 600), QSize(400, 300))
         AssetGrid.resizeEvent(grid, event)
         mock_repaint.assert_not_called()
+
+
+def test_emit_visible_rows_probes_inward_from_invalid_corners(qapp: QApplication) -> None:
+    view = GalleryGridView()
+    delegate = AssetGridDelegate(view)
+    view.setItemDelegate(delegate)
+
+    model = QStandardItemModel()
+    for _index in range(200):
+        item = QStandardItem()
+        item.setData(False, Roles.IS_SPACER)
+        model.appendRow(item)
+
+    view.setModel(model)
+    view.resize(820, 620)
+    view.show()
+    qapp.processEvents()
+    view.doItemsLayout()
+    qapp.processEvents()
+
+    captured: list[tuple[int, int]] = []
+    view.visibleRowsChanged.connect(lambda first, last: captured.append((first, last)))
+    view._visible_range = None
+
+    view._emit_visible_rows()
+
+    assert captured
+    first, last = captured[-1]
+    assert 0 <= first <= last < model.rowCount()
+    assert last < model.rowCount() - 1
+
+
+def test_emit_visible_rows_after_scroll_avoids_full_model_fallback(qapp: QApplication) -> None:
+    view = GalleryGridView()
+    delegate = AssetGridDelegate(view)
+    view.setItemDelegate(delegate)
+
+    model = QStandardItemModel()
+    for _index in range(400):
+        item = QStandardItem()
+        item.setData(False, Roles.IS_SPACER)
+        model.appendRow(item)
+
+    view.setModel(model)
+    view.resize(820, 620)
+    view.show()
+    qapp.processEvents()
+    view.doItemsLayout()
+    qapp.processEvents()
+    view.verticalScrollBar().setValue(400)
+    qapp.processEvents()
+
+    captured: list[tuple[int, int]] = []
+    view.visibleRowsChanged.connect(lambda first, last: captured.append((first, last)))
+    view._visible_range = None
+
+    view._emit_visible_rows()
+
+    assert captured
+    first, last = captured[-1]
+    assert first <= last < model.rowCount()
+    assert last < model.rowCount() - 1

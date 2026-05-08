@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import shutil
 from typing import Dict, Optional, Set
 
@@ -67,7 +68,11 @@ class ThumbnailCacheService(QObject):
         self._max_memory_items = 1000  # Rough approximation
 
         self._pending_tasks: Set[str] = set()
-        self._thread_pool = QThreadPool.globalInstance()
+        # Isolate grid thumbnail work from the application's global worker pool
+        # so scan and gallery-page jobs cannot starve thumbnail delivery.
+        self._thread_pool = QThreadPool(self)
+        max_threads = max(1, min(4, (os.cpu_count() or 4) // 2))
+        self._thread_pool.setMaxThreadCount(max_threads)
         self._is_shutting_down = False
 
     def shutdown(self):

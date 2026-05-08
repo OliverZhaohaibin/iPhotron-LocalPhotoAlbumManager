@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, QThreadPool
 from PySide6.QtGui import QImage
 
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
@@ -31,6 +31,14 @@ def test_thumbnail_cache_service_remaps_album_disk_cache(tmp_path: Path) -> None
     service.remap_album_paths(old_album, new_album, size=size)
 
     assert new_cache_file.read_bytes() == b"cached-thumbnail"
+
+
+def test_thumbnail_cache_service_uses_dedicated_thread_pool(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+
+    assert service._thread_pool is not QThreadPool.globalInstance()
+    assert service._thread_pool.maxThreadCount() >= 1
+    service.shutdown()
 
 
 def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> None:

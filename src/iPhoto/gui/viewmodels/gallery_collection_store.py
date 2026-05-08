@@ -494,6 +494,12 @@ class GalleryCollectionStore:
             and self._pending_scan_refresh
             and self._pending_scan_affects_visible_window(first, last)
         )
+        self._prime_visible_rows(
+            first,
+            last,
+            force_refetch=should_refresh,
+            emit_signals=True,
+        )
         if should_refresh:
             self._request_window_load(
                 first,
@@ -872,6 +878,47 @@ class GalleryCollectionStore:
             return None
         fetched = self._fetch_rows(row, row)
         return fetched.get(row)
+
+    def _prime_visible_rows(
+        self,
+        first: int,
+        last: int,
+        *,
+        force_refetch: bool,
+        emit_signals: bool,
+    ) -> bool:
+        """Synchronously materialize the visible rows before async prefetch."""
+
+        if self._current_query is None or last < first:
+            return False
+
+        fetched_rows = (
+            self._fetch_rows(first, last)
+            if force_refetch
+            else self._fetch_window_rows(first, last, force_refetch=False)
+        )
+        if not fetched_rows:
+            return False
+
+        changed = False
+        for row in range(first, last + 1):
+            dto = fetched_rows.get(row)
+            if dto is None:
+                continue
+            cached = self._row_cache.get(row)
+            if cached is dto:
+                continue
+            self._row_cache[row] = dto
+            changed = True
+
+        if not changed:
+            return False
+
+        self._rebuild_cached_abs_rows()
+        self._window_revision += 1
+        if emit_signals:
+            self.window_changed.emit(first, last)
+        return True
 
     def _ensure_row_loaded(self, row: int, *, emit_signals: bool, allow_async: bool) -> None:
         if row in self._row_cache:

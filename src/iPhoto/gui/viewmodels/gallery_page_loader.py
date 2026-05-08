@@ -121,7 +121,9 @@ class GalleryPageLoader(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._thread_pool = QThreadPool.globalInstance()
+        # Keep gallery window fetches isolated from scan and thumbnail work.
+        self._thread_pool = QThreadPool(self)
+        self._thread_pool.setMaxThreadCount(1)
         self._latest_request_id = 0
         self._latest_selection_revision = 0
 

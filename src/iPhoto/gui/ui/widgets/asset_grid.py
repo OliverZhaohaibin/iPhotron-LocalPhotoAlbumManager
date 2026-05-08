@@ -29,6 +29,7 @@ class AssetGrid(QListView):
     visibleRowsChanged = Signal(int, int)
 
     _DRAG_CANCEL_THRESHOLD = 6
+    _VISIBLE_PROBE_OFFSETS = (0, 8, 24, 48, 96)
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -41,7 +42,9 @@ class AssetGrid(QListView):
         self._suppress_next_preview_leave = False
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
-        self._update_timer.setInterval(100)
+        # Keep viewport tracking close to the next frame so large scrollbar
+        # jumps can prime their visible rows before a long placeholder flash.
+        self._update_timer.setInterval(16)
         self._update_timer.timeout.connect(self._emit_visible_rows)
         self._visible_range: Optional[tuple[int, int]] = None
         self._model = None
@@ -349,18 +352,16 @@ class AssetGrid(QListView):
         if viewport_rect.isEmpty():
             return
 
-        top_index = self.indexAt(viewport_rect.topLeft())
-        bottom_index = self.indexAt(viewport_rect.bottomRight())
+        top_index = self._find_index_near(viewport_rect.topLeft(), x_dir=1, y_dir=1)
+        bottom_index = self._find_index_near(viewport_rect.bottomRight(), x_dir=-1, y_dir=-1)
 
-        first = top_index.row()
-        last = bottom_index.row()
-
-        if first == -1 and last == -1:
+        if not top_index.isValid() and not bottom_index.isValid():
             return
-        if first == -1:
-            first = 0
-        if last == -1:
-            last = row_count - 1
+
+        first = top_index.row() if top_index.isValid() else 0
+        last = bottom_index.row() if bottom_index.isValid() else first
+        if first > last:
+            first, last = last, first
 
         buffer = 20
         first = max(0, first - buffer)
@@ -374,6 +375,31 @@ class AssetGrid(QListView):
 
         self._visible_range = visible_range
         self.visibleRowsChanged.emit(first, last)
+
+    def _find_index_near(self, point: QPoint, *, x_dir: int, y_dir: int) -> QModelIndex:
+        """Probe inward from *point* until a visible index is found."""
+
+        viewport_rect = self.viewport().rect()
+        if viewport_rect.isEmpty():
+            return QModelIndex()
+
+        def _clamp_x(value: int) -> int:
+            return max(viewport_rect.left(), min(value, viewport_rect.right()))
+
+        def _clamp_y(value: int) -> int:
+            return max(viewport_rect.top(), min(value, viewport_rect.bottom()))
+
+        for y_offset in self._VISIBLE_PROBE_OFFSETS:
+            for x_offset in self._VISIBLE_PROBE_OFFSETS:
+                candidate = QPoint(
+                    _clamp_x(point.x() + (x_dir * x_offset)),
+                    _clamp_y(point.y() + (y_dir * y_offset)),
+                )
+                index = self.indexAt(candidate)
+                if index.isValid():
+                    return index
+
+        return QModelIndex()
 
     def _extract_local_files(self, event: QDropEvent | QDragEnterEvent | QDragMoveEvent) -> List[Path]:
         """Return all unique local file paths advertised by *event*.

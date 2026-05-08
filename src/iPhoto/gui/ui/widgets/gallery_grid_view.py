@@ -31,6 +31,8 @@ class GalleryGridView(AssetGrid):
         self._empty_label = None
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
+        self.setLayoutMode(QListView.LayoutMode.Batched)
+        self.setBatchSize(64)
         # Defer initial size calculation to resizeEvent to avoid rendering the
         # default 192px layout before the viewport dimensions are known.
         self.setSpacing(0)

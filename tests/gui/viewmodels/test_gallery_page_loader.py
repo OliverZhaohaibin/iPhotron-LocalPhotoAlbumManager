@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for gallery page loader tests", exc_type=ImportError)
 
 import shiboken6
+from PySide6.QtCore import QThreadPool
 
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery
@@ -99,6 +99,13 @@ def test_gallery_page_loader_emits_page_failed_for_latest_request() -> None:
     assert failed == [(3, 7)]
 
 
+def test_gallery_page_loader_uses_dedicated_single_thread_pool() -> None:
+    loader = GalleryPageLoader()
+
+    assert loader._thread_pool is not QThreadPool.globalInstance()
+    assert loader._thread_pool.maxThreadCount() == 1
+
+
 def test_gallery_page_loader_tolerates_loader_teardown_during_inflight_task(qapp) -> None:
     class _CapturingThreadPool:
         def __init__(self) -> None:
@@ -129,14 +136,13 @@ def test_gallery_page_loader_tolerates_loader_teardown_during_inflight_task(qapp
         last=0,
     )
     pool = _CapturingThreadPool()
-
-    with patch("iPhoto.gui.viewmodels.gallery_page_loader.QThreadPool.globalInstance", return_value=pool):
-        loader = GalleryPageLoader()
-        loader.load(
-            asset_query_service=service,
-            library_root=Path("."),
-            request=request,
-        )
+    loader = GalleryPageLoader()
+    loader._thread_pool = pool
+    loader.load(
+        asset_query_service=service,
+        library_root=Path("."),
+        request=request,
+    )
 
     assert pool.task is not None
 

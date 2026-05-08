@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import time
 from typing import Dict, Optional, Set
 
 import numpy as np
@@ -37,15 +38,17 @@ class ThumbnailGenerationTask(QRunnable):
         self._signals = signals
 
     def run(self):
+        qimg = QImage()
         try:
             # Generate logic (CPU intensive)
-            qimg = self._renderer(self._path, self._size)
-            if qimg is not None and not qimg.isNull():
-                # Emit result back to main thread
-                self._signals.result.emit(self._path, self._size, qimg)
+            rendered = self._renderer(self._path, self._size)
+            if isinstance(rendered, QImage):
+                qimg = rendered
         except Exception:
             # Silently fail or log in generator
-            pass
+            qimg = QImage()
+        # Emit result back to main thread even on failure to clear pending tasks
+        self._signals.result.emit(self._path, self._size, qimg)
 
 class ThumbnailCacheService(QObject):
     """
@@ -67,6 +70,8 @@ class ThumbnailCacheService(QObject):
         self._max_memory_items = 1000  # Rough approximation
 
         self._pending_tasks: Set[str] = set()
+        self._failed_tasks: Dict[str, float] = {}
+        self._failure_backoff_seconds = 5.0
         self._thread_pool = QThreadPool.globalInstance()
         self._is_shutting_down = False
 
@@ -74,6 +79,7 @@ class ThumbnailCacheService(QObject):
         """Prevents new tasks from being submitted and clears pending logic."""
         self._is_shutting_down = True
         self._pending_tasks.clear()
+        self._failed_tasks.clear()
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
         self._is_shutting_down = False
@@ -83,6 +89,7 @@ class ThumbnailCacheService(QObject):
         self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._memory_cache.clear()
         self._pending_tasks.clear()
+        self._failed_tasks.clear()
 
     def set_edit_service(self, edit_service: EditServicePort | None) -> None:
         """Bind the current edit surface used for thumbnail rendering."""
@@ -97,6 +104,7 @@ class ThumbnailCacheService(QObject):
 
         # 1. Memory Check
         if key in self._memory_cache:
+            self._failed_tasks.pop(key, None)
             return self._memory_cache[key]
 
         # 2. Disk Check
@@ -105,7 +113,19 @@ class ThumbnailCacheService(QObject):
             pixmap = QPixmap(str(disk_file))
             if not pixmap.isNull():
                 self._add_to_memory(key, pixmap)
+                self._failed_tasks.pop(key, None)
                 return pixmap
+            try:
+                disk_file.unlink()
+            except OSError:
+                pass
+
+        if self._failure_backoff_active(key):
+            return None
+
+        if not path.exists():
+            self._mark_failure(key)
+            return None
 
         # 3. Trigger Async Generation if not pending
         if key not in self._pending_tasks:
@@ -136,18 +156,24 @@ class ThumbnailCacheService(QObject):
 
     def _handle_generation_result(self, path: Path, size: QSize, image: QImage):
         # Back on main thread
-        if not image.isNull():
-            key = self._cache_key(path, size)
-            pixmap = QPixmap.fromImage(image)
+        key = self._cache_key(path, size)
+        self._pending_tasks.discard(key)
+        if self._is_shutting_down:
+            return
+        if image.isNull():
+            self._mark_failure(key)
+            return
 
-            # Save to disk
-            disk_file = self._disk_cache_path / f"{key}.jpg"
-            pixmap.save(str(disk_file), "JPEG")
+        pixmap = QPixmap.fromImage(image)
 
-            self._add_to_memory(key, pixmap)
-            self._pending_tasks.discard(key)
+        # Save to disk
+        disk_file = self._disk_cache_path / f"{key}.jpg"
+        pixmap.save(str(disk_file), "JPEG")
 
-            self.thumbnailReady.emit(path)
+        self._add_to_memory(key, pixmap)
+        self._failed_tasks.pop(key, None)
+
+        self.thumbnailReady.emit(path)
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
         """Removes the thumbnail from cache to force regeneration."""
@@ -157,6 +183,7 @@ class ThumbnailCacheService(QObject):
 
         if key in self._memory_cache:
             del self._memory_cache[key]
+        self._failed_tasks.pop(key, None)
 
         disk_file = self._disk_cache_path / f"{key}.jpg"
         if disk_file.exists():
@@ -201,6 +228,18 @@ class ThumbnailCacheService(QObject):
         import hashlib
         s = f"{path.as_posix()}_{size.width()}x{size.height()}"
         return hashlib.md5(s.encode('utf-8')).hexdigest()
+
+    def _mark_failure(self, key: str) -> None:
+        self._failed_tasks[key] = time.monotonic()
+
+    def _failure_backoff_active(self, key: str) -> bool:
+        last_failure = self._failed_tasks.get(key)
+        if last_failure is None:
+            return False
+        if time.monotonic() - last_failure < self._failure_backoff_seconds:
+            return True
+        self._failed_tasks.pop(key, None)
+        return False
 
     def _add_to_memory(self, key: str, pixmap: QPixmap):
         if len(self._memory_cache) > self._max_memory_items:

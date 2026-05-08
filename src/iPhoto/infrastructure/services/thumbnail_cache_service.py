@@ -38,17 +38,17 @@ class ThumbnailGenerationTask(QRunnable):
         self._signals = signals
 
     def run(self):
-        qimg = QImage()
+        rendered: Optional[QImage] = None
         try:
             # Generate logic (CPU intensive)
             rendered = self._renderer(self._path, self._size)
-            if isinstance(rendered, QImage):
-                qimg = rendered
         except Exception:
             # Silently fail or log in generator
-            qimg = QImage()
+            rendered = None
+        if not isinstance(rendered, QImage):
+            rendered = QImage()
         # Emit result back to main thread even on failure to clear pending tasks
-        self._signals.result.emit(self._path, self._size, qimg)
+        self._signals.result.emit(self._path, self._size, rendered)
 
 class ThumbnailCacheService(QObject):
     """
@@ -72,6 +72,7 @@ class ThumbnailCacheService(QObject):
         self._pending_tasks: Set[str] = set()
         self._failed_tasks: Dict[str, float] = {}
         self._failure_backoff_seconds = 5.0
+        self._failure_cache_limit = 2000
         self._thread_pool = QThreadPool.globalInstance()
         self._is_shutting_down = False
 
@@ -231,6 +232,8 @@ class ThumbnailCacheService(QObject):
 
     def _mark_failure(self, key: str) -> None:
         self._failed_tasks[key] = time.monotonic()
+        while len(self._failed_tasks) > self._failure_cache_limit:
+            self._failed_tasks.pop(next(iter(self._failed_tasks)), None)
 
     def _failure_backoff_active(self, key: str) -> bool:
         last_failure = self._failed_tasks.get(key)

@@ -125,6 +125,43 @@ class ThumbnailCacheService(QObject):
         # Return placeholder or None while loading
         return None
 
+    def batch_prefetch(
+        self,
+        paths: list[tuple[str, Path]],
+        size: QSize | None = None,
+    ) -> None:
+        """Batch prefetch thumbnails for multiple assets.
+
+        This method is designed to be called after scan completes to warm up
+        the thumbnail cache for all newly indexed assets.
+
+        Args:
+            paths: List of (rel_path, abs_path) tuples for assets to prefetch
+            size: Target thumbnail size (defaults to 512x512)
+        """
+        if self._is_shutting_down:
+            return
+        if size is None:
+            size = QSize(512, 512)
+        if not paths:
+            return
+
+        for rel, abs_path in paths:
+            key = self._cache_key(abs_path, size)
+            # Skip if already cached in memory
+            if key in self._memory_cache:
+                continue
+            # Skip if already cached on disk
+            disk_file = self._disk_cache_path / f"{key}.jpg"
+            if disk_file.exists():
+                continue
+            # Skip if generation already pending
+            if key in self._pending_tasks:
+                continue
+            # Queue for generation
+            self._pending_tasks.add(key)
+            self._start_generation(abs_path, size)
+
     def _start_generation(self, path: Path, size: QSize):
         # Create signals object (must be created on heap/managed by QObject tree or kept alive)
         # Since QRunnable isn't a QObject parent, we need to ensure signals exist during run.

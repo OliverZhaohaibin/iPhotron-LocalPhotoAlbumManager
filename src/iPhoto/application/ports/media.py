@@ -21,6 +21,7 @@ class MediaScannerPort(Protocol):
         progress_callback: Callable[[int, int], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
         generate_micro_thumbnails: bool | Callable[[], bool] = True,
+        thumbnail_cache_path: Path | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield normalized scan rows."""
 

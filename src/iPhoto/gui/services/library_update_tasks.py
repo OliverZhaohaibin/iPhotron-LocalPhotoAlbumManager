@@ -32,6 +32,14 @@ class LibraryUpdateTaskRunner:
         self._scanner_worker: ScannerWorker | None = None
         self._scan_pending = False
 
+    @staticmethod
+    def _compute_thumbnail_cache_path(library_root: Path) -> Path:
+        """Compute the thumbnail cache directory path for a library root."""
+        work_dir = library_root / ".iPhoto"
+        thumbnail_cache_path = work_dir / "thumbs"
+        thumbnail_cache_path.mkdir(parents=True, exist_ok=True)
+        return thumbnail_cache_path
+
     def start_scan(
         self,
         *,
@@ -118,6 +126,7 @@ class LibraryUpdateTaskRunner:
             library_root=library_root,
             scan_service=scan_service,
             scan_plan=scan_plan,
+            thumbnail_cache_path=self._compute_thumbnail_cache_path(library_root) if library_root else None,
         )
         self._scanner_worker = worker
         self._scan_pending = False

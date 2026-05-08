@@ -467,8 +467,6 @@ class MainCoordinator(QObject):
         updates.scanStatusChanged.connect(self._gallery_store.handle_scan_status)
         updates.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
         updates.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
-        # Trigger thumbnail prefetch after scan completes
-        updates.scanFinished.connect(self._on_scan_finished_thumbnail_prefetch)
         self._gallery_store.scan_refresh_idle_requested.connect(
             self._schedule_idle_gallery_scan_refresh
         )
@@ -1026,53 +1024,3 @@ class MainCoordinator(QObject):
             if p:
                 paths.append(Path(p))
         return paths
-
-    def _on_scan_finished_thumbnail_prefetch(self, root: Path, success: bool) -> None:
-        """Trigger batch thumbnail prefetch after scan completes.
-
-        This warms up the thumbnail cache for all indexed assets, providing
-        a seamless browsing experience without placeholder thumbnails.
-        """
-        if not success or self._thumbnail_service is None:
-            return
-
-        asset_query_service = self._asset_query_service()
-        if asset_query_service is None:
-            return
-
-        try:
-            # Get all asset rows for the scanned root
-            from iPhoto.domain.models.query import AssetQuery
-            query = AssetQuery()
-            rows = list(asset_query_service.read_query_asset_rows(root, query))
-
-            if not rows:
-                return
-
-            # Collect paths for batch prefetch
-            paths_to_prefetch: list[tuple[str, Path]] = []
-            for row in rows:
-                rel = row.get("rel")
-                if not rel or not isinstance(rel, str):
-                    continue
-                # Skip thumbnail assets
-                if self._gallery_store._scan_row_is_thumbnail(rel, row):
-                    continue
-                abs_path = root / rel
-                if abs_path.exists():
-                    paths_to_prefetch.append((rel, abs_path))
-
-            if paths_to_prefetch:
-                self._logger.debug(
-                    "Triggering thumbnail prefetch for %d assets after scan of %s",
-                    len(paths_to_prefetch),
-                    root,
-                )
-                self._thumbnail_service.batch_prefetch(paths_to_prefetch)
-        except Exception as exc:
-            self._logger.warning(
-                "Failed to prefetch thumbnails after scan of %s: %s",
-                root,
-                exc,
-                exc_info=True,
-            )

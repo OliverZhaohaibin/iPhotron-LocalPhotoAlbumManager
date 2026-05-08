@@ -111,6 +111,34 @@ def _fallback_row_for_path(root: Path, path: Path) -> Dict[str, Any]:
     row["face_status"] = initial_face_status(row)
     return row
 
+def _compute_cache_key(path: Path, width: int, height: int) -> str:
+    """Compute cache key for thumbnail, matching ThumbnailCacheService._cache_key()."""
+    import hashlib
+    s = f"{path.as_posix()}_{width}x{height}"
+    return hashlib.md5(s.encode('utf-8')).hexdigest()
+
+
+def _save_thumbnail_to_cache(
+    thumbnail: Any,
+    path: Path,
+    cache_path: Path,
+    width: int,
+    height: int,
+) -> bool:
+    """Save a PIL Image thumbnail to disk cache.
+
+    Returns True if saved successfully, False otherwise.
+    """
+    try:
+        cache_key = _compute_cache_key(path, width, height)
+        cache_file = cache_path / f"{cache_key}.jpg"
+        thumbnail.save(str(cache_file), "JPEG", quality=85)
+        return True
+    except Exception as exc:
+        LOGGER.debug("Failed to save thumbnail to cache for %s: %s", path, exc)
+        return False
+
+
 def process_media_paths(
     root: Path,
     image_paths: List[Path],
@@ -118,6 +146,7 @@ def process_media_paths(
     *,
     is_cancelled: Optional[Callable[[], bool]] = None,
     generate_micro_thumbnails: bool | Callable[[], bool] = True,
+    thumbnail_cache_path: Optional[Path] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield populated index rows for the provided media paths."""
 
@@ -193,6 +222,25 @@ def process_media_paths(
                     if mt:
                         row["micro_thumbnail"] = mt
 
+                # Also generate full 512px thumbnail and write to cache
+                if thumbnail_cache_path:
+                    try:
+                        full_thumb = _thumbnail_generator.generate(path, (512, 512))
+                        if full_thumb:
+                            _save_thumbnail_to_cache(
+                                full_thumb,
+                                path,
+                                thumbnail_cache_path,
+                                512,
+                                512,
+                            )
+                    except Exception as exc:
+                        LOGGER.debug(
+                            "Full thumbnail generation failed for %s: %s",
+                            path,
+                            exc,
+                        )
+
             yield row
 
 def scan_album(
@@ -204,6 +252,7 @@ def scan_album(
     existing_rows_resolver: Optional[Callable[[List[str]], Dict[str, Dict[str, Any]]]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     generate_micro_thumbnails: bool | Callable[[], bool] = True,
+    thumbnail_cache_path: Optional[Path] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield index rows for all matching assets in *root*, scanning in parallel."""
 
@@ -263,6 +312,7 @@ def scan_album(
                 [],
                 is_cancelled=is_cancelled,
                 generate_micro_thumbnails=generate_micro_thumbnails,
+                thumbnail_cache_path=thumbnail_cache_path,
             )
 
     try:

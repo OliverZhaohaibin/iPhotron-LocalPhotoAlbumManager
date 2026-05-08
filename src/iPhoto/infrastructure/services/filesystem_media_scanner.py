@@ -23,6 +23,7 @@ class FilesystemMediaScanner(MediaScannerPort):
         progress_callback: Callable[[int, int], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
         generate_micro_thumbnails: bool | Callable[[], bool] = True,
+        thumbnail_cache_path: Path | None = None,
     ) -> Iterator[dict[str, Any]]:
         scanner = scan_album(
             root,
@@ -32,6 +33,7 @@ class FilesystemMediaScanner(MediaScannerPort):
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
             generate_micro_thumbnails=generate_micro_thumbnails,
+            thumbnail_cache_path=thumbnail_cache_path,
         )
         try:
             yield from scanner

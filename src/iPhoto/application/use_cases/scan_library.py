@@ -34,6 +34,7 @@ class ScanLibraryRequest:
     scan_id: str | None = None
     mode: ScanMode = ScanMode.BACKGROUND
     generate_micro_thumbnails: bool | Callable[[], bool] = True
+    thumbnail_cache_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,8 @@ class ScanLibraryUseCase:
             scan_kwargs["is_cancelled"] = request.is_cancelled
         if self._supports_scan_kw(signature, "generate_micro_thumbnails"):
             scan_kwargs["generate_micro_thumbnails"] = request.generate_micro_thumbnails
+        if self._supports_scan_kw(signature, "thumbnail_cache_path"):
+            scan_kwargs["thumbnail_cache_path"] = request.thumbnail_cache_path
 
         return scan_method(
             request.root,

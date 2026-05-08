@@ -346,6 +346,7 @@ class LibraryScanService:
         status_callback: Callable[[ScanStatusUpdate], None] | None = None,
         generate_micro_thumbnails: bool | Callable[[], bool] | None = None,
         plan_state_resolver: Callable[[], ScanPlan] | None = None,
+        thumbnail_cache_path: Path | None = None,
     ) -> ScanLibraryResult:
         repository = self._repository()
 
@@ -492,6 +493,7 @@ class LibraryScanService:
                     if generate_micro_thumbnails is not None
                     else plan.generate_micro_thumbnails
                 ),
+                thumbnail_cache_path=thumbnail_cache_path,
             )
         )
         if plan.mode != ScanMode.ATOMIC:

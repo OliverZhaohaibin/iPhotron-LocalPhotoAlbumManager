@@ -63,6 +63,7 @@ class ScannerWorker(QRunnable):
         library_root: Optional[Path] = None,
         scan_service: Optional[LibraryScanService] = None,
         scan_plan: ScanPlan | None = None,
+        thumbnail_cache_path: Optional[Path] = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -74,6 +75,7 @@ class ScannerWorker(QRunnable):
         self._library_root = library_root if library_root else root
         self._scan_service = scan_service
         self._scan_plan = scan_plan
+        self._thumbnail_cache_path = thumbnail_cache_path
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
@@ -234,6 +236,7 @@ class ScannerWorker(QRunnable):
                         else plan.generate_micro_thumbnails
                     ),
                     plan_state_resolver=lambda: self._scan_plan or plan,
+                    thumbnail_cache_path=self._thumbnail_cache_path,
                 )
             else:
                 result = self.scan_service.scan_album(

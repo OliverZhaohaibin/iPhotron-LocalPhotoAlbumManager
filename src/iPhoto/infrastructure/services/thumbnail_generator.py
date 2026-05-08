@@ -49,14 +49,23 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
     def _generate_image_thumbnail(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:
         try:
             with Image.open(path) as img:
+                # Use faster BILINEAR resampling for thumbnails (3-5x speedup vs LANCZOS)
+                resample = Image.Resampling.BILINEAR
+
+                # Use draft mode for JPEGs to load at reduced resolution
+                if img.format == "JPEG":
+                    draft_size = (min(size[0] * 4, img.width), min(size[1] * 4, img.height))
+                    img.draft("RGB", draft_size)
+
                 if img.mode != "RGB":
                     img = img.convert("RGB")
 
-                # Apply EXIF orientation
-                img = ImageOps.exif_transpose(img)
+                # Apply EXIF orientation only if needed (check before transpose)
+                exif = img.getexif()
+                if exif:
+                    img = ImageOps.exif_transpose(img)
 
-                # Create thumbnail using LANCZOS for quality
-                img.thumbnail(size, Image.Resampling.LANCZOS)
+                img.thumbnail(size, resample)
                 return img.copy()
         except Exception as e:
             LOGGER.warning(f"Pillow failed to open {path}: {e}")

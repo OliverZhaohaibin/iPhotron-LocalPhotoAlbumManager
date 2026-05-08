@@ -15,7 +15,9 @@ from ..application.use_cases.scan_models import (
     ScanStatusUpdate,
 )
 from ..bootstrap.library_scan_service import LibraryScanService
+from ..config import WORK_DIR_NAME
 from ..utils.logging import get_logger
+from ..utils.pathutils import ensure_work_dir
 from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
 
@@ -137,11 +139,11 @@ class ScanCoordinatorMixin:
             scan_plan = None
 
         # Pass library root to scanner so all assets go to global database
-        # Compute thumbnail cache path
+        # Compute thumbnail cache path - must match ThumbnailCacheService._cache_root()
         thumbnail_cache_path = None
         if self._root is not None:
-            work_dir = self._root / ".iPhoto"
-            thumbnail_cache_path = work_dir / "thumbs"
+            work_dir = ensure_work_dir(self._root)
+            thumbnail_cache_path = work_dir / "cache" / "thumbs"
             thumbnail_cache_path.mkdir(parents=True, exist_ok=True)
 
         worker = ScannerWorker(

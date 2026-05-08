@@ -279,7 +279,7 @@ class RuntimeContext:
         startup_notice = getattr(self.facade, "startupResumePending", None)
         if startup_notice is not None:
             startup_notice.emit(
-                "发现未完成扫描，界面空闲后会继续。需要立刻继续时可点击 Rescan。"
+                "Incomplete scan detected. Scanning will resume when the interface is idle. Click Rescan to continue immediately."
             )
         if QCoreApplication.instance() is None:
             return

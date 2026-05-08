@@ -55,16 +55,17 @@ _INFO_PANEL_METADATA_CACHE_MAX = 200
 _LOCATION_SEARCH_RESULT_LIMIT = 5
 _LOCATION_SEARCH_DEBOUNCE_MS = 80
 _LOCATION_EXTENSION_PROMPT = "Install the map extension to use Assign a Location."
-_LOCATION_EXIFTOOL_LIMITED_TITLE = "功能受限"
+_LOCATION_EXIFTOOL_LIMITED_TITLE = "Feature Limited"
 _LOCATION_EXIFTOOL_LIMITED_MESSAGE = (
-    "地点已保存到本机图库数据库。\n\n"
-    "应用当前环境未找到或无法访问 ExifTool，暂时无法把 GPS 信息写入原始照片/视频文件。"
-    "请确认 ExifTool 已安装并可被应用访问。"
+    "Location saved to local library database.\n\n"
+    "ExifTool was not found or accessible in the current environment. "
+    "GPS information could not be written to the original photo/video file."
+    "Please ensure ExifTool is installed and accessible to the application."
 )
-_LOCATION_FILE_WRITE_LIMITED_TITLE = "原文件写入失败"
+_LOCATION_FILE_WRITE_LIMITED_TITLE = "File Write Failed"
 _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE = (
-    "地点已保存到本机图库数据库。\n\n"
-    "GPS 信息未能写入原始照片/视频文件：{reason}"
+    "Location saved to local library database.\n\n"
+    "GPS information could not be written to the original photo/video file: {reason}"
 )
 
 

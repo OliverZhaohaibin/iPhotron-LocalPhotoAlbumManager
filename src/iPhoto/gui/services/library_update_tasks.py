@@ -9,6 +9,7 @@ from pathlib import Path
 from ...application.use_cases.scan_models import ScanCompletion, ScanMode, ScanPlan
 from ...application.use_cases.scan_models import ScanPressureLevel, ScanScopeKind
 from ...bootstrap.library_scan_service import LibraryScanService
+from ...utils.pathutils import ensure_work_dir
 from ..background_task_manager import BackgroundTaskManager
 from ...library.workers.rescan_worker import RescanSignals, RescanWorker
 from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
@@ -34,9 +35,13 @@ class LibraryUpdateTaskRunner:
 
     @staticmethod
     def _compute_thumbnail_cache_path(library_root: Path) -> Path:
-        """Compute the thumbnail cache directory path for a library root."""
-        work_dir = library_root / ".iPhoto"
-        thumbnail_cache_path = work_dir / "thumbs"
+        """Compute the thumbnail cache directory path for a library root.
+
+        This must match LibraryAssetRuntime._cache_root() to ensure thumbnails
+        generated during scan can be read by ThumbnailCacheService.
+        """
+        work_dir = ensure_work_dir(library_root)
+        thumbnail_cache_path = work_dir / "cache" / "thumbs"
         thumbnail_cache_path.mkdir(parents=True, exist_ok=True)
         return thumbnail_cache_path
 

@@ -73,7 +73,7 @@ class ThumbnailCacheService(QObject):
         self._max_memory_items = 1000  # Rough approximation
 
         self._pending_tasks: Set[str] = set()
-        self._failed_tasks: "OrderedDict[str, float]" = OrderedDict()
+        self._failed_tasks: OrderedDict[str, float] = OrderedDict()
         self._failure_backoff_seconds = self.FAILURE_BACKOFF_SECONDS
         self._failure_cache_limit = self.FAILURE_CACHE_LIMIT
         self._thread_pool = QThreadPool.globalInstance()
@@ -235,7 +235,6 @@ class ThumbnailCacheService(QObject):
 
     def _mark_failure(self, key: str) -> None:
         self._failed_tasks[key] = time.monotonic()
-        self._failed_tasks.move_to_end(key)
         while len(self._failed_tasks) > self._failure_cache_limit:
             self._failed_tasks.popitem(last=False)
 

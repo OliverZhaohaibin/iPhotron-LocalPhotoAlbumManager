@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from pathlib import Path
 import shutil
 import time
@@ -56,6 +57,8 @@ class ThumbnailCacheService(QObject):
     """
 
     thumbnailReady = Signal(Path)
+    FAILURE_BACKOFF_SECONDS = 5.0
+    FAILURE_CACHE_LIMIT = 2000
 
     def __init__(self, disk_cache_path: Path, memory_limit_mb: int = 500):
         super().__init__()
@@ -70,9 +73,9 @@ class ThumbnailCacheService(QObject):
         self._max_memory_items = 1000  # Rough approximation
 
         self._pending_tasks: Set[str] = set()
-        self._failed_tasks: Dict[str, float] = {}
-        self._failure_backoff_seconds = 5.0
-        self._failure_cache_limit = 2000
+        self._failed_tasks: "OrderedDict[str, float]" = OrderedDict()
+        self._failure_backoff_seconds = self.FAILURE_BACKOFF_SECONDS
+        self._failure_cache_limit = self.FAILURE_CACHE_LIMIT
         self._thread_pool = QThreadPool.globalInstance()
         self._is_shutting_down = False
 
@@ -232,8 +235,9 @@ class ThumbnailCacheService(QObject):
 
     def _mark_failure(self, key: str) -> None:
         self._failed_tasks[key] = time.monotonic()
+        self._failed_tasks.move_to_end(key)
         while len(self._failed_tasks) > self._failure_cache_limit:
-            self._failed_tasks.pop(next(iter(self._failed_tasks)), None)
+            self._failed_tasks.popitem(last=False)
 
     def _failure_backoff_active(self, key: str) -> bool:
         last_failure = self._failed_tasks.get(key)

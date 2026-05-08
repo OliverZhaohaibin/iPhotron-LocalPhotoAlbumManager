@@ -65,7 +65,8 @@ def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> N
     compute_stats.assert_not_called()
 
 
-def test_thumbnail_cache_service_emits_ready_with_size(tmp_path: Path) -> None:
+def test_thumbnail_cache_service_emits_ready_with_size(tmp_path: Path, qapp) -> None:
+    del qapp
     service = ThumbnailCacheService(tmp_path / "thumbs")
     path = tmp_path / "photo.jpg"
     size = QSize(64, 64)
@@ -77,3 +78,53 @@ def test_thumbnail_cache_service_emits_ready_with_size(tmp_path: Path) -> None:
     assert spy.count() == 1
     assert spy.at(0)[0] == path
     assert spy.at(0)[1] == size
+
+
+def test_handle_generation_result_clears_pending_on_null_image(tmp_path: Path, qapp) -> None:
+    del qapp
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(64, 64)
+    key = service._cache_key(path, size)
+    service._pending_tasks.add(key)
+
+    service._handle_generation_result(path, size, QImage())
+
+    assert key not in service._pending_tasks
+
+
+def test_get_thumbnail_retries_after_failed_generation(tmp_path: Path, qapp) -> None:
+    del qapp
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(64, 64)
+    path.write_bytes(b"image")
+
+    calls = {"count": 0}
+
+    def fake_start_generation(request_path: Path, request_size: QSize) -> None:
+        calls["count"] += 1
+        service._handle_generation_result(request_path, request_size, QImage())
+
+    with patch.object(service, "_start_generation", side_effect=fake_start_generation):
+        assert service.get_thumbnail(path, size) is None
+        assert service.get_thumbnail(path, size) is None
+
+    assert calls["count"] == 2
+
+
+def test_get_thumbnail_removes_corrupt_disk_cache(tmp_path: Path, qapp) -> None:
+    del qapp
+    cache_dir = tmp_path / "thumbs"
+    service = ThumbnailCacheService(cache_dir)
+    path = tmp_path / "photo.jpg"
+    size = QSize(64, 64)
+    key = service._cache_key(path, size)
+    disk_file = cache_dir / f"{key}.jpg"
+    disk_file.write_bytes(b"not-a-valid-jpeg")
+
+    with patch.object(service, "_start_generation") as start_generation:
+        assert service.get_thumbnail(path, size) is None
+
+    assert not disk_file.exists()
+    start_generation.assert_called_once_with(path, size)

@@ -38,15 +38,16 @@ class ThumbnailGenerationTask(QRunnable):
         self._signals = signals
 
     def run(self):
+        qimg = QImage()
         try:
             # Generate logic (CPU intensive)
-            qimg = self._renderer(self._path, self._size)
-            if qimg is not None and not qimg.isNull():
-                # Emit result back to main thread
-                self._signals.result.emit(self._path, self._size, qimg)
+            rendered = self._renderer(self._path, self._size)
+            if rendered is not None and not rendered.isNull():
+                qimg = rendered
         except Exception:
             # Silently fail or log in generator
             pass
+        self._signals.result.emit(self._path, self._size, qimg)
 
 class ThumbnailCacheService(QObject):
     """
@@ -111,6 +112,10 @@ class ThumbnailCacheService(QObject):
             if not pixmap.isNull():
                 self._add_to_memory(key, pixmap)
                 return pixmap
+            try:
+                disk_file.unlink()
+            except OSError:
+                pass
 
         # 3. Trigger Async Generation if not pending
         if key not in self._pending_tasks:
@@ -141,18 +146,22 @@ class ThumbnailCacheService(QObject):
 
     def _handle_generation_result(self, path: Path, size: QSize, image: QImage):
         # Back on main thread
-        if not image.isNull():
-            key = self._cache_key(path, size)
-            pixmap = QPixmap.fromImage(image)
+        key = self._cache_key(path, size)
+        self._pending_tasks.discard(key)
+        if image.isNull():
+            return
 
-            # Save to disk
-            disk_file = self._disk_cache_path / f"{key}.jpg"
-            pixmap.save(str(disk_file), "JPEG")
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return
 
-            self._add_to_memory(key, pixmap)
-            self._pending_tasks.discard(key)
+        # Save to disk
+        disk_file = self._disk_cache_path / f"{key}.jpg"
+        pixmap.save(str(disk_file), "JPEG")
 
-            self.thumbnailReady.emit(path, QSize(size))
+        self._add_to_memory(key, pixmap)
+
+        self.thumbnailReady.emit(path, QSize(size))
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
         """Removes the thumbnail from cache to force regeneration."""

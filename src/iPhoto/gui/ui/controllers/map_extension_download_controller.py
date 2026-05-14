@@ -26,6 +26,9 @@ from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadWorker,
 )
 from maps.map_sources import (
+    apply_pending_osmand_extension_install,
+    default_osmand_extension_root,
+    default_pending_osmand_extension_root,
     has_installed_osmand_extension,
     has_pending_osmand_extension_install,
     supports_map_extension_download,
@@ -103,6 +106,7 @@ class MapExtensionDownloadController:
         self._progress_dialog: _MapExtensionProgressDialog | None = None
         self._download_inflight = False
         self._latest_result: MapExtensionDownloadResult | None = None
+        self._active_worker: MapExtensionDownloadWorker | None = None
         self._temporarily_hidden_windows: list[QWidget] = []
 
     def maybe_prompt_on_startup(self) -> None:
@@ -111,6 +115,7 @@ class MapExtensionDownloadController:
         if has_installed_osmand_extension(self._package_root):
             return
         if has_pending_osmand_extension_install(self._package_root):
+            self._recover_pending_install_on_startup()
             return
         if not bool(self._context.settings.get(_SHOW_STARTUP_PROMPT_KEY, True)):
             return
@@ -176,6 +181,7 @@ class MapExtensionDownloadController:
         worker.signals.ready.connect(self._handle_ready)
         worker.signals.error.connect(self._handle_error)
         worker.signals.finished.connect(self._handle_finished)
+        self._active_worker = worker
         QThreadPool.globalInstance().start(worker, -1)
 
     def _handle_progress(self, current: int, total: int, message: str) -> None:
@@ -188,7 +194,9 @@ class MapExtensionDownloadController:
         install_verified = verify_osmand_extension_install(self._package_root, platform=sys.platform)
         if not install_verified:
             self._handle_error(
-                "Map extension download finished, but the install folder was not renamed successfully."
+                self._install_verification_failed_message(
+                    "Map extension download finished, but the install folder was not renamed successfully."
+                )
             )
             return
         if self._progress_dialog is not None:
@@ -225,6 +233,46 @@ class MapExtensionDownloadController:
 
     def _handle_finished(self) -> None:
         self._download_inflight = False
+        self._active_worker = None
+
+    def _recover_pending_install_on_startup(self) -> None:
+        try:
+            apply_pending_osmand_extension_install(self._package_root)
+        except Exception:
+            LOGGER.warning("Failed to recover pending map extension install", exc_info=True)
+            QMessageBox.critical(
+                self._parent,
+                "Map Extension",
+                self._install_verification_failed_message(
+                    "A pending map extension install exists, but it could not be activated."
+                ),
+            )
+            return
+
+        if verify_osmand_extension_install(self._package_root, platform=sys.platform):
+            QMessageBox.information(
+                self._parent,
+                "Map Extension",
+                "Map extension installation was completed. Restart the application to activate it.",
+            )
+            return
+
+        QMessageBox.critical(
+            self._parent,
+            "Map Extension",
+            self._install_verification_failed_message(
+                "A pending map extension install was found, but the installed files could not be verified."
+            ),
+        )
+
+    def _install_verification_failed_message(self, prefix: str) -> str:
+        pending_root = default_pending_osmand_extension_root(self._package_root)
+        extension_root = default_osmand_extension_root(self._package_root)
+        return (
+            f"{prefix}\n\n"
+            f"Pending folder: {pending_root}\n"
+            f"Active extension folder: {extension_root}"
+        )
 
     def _restart_application(self) -> None:
         app = QCoreApplication.instance()

@@ -83,13 +83,13 @@ class MapExtensionDownloadWorker(QRunnable):
         pending_root = default_pending_osmand_extension_root(self._request.package_root)
         extension_root = default_osmand_extension_root(self._request.package_root)
 
-        with tempfile.TemporaryDirectory(prefix="iphoto-map-extension-") as tmp_dir_str:
-            tmp_dir = Path(tmp_dir_str)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="iphoto-map-extension-"))
+        install_verified = False
+        try:
             archive_name = "extension.zip" if self._request.platform == "win32" else "extension.tar.xz"
             archive_path = tmp_dir / archive_name
             extracted_root = tmp_dir / "extracted"
             extracted_root.mkdir(parents=True, exist_ok=True)
-
             self._download_archive(download_url, archive_path)
             self._extract_archive(archive_path, extracted_root)
             staged_extension_root = extracted_root / "extension"
@@ -97,6 +97,9 @@ class MapExtensionDownloadWorker(QRunnable):
             self._validate_extension_root(staged_extension_root)
             self._publish_pending_install(staged_extension_root, pending_root)
             self._install_and_verify_pending_root()
+            install_verified = True
+        finally:
+            self._cleanup_temporary_directory(tmp_dir, report_progress=install_verified)
 
         self.signals.progress.emit(100, 100, "Map extension installed.")
         return MapExtensionDownloadResult(
@@ -196,6 +199,14 @@ class MapExtensionDownloadWorker(QRunnable):
             raise RuntimeError(
                 "Map extension files were downloaded, but the install folder is still incomplete or stuck as '.pending'."
             )
+
+    def _cleanup_temporary_directory(self, tmp_dir: Path, *, report_progress: bool = True) -> None:
+        if report_progress:
+            self.signals.progress.emit(99, 100, "Finalizing map extension install...")
+        try:
+            shutil.rmtree(tmp_dir)
+        except Exception:  # noqa: BLE001 - cleanup must not invalidate a verified install
+            _LOGGER.warning("Failed to remove temporary map extension directory: %s", tmp_dir, exc_info=True)
 
 
 __all__ = [

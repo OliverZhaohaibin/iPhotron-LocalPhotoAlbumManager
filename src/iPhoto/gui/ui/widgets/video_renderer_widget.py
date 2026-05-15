@@ -89,6 +89,25 @@ def _load_shader(path: Path) -> QShader:
     return shader
 
 
+def _rgba_upload_payload(image: QImage) -> tuple[QImage, bytes, int]:
+    """Return a detached RGBA image, packed bytes, and row stride for upload."""
+
+    if image.format() == QImage.Format.Format_RGBA8888:
+        rgba_image = QImage(image)
+    else:
+        rgba_image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    rgba_image = rgba_image.copy()
+
+    byte_count = rgba_image.sizeInBytes()
+    data = rgba_image.constBits()
+    if hasattr(data, "setsize"):
+        data.setsize(byte_count)
+        payload = bytes(data)
+    else:
+        payload = bytes(data[:byte_count])
+    return rgba_image, payload, int(rgba_image.bytesPerLine())
+
+
 # Format enum values matching the shader
 _FMT_NV12 = 0
 _FMT_P010 = 1
@@ -919,9 +938,7 @@ class VideoRendererWidget(QRhiWidget):
         if img.isNull():
             return False
 
-        # Ensure RGBA8888 format
-        if img.format() != QImage.Format.Format_RGBA8888:
-            img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+        img, rgba_data, bytes_per_line = _rgba_upload_payload(img)
 
         w = img.width()
         h = img.height()
@@ -956,7 +973,8 @@ class VideoRendererWidget(QRhiWidget):
         # Set format to RGBA passthrough for shader
         self._fmt_enum = _FMT_RGBA
 
-        rgba_sub = QRhiTextureSubresourceUploadDescription(img)
+        rgba_sub = QRhiTextureSubresourceUploadDescription(rgba_data)
+        rgba_sub.setDataStride(bytes_per_line)
         rgba_upload = QRhiTextureUploadDescription(
             QRhiTextureUploadEntry(0, 0, rgba_sub)
         )

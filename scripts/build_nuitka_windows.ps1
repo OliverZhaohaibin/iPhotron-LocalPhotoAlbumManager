@@ -98,7 +98,7 @@ $arguments = @(
     '--follow-imports',
     '--python-flag=no_site',
     '--enable-plugin=pyside6',
-    '--include-qt-plugins=qml,multimedia',
+    '--include-qt-plugins=qml,multimedia,platforms',
     "--windows-console-mode=$ConsoleMode",
     '--assume-yes-for-downloads',
     '--nofollow-import-to=numba',

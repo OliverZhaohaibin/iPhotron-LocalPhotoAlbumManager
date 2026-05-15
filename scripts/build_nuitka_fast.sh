@@ -10,7 +10,7 @@ python -m nuitka \
   --lto=yes \
   --clang \
   --enable-plugin=pyside6 \
-  --include-qt-plugins=qml,multimedia \
+  --include-qt-plugins=qml,multimedia,xcbglintegrations,platforms \
   --follow-imports \
   --nofollow-import-to=numba \
   --nofollow-import-to=llvmlite \

@@ -283,7 +283,7 @@ nuitka_args=(
   "--lto=yes"
   "--clang"
   "--enable-plugin=pyside6"
-  "--include-qt-plugins=qml,multimedia"
+  "--include-qt-plugins=qml,multimedia,platforms"
   "--follow-imports"
   "--nofollow-import-to=numba"
   "--nofollow-import-to=llvmlite"

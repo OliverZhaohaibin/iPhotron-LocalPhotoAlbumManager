@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImage
+from PIL import Image
 
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery, WindowResult
@@ -153,13 +154,9 @@ class _FailingOnceQueryService(_FakeQueryService):
 
 
 def _jpeg_bytes() -> bytes:
-    image = QImage(4, 4, QImage.Format.Format_RGB32)
-    image.fill(0xFF336699)
-    data = QByteArray()
-    buffer = QBuffer(data)
-    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-    assert image.save(buffer, "JPEG")
-    return bytes(data)
+    data = BytesIO()
+    Image.new("RGB", (4, 4), (0x33, 0x66, 0x99)).save(data, format="JPEG")
+    return data.getvalue()
 
 
 def test_scan_row_to_dto_decodes_micro_thumbnail_bytes() -> None:

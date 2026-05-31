@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -203,6 +204,8 @@ class LibraryScanService:
     ) -> ScanLibraryResult:
         """Scan *root* using the shared application use case."""
 
+        scan_started_ms = _monotonic_ms()
+        stage_elapsed_ms: dict[str, float] = {}
         scan_root = Path(root)
         resolved_include, resolved_exclude = self.scan_filters(
             scan_root,
@@ -229,13 +232,31 @@ class LibraryScanService:
                 "stage_changed",
                 {"stage": ScanStage.DISCOVER.value},
             )
+        stage_elapsed_ms[ScanStage.DISCOVER.value] = round(
+            _monotonic_ms() - scan_started_ms,
+            3,
+        )
+        stat_cache_started_ms = _monotonic_ms()
         existing_index = load_incremental_index_cache(
             scan_root,
             library_root=self.library_root,
             repository=repository,
         )
+        stage_elapsed_ms[ScanStage.STAT_CACHE.value] = round(
+            _monotonic_ms() - stat_cache_started_ms,
+            3,
+        )
         if callable(update_scan_job_stage):
             update_scan_job_stage(scan_job_id, stage=ScanStage.STAT_CACHE.value)
+        if callable(append_scan_event):
+            append_scan_event(
+                scan_job_id,
+                "stage_changed",
+                {
+                    "stage": ScanStage.STAT_CACHE.value,
+                    "elapsed_ms": stage_elapsed_ms[ScanStage.STAT_CACHE.value],
+                },
+            )
 
         use_case = ScanLibraryUseCase(
             scanner=self._scanner,
@@ -244,6 +265,13 @@ class LibraryScanService:
         try:
             if callable(update_scan_job_stage):
                 update_scan_job_stage(scan_job_id, stage=ScanStage.METADATA.value)
+            if callable(append_scan_event):
+                append_scan_event(
+                    scan_job_id,
+                    "stage_changed",
+                    {"stage": ScanStage.METADATA.value},
+                )
+            metadata_started_ms = _monotonic_ms()
             result = use_case.execute(
                 ScanLibraryRequest(
                     root=scan_root,
@@ -259,7 +287,12 @@ class LibraryScanService:
                     chunk_size=chunk_size,
                     persist_chunks=persist_chunks,
                     scan_job_id=scan_job_id,
+                    scan_stage_elapsed_ms=stage_elapsed_ms,
                 )
+            )
+            stage_elapsed_ms[ScanStage.METADATA.value] = round(
+                _monotonic_ms() - metadata_started_ms,
+                3,
             )
         except Exception:
             if callable(update_scan_job_stage):
@@ -270,6 +303,7 @@ class LibraryScanService:
                 )
             raise
 
+        visible_publish_started_ms = _monotonic_ms()
         if callable(update_scan_job_stage):
             update_scan_job_stage(
                 scan_job_id,
@@ -283,6 +317,20 @@ class LibraryScanService:
                 visible_count=sum(1 for row in result.rows if _row_is_ready_visible(row)),
                 failed_count=result.failed_count,
                 finished=True,
+            )
+        stage_elapsed_ms[ScanStage.VISIBLE_PUBLISH.value] = round(
+            _monotonic_ms() - visible_publish_started_ms,
+            3,
+        )
+        if callable(append_scan_event):
+            append_scan_event(
+                scan_job_id,
+                "stage_changed",
+                {
+                    "stage": ScanStage.VISIBLE_PUBLISH.value,
+                    "elapsed_ms": stage_elapsed_ms[ScanStage.VISIBLE_PUBLISH.value],
+                    "stage_elapsed_ms": stage_elapsed_ms,
+                },
             )
         return result
 
@@ -690,6 +738,10 @@ def _row_is_ready_visible(row: dict[str, Any]) -> bool:
         row.get("micro_thumbnail") is not None
         or bool(str(row.get("thumb_cache_key") or "").strip())
     )
+
+
+def _monotonic_ms() -> float:
+    return time.perf_counter() * 1000
 
 
 __all__ = [

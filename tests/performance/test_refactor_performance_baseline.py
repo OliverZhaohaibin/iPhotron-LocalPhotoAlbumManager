@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,7 +13,8 @@ import pytest
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.cache.index_store.queries import QueryBuilder
-from iPhoto.domain.models.query import CollectionQuery, CollectionType
+from iPhoto.domain.models.query import AssetQuery, CollectionQuery, CollectionType, WindowResult
+from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.infrastructure.services.cache_stats import CacheStatsCollector
 from iPhoto.infrastructure.services.disk_thumbnail_cache import DiskThumbnailCache
 from iPhoto.infrastructure.services.thumbnail_cache import MemoryThumbnailCache
@@ -21,10 +24,14 @@ from iPhoto.infrastructure.services.thumbnail_service import ThumbnailService
 SCAN_BASELINE_ROWS = 1_000
 PAGINATION_BASELINE_ROWS = 2_500
 THUMBNAIL_CACHE_HITS = 2_000
+SCROLL_SANITY_ROWS = 10_000
+SCAN_VISIBLE_PUBLISH_ROWS = 20
 
 MAX_SCAN_SECONDS = 5.0
 MAX_PAGINATION_SECONDS = 2.0
 MAX_THUMBNAIL_CACHE_SECONDS = 1.0
+MAX_SCROLL_SANITY_SECONDS = 2.0
+MAX_VISIBLE_PUBLISH_SECONDS = 0.2
 
 
 class _SyntheticScanner:
@@ -70,6 +77,39 @@ class _UnexpectedThumbnailGenerator:
         del asset_id, size
         self.calls += 1
         return b"generated"
+
+
+class _WindowQueryService:
+    def __init__(self, library_root: Path, total_count: int) -> None:
+        self.library_root = library_root
+        self.total_count = total_count
+        self.window_calls: list[tuple[int, int]] = []
+
+    def read_query_asset_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        del root, query
+        first = max(0, min(int(first), max(0, self.total_count - 1)))
+        limit = max(0, int(limit))
+        self.window_calls.append((first, limit))
+        end = min(self.total_count, first + limit)
+        return WindowResult(
+            first=first,
+            rows=[_asset_row(index) for index in range(first, end)],
+            total_count=self.total_count,
+            collection_revision=len(self.window_calls),
+        )
+
+    def find_row_by_path(self, query: AssetQuery, path: Path) -> int | None:
+        del query
+        try:
+            return int(path.stem.rsplit("-", 1)[1])
+        except (IndexError, ValueError):
+            return None
 
 
 @pytest.fixture(autouse=True)
@@ -219,3 +259,63 @@ def test_ready_thumbnail_collection_queries_use_visible_indexes(tmp_path: Path) 
         assert params[params.index("ready")] == "ready"
         assert "USING INDEX idx_assets_visible" in plan or "USING INDEX idx_assets_gps" in plan
         assert "USE TEMP B-TREE" not in plan
+
+
+def test_gallery_scroll_window_materialization_bound(tmp_path: Path) -> None:
+    service = _WindowQueryService(tmp_path, SCROLL_SANITY_ROWS)
+    store = GalleryCollectionStore(service, tmp_path)
+    store.load_selection(tmp_path, query=AssetQuery())
+
+    started = time.perf_counter()
+    for first in range(0, 5_000, 250):
+        store.prioritize_rows(first, first + 79)
+    elapsed = time.perf_counter() - started
+
+    assert len(store._row_cache) <= store.MAX_WINDOW_SIZE + 1
+    assert max(limit for _first, limit in service.window_calls) <= store.MAX_WINDOW_SIZE
+    _assert_under_baseline(elapsed, MAX_SCROLL_SANITY_SECONDS, "gallery scroll window baseline")
+
+
+def test_scan_visible_publish_latency_baseline() -> None:
+    service = _WindowQueryService(Path("/library"), SCAN_VISIBLE_PUBLISH_ROWS)
+    store = GalleryCollectionStore(service, Path("/library"))
+    store.load_selection(Path("/library"), query=AssetQuery())
+    store.prioritize_rows(0, min(SCAN_VISIBLE_PUBLISH_ROWS - 1, 19))
+    batch = SimpleNamespace(
+        root=Path("/library"),
+        collection_revision=2,
+        rows=[
+            {
+                "rel": f"Album/photo-{index:05d}.jpg",
+                "id": f"asset-{index:05d}",
+                "thumbnail_state": "ready",
+                "thumb_cache_key": f"thumb-{index:05d}",
+            }
+            for index in range(SCAN_VISIBLE_PUBLISH_ROWS)
+        ],
+    )
+
+    started = time.perf_counter()
+    assert store.record_scan_batch(batch) is True
+    store.flush_pending_scan_refresh()
+    elapsed = time.perf_counter() - started
+
+    assert store.snapshot_signature()[2] >= 2
+    _assert_under_baseline(elapsed, MAX_VISIBLE_PUBLISH_SECONDS, "scan visible publish baseline")
+
+
+@pytest.mark.skipif(
+    os.environ.get("IPHOTO_RUN_STRESS") != "1",
+    reason="Set IPHOTO_RUN_STRESS=1 to run 100k/1M synthetic scroll benchmarks.",
+)
+@pytest.mark.parametrize("row_count", [100_000, 1_000_000])
+def test_stress_gallery_scroll_window_materialization_bound(tmp_path: Path, row_count: int) -> None:
+    service = _WindowQueryService(tmp_path, row_count)
+    store = GalleryCollectionStore(service, tmp_path)
+    store.load_selection(tmp_path, query=AssetQuery())
+
+    for first in range(0, min(row_count, 50_000), 1_000):
+        store.prioritize_rows(first, first + 119)
+
+    assert len(store._row_cache) <= store.MAX_WINDOW_SIZE + 1
+    assert max(limit for _first, limit in service.window_calls) <= store.MAX_WINDOW_SIZE

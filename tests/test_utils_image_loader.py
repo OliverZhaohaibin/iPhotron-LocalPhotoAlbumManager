@@ -54,6 +54,18 @@ def test_qimage_from_pil_converts_to_rgba():
         passed_image = args[0]
         assert passed_image.mode == "RGBA"
 
+def test_qimage_from_bytes_returns_none_when_pillow_decode_fails(monkeypatch):
+    """Avoid Qt byte decoding for broken data when Pillow is available."""
+    monkeypatch.setattr(
+        image_loader,
+        "_ImageQt",
+        MagicMock(side_effect=Exception("Conversion failed")),
+    )
+
+    qimg = image_loader.qimage_from_bytes(b"not-an-image")
+
+    assert qimg is None
+
 def test_generate_micro_thumbnail_success(tmp_path):
     """Test generating a micro thumbnail from a valid image."""
     image_path = tmp_path / "test.jpg"

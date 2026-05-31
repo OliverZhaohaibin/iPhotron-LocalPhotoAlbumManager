@@ -422,3 +422,82 @@ Next recommended work:
   completion event that can publish `ScanBatchCommitted` on success.
 - Add explicit Qt timer coalescing for scan-triggered Gallery reloads.
 - Add query-plan and opt-in synthetic 100k/1M performance benchmarks.
+
+---
+
+# Scan/Scroll Location Batch + Benchmark Log
+
+Date: 2026-05-31
+Branch: `codex/large-library-performance`
+Status: completed
+
+## Scope
+
+This follow-up continues the scan/scroll event migration after
+`31-large-library-performance-scan-scroll-events-handoff.md`:
+
+- Location/Map now consumes ready-only `ScanBatchCommitted` batches.
+- Legacy `scanChunkReady` remains wired as a compatibility fallback.
+- Scan batches and persisted batch events carry available stage timing.
+- Performance coverage now includes Gallery scroll materialization bounds,
+  scan visible-publish latency, and opt-in 100k/1M synthetic scroll checks.
+
+The existing deletion of `docs/requirements/INITIAL_SCAN_LARGE_LIBRARY_STABILITY.md`
+was preserved and not modified.
+
+## Completed Changes
+
+- Added `GalleryViewModel.handle_location_scan_batch()` and routed both
+  runtime and facade `scanBatchCommitted` signals to it.
+- Kept `handle_location_scan_chunk()` and `scanChunkReady` in place for old
+  transport compatibility while making batch transport the preferred path for
+  both Gallery and Location/Map.
+- Reused existing Location/Map snapshot semantics for batches:
+  map mode emits one `map_assets_changed`, cluster-gallery mode updates the
+  cached snapshot without refreshing the gallery, and inactive mode only
+  invalidates a cached location snapshot.
+- Added available stage timing to `ScanBatchCommitted.stage_elapsed_ms` and
+  `scan_events.batch_committed` payloads: discover, stat-cache validation,
+  metadata extraction elapsed so far, and DB commit.
+- Added final `visible_publish` timing to persisted scan stage events.
+- Added performance coverage for bounded Gallery scroll materialization,
+  scan visible-publish latency, and opt-in synthetic 100k/1M scroll benchmarks
+  guarded by `IPHOTO_RUN_STRESS=1`.
+- Changed micro-thumbnail byte decoding to prefer Pillow when available, using
+  Qt's byte decoder only as a fallback when Pillow support is unavailable.
+
+## Verification
+
+Commands run:
+
+```bash
+.venv/bin/pytest tests/gui/viewmodels/test_gallery_viewmodel.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/gui/viewmodels/test_gallery_collection_store.py tests/application/test_library_scan_service.py tests/performance/test_refactor_performance_baseline.py tests/test_utils_image_loader.py -q
+python3 -m compileall -q src/iPhoto
+git diff --check
+```
+
+Result:
+
+- 115 passed, 2 skipped for the focused GUI/scan/performance command.
+- compileall passed.
+- diff whitespace check passed.
+- Existing warning remains: pytest unknown config option `env`.
+
+## Handoff
+
+Current behavior to preserve:
+
+- `ScanBatchCommitted.rows` remains ready-only.
+- Location/Map should prefer `scanBatchCommitted`; `scanChunkReady` remains a
+  fallback until remaining legacy producers are formally retired.
+- Location/Map batch handling must not refresh cluster gallery views.
+- The stress benchmark is opt-in only through `IPHOTO_RUN_STRESS=1`.
+- No startup full-library thumbnail backfill was added.
+
+Next recommended work:
+
+- Add richer scanner-owned timing if/when the scanner exposes discover,
+  metadata, thumbnail, and derived-job boundaries directly.
+- Continue evaluating `scanChunkReady` removal once all GUI and service
+  consumers prove they no longer depend on legacy chunk payloads.
+- Add JSON/CSV benchmark output for long-running local stress comparisons.

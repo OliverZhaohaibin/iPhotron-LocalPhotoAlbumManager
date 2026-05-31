@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -465,12 +466,27 @@ def test_scan_batch_committed_transport_contains_only_ready_rows(tmp_path: Path)
     assert batches[0].job_id == result.scan_job_id
     assert [row["rel"] for row in batches[0].rows] == ["ready.jpg"]
     assert [row["rel"] for row in legacy_chunks[0]] == ["ready.jpg"]
+    assert "db_commit" in batches[0].stage_elapsed_ms
+    assert "discover" in batches[0].stage_elapsed_ms
+    assert "stat_cache_validation" in batches[0].stage_elapsed_ms
+    assert "metadata_extraction" in batches[0].stage_elapsed_ms
 
     with sqlite3.connect(get_global_repository(library_root).path) as conn:
         event = conn.execute(
             "SELECT event_type, payload_json FROM scan_events WHERE job_id = ? AND event_type = 'batch_committed'",
             [result.scan_job_id],
         ).fetchone()
+        visible_event = conn.execute(
+            "SELECT payload_json FROM scan_events WHERE job_id = ? AND event_type = 'stage_changed' AND payload_json LIKE ?",
+            [result.scan_job_id, '%"visible_publish"%'],
+        ).fetchone()
     assert event is not None
     assert event[0] == "batch_committed"
-    assert '"ready_rows": 1' in event[1]
+    payload = json.loads(event[1])
+    assert payload["ready_rows"] == 1
+    assert "stage_elapsed_ms" in payload
+    assert "db_commit" in payload["stage_elapsed_ms"]
+    assert "metadata_extraction" in payload["stage_elapsed_ms"]
+    assert visible_event is not None
+    visible_payload = json.loads(visible_event[0])
+    assert "visible_publish" in visible_payload["stage_elapsed_ms"]

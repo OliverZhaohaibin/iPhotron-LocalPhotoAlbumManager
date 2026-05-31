@@ -385,7 +385,19 @@ class GalleryViewModel(BaseViewModel):
     def return_to_map_from_cluster_gallery(self) -> None:
         self.return_from_cluster_gallery()
 
+    def handle_location_scan_batch(self, batch: object) -> None:
+        """Consume ready-only scan batches for the Location/Map snapshot."""
+
+        scan_root = getattr(batch, "root", None)
+        rows = getattr(batch, "rows", None)
+        if scan_root is None or not rows:
+            return
+        self._handle_location_scan_rows(Path(scan_root), list(rows))
+
     def handle_location_scan_chunk(self, scan_root: Path, chunk: list[dict]) -> None:
+        self._handle_location_scan_rows(scan_root, chunk)
+
+    def _handle_location_scan_rows(self, scan_root: Path, rows: list[dict]) -> None:
         root = self._context.library.root()
         if root is None or not self._scan_root_matches_location_context(scan_root, root):
             return
@@ -395,7 +407,7 @@ class GalleryViewModel(BaseViewModel):
             return
 
         changed = False
-        for row in chunk:
+        for row in rows:
             asset = self._location_asset_from_row(row, root)
             if asset is not None:
                 changed = self._location_session.upsert_asset(asset) or changed

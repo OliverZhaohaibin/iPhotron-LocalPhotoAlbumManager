@@ -31,6 +31,7 @@ class ScanLibraryRequest:
     chunk_size: int = 500
     persist_chunks: bool = True
     scan_job_id: str | None = None
+    scan_stage_elapsed_ms: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class ScanLibraryUseCase:
         chunk: list[dict[str, Any]] = []
         failed_count = 0
         chunk_size = max(1, int(request.chunk_size))
+        scan_started = _monotonic_ms()
 
         for scanned_row in self._scanner.scan(
             request.root,
@@ -76,7 +78,11 @@ class ScanLibraryUseCase:
             if request.persist_chunks:
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
-                    failed_count += self._merge_chunk(chunk, request)
+                    failed_count += self._merge_chunk(
+                        chunk,
+                        request,
+                        metadata_elapsed_ms=round(_monotonic_ms() - scan_started, 3),
+                    )
                     chunk = []
 
         if (
@@ -84,7 +90,11 @@ class ScanLibraryUseCase:
             and chunk
             and not (request.is_cancelled is not None and request.is_cancelled())
         ):
-            failed_count += self._merge_chunk(chunk, request)
+            failed_count += self._merge_chunk(
+                chunk,
+                request,
+                metadata_elapsed_ms=round(_monotonic_ms() - scan_started, 3),
+            )
 
         return ScanLibraryResult(
             rows=rows,
@@ -105,6 +115,8 @@ class ScanLibraryUseCase:
         self,
         chunk: list[dict[str, Any]],
         request: ScanLibraryRequest,
+        *,
+        metadata_elapsed_ms: float | None = None,
     ) -> int:
         started = _monotonic_ms()
         try:
@@ -129,6 +141,10 @@ class ScanLibraryUseCase:
         commit_elapsed_ms = round(_monotonic_ms() - started, 3)
         ready_chunk = _ready_visible_rows(emitted_chunk)
         collection_revision = _collection_revision_from_rows(emitted_chunk)
+        stage_elapsed_ms = dict(request.scan_stage_elapsed_ms or {})
+        if metadata_elapsed_ms is not None:
+            stage_elapsed_ms["metadata_extraction"] = metadata_elapsed_ms
+        stage_elapsed_ms["db_commit"] = commit_elapsed_ms
         batch = None
         if request.scan_job_id and ready_chunk:
             batch = ScanBatchCommitted(
@@ -137,7 +153,7 @@ class ScanLibraryUseCase:
                 collection_revision=collection_revision,
                 ready_count=len(ready_chunk),
                 rows=ready_chunk,
-                stage_elapsed_ms={"db_commit": commit_elapsed_ms},
+                stage_elapsed_ms=stage_elapsed_ms,
             )
         append_scan_event = getattr(self._asset_repository, "append_scan_event", None)
         if request.scan_job_id and callable(append_scan_event):
@@ -149,6 +165,7 @@ class ScanLibraryUseCase:
                     "rows": len(emitted_chunk),
                     "ready_rows": len(ready_chunk),
                     "commit_elapsed_ms": commit_elapsed_ms,
+                    "stage_elapsed_ms": stage_elapsed_ms,
                     "collection_revision": collection_revision,
                 },
             )

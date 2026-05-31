@@ -110,6 +110,16 @@ def load_qpixmap(source: Path, target: QSize | None = None) -> Optional[QPixmap]
 def qimage_from_bytes(data: bytes) -> Optional[QImage]:
     """Return a :class:`QImage` decoded from JPEG/PNG *data*."""
 
+    if _Image is not None and _ImageOps is not None and _ImageQt is not None:
+        try:
+            with _Image.open(BytesIO(data)) as img:  # type: ignore[union-attr]
+                img = _ImageOps.exif_transpose(img)
+                qt_image = _ImageQt(img.convert("RGBA"))
+            return QImage(qt_image)
+        except Exception:
+            _LOGGER.debug("Pillow failed to decode image bytes in qimage_from_bytes")
+            return None
+
     image = QImage()
     if image.loadFromData(data):
         return image
@@ -119,16 +129,7 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
         return image
     if image.loadFromData(data, "PNG"):
         return image
-    if _Image is None or _ImageOps is None or _ImageQt is None:
-        return None
-    try:
-        with _Image.open(BytesIO(data)) as img:  # type: ignore[union-attr]
-            img = _ImageOps.exif_transpose(img)
-            qt_image = _ImageQt(img.convert("RGBA"))
-    except Exception:
-        _LOGGER.exception("Pillow failed to decode image bytes in qimage_from_bytes")
-        return None
-    return QImage(qt_image)
+    return None
 
 
 def qimage_from_pil(image: "Image.Image") -> Optional[QImage]:

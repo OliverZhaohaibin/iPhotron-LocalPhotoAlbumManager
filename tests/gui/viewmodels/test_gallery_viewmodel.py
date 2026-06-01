@@ -269,7 +269,7 @@ def test_return_to_map_from_singleton_location_cluster_reuses_snapshot(tmp_path:
     assert map_payloads == [(assets, tmp_path)]
 
 
-def test_location_scan_chunk_updates_map_snapshot_incrementally(tmp_path: Path) -> None:
+def test_location_scan_batch_updates_map_snapshot_incrementally(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     existing = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
     serial = vm.location_session.begin_load(tmp_path)
@@ -279,17 +279,19 @@ def test_location_scan_chunk_updates_map_snapshot_incrementally(tmp_path: Path) 
     payloads = []
     vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
 
-    vm.handle_location_scan_chunk(
-        tmp_path / "Album",
-        [
-            {
-                "rel": "Album/new.jpg",
-                "id": "asset-2",
-                "gps": {"lat": 52.5, "lon": 13.4},
-                "mime": "image/jpeg",
-                "parent_album_path": "Album",
-            }
-        ],
+    vm.handle_location_scan_batch(
+        SimpleNamespace(
+            root=tmp_path / "Album",
+            rows=[
+                {
+                    "rel": "Album/new.jpg",
+                    "id": "asset-2",
+                    "gps": {"lat": 52.5, "lon": 13.4},
+                    "mime": "image/jpeg",
+                    "parent_album_path": "Album",
+                }
+            ],
+        )
     )
 
     snapshot = vm.location_session.full_assets()
@@ -297,7 +299,7 @@ def test_location_scan_chunk_updates_map_snapshot_incrementally(tmp_path: Path) 
     assert payloads[-1] == (snapshot, tmp_path)
 
 
-def test_location_scan_batch_updates_map_snapshot_incrementally(tmp_path: Path) -> None:
+def test_location_scan_batch_updates_map_snapshot_with_ready_rows(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     existing = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
     serial = vm.location_session.begin_load(tmp_path)
@@ -329,7 +331,7 @@ def test_location_scan_batch_updates_map_snapshot_incrementally(tmp_path: Path) 
     assert payloads[-1] == (snapshot, tmp_path)
 
 
-def test_location_scan_chunk_uses_session_location_service(tmp_path: Path) -> None:
+def test_location_scan_batch_uses_session_location_service(tmp_path: Path) -> None:
     vm, _store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, [])
@@ -341,24 +343,26 @@ def test_location_scan_chunk_uses_session_location_service(tmp_path: Path) -> No
     context.library.location_service = MagicMock()
     context.library.location_service.asset_from_row.return_value = converted
 
-    vm.handle_location_scan_chunk(
-        tmp_path / "Album",
-        [
-            {
-                "rel": "Album/new.jpg",
-                "id": "asset-2",
-                "gps": {"lat": 52.5, "lon": 13.4},
-                "mime": "image/jpeg",
-                "parent_album_path": "Album",
-            }
-        ],
+    vm.handle_location_scan_batch(
+        SimpleNamespace(
+            root=tmp_path / "Album",
+            rows=[
+                {
+                    "rel": "Album/new.jpg",
+                    "id": "asset-2",
+                    "gps": {"lat": 52.5, "lon": 13.4},
+                    "mime": "image/jpeg",
+                    "parent_album_path": "Album",
+                }
+            ],
+        )
     )
 
     context.library.location_service.asset_from_row.assert_called_once()
     assert vm.location_session.full_assets() == [converted]
 
 
-def test_location_scan_chunk_removes_assets_that_no_longer_qualify(tmp_path: Path) -> None:
+def test_location_scan_batch_removes_assets_that_no_longer_qualify(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     existing = SimpleNamespace(library_relative="Album/new.jpg", absolute_path=tmp_path / "Album" / "new.jpg")
     serial = vm.location_session.begin_load(tmp_path)
@@ -368,9 +372,11 @@ def test_location_scan_chunk_removes_assets_that_no_longer_qualify(tmp_path: Pat
     payloads = []
     vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
 
-    vm.handle_location_scan_chunk(
-        tmp_path / "Album",
-        [{"rel": "Album/new.jpg", "id": "asset-2", "live_role": 1}],
+    vm.handle_location_scan_batch(
+        SimpleNamespace(
+            root=tmp_path / "Album",
+            rows=[{"rel": "Album/new.jpg", "id": "asset-2", "live_role": 1}],
+        )
     )
 
     snapshot = vm.location_session.full_assets()
@@ -378,7 +384,7 @@ def test_location_scan_chunk_removes_assets_that_no_longer_qualify(tmp_path: Pat
     assert payloads[-1] == (snapshot, tmp_path)
 
 
-def test_location_scan_chunk_updates_snapshot_without_refreshing_cluster_gallery(tmp_path: Path) -> None:
+def test_location_scan_batch_updates_cluster_snapshot_without_ready_details(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, [])
@@ -387,24 +393,26 @@ def test_location_scan_chunk_updates_snapshot_without_refreshing_cluster_gallery
     payloads = []
     vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
 
-    vm.handle_location_scan_chunk(
-        tmp_path,
-        [
-            {
-                "rel": "Album/new.jpg",
-                "id": "asset-2",
-                "gps": {"lat": 52.5, "lon": 13.4},
-                "mime": "image/jpeg",
-                "parent_album_path": "Album",
-            }
-        ],
+    vm.handle_location_scan_batch(
+        SimpleNamespace(
+            root=tmp_path,
+            rows=[
+                {
+                    "rel": "Album/new.jpg",
+                    "id": "asset-2",
+                    "gps": {"lat": 52.5, "lon": 13.4},
+                    "mime": "image/jpeg",
+                    "parent_album_path": "Album",
+                }
+            ],
+        )
     )
 
     assert payloads == []
     assert vm.location_session.resolve_asset("Album/new.jpg") is not None
 
 
-def test_location_scan_batch_updates_snapshot_without_refreshing_cluster_gallery(tmp_path: Path) -> None:
+def test_location_scan_batch_updates_cluster_snapshot_with_ready_rows(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, [])
@@ -467,9 +475,17 @@ def test_location_scan_updates_ignore_unrelated_scan_roots(tmp_path: Path) -> No
     vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
 
     other_root = tmp_path.parent / "OtherLibrary"
-    vm.handle_location_scan_chunk(
-        other_root,
-        [{"rel": "Album/new.jpg", "gps": {"lat": 52.5, "lon": 13.4}, "mime": "image/jpeg"}],
+    vm.handle_location_scan_batch(
+        SimpleNamespace(
+            root=other_root,
+            rows=[
+                {
+                    "rel": "Album/new.jpg",
+                    "gps": {"lat": 52.5, "lon": 13.4},
+                    "mime": "image/jpeg",
+                }
+            ],
+        )
     )
     vm.handle_location_scan_finished(other_root, True)
 
@@ -477,30 +493,32 @@ def test_location_scan_updates_ignore_unrelated_scan_roots(tmp_path: Path) -> No
     assert vm.location_session.full_assets() == []
 
 
-def test_location_scan_chunk_invalidates_cached_snapshot_while_location_is_inactive(tmp_path: Path) -> None:
+def test_location_scan_batch_invalidates_cached_snapshot_without_ready_details(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     existing = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, [existing])
     vm.location_session.set_mode("inactive")
 
-    vm.handle_location_scan_chunk(
-        tmp_path / "Album",
-        [
-            {
-                "rel": "Album/new.jpg",
-                "id": "asset-2",
-                "gps": {"lat": 52.5, "lon": 13.4},
-                "mime": "image/jpeg",
-                "parent_album_path": "Album",
-            }
-        ],
+    vm.handle_location_scan_batch(
+        SimpleNamespace(
+            root=tmp_path / "Album",
+            rows=[
+                {
+                    "rel": "Album/new.jpg",
+                    "id": "asset-2",
+                    "gps": {"lat": 52.5, "lon": 13.4},
+                    "mime": "image/jpeg",
+                    "parent_album_path": "Album",
+                }
+            ],
+        )
     )
 
     assert vm.location_session.invalidated is True
 
 
-def test_location_scan_batch_invalidates_cached_snapshot_while_location_is_inactive(tmp_path: Path) -> None:
+def test_location_scan_batch_invalidates_cached_snapshot_with_ready_rows(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     existing = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
     serial = vm.location_session.begin_load(tmp_path)

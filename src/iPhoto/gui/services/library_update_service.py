@@ -56,7 +56,6 @@ class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
     scanProgress = Signal(Path, int, int)
-    scanChunkReady = Signal(Path, list)
     scanBatchCommitted = Signal(object)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
@@ -182,7 +181,6 @@ class LibraryUpdateService(QObject):
             library_root=library_root,
             scan_service=scan_service,
             on_progress=self._relay_scan_progress,
-            on_chunk=self._relay_scan_chunk_ready,
             on_batch_committed=self._relay_scan_batch_committed,
             on_batch_failed=self._relay_scan_batch_failed,
             on_cancelled=self._on_scan_cancelled,
@@ -448,11 +446,6 @@ class LibraryUpdateService(QObject):
         """Forward worker progress updates to keep Qt's type system satisfied."""
 
         self.scanProgress.emit(root, current, total)
-
-    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
-        """Forward worker chunks to listeners."""
-
-        self.scanChunkReady.emit(root, chunk)
 
     def _relay_scan_batch_committed(self, batch: object) -> None:
         """Forward explicit ready-only scan batches to listeners."""

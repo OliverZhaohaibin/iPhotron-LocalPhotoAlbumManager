@@ -731,7 +731,7 @@ class LibraryAssetQueryService:
             date_to=query.date_to,
             sort_key="sort_ts",
             sort_direction=SortDirection.DESC,
-            min_thumbnail_state=None,
+            min_thumbnail_state="ready",
         )
 
     @staticmethod

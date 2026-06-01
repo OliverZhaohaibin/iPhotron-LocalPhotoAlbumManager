@@ -570,3 +570,117 @@ Next recommended work:
 - Add a maintenance/repair command for older libraries that have micro-only
   ready rows and need full L2 cache backfill.
 - Add benchmark JSON/CSV output for comparing L2 cache hit rates over time.
+
+---
+
+# ScanChunkReady Removal Log
+
+Date: 2026-06-01
+Branch: `codex/large-library-performance`
+Status: completed
+
+## Scope
+
+This follow-up fully removes the legacy `scanChunkReady` scan transport after
+the full-cache-key ready-row invariant was tightened.
+
+## Completed Changes
+
+- Removed scan-time `scanChunkReady` / `chunkReady` publication from runtime,
+  facade, update service, task runner, scanner worker, and main coordinator
+  wiring.
+- Removed legacy scan chunk callback APIs from `LibraryScanService` and
+  `ScanLibraryUseCase`; scan UI publication now uses `ScanBatchCommitted` only.
+- Added a 100-ready-row visible publish threshold for scan jobs with a UI batch
+  subscriber while keeping the default 500-row DB merge chunk intact.
+- Visible publication remains filtered through ready rows that have non-empty
+  `thumb_cache_key`.
+- Kept Location/Map and Gallery scan refresh on the batch path only.
+- Fixed empty first-window Gallery refresh so a scan batch arriving after an
+  initially empty collection loads the first window instead of clearing the
+  pending refresh.
+- Archived the removed transport shape under
+  `src/iPhoto/legacy/library/scan_chunk_ready_transport.py` as reference-only
+  code that production runtime must not import.
+
+## Current behavior to preserve
+
+- `ScanBatchCommitted.rows` remains ready-only and full-cache-key-only.
+- Scan UI publication should happen through `ScanBatchCommitted` in small
+  ready-row batches, without reintroducing `scanChunkReady`.
+- Asset-loader-local `chunkReady` names are unrelated to scan publication and
+  are intentionally unchanged.
+- `src/iPhoto/legacy` remains a quarantine/reference area only.
+
+---
+
+# Scan Visible Publish Repair Log
+
+Date: 2026-06-02
+Branch: `codex/large-library-performance`
+Status: completed
+
+## Scope
+
+This follow-up repairs the in-scan UI feedback regression introduced during the
+large-library scan transport migration. The fix preserves the new
+`ScanBatchCommitted` architecture and does not reintroduce production
+`scanChunkReady` calls.
+
+Detailed handoff:
+
+- `docs/refactor/34-large-library-performance-scan-visible-publish-repair.md`
+
+## Findings
+
+- Scan publication had moved to `ScanBatchCommitted`, but UI-visible batches
+  could still wait for the larger 500-row DB merge chunk.
+- Empty first-window Gallery selections could drop pending scan refreshes
+  because no visible range existed yet.
+- Some collection query tests still encoded the old behavior where
+  stale/failed/pending or no-key rows could appear in ordinary Gallery
+  collections. The current ready-row invariant requires ordinary collection
+  rows to be `thumbnail_state='ready'` with a non-empty `thumb_cache_key`.
+
+## Completed Changes
+
+- Added `visible_publish_size=100` to scan requests.
+- Changed scan execution so each DB merge can publish ready/full-cache-key rows
+  as 100-row `ScanBatchCommitted` UI batches.
+- Kept batch rows ready-only and full-cache-key-only after repository merge.
+- Changed empty Gallery first-window scan refresh handling so the first
+  `ScanBatchCommitted` can load the initial window instead of being discarded.
+- Restored ordinary `CollectionQuery` and `AssetQuery -> CollectionQuery`
+  behavior to ready-only collections by default.
+- Updated tests to assert the new architecture: small ready-row batch
+  publication, empty initial-window refresh, and hidden stale/failed/pending
+  rows.
+
+## Verification
+
+Commands run:
+
+```bash
+.venv/bin/pytest tests/application/test_library_scan_service.py tests/application/test_scan_library_use_case.py tests/application/test_library_asset_query_service.py tests/cache/test_index_store_features.py tests/library/test_scanner_worker.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/gui/viewmodels/test_gallery_viewmodel.py tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/test_people_service.py::test_scanner_worker_does_not_emit_batch_for_failed_persist tests/performance/test_refactor_performance_baseline.py tests/architecture/test_layer_boundaries.py -q
+python3 -m compileall -q src/iPhoto
+git diff --check
+rg -n "scanChunkReady|handle_location_scan_chunk|visible_chunk_callback|chunk_callback" src/iPhoto tests
+```
+
+Result:
+
+- 173 passed, 2 skipped.
+- compileall passed.
+- diff whitespace check passed.
+- `rg` only reports the reference-only legacy archive for removed scan chunk
+  transport; production scan code remains on `ScanBatchCommitted`.
+- Existing warning remains: pytest unknown config option `env`.
+
+## Current behavior to preserve
+
+- In-scan UI updates must flow through `ScanBatchCommitted`.
+- Production code must not reconnect `scanChunkReady`.
+- Visible batch publication should remain within the 50-200 ready-row range
+  unless replaced by an equivalent 100-250ms coalescing policy.
+- Ordinary Gallery collections should not show stale, failed, pending, or
+  full-cache-key-missing rows.

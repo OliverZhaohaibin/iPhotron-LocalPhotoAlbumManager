@@ -740,7 +740,7 @@ def test_asset_id_query_reads_people_cluster_rows_through_query_service(
     assert dto.rel_path == Path("b.jpg")
 
 
-def test_handle_scan_chunk_refreshes_when_new_row_sorts_into_visible_window(tmp_path: Path) -> None:
+def test_handle_scan_batch_refreshes_when_new_row_sorts_into_visible_window(tmp_path: Path) -> None:
     root = tmp_path / "Library"
     root.mkdir()
     base_dt = datetime(2024, 1, 1, 12, 0, 0)
@@ -766,12 +766,62 @@ def test_handle_scan_chunk_refreshes_when_new_row_sorts_into_visible_window(tmp_
 
     refreshed = []
     store.data_changed.connect(lambda: refreshed.append(True))
-    store.handle_scan_chunk(
-        root,
-        [{"rel": "new_visible.jpg", "id": "scan-1", "dt": midpoint.created_at.isoformat()}],
+    store.handle_scan_batch(
+        SimpleNamespace(
+            root=root,
+            rows=[
+                {
+                    "rel": "new_visible.jpg",
+                    "id": "scan-1",
+                    "dt": midpoint.created_at.isoformat(),
+                }
+            ],
+        )
     )
 
     assert refreshed
+
+
+def test_handle_scan_batch_refreshes_empty_initial_window(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    query_service = _FakeQueryService([], library_root=root)
+    store = GalleryCollectionStore(query_service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.set_active_root(root)
+    store.load_selection(root, query=AssetQuery())
+
+    assert store.count() == 0
+    assert store.snapshot_signature()[1] is None
+
+    query_service.assets.append(
+        Asset(
+            id="scan-new",
+            album_id="a",
+            path=Path("new_asset.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=datetime(2024, 1, 1, 12, 0, 0),
+        )
+    )
+
+    store.handle_scan_batch(
+        SimpleNamespace(
+            root=root,
+            collection_revision=2,
+            rows=[
+                {
+                    "rel": "new_asset.jpg",
+                    "id": "scan-new",
+                    "thumbnail_state": "ready",
+                    "thumb_cache_key": "thumb-new",
+                }
+            ],
+        )
+    )
+
+    assert store.count() == 1
+    assert store.asset_at(0) is not None
 
 
 def test_handle_scan_finished_refreshes_count_outside_top_visible_window(tmp_path: Path) -> None:
@@ -851,9 +901,17 @@ def test_mid_scroll_rescan_updates_gallery_after_single_scan_finished(tmp_path: 
         ),
     )
 
-    store.handle_scan_chunk(
-        root,
-        [{"rel": "new_asset.jpg", "id": "scan-new", "dt": (base_dt + timedelta(minutes=5)).isoformat()}],
+    store.handle_scan_batch(
+        SimpleNamespace(
+            root=root,
+            rows=[
+                {
+                    "rel": "new_asset.jpg",
+                    "id": "scan-new",
+                    "dt": (base_dt + timedelta(minutes=5)).isoformat(),
+                }
+            ],
+        )
     )
 
     assert store.count() == 240

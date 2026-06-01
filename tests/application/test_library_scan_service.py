@@ -121,7 +121,7 @@ def test_subalbum_scan_prefixes_library_relative_rows(tmp_path: Path) -> None:
     ]
 
 
-def test_scan_album_default_chunk_size_is_large_enough(tmp_path: Path) -> None:
+def test_scan_album_visible_publish_batches_are_small_enough(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     library_root.mkdir()
     rows = [
@@ -140,11 +140,11 @@ def test_scan_album_default_chunk_size_is_large_enough(tmp_path: Path) -> None:
     result = service.scan_album(
         library_root,
         persist_chunks=True,
-        chunk_callback=lambda chunk: emitted_sizes.append(len(chunk)),
+        scan_batch_callback=lambda batch: emitted_sizes.append(len(batch.rows)),
     )
 
     assert len(result.rows) == 501
-    assert emitted_sizes == [500, 1]
+    assert emitted_sizes == [100, 100, 100, 100, 100, 1]
 
 
 def test_finalize_scan_does_not_prune_stale_rows(tmp_path: Path) -> None:
@@ -452,14 +452,12 @@ def test_scan_batch_committed_transport_contains_only_ready_rows(tmp_path: Path)
         },
     ]
     batches = []
-    legacy_chunks: list[list[dict[str, Any]]] = []
     service = LibraryScanService(library_root, scanner=_Scanner(rows))
 
     result = service.scan_album(
         library_root,
         persist_chunks=True,
         chunk_size=2,
-        chunk_callback=legacy_chunks.append,
         scan_batch_callback=batches.append,
     )
 
@@ -467,7 +465,6 @@ def test_scan_batch_committed_transport_contains_only_ready_rows(tmp_path: Path)
     assert len(batches) == 1
     assert batches[0].job_id == result.scan_job_id
     assert [row["rel"] for row in batches[0].rows] == ["ready.jpg"]
-    assert [row["rel"] for row in legacy_chunks[0]] == ["ready.jpg"]
     assert "db_commit" in batches[0].stage_elapsed_ms
     assert "discover" in batches[0].stage_elapsed_ms
     assert "stat_cache_validation" in batches[0].stage_elapsed_ms

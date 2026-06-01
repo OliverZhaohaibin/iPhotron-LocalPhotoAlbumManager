@@ -98,7 +98,6 @@ class ScanCoordinatorMixin:
         )
         self._current_scanner_worker = worker
         signals.progressUpdated.connect(self.scanProgress)
-        signals.chunkReady.connect(self._on_scan_chunk)
         signals.batchCommitted.connect(self._on_scan_batch_committed)
         signals.finished.connect(
             lambda emitted_root, rows, scan_worker=worker: self._on_scan_finished(
@@ -319,22 +318,6 @@ class ScanCoordinatorMixin:
             return filtered
 
         return []
-
-    def _on_scan_chunk(self, root: Path, chunk: List[dict]) -> None:
-        """Handle incoming scan chunks after persistence.
-
-        The scan worker already persists each chunk to disk before this signal is
-        observed. The browsing layer now treats the database as the source of
-        truth, so we only relay the invalidation event here.
-        """
-
-        if not chunk:
-            return
-
-        self.invalidate_geotagged_assets_cache()
-        if self._current_face_scanner is not None:
-            self._current_face_scanner.enqueue_rows(chunk)
-        self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_batch_committed(self, batch: object) -> None:
         """Handle explicit ready-only scan batches after persistence."""

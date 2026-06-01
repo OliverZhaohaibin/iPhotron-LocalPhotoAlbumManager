@@ -394,9 +394,6 @@ class GalleryViewModel(BaseViewModel):
             return
         self._handle_location_scan_rows(Path(scan_root), list(rows))
 
-    def handle_location_scan_chunk(self, scan_root: Path, chunk: list[dict]) -> None:
-        self._handle_location_scan_rows(scan_root, chunk)
-
     def _handle_location_scan_rows(self, scan_root: Path, rows: list[dict]) -> None:
         root = self._context.library.root()
         if root is None or not self._scan_root_matches_location_context(scan_root, root):

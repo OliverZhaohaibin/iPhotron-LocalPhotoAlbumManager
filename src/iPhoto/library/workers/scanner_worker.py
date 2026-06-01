@@ -3,27 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional, TYPE_CHECKING
+from typing import Iterable, List, Optional
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from ...bootstrap.library_scan_service import (
-    LibraryScanService,
-    merge_scan_chunk_with_repository,
-)
+from ...bootstrap.library_scan_service import LibraryScanService
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
 
 LOGGER = get_logger()
 
-if TYPE_CHECKING:
-    from ...cache.index_store.repository import AssetRepository
 
 class ScannerSignals(QObject):
     """Signals emitted by :class:`ScannerWorker` while scanning."""
 
     progressUpdated = Signal(Path, int, int)
-    chunkReady = Signal(Path, list)
     batchCommitted = Signal(object)
     finished = Signal(Path, list)
     error = Signal(Path, str)
@@ -128,7 +122,6 @@ class ScannerWorker(QRunnable):
                 exclude=self._exclude,
                 progress_callback=progress_callback,
                 is_cancelled=lambda: self._is_cancelled,
-                chunk_callback=self._emit_chunk_if_active,
                 scan_batch_callback=self._emit_batch_if_active,
                 batch_failed_callback=lambda count: self._signals.batchFailed.emit(
                     self._root,
@@ -146,36 +139,12 @@ class ScannerWorker(QRunnable):
                 self._signals.error.emit(self._root, str(exc))
         finally:
             if not self._is_cancelled and not self._had_error:
-                # Consumers should use `chunkReady` for progressive UI updates.
+                # Consumers should use `batchCommitted` for progressive UI updates.
                 # The `finished` signal provides the complete dataset for
                 # authoritative operations (e.g. writing the index file).
                 self._signals.finished.emit(self._root, rows)
             else:
                 self._signals.finished.emit(self._root, [])
-
-    def _process_chunk(self, store: "AssetRepository", chunk: List[dict]) -> None:
-        """Compatibility wrapper for tests and legacy worker internals."""
-
-        self._failed_count += merge_scan_chunk_with_repository(
-            store,
-            root=self._root,
-            include=self._include,
-            exclude=self._exclude,
-            chunk=chunk,
-            chunk_callback=lambda emitted: self._signals.chunkReady.emit(
-                self._root,
-                emitted,
-            ),
-            batch_failed_callback=lambda count: self._signals.batchFailed.emit(
-                self._root,
-                count,
-            ),
-        )
-
-    def _emit_chunk_if_active(self, chunk: list[dict]) -> None:
-        if self._is_cancelled:
-            return
-        self._signals.chunkReady.emit(self._root, chunk)
 
     def _emit_batch_if_active(self, batch: object) -> None:
         if self._is_cancelled:

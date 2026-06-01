@@ -40,7 +40,6 @@ class LibraryUpdateTaskRunner:
         library_root: Path | None,
         scan_service: LibraryScanService | None,
         on_progress: Callable[[Path, int, int], None],
-        on_chunk: Callable[[Path, list[dict]], None],
         on_batch_committed: Callable[[object], None],
         on_batch_failed: Callable[[Path, int], None],
         on_cancelled: Callable[[Path, bool], None],
@@ -58,7 +57,6 @@ class LibraryUpdateTaskRunner:
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(on_progress)
-        signals.chunkReady.connect(on_chunk)
         if on_batch_committed is not None:
             signals.batchCommitted.connect(on_batch_committed)
         signals.batchFailed.connect(on_batch_failed)

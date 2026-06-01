@@ -496,22 +496,12 @@ class GalleryCollectionStore:
         self._pinned_row = row
         self.ensure_row_loaded(row, emit_signals=True)
 
-    def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
-        if not self.record_scan_chunk(scan_root, chunk):
-            return
-        if self._visible_range is None:
-            return
+    def _record_scan_rows(self, scan_root: Path, rows: List[dict]) -> bool:
+        """Record ready batch rows and defer the visible-window refresh."""
 
-        visible_first, visible_last = self._visible_range
-        if visible_first == 0 or self._pending_scan_affects_visible_window(visible_first, visible_last):
-            self.flush_pending_scan_refresh()
-
-    def record_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> bool:
-        """Record ready scan rows and defer the visible-window refresh."""
-
-        if not chunk or self._current_query is None or self._active_root is None:
+        if not rows or self._current_query is None or self._active_root is None:
             return False
-        mapped_entries = self._map_scan_rows_to_active_entries(scan_root, chunk)
+        mapped_entries = self._map_scan_rows_to_active_entries(scan_root, rows)
         if not mapped_entries:
             return False
 
@@ -541,7 +531,7 @@ class GalleryCollectionStore:
             self._collection_revision = max(self._collection_revision, revision)
         if root is None or not rows:
             return False
-        return self.record_scan_chunk(Path(root), list(rows))
+        return self._record_scan_rows(Path(root), list(rows))
 
     def handle_scan_finished(self, root: Path, success: bool) -> None:
         if not success or self._current_query is None or self._active_root is None:
@@ -567,13 +557,12 @@ class GalleryCollectionStore:
             self._pending_scan_sort_keys.clear()
             return
         if self._visible_range is None:
-            self._pending_scan_refresh = False
-            self._pending_scan_rels.clear()
-            self._pending_scan_sort_keys.clear()
-            return
-        first, last = self._visible_range
-        if first != 0 and not self._pending_scan_affects_visible_window(first, last):
-            return
+            first = 0
+            last = max(0, self.INITIAL_VISIBLE_ROWS - 1)
+        else:
+            first, last = self._visible_range
+            if first != 0 and not self._pending_scan_affects_visible_window(first, last):
+                return
         self._reload_window_for_visible_range(
             first,
             last,

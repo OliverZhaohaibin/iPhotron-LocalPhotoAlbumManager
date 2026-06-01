@@ -166,7 +166,6 @@ def test_collection_query_sql_pushdown_filters_visible_media_rows(store: IndexSt
 
     all_photos = CollectionQuery(collection_type=CollectionType.ALL_PHOTOS)
     assert [row["id"] for row in store.read_collection_window(all_photos, 0, 10).rows] == [
-        "asset-4",
         "asset-3",
         "asset-2",
         "asset-1",
@@ -199,7 +198,7 @@ def test_ready_row_requires_thumbnail_payload(store: IndexStore) -> None:
     )
 
     rows = store.read_collection_window(CollectionQuery(), 0, 10).rows
-    assert [row["id"] for row in rows] == ["no-thumb", "ready"]
+    assert [row["id"] for row in rows] == ["ready"]
 
     ready_rows = store.read_collection_window(
         CollectionQuery(min_thumbnail_state="ready"),
@@ -210,7 +209,7 @@ def test_ready_row_requires_thumbnail_payload(store: IndexStore) -> None:
     assert store.get_rows_by_rels(["no-thumb.jpg"])["no-thumb.jpg"]["thumbnail_state"] == "stale"
 
 
-def test_old_style_rows_without_thumbnail_key_remain_gallery_visible(
+def test_old_style_rows_without_thumbnail_key_are_backfill_candidates(
     store: IndexStore,
 ) -> None:
     base = datetime(2024, 1, 1)
@@ -227,13 +226,13 @@ def test_old_style_rows_without_thumbnail_key_remain_gallery_visible(
     )
 
     rows = store.read_collection_window(CollectionQuery(), 0, 10).rows
-    assert [row["id"] for row in rows] == ["old"]
-    assert rows[0]["thumbnail_state"] == "stale"
+    assert rows == []
     candidates = store.read_thumbnail_backfill_candidates(CollectionQuery(), 0, 10)
     assert [row["id"] for row in candidates] == ["old"]
+    assert candidates[0]["thumbnail_state"] == "stale"
 
 
-def test_pending_failed_stale_rows_are_visible_in_gallery_collection(store: IndexStore) -> None:
+def test_pending_failed_stale_rows_are_hidden_from_gallery_collection(store: IndexStore) -> None:
     base = datetime(2024, 1, 1)
     store.write_rows(
         {
@@ -250,7 +249,7 @@ def test_pending_failed_stale_rows_are_visible_in_gallery_collection(store: Inde
 
     rows = store.read_collection_window(CollectionQuery(), 0, 10).rows
 
-    assert [row["id"] for row in rows] == ["stale", "failed", "pending", "ready"]
+    assert [row["id"] for row in rows] == ["ready"]
 
 
 def test_collection_query_excludes_recently_deleted_from_normal_views(store: IndexStore) -> None:
@@ -430,9 +429,9 @@ def test_album_collection_deep_window_filters_live_and_other_album_rows(store: I
     window = store.read_collection_window(query, first=7_000, limit=3)
 
     assert [row["id"] for row in window.rows] == [
-        "asset-03000",
         "asset-02999",
         "asset-02998",
+        "asset-02997",
     ]
 
 

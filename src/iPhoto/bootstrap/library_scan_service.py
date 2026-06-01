@@ -6,7 +6,7 @@ import inspect
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -68,49 +68,6 @@ class AlbumOpenPreparation:
     asset_count: int
     rows: list[dict[str, Any]] | None = None
     scanned: bool = False
-
-
-class _EmptyScanner(MediaScannerPort):
-    """Scanner placeholder used when only chunk merging is needed."""
-
-    def scan(
-        self,
-        _root: Path,
-        _include: Iterable[str],
-        _exclude: Iterable[str],
-        *,
-        existing_index: dict[str, dict[str, Any]] | None = None,
-        progress_callback: Callable[[int, int], None] | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        return iter(())
-
-
-def merge_scan_chunk_with_repository(
-    repository: AssetRepositoryPort,
-    *,
-    root: Path,
-    include: Iterable[str],
-    exclude: Iterable[str],
-    chunk: list[dict[str, Any]],
-    chunk_callback: Callable[[list[dict[str, Any]]], None] | None = None,
-    batch_failed_callback: Callable[[int], None] | None = None,
-) -> int:
-    """Persist one scan chunk through the application scan merge policy."""
-
-    use_case = ScanLibraryUseCase(
-        scanner=_EmptyScanner(),
-        asset_repository=repository,
-    )
-    return use_case.merge_chunk(
-        chunk,
-        ScanLibraryRequest(
-            root=root,
-            include=include,
-            exclude=exclude,
-            visible_chunk_callback=chunk_callback,
-            batch_failed_callback=batch_failed_callback,
-        ),
-    )
 
 
 class LibraryScanService:
@@ -199,10 +156,10 @@ class LibraryScanService:
         exclude: Iterable[str] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
-        chunk_callback: Callable[[list[dict[str, Any]]], None] | None = None,
         scan_batch_callback: Callable[[ScanBatchCommitted], None] | None = None,
         batch_failed_callback: Callable[[int], None] | None = None,
         chunk_size: int = 500,
+        visible_publish_size: int = 100,
         persist_chunks: bool = False,
     ) -> ScanLibraryResult:
         """Scan *root* using the shared application use case."""
@@ -284,10 +241,10 @@ class LibraryScanService:
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
                     row_transform=self._library_relative_transform(scan_root),
-                    visible_chunk_callback=chunk_callback,
                     scan_batch_callback=scan_batch_callback,
                     batch_failed_callback=batch_failed_callback,
                     chunk_size=chunk_size,
+                    visible_publish_size=visible_publish_size,
                     persist_chunks=persist_chunks,
                     scan_job_id=scan_job_id,
                     scan_stage_elapsed_ms=stage_elapsed_ms,
@@ -779,5 +736,4 @@ __all__ = [
     "AlbumOpenPreparation",
     "AlbumReport",
     "LibraryScanService",
-    "merge_scan_chunk_with_repository",
 ]

@@ -24,11 +24,10 @@ class ScanLibraryRequest:
     progress_callback: Callable[[int, int], None] | None = None
     is_cancelled: Callable[[], bool] | None = None
     row_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None
-    chunk_callback: Callable[[list[dict[str, Any]]], None] | None = None
-    visible_chunk_callback: Callable[[list[dict[str, Any]]], None] | None = None
     scan_batch_callback: Callable[[ScanBatchCommitted], None] | None = None
     batch_failed_callback: Callable[[int], None] | None = None
     chunk_size: int = 500
+    visible_publish_size: int = 100
     persist_chunks: bool = True
     scan_job_id: str | None = None
     scan_stage_elapsed_ms: dict[str, float] | None = None
@@ -102,15 +101,6 @@ class ScanLibraryUseCase:
             scan_job_id=request.scan_job_id,
         )
 
-    def merge_chunk(
-        self,
-        chunk: list[dict[str, Any]],
-        request: ScanLibraryRequest,
-    ) -> int:
-        """Persist one already-discovered chunk through the same merge policy."""
-
-        return self._merge_chunk(chunk, request)
-
     def _merge_chunk(
         self,
         chunk: list[dict[str, Any]],
@@ -145,16 +135,20 @@ class ScanLibraryUseCase:
         if metadata_elapsed_ms is not None:
             stage_elapsed_ms["metadata_extraction"] = metadata_elapsed_ms
         stage_elapsed_ms["db_commit"] = commit_elapsed_ms
-        batch = None
+        ui_batches: list[ScanBatchCommitted] = []
         if request.scan_job_id and ready_chunk:
-            batch = ScanBatchCommitted(
-                job_id=request.scan_job_id,
-                root=request.root,
-                collection_revision=collection_revision,
-                ready_count=len(ready_chunk),
-                rows=ready_chunk,
-                stage_elapsed_ms=stage_elapsed_ms,
-            )
+            visible_publish_size = max(1, int(request.visible_publish_size))
+            for ready_rows in _batched_rows(ready_chunk, visible_publish_size):
+                ui_batches.append(
+                    ScanBatchCommitted(
+                        job_id=request.scan_job_id,
+                        root=request.root,
+                        collection_revision=collection_revision,
+                        ready_count=len(ready_rows),
+                        rows=ready_rows,
+                        stage_elapsed_ms=stage_elapsed_ms,
+                    )
+                )
         append_scan_event = getattr(self._asset_repository, "append_scan_event", None)
         if request.scan_job_id and callable(append_scan_event):
             append_scan_event(
@@ -169,12 +163,9 @@ class ScanLibraryUseCase:
                     "collection_revision": collection_revision,
                 },
             )
-        if request.chunk_callback is not None:
-            request.chunk_callback(emitted_chunk)
-        if request.visible_chunk_callback is not None and ready_chunk:
-            request.visible_chunk_callback(ready_chunk)
-        if request.scan_batch_callback is not None and batch is not None:
-            request.scan_batch_callback(batch)
+        if request.scan_batch_callback is not None:
+            for batch in ui_batches:
+                request.scan_batch_callback(batch)
         return 0
 
 
@@ -185,12 +176,22 @@ def _monotonic_ms() -> float:
 def _ready_visible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ready: list[dict[str, Any]] = []
     for row in rows:
-        if row.get("thumbnail_state") != "ready":
-            continue
-        if not str(row.get("thumb_cache_key") or "").strip():
-            continue
-        ready.append(row)
+        if _row_is_ready_visible(row):
+            ready.append(row)
     return ready
+
+
+def _row_is_ready_visible(row: dict[str, Any]) -> bool:
+    return row.get("thumbnail_state") == "ready" and bool(
+        str(row.get("thumb_cache_key") or "").strip()
+    )
+
+
+def _batched_rows(
+    rows: list[dict[str, Any]],
+    batch_size: int,
+) -> list[list[dict[str, Any]]]:
+    return [rows[index : index + batch_size] for index in range(0, len(rows), batch_size)]
 
 
 def _collection_revision_from_rows(rows: list[dict[str, Any]]) -> int:

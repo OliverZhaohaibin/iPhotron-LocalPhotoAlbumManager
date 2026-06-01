@@ -282,6 +282,10 @@ def test_thumbnail_backfill_request_is_deferred_off_call_path(tmp_path: Path) ->
     service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
     executor = _DeferredExecutor()
     service._thumbnail_backfill_executor = executor  # type: ignore[assignment]
+    progress: list[tuple[Path, int, int]] = []
+    service.thumbnail_backfill_progress.connect(
+        lambda root, current, total: progress.append((root, current, total))
+    )
 
     queued = service.request_thumbnail_backfill(album_root, AssetQuery(), 0, 100)
 
@@ -289,6 +293,7 @@ def test_thumbnail_backfill_request_is_deferred_off_call_path(tmp_path: Path) ->
     assert len(executor.submitted) == 1
     assert repo.ready_updates == []
     assert service.thumbnail_backfill_pending() is True
+    assert progress == [(album_root, 0, 1)]
 
 
 def test_thumbnail_backfill_completion_publishes_ready_batch(tmp_path: Path) -> None:
@@ -301,7 +306,11 @@ def test_thumbnail_backfill_completion_publishes_ready_batch(tmp_path: Path) -> 
     executor = _DeferredExecutor()
     service._thumbnail_backfill_executor = executor  # type: ignore[assignment]
     batches = []
+    progress: list[tuple[Path, int, int]] = []
     service.thumbnail_backfill_completed.connect(batches.append)
+    service.thumbnail_backfill_progress.connect(
+        lambda root, current, total: progress.append((root, current, total))
+    )
 
     with patch(
         "iPhoto.bootstrap.library_asset_query_service.ensure_scan_thumbnail",
@@ -332,6 +341,7 @@ def test_thumbnail_backfill_completion_publishes_ready_batch(tmp_path: Path) -> 
     assert batch.rows[0]["rel"] == "stale.jpg"
     assert batch.rows[0]["thumbnail_state"] == "ready"
     assert service.thumbnail_backfill_pending() is False
+    assert progress == [(album_root, 0, 1), (album_root, 1, 1)]
 
 
 def test_thumbnail_backfill_failed_rows_do_not_publish_batch(tmp_path: Path) -> None:

@@ -105,6 +105,32 @@ class StatusBarController(QObject):
         """Report a partial failure without interrupting the active scan."""
         self.show_message(f"Failed to save {count} items to database", 5000)
 
+    def handle_thumbnail_backfill_progress(
+        self,
+        _root: Path,
+        current: int,
+        total: int,
+    ) -> None:
+        """Surface lazy thumbnail migration/backfill progress."""
+
+        if self._progress_context not in {"thumbnail", None}:
+            return
+        self._progress_context = "thumbnail"
+        if total <= 0:
+            self._progress_bar.setRange(0, 0)
+            self.show_message("Updating thumbnails…")
+        else:
+            bounded_current = max(0, min(current, total))
+            self._progress_bar.setRange(0, total)
+            self._progress_bar.setValue(bounded_current)
+            self.show_message(f"Updating thumbnails… ({bounded_current}/{total})")
+        self._progress_bar.setVisible(True)
+        if total > 0 and current >= total:
+            self._progress_bar.setVisible(False)
+            self._progress_bar.setRange(0, 0)
+            self._progress_context = None
+            self.show_message("Thumbnails updated.", 3000)
+
     def handle_load_started(self, root: Path) -> None:
         """Show an indeterminate progress indicator while assets load."""
 

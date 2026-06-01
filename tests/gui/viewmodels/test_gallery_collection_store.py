@@ -302,6 +302,19 @@ class _BackfillQueryService(_FakeQueryService):
         )
 
 
+class _VisibleBackfillQueryService(_BackfillQueryService):
+    def request_thumbnail_backfill(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> int:
+        del root, query
+        self.backfill_requests.append((first, limit))
+        return 1
+
+
 def test_gallery_requests_visible_window_stale_backfill_once() -> None:
     service = _BackfillQueryService(library_root=Path("."))
     store = GalleryCollectionStore(service, library_root=Path("."))
@@ -316,6 +329,27 @@ def test_gallery_requests_visible_window_stale_backfill_once() -> None:
     assert store.flush_pending_thumbnail_backfill() is False
     assert store.count() == 1
     assert store.snapshot_signature()[2] >= 42
+
+
+def test_gallery_shows_stale_rows_while_scheduling_thumbnail_backfill() -> None:
+    service = _VisibleBackfillQueryService(library_root=Path("."))
+    service.assets.append(
+        Asset(
+            id="stale",
+            album_id="a",
+            path=Path("stale.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+    )
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(Path("."), query=AssetQuery())
+
+    assert store.count() == 1
+    assert store.asset_at(0) is not None
+    assert service.backfill_requests == [(0, store.MIN_WINDOW_SIZE)]
 
 
 def test_scan_batch_can_be_recorded_without_immediate_refresh(tmp_path: Path) -> None:

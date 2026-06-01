@@ -90,6 +90,7 @@ class LibraryAssetQueryService:
         self._thumbnail_backfill_pending: set[tuple[str, int, int, str]] = set()
         self._thumbnail_backfill_shutdown = False
         self.thumbnail_backfill_completed = _CallbackSignal()
+        self.thumbnail_backfill_progress = _CallbackSignal()
 
     def count_assets(
         self,
@@ -360,6 +361,7 @@ class LibraryAssetQueryService:
                 return 0
             self._thumbnail_backfill_pending.add(request_key)
 
+        self.thumbnail_backfill_progress.emit(Path(root), 0, len(candidates))
         self._thumbnail_backfill_executor.submit(
             self._run_thumbnail_backfill,
             request_key,
@@ -398,9 +400,11 @@ class LibraryAssetQueryService:
             return
         try:
             ready_rows: list[dict[str, Any]] = []
-            for row in candidates:
+            total = len(candidates)
+            for index, row in enumerate(candidates, start=1):
                 view_rel = row.get("rel")
                 if not isinstance(view_rel, str) or not view_rel:
+                    self.thumbnail_backfill_progress.emit(root, index, total)
                     continue
                 library_rel = f"{album_path}/{view_rel}" if album_path else view_rel
                 abs_path = root / view_rel
@@ -411,6 +415,7 @@ class LibraryAssetQueryService:
                 )
                 if thumbnail.thumb_error:
                     update_thumbnail_ready(library_rel, error=thumbnail.thumb_error)
+                    self.thumbnail_backfill_progress.emit(root, index, total)
                     continue
                 update_thumbnail_ready(
                     library_rel,
@@ -423,6 +428,7 @@ class LibraryAssetQueryService:
                 ready_row["thumb_cache_key"] = thumbnail.thumb_cache_key
                 ready_row["thumb_error"] = None
                 ready_rows.append(ready_row)
+                self.thumbnail_backfill_progress.emit(root, index, total)
             if ready_rows:
                 batch = ScanBatchCommitted(
                     job_id=(
@@ -725,7 +731,7 @@ class LibraryAssetQueryService:
             date_to=query.date_to,
             sort_key="sort_ts",
             sort_direction=SortDirection.DESC,
-            min_thumbnail_state="ready",
+            min_thumbnail_state=None,
         )
 
     @staticmethod

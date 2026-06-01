@@ -29,6 +29,7 @@ class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
 
     _scan_batch_received = QtSignal(object)
+    thumbnailBackfillProgress = QtSignal(Path, int, int)
 
     def __init__(
         self,
@@ -450,12 +451,35 @@ class GalleryListModelAdapter(QAbstractListModel):
                 old_disconnect(self.handle_scan_batch)
             except (RuntimeError, TypeError, ValueError):
                 pass
+        old_progress = getattr(
+            self._backfill_completion_source,
+            "thumbnail_backfill_progress",
+            None,
+        )
+        old_progress_disconnect = getattr(old_progress, "disconnect", None)
+        if callable(old_progress_disconnect):
+            try:
+                old_progress_disconnect(self._handle_thumbnail_backfill_progress)
+            except (RuntimeError, TypeError, ValueError):
+                pass
 
         self._backfill_completion_source = asset_query_service
         new_signal = getattr(asset_query_service, "thumbnail_backfill_completed", None)
         new_connect = getattr(new_signal, "connect", None)
         if callable(new_connect):
             new_connect(self.handle_scan_batch)
+        new_progress = getattr(asset_query_service, "thumbnail_backfill_progress", None)
+        new_progress_connect = getattr(new_progress, "connect", None)
+        if callable(new_progress_connect):
+            new_progress_connect(self._handle_thumbnail_backfill_progress)
+
+    def _handle_thumbnail_backfill_progress(
+        self,
+        root: Path,
+        current: int,
+        total: int,
+    ) -> None:
+        self.thumbnailBackfillProgress.emit(Path(root), int(current), int(total))
 
     def _snapshot_hash(self, count: int) -> bytes:
         del count

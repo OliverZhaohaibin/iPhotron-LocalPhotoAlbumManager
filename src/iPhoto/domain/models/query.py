@@ -56,7 +56,7 @@ class CollectionQuery:
     search_text: str | None = None
     sort_key: str = "sort_ts"
     sort_direction: SortDirection = SortDirection.DESC
-    min_thumbnail_state: str = ThumbnailState.READY.value
+    min_thumbnail_state: str | None = None
 
 
 @dataclass(frozen=True)

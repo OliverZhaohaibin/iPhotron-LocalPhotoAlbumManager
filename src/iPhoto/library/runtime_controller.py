@@ -105,9 +105,11 @@ class LibraryRuntimeController(
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
         self._current_face_scanner: Optional[FaceScanWorker] = None
+        self._cancelled_scanner_workers: set[int] = set()
         self._scan_thread_pool = QThreadPool.globalInstance()
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
+        self._deferred_scan_queue: list[tuple[Path, list[str], list[str]]] = []
         self._scan_buffer_lock = QMutex()
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None

@@ -34,6 +34,12 @@ class _Signal:
 class _BackfillService:
     def __init__(self) -> None:
         self.thumbnail_backfill_completed = _Signal()
+        self.thumbnail_backfill_progress = _Signal()
+
+
+@pytest.fixture(autouse=True)
+def _qt_app(qapp):
+    return qapp
 
 
 @pytest.fixture
@@ -173,10 +179,31 @@ def test_rebind_asset_query_service_moves_backfill_completion_signal(
 
     assert adapter.handle_scan_batch not in old_service.thumbnail_backfill_completed.handlers
     assert adapter.handle_scan_batch in new_service.thumbnail_backfill_completed.handlers
+    assert adapter._handle_thumbnail_backfill_progress not in old_service.thumbnail_backfill_progress.handlers
+    assert adapter._handle_thumbnail_backfill_progress in new_service.thumbnail_backfill_progress.handlers
     mock_store.rebind_asset_query_service.assert_called_once_with(
         new_service,
         Path("/library"),
     )
+
+
+def test_backfill_progress_is_relayed_from_query_service(mock_thumb_service):
+    service = _BackfillService()
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = MagicMock()
+    store.window_changed = MagicMock()
+    store.row_changed = MagicMock()
+    store.count.return_value = 0
+    store.asset_query_service = service
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    progress: list[tuple[Path, int, int]] = []
+    adapter.thumbnailBackfillProgress.connect(
+        lambda root, current, total: progress.append((root, current, total))
+    )
+
+    service.thumbnail_backfill_progress.emit(Path("/library"), 2, 5)
+
+    assert progress == [(Path("/library"), 2, 5)]
 
 
 def test_decoration_role_uses_full_size_thumbnail_even_with_micro_fallback(

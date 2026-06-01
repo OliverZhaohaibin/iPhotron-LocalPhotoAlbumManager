@@ -538,6 +538,9 @@ class MainCoordinator(QObject):
         self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)
         self._facade.scanProgress.connect(self._status_bar.handle_scan_progress)
         self._facade.scanFinished.connect(self._status_bar.handle_scan_finished)
+        self._asset_list_vm.thumbnailBackfillProgress.connect(
+            self._status_bar.handle_thumbnail_backfill_progress
+        )
 
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)

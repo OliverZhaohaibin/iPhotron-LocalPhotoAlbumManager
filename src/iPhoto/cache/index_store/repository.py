@@ -1029,8 +1029,8 @@ class AssetRepository:
                 [str(error), _utc_ms(), normalized_rel],
             )
         else:
-            if micro_thumbnail is None and not str(thumb_cache_key or "").strip():
-                raise ValueError("ready thumbnails require micro_thumbnail or thumb_cache_key")
+            if not str(thumb_cache_key or "").strip():
+                raise ValueError("ready thumbnails require thumb_cache_key")
             self._db_manager.execute_in_transaction(
                 """
                 UPDATE assets

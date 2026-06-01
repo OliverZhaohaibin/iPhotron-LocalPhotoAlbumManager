@@ -13,6 +13,9 @@ from ...io.scanner_adapter import scan_album
 class FilesystemMediaScanner(MediaScannerPort):
     """Adapter around the existing filesystem scanner implementation."""
 
+    def __init__(self, *, thumbnail_cache_dir: Path | None = None) -> None:
+        self._thumbnail_cache_dir = thumbnail_cache_dir
+
     def scan(
         self,
         root: Path,
@@ -28,6 +31,7 @@ class FilesystemMediaScanner(MediaScannerPort):
             exclude,
             existing_index=existing_index,
             progress_callback=progress_callback,
+            thumbnail_cache_dir=self._thumbnail_cache_dir,
         )
         try:
             yield from scanner

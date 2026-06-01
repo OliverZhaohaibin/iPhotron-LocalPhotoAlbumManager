@@ -299,7 +299,7 @@ class QueryBuilder:
             params.append(collection_query.min_thumbnail_state)
             if collection_query.min_thumbnail_state == "ready":
                 where_clauses.append(
-                    "(micro_thumbnail IS NOT NULL OR TRIM(COALESCE(thumb_cache_key, '')) != '')"
+                    "TRIM(COALESCE(thumb_cache_key, '')) != ''"
                 )
 
         if collection_query.collection_type == CollectionType.ALBUM or album_path:

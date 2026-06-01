@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from iPhoto.bootstrap import library_asset_lifecycle_service as lifecycle_module
 from iPhoto.bootstrap.library_asset_lifecycle_service import (
     LibraryAssetLifecycleService,
 )
@@ -76,6 +78,58 @@ def test_apply_move_reuses_cached_metadata_and_pairs_once(tmp_path: Path) -> Non
     assert rows["AlbumB/photo.jpg"]["id"] == "asset-1"
     assert rows["AlbumB/photo.jpg"]["parent_album_path"] == "AlbumB"
     assert pair_recorder.pair_roots == [library_root]
+
+
+def test_sessionless_move_uses_destination_root_thumbnail_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "AlbumA"
+    destination_root = tmp_path / "AlbumB"
+    source_root.mkdir()
+    destination_root.mkdir()
+    source = source_root / "photo.jpg"
+    target = destination_root / "photo.jpg"
+    source.write_bytes(b"source")
+    target.write_bytes(b"target")
+    get_global_repository(source_root).write_rows(
+        [
+            {
+                "rel": "photo.jpg",
+                "id": "asset-1",
+                "dt": "2024-01-01",
+            }
+        ]
+    )
+    seen_cache_dirs: list[Path] = []
+
+    def fake_ensure_scan_thumbnail(_path, _asset_id, *, thumbnail_cache_dir, **_kwargs):
+        seen_cache_dirs.append(Path(thumbnail_cache_dir))
+        return SimpleNamespace(
+            state=SimpleNamespace(value="ready"),
+            micro_thumbnail=b"micro",
+            thumb_cache_key="thumb-key",
+            thumb_error=None,
+        )
+
+    monkeypatch.setattr(
+        lifecycle_module,
+        "ensure_scan_thumbnail",
+        fake_ensure_scan_thumbnail,
+    )
+    service = LibraryAssetLifecycleService(
+        None,
+        scan_service=_PairRecorder(),  # type: ignore[arg-type]
+    )
+
+    result = service.apply_move(
+        moved=[(source, target)],
+        source_root=source_root,
+        destination_root=destination_root,
+    )
+
+    assert result.errors == []
+    assert seen_cache_dirs == [destination_root / ".iPhoto" / "cache" / "thumbs"]
 
 
 def test_delete_annotation_and_stale_trash_cleanup(tmp_path: Path) -> None:

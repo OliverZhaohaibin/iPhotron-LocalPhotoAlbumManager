@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import sqlite3
 import uuid
@@ -16,7 +17,7 @@ from ..cache.lock import FileLock
 from ..config import ALBUM_MANIFEST_NAMES, RECENTLY_DELETED_DIR_NAME
 from ..errors import IPhotoError
 from ..index_sync_service import prune_index_scope
-from ..io.scanner_adapter import process_media_paths
+from ..io.scanner_adapter import ensure_scan_thumbnail, process_media_paths
 from ..media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ..schemas import validate_album
 from ..utils.jsonio import read_json, write_json
@@ -340,6 +341,21 @@ class LibraryAssetLifecycleService:
                 row = dict(cached)
                 row["rel"] = self._target_rel(target, process_root)
                 row["parent_album_path"] = self._parent_album_path(row["rel"])
+                thumbnail = ensure_scan_thumbnail(
+                    target,
+                    str(row.get("id") or target),
+                    thumbnail_cache_dir=self._thumbnail_cache_dir(process_root),
+                    refresh_cache=True,
+                )
+                row["thumbnail_state"] = thumbnail.state.value
+                row.pop("thumb_error", None)
+                if thumbnail.micro_thumbnail is not None:
+                    row["micro_thumbnail"] = thumbnail.micro_thumbnail
+                if thumbnail.thumb_cache_key:
+                    row["thumb_cache_key"] = thumbnail.thumb_cache_key
+                if thumbnail.thumb_error:
+                    row["thumb_error"] = thumbnail.thumb_error
+                    row.pop("thumb_cache_key", None)
                 if is_restore:
                     row.pop("original_rel_path", None)
                     row.pop("original_album_id", None)
@@ -357,14 +373,25 @@ class LibraryAssetLifecycleService:
 
         freshly_scanned: list[dict[str, Any]] = []
         if uncached_images or uncached_videos:
-            freshly_scanned = [
-                dict(row)
-                for row in self._media_processor(
-                    process_root,
-                    uncached_images,
-                    uncached_videos,
-                )
-            ]
+            if self._media_processor is process_media_paths:
+                freshly_scanned = [
+                    dict(row)
+                    for row in _process_media_paths_with_thumbnail_cache(
+                        process_root,
+                        uncached_images,
+                        uncached_videos,
+                        thumbnail_cache_dir=self._thumbnail_cache_dir(process_root),
+                    )
+                ]
+            else:
+                freshly_scanned = [
+                    dict(row)
+                    for row in self._media_processor(
+                        process_root,
+                        uncached_images,
+                        uncached_videos,
+                    )
+                ]
 
         new_rows = reused_rows + freshly_scanned
         if is_trash_destination and not is_restore:
@@ -475,6 +502,10 @@ class LibraryAssetLifecycleService:
 
     def _repository(self, root: Path) -> AssetRepositoryPort:
         return self._repository_factory(Path(root))
+
+    def _thumbnail_cache_dir(self, root: Path | None = None) -> Path:
+        root = self.library_root or root or Path.cwd()
+        return ensure_work_dir(root) / "cache" / "thumbs"
 
     def _repository_root_for_source(self, source_root: Path) -> Path:
         return self.library_root or Path(source_root)
@@ -682,6 +713,27 @@ class LibraryAssetLifecycleService:
         if left == right:
             return True
         return self._normalised_string(left) == self._normalised_string(right)
+
+
+def _process_media_paths_with_thumbnail_cache(
+    root: Path,
+    image_paths: list[Path],
+    video_paths: list[Path],
+    *,
+    thumbnail_cache_dir: Path,
+) -> Iterable[dict[str, Any]]:
+    try:
+        signature = inspect.signature(process_media_paths)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None and "thumbnail_cache_dir" in signature.parameters:
+        return process_media_paths(
+            root,
+            image_paths,
+            video_paths,
+            thumbnail_cache_dir=thumbnail_cache_dir,
+        )
+    return process_media_paths(root, image_paths, video_paths)
 
 
 __all__ = ["AssetLifecycleResult", "LibraryAssetLifecycleService"]

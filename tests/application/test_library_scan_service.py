@@ -126,13 +126,14 @@ def test_scan_album_default_chunk_size_is_large_enough(tmp_path: Path) -> None:
     library_root.mkdir()
     rows = [
         {
-            "rel": f"{index}.jpg",
-            "id": f"asset-{index}",
-            "thumbnail_state": "ready",
-            "micro_thumbnail": b"thumb",
-        }
-        for index in range(501)
-    ]
+                "rel": f"{index}.jpg",
+                "id": f"asset-{index}",
+                "thumbnail_state": "ready",
+                "micro_thumbnail": b"thumb",
+                "thumb_cache_key": f"thumb-{index}",
+            }
+            for index in range(501)
+        ]
     emitted_sizes: list[int] = []
     service = LibraryScanService(library_root, scanner=_Scanner(rows))
 
@@ -410,7 +411,7 @@ def test_scan_specific_files_prefixes_subalbum_rows(
     asset = album_root / "a.jpg"
     asset.write_bytes(b"data")
 
-    def fake_process_media_paths(root: Path, image_paths, video_paths):
+    def fake_process_media_paths(root: Path, image_paths, video_paths, **_kwargs):
         assert root == album_root
         assert image_paths == [asset]
         assert video_paths == []
@@ -441,6 +442,7 @@ def test_scan_batch_committed_transport_contains_only_ready_rows(tmp_path: Path)
             "id": "ready",
             "thumbnail_state": "ready",
             "micro_thumbnail": b"thumb",
+            "thumb_cache_key": "thumb-ready",
         },
         {
             "rel": "failed.jpg",

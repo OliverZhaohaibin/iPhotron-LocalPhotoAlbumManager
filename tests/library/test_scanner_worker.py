@@ -47,6 +47,7 @@ def _fake_rows(n=15):
             "mime": "image/jpeg",
             "thumbnail_state": "ready",
             "micro_thumbnail": b"thumb",
+            "thumb_cache_key": f"thumb-{i}",
         }
         for i in range(n)
     ]

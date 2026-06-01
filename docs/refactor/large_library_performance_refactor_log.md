@@ -501,3 +501,72 @@ Next recommended work:
 - Continue evaluating `scanChunkReady` removal once all GUI and service
   consumers prove they no longer depend on legacy chunk payloads.
 - Add JSON/CSV benchmark output for long-running local stress comparisons.
+
+---
+
+# Scan Thumbnail Cache-Key Readiness Log
+
+Date: 2026-06-01
+Branch: `codex/large-library-performance`
+Status: completed
+
+## Scope
+
+This follow-up tightens the thumbnail-ready invariant for large-library scan
+and scroll behavior:
+
+- ready rows now require a stable 512px thumbnail cache key, not micro-only
+  payloads.
+- scan-time thumbnail generation writes both micro payloads and the shared L2
+  disk thumbnail used by `ThumbnailCacheService`.
+- cached scan rows, stale backfill, and move/restore reuse paths refresh missing
+  full thumbnails before publishing rows as visible-ready.
+
+## Completed Changes
+
+- Added shared thumbnail cache-key helpers so scanner and GUI cache service use
+  the same path/size key and disk filename.
+- Updated `ThumbnailCacheService` to resolve disk files through the shared key
+  helpers.
+- Updated scanner thumbnail generation to compose/write a 512px JPEG cache file
+  and publish `thumb_cache_key` with ready rows.
+- Changed ready collection SQL, row mapping, migration cleanup, repository
+  update guards, and scan batch filtering to require `thumb_cache_key`.
+- Updated stale thumbnail backfill and move/restore lifecycle paths so refreshed
+  rows get a full thumbnail cache entry before becoming ready.
+- Added tests for scan-written L2 cache hits, cached-row refresh, move/restore
+  cache directory selection, and the stricter ready invariant.
+
+## Verification
+
+Commands run:
+
+```bash
+.venv/bin/pytest tests/application/test_library_asset_lifecycle_service.py tests/application/test_library_asset_query_service.py tests/application/test_library_scan_service.py tests/cache/test_index_store_features.py tests/test_scanner_adapter.py tests/test_thumbnail_cache_service.py tests/library/test_scanner_worker.py tests/test_utils_image_loader.py -q
+python3 -m compileall -q src/iPhoto
+git diff --check
+```
+
+Result:
+
+- 86 passed for the scan/cache/query/lifecycle/thumbnail focused command.
+- compileall passed.
+- diff whitespace check passed.
+- Existing warning remains: pytest unknown config option `env`.
+
+## Handoff
+
+Current behavior to preserve:
+
+- `thumbnail_state='ready'` now requires a non-empty `thumb_cache_key`.
+- Micro thumbnails remain useful as a temporary fallback but are not sufficient
+  for normal visible collection membership.
+- Scanner, stale backfill, move/restore, and GUI thumbnail cache must continue
+  sharing the same 512px cache key convention.
+- `IPHOTO_RUN_STRESS=1` benchmarks remain opt-in only.
+
+Next recommended work:
+
+- Add a maintenance/repair command for older libraries that have micro-only
+  ready rows and need full L2 cache backfill.
+- Add benchmark JSON/CSV output for comparing L2 cache hit rates over time.

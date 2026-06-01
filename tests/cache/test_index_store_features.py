@@ -479,14 +479,15 @@ def test_sync_favorites_mixed_unicode_forms(store: IndexStore) -> None:
 def test_collection_window_reuses_count_revision_cache_until_invalidation(store: IndexStore) -> None:
     store.write_rows(
         [
-            {
-                "rel": "ready.jpg",
-                "id": "ready",
-                "thumbnail_state": "ready",
-                "micro_thumbnail": b"thumb",
-            }
-        ]
-    )
+                {
+                    "rel": "ready.jpg",
+                    "id": "ready",
+                    "thumbnail_state": "ready",
+                    "micro_thumbnail": b"thumb",
+                    "thumb_cache_key": "thumb-ready",
+                }
+            ]
+        )
     query = CollectionQuery()
 
     first = store.read_collection_window(query, 0, 10)
@@ -495,7 +496,11 @@ def test_collection_window_reuses_count_revision_cache_until_invalidation(store:
     assert first.total_count == second.total_count == 1
     assert store._collection_meta_cache
 
-    store.update_thumbnail_ready("ready.jpg", micro_thumbnail=b"new-thumb")
+    store.update_thumbnail_ready(
+        "ready.jpg",
+        micro_thumbnail=b"new-thumb",
+        thumb_cache_key="thumb-ready",
+    )
 
     assert store._collection_meta_cache == {}
 
@@ -515,7 +520,11 @@ def test_thumbnail_backfill_candidates_and_ready_update(store: IndexStore) -> No
     candidates = store.read_thumbnail_backfill_candidates(query, 0, 10)
     assert [row["rel"] for row in candidates] == ["stale.jpg"]
 
-    store.update_thumbnail_ready("stale.jpg", micro_thumbnail=b"thumb")
+    store.update_thumbnail_ready(
+        "stale.jpg",
+        micro_thumbnail=b"thumb",
+        thumb_cache_key="thumb-stale",
+    )
     rows = store.read_collection_window(query, 0, 10).rows
     assert [row["rel"] for row in rows] == ["stale.jpg"]
     assert rows[0]["thumbnail_state"] == "ready"

@@ -135,9 +135,7 @@ def _thumbnail_state_for_row(row: Dict[str, Any]) -> str:
 
 def _has_thumbnail_payload(row: Dict[str, Any]) -> bool:
     thumb_key = row.get("thumb_cache_key")
-    return row.get("micro_thumbnail") is not None or (
-        isinstance(thumb_key, str) and bool(thumb_key.strip())
-    )
+    return isinstance(thumb_key, str) and bool(thumb_key.strip())
 
 
 def db_row_to_dict(db_row: sqlite3.Row) -> Dict[str, Any]:

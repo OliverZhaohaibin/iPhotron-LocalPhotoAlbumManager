@@ -307,7 +307,7 @@ def test_thumbnail_backfill_completion_publishes_ready_batch(tmp_path: Path) -> 
         "iPhoto.bootstrap.library_asset_query_service.ensure_scan_thumbnail",
         return_value=SimpleNamespace(
             micro_thumbnail=b"micro",
-            thumb_cache_key=None,
+            thumb_cache_key="thumb-key",
             thumb_error=None,
         ),
     ):
@@ -320,7 +320,7 @@ def test_thumbnail_backfill_completion_publishes_ready_batch(tmp_path: Path) -> 
             "Trip/stale.jpg",
             {
                 "micro_thumbnail": b"micro",
-                "thumb_cache_key": None,
+                "thumb_cache_key": "thumb-key",
             },
         )
     ]
@@ -377,7 +377,7 @@ def test_thumbnail_backfill_shutdown_suppresses_completion_event(tmp_path: Path)
         "iPhoto.bootstrap.library_asset_query_service.ensure_scan_thumbnail",
         return_value=SimpleNamespace(
             micro_thumbnail=b"micro",
-            thumb_cache_key=None,
+            thumb_cache_key="thumb-key",
             thumb_error=None,
         ),
     ):

@@ -13,6 +13,10 @@ from iPhoto.core import geo_utils
 from iPhoto.core.color_resolver import compute_color_statistics
 from iPhoto.core.image_filters import apply_adjustments
 from iPhoto.infrastructure.services.performance_events import emit_perf_event, monotonic_ms
+from iPhoto.infrastructure.services.thumbnail_cache_keys import (
+    thumbnail_cache_file_for_key,
+    thumbnail_cache_key,
+)
 from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
 from iPhoto.io import sidecar
 from iPhoto.utils import image_loader
@@ -129,7 +133,7 @@ class ThumbnailCacheService(QObject):
             return self._memory_cache[key]
 
         # 2. Disk Check
-        disk_file = self._disk_cache_path / f"{key}.jpg"
+        disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         if disk_file.exists():
             pixmap = QPixmap(str(disk_file))
             if not pixmap.isNull():
@@ -222,7 +226,7 @@ class ThumbnailCacheService(QObject):
             pixmap = QPixmap.fromImage(image)
 
             # Save to disk
-            disk_file = self._disk_cache_path / f"{key}.jpg"
+            disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
             pixmap.save(str(disk_file), "JPEG")
 
             self._add_to_memory(key, pixmap)
@@ -268,7 +272,7 @@ class ThumbnailCacheService(QObject):
         self._pending_tasks.discard(key)
         self._queued_tasks.pop(key, None)
 
-        disk_file = self._disk_cache_path / f"{key}.jpg"
+        disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         if disk_file.exists():
             try:
                 disk_file.unlink()
@@ -298,8 +302,8 @@ class ThumbnailCacheService(QObject):
             if old_key in self._memory_cache and new_key not in self._memory_cache:
                 self._memory_cache[new_key] = self._memory_cache[old_key]
 
-            old_disk_file = self._disk_cache_path / f"{old_key}.jpg"
-            new_disk_file = self._disk_cache_path / f"{new_key}.jpg"
+            old_disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, old_key)
+            new_disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, new_key)
             if old_disk_file.exists() and not new_disk_file.exists():
                 try:
                     shutil.copy2(old_disk_file, new_disk_file)
@@ -307,10 +311,7 @@ class ThumbnailCacheService(QObject):
                     pass
 
     def _cache_key(self, path: Path, size: QSize) -> str:
-        # Simple hash of path + size
-        import hashlib
-        s = f"{path.as_posix()}_{size.width()}x{size.height()}"
-        return hashlib.md5(s.encode('utf-8')).hexdigest()
+        return thumbnail_cache_key(path, (size.width(), size.height()))
 
     def _add_to_memory(self, key: str, pixmap: QPixmap):
         if len(self._memory_cache) > self._max_memory_items:

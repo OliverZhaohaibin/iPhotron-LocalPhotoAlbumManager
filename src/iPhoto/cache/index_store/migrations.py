@@ -260,6 +260,14 @@ class SchemaMigrator:
             WHERE thumbnail_state IS NULL OR TRIM(thumbnail_state) = ''
             """
         )
+        conn.execute(
+            """
+            UPDATE assets
+            SET thumbnail_state = 'stale'
+            WHERE thumbnail_state = 'ready'
+                AND TRIM(COALESCE(thumb_cache_key, '')) = ''
+            """
+        )
 
     @staticmethod
     def _create_indexes(conn: sqlite3.Connection) -> None:

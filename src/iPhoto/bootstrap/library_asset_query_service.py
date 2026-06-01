@@ -28,6 +28,7 @@ from ..domain.models.query import (
 from ..domain.models.scan import ScanBatchCommitted
 from ..io.scanner_adapter import ensure_scan_thumbnail
 from ..path_normalizer import compute_album_path
+from ..utils.pathutils import ensure_work_dir
 
 
 class _CallbackSignal:
@@ -403,7 +404,11 @@ class LibraryAssetQueryService:
                     continue
                 library_rel = f"{album_path}/{view_rel}" if album_path else view_rel
                 abs_path = root / view_rel
-                thumbnail = ensure_scan_thumbnail(abs_path, str(row.get("id") or library_rel))
+                thumbnail = ensure_scan_thumbnail(
+                    abs_path,
+                    str(row.get("id") or library_rel),
+                    thumbnail_cache_dir=self._thumbnail_cache_dir(),
+                )
                 if thumbnail.thumb_error:
                     update_thumbnail_ready(library_rel, error=thumbnail.thumb_error)
                     continue
@@ -510,6 +515,9 @@ class LibraryAssetQueryService:
 
     def _repository(self) -> AssetRepositoryPort:
         return self._repository_factory(self.library_root)
+
+    def _thumbnail_cache_dir(self) -> Path:
+        return ensure_work_dir(self.library_root) / "cache" / "thumbs"
 
     def _filtered_query_rows(self, query: AssetQuery) -> Iterator[dict[str, Any]]:
         repository = self._repository()

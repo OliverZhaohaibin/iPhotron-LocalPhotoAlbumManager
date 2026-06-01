@@ -187,7 +187,7 @@ def _ready_visible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         if row.get("thumbnail_state") != "ready":
             continue
-        if row.get("micro_thumbnail") is None and not str(row.get("thumb_cache_key") or "").strip():
+        if not str(row.get("thumb_cache_key") or "").strip():
             continue
         ready.append(row)
     return ready

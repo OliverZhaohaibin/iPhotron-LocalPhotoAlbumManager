@@ -5,9 +5,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
+from PIL import Image
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
 
+from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 
@@ -82,4 +84,24 @@ def test_l1_l2_hit_does_not_enqueue_generation(tmp_path: Path) -> None:
     with patch.object(service, "_queue_generation") as queue_generation:
         assert service.get_thumbnail(path, size) is image
 
+    queue_generation.assert_not_called()
+
+
+def test_l2_hit_for_scan_written_512_thumbnail_does_not_enqueue_generation(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"image")
+    size = QSize(512, 512)
+    disk_file = thumbnail_cache_file(tmp_path / "thumbs", path, (512, 512))
+    disk_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), "red").save(disk_file, format="JPEG")
+
+    with patch.object(service, "_queue_generation") as queue_generation:
+        pixmap = service.get_thumbnail(path, size)
+
+    assert pixmap is not None
+    assert not pixmap.isNull()
     queue_generation.assert_not_called()

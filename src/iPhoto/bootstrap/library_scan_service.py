@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 import time
 import uuid
@@ -128,7 +129,9 @@ class LibraryScanService:
         repository_factory: Callable[[Path], AssetRepositoryPort] | None = None,
     ) -> None:
         self.library_root = Path(library_root)
-        self._scanner = scanner or FilesystemMediaScanner()
+        self._scanner = scanner or FilesystemMediaScanner(
+            thumbnail_cache_dir=self._thumbnail_cache_dir(),
+        )
         self._repository_factory = repository_factory or get_global_repository
 
     def prepare_album_open(
@@ -488,7 +491,12 @@ class LibraryScanService:
 
         rows = [
             dict(row)
-            for row in process_media_paths(scan_root, image_paths, video_paths)
+            for row in _process_media_paths_with_thumbnail_cache(
+                scan_root,
+                image_paths,
+                video_paths,
+                thumbnail_cache_dir=self._thumbnail_cache_dir(),
+            )
         ]
         transform = self._library_relative_transform(scan_root)
         transformed = [transform(row) for row in rows]
@@ -658,6 +666,9 @@ class LibraryScanService:
     def _repository(self) -> AssetRepositoryPort:
         return self._repository_factory(self.library_root)
 
+    def _thumbnail_cache_dir(self) -> Path:
+        return ensure_work_dir(self.library_root) / "cache" / "thumbs"
+
     def _load_manifest(self, root: Path) -> dict[str, Any]:
         if not root.exists():
             raise AlbumNotFoundError(f"Album directory does not exist: {root}")
@@ -734,14 +745,34 @@ def _is_recoverable_index_error(exc: Exception) -> bool:
 
 
 def _row_is_ready_visible(row: dict[str, Any]) -> bool:
-    return row.get("thumbnail_state") == "ready" and (
-        row.get("micro_thumbnail") is not None
-        or bool(str(row.get("thumb_cache_key") or "").strip())
+    return row.get("thumbnail_state") == "ready" and bool(
+        str(row.get("thumb_cache_key") or "").strip()
     )
 
 
 def _monotonic_ms() -> float:
     return time.perf_counter() * 1000
+
+
+def _process_media_paths_with_thumbnail_cache(
+    root: Path,
+    image_paths: list[Path],
+    video_paths: list[Path],
+    *,
+    thumbnail_cache_dir: Path,
+) -> Iterable[dict[str, Any]]:
+    try:
+        signature = inspect.signature(process_media_paths)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None and "thumbnail_cache_dir" in signature.parameters:
+        return process_media_paths(
+            root,
+            image_paths,
+            video_paths,
+            thumbnail_cache_dir=thumbnail_cache_dir,
+        )
+    return process_media_paths(root, image_paths, video_paths)
 
 
 __all__ = [

@@ -274,6 +274,48 @@ def test_date_query_compares_scanned_utc_rows_with_naive_bounds(tmp_path: Path) 
     assert [row["id"] for row in rows] == ["inside"]
 
 
+def test_count_query_assets_keeps_unrepresented_live_date_filters_in_memory(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    repo = _Repository()
+    repo.all_rows = [
+        {
+            "rel": "before.jpg",
+            "id": "before",
+            "dt": "2024-01-01T09:59:59Z",
+            "live_role": 0,
+            "live_partner_rel": "before.mov",
+        },
+        {
+            "rel": "inside.jpg",
+            "id": "inside",
+            "dt": "2024-01-01T10:30:00Z",
+            "live_role": 0,
+            "live_partner_rel": "inside.mov",
+        },
+        {
+            "rel": "after.jpg",
+            "id": "after",
+            "dt": "2024-01-01T11:00:01Z",
+            "live_role": 0,
+            "live_partner_rel": "after.mov",
+        },
+    ]
+    service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
+
+    count = service.count_query_assets(
+        AssetQuery(
+            media_types=[MediaType.LIVE_PHOTO],
+            date_from=datetime(2024, 1, 1, 10, 0, 0),
+            date_to=datetime(2024, 1, 1, 11, 0, 0),
+        )
+    )
+
+    assert count == 1
+    assert repo.count_calls == []
+
+
 def test_thumbnail_backfill_request_is_deferred_off_call_path(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     album_root = library_root / "Trip"

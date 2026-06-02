@@ -977,7 +977,148 @@ class AssetRepository:
     ) -> list[dict[str, Any]]:
         """Return stale thumbnail rows matching the same collection scope."""
 
-        stale_query = CollectionQuery(
+        first = max(0, int(first))
+        limit = max(0, int(limit))
+        if limit <= 0:
+            return []
+
+        stale_query = self._collection_query_with_thumbnail_state(query, "stale")
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            window_rows, _window_sql, _window_params = self._collection_window_rows_for_backfill(
+                conn,
+                query,
+                first,
+                limit,
+            )
+            if not window_rows:
+                sql, params = QueryBuilder.build_collection_query(
+                    stale_query,
+                    limit=limit,
+                    offset=first,
+                )
+                return [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+
+            sql, params = self._build_stale_window_query(
+                stale_query,
+                window_rows,
+                first=first,
+                limit=limit,
+            )
+            if sql is None:
+                return []
+            return [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+        finally:
+            if should_close:
+                conn.close()
+
+    def _collection_window_rows_for_backfill(
+        self,
+        conn: sqlite3.Connection,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], str | None, list[Any]]:
+        if first > _DEEP_OFFSET_LIMIT:
+            sql, params = self._build_deep_collection_window_query(
+                conn,
+                query,
+                first,
+                limit,
+            )
+            if sql is None:
+                return [], None, []
+        else:
+            sql, params = QueryBuilder.build_collection_query(
+                query,
+                limit=limit,
+                offset=first,
+            )
+        rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+        return rows, sql, params
+
+    def _build_stale_window_query(
+        self,
+        stale_query: CollectionQuery,
+        window_rows: list[dict[str, Any]],
+        *,
+        first: int,
+        limit: int,
+    ) -> tuple[str | None, list[Any]]:
+        if not window_rows:
+            return None, []
+
+        sort_col = QueryBuilder._collection_sort_column(stale_query)
+        top_bound = self._collection_sort_bound(window_rows[0], sort_col)
+        bottom_bound = self._collection_sort_bound(window_rows[-1], sort_col)
+        if top_bound is None or bottom_bound is None:
+            return None, []
+
+        where_clauses, params = QueryBuilder.build_collection_where(stale_query)
+        if first > 0:
+            clause, clause_params = self._collection_range_clause(
+                sort_col,
+                top_bound,
+                stale_query.sort_direction.value,
+                lower=False,
+            )
+            where_clauses.append(clause)
+            params.extend(clause_params)
+
+        clause, clause_params = self._collection_range_clause(
+            sort_col,
+            bottom_bound,
+            stale_query.sort_direction.value,
+            lower=True,
+        )
+        where_clauses.append(clause)
+        params.extend(clause_params)
+
+        sql = "SELECT * FROM assets WHERE " + " AND ".join(where_clauses)
+        sql += " " + QueryBuilder.build_collection_order(stale_query)
+        sql += " LIMIT ?"
+        params.append(limit)
+        return sql, params
+
+    @staticmethod
+    def _collection_sort_bound(
+        row: dict[str, Any],
+        sort_col: str,
+    ) -> tuple[Any, str] | None:
+        sort_value = row.get(sort_col)
+        asset_id = row.get("id")
+        if sort_value is None or asset_id is None:
+            return None
+        return sort_value, str(asset_id)
+
+    @staticmethod
+    def _collection_range_clause(
+        sort_col: str,
+        bound: tuple[Any, str],
+        direction: str,
+        *,
+        lower: bool,
+    ) -> tuple[str, list[Any]]:
+        sort_value, asset_id = bound
+        if direction == "ASC":
+            operator = "<" if lower else ">"
+            id_operator = "<=" if lower else ">="
+        else:
+            operator = ">" if lower else "<"
+            id_operator = ">=" if lower else "<="
+        return (
+            f"({sort_col} {operator} ? OR ({sort_col} = ? AND id {id_operator} ?))",
+            [sort_value, sort_value, asset_id],
+        )
+
+    @staticmethod
+    def _collection_query_with_thumbnail_state(
+        query: CollectionQuery,
+        state: str,
+    ) -> CollectionQuery:
+        return CollectionQuery(
             collection_type=query.collection_type,
             album_path=query.album_path,
             include_subalbums=query.include_subalbums,
@@ -989,21 +1130,8 @@ class AssetRepository:
             search_text=query.search_text,
             sort_key=query.sort_key,
             sort_direction=query.sort_direction,
-            min_thumbnail_state="stale",
+            min_thumbnail_state=state,
         )
-        sql, params = QueryBuilder.build_collection_query(
-            stale_query,
-            limit=max(0, int(limit)),
-            offset=max(0, int(first)),
-        )
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
-        try:
-            conn.row_factory = sqlite3.Row
-            return [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
-        finally:
-            if should_close:
-                conn.close()
 
     def update_thumbnail_ready(
         self,

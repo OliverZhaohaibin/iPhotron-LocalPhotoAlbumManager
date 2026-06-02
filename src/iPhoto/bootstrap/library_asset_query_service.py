@@ -674,6 +674,12 @@ class LibraryAssetQueryService:
     def _requires_in_memory_query(self, query: AssetQuery) -> bool:
         if query.asset_ids or query.album_id:
             return True
+        if query.has_gps is not None:
+            return True
+        if query.date_from is not None or query.date_to is not None:
+            return True
+        if query.is_favorite is False:
+            return True
         if query.order != SortOrder.DESC or not self._sort_by_date(query):
             return True
         media_values = {media_type.value for media_type in query.media_types}
@@ -731,7 +737,7 @@ class LibraryAssetQueryService:
             date_to=query.date_to,
             sort_key="sort_ts",
             sort_direction=SortDirection.DESC,
-            min_thumbnail_state="ready",
+            min_thumbnail_state=None,
         )
 
     @staticmethod

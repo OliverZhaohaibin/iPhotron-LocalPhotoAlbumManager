@@ -112,6 +112,9 @@ class GalleryListModelAdapter(QAbstractListModel):
             return False
 
         asset: Optional[AssetDTO] = self._store.asset_at(row)
+        if asset is None:
+            self._store.ensure_row_loaded(row, emit_signals=False)
+            asset = self._store.asset_at(row)
         if not asset:
             return None
 

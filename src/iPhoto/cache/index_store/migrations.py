@@ -321,6 +321,16 @@ class SchemaMigrator:
              "ON assets (is_favorite, live_role, is_deleted, thumbnail_state, sort_ts DESC, id DESC)"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_gps "
              "ON assets (has_gps, live_role, is_deleted, thumbnail_state, sort_ts DESC, id DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_global "
+             "ON assets (live_role, is_deleted, sort_ts DESC, id DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_album "
+             "ON assets (parent_album_path, live_role, is_deleted, sort_ts DESC, id DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_media "
+             "ON assets (media_type, live_role, is_deleted, sort_ts DESC, id DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_favorite "
+             "ON assets (is_favorite, live_role, is_deleted, sort_ts DESC, id DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_gps "
+             "ON assets (has_gps, live_role, is_deleted, sort_ts DESC, id DESC)"),
             "CREATE INDEX IF NOT EXISTS idx_assets_rel_lookup ON assets (rel)",
             "CREATE INDEX IF NOT EXISTS idx_assets_id_lookup ON assets (id)",
             "CREATE INDEX IF NOT EXISTS idx_assets_revision ON assets (index_revision)",

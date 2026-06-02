@@ -232,6 +232,122 @@ def test_old_style_rows_without_thumbnail_key_are_backfill_candidates(
     assert candidates[0]["thumbnail_state"] == "stale"
 
 
+def _thumbnail_backfill_row(
+    index: int,
+    *,
+    stale: bool,
+    album: str | None = None,
+) -> dict:
+    base = datetime(2024, 1, 1)
+    timestamp = base + timedelta(seconds=index)
+    rel = f"asset-{index:05d}.jpg"
+    if album:
+        rel = f"{album}/{rel}"
+    return {
+        "rel": rel,
+        "id": f"asset-{index:05d}",
+        "parent_album_path": album or "",
+        "dt": timestamp.isoformat(),
+        "ts": int(timestamp.timestamp() * 1_000_000),
+        "media_type": 0,
+        "thumbnail_state": "stale" if stale else "ready",
+        "thumb_cache_key": None if stale else f"thumb-{index}",
+    }
+
+
+def test_thumbnail_backfill_candidates_use_visible_window_bounds(
+    store: IndexStore,
+) -> None:
+    store.write_rows(
+        _thumbnail_backfill_row(index, stale=index % 10 == 0)
+        for index in range(100)
+    )
+    query = CollectionQuery()
+
+    ready_window = store.read_collection_window(query, 50, 10).rows
+    candidates = store.read_thumbnail_backfill_candidates(query, 50, 10)
+
+    assert [row["id"] for row in ready_window] == [
+        "asset-00044",
+        "asset-00043",
+        "asset-00042",
+        "asset-00041",
+        "asset-00039",
+        "asset-00038",
+        "asset-00037",
+        "asset-00036",
+        "asset-00035",
+        "asset-00034",
+    ]
+    assert [row["id"] for row in candidates] == ["asset-00040"]
+
+
+def test_thumbnail_backfill_top_window_includes_rows_before_first_ready(
+    store: IndexStore,
+) -> None:
+    store.write_rows(
+        [
+            _thumbnail_backfill_row(100, stale=True),
+            _thumbnail_backfill_row(99, stale=False),
+            _thumbnail_backfill_row(98, stale=False),
+        ]
+    )
+    query = CollectionQuery()
+
+    candidates = store.read_thumbnail_backfill_candidates(query, 0, 2)
+
+    assert [row["id"] for row in candidates] == ["asset-00100"]
+
+
+def test_thumbnail_backfill_candidates_follow_visible_window_with_stale_rows(
+    store: IndexStore,
+) -> None:
+    store.write_rows(
+        [
+            _thumbnail_backfill_row(100, stale=True),
+            _thumbnail_backfill_row(99, stale=False),
+            _thumbnail_backfill_row(98, stale=False),
+            _thumbnail_backfill_row(97, stale=True),
+            _thumbnail_backfill_row(96, stale=True),
+        ]
+    )
+    query = CollectionQuery(min_thumbnail_state=None)
+
+    visible_window = store.read_collection_window(query, 2, 2).rows
+    candidates = store.read_thumbnail_backfill_candidates(query, 2, 2)
+
+    assert [f"{row['id']}:{row['thumbnail_state']}" for row in visible_window] == [
+        "asset-00098:ready",
+        "asset-00097:stale",
+    ]
+    assert [row["id"] for row in candidates] == ["asset-00097"]
+
+
+def test_thumbnail_backfill_deep_window_uses_visible_sort_range(
+    store: IndexStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.write_rows(
+        _thumbnail_backfill_row(index, stale=index % 10 == 0, album="Album")
+        for index in range(10_000)
+    )
+    query = CollectionQuery(collection_type=CollectionType.ALBUM, album_path="Album")
+    monkeypatch.setattr(
+        store,
+        "read_all",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read_all called")),
+    )
+
+    ready_window = store.read_collection_window(query, 7_000, 60).rows
+    candidates = store.read_thumbnail_backfill_candidates(query, 7_000, 60)
+
+    top_ts = ready_window[0]["sort_ts"]
+    bottom_ts = ready_window[-1]["sort_ts"]
+    assert candidates
+    assert all(row["thumbnail_state"] == "stale" for row in candidates)
+    assert all(bottom_ts <= row["sort_ts"] <= top_ts for row in candidates)
+
+
 def test_pending_failed_stale_rows_are_hidden_from_gallery_collection(store: IndexStore) -> None:
     base = datetime(2024, 1, 1)
     store.write_rows(

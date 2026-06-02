@@ -8,10 +8,10 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for marker controller tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtCore", reason="QtCore is required for marker controller tests", exc_type=ImportError)
 
-from PySide6.QtCore import QObject, QPointF
+from PySide6.QtCore import QObject, QPointF, QRectF
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.gui.ui.widgets.marker_controller import MarkerController
+from iPhoto.gui.ui.widgets.marker_controller import MarkerController, _MarkerCluster
 from maps.map_widget.map_renderer import CityAnnotation
 from iPhoto.library.runtime_controller import GeotaggedAsset
 
@@ -62,6 +62,34 @@ class _DummyThumbnailLoader(QObject):
 
     def request(self, *args, **kwargs):
         return None
+
+
+def _asset(tmp_path: Path) -> GeotaggedAsset:
+    return GeotaggedAsset(
+        library_relative="a.jpg",
+        album_relative="a.jpg",
+        absolute_path=tmp_path / "a.jpg",
+        album_path=tmp_path,
+        asset_id="a",
+        latitude=20.0,
+        longitude=10.0,
+        is_image=True,
+        is_video=False,
+        still_image_time=None,
+        duration=None,
+        location_name=None,
+        live_photo_group_id=None,
+        live_partner_rel=None,
+    )
+
+
+def _clickable_cluster(asset: GeotaggedAsset) -> _MarkerCluster:
+    cluster = _MarkerCluster(
+        representative=asset,
+        screen_pos=QPointF(100.0, 100.0),
+    )
+    cluster.bounding_rect = QRectF(64.0, 28.0, 72.0, 72.0)
+    return cluster
 
 
 def test_marker_controller_suppresses_city_labels_when_backend_provides_them(
@@ -215,22 +243,7 @@ def test_marker_controller_emits_raw_marker_assets(
     tmp_path: Path,
 ) -> None:
     del qapp
-    asset = GeotaggedAsset(
-        library_relative="a.jpg",
-        album_relative="a.jpg",
-        absolute_path=tmp_path / "a.jpg",
-        album_path=tmp_path,
-        asset_id="a",
-        latitude=20.0,
-        longitude=10.0,
-        is_image=True,
-        is_video=False,
-        still_image_time=None,
-        duration=None,
-        location_name=None,
-        live_photo_group_id=None,
-        live_partner_rel=None,
-    )
+    asset = _asset(tmp_path)
     controller = MarkerController(
         _DummyMapWidget(),
         _DummyThumbnailLoader(),
@@ -247,3 +260,253 @@ def test_marker_controller_emits_raw_marker_assets(
         controller.shutdown()
 
     assert emitted == [[asset]]
+
+
+def test_marker_controller_pointer_press_defers_marker_activation(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    asset = _asset(tmp_path)
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+    finally:
+        controller.shutdown()
+
+    assert emitted == []
+
+
+def test_marker_controller_pointer_release_activates_pending_marker_click(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    asset = _asset(tmp_path)
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+        assert controller.handle_pointer_release(QPointF(100.0, 60.0))
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert emitted == [[asset]]
+
+
+def test_marker_controller_pointer_release_survives_cluster_rebuild(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    asset = _asset(tmp_path)
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+        controller._clusters = [_clickable_cluster(asset)]
+        qapp.processEvents()
+        assert controller.handle_pointer_release(QPointF(100.0, 60.0))
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert emitted == [[asset]]
+
+
+def test_marker_controller_set_assets_cancels_pending_marker_click(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    asset = _asset(tmp_path)
+    replacement_root = tmp_path / "replacement"
+    replacement_asset = GeotaggedAsset(
+        library_relative="b.jpg",
+        album_relative="b.jpg",
+        absolute_path=replacement_root / "b.jpg",
+        album_path=replacement_root,
+        asset_id="b",
+        latitude=21.0,
+        longitude=11.0,
+        is_image=True,
+        is_video=False,
+        still_image_time=None,
+        duration=None,
+        location_name=None,
+        live_photo_group_id=None,
+        live_partner_rel=None,
+    )
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+        controller.set_assets([replacement_asset], replacement_root)
+        assert not controller.handle_pointer_release(QPointF(100.0, 60.0))
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert emitted == []
+
+
+def test_marker_controller_set_assets_preserves_pending_click_for_same_asset_keys(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    asset = _asset(tmp_path)
+    refreshed_asset = GeotaggedAsset(
+        library_relative=asset.library_relative,
+        album_relative=asset.album_relative,
+        absolute_path=asset.absolute_path,
+        album_path=asset.album_path,
+        asset_id=asset.asset_id,
+        latitude=asset.latitude,
+        longitude=asset.longitude,
+        is_image=asset.is_image,
+        is_video=asset.is_video,
+        still_image_time=asset.still_image_time,
+        duration=asset.duration,
+        location_name=asset.location_name,
+        live_photo_group_id=asset.live_photo_group_id,
+        live_partner_rel=asset.live_partner_rel,
+    )
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+        controller._library_root = tmp_path
+        controller.set_assets([refreshed_asset], tmp_path)
+        assert controller.handle_pointer_release(QPointF(100.0, 60.0))
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert emitted == [[asset]]
+
+
+def test_marker_controller_pan_does_not_cancel_pending_marker_click(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    asset = _asset(tmp_path)
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+        threshold = controller._click_drag_threshold()
+        controller.handle_pan(QPointF(float(threshold + 1), 0.0))
+        assert controller.handle_pointer_release(QPointF(100.0, 60.0))
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert emitted == [[asset]]
+
+
+def test_marker_controller_small_pan_keeps_pending_marker_click(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    asset = _asset(tmp_path)
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+        controller.handle_pan(QPointF(1.0, 0.0))
+        assert controller.handle_pointer_release(QPointF(101.0, 60.0))
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert emitted == [[asset]]
+
+
+def test_marker_controller_drag_distance_cancels_pending_marker_click(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    asset = _asset(tmp_path)
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._clusters = [_clickable_cluster(asset)]
+    emitted: list[list[GeotaggedAsset]] = []
+    controller.markerActivated.connect(lambda assets: emitted.append(list(assets)))
+
+    try:
+        assert controller.handle_pointer_press(QPointF(100.0, 60.0))
+        threshold = controller._click_drag_threshold()
+        controller.handle_pointer_move(QPointF(100.0 + threshold + 1.0, 60.0))
+        assert not controller.handle_pointer_release(QPointF(100.0, 60.0))
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert emitted == []

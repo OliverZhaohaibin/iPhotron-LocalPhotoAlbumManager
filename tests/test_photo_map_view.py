@@ -194,6 +194,18 @@ class _DummyMarkerController(QObject):
         del cluster
         return None
 
+    def handle_pointer_press(self, position: QPointF) -> bool:
+        del position
+        return False
+
+    def handle_pointer_move(self, position: QPointF) -> None:
+        del position
+        return None
+
+    def handle_pointer_release(self, position: QPointF) -> bool:
+        del position
+        return False
+
     def set_assets(self, *args, **kwargs) -> None:
         del args, kwargs
         return None
@@ -561,7 +573,7 @@ def test_photo_map_view_routes_marker_assets_through_interaction_service(
     assert emitted == [asset.library_relative]
 
 
-def test_photo_map_view_delegates_pointer_hit_testing_to_marker_controller(
+def test_photo_map_view_records_pointer_press_without_consuming_event(
     qapp: QApplication,
     monkeypatch,
     tmp_path: Path,
@@ -613,9 +625,68 @@ def test_photo_map_view_delegates_pointer_hit_testing_to_marker_controller(
             Qt.KeyboardModifier.NoModifier,
         )
 
-        assert view.eventFilter(cast(QObject, view._map_event_target), event)
+        assert not view.eventFilter(cast(QObject, view._map_event_target), event)
         assert len(controller_instances) == 1
         assert controller_instances[0].pointer_positions == [QPointF(14.0, 18.0)]
+    finally:
+        view.close()
+
+
+def test_photo_map_view_marker_release_does_not_consume_map_release(
+    qapp: QApplication,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    del qapp
+
+    source = MapSourceSpec(
+        kind="legacy_pbf",
+        data_path=tmp_path / "tiles",
+        style_path=tmp_path / "style.json",
+    )
+
+    class _ReleaseAwareMarkerController(_DummyMarkerController):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.release_positions: list[QPointF] = []
+
+        def handle_pointer_release(self, position: QPointF) -> bool:
+            self.release_positions.append(QPointF(position))
+            return True
+
+    controller_instances: list[_ReleaseAwareMarkerController] = []
+
+    def _create_controller(*args, **kwargs):
+        controller = _ReleaseAwareMarkerController(*args, **kwargs)
+        controller_instances.append(controller)
+        return controller
+
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _create_controller)
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "create_map_widget",
+        lambda *args, **kwargs: MapWidgetFactoryResult(
+            _FallbackMapWidget(args[0], map_source=source),
+            source,
+            "legacy_python",
+            False,
+        ),
+    )
+
+    view = photo_map_view_module.PhotoMapView(map_source=source)
+    try:
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(14.0, 18.0),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        assert not view.eventFilter(cast(QObject, view._map_event_target), event)
+        assert len(controller_instances) == 1
+        assert controller_instances[0].release_positions == [QPointF(14.0, 18.0)]
     finally:
         view.close()
 

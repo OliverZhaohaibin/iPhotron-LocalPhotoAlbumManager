@@ -443,6 +443,14 @@ class PhotoMapView(QWidget):
                     if self._last_tooltip_text:
                         self._tooltip.hide_tooltip()
                         self._last_tooltip_text = ""
+                if mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                    handle_pointer_move = getattr(
+                        self._marker_controller,
+                        "handle_pointer_move",
+                        None,
+                    )
+                    if callable(handle_pointer_move):
+                        handle_pointer_move(mouse_event.position())
             elif event.type() == QEvent.Type.Leave:
                 if self._last_tooltip_text:
                     self._tooltip.hide_tooltip()
@@ -455,19 +463,27 @@ class PhotoMapView(QWidget):
                 if self._last_tooltip_text:
                     self._tooltip.hide_tooltip()
                     self._last_tooltip_text = ""
-                handle_pointer_press = getattr(
-                    self._marker_controller,
-                    "handle_pointer_press",
-                    None,
-                )
-                if callable(handle_pointer_press):
-                    if handle_pointer_press(mouse_event.position()):
-                        return True
-                else:
-                    cluster = self._marker_controller.cluster_at(mouse_event.position())
-                    if cluster is not None:
-                        self._marker_controller.handle_marker_click(cluster)
-                        return True
+                if mouse_event.button() == Qt.MouseButton.LeftButton:
+                    handle_pointer_press = getattr(
+                        self._marker_controller,
+                        "handle_pointer_press",
+                        None,
+                    )
+                    if callable(handle_pointer_press):
+                        handle_pointer_press(mouse_event.position())
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                mouse_event = cast(QMouseEvent, event)
+                if self._last_tooltip_text:
+                    self._tooltip.hide_tooltip()
+                    self._last_tooltip_text = ""
+                if mouse_event.button() == Qt.MouseButton.LeftButton:
+                    handle_pointer_release = getattr(
+                        self._marker_controller,
+                        "handle_pointer_release",
+                        None,
+                    )
+                    if callable(handle_pointer_release):
+                        handle_pointer_release(mouse_event.position())
         return super().eventFilter(watched, event)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]

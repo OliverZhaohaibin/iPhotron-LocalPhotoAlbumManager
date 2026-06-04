@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QModelIndex, QObject, QCoreApplication, Signal
+from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QCoreApplication, Signal
 from PySide6.QtWidgets import QPushButton
 
+from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.asset_delegate import AssetGridDelegate
 from .preview_controller import PreviewController
@@ -39,10 +41,13 @@ class SelectionController(QObject):
         self._preview_controller = preview_controller
         self._playback = playback
         self._active = False
+        self._reset_selection_paths: list[Path] = []
+        self._bound_model = None
 
         self._selection_button.clicked.connect(self._handle_toggle_requested)
         if handle_grid_clicks and self._playback is not None:
             self._grid_view.itemClicked.connect(self._handle_grid_item_clicked)
+        self._bind_model_reset_signals(self._grid_view.model())
 
     # ------------------------------------------------------------------
     # Public API
@@ -109,3 +114,68 @@ class SelectionController(QObject):
         if self._playback is None:
             return
         self._playback.play_asset(index.row())
+
+    def _bind_model_reset_signals(self, model) -> None:
+        if model is self._bound_model:
+            return
+        if self._bound_model is not None:
+            try:
+                self._bound_model.modelAboutToBeReset.disconnect(
+                    self._capture_selection_before_reset
+                )
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                self._bound_model.modelReset.disconnect(
+                    self._restore_selection_after_reset
+                )
+            except (RuntimeError, TypeError):
+                pass
+        self._bound_model = model
+        if model is not None:
+            model.modelAboutToBeReset.connect(self._capture_selection_before_reset)
+            model.modelReset.connect(self._restore_selection_after_reset)
+
+    def _capture_selection_before_reset(self) -> None:
+        self._reset_selection_paths = []
+        if not self._active:
+            return
+        selection_model = self._grid_view.selectionModel()
+        if selection_model is None:
+            return
+        seen: set[Path] = set()
+        for index in selection_model.selectedIndexes():
+            if not index.isValid():
+                continue
+            raw_path = index.data(Roles.ABS)
+            if not raw_path:
+                continue
+            path = Path(str(raw_path))
+            if path in seen:
+                continue
+            seen.add(path)
+            self._reset_selection_paths.append(path)
+
+    def _restore_selection_after_reset(self) -> None:
+        if not self._active or not self._reset_selection_paths:
+            self._reset_selection_paths = []
+            return
+        model = self._grid_view.model()
+        selection_model = self._grid_view.selectionModel()
+        if model is None or selection_model is None:
+            self._reset_selection_paths = []
+            return
+        selection_model.clearSelection()
+        for path in self._reset_selection_paths:
+            row_for_path = getattr(model, "row_for_path", None)
+            row = row_for_path(path) if callable(row_for_path) else None
+            if row is None or row < 0:
+                continue
+            index = model.index(row, 0)
+            if index.isValid():
+                selection_model.select(
+                    index,
+                    QItemSelectionModel.SelectionFlag.Select
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+        self._reset_selection_paths = []

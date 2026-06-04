@@ -39,6 +39,7 @@ class AppFacade(QObject):
     scanBatchCommitted = Signal(object)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
+    assetReloadRequested = Signal(Path, bool, bool)
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
@@ -370,6 +371,11 @@ class AppFacade(QObject):
 
         return self._restoration_service.restore_assets(sources)
 
+    def restore_assets_with_plan(self, sources: Iterable[Path]):
+        """Schedule restores and return accepted source/destination batches."""
+
+        return self._restoration_service.restore_assets_with_plan(sources)
+
     def toggle_featured(self, ref: str) -> bool:
         """Toggle *ref* in the active album and mirror the change in the library."""
 
@@ -477,6 +483,7 @@ class AppFacade(QObject):
         announce_index: bool,
         force_reload: bool,
     ) -> None:
+        self.assetReloadRequested.emit(root, announce_index, force_reload)
         # Legacy reload hook
         self.loadStarted.emit(root)
         self.loadFinished.emit(root, True)

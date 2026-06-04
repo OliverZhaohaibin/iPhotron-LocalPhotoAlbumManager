@@ -56,6 +56,7 @@ def test_apply_move_reuses_cached_metadata_and_pairs_once(tmp_path: Path) -> Non
                 "id": "asset-1",
                 "dt": "2024-01-01",
                 "metadata": {"camera": "cached"},
+                "is_deleted": 1,
             }
         ]
     )
@@ -77,6 +78,7 @@ def test_apply_move_reuses_cached_metadata_and_pairs_once(tmp_path: Path) -> Non
     assert "AlbumA/photo.jpg" not in rows
     assert rows["AlbumB/photo.jpg"]["id"] == "asset-1"
     assert rows["AlbumB/photo.jpg"]["parent_album_path"] == "AlbumB"
+    assert rows["AlbumB/photo.jpg"]["is_deleted"] == 0
     assert pair_recorder.pair_roots == [library_root]
 
 
@@ -150,7 +152,7 @@ def test_delete_annotation_and_stale_trash_cleanup(tmp_path: Path) -> None:
 
     get_global_repository(library_root).write_rows(
         [
-            {"rel": "AlbumA/photo.jpg", "id": "asset-1"},
+            {"rel": "AlbumA/photo.jpg", "id": "asset-1", "is_deleted": 0},
             {
                 "rel": f"{RECENTLY_DELETED_DIR_NAME}/missing.jpg",
                 "id": "stale",
@@ -173,6 +175,8 @@ def test_delete_annotation_and_stale_trash_cleanup(tmp_path: Path) -> None:
     trash_rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
     assert result.errors == []
     assert f"{RECENTLY_DELETED_DIR_NAME}/missing.jpg" not in rows
+    assert rows[trash_rel]["is_deleted"] == 1
+    assert rows[trash_rel]["parent_album_path"] == RECENTLY_DELETED_DIR_NAME
     assert rows[trash_rel]["original_rel_path"] == "AlbumA/photo.jpg"
     assert rows[trash_rel]["original_album_id"] == "album-a"
     assert rows[trash_rel]["original_album_subpath"] == "photo.jpg"
@@ -272,6 +276,7 @@ def test_restore_clears_trash_metadata_from_destination_row(tmp_path: Path) -> N
                 "original_rel_path": "AlbumA/photo.jpg",
                 "original_album_id": "album-a",
                 "original_album_subpath": "photo.jpg",
+                "is_deleted": 1,
             },
         ]
     )
@@ -292,6 +297,8 @@ def test_restore_clears_trash_metadata_from_destination_row(tmp_path: Path) -> N
     assert result.errors == []
     assert f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg" not in rows
     restored = rows["AlbumA/photo.jpg"]
+    assert restored["is_deleted"] == 0
+    assert restored["parent_album_path"] == "AlbumA"
     assert restored.get("original_rel_path") is None
     assert restored.get("original_album_id") is None
     assert restored.get("original_album_subpath") is None

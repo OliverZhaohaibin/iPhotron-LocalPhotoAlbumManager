@@ -101,6 +101,12 @@ class MoveWorker(QRunnable):
 
         return self._cancel_requested
 
+    @property
+    def source_count(self) -> int:
+        """Return how many source files were submitted to this worker."""
+
+        return len(self._sources)
+
     def run(self) -> None:  # pragma: no cover - executed on a worker thread
         """Move the queued files while updating progress and rescanning albums."""
 

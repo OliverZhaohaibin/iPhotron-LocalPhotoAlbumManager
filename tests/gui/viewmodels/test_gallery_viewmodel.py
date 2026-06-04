@@ -204,6 +204,26 @@ def test_open_filtered_collection_sets_media_types(tmp_path: Path) -> None:
     assert query.media_types == [MediaType.VIDEO]
 
 
+def test_paths_for_rows_loads_sparse_rows_before_returning_paths(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    dto = SimpleNamespace(abs_path=tmp_path / "deep.jpg")
+    store.asset_at.side_effect = [None, dto]
+
+    assert vm.paths_for_rows([360]) == [tmp_path / "deep.jpg"]
+
+    store.ensure_row_loaded.assert_called_once_with(360)
+
+
+def test_items_for_rows_loads_sparse_rows_before_returning_assets(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    dto = SimpleNamespace(abs_path=tmp_path / "deep.jpg")
+    store.asset_at.side_effect = [None, dto]
+
+    assert vm.items_for_rows([360]) == [dto]
+
+    store.ensure_row_loaded.assert_called_once_with(360)
+
+
 def test_open_location_map_requests_assets_through_navigation_service(tmp_path: Path) -> None:
     vm, _store, context, _facade, _asset_service, nav_service = _make_vm(
         library_root=tmp_path,

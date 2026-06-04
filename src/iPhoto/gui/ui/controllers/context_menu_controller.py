@@ -165,7 +165,8 @@ class ContextMenuController(QObject):
 
         try:
             self._prepare_file_mutation(paths)
-            queued_restore = self._facade.restore_assets(paths)
+            restore_result = self._facade.restore_assets_with_plan(paths)
+            queued_restore = bool(getattr(restore_result, "scheduled", False))
         except Exception:
             self._facade.rescan_current()
             raise
@@ -178,7 +179,21 @@ class ContextMenuController(QObject):
                 # Removing the rows only after the restore task has been accepted
                 # avoids hiding assets when the backend declined to queue any
                 # work (for example because the user rejected every fallback).
-                if not self._apply_optimistic_move(paths, is_delete=False):
+                optimistic_applied = False
+                for batch in getattr(restore_result, "batches", ()):
+                    destination_root = getattr(batch, "destination_root", None)
+                    batch_sources = list(getattr(batch, "sources", ()) or ())
+                    if destination_root is None or not batch_sources:
+                        continue
+                    optimistic_applied = (
+                        self._apply_optimistic_move(
+                            batch_sources,
+                            destination_root=Path(destination_root),
+                            is_delete=False,
+                        )
+                        or optimistic_applied
+                    )
+                if not optimistic_applied:
                     self._remove_selection_rows(selected_indexes)
             self._toast.show_toast("Restoring ...")
 

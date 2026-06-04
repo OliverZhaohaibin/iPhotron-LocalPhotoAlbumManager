@@ -20,6 +20,9 @@ from ..tasks.asset_loader_worker import (
 class AssetDataLoader(QObject):
     """Wrap :class:`AssetLoaderWorker` to provide a minimal Qt friendly API."""
 
+    # Legacy album-load transport only. Current scan-visible publishing flows
+    # through scanBatchCommitted -> GalleryListModelAdapter.handle_scan_batch so
+    # pending mutation overlays and selection preservation stay single-sourced.
     chunkReady = Signal(Path, list)
     loadFinished = Signal(Path, bool)
     loadProgress = Signal(Path, int, int)

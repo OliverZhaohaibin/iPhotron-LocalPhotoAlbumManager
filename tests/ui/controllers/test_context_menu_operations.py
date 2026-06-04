@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for context menu tests", exc_type=ImportError)
 
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
+from iPhoto.gui.services.restoration_service import RestoreBatch, RestoreScheduleResult
 
 
 def _make_controller(*, selected_paths: list[Path], prepare_cb=None):
@@ -112,3 +113,55 @@ def test_execute_move_to_album_waits_for_backend_acceptance() -> None:
 
     assert events == [f"move:{destination}"]
     controller._apply_optimistic_move.assert_not_called()
+
+
+def test_execute_restore_uses_resolved_destination_for_optimistic_move() -> None:
+    asset_path = Path("D:/library/.Recently Deleted/photo.jpg")
+    destination = Path("D:/library/AlbumA")
+    events: list[str] = []
+
+    def _prepare(paths: list[Path]) -> None:
+        assert paths == [asset_path]
+        events.append("prepare")
+
+    controller, facade = _make_controller(selected_paths=[asset_path], prepare_cb=_prepare)
+    controller._apply_optimistic_move = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda paths, destination_root, is_delete=False: events.append(
+            f"optimistic:{destination_root}:{is_delete}:{paths}"
+        )
+        or True
+    )
+    facade.restore_assets_with_plan.side_effect = (
+        lambda paths: events.append("restore")
+        or RestoreScheduleResult(
+            batches=[RestoreBatch(sources=list(paths), destination_root=destination)]
+        )
+    )
+
+    controller._execute_restore()
+
+    assert events == [
+        "prepare",
+        "restore",
+        f"optimistic:{destination}:False:{[asset_path]}",
+    ]
+    controller._toast.show_toast.assert_called_once_with("Restoring ...")
+
+
+def test_execute_restore_waits_for_backend_acceptance() -> None:
+    asset_path = Path("D:/library/.Recently Deleted/photo.jpg")
+    events: list[str] = []
+
+    controller, facade = _make_controller(selected_paths=[asset_path])
+    controller._apply_optimistic_move = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda *_args, **_kwargs: events.append("optimistic") or True
+    )
+    facade.restore_assets_with_plan.side_effect = (
+        lambda paths: events.append("restore") or RestoreScheduleResult()
+    )
+
+    controller._execute_restore()
+
+    assert events == ["restore"]
+    controller._apply_optimistic_move.assert_not_called()
+    controller._toast.show_toast.assert_not_called()

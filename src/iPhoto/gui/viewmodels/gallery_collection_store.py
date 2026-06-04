@@ -34,6 +34,9 @@ from iPhoto.gui.viewmodels.pending_move_buffer import (
     _PendingMove,
 )
 from iPhoto.gui.viewmodels.pending_move_buffer import (
+    pending_source_matches_query as _pending_source_matches_query_fn,
+)
+from iPhoto.gui.viewmodels.pending_move_buffer import (
     should_include_pending as _should_include_pending_fn,
 )
 from iPhoto.gui.viewmodels.signal import Signal
@@ -128,7 +131,7 @@ class GalleryCollectionStore:
         if self._library_root == root:
             return
         self._library_root = root
-        self._reset_window_state()
+        self._reset_window_state(clear_pending=True)
         self.data_changed.emit()
 
     def set_asset_query_service(
@@ -226,7 +229,7 @@ class GalleryCollectionStore:
         next_index = 0
         for asset in stored_assets:
             dto = self._geotagged_asset_to_dto(asset, library_root)
-            if dto is not None:
+            if dto is not None and not self._dto_matches_pending_source(dto):
                 self._row_cache[next_index] = dto
                 next_index += 1
 
@@ -300,12 +303,18 @@ class GalleryCollectionStore:
                     asset,
                     self._selection_library_root or self._library_root or path.parent,
                 )
-                if dto is not None and self._normalize_abs_key(dto.abs_path) == target:
+                if (
+                    dto is not None
+                    and not self._dto_matches_pending_source(dto)
+                    and self._normalize_abs_key(dto.abs_path) == target
+                ):
                     return dto
         return None
 
     def row_for_path(self, path: Path) -> Optional[int]:
         target = self._normalize_abs_key(path)
+        if target in self._pending_paths:
+            return None
         for row, dto in self._row_cache.items():
             if self._normalize_abs_key(dto.abs_path) == target:
                 return row
@@ -317,7 +326,7 @@ class GalleryCollectionStore:
             next_index = 0
             for asset in self._selection_direct_assets:
                 dto = self._geotagged_asset_to_dto(asset, library_root)
-                if dto is None:
+                if dto is None or self._dto_matches_pending_source(dto):
                     continue
                 if self._normalize_abs_key(dto.abs_path) == target:
                     return next_index
@@ -330,7 +339,13 @@ class GalleryCollectionStore:
         find_row_by_path = getattr(self._asset_query_service, "find_row_by_path", None)
         if not callable(find_row_by_path):
             return None
-        return find_row_by_path(self._current_query, path)
+        raw_row = find_row_by_path(self._current_query, path)
+        if raw_row is None:
+            return None
+        return self._pending_adjusted_view_row_for_raw_row(
+            self._current_query,
+            int(raw_row),
+        )
 
     def count(self) -> int:
         return self._total_count
@@ -417,10 +432,11 @@ class GalleryCollectionStore:
         removed_rows: list[int] = []
         inserted_dtos: list[AssetDTO] = []
         cached_map = {
-            str(dto.abs_path): (idx, dto) for idx, dto in self._iter_cached_rows()
+            self._normalize_abs_key(dto.abs_path): (idx, dto)
+            for idx, dto in self._iter_cached_rows()
         }
         for path in paths:
-            key = str(path)
+            key = self._normalize_abs_key(path)
             if key in self._pending_paths:
                 continue
             found = cached_map.get(key)
@@ -429,6 +445,7 @@ class GalleryCollectionStore:
             row, dto = found
             removed_rows.append(row)
             destination_abs = destination_root / path.name
+            source_library_rel = self._rel_path_for_abs(path)
             destination_rel = self._rel_path_for_abs(destination_abs)
             moved_dto = AssetDTO(
                 id=dto.id,
@@ -448,7 +465,10 @@ class GalleryCollectionStore:
             )
             pending = _PendingMove(
                 dto=moved_dto,
+                source_id=str(dto.id) if dto.id else None,
                 source_abs=path,
+                source_library_rel=source_library_rel,
+                source_album_path=self._album_path_for_rel(source_library_rel),
                 destination_root=destination_root,
                 destination_album_path=destination_album_path,
                 destination_abs=destination_abs,
@@ -460,6 +480,33 @@ class GalleryCollectionStore:
             if self._current_query and self._should_include_pending(pending, self._current_query):
                 inserted_dtos.append(moved_dto)
         return removed_rows, inserted_dtos
+
+    def clear_pending_moves_for_paths(self, paths: Iterable[Path]) -> bool:
+        """Clear pending mutations whose source or destination matches *paths*."""
+
+        keys = {self._normalize_abs_key(Path(path)) for path in paths}
+        if not keys:
+            return False
+        before = len(self._pending_moves)
+        self._pending_moves = [
+            pending
+            for pending in self._pending_moves
+            if self._normalize_abs_key(pending.source_abs) not in keys
+            and self._normalize_abs_key(pending.destination_abs) not in keys
+        ]
+        self._pending_paths = {
+            self._normalize_abs_key(pending.source_abs)
+            for pending in self._pending_moves
+        }
+        return len(self._pending_moves) != before
+
+    def clear_all_pending_moves(self) -> bool:
+        """Drop every optimistic mutation overlay for this collection store."""
+
+        had_pending = bool(self._pending_moves or self._pending_paths)
+        self._pending_moves.clear()
+        self._pending_paths.clear()
+        return had_pending
 
     def append_dtos(self, dtos: List[AssetDTO]) -> None:
         if not dtos:
@@ -626,6 +673,13 @@ class GalleryCollectionStore:
         old_total = self._total_count
         previous_cache = self._row_cache
         new_cache = dict(fetched_rows)
+        pending_insertions = (
+            self._pending_insertions_for_query(self._current_query, new_cache.values())
+            if self._current_query is not None
+            else []
+        )
+        for offset, dto in enumerate(pending_insertions):
+            new_cache[new_total - len(pending_insertions) + offset] = dto
 
         pinned_row = self._pinned_row
         if pinned_row is not None and pinned_row not in new_cache and 0 <= pinned_row < new_total:
@@ -693,11 +747,15 @@ class GalleryCollectionStore:
         read_window = getattr(self._asset_query_service, "read_query_asset_window", None)
         if callable(read_window):
             window_first, window_limit = self._compute_target_window_unbounded(first, last)
+            raw_window_first = self._pending_adjusted_raw_offset_for_view_offset(
+                self._current_query,
+                window_first,
+            )
             try:
                 window = read_window(
                     active_root,
                     self._current_query,
-                    window_first,
+                    raw_window_first,
                     window_limit,
                 )
             except Exception as exc:
@@ -708,20 +766,43 @@ class GalleryCollectionStore:
                     error=type(exc).__name__,
                 )
                 return self._total_count, window_first, window_first + max(0, window_limit) - 1, {}, self._collection_revision
-            rows = self._rows_to_dtos(window.first, window.rows)
-            fetched_last = window.first + len(window.rows) - 1
-            if not rows and window.total_count > 0:
-                fetched_last = window.first + max(0, window_limit) - 1
-            return (
+            pending_source_count = self._pending_source_count_for_query(
+                self._current_query
+            )
+            extra_limit = pending_source_count if pending_source_count > 0 else 0
+            if extra_limit > 0:
+                try:
+                    window = read_window(
+                        active_root,
+                        self._current_query,
+                        raw_window_first,
+                        window_limit + extra_limit,
+                    )
+                except Exception:
+                    pass
+            rows = self._rows_to_dtos(window_first, window.rows)
+            total_count = self._pending_adjusted_total_count(
                 window.total_count,
-                window.first,
-                min(max(window.first, fetched_last), max(0, window.total_count - 1)),
+                self._current_query,
+                rows.values(),
+            )
+            fetched_last = window_first + len(window.rows) - 1
+            if not rows and window.total_count > 0:
+                fetched_last = window_first + max(0, window_limit) - 1
+            return (
+                total_count,
+                window_first,
+                min(max(window_first, fetched_last), max(0, total_count - 1)),
                 rows,
                 window.collection_revision,
             )
 
         count_query = self._count_query(self._current_query)
-        new_total = self._asset_query_service.count_query_assets(count_query)
+        new_total = self._pending_adjusted_total_count(
+            self._asset_query_service.count_query_assets(count_query),
+            count_query,
+            (),
+        )
         if new_total <= 0:
             return 0, 0, -1, {}, self._collection_revision
         bounded_first = max(0, min(first, new_total - 1))
@@ -810,7 +891,16 @@ class GalleryCollectionStore:
         if self._current_query is None or last < first:
             return {}
 
-        query = self._slice_query(self._current_query, first, last - first + 1)
+        pending_source_count = self._pending_source_count_for_query(self._current_query)
+        raw_first = self._pending_adjusted_raw_offset_for_view_offset(
+            self._current_query,
+            first,
+        )
+        query = self._slice_query(
+            self._current_query,
+            raw_first,
+            last - first + 1 + pending_source_count,
+        )
         validate_paths = self._should_validate_paths(self._current_query)
         rows: Dict[int, AssetDTO] = {}
         active_root = self._active_root or self._library_root
@@ -851,7 +941,6 @@ class GalleryCollectionStore:
                 and self._should_validate_paths(self._current_query)
             )
         for offset, row in enumerate(raw_rows):
-            row_index = first + offset
             view_rel = row.get("rel") if isinstance(row, dict) else None
             if not isinstance(view_rel, str) or not view_rel:
                 continue
@@ -862,6 +951,9 @@ class GalleryCollectionStore:
                 continue
             if validate_paths and not self._path_exists_cached(dto.abs_path):
                 continue
+            if self._dto_matches_pending_source(dto):
+                continue
+            row_index = first + len(rows)
             rows[row_index] = dto
         return rows
 
@@ -1070,6 +1162,10 @@ class GalleryCollectionStore:
             resolved = path
         return os.path.normcase(str(resolved))
 
+    @staticmethod
+    def _normalize_rel_key(path: Path) -> str:
+        return os.path.normcase(Path(path).as_posix())
+
     def _resolve_abs_path(self, rel_path: Path) -> Path:
         return _resolve_abs_path_fn(rel_path, self._library_root)
 
@@ -1088,6 +1184,156 @@ class GalleryCollectionStore:
     def _should_include_pending(self, pending: _PendingMove, query: AssetQuery) -> bool:
         return _should_include_pending_fn(pending, query)
 
+    def _pending_source_matches_query(self, pending: _PendingMove, query: AssetQuery) -> bool:
+        return _pending_source_matches_query_fn(pending, query)
+
+    def _pending_source_count_for_query(self, query: AssetQuery) -> int:
+        return sum(
+            1
+            for pending in self._pending_moves
+            if self._pending_source_matches_query(pending, query)
+        )
+
+    def _pending_source_rows_for_query(self, query: AssetQuery) -> list[int]:
+        if self._asset_query_service is None or not self._pending_moves:
+            return []
+        find_row_by_path = getattr(self._asset_query_service, "find_row_by_path", None)
+        if not callable(find_row_by_path):
+            return []
+        rows: list[int] = []
+        for pending in self._pending_moves:
+            if not self._pending_source_matches_query(pending, query):
+                continue
+            raw_row = find_row_by_path(query, pending.source_abs)
+            if raw_row is None:
+                raw_row = find_row_by_path(query, pending.source_library_rel)
+            if raw_row is not None:
+                rows.append(int(raw_row))
+        return sorted(set(rows))
+
+    def _pending_adjusted_raw_offset_for_view_offset(
+        self,
+        query: AssetQuery,
+        view_offset: int,
+    ) -> int:
+        raw_offset = max(0, int(view_offset))
+        for source_row in self._pending_source_rows_for_query(query):
+            if source_row <= raw_offset:
+                raw_offset += 1
+                continue
+            break
+        return raw_offset
+
+    def _pending_adjusted_view_row_for_raw_row(
+        self,
+        query: AssetQuery,
+        raw_row: int,
+    ) -> int:
+        hidden_before = sum(
+            1
+            for source_row in self._pending_source_rows_for_query(query)
+            if source_row < raw_row
+        )
+        return max(0, int(raw_row) - hidden_before)
+
+    def _pending_adjusted_total_count(
+        self,
+        raw_total_count: int,
+        query: AssetQuery,
+        existing_rows: Iterable[AssetDTO],
+    ) -> int:
+        pending_sources = self._pending_source_count_for_query(query)
+        pending_insertions = len(
+            self._pending_insertions_for_query(query, existing_rows)
+        )
+        return max(0, int(raw_total_count) - pending_sources) + pending_insertions
+
+    def _pending_insertions_for_query(
+        self,
+        query: AssetQuery,
+        existing_rows: Iterable[AssetDTO],
+    ) -> list[AssetDTO]:
+        if not self._pending_moves:
+            return []
+        existing_keys: set[str] = set()
+        for dto in existing_rows:
+            existing_keys.update(self._dto_destination_keys(dto, include_id=True))
+        inserted: list[AssetDTO] = []
+        for pending in self._pending_moves:
+            if not self._should_include_pending(pending, query):
+                continue
+            dto = pending.dto
+            pending_keys = self._pending_destination_keys(pending, include_id=True)
+            if existing_keys.intersection(pending_keys):
+                continue
+            inserted.append(dto)
+            existing_keys.update(pending_keys)
+        return inserted
+
+    def _dto_matches_pending_source(self, dto: AssetDTO) -> bool:
+        if not self._pending_paths:
+            return False
+        dto_abs_key = self._normalize_abs_key(dto.abs_path)
+        dto_rel_key = self._normalize_rel_key(self._rel_path_for_abs(dto.abs_path))
+        dto_fallback_rel_key = self._normalize_rel_key(dto.rel_path)
+        dto_id = str(dto.id) if dto.id else None
+        return any(
+            not self._dto_matches_pending_destination(dto, pending)
+            and (
+                dto_abs_key == self._normalize_abs_key(pending.source_abs)
+                or dto_rel_key == self._normalize_rel_key(pending.source_library_rel)
+                or dto_fallback_rel_key == self._normalize_rel_key(
+                    pending.source_library_rel
+                )
+                or (
+                    dto_id is not None
+                    and pending.source_id is not None
+                    and dto_id == pending.source_id
+                )
+            )
+            for pending in self._pending_moves
+        )
+
+    def _dto_matches_pending_destination(
+        self,
+        dto: AssetDTO,
+        pending: _PendingMove,
+    ) -> bool:
+        return bool(
+            self._dto_destination_keys(dto).intersection(
+                self._pending_destination_keys(pending)
+            )
+        )
+
+    def _dto_destination_keys(
+        self,
+        dto: AssetDTO,
+        *,
+        include_id: bool = False,
+    ) -> set[str]:
+        keys = {
+            f"abs:{self._normalize_abs_key(dto.abs_path)}",
+            f"rel:{self._normalize_rel_key(self._rel_path_for_abs(dto.abs_path))}",
+            f"rel:{self._normalize_rel_key(dto.rel_path)}",
+        }
+        if include_id and dto.id:
+            keys.add(f"id:{dto.id}")
+        return keys
+
+    def _pending_destination_keys(
+        self,
+        pending: _PendingMove,
+        *,
+        include_id: bool = False,
+    ) -> set[str]:
+        keys = {
+            f"abs:{self._normalize_abs_key(pending.destination_abs)}",
+            f"rel:{self._normalize_rel_key(pending.destination_rel)}",
+        }
+        if include_id and pending.dto.id:
+            keys.add(f"id:{pending.dto.id}")
+        return keys
+
     def _album_path_for_root(self, root: Path) -> str:
         if self._library_root is None:
             return root.name
@@ -1099,6 +1345,12 @@ class GalleryCollectionStore:
             except ValueError:
                 return root.name
         return rel.as_posix()
+
+    @staticmethod
+    def _album_path_for_rel(rel_path: Path) -> str:
+        parent = rel_path.parent
+        rel = parent.as_posix()
+        return "" if rel == "." else rel
 
     def _rel_path_for_abs(self, path: Path) -> Path:
         if self._library_root is None:
@@ -1130,15 +1382,16 @@ class GalleryCollectionStore:
     def _iter_cached_rows(self) -> List[tuple[int, AssetDTO]]:
         return sorted(self._row_cache.items(), key=lambda item: item[0])
 
-    def _reset_window_state(self) -> None:
+    def _reset_window_state(self, *, clear_pending: bool = False) -> None:
         self._row_cache.clear()
         self._total_count = 0
         self._window_range = None
         self._visible_range = None
         self._pinned_row = None
         self._path_cache.clear()
-        self._pending_moves.clear()
-        self._pending_paths.clear()
+        if clear_pending:
+            self._pending_moves.clear()
+            self._pending_paths.clear()
         self._pending_scan_refresh = False
         self._pending_scan_rels.clear()
         self._pending_scan_sort_keys.clear()

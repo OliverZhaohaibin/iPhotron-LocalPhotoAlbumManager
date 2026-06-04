@@ -324,6 +324,18 @@ class GalleryListModelAdapter(QAbstractListModel):
             self.endInsertRows()
         return bool(removed_rows or inserted_dtos)
 
+    def clear_pending_moves_for_paths(self, paths: list[Path]) -> bool:
+        changed = self._store.clear_pending_moves_for_paths(paths)
+        if changed:
+            self._store.reload_current_selection()
+        return changed
+
+    def rollback_pending_moves(self) -> bool:
+        changed = self._store.clear_all_pending_moves()
+        if changed:
+            self._store.reload_current_selection()
+        return changed
+
     def removeRows(self, row: int, count: int, parent: QModelIndex = QModelIndex()) -> bool:  # type: ignore[override]
         if count <= 0 or row < 0:
             return False

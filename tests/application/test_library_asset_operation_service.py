@@ -67,6 +67,134 @@ def test_move_plan_dedupes_sources_and_rejects_same_destination(
     assert rejected.finished_message == "Files are already located in this album."
 
 
+def test_move_plan_uses_library_scope_for_aggregate_source(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    active_album = library_root / "AlbumA"
+    source_album = library_root / "AlbumB"
+    destination_root = library_root / "AlbumC"
+    active_album.mkdir(parents=True)
+    source_album.mkdir()
+    destination_root.mkdir()
+    asset = source_album / "photo.jpg"
+    asset.write_bytes(b"data")
+    service = LibraryAssetOperationService(
+        library_root,
+        lifecycle_service=_FakeLifecycleService(),  # type: ignore[arg-type]
+    )
+
+    plan = service.plan_move_request(
+        [asset],
+        destination_root,
+        current_album_root=active_album,
+    )
+
+    assert plan.accepted is True
+    assert plan.source_root == library_root.resolve()
+    assert plan.destination_root == destination_root.resolve()
+    assert plan.sources == [asset.resolve()]
+    assert plan.errors == []
+
+
+def test_move_plan_rejects_external_sources_when_using_library_scope(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    destination_root = library_root / "AlbumA"
+    external_root = tmp_path / "External"
+    destination_root.mkdir(parents=True)
+    external_root.mkdir()
+    asset = external_root / "photo.jpg"
+    asset.write_bytes(b"data")
+    service = LibraryAssetOperationService(
+        library_root,
+        lifecycle_service=_FakeLifecycleService(),  # type: ignore[arg-type]
+    )
+
+    plan = service.plan_move_request(
+        [asset],
+        destination_root,
+        current_album_root=None,
+    )
+
+    assert plan.accepted is False
+    assert plan.finished_message == "No valid files were selected for moving."
+    assert plan.errors == [
+        f"Path '{asset.resolve()}' is not inside the active library."
+    ]
+
+
+def test_move_plan_skips_sources_already_in_destination_album(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    source_root = library_root / "AlbumA"
+    destination_root = library_root / "AlbumB"
+    source_root.mkdir(parents=True)
+    destination_root.mkdir()
+    source_asset = source_root / "move.jpg"
+    destination_asset = destination_root / "already.jpg"
+    source_asset.write_bytes(b"move")
+    destination_asset.write_bytes(b"already")
+    service = LibraryAssetOperationService(
+        library_root,
+        lifecycle_service=_FakeLifecycleService(),  # type: ignore[arg-type]
+    )
+
+    mixed = service.plan_move_request(
+        [source_asset, destination_asset],
+        destination_root,
+        current_album_root=None,
+    )
+
+    assert mixed.accepted is True
+    assert mixed.source_root == library_root.resolve()
+    assert mixed.sources == [source_asset.resolve()]
+    assert mixed.errors == [
+        f"Skipping item already in destination album: {destination_asset.name}"
+    ]
+
+    already_there = service.plan_move_request(
+        [destination_asset],
+        destination_root,
+        current_album_root=None,
+    )
+
+    assert already_there.accepted is False
+    assert already_there.finished_message == "Files are already located in this album."
+    assert already_there.errors == [
+        f"Skipping item already in destination album: {destination_asset.name}"
+    ]
+
+
+def test_move_plan_allows_child_album_source_to_move_to_parent_album(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    destination_root = library_root / "Album"
+    child_root = destination_root / "Subalbum"
+    child_root.mkdir(parents=True)
+    asset = child_root / "photo.jpg"
+    asset.write_bytes(b"data")
+    service = LibraryAssetOperationService(
+        library_root,
+        lifecycle_service=_FakeLifecycleService(),  # type: ignore[arg-type]
+    )
+
+    plan = service.plan_move_request(
+        [asset],
+        destination_root,
+        current_album_root=None,
+    )
+
+    assert plan.accepted is True
+    assert plan.source_root == library_root.resolve()
+    assert plan.destination_root == destination_root.resolve()
+    assert plan.sources == [asset.resolve()]
+    assert plan.errors == []
+
+
 def test_delete_plan_skips_missing_sources_and_adds_live_companion(
     tmp_path: Path,
 ) -> None:

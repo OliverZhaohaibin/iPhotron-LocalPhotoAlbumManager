@@ -88,24 +88,33 @@ class LibraryAssetOperationService:
                 errors=[f"Unsupported move operation: {operation}"],
             )
 
-        resolved_trash_root = self._normalize_optional_path(trash_root)
-        source_root = self._source_root_for(
-            operation_normalized,
-            current_album_root=current_album_root,
-        )
-        if source_root is None:
-            return self._rejected_move(
-                operation_normalized,
-                errors=["No album is currently open."],
-            )
-
         try:
             destination_root = Path(destination).expanduser().resolve()
         except OSError as exc:
             return self._rejected_move(
                 operation_normalized,
-                source_root=source_root,
                 errors=[f"Invalid destination: {exc}"],
+            )
+
+        resolved_trash_root = self._normalize_optional_path(trash_root)
+        expanded_sources = list(sources)
+        if operation_normalized == "delete":
+            expanded_sources = self._expand_delete_live_companions(
+                expanded_sources,
+                metadata_lookup=metadata_lookup,
+            )
+
+        source_root = self._source_root_for(
+            operation_normalized,
+            current_album_root=current_album_root,
+            destination_root=destination_root,
+            sources=expanded_sources,
+        )
+        if source_root is None:
+            return self._rejected_move(
+                operation_normalized,
+                destination_root=destination_root,
+                errors=["No album is currently open."],
             )
 
         if not destination_root.exists() or not destination_root.is_dir():
@@ -171,23 +180,37 @@ class LibraryAssetOperationService:
                     errors=["Cannot restore items back into Recently Deleted."],
                 )
 
-        expanded_sources = list(sources)
-        if is_delete_operation:
-            expanded_sources = self._expand_delete_live_companions(
-                expanded_sources,
-                metadata_lookup=metadata_lookup,
-            )
-
         normalized, errors = self._normalize_sources(
             expanded_sources,
             source_root=source_root,
             operation=operation_normalized,
+            scope_label=(
+                "the active library"
+                if operation_normalized == "move"
+                and self._paths_equal(source_root, self.library_root)
+                else "the active album"
+            ),
         )
+        if operation_normalized == "move" and normalized:
+            normalized, skipped = self._exclude_destination_sources(
+                normalized,
+                destination_root=destination_root,
+            )
+            errors.extend(skipped)
         if not normalized:
             message = (
                 "No items were deleted."
                 if is_delete_operation
-                else "No valid files were selected for moving."
+                else (
+                    "Files are already located in this album."
+                    if operation_normalized == "move"
+                    and errors
+                    and all(
+                        error.startswith("Skipping item already in destination album:")
+                        for error in errors
+                    )
+                    else "No valid files were selected for moving."
+                )
             )
             return self._rejected_move(
                 operation_normalized,
@@ -318,12 +341,45 @@ class LibraryAssetOperationService:
         operation: str,
         *,
         current_album_root: Path | None,
+        destination_root: Path,
+        sources: Iterable[Path],
     ) -> Path | None:
         if operation == "delete" and self.library_root is not None:
             return self.library_root
+        if operation == "move":
+            return self._move_source_root_for(
+                sources,
+                current_album_root=current_album_root,
+                destination_root=destination_root,
+            )
         if current_album_root is not None:
             return self._normalize_path(Path(current_album_root))
         return self.library_root
+
+    def _move_source_root_for(
+        self,
+        sources: Iterable[Path],
+        *,
+        current_album_root: Path | None,
+        destination_root: Path,
+    ) -> Path | None:
+        current_root = (
+            self._normalize_path(Path(current_album_root))
+            if current_album_root is not None
+            else None
+        )
+        materialized_sources = list(sources)
+        if current_root is not None and self._all_sources_under(
+            materialized_sources,
+            current_root,
+        ):
+            return current_root
+        if self.library_root is not None and self._path_is_descendant(
+            destination_root,
+            self.library_root,
+        ):
+            return self.library_root
+        return current_root or self.library_root
 
     def _normalize_sources(
         self,
@@ -331,6 +387,7 @@ class LibraryAssetOperationService:
         *,
         source_root: Path,
         operation: str,
+        scope_label: str = "the active album",
     ) -> tuple[list[Path], list[str]]:
         normalized: list[Path] = []
         errors: list[str] = []
@@ -356,10 +413,27 @@ class LibraryAssetOperationService:
             try:
                 resolved.relative_to(source_root)
             except ValueError:
-                errors.append(f"Path '{resolved}' is not inside the active album.")
+                errors.append(f"Path '{resolved}' is not inside {scope_label}.")
                 continue
             normalized.append(resolved)
         return normalized, errors
+
+    def _exclude_destination_sources(
+        self,
+        sources: Iterable[Path],
+        *,
+        destination_root: Path,
+    ) -> tuple[list[Path], list[str]]:
+        movable: list[Path] = []
+        skipped: list[str] = []
+        for source in sources:
+            if self._paths_equal(source.parent, destination_root):
+                skipped.append(
+                    f"Skipping item already in destination album: {source.name}"
+                )
+                continue
+            movable.append(source)
+        return movable, skipped
 
     def _normalize_restore_sources(
         self,
@@ -750,6 +824,27 @@ class LibraryAssetOperationService:
         if left is None or right is None:
             return False
         return cls._normalize_path(Path(left)) == cls._normalize_path(Path(right))
+
+    @classmethod
+    def _path_is_descendant(cls, candidate: Path, ancestor: Path) -> bool:
+        candidate_norm = cls._normalize_path(Path(candidate))
+        ancestor_norm = cls._normalize_path(Path(ancestor))
+        if candidate_norm == ancestor_norm:
+            return True
+        try:
+            candidate_norm.relative_to(ancestor_norm)
+        except ValueError:
+            return False
+        return True
+
+    def _all_sources_under(self, sources: Iterable[Path], root: Path) -> bool:
+        materialized = list(sources)
+        if not materialized:
+            return True
+        return all(
+            self._path_is_descendant(self._normalize_path(Path(source)), root)
+            for source in materialized
+        )
 
     @staticmethod
     def _is_safe_relative_path(value: str) -> bool:

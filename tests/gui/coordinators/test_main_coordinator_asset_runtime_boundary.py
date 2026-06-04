@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 from iPhoto.people.service import PeopleService
 
@@ -348,6 +349,56 @@ def test_handle_media_load_failed_prunes_row_and_refreshes_collection(tmp_path: 
     coordinator._dialog.show_error.assert_called_once()
     updates.handle_media_load_failure.assert_called_once_with(failed_path)
     coordinator._gallery_store.reload_current_selection.assert_called_once_with()
+
+
+def test_asset_reload_request_reloads_current_target_album(tmp_path: Path) -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    root = tmp_path / "Library"
+    album_root = root / "Album"
+    album_root.mkdir(parents=True)
+    store = MagicMock()
+    store.active_root.return_value = album_root
+    store.library_root.return_value = root
+    store.current_query.return_value = AssetQuery(album_path="Album")
+    coordinator._gallery_store = store
+
+    coordinator._handle_asset_reload_requested(album_root, False, False)
+
+    store.reload_current_selection.assert_called_once_with()
+
+
+def test_asset_reload_request_reloads_current_library_aggregate(tmp_path: Path) -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    root = tmp_path / "Library"
+    album_root = root / "Album"
+    album_root.mkdir(parents=True)
+    store = MagicMock()
+    store.active_root.return_value = root
+    store.library_root.return_value = root
+    store.current_query.return_value = AssetQuery()
+    coordinator._gallery_store = store
+
+    coordinator._handle_asset_reload_requested(album_root, False, False)
+
+    store.reload_current_selection.assert_called_once_with()
+
+
+def test_asset_reload_request_ignores_unrelated_collection(tmp_path: Path) -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    root = tmp_path / "Library"
+    album_root = root / "Album"
+    other_root = root / "Other"
+    album_root.mkdir(parents=True)
+    other_root.mkdir()
+    store = MagicMock()
+    store.active_root.return_value = other_root
+    store.library_root.return_value = root
+    store.current_query.return_value = AssetQuery(album_path="Other")
+    coordinator._gallery_store = store
+
+    coordinator._handle_asset_reload_requested(album_root, False, False)
+
+    store.reload_current_selection.assert_not_called()
 
 
 def test_handle_people_snapshot_sidebar_refresh_prunes_people_pins_before_refresh() -> None:

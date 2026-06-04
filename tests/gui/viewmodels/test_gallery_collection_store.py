@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from PySide6.QtGui import QImage
 from PIL import Image
 
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
@@ -71,6 +72,15 @@ class _FakeQueryService:
 
     def _matching_assets(self, query: AssetQuery):
         assets = list(self.assets)
+        if query.album_path != RECENTLY_DELETED_DIR_NAME:
+            assets = [
+                asset
+                for asset in assets
+                if asset.parent_album_path != RECENTLY_DELETED_DIR_NAME
+                and not asset.path.as_posix().startswith(
+                    f"{RECENTLY_DELETED_DIR_NAME}/"
+                )
+            ]
         if query.asset_ids:
             wanted = set(query.asset_ids)
             assets = [asset for asset in assets if asset.id in wanted]
@@ -470,6 +480,489 @@ def test_row_for_path_uses_query_lookup_without_scanning_batches() -> None:
     assert store.row_for_path(Path("asset_360.jpg")) == 360
     assert service.row_lookup_calls == [Path("asset_360.jpg")]
     assert service.read_calls == []
+
+
+def test_pending_delete_survives_section_reload_for_aggregate_collections(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    deleted_root = root / RECENTLY_DELETED_DIR_NAME
+    assets = [
+        Asset(
+            id="photo",
+            album_id="a",
+            path=Path("Album/photo.jpg"),
+            parent_album_path="Album",
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            is_favorite=True,
+        ),
+        Asset(
+            id="video",
+            album_id="a",
+            path=Path("Album/video.mov"),
+            parent_album_path="Album",
+            media_type=MediaType.VIDEO,
+            size_bytes=1,
+        ),
+    ]
+    service = _FakeQueryService(assets, library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(root, query=AssetQuery())
+    photo_path = root / "Album" / "photo.jpg"
+    removed_rows, inserted = store.apply_optimistic_move(
+        [photo_path],
+        deleted_root,
+        is_delete=True,
+    )
+
+    assert removed_rows == [0]
+    assert inserted == []
+
+    store.load_selection(root, query=AssetQuery())
+
+    assert store.count() == 1
+    assert [dto.id for dto in store._row_cache.values()] == ["video"]
+
+    video_query = AssetQuery(media_types=[MediaType.VIDEO])
+    store.load_selection(root, query=video_query)
+
+    assert store.count() == 1
+    assert [dto.id for dto in store._row_cache.values()] == ["video"]
+
+    favorite_query = AssetQuery(is_favorite=True)
+    store.load_selection(root, query=favorite_query)
+
+    assert store.count() == 0
+    assert store._row_cache == {}
+
+
+def test_pending_delete_from_physical_album_hides_source_in_aggregate_collections(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    album_root = root / "Album"
+    album_root.mkdir(parents=True)
+    deleted_root = root / RECENTLY_DELETED_DIR_NAME
+    asset = Asset(
+        id="photo",
+        album_id="a",
+        path=Path("Album/photo.jpg"),
+        parent_album_path="Album",
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        is_favorite=True,
+    )
+    service = _FakeQueryService([asset], library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(album_root, query=AssetQuery(album_path="Album"))
+    removed_rows, inserted = store.apply_optimistic_move(
+        [album_root / "photo.jpg"],
+        deleted_root,
+        is_delete=True,
+    )
+
+    assert removed_rows == [0]
+    assert inserted == []
+
+    store.load_selection(root, query=AssetQuery())
+    assert store.count() == 0
+    assert store._row_cache == {}
+
+    store.load_selection(root, query=AssetQuery(is_favorite=True))
+    assert store.count() == 0
+    assert store._row_cache == {}
+
+    store.load_selection(deleted_root, query=AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME))
+    dto = store.asset_at(0)
+    assert store.count() == 1
+    assert dto is not None
+    assert dto.abs_path == deleted_root / "photo.jpg"
+
+
+def test_pending_delete_is_visible_in_recently_deleted_until_backend_finishes(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    deleted_root = root / RECENTLY_DELETED_DIR_NAME
+    asset = Asset(
+        id="photo",
+        album_id="a",
+        path=Path("Album/photo.jpg"),
+        parent_album_path="Album",
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+    )
+    service = _FakeQueryService([asset], library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(root, query=AssetQuery())
+    store.apply_optimistic_move([root / "Album" / "photo.jpg"], deleted_root, is_delete=True)
+
+    trash_query = AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME)
+    store.load_selection(deleted_root, query=trash_query)
+
+    dto = store.asset_at(0)
+    assert store.count() == 1
+    assert dto is not None
+    assert dto.abs_path == deleted_root / "photo.jpg"
+
+
+def test_clearing_pending_delete_allows_aggregate_row_to_return(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    deleted_root = root / RECENTLY_DELETED_DIR_NAME
+    asset = Asset(
+        id="photo",
+        album_id="a",
+        path=Path("Album/photo.jpg"),
+        parent_album_path="Album",
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+    )
+    service = _FakeQueryService([asset], library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    source = root / "Album" / "photo.jpg"
+
+    store.load_selection(root, query=AssetQuery())
+    store.apply_optimistic_move([source], deleted_root, is_delete=True)
+    assert store.clear_pending_moves_for_paths([source, deleted_root / "photo.jpg"]) is True
+    store.load_selection(root, query=AssetQuery())
+
+    assert store.count() == 1
+    assert store.asset_at(0).id == "photo"
+
+
+def test_pending_move_from_physical_album_shows_destination_in_aggregates(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    source_root = root / "Album"
+    target_root = root / "Target"
+    source_root.mkdir(parents=True)
+    target_root.mkdir()
+    asset = Asset(
+        id="photo",
+        album_id="a",
+        path=Path("Album/photo.jpg"),
+        parent_album_path="Album",
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        is_favorite=True,
+    )
+    service = _FakeQueryService([asset], library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(source_root, query=AssetQuery(album_path="Album"))
+    removed_rows, inserted = store.apply_optimistic_move(
+        [source_root / "photo.jpg"],
+        target_root,
+        is_delete=False,
+    )
+
+    assert removed_rows == [0]
+    assert inserted == []
+
+    store.load_selection(source_root, query=AssetQuery(album_path="Album"))
+    assert store.count() == 0
+
+    store.load_selection(target_root, query=AssetQuery(album_path="Target"))
+    dto = store.asset_at(0)
+    assert store.count() == 1
+    assert dto is not None
+    assert dto.abs_path == target_root / "photo.jpg"
+
+    store.load_selection(root, query=AssetQuery())
+    aggregate_dtos = list(store._row_cache.values())
+    assert store.count() == 1
+    assert [dto.abs_path for dto in aggregate_dtos] == [target_root / "photo.jpg"]
+
+    store.load_selection(root, query=AssetQuery(is_favorite=True))
+    favorite_dto = store.asset_at(0)
+    assert store.count() == 1
+    assert favorite_dto is not None
+    assert favorite_dto.abs_path == target_root / "photo.jpg"
+
+
+def test_pending_restore_shows_destination_in_album_and_aggregates(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    trash_root = root / RECENTLY_DELETED_DIR_NAME
+    album_root = root / "Album"
+    trash_root.mkdir(parents=True)
+    album_root.mkdir()
+    asset = Asset(
+        id="photo",
+        album_id="trash",
+        path=Path(f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"),
+        parent_album_path=RECENTLY_DELETED_DIR_NAME,
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        is_favorite=True,
+    )
+    service = _FakeQueryService([asset], library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(
+        trash_root,
+        query=AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME),
+    )
+    removed_rows, inserted = store.apply_optimistic_move(
+        [trash_root / "photo.jpg"],
+        album_root,
+        is_delete=False,
+    )
+
+    assert removed_rows == [0]
+    assert inserted == []
+
+    store.load_selection(
+        trash_root,
+        query=AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME),
+    )
+    assert store.count() == 0
+
+    store.load_selection(album_root, query=AssetQuery(album_path="Album"))
+    album_dto = store.asset_at(0)
+    assert store.count() == 1
+    assert album_dto is not None
+    assert album_dto.abs_path == album_root / "photo.jpg"
+
+    store.load_selection(root, query=AssetQuery())
+    aggregate_dto = store.asset_at(0)
+    assert store.count() == 1
+    assert aggregate_dto is not None
+    assert aggregate_dto.abs_path == album_root / "photo.jpg"
+
+    store.load_selection(root, query=AssetQuery(is_favorite=True))
+    favorite_dto = store.asset_at(0)
+    assert store.count() == 1
+    assert favorite_dto is not None
+    assert favorite_dto.abs_path == album_root / "photo.jpg"
+
+
+def test_pending_restore_keeps_existing_aggregate_rows(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    trash_root = root / RECENTLY_DELETED_DIR_NAME
+    album_root = root / "Album"
+    other_root = root / "Other"
+    trash_root.mkdir(parents=True)
+    album_root.mkdir()
+    other_root.mkdir()
+    trashed_asset = Asset(
+        id="photo",
+        album_id="trash",
+        path=Path(f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"),
+        parent_album_path=RECENTLY_DELETED_DIR_NAME,
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        is_favorite=True,
+    )
+    existing_asset = Asset(
+        id="existing",
+        album_id="other",
+        path=Path("Other/existing.jpg"),
+        parent_album_path="Other",
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        is_favorite=True,
+    )
+    service = _FakeQueryService([trashed_asset, existing_asset], library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(
+        trash_root,
+        query=AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME),
+    )
+    store.apply_optimistic_move(
+        [trash_root / "photo.jpg"],
+        album_root,
+        is_delete=False,
+    )
+
+    store.load_selection(root, query=AssetQuery())
+
+    aggregate_dtos = list(store._row_cache.values())
+    assert store.count() == 2
+    assert [dto.abs_path for dto in aggregate_dtos] == [
+        other_root / "existing.jpg",
+        album_root / "photo.jpg",
+    ]
+
+
+def test_pending_restore_does_not_duplicate_restored_database_row(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    trash_root = root / RECENTLY_DELETED_DIR_NAME
+    album_root = root / "Album"
+    trash_root.mkdir(parents=True)
+    album_root.mkdir()
+    trashed_asset = Asset(
+        id="trash-photo",
+        album_id="trash",
+        path=Path(f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"),
+        parent_album_path=RECENTLY_DELETED_DIR_NAME,
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        is_favorite=True,
+    )
+    service = _FakeQueryService([trashed_asset], library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(
+        trash_root,
+        query=AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME),
+    )
+    store.apply_optimistic_move(
+        [trash_root / "photo.jpg"],
+        album_root,
+        is_delete=False,
+    )
+
+    restored_asset = Asset(
+        id="restored-different-id",
+        album_id="a",
+        path=Path("Album/photo.jpg"),
+        parent_album_path="Album",
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        is_favorite=True,
+    )
+    service.assets.append(restored_asset)
+
+    store.load_selection(root, query=AssetQuery())
+    aggregate_dtos = list(store._row_cache.values())
+    assert store.count() == 1
+    assert [dto.id for dto in aggregate_dtos] == ["restored-different-id"]
+    assert [dto.abs_path for dto in aggregate_dtos] == [album_root / "photo.jpg"]
+
+    store.load_selection(album_root, query=AssetQuery(album_path="Album"))
+    album_dtos = list(store._row_cache.values())
+    assert store.count() == 1
+    assert [dto.id for dto in album_dtos] == ["restored-different-id"]
+    assert [dto.abs_path for dto in album_dtos] == [album_root / "photo.jpg"]
+
+    store.load_selection(root, query=AssetQuery(is_favorite=True))
+    favorite_dtos = list(store._row_cache.values())
+    assert store.count() == 1
+    assert [dto.id for dto in favorite_dtos] == ["restored-different-id"]
+    assert [dto.abs_path for dto in favorite_dtos] == [album_root / "photo.jpg"]
+
+
+def test_pending_delete_offsets_deep_window_after_source_before_window(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    deleted_root = root / RECENTLY_DELETED_DIR_NAME
+    assets = [
+        Asset(
+            id=f"asset{i}",
+            album_id="a",
+            path=Path(f"Album/asset{i}.jpg"),
+            parent_album_path="Album",
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(500)
+    ]
+    service = _FakeQueryService(assets, library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(root, query=AssetQuery())
+    store.apply_optimistic_move(
+        [root / "Album" / "asset0.jpg"],
+        deleted_root,
+        is_delete=True,
+    )
+    store.load_selection(root, query=AssetQuery())
+    service.read_calls.clear()
+
+    assert store.ensure_row_loaded(350) is True
+
+    dto = store.asset_at(350)
+    assert dto is not None
+    assert dto.id == "asset351"
+    assert service.read_calls[-1][0] == 350
+
+
+def test_row_for_path_accounts_for_pending_sources_before_raw_row(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    deleted_root = root / RECENTLY_DELETED_DIR_NAME
+    assets = [
+        Asset(
+            id=f"asset{i}",
+            album_id="a",
+            path=Path(f"Album/asset{i}.jpg"),
+            parent_album_path="Album",
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(5)
+    ]
+    service = _FakeQueryService(assets, library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    source = root / "Album" / "asset0.jpg"
+
+    store.load_selection(root, query=AssetQuery())
+    store.apply_optimistic_move([source], deleted_root, is_delete=True)
+    store.load_selection(root, query=AssetQuery())
+
+    assert store.row_for_path(source) is None
+    assert store.row_for_path(root / "Album" / "asset4.jpg") == 3
+
+
+def test_pending_delete_from_physical_album_offsets_aggregate_deep_window(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    album_root = root / "Album"
+    album_root.mkdir(parents=True)
+    deleted_root = root / RECENTLY_DELETED_DIR_NAME
+    assets = [
+        Asset(
+            id=f"asset{i}",
+            album_id="a",
+            path=Path(f"Album/asset{i}.jpg"),
+            parent_album_path="Album",
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(500)
+    ]
+    service = _FakeQueryService(assets, library_root=root)
+    store = GalleryCollectionStore(service, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(album_root, query=AssetQuery(album_path="Album"))
+    store.apply_optimistic_move(
+        [album_root / "asset0.jpg"],
+        deleted_root,
+        is_delete=True,
+    )
+    store.load_selection(root, query=AssetQuery())
+    service.read_calls.clear()
+
+    assert store.ensure_row_loaded(350) is True
+
+    dto = store.asset_at(350)
+    assert dto is not None
+    assert dto.id == "asset351"
+    assert service.read_calls[-1][0] == 350
+    assert store.row_for_path(root / "Album" / "asset351.jpg") == 350
 
 
 def test_prioritize_rows_loads_deep_window_without_sync_asset_at_fetch() -> None:

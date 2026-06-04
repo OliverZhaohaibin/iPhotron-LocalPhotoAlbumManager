@@ -529,6 +529,11 @@ class GalleryViewModel(BaseViewModel):
 
     def path_for_row(self, row: int) -> Optional[Path]:
         dto = self._store.asset_at(row)
+        if dto is None:
+            ensure_row_loaded = getattr(self._store, "ensure_row_loaded", None)
+            if callable(ensure_row_loaded):
+                ensure_row_loaded(row)
+                dto = self._store.asset_at(row)
         return dto.abs_path if dto is not None else None
 
     def paths_for_rows(self, rows: Iterable[int]) -> list[Path]:
@@ -550,6 +555,11 @@ class GalleryViewModel(BaseViewModel):
                 continue
             seen_rows.add(row)
             dto = self._store.asset_at(row)
+            if dto is None:
+                ensure_row_loaded = getattr(self._store, "ensure_row_loaded", None)
+                if callable(ensure_row_loaded):
+                    ensure_row_loaded(row)
+                    dto = self._store.asset_at(row)
             if dto is not None:
                 items.append(dto)
         return items

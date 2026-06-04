@@ -356,10 +356,6 @@ class LibraryAssetLifecycleService:
                 if thumbnail.thumb_error:
                     row["thumb_error"] = thumbnail.thumb_error
                     row.pop("thumb_cache_key", None)
-                if is_restore:
-                    row.pop("original_rel_path", None)
-                    row.pop("original_album_id", None)
-                    row.pop("original_album_subpath", None)
                 reused_rows.append(row)
                 continue
 
@@ -396,9 +392,40 @@ class LibraryAssetLifecycleService:
         new_rows = reused_rows + freshly_scanned
         if is_trash_destination and not is_restore:
             new_rows = self._annotate_trash_rows(new_rows, moved, process_root)
+        new_rows = [
+            self._normalise_destination_row(
+                row,
+                is_trash_destination=is_trash_destination,
+                is_restore=is_restore,
+            )
+            for row in new_rows
+        ]
 
         if new_rows:
             repository.append_rows(new_rows)
+
+    def _normalise_destination_row(
+        self,
+        row: dict[str, Any],
+        *,
+        is_trash_destination: bool,
+        is_restore: bool,
+    ) -> dict[str, Any]:
+        normalised = dict(row)
+        rel_value = normalised.get("rel")
+        if isinstance(rel_value, str) and rel_value:
+            normalised["parent_album_path"] = self._parent_album_path(rel_value)
+
+        if is_trash_destination and not is_restore:
+            normalised["is_deleted"] = 1
+            normalised["parent_album_path"] = RECENTLY_DELETED_DIR_NAME
+            return normalised
+
+        normalised["is_deleted"] = 0
+        normalised.pop("original_rel_path", None)
+        normalised.pop("original_album_id", None)
+        normalised.pop("original_album_subpath", None)
+        return normalised
 
     def _cleanup_stale_trash_rows(
         self,

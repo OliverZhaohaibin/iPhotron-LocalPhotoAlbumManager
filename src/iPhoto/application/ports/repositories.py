@@ -147,6 +147,14 @@ class AssetRepositoryPort(Protocol):
     ) -> None:
         """Append one scan event."""
 
+    def latest_scan_job(
+        self,
+        *,
+        root: str,
+        scope: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the newest scan job matching *root* and optional *scope*."""
+
     def find_row_by_path(self, query: CollectionQuery, path: Path) -> int | None:
         """Return a row index for *path* inside *query*."""
 

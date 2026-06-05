@@ -126,9 +126,13 @@ class LibraryScanService:
 
             if asset_count == 0 and autoscan:
                 result = self.scan_album(scan_root, persist_chunks=False)
-                self.finalize_scan(scan_root, result.rows)
-                self.reconcile_missing_scan_rows(scan_root, result.rows)
-                rows = result.rows
+                rows = self.finalize_scan_result(
+                    scan_root,
+                    result.rows,
+                    pair_live=False,
+                    preserve_modified_after_ms=result.scan_started_at_ms,
+                    current_scan_job_id=result.scan_job_id,
+                )
                 asset_count = len(rows)
                 scanned = True
             elif asset_count == 0:
@@ -166,6 +170,7 @@ class LibraryScanService:
         """Scan *root* using the shared application use case."""
 
         scan_started_ms = _monotonic_ms()
+        scan_started_at_ms = _utc_ms()
         stage_elapsed_ms: dict[str, float] = {}
         scan_root = Path(root)
         resolved_include, resolved_exclude = self.scan_filters(
@@ -249,6 +254,7 @@ class LibraryScanService:
                     max_chunk_interval_ms=max_chunk_interval_ms,
                     persist_chunks=persist_chunks,
                     scan_job_id=scan_job_id,
+                    scan_started_at_ms=scan_started_at_ms,
                     scan_stage_elapsed_ms=stage_elapsed_ms,
                 )
             )
@@ -273,7 +279,7 @@ class LibraryScanService:
                 status=(
                     "cancelled"
                     if is_cancelled is not None and is_cancelled()
-                    else "completed"
+                    else "scanned"
                 ),
                 processed_count=len(result.rows),
                 visible_count=sum(1 for row in result.rows if _row_is_ready_visible(row)),
@@ -327,6 +333,8 @@ class LibraryScanService:
             result.rows,
             pair_live=pair_live,
             exclude=resolved_exclude,
+            preserve_modified_after_ms=result.scan_started_at_ms,
+            current_scan_job_id=result.scan_job_id,
         )
         if sync_manifest_favorites:
             self.sync_manifest_favorites(Path(root))
@@ -353,6 +361,8 @@ class LibraryScanService:
         *,
         pair_live: bool = True,
         exclude: Iterable[str] | None = None,
+        preserve_modified_after_ms: int | None = None,
+        current_scan_job_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Persist scan completion side effects for one scope.
 
@@ -372,7 +382,7 @@ class LibraryScanService:
             self.library_root,
             scan_service=self,
         )
-        materialized_rows = [dict(row) for row in rows]
+        materialized_rows = self._existing_scan_rows(scan_root, rows)
 
         if scan_root.name == RECENTLY_DELETED_DIR_NAME:
             materialized_rows = lifecycle_service.preserve_trash_metadata(
@@ -380,14 +390,22 @@ class LibraryScanService:
                 materialized_rows,
             )
 
-        self.finalize_scan(scan_root, materialized_rows)
-        lifecycle_service.reconcile_missing_scan_rows(
-            scan_root,
-            materialized_rows,
-            exclude_globs=resolved_exclude,
-        )
-        if pair_live:
-            self.pair_album(scan_root)
+        try:
+            self.finalize_scan(scan_root, materialized_rows)
+            lifecycle_service.reconcile_missing_scan_rows(
+                scan_root,
+                materialized_rows,
+                exclude_globs=resolved_exclude,
+                preserve_modified_after_ms=preserve_modified_after_ms,
+                current_scan_job_id=current_scan_job_id,
+            )
+            if pair_live:
+                self.pair_album(scan_root)
+        except Exception:
+            self._mark_scan_job_failed(current_scan_job_id)
+            raise
+
+        self._mark_scan_job_finalized(scan_root, current_scan_job_id)
         return materialized_rows
 
     def refresh_restored_album(
@@ -413,6 +431,8 @@ class LibraryScanService:
         rows: Iterable[dict[str, Any]],
         *,
         exclude_globs: Iterable[str] | None = None,
+        preserve_modified_after_ms: int | None = None,
+        current_scan_job_id: str | None = None,
     ) -> int:
         """Prune stale rows for a completed full scan scope."""
 
@@ -428,7 +448,30 @@ class LibraryScanService:
             library_root=self.library_root,
             repository=repository,
             exclude_globs=resolved_exclude,
+            preserve_modified_after_ms=preserve_modified_after_ms,
+            current_scan_job_id=current_scan_job_id,
         )
+
+    def is_scan_scope_complete(self, root: Path) -> bool:
+        """Return whether *root* is covered by a completed scan job."""
+
+        scan_root = Path(root)
+        repository = self._repository()
+        latest_scan_job = getattr(repository, "latest_scan_job", None)
+        if not callable(latest_scan_job):
+            return False
+
+        exact_scope = "album" if self._album_path(scan_root) else "library"
+        exact = latest_scan_job(root=scan_root.as_posix(), scope=exact_scope)
+        covering = None
+        if not self._paths_equal(scan_root, self.library_root):
+            covering = latest_scan_job(
+                root=self.library_root.as_posix(),
+                scope="library",
+            )
+
+        latest = self._newer_scan_job(exact, covering)
+        return self._scan_job_completed(latest)
 
     def scan_specific_files(
         self,
@@ -684,6 +727,85 @@ class LibraryScanService:
                 album_rows.append(dict(row))
         return album_rows
 
+    def _existing_scan_rows(
+        self,
+        scan_root: Path,
+        rows: Iterable[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Drop rows whose source file disappeared before scan finalization."""
+
+        materialized: list[dict[str, Any]] = []
+        for row in rows:
+            row_data = dict(row)
+            rel_value = row_data.get("rel")
+            if not isinstance(rel_value, str) or not rel_value:
+                continue
+            absolute = self._absolute_path_for_scan_row(scan_root, rel_value)
+            try:
+                if not absolute.exists():
+                    continue
+            except OSError:
+                continue
+            materialized.append(row_data)
+        return materialized
+
+    def _mark_scan_job_finalized(self, scan_root: Path, scan_job_id: str | None) -> None:
+        if not scan_job_id:
+            return
+        repository = self._repository()
+        latest_scan_job = getattr(repository, "latest_scan_job", None)
+        if callable(latest_scan_job):
+            scope = "album" if self._album_path(scan_root) else "library"
+            job = latest_scan_job(root=scan_root.as_posix(), scope=scope)
+            if job is not None and job.get("job_id") == scan_job_id:
+                status = str(job.get("status") or "")
+                if status == "cancelled":
+                    return
+        update_scan_job_stage = getattr(repository, "update_scan_job_stage", None)
+        if callable(update_scan_job_stage):
+            update_scan_job_stage(
+                scan_job_id,
+                stage=ScanStage.DB_COMMIT.value,
+                status="completed",
+                finished=True,
+            )
+
+    def _mark_scan_job_failed(self, scan_job_id: str | None) -> None:
+        if not scan_job_id:
+            return
+        update_scan_job_stage = getattr(self._repository(), "update_scan_job_stage", None)
+        if callable(update_scan_job_stage):
+            update_scan_job_stage(scan_job_id, status="failed", finished=True)
+
+    def _absolute_path_for_scan_row(self, scan_root: Path, rel: str) -> Path:
+        if self._album_path(scan_root):
+            return self.library_root / rel
+        return scan_root / rel
+
+    @staticmethod
+    def _scan_job_completed(job: dict[str, Any] | None) -> bool:
+        if not job:
+            return False
+        return str(job.get("status") or "") == "completed" and job.get("finished_at") is not None
+
+    @staticmethod
+    def _newer_scan_job(
+        first: dict[str, Any] | None,
+        second: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if first is None:
+            return second
+        if second is None:
+            return first
+        return first if _scan_job_sort_key(first) >= _scan_job_sort_key(second) else second
+
+    @staticmethod
+    def _paths_equal(left: Path, right: Path) -> bool:
+        try:
+            return Path(left).resolve() == Path(right).resolve()
+        except OSError:
+            return Path(left) == Path(right)
+
     def _read_live_pair_count(self, root: Path) -> int | None:
         work_dir = resolve_work_dir(root)
         links_path = work_dir / "links.json" if work_dir is not None else None
@@ -711,6 +833,23 @@ def _row_is_ready_visible(row: dict[str, Any]) -> bool:
 
 def _monotonic_ms() -> float:
     return time.perf_counter() * 1000
+
+
+def _utc_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _scan_job_sort_key(job: dict[str, Any]) -> tuple[int, int]:
+    def _coerce(value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        max(_coerce(job.get("updated_at")), _coerce(job.get("started_at"))),
+        _coerce(job.get("finished_at")),
+    )
 
 
 def _process_media_paths_with_thumbnail_cache(

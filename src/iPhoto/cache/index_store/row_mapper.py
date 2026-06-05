@@ -35,7 +35,8 @@ def insert_rows(
         "live_role", "live_partner_rel", "aspect_ratio", "year", "month",
         "media_type", "is_favorite", "is_deleted", "has_gps", "thumbnail_state",
         "location", "micro_thumbnail", "thumb_cache_key", "thumb_updated_at",
-        "thumb_error", "scan_job_id", "index_revision", "face_status"
+        "thumb_error", "scan_job_id", "index_revision", "index_updated_at_ms",
+        "face_status"
     ]
     placeholders = ", ".join(["?"] * len(columns))
     query = (
@@ -118,6 +119,7 @@ def row_to_db_params(row: Dict[str, Any]) -> List[Any]:
         row.get("thumb_error"),
         row.get("scan_job_id"),
         row.get("index_revision", 0),
+        row.get("index_updated_at_ms", 0),
         row.get("face_status"),
     ]
 

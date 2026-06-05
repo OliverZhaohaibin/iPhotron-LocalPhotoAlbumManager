@@ -436,7 +436,13 @@ class ScanCoordinatorMixin:
         # links.json reflect the latest scan results.
         scan_service = worker.scan_service
         try:
-            scan_service.finalize_scan_result(root, rows, pair_live=False)
+            scan_service.finalize_scan_result(
+                root,
+                rows,
+                pair_live=False,
+                preserve_modified_after_ms=worker.scan_started_at_ms,
+                current_scan_job_id=worker.scan_job_id,
+            )
         except Exception as exc:
             LOGGER.warning("Failed to persist scan finalization for %s: %s", root, exc)
             self.scanFinished.emit(root, False)

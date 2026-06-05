@@ -21,6 +21,8 @@ class ScanTaskCompletion:
     scan_service: LibraryScanService
     library_root: Path | None
     restart_requested: bool = False
+    scan_job_id: str | None = None
+    scan_started_at_ms: int | None = None
 
 
 class LibraryUpdateTaskRunner:
@@ -187,6 +189,8 @@ class LibraryUpdateTaskRunner:
             scan_service=worker.scan_service,
             library_root=library_root,
             restart_requested=restart_requested,
+            scan_job_id=worker.scan_job_id,
+            scan_started_at_ms=worker.scan_started_at_ms,
         )
         self._cleanup_scan_worker()
         on_completed(completion)

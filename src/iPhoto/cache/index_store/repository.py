@@ -224,15 +224,17 @@ class AssetRepository:
 
     def write_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Rewrite the entire index with *rows*."""
+        stamped_rows = self._stamp_rows(rows)
         with self.transaction() as conn:
             conn.execute("DELETE FROM assets")
-            self._insert_rows(conn, rows)
+            self._insert_rows(conn, stamped_rows)
         self._clear_collection_anchor_cache()
 
     def append_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
+        stamped_rows = self._stamp_rows(rows)
         with self.transaction() as conn:
-            self._insert_rows(conn, rows)
+            self._insert_rows(conn, stamped_rows)
         self._clear_collection_anchor_cache()
 
     def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -249,7 +251,7 @@ class AssetRepository:
         ``index_sync_service.update_index_snapshot``).
         """
 
-        materialized_rows = [dict(row) for row in rows]
+        materialized_rows = self._stamp_rows(rows)
         if not materialized_rows:
             return []
 
@@ -287,9 +289,19 @@ class AssetRepository:
         """Insert or update a single row identified by *rel*."""
         row_data = row.copy()
         row_data["rel"] = rel
+        row_data["index_updated_at_ms"] = _utc_ms()
         with self.transaction() as conn:
             self._insert_rows(conn, [row_data])
         self._clear_collection_anchor_cache()
+
+    def _stamp_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        now = _utc_ms()
+        stamped: List[Dict[str, Any]] = []
+        for row in rows:
+            row_data = dict(row)
+            row_data["index_updated_at_ms"] = now
+            stamped.append(row_data)
+        return stamped
 
     def remove_rows(self, rels: Iterable[str]) -> None:
         """Drop any index rows whose ``rel`` key matches *rels*."""
@@ -855,6 +867,35 @@ class AssetRepository:
                 """,
                 [job_id, event_type, payload_json, _utc_ms()],
             )
+
+    def latest_scan_job(
+        self,
+        *,
+        root: str,
+        scope: str | None = None,
+    ) -> Dict[str, Any] | None:
+        """Return the newest scan job matching *root* and optional *scope*."""
+
+        where = ["root = ?"]
+        params: list[Any] = [root]
+        if scope is not None:
+            where.append("scope = ?")
+            params.append(scope)
+        sql = (
+            "SELECT * FROM scan_jobs WHERE "
+            + " AND ".join(where)
+            + " ORDER BY COALESCE(updated_at, started_at, 0) DESC, "
+            "COALESCE(finished_at, 0) DESC LIMIT 1"
+        )
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(sql, params).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            if should_close:
+                conn.close()
 
     def read_collection_page(
         self,

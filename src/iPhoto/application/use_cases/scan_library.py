@@ -31,6 +31,7 @@ class ScanLibraryRequest:
     max_chunk_interval_ms: float | None = None
     persist_chunks: bool = True
     scan_job_id: str | None = None
+    scan_started_at_ms: int | None = None
     scan_stage_elapsed_ms: dict[str, float] | None = None
 
 
@@ -39,6 +40,7 @@ class ScanLibraryResult:
     rows: list[dict[str, Any]]
     failed_count: int = 0
     scan_job_id: str | None = None
+    scan_started_at_ms: int | None = None
 
 
 class ScanLibraryUseCase:
@@ -77,7 +79,10 @@ class ScanLibraryUseCase:
 
             rows.append(row)
             if request.persist_chunks:
-                chunk.append(row)
+                chunk_row = dict(row)
+                if request.scan_job_id:
+                    chunk_row["scan_job_id"] = request.scan_job_id
+                chunk.append(chunk_row)
                 now = _monotonic_ms()
                 if _should_flush_chunk(
                     chunk,
@@ -109,6 +114,7 @@ class ScanLibraryUseCase:
             rows=rows,
             failed_count=failed_count,
             scan_job_id=request.scan_job_id,
+            scan_started_at_ms=request.scan_started_at_ms,
         )
 
     def _merge_chunk(

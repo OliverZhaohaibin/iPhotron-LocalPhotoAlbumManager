@@ -106,8 +106,15 @@ class LibraryUpdateService(QObject):
         )
 
         is_already_scanning = self._is_scan_active_for(scan_root)
+        is_scope_complete = True
+        is_scan_scope_complete = getattr(scan_service, "is_scan_scope_complete", None)
+        if callable(is_scan_scope_complete):
+            try:
+                is_scope_complete = bool(is_scan_scope_complete(scan_root))
+            except Exception:
+                is_scope_complete = False
         should_rescan_async = (
-            preparation.asset_count == 0
+            (preparation.asset_count == 0 or not is_scope_complete)
             and not preparation.scanned
             and not is_already_scanning
         )
@@ -471,6 +478,8 @@ class LibraryUpdateService(QObject):
                 completion.root,
                 completion.rows,
                 pair_live=True,
+                preserve_modified_after_ms=completion.scan_started_at_ms,
+                current_scan_job_id=completion.scan_job_id,
             )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))

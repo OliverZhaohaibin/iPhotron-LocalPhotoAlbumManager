@@ -273,6 +273,8 @@ class LibraryAssetLifecycleService:
         materialised_rows: Iterable[dict[str, Any]],
         *,
         exclude_globs: Iterable[str] | None = None,
+        preserve_modified_after_ms: int | None = None,
+        current_scan_job_id: str | None = None,
     ) -> int:
         """Explicitly prune stale scan rows for a completed scan scope."""
 
@@ -285,6 +287,8 @@ class LibraryAssetLifecycleService:
             library_root=self.library_root,
             repository=repository,
             exclude_globs=exclude_globs,
+            preserve_modified_after_ms=preserve_modified_after_ms,
+            current_scan_job_id=current_scan_job_id,
         )
 
     def _remove_source_rows(
@@ -419,9 +423,11 @@ class LibraryAssetLifecycleService:
         if is_trash_destination and not is_restore:
             normalised["is_deleted"] = 1
             normalised["parent_album_path"] = RECENTLY_DELETED_DIR_NAME
+            normalised["scan_job_id"] = None
             return normalised
 
         normalised["is_deleted"] = 0
+        normalised["scan_job_id"] = None
         normalised.pop("original_rel_path", None)
         normalised.pop("original_album_id", None)
         normalised.pop("original_album_subpath", None)

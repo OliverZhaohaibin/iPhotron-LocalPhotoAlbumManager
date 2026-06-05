@@ -11,7 +11,6 @@ from PySide6.QtWidgets import QWidget
 from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
 from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ....errors import LibraryError
-from ....utils.pathutils import resolve_work_dir
 from ..widgets import dialogs
 
 if TYPE_CHECKING:
@@ -83,11 +82,17 @@ class DialogController:
         return bound_root
 
     def _start_initial_scan_if_needed(self, bound_root: Path) -> None:
-        work_dir = resolve_work_dir(bound_root)
-        db_path = work_dir / "global_index.db" if work_dir is not None else None
-        if db_path is not None and db_path.exists():
-            return
         if self._context.library.is_scanning_path(bound_root):
+            return
+        scan_service = getattr(self._context.library, "scan_service", None)
+        is_complete = False
+        is_scan_scope_complete = getattr(scan_service, "is_scan_scope_complete", None)
+        if callable(is_scan_scope_complete):
+            try:
+                is_complete = bool(is_scan_scope_complete(bound_root))
+            except Exception:
+                is_complete = False
+        if is_complete:
             return
         self._context.facade.scan_root_async(
             bound_root,

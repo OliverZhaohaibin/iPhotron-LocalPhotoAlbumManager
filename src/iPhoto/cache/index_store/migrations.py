@@ -90,6 +90,7 @@ class SchemaMigrator:
                 thumb_error TEXT,
                 scan_job_id TEXT,
                 index_revision INTEGER DEFAULT 0,
+                index_updated_at_ms INTEGER DEFAULT 0,
                 face_status TEXT
             )
         """)
@@ -181,6 +182,7 @@ class SchemaMigrator:
             "thumb_error": "ALTER TABLE assets ADD COLUMN thumb_error TEXT",
             "scan_job_id": "ALTER TABLE assets ADD COLUMN scan_job_id TEXT",
             "index_revision": "ALTER TABLE assets ADD COLUMN index_revision INTEGER DEFAULT 0",
+            "index_updated_at_ms": "ALTER TABLE assets ADD COLUMN index_updated_at_ms INTEGER DEFAULT 0",
             "location": "ALTER TABLE assets ADD COLUMN location TEXT",
             "face_status": "ALTER TABLE assets ADD COLUMN face_status TEXT",
         }
@@ -334,6 +336,8 @@ class SchemaMigrator:
             "CREATE INDEX IF NOT EXISTS idx_assets_rel_lookup ON assets (rel)",
             "CREATE INDEX IF NOT EXISTS idx_assets_id_lookup ON assets (id)",
             "CREATE INDEX IF NOT EXISTS idx_assets_revision ON assets (index_revision)",
+            "CREATE INDEX IF NOT EXISTS idx_assets_updated_at ON assets (index_updated_at_ms)",
+            "CREATE INDEX IF NOT EXISTS idx_scan_jobs_root_scope ON scan_jobs (root, scope, updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_scan_events_job ON scan_events (job_id, event_id)",
         ]
 

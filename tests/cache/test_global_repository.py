@@ -701,6 +701,31 @@ class TestMultipleScanEntryPoints:
         assert len(rows) == 3
 
 
+def test_latest_scan_job_returns_newest_matching_scope(tmp_path: Path) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.create_scan_job(
+        job_id="older",
+        root=tmp_path.as_posix(),
+        scope="library",
+        status="running",
+    )
+    repo.update_scan_job_stage("older", status="completed", finished=True)
+    time.sleep(0.002)
+    repo.create_scan_job(
+        job_id="newer",
+        root=tmp_path.as_posix(),
+        scope="library",
+        status="running",
+    )
+    repo.update_scan_job_stage("newer", status="cancelled", finished=True)
+
+    job = repo.latest_scan_job(root=tmp_path.as_posix(), scope="library")
+
+    assert job is not None
+    assert job["job_id"] == "newer"
+    assert job["status"] == "cancelled"
+
+
 class TestSingleWriteGateway:
     """Tests verifying single write gateway (Constraint #2)."""
 

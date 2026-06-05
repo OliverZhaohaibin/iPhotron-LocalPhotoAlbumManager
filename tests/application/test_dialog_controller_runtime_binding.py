@@ -8,8 +8,9 @@ from iPhoto.gui.ui.controllers.dialog_controller import DialogController
 
 
 class _Library:
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(self, root: Path | None = None, scan_service: object | None = None) -> None:
         self._root = root
+        self.scan_service = scan_service
         self.bind_calls: list[Path] = []
         self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
 
@@ -33,8 +34,8 @@ class _Library:
 
 
 class _Context:
-    def __init__(self, root: Path | None = None) -> None:
-        self.library = _Library(root)
+    def __init__(self, root: Path | None = None, scan_service: object | None = None) -> None:
+        self.library = _Library(root, scan_service)
         self.facade = Mock()
         self.settings = Mock()
         self.open_calls: list[Path] = []
@@ -86,3 +87,26 @@ def test_bind_library_dialog_uses_runtime_open_library(
     status_bar.showMessage.assert_called_once_with(
         f"Basic Library bound to {selected_root}"
     )
+
+
+def test_bind_library_dialog_skips_initial_scan_when_scope_complete(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    selected_root = tmp_path / "selected"
+    selected_root.mkdir()
+    scan_service = Mock()
+    scan_service.is_scan_scope_complete.return_value = True
+    context = _Context(None, scan_service=scan_service)
+    status_bar = Mock()
+    controller = DialogController(object(), context, status_bar)
+
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.controllers.dialog_controller.dialogs.select_directory",
+        lambda *_args, **_kwargs: selected_root,
+    )
+
+    assert controller.bind_library_dialog() == selected_root
+
+    scan_service.is_scan_scope_complete.assert_called_once_with(selected_root)
+    context.facade.scan_root_async.assert_not_called()

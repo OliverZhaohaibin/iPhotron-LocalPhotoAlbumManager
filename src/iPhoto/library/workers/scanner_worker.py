@@ -56,6 +56,8 @@ class ScannerWorker(QRunnable):
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
+        self._scan_job_id: str | None = None
+        self._scan_started_at_ms: int | None = None
 
     @property
     def root(self) -> Path:
@@ -101,6 +103,18 @@ class ScannerWorker(QRunnable):
 
         return self._failed_count
 
+    @property
+    def scan_job_id(self) -> str | None:
+        """Return the durable scan job id for the most recent run."""
+
+        return self._scan_job_id
+
+    @property
+    def scan_started_at_ms(self) -> int | None:
+        """Return the wall-clock start time for the most recent scan."""
+
+        return self._scan_started_at_ms
+
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         """Perform the scan and emit progress as files are processed."""
 
@@ -132,6 +146,8 @@ class ScannerWorker(QRunnable):
             )
             rows = result.rows
             self._failed_count += result.failed_count
+            self._scan_job_id = result.scan_job_id
+            self._scan_started_at_ms = result.scan_started_at_ms
 
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:

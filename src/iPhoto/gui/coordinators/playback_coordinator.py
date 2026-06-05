@@ -157,6 +157,9 @@ class PlaybackCoordinator(QObject):
         self._location_preview_metadata: dict[str, Any] | None = None
         self._pending_location_query = ""
         self._location_search_target_path: Path | None = None
+        self._location_released_video_path: Path | None = None
+        self._location_released_video_was_playing = False
+        self._location_released_video_position_ms: int | None = None
 
         self._pending_play_row: int | None = None
         self._show_face_names = False
@@ -1261,7 +1264,10 @@ class PlaybackCoordinator(QObject):
             self._info_panel.set_location_busy(True)
             self._info_panel.set_location_suggestions([])
 
-        existing_metadata = self._asset_model.metadata_for_path(presentation.path) or dict(presentation.info)
+        self._release_current_video_for_location_write(presentation)
+        existing_metadata = self._asset_model.metadata_for_path(presentation.path) or dict(
+            presentation.info
+        )
         worker = AssignLocationWorker(
             AssignLocationRequest(
                 library_root=Path(library_root),
@@ -1281,10 +1287,55 @@ class PlaybackCoordinator(QObject):
             QThreadPool.globalInstance().start(worker, -1)
         except Exception:  # noqa: BLE001
             LOGGER.warning("Failed to start location assignment worker", exc_info=True)
+            self._restore_video_released_for_location_write()
             self._location_assign_inflight = False
             self._location_assign_path = None
             if self._info_panel is not None:
                 self._info_panel.set_location_busy(False)
+
+    def _release_current_video_for_location_write(self, presentation: DetailPresentation) -> None:
+        if not presentation.is_video:
+            return
+        video_area = getattr(getattr(self, "_player_view", None), "video_area", None)
+        current_source = getattr(video_area, "current_source", None)
+        stop = getattr(video_area, "stop", None)
+        is_playing = getattr(video_area, "is_playing", None)
+        current_position = getattr(video_area, "current_position", None)
+        if not callable(current_source) or not callable(stop):
+            return
+        if current_source() != presentation.path:
+            return
+        self._location_released_video_path = presentation.path
+        self._location_released_video_was_playing = (
+            bool(is_playing()) if callable(is_playing) else False
+        )
+        self._location_released_video_position_ms = (
+            max(0, int(current_position())) if callable(current_position) else None
+        )
+        stop()
+
+    def _restore_video_released_for_location_write(self) -> None:
+        released_path = getattr(self, "_location_released_video_path", None)
+        if released_path is None:
+            return
+        was_playing = bool(getattr(self, "_location_released_video_was_playing", False))
+        position_ms = getattr(self, "_location_released_video_position_ms", None)
+        self._location_released_video_path = None
+        self._location_released_video_was_playing = False
+        self._location_released_video_position_ms = None
+        presentation = getattr(self, "_current_presentation", None)
+        if (
+            presentation is None
+            or presentation.path != released_path
+            or not presentation.is_video
+            or not self._router.is_detail_view_active()
+        ):
+            return
+        self._render_presentation(presentation)
+        if isinstance(position_ms, int) and position_ms > 0:
+            self._player_view.video_area.seek(position_ms)
+        if not was_playing:
+            self._player_view.video_area.pause()
 
     @Slot(object)
     def _handle_location_assignment_ready(self, result: object) -> None:
@@ -1321,6 +1372,7 @@ class PlaybackCoordinator(QObject):
             self._location_preview_path = None
             self._location_preview_metadata = None
 
+        self._restore_video_released_for_location_write()
         self._detail_vm.refresh_current()
 
         library_manager = getattr(self, "_library_manager", None)
@@ -1379,6 +1431,7 @@ class PlaybackCoordinator(QObject):
     @Slot(str)
     def _handle_location_assignment_error(self, message: str) -> None:
         LOGGER.warning("Failed to assign location: %s", message)
+        self._restore_video_released_for_location_write()
         if self._location_preview_path == self._location_assign_path:
             self._location_preview_path = None
             self._location_preview_metadata = None
@@ -1397,6 +1450,7 @@ class PlaybackCoordinator(QObject):
 
     @Slot()
     def _handle_location_assignment_finished(self) -> None:
+        self._restore_video_released_for_location_write()
         self._location_assign_inflight = False
         self._location_assign_path = None
         info_panel = getattr(self, "_info_panel", None)

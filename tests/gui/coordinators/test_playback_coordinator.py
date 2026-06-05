@@ -865,6 +865,49 @@ def test_ready_enrichment_is_cached_without_touching_other_asset_panel() -> None
     assert coordinator._info_panel_metadata_cache[str(Path("/fake/video.mp4"))]["frame_rate"] == 59.94
 
 
+def test_location_assignment_releases_current_video_source_before_write() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    video_area = Mock(
+        current_source=Mock(return_value=Path("/fake/video.mp4")),
+        is_playing=Mock(return_value=False),
+        current_position=Mock(return_value=1234),
+        stop=Mock(),
+    )
+    coordinator._player_view = Mock(video_area=video_area)
+    coordinator._location_released_video_path = None
+    coordinator._location_released_video_was_playing = False
+    coordinator._location_released_video_position_ms = None
+    presentation = _make_presentation(path="/fake/video.mp4", is_video=True)
+
+    PlaybackCoordinator._release_current_video_for_location_write(coordinator, presentation)
+
+    video_area.stop.assert_called_once_with()
+    assert coordinator._location_released_video_path == Path("/fake/video.mp4")
+    assert coordinator._location_released_video_was_playing is False
+    assert coordinator._location_released_video_position_ms == 1234
+
+
+def test_location_assignment_restore_reloads_video_when_same_asset_remains() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = _make_presentation(path="/fake/video.mp4", is_video=True)
+    video_area = Mock(pause=Mock(), seek=Mock())
+    coordinator._player_view = Mock(video_area=video_area)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = presentation
+    coordinator._location_released_video_path = Path("/fake/video.mp4")
+    coordinator._location_released_video_was_playing = False
+    coordinator._location_released_video_position_ms = 1234
+    coordinator._render_presentation = Mock()
+
+    PlaybackCoordinator._restore_video_released_for_location_write(coordinator)
+
+    coordinator._render_presentation.assert_called_once_with(presentation)
+    video_area.seek.assert_called_once_with(1234)
+    video_area.pause.assert_called_once_with()
+    assert coordinator._location_released_video_path is None
+    assert coordinator._location_released_video_position_ms is None
+
+
 def test_location_assignment_ready_with_file_write_error_still_updates_library_state(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

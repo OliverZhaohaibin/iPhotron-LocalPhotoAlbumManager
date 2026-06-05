@@ -610,6 +610,10 @@ class VideoArea(QWidget):
         """Return True when a video source is currently loaded."""
         return self._current_source is not None
 
+    def current_source(self) -> Path | None:
+        """Return the currently loaded video source, if any."""
+        return self._current_source
+
     def load_video(
         self,
         path: Path,
@@ -792,6 +796,10 @@ class VideoArea(QWidget):
         """Return whether the underlying media player is actively playing."""
 
         return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+    def current_position(self) -> int:
+        """Return the current playback position in milliseconds."""
+        return int(self._player.position())
 
     def pause(self) -> None:
         """Pause playback."""

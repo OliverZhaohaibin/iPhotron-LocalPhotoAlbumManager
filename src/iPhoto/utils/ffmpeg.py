@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING
 
 from ..errors import ExternalToolError
+from .media_access import media_access
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -194,13 +195,14 @@ def extract_video_frame(
     if fmt not in {"png", "jpeg"}:
         raise ValueError("format must be either 'png' or 'jpeg'")
 
-    try:
-        return _extract_with_ffmpeg(source, at=at, scale=scale, format=fmt)
-    except ExternalToolError as exc:
-        fallback = _extract_with_opencv(source, at=at, scale=scale, format=fmt)
-        if fallback is not None:
-            return fallback
-        raise exc
+    with media_access.read(source):
+        try:
+            return _extract_with_ffmpeg(source, at=at, scale=scale, format=fmt)
+        except ExternalToolError as exc:
+            fallback = _extract_with_opencv(source, at=at, scale=scale, format=fmt)
+            if fallback is not None:
+                return fallback
+            raise exc
 
 
 def _extract_with_ffmpeg(
@@ -569,7 +571,8 @@ def probe_media(source: Path) -> Dict[str, Any]:
         str(source.absolute()),
     ]
 
-    process = _run_command(command)
+    with media_access.read(source):
+        process = _run_command(command)
     if process.returncode != 0 or not process.stdout:
         stderr = process.stderr.decode("utf-8", "ignore").strip()
         raise ExternalToolError(

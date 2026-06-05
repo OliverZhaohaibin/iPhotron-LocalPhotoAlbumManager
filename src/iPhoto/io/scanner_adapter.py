@@ -23,6 +23,7 @@ from ..infrastructure.services.thumbnail_cache_keys import (
 from ..infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
 from ..people import initial_face_status
 from ..utils.hashutils import compute_file_id
+from ..utils.media_access import media_access
 from ..utils.pathutils import ensure_work_dir, should_include
 from ..config import (
     ALL_WORK_DIR_NAMES,
@@ -49,36 +50,37 @@ def ensure_scan_thumbnail(
 ) -> ThumbnailReadyResult:
     """Generate the scan-time thumbnail payload and 512px disk cache entry."""
 
-    try:
-        micro_payload = _generate_micro_payload(path)
-        cache_key = _write_scan_thumbnail_cache(
-            path,
-            thumbnail_cache_dir,
-            size,
-            refresh=refresh_cache,
-        )
-        if cache_key is None:
+    with media_access.read(path):
+        try:
+            micro_payload = _generate_micro_payload(path)
+            cache_key = _write_scan_thumbnail_cache(
+                path,
+                thumbnail_cache_dir,
+                size,
+                refresh=refresh_cache,
+            )
+            if cache_key is None:
+                return ThumbnailReadyResult(
+                    state=ThumbnailState.FAILED,
+                    thumb_error="thumbnail_unavailable",
+                )
+            return ThumbnailReadyResult(
+                state=ThumbnailState.READY,
+                micro_thumbnail=micro_payload,
+                thumb_cache_key=cache_key,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Scan thumbnail generation failed for %s (%s): %s",
+                path,
+                asset_id,
+                exc,
+                exc_info=True,
+            )
             return ThumbnailReadyResult(
                 state=ThumbnailState.FAILED,
-                thumb_error="thumbnail_unavailable",
+                thumb_error=f"{type(exc).__name__}: {exc}",
             )
-        return ThumbnailReadyResult(
-            state=ThumbnailState.READY,
-            micro_thumbnail=micro_payload,
-            thumb_cache_key=cache_key,
-        )
-    except Exception as exc:
-        LOGGER.warning(
-            "Scan thumbnail generation failed for %s (%s): %s",
-            path,
-            asset_id,
-            exc,
-            exc_info=True,
-        )
-        return ThumbnailReadyResult(
-            state=ThumbnailState.FAILED,
-            thumb_error=f"{type(exc).__name__}: {exc}",
-        )
 
 
 def _generate_micro_payload(path: Path) -> bytes | None:

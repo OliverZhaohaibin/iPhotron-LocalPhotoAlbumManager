@@ -105,6 +105,61 @@ def test_update_asset_geodata_sanitizes_metadata_updates_for_json(
     assert metadata["items"] == ["visible"]
     assert "micro_thumbnail" not in metadata
 
+def test_merge_scan_rows_preserves_manual_location_and_metadata(
+    store: IndexStore,
+) -> None:
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("ALTER TABLE assets ADD COLUMN metadata TEXT")
+
+    store.write_rows(
+        [
+            {
+                "rel": "clip.mov",
+                "id": "as_clip",
+                "bytes": 100,
+                "gps": {"lat": 48.137154, "lon": 11.576124},
+                "location": "Munich",
+                "has_gps": 1,
+                "metadata": {
+                    "gps": {"lat": 48.137154, "lon": 11.576124},
+                    "legacy": True,
+                    "location": "Munich",
+                    "location_name": "Munich",
+                },
+            }
+        ]
+    )
+
+    merged = store.merge_scan_rows(
+        [
+            {
+                "rel": "clip.mov",
+                "id": "as_clip",
+                "bytes": 100,
+                "gps": None,
+                "location": None,
+                "has_gps": 0,
+                "metadata": {"codec": "h264"},
+            }
+        ]
+    )
+
+    assert merged[0]["gps"] == {"lat": 48.137154, "lon": 11.576124}
+    assert merged[0]["location"] == "Munich"
+    assert merged[0]["has_gps"] == 1
+    assert merged[0]["metadata"]["codec"] == "h264"
+    assert merged[0]["metadata"]["legacy"] is True
+    assert merged[0]["metadata"]["gps"] == {"lat": 48.137154, "lon": 11.576124}
+    assert merged[0]["metadata"]["location"] == "Munich"
+    assert merged[0]["metadata"]["location_name"] == "Munich"
+
+    row = next(r for r in store.read_all() if r["rel"] == "clip.mov")
+    assert row["gps"] == {"lat": 48.137154, "lon": 11.576124}
+    assert row["location"] == "Munich"
+    stored_metadata = json.loads(row["metadata"])
+    assert stored_metadata["legacy"] is True
+    assert stored_metadata["location_name"] == "Munich"
+
 def test_read_geotagged(store: IndexStore) -> None:
     gps_data = {"lat": 51.5, "lon": -0.1}
     rows = [

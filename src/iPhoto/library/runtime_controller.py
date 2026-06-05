@@ -245,25 +245,18 @@ class LibraryRuntimeController(
     def shutdown(self) -> None:
         """Stop background workers and watchers during application shutdown."""
 
-        self.stop_scanning()
+        self.stop_scanning(wait=True)
         self._debounce.stop()
         if self._watcher.directories():
             self._watcher.removePaths(self._watcher.directories())
+        if self._watcher.files():
+            self._watcher.removePaths(self._watcher.files())
         self._live_scan_buffer.clear()
         self._live_scan_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
-        if self._current_face_scanner is not None:
-            self._current_face_scanner.cancel()
-            self._current_face_scanner.wait(2000)
-            if self._current_face_scanner.isRunning():
-                LOGGER.warning(
-                    "Face scan worker did not exit within 2 s after cancel(); "
-                    "detaching without terminate() to avoid DB corruption."
-                )
-            self._current_face_scanner = None
         self._unbind_people_index_coordinator()
 
     def face_scan_status_message(self) -> str | None:

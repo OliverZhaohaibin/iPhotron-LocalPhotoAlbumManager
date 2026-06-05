@@ -133,9 +133,11 @@ class ScanCoordinatorMixin:
         face_worker.start()
         self._scan_thread_pool.start(worker)
 
-    def stop_scanning(self) -> None:
+    def stop_scanning(self, *, wait: bool = False, timeout_ms: int = 2000) -> None:
         """Cancel the currently running scan, if any."""
         locker = QMutexLocker(self._scan_buffer_lock)
+        scanner_worker = self._current_scanner_worker
+        face_scanner = self._current_face_scanner
         if self._current_scanner_worker:
             worker = self._current_scanner_worker
             worker.cancel()
@@ -152,6 +154,62 @@ class ScanCoordinatorMixin:
         if self._current_face_scanner is not None:
             self._current_face_scanner.cancel()
             self._current_face_scanner = None
+        del locker
+
+        if wait:
+            self._wait_for_scan_workers(
+                scanner_worker=scanner_worker,
+                face_scanner=face_scanner,
+                timeout_ms=timeout_ms,
+            )
+
+    def _wait_for_scan_workers(
+        self,
+        *,
+        scanner_worker: ScannerWorker | None,
+        face_scanner: FaceScanWorker | None,
+        timeout_ms: int,
+    ) -> None:
+        """Best-effort bounded wait for cancelled scan workers during teardown."""
+
+        if face_scanner is not None:
+            wait = getattr(face_scanner, "wait", None)
+            if callable(wait):
+                try:
+                    wait(timeout_ms)
+                except RuntimeError:
+                    LOGGER.debug("Face scanner wait failed during teardown", exc_info=True)
+            is_running = getattr(face_scanner, "isRunning", None)
+            if callable(is_running):
+                try:
+                    if is_running():
+                        LOGGER.warning(
+                            "Face scan worker did not exit within %d ms after cancel(); "
+                            "detaching without terminate() to avoid DB corruption.",
+                            timeout_ms,
+                        )
+                except RuntimeError:
+                    LOGGER.debug(
+                        "Face scanner state check failed during teardown",
+                        exc_info=True,
+                    )
+
+        if scanner_worker is None:
+            return
+        wait_for_done = getattr(self._scan_thread_pool, "waitForDone", None)
+        if not callable(wait_for_done):
+            return
+        try:
+            completed = wait_for_done(timeout_ms)
+        except RuntimeError:
+            LOGGER.debug("Scanner thread-pool wait failed during teardown", exc_info=True)
+            return
+        if completed is False:
+            LOGGER.warning(
+                "Scanner thread pool did not quiesce within %d ms after cancel(); "
+                "continuing teardown.",
+                timeout_ms,
+            )
 
     def is_scanning_path(self, path: Path) -> bool:
         """Return True if the given path is covered by the active scan."""
@@ -328,6 +386,15 @@ class ScanCoordinatorMixin:
             if self._current_face_scanner is not None:
                 self._current_face_scanner.enqueue_rows(rows)
         self.scanBatchCommitted.emit(batch)
+
+    def _on_scan_chunk(self, _root: Path, rows: List[dict]) -> None:
+        """Compatibility hook for callers that still relay raw scan chunks."""
+
+        if not rows:
+            return
+        self.invalidate_geotagged_assets_cache()
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.enqueue_rows(rows)
 
     def _on_scan_finished(
         self,

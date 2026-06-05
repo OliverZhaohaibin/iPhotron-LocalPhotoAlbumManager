@@ -273,6 +273,55 @@ class _SimpleMocker:
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_library_runtime_controllers(monkeypatch):
+    """Ensure runtime-controller tests do not leak Qt worker threads."""
+
+    if not HAS_PYSIDE6:
+        yield
+        return
+
+    try:
+        from iPhoto.library import runtime_controller
+    except (ImportError, RuntimeError):
+        yield
+        return
+
+    controllers = []
+    original_init = runtime_controller.LibraryRuntimeController.__init__
+
+    def tracked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        controllers.append(self)
+
+    monkeypatch.setattr(
+        runtime_controller.LibraryRuntimeController,
+        "__init__",
+        tracked_init,
+    )
+
+    try:
+        yield
+    finally:
+        for controller in reversed(controllers):
+            shutdown = getattr(controller, "shutdown", None)
+            if not callable(shutdown):
+                continue
+            try:
+                shutdown()
+            except RuntimeError:
+                pass
+
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+        except RuntimeError:
+            pass
+
+
 @pytest.fixture()
 def mocker():
     helper = _SimpleMocker()

@@ -95,3 +95,35 @@ def test_assign_location_merges_refreshed_metadata_without_overwriting_with_empt
         existing_metadata={"make": "FUJIFILM", "model": "X-T4", "iso": 320},
     )
     state_repository.update_asset_geodata.assert_called_once()
+
+
+def test_persist_library_assignment_updates_video_metadata_without_file_readback(
+    tmp_path: Path,
+) -> None:
+    state_repository = Mock()
+    metadata = Mock()
+
+    service = AssignLocationService(state_repository, metadata)
+    result = service.persist_library_assignment(
+        asset_path=tmp_path / "video.mov",
+        asset_rel="video.mov",
+        display_name="  Munich  ",
+        latitude=48.137154,
+        longitude=11.576124,
+        existing_metadata={"codec": "hevc", "gps": None},
+    )
+
+    assert result.display_name == "Munich"
+    assert result.file_write_error is None
+    assert result.metadata["codec"] == "hevc"
+    assert result.metadata["gps"] == {"lat": 48.137154, "lon": 11.576124}
+    assert result.metadata["location"] == "Munich"
+    assert result.metadata["location_name"] == "Munich"
+    metadata.write_gps_metadata.assert_not_called()
+    metadata.read_back_metadata.assert_not_called()
+    state_repository.update_asset_geodata.assert_called_once_with(
+        "video.mov",
+        gps={"lat": 48.137154, "lon": 11.576124},
+        location="Munich",
+        metadata_updates=result.metadata,
+    )

@@ -31,6 +31,38 @@ class AssignLocationService:
         self._state_repository = state_repository
         self._metadata = metadata
 
+    def persist_library_assignment(
+        self,
+        *,
+        asset_path: Path,
+        asset_rel: str,
+        display_name: str,
+        latitude: float,
+        longitude: float,
+        existing_metadata: dict[str, Any] | None = None,
+    ) -> AssignedLocationResult:
+        normalized_name = display_name.strip()
+        gps = {"lat": float(latitude), "lon": float(longitude)}
+        refreshed_metadata = dict(existing_metadata or {})
+        refreshed_metadata["gps"] = dict(gps)
+        refreshed_metadata["location"] = normalized_name
+        refreshed_metadata["location_name"] = normalized_name
+
+        self._state_repository.update_asset_geodata(
+            asset_rel,
+            gps=gps,
+            location=normalized_name,
+            metadata_updates=refreshed_metadata,
+        )
+        return AssignedLocationResult(
+            asset_path=Path(asset_path),
+            asset_rel=str(asset_rel),
+            display_name=normalized_name,
+            gps=gps,
+            metadata=refreshed_metadata,
+            file_write_error=None,
+        )
+
     def assign(
         self,
         *,

@@ -320,6 +320,45 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
     assert coordinator._trim_out_ms == 3000
 
 
+def test_render_presentation_defers_video_load_during_location_file_write() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    video_area = Mock(
+        has_video=Mock(return_value=True),
+        stop=Mock(),
+        load_video=Mock(),
+        play=Mock(),
+    )
+    coordinator._player_view = Mock(
+        show_placeholder=Mock(),
+        show_video_surface=Mock(),
+        video_area=video_area,
+    )
+    coordinator._favorite_button = Mock(setEnabled=Mock())
+    coordinator._info_button = Mock(setEnabled=Mock())
+    coordinator._share_button = Mock(setEnabled=Mock())
+    coordinator._edit_button = Mock(setEnabled=Mock())
+    coordinator._rotate_button = Mock(setEnabled=Mock())
+    coordinator._update_favorite_icon = Mock()
+    coordinator._zoom_slider = Mock(blockSignals=Mock(), setValue=Mock())
+    coordinator._player_bar = Mock(setEnabled=Mock(), set_playback_state=Mock(), set_position=Mock())
+    coordinator._zoom_handler = Mock(set_viewer=Mock())
+    coordinator._zoom_widget = Mock(show=Mock())
+    coordinator._info_panel = None
+    coordinator._clear_play_profile = Mock()
+    coordinator._location_video_write_inflight_paths = {Path("/fake/video.mp4")}
+
+    presentation = _make_presentation()
+
+    PlaybackCoordinator._render_presentation(coordinator, presentation)
+
+    video_area.stop.assert_called_once_with()
+    coordinator._player_view.show_placeholder.assert_called_once_with()
+    coordinator._player_view.show_video_surface.assert_not_called()
+    video_area.load_video.assert_not_called()
+    video_area.play.assert_not_called()
+    coordinator._player_bar.setEnabled.assert_called_once_with(False)
+
+
 def test_render_presentation_stops_video_area_before_showing_still() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     video_area = Mock(has_video=Mock(return_value=True), stop=Mock())
@@ -967,6 +1006,58 @@ def test_location_assignment_ready_refreshes_current_video_header_before_restore
     coordinator._detail_vm.refresh_current.assert_called_once_with()
 
 
+def test_location_assignment_ready_keeps_current_video_released_while_file_write_inflight() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/video.mp4")
+    metadata = {
+        "gps": {"lat": 48.137154, "lon": 11.576124},
+        "location": "Munich",
+        "location_name": "Munich",
+    }
+    store = Mock()
+    coordinator._asset_model = Mock(row_for_path=Mock(return_value=4), store=store)
+    coordinator._info_panel_metadata_cache = {}
+    coordinator._info_panel_metadata_attempted = set()
+    coordinator._info_panel_metadata_inflight = {str(asset_path)}
+    coordinator._location_preview_path = asset_path
+    coordinator._location_preview_metadata = dict(metadata)
+    coordinator._location_assign_inflight = True
+    coordinator._location_assign_path = asset_path
+    coordinator._location_video_write_inflight_paths = {asset_path}
+    coordinator._detail_vm = Mock(refresh_current=Mock())
+    coordinator._library_manager = None
+    coordinator._location_session_invalidator = None
+    coordinator._info_panel = Mock()
+    coordinator._refresh_info_panel = Mock()
+    coordinator._current_presentation = _make_presentation(
+        path=str(asset_path),
+        is_video=True,
+        info_panel_visible=True,
+    )
+    coordinator._update_header = Mock()
+    coordinator._render_presentation = Mock()
+    coordinator._location_released_video_path = asset_path
+    coordinator._location_released_video_was_playing = False
+    coordinator._location_released_video_position_ms = 1234
+
+    result = AssignedLocationResult(
+        asset_path=asset_path,
+        asset_rel="video.mp4",
+        display_name="Munich",
+        gps={"lat": 48.137154, "lon": 11.576124},
+        metadata=metadata,
+    )
+
+    PlaybackCoordinator._handle_location_assignment_ready(coordinator, result)
+
+    assert coordinator._current_presentation.location == "Munich"
+    assert coordinator._location_assign_inflight is False
+    assert coordinator._location_assign_path is None
+    assert coordinator._location_released_video_path == asset_path
+    coordinator._render_presentation.assert_not_called()
+    coordinator._detail_vm.refresh_current.assert_called_once_with()
+
+
 def test_location_assignment_ready_ignores_non_current_asset_for_header_refresh() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     asset_path = Path("/fake/other-video.mp4")
@@ -1121,6 +1212,83 @@ def test_location_assignment_ready_with_non_missing_file_write_error_warns(
         popup_parent,
         playback_coordinator_module._LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE.format(
             reason="ExifTool failed with an error: permission denied"
+        ),
+        title=playback_coordinator_module._LOCATION_FILE_WRITE_LIMITED_TITLE,
+    )
+
+
+def test_location_file_write_finished_restores_released_current_video() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/video.mp4")
+    presentation = _make_presentation(path=str(asset_path), is_video=True)
+    video_area = Mock(pause=Mock(), seek=Mock())
+    coordinator._player_view = Mock(video_area=video_area)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = presentation
+    coordinator._render_presentation = Mock()
+    coordinator._location_video_write_inflight_paths = {asset_path}
+    coordinator._location_released_video_path = asset_path
+    coordinator._location_released_video_was_playing = False
+    coordinator._location_released_video_position_ms = 1234
+
+    PlaybackCoordinator._handle_location_assignment_file_write_finished(coordinator, asset_path)
+
+    assert coordinator._location_video_write_inflight_paths == set()
+    coordinator._render_presentation.assert_called_once_with(presentation)
+    video_area.seek.assert_called_once_with(1234)
+    video_area.pause.assert_called_once_with()
+
+
+def test_location_file_write_finished_renders_current_video_when_user_returned() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/video.mp4")
+    presentation = _make_presentation(path=str(asset_path), is_video=True)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = presentation
+    coordinator._render_presentation = Mock()
+    coordinator._location_video_write_inflight_paths = {asset_path}
+    coordinator._location_released_video_path = None
+
+    PlaybackCoordinator._handle_location_assignment_file_write_finished(coordinator, asset_path)
+
+    assert coordinator._location_video_write_inflight_paths == set()
+    coordinator._render_presentation.assert_called_once_with(presentation)
+
+
+def test_location_file_write_error_warns_and_allows_video_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/video.mp4")
+    popup_parent = Mock()
+    coordinator._info_panel = Mock(parentWidget=Mock(return_value=popup_parent))
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = _make_presentation(path=str(asset_path), is_video=True)
+    coordinator._render_presentation = Mock()
+    coordinator._location_video_write_inflight_paths = {asset_path}
+    coordinator._location_released_video_path = None
+    show_warning = Mock()
+    monkeypatch.setattr(playback_coordinator_module.dialogs, "show_warning", show_warning)
+    coordinator._queue_location_file_write_warning = Mock(
+        side_effect=lambda message: PlaybackCoordinator._show_location_file_write_warning(
+            coordinator,
+            message,
+        )
+    )
+
+    PlaybackCoordinator._handle_location_assignment_file_write_error(
+        coordinator,
+        asset_path,
+        "permission denied",
+    )
+
+    assert coordinator._location_video_write_inflight_paths == set()
+    coordinator._queue_location_file_write_warning.assert_called_once_with("permission denied")
+    coordinator._render_presentation.assert_called_once_with(coordinator._current_presentation)
+    show_warning.assert_called_once_with(
+        popup_parent,
+        playback_coordinator_module._LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE.format(
+            reason="permission denied"
         ),
         title=playback_coordinator_module._LOCATION_FILE_WRITE_LIMITED_TITLE,
     )

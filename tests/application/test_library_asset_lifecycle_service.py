@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from iPhoto.bootstrap import library_asset_lifecycle_service as lifecycle_module
 from iPhoto.bootstrap.library_asset_lifecycle_service import (
     LibraryAssetLifecycleService,
 )
@@ -54,6 +56,7 @@ def test_apply_move_reuses_cached_metadata_and_pairs_once(tmp_path: Path) -> Non
                 "id": "asset-1",
                 "dt": "2024-01-01",
                 "metadata": {"camera": "cached"},
+                "is_deleted": 1,
             }
         ]
     )
@@ -75,7 +78,60 @@ def test_apply_move_reuses_cached_metadata_and_pairs_once(tmp_path: Path) -> Non
     assert "AlbumA/photo.jpg" not in rows
     assert rows["AlbumB/photo.jpg"]["id"] == "asset-1"
     assert rows["AlbumB/photo.jpg"]["parent_album_path"] == "AlbumB"
+    assert rows["AlbumB/photo.jpg"]["is_deleted"] == 0
     assert pair_recorder.pair_roots == [library_root]
+
+
+def test_sessionless_move_uses_destination_root_thumbnail_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "AlbumA"
+    destination_root = tmp_path / "AlbumB"
+    source_root.mkdir()
+    destination_root.mkdir()
+    source = source_root / "photo.jpg"
+    target = destination_root / "photo.jpg"
+    source.write_bytes(b"source")
+    target.write_bytes(b"target")
+    get_global_repository(source_root).write_rows(
+        [
+            {
+                "rel": "photo.jpg",
+                "id": "asset-1",
+                "dt": "2024-01-01",
+            }
+        ]
+    )
+    seen_cache_dirs: list[Path] = []
+
+    def fake_ensure_scan_thumbnail(_path, _asset_id, *, thumbnail_cache_dir, **_kwargs):
+        seen_cache_dirs.append(Path(thumbnail_cache_dir))
+        return SimpleNamespace(
+            state=SimpleNamespace(value="ready"),
+            micro_thumbnail=b"micro",
+            thumb_cache_key="thumb-key",
+            thumb_error=None,
+        )
+
+    monkeypatch.setattr(
+        lifecycle_module,
+        "ensure_scan_thumbnail",
+        fake_ensure_scan_thumbnail,
+    )
+    service = LibraryAssetLifecycleService(
+        None,
+        scan_service=_PairRecorder(),  # type: ignore[arg-type]
+    )
+
+    result = service.apply_move(
+        moved=[(source, target)],
+        source_root=source_root,
+        destination_root=destination_root,
+    )
+
+    assert result.errors == []
+    assert seen_cache_dirs == [destination_root / ".iPhoto" / "cache" / "thumbs"]
 
 
 def test_delete_annotation_and_stale_trash_cleanup(tmp_path: Path) -> None:
@@ -96,7 +152,7 @@ def test_delete_annotation_and_stale_trash_cleanup(tmp_path: Path) -> None:
 
     get_global_repository(library_root).write_rows(
         [
-            {"rel": "AlbumA/photo.jpg", "id": "asset-1"},
+            {"rel": "AlbumA/photo.jpg", "id": "asset-1", "is_deleted": 0},
             {
                 "rel": f"{RECENTLY_DELETED_DIR_NAME}/missing.jpg",
                 "id": "stale",
@@ -119,6 +175,8 @@ def test_delete_annotation_and_stale_trash_cleanup(tmp_path: Path) -> None:
     trash_rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
     assert result.errors == []
     assert f"{RECENTLY_DELETED_DIR_NAME}/missing.jpg" not in rows
+    assert rows[trash_rel]["is_deleted"] == 1
+    assert rows[trash_rel]["parent_album_path"] == RECENTLY_DELETED_DIR_NAME
     assert rows[trash_rel]["original_rel_path"] == "AlbumA/photo.jpg"
     assert rows[trash_rel]["original_album_id"] == "album-a"
     assert rows[trash_rel]["original_album_subpath"] == "photo.jpg"
@@ -218,6 +276,7 @@ def test_restore_clears_trash_metadata_from_destination_row(tmp_path: Path) -> N
                 "original_rel_path": "AlbumA/photo.jpg",
                 "original_album_id": "album-a",
                 "original_album_subpath": "photo.jpg",
+                "is_deleted": 1,
             },
         ]
     )
@@ -238,6 +297,8 @@ def test_restore_clears_trash_metadata_from_destination_row(tmp_path: Path) -> N
     assert result.errors == []
     assert f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg" not in rows
     restored = rows["AlbumA/photo.jpg"]
+    assert restored["is_deleted"] == 0
+    assert restored["parent_album_path"] == "AlbumA"
     assert restored.get("original_rel_path") is None
     assert restored.get("original_album_id") is None
     assert restored.get("original_album_subpath") is None

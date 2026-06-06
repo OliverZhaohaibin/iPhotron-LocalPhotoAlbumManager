@@ -28,6 +28,7 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 import iPhoto.bootstrap.library_scan_service as scan_service_module
+from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
 from iPhoto.bootstrap.library_asset_lifecycle_service import (
     LibraryAssetLifecycleService,
 )
@@ -38,6 +39,7 @@ from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.bootstrap.library_session import LibrarySession
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.ui.tasks.import_worker import ImportSignals, ImportWorker
 from iPhoto.gui.ui.tasks.move_worker import MoveSignals, MoveWorker
 from iPhoto.media_classifier import ALL_IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
@@ -292,10 +294,17 @@ def test_delete_and_restore_preserve_trash_metadata_in_temp_library(
     trashed_row = indexed_after_delete[f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"]
     assert not asset.exists()
     assert trashed.exists()
+    assert trashed_row["is_deleted"] == 1
+    assert trashed_row["parent_album_path"] == RECENTLY_DELETED_DIR_NAME
     assert trashed_row["original_rel_path"] == "AlbumA/photo.jpg"
     assert isinstance(trashed_row["original_album_id"], str)
     assert trashed_row["original_album_id"]
     assert str(trashed_row["original_album_subpath"]).endswith("photo.jpg")
+    assert session.asset_queries is not None
+    assert session.asset_queries.count_query_assets(AssetQuery()) == 0
+    assert session.asset_queries.count_query_assets(
+        AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME)
+    ) == 1
 
     restore_plan = session.asset_operations.plan_restore_request(
         [trashed],
@@ -312,6 +321,8 @@ def test_delete_and_restore_preserve_trash_metadata_in_temp_library(
     restored_row = indexed_after_restore["AlbumA/photo.jpg"]
     assert (album_root / "photo.jpg").exists()
     assert not trashed.exists()
+    assert restored_row["is_deleted"] == 0
+    assert restored_row["parent_album_path"] == "AlbumA"
     assert restored_row.get("original_rel_path") is None
     assert restored_row.get("original_album_id") is None
     assert restored_row.get("original_album_subpath") is None
@@ -354,7 +365,17 @@ def test_library_rescan_does_not_break_recently_deleted_restore(
         for row in get_global_repository(library_root).read_all(filter_hidden=False)
     }
     trashed_rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
+    assert indexed_after_delete[trashed_rel]["is_deleted"] == 1
+    assert (
+        indexed_after_delete[trashed_rel]["parent_album_path"]
+        == RECENTLY_DELETED_DIR_NAME
+    )
     assert indexed_after_delete[trashed_rel]["original_rel_path"] == "AlbumA/photo.jpg"
+    session_queries = LibraryAssetQueryService(library_root)
+    assert session_queries.count_query_assets(AssetQuery()) == 0
+    assert session_queries.count_query_assets(
+        AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME)
+    ) == 1
 
     scan_service.rescan_album(library_root)
     indexed_after_library_rescan = {

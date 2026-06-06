@@ -21,6 +21,8 @@ class ScanTaskCompletion:
     scan_service: LibraryScanService
     library_root: Path | None
     restart_requested: bool = False
+    scan_job_id: str | None = None
+    scan_started_at_ms: int | None = None
 
 
 class LibraryUpdateTaskRunner:
@@ -40,7 +42,7 @@ class LibraryUpdateTaskRunner:
         library_root: Path | None,
         scan_service: LibraryScanService | None,
         on_progress: Callable[[Path, int, int], None],
-        on_chunk: Callable[[Path, list[dict]], None],
+        on_batch_committed: Callable[[object], None],
         on_batch_failed: Callable[[Path, int], None],
         on_cancelled: Callable[[Path, bool], None],
         on_completed: Callable[[ScanTaskCompletion], None],
@@ -57,7 +59,8 @@ class LibraryUpdateTaskRunner:
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(on_progress)
-        signals.chunkReady.connect(on_chunk)
+        if on_batch_committed is not None:
+            signals.batchCommitted.connect(on_batch_committed)
         signals.batchFailed.connect(on_batch_failed)
 
         worker = ScannerWorker(
@@ -186,6 +189,8 @@ class LibraryUpdateTaskRunner:
             scan_service=worker.scan_service,
             library_root=library_root,
             restart_requested=restart_requested,
+            scan_job_id=worker.scan_job_id,
+            scan_started_at_ms=worker.scan_started_at_ms,
         )
         self._cleanup_scan_worker()
         on_completed(completion)
@@ -215,4 +220,3 @@ class LibraryUpdateTaskRunner:
             return Path(left).resolve() == Path(right).resolve()
         except OSError:
             return Path(left) == Path(right)
-

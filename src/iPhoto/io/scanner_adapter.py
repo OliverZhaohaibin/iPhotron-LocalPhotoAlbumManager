@@ -9,13 +9,22 @@ import unicodedata
 from datetime import datetime, timezone
 import logging
 import mimetypes
+import time
 
 from ..application.interfaces import IMetadataProvider, IThumbnailGenerator
+from ..domain.models.query import ThumbnailReadyResult, ThumbnailState
 from ..infrastructure.services.metadata_provider import ExifToolMetadataProvider
+from ..infrastructure.services.thumbnail_cache_keys import (
+    DEFAULT_THUMBNAIL_SIZE,
+    thumbnail_cache_file,
+    thumbnail_cache_file_for_key,
+    thumbnail_cache_key,
+)
 from ..infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
 from ..people import initial_face_status
 from ..utils.hashutils import compute_file_id
-from ..utils.pathutils import should_include
+from ..utils.media_access import media_access
+from ..utils.pathutils import ensure_work_dir, should_include
 from ..config import (
     ALL_WORK_DIR_NAMES,
     DEFAULT_EXCLUDE,
@@ -29,6 +38,127 @@ _thumbnail_generator = PillowThumbnailGenerator()
 _IMAGE_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_IMAGE_EXTENSIONS", ()))
 _VIDEO_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_VIDEO_EXTENSIONS", ()))
 LOGGER = logging.getLogger(__name__)
+
+
+def ensure_scan_thumbnail(
+    path: Path,
+    asset_id: str,
+    *,
+    thumbnail_cache_dir: Path,
+    size: tuple[int, int] = DEFAULT_THUMBNAIL_SIZE,
+    refresh_cache: bool = False,
+) -> ThumbnailReadyResult:
+    """Generate the scan-time thumbnail payload and 512px disk cache entry."""
+
+    with media_access.read(path):
+        try:
+            micro_payload = _generate_micro_payload(path)
+            cache_key = _write_scan_thumbnail_cache(
+                path,
+                thumbnail_cache_dir,
+                size,
+                refresh=refresh_cache,
+            )
+            if cache_key is None:
+                return ThumbnailReadyResult(
+                    state=ThumbnailState.FAILED,
+                    thumb_error="thumbnail_unavailable",
+                )
+            return ThumbnailReadyResult(
+                state=ThumbnailState.READY,
+                micro_thumbnail=micro_payload,
+                thumb_cache_key=cache_key,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Scan thumbnail generation failed for %s (%s): %s",
+                path,
+                asset_id,
+                exc,
+                exc_info=True,
+            )
+            return ThumbnailReadyResult(
+                state=ThumbnailState.FAILED,
+                thumb_error=f"{type(exc).__name__}: {exc}",
+            )
+
+
+def _generate_micro_payload(path: Path) -> bytes | None:
+    try:
+        micro_thumbnail = _thumbnail_generator.generate_micro_thumbnail(path)
+    except Exception:
+        LOGGER.debug("Micro thumbnail generation failed for %s", path, exc_info=True)
+        return None
+    if not micro_thumbnail:
+        return None
+    if isinstance(micro_thumbnail, (bytes, bytearray, memoryview)):
+        return bytes(micro_thumbnail)
+    return str(micro_thumbnail).encode("utf-8")
+
+
+def _write_scan_thumbnail_cache(
+    path: Path,
+    thumbnail_cache_dir: Path,
+    size: tuple[int, int] = DEFAULT_THUMBNAIL_SIZE,
+    *,
+    refresh: bool = False,
+) -> str | None:
+    key = thumbnail_cache_key(path, size)
+    cache_file = thumbnail_cache_file_for_key(thumbnail_cache_dir, key)
+    if not refresh and _cache_file_is_ready(cache_file):
+        return key
+
+    generated = _thumbnail_generator.generate(path, size)
+    if generated is None:
+        return None
+
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    composed = _compose_square_thumbnail(generated, size)
+    tmp_file = cache_file.with_name(
+        f".{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        composed.save(tmp_file, format="JPEG", quality=90)
+        if not _cache_file_is_ready(tmp_file):
+            tmp_file.unlink(missing_ok=True)
+            return None
+        os.replace(tmp_file, cache_file)
+    finally:
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return key
+
+
+def _compose_square_thumbnail(image: Any, size: tuple[int, int]) -> Any:
+    width, height = max(1, int(size[0])), max(1, int(size[1]))
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    source_w, source_h = image.size
+    if source_w <= 0 or source_h <= 0:
+        return image.resize((width, height))
+
+    scale = max(width / source_w, height / source_h)
+    resized_size = (
+        max(width, int(round(source_w * scale))),
+        max(height, int(round(source_h * scale))),
+    )
+    resized = image.resize(resized_size)
+    left = max(0, (resized.width - width) // 2)
+    top = max(0, (resized.height - height) // 2)
+    return resized.crop((left, top, left + width, top + height))
+
+
+def _cache_file_is_ready(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _default_thumbnail_cache_dir(root: Path) -> Path:
+    return ensure_work_dir(root) / "cache" / "thumbs"
 
 
 class FileDiscoveryThread(threading.Thread):
@@ -112,13 +242,18 @@ def _fallback_row_for_path(root: Path, path: Path) -> Dict[str, Any]:
     return row
 
 def process_media_paths(
-    root: Path, image_paths: List[Path], video_paths: List[Path]
+    root: Path,
+    image_paths: List[Path],
+    video_paths: List[Path],
+    *,
+    thumbnail_cache_dir: Path | None = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield populated index rows for the provided media paths."""
 
     all_paths = image_paths + video_paths
     if not all_paths:
         return
+    resolved_thumbnail_cache_dir = thumbnail_cache_dir or _default_thumbnail_cache_dir(root)
 
     # Process in batches
     BATCH_SIZE = 50
@@ -165,19 +300,20 @@ def process_media_paths(
                     exc_info=True,
                 )
 
-            if row.get("media_type") == 0:
-                try:
-                    mt = _thumbnail_generator.generate_micro_thumbnail(path)
-                except Exception as exc:
-                    LOGGER.warning(
-                        "Micro-thumbnail generation failed for %s; keeping asset indexed without thumbnail: %s",
-                        path,
-                        exc,
-                        exc_info=True,
-                    )
-                else:
-                    if mt:
-                        row["micro_thumbnail"] = mt
+            thumbnail = ensure_scan_thumbnail(
+                path,
+                str(row.get("id") or path),
+                thumbnail_cache_dir=resolved_thumbnail_cache_dir,
+                refresh_cache=True,
+            )
+            row["thumbnail_state"] = thumbnail.state.value
+            if thumbnail.micro_thumbnail is not None:
+                row["micro_thumbnail"] = thumbnail.micro_thumbnail
+            if thumbnail.thumb_cache_key:
+                row["thumb_cache_key"] = thumbnail.thumb_cache_key
+                row["thumb_updated_at"] = _utc_ms()
+            if thumbnail.thumb_error:
+                row["thumb_error"] = thumbnail.thumb_error
 
             yield row
 
@@ -187,17 +323,24 @@ def scan_album(
     exclude_globs: Iterable[str],
     existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    thumbnail_cache_dir: Path | None = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield index rows for all matching assets in *root*, scanning in parallel."""
 
     path_queue = queue.Queue(maxsize=1000)
     # FileDiscoveryThread expects list, ensure we pass lists
-    discoverer = FileDiscoveryThread(root, path_queue, include=list(include_globs), exclude=list(exclude_globs))
+    discoverer = FileDiscoveryThread(
+        root,
+        path_queue,
+        include=list(include_globs),
+        exclude=list(exclude_globs),
+    )
     discoverer.start()
 
     batch = []
     BATCH_SIZE = 50
     total_processed = 0
+    resolved_thumbnail_cache_dir = thumbnail_cache_dir or _default_thumbnail_cache_dir(root)
 
     def process_batch_rows(paths: List[Path]) -> Iterator[Dict[str, Any]]:
         # Check cache first to avoid expensive metadata extraction
@@ -218,8 +361,22 @@ def scan_album(
                     # Validate cache
                     cached_ts = cached.get("ts")
                     current_ts = int(stat.st_mtime * 1_000_000)
-                    if cached.get("bytes") == stat.st_size and abs((cached_ts or 0) - current_ts) <= 1_000_000:
-                        yield cached
+                    if (
+                        cached.get("bytes") == stat.st_size
+                        and abs((cached_ts or 0) - current_ts) <= 1_000_000
+                    ):
+                        if _cached_thumbnail_ready(
+                            p,
+                            cached,
+                            resolved_thumbnail_cache_dir,
+                        ):
+                            yield cached
+                        else:
+                            yield _refresh_cached_thumbnail(
+                                p,
+                                cached,
+                                resolved_thumbnail_cache_dir,
+                            )
                         continue
                 except OSError:
                     pass
@@ -228,9 +385,13 @@ def scan_album(
 
         # Process remaining
         if paths_to_process:
-             # Reuse process_media_paths logic but we need to split images/videos if we strictly followed signature,
-             # but process_media_paths just joins them.
-             yield from process_media_paths(root, paths_to_process, [])
+            # Reuse process_media_paths logic; it treats image/video paths the same here.
+            yield from process_media_paths(
+                root,
+                paths_to_process,
+                [],
+                thumbnail_cache_dir=resolved_thumbnail_cache_dir,
+            )
 
     try:
         if progress_callback:
@@ -274,3 +435,45 @@ def scan_album(
                     break
 
         discoverer.join(timeout=1.0)
+
+
+def _cached_thumbnail_ready(
+    path: Path,
+    cached: Dict[str, Any],
+    thumbnail_cache_dir: Path,
+) -> bool:
+    cache_key = cached.get("thumb_cache_key")
+    if not isinstance(cache_key, str) or not cache_key.strip():
+        return False
+    expected_key = thumbnail_cache_key(path, DEFAULT_THUMBNAIL_SIZE)
+    if cache_key != expected_key:
+        return False
+    return _cache_file_is_ready(thumbnail_cache_file(thumbnail_cache_dir, path))
+
+
+def _refresh_cached_thumbnail(
+    path: Path,
+    cached: Dict[str, Any],
+    thumbnail_cache_dir: Path,
+) -> Dict[str, Any]:
+    row = dict(cached)
+    thumbnail = ensure_scan_thumbnail(
+        path,
+        str(row.get("id") or path),
+        thumbnail_cache_dir=thumbnail_cache_dir,
+    )
+    row["thumbnail_state"] = thumbnail.state.value
+    row.pop("thumb_error", None)
+    if thumbnail.micro_thumbnail is not None:
+        row["micro_thumbnail"] = thumbnail.micro_thumbnail
+    if thumbnail.thumb_cache_key:
+        row["thumb_cache_key"] = thumbnail.thumb_cache_key
+        row["thumb_updated_at"] = _utc_ms()
+    if thumbnail.thumb_error:
+        row["thumb_error"] = thumbnail.thumb_error
+        row.pop("thumb_cache_key", None)
+    return row
+
+
+def _utc_ms() -> int:
+    return int(time.time() * 1000)

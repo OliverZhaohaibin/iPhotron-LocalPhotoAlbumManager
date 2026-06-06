@@ -7,45 +7,66 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any
+
+from ...config import RECENTLY_DELETED_DIR_NAME
 
 
 def insert_rows(
     conn: sqlite3.Connection,
-    rows: Iterable[Dict[str, Any]],
+    rows: Iterable[dict[str, Any]],
 ) -> None:
     """Bulk insert rows into the assets table."""
+    columns = _asset_insert_columns(conn)
     data_list = []
     for row in rows:
-        data = row_to_db_params(row)
+        data = row_to_db_params(row, include_metadata="metadata" in columns)
         data_list.append(data)
 
     if not data_list:
         return
 
-    columns = [
-        "rel", "id", "parent_album_path", "dt", "ts", "bytes", "mime",
-        "make", "model", "lens", "iso", "f_number", "exposure_time",
-        "exposure_compensation", "focal_length", "w", "h", "gps",
-        "content_id", "frame_rate", "codec", "still_image_time", "dur",
-        "original_rel_path", "original_album_id", "original_album_subpath",
-        "live_role", "live_partner_rel", "aspect_ratio", "year", "month",
-        "media_type", "is_favorite", "location", "micro_thumbnail", "face_status"
-    ]
     placeholders = ", ".join(["?"] * len(columns))
     query = (
-        f"INSERT OR REPLACE INTO assets ({', '.join(columns)}) "
+        f"INSERT OR REPLACE INTO assets ({', '.join(columns)}) "  # noqa: S608
         f"VALUES ({placeholders})"
     )
 
     conn.executemany(query, data_list)
 
 
-def row_to_db_params(row: Dict[str, Any]) -> List[Any]:
+def _asset_insert_columns(conn: sqlite3.Connection) -> list[str]:
+    columns = [
+        "rel", "id", "parent_album_path", "dt", "ts", "sort_ts", "bytes", "mime",
+        "make", "model", "lens", "iso", "f_number", "exposure_time",
+        "exposure_compensation", "focal_length", "w", "h", "gps",
+        "content_id", "frame_rate", "codec", "still_image_time", "dur",
+        "original_rel_path", "original_album_id", "original_album_subpath",
+        "live_role", "live_partner_rel", "aspect_ratio", "year", "month",
+        "media_type", "is_favorite", "is_deleted", "has_gps", "thumbnail_state",
+        "location", "micro_thumbnail", "thumb_cache_key", "thumb_updated_at",
+        "thumb_error", "scan_job_id", "index_revision", "index_updated_at_ms",
+        "face_status"
+    ]
+    table_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(assets)")}
+    if "metadata" in table_columns:
+        columns.append("metadata")
+    return columns
+
+
+def row_to_db_params(row: dict[str, Any], *, include_metadata: bool = False) -> list[Any]:
     """Map a dictionary row to a list of values for the DB."""
     gps_val = row.get("gps")
     gps_str = json.dumps(gps_val) if gps_val is not None else None
+    has_gps = row.get("has_gps")
+    if has_gps is None:
+        has_gps = 1 if gps_val is not None else 0
+    sort_ts = row.get("sort_ts")
+    if sort_ts is None:
+        sort_ts = row.get("ts")
+    thumbnail_state = _thumbnail_state_for_row(row)
 
     # Compute parent_album_path from rel if not provided
     rel = row.get("rel")
@@ -54,13 +75,21 @@ def row_to_db_params(row: Dict[str, Any]) -> List[Any]:
         rel_path = Path(rel)
         parent = rel_path.parent
         parent_album_path = parent.as_posix() if parent != Path(".") else ""
+    is_deleted = row.get("is_deleted")
+    if is_deleted is None:
+        rel_str = str(rel or "")
+        is_deleted = 1 if (
+            parent_album_path == RECENTLY_DELETED_DIR_NAME
+            or rel_str.startswith(f"{RECENTLY_DELETED_DIR_NAME}/")
+        ) else 0
 
-    return [
+    params = [
         rel,
         row.get("id"),
         parent_album_path,
         row.get("dt"),
         row.get("ts"),
+        sort_ts,
         row.get("bytes"),
         row.get("mime"),
         row.get("make"),
@@ -89,13 +118,41 @@ def row_to_db_params(row: Dict[str, Any]) -> List[Any]:
         row.get("month"),
         row.get("media_type"),
         row.get("is_favorite", 0),
+        is_deleted,
+        has_gps,
+        thumbnail_state,
         row.get("location"),
         row.get("micro_thumbnail"),
+        row.get("thumb_cache_key"),
+        row.get("thumb_updated_at", 0),
+        row.get("thumb_error"),
+        row.get("scan_job_id"),
+        row.get("index_revision", 0),
+        row.get("index_updated_at_ms", 0),
         row.get("face_status"),
     ]
+    if include_metadata:
+        params.append(_metadata_to_json(row.get("metadata")))
+    return params
 
 
-def db_row_to_dict(db_row: sqlite3.Row) -> Dict[str, Any]:
+def _thumbnail_state_for_row(row: dict[str, Any]) -> str:
+    state = str(row.get("thumbnail_state") or "").strip().lower()
+    if not state:
+        state = "ready" if _has_thumbnail_payload(row) else "stale"
+    if state == "ready" and not _has_thumbnail_payload(row):
+        return "stale"
+    if state not in {"ready", "pending", "failed", "stale"}:
+        return "stale"
+    return state
+
+
+def _has_thumbnail_payload(row: dict[str, Any]) -> bool:
+    thumb_key = row.get("thumb_cache_key")
+    return isinstance(thumb_key, str) and bool(thumb_key.strip())
+
+
+def db_row_to_dict(db_row: sqlite3.Row) -> dict[str, Any]:
     """Map a DB row back to a dictionary."""
     d = dict(db_row)
     if d.get("gps") is not None:
@@ -104,3 +161,38 @@ def db_row_to_dict(db_row: sqlite3.Row) -> Dict[str, Any]:
         except json.JSONDecodeError:
             d["gps"] = None
     return d
+
+
+def _metadata_to_json(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    sanitized = _sanitize_metadata_value(value)
+    if not isinstance(sanitized, dict):
+        return None
+    return json.dumps(sanitized, ensure_ascii=False)
+
+
+def _sanitize_metadata_value(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return None
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            sanitized_item = _sanitize_metadata_value(item)
+            if sanitized_item is not None:
+                sanitized[str(key)] = sanitized_item
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        sanitized_items = []
+        for item in value:
+            sanitized_item = _sanitize_metadata_value(item)
+            if sanitized_item is not None:
+                sanitized_items.append(sanitized_item)
+        return sanitized_items
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)

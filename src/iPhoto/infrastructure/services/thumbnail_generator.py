@@ -16,7 +16,7 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
     Generates thumbnails using Pillow for images and FFmpeg for videos.
     """
 
-    def generate_micro_thumbnail(self, path: Path) -> Optional[str]:
+    def generate_micro_thumbnail(self, path: Path) -> Optional[bytes]:
         # Reuse existing utility
         if not path.exists():
             return None

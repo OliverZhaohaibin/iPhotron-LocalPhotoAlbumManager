@@ -262,14 +262,220 @@ def test_scan_finished_skips_prune_when_worker_failed(tmp_path: Path, qapp: QApp
         failed = True
         scan_service = Mock()
 
+    worker = _Worker()
     spy = QSignalSpy(manager.scanFinished)
-    manager._current_scanner_worker = _Worker()
+    manager._current_scanner_worker = worker
+    manager._live_scan_root = root
 
     with patch.object(manager._scan_thread_pool, "start") as start_mock:
-        manager._on_scan_finished(root, [])
+        manager._on_scan_finished(worker, root, [])
         qapp.processEvents()
 
     _Worker.scan_service.finalize_scan_result.assert_not_called()
     start_mock.assert_not_called()
     assert spy.count() == 1
     assert spy.at(0)[1] is False
+
+
+def test_scan_finished_skips_prune_when_worker_cancelled(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+
+    class _Worker:
+        cancelled = True
+        failed = False
+        scan_service = Mock()
+
+    worker = _Worker()
+    spy = QSignalSpy(manager.scanFinished)
+    manager._current_scanner_worker = worker
+    manager._live_scan_root = root
+
+    with patch.object(manager._scan_thread_pool, "start") as start_mock:
+        manager._on_scan_finished(worker, root, [])
+        qapp.processEvents()
+
+    _Worker.scan_service.finalize_scan_result.assert_not_called()
+    start_mock.assert_not_called()
+    assert spy.count() == 1
+    assert spy.at(0)[1] is False
+
+
+def test_stop_scanning_still_reports_cancelled_completion(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+
+    class _Worker:
+        cancelled = False
+        failed = False
+        scan_service = Mock()
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    worker = _Worker()
+    spy = QSignalSpy(manager.scanFinished)
+    manager._current_scanner_worker = worker
+    manager._live_scan_root = root
+
+    manager.stop_scanning()
+    manager._on_scan_finished(worker, root, [])
+    qapp.processEvents()
+
+    _Worker.scan_service.finalize_scan_result.assert_not_called()
+    assert spy.count() == 1
+    assert spy.at(0)[1] is False
+
+
+def test_shutdown_cancels_and_waits_for_scan_workers(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+
+    class _Worker:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    worker = _Worker()
+    face_scanner = Mock()
+    face_scanner.isRunning.return_value = False
+    manager._current_scanner_worker = worker
+    manager._current_face_scanner = face_scanner
+    manager._live_scan_root = root
+
+    with patch.object(
+        manager._scan_thread_pool,
+        "waitForDone",
+        return_value=True,
+    ) as wait_for_done:
+        manager.shutdown()
+
+    assert worker.cancelled is True
+    face_scanner.cancel.assert_called_once_with()
+    face_scanner.wait.assert_called_once_with(2000)
+    wait_for_done.assert_called_once_with(2000)
+
+
+def test_scan_finished_ignores_stale_worker_result(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+
+    current_worker = Mock(cancelled=False, failed=False)
+    stale_worker = Mock(cancelled=False, failed=False)
+    manager._current_scanner_worker = current_worker
+    manager._live_scan_root = root
+    spy = QSignalSpy(manager.scanFinished)
+
+    manager._on_scan_finished(stale_worker, root, [])
+    qapp.processEvents()
+
+    assert manager._current_scanner_worker is current_worker
+    assert spy.count() == 0
+
+
+def test_scan_finished_reports_failure_when_finalization_fails(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    scan_service = Mock()
+    scan_service.finalize_scan_result.side_effect = RuntimeError("finalize failed")
+
+    worker = Mock(cancelled=False, failed=False, scan_service=scan_service)
+    spy = QSignalSpy(manager.scanFinished)
+    manager._current_scanner_worker = worker
+    manager._live_scan_root = root
+
+    with patch.object(manager._scan_thread_pool, "start") as start_mock:
+        manager._on_scan_finished(worker, root, [{"rel": "a.jpg"}])
+        qapp.processEvents()
+
+    scan_service.finalize_scan_result.assert_called_once()
+    start_mock.assert_not_called()
+    assert spy.count() == 1
+    assert spy.at(0)[1] is False
+
+
+def test_scan_request_is_queued_until_active_scan_finishes(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    first = root / "First"
+    second = root / "Second"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    scan_service = Mock()
+
+    worker = Mock(cancelled=False, failed=False, scan_service=scan_service)
+    manager._current_scanner_worker = worker
+    manager._live_scan_root = first
+
+    manager.start_scanning(second, ["*.jpg"], ["*.mov"])
+    assert manager._deferred_scan_queue == [(second, ["*.jpg"], ["*.mov"])]
+
+    with patch.object(manager, "start_scanning") as start_mock:
+        manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
+        qapp.processEvents()
+
+    scan_service.finalize_scan_result.assert_called_once()
+    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"])
+
+
+def test_deferred_scan_waits_for_face_scan_to_finish(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    first = root / "First"
+    second = root / "Second"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    scan_service = Mock()
+
+    worker = Mock(cancelled=False, failed=False, scan_service=scan_service)
+    face_scanner = Mock()
+    face_scanner.isRunning.return_value = True
+    manager._current_scanner_worker = worker
+    manager._current_face_scanner = face_scanner
+    manager._live_scan_root = first
+
+    manager.start_scanning(second, ["*.jpg"], ["*.mov"])
+
+    with patch.object(manager, "start_scanning") as start_mock:
+        manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
+        qapp.processEvents()
+
+        face_scanner.finish_input.assert_called_once_with()
+        start_mock.assert_not_called()
+        face_scanner.isRunning.return_value = False
+        manager._on_face_scan_finished(face_scanner)
+
+    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"])

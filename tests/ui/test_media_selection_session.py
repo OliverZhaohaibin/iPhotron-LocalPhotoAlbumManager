@@ -11,12 +11,16 @@ class _Collection:
     def __init__(self, paths: list[Path]) -> None:
         self.data_changed = Signal()
         self._paths = list(paths)
+        self.ensure_calls: list[int] = []
+        self._missing_until_ensured: set[int] = set()
 
     def count(self) -> int:
         return len(self._paths)
 
     def asset_at(self, row: int):
         if row < 0 or row >= len(self._paths):
+            return None
+        if row in self._missing_until_ensured:
             return None
         path = self._paths[row]
         return AssetDTO(
@@ -32,6 +36,12 @@ class _Collection:
             metadata={},
             is_favorite=False,
         )
+
+    def ensure_row_loaded(self, row: int, *, emit_signals: bool = True) -> bool:
+        del emit_signals
+        self.ensure_calls.append(row)
+        self._missing_until_ensured.discard(row)
+        return 0 <= row < len(self._paths)
 
     def row_for_path(self, path: Path) -> int | None:
         for index, candidate in enumerate(self._paths):
@@ -58,6 +68,20 @@ def test_session_tracks_current_row_and_source() -> None:
     assert source == Path("/fake/b.jpg")
     assert session.current_row() == 1
     assert session.current_source() == Path("/fake/b.jpg")
+
+
+def test_session_ensures_missing_row_before_setting_current() -> None:
+    session = MediaSelectionSession()
+    collection = _Collection([Path("/fake/a.jpg"), Path("/fake/deep.jpg")])
+    collection._missing_until_ensured.add(1)
+    session.bind_collection(collection)
+
+    source = session.set_current_row(1)
+
+    assert source == Path("/fake/deep.jpg")
+    assert collection.ensure_calls == [1]
+    assert session.current_row() == 1
+    assert session.current_source() == Path("/fake/deep.jpg")
 
 
 def test_session_relocates_current_asset_after_rows_removed() -> None:

@@ -7,7 +7,7 @@ import pytest
 
 from iPhoto.errors import ExternalToolError
 from iPhoto.utils import exiftool
-from iPhoto.utils.exiftool import get_metadata_batch
+from iPhoto.utils.exiftool import get_metadata_batch, write_gps_metadata
 
 
 def _make_executable(path: Path) -> Path:
@@ -135,3 +135,112 @@ def test_get_metadata_batch_uses_posix_paths():
         get_metadata_batch([mock_path])
 
         assert mock_run.called
+
+
+def test_write_gps_metadata_rejects_missing_source_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/usr/bin/exiftool")
+
+    with pytest.raises(ExternalToolError) as exc_info:
+        write_gps_metadata(
+            tmp_path / "missing.jpg",
+            latitude=48.137154,
+            longitude=11.576124,
+            is_video=False,
+        )
+
+    assert "Source media file is unavailable" in str(exc_info.value)
+
+
+def test_write_gps_metadata_passes_source_file_via_arg_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = tmp_path / "photo with spaces.jpg"
+    asset.write_bytes(b"jpeg-data")
+    seen_arg_file = None
+
+    def fake_run(cmd, **kwargs):
+        nonlocal seen_arg_file
+        assert "-@" in cmd
+        seen_arg_file = cmd[cmd.index("-@") + 1]
+        with open(seen_arg_file, encoding="utf-8") as handle:
+            assert handle.read().strip() == asset.resolve().as_posix()
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/usr/bin/exiftool")
+    monkeypatch.setattr(exiftool.subprocess, "run", fake_run)
+
+    write_gps_metadata(
+        asset,
+        latitude=48.137154,
+        longitude=11.576124,
+        is_video=False,
+    )
+
+    assert seen_arg_file is not None
+    assert not Path(seen_arg_file).exists()
+
+
+def test_write_gps_metadata_retries_rename_failure_with_in_place_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = tmp_path / "clip.mov"
+    asset.write_bytes(b"video-data")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(
+                1,
+                cmd,
+                stderr=f"Error renaming temporary file to {asset}",
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/usr/bin/exiftool")
+    monkeypatch.setattr(exiftool.subprocess, "run", fake_run)
+    monkeypatch.setattr(exiftool.time, "sleep", lambda _seconds: None)
+
+    write_gps_metadata(
+        asset,
+        latitude=48.137154,
+        longitude=11.576124,
+        is_video=False,
+    )
+
+    assert "-overwrite_original" in calls[0]
+    assert "-overwrite_original_in_place" in calls[1]
+
+
+def test_write_gps_metadata_retries_no_matching_files_when_source_still_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = tmp_path / "clip.mov"
+    asset.write_bytes(b"video-data")
+    calls = 0
+
+    def fake_run(cmd, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise subprocess.CalledProcessError(1, cmd, stderr="No matching files")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/usr/bin/exiftool")
+    monkeypatch.setattr(exiftool.subprocess, "run", fake_run)
+    monkeypatch.setattr(exiftool.time, "sleep", lambda _seconds: None)
+
+    write_gps_metadata(
+        asset,
+        latitude=48.137154,
+        longitude=11.576124,
+        is_video=True,
+    )
+
+    assert calls == 2

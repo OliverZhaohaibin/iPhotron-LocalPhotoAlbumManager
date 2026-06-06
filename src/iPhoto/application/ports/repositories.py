@@ -7,6 +7,8 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Protocol
 
+from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
+
 
 class AssetRepositoryPort(Protocol):
     """Read and merge rebuildable scan facts for one library."""
@@ -74,6 +76,90 @@ class AssetRepositoryPort(Protocol):
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Return one paginated asset page."""
+
+    def count_collection(self, query: CollectionQuery) -> int:
+        """Return the number of rows matching a collection query."""
+
+    def read_collection_page(
+        self,
+        query: CollectionQuery,
+        cursor: PageCursor | None = None,
+        limit: int = 100,
+    ) -> PageResult:
+        """Return one keyset-paginated collection page."""
+
+    def read_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a bounded collection window."""
+
+    def read_thumbnail_backfill_candidates(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return stale thumbnail rows matching a collection query."""
+
+    def update_thumbnail_ready(
+        self,
+        rel: str,
+        *,
+        micro_thumbnail: bytes | None = None,
+        thumb_cache_key: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Update thumbnail readiness for one row."""
+
+    def create_scan_job(
+        self,
+        *,
+        job_id: str,
+        root: str,
+        scope: str,
+        status: str = "running",
+        stage: str = "discover",
+    ) -> None:
+        """Create scan job bookkeeping."""
+
+    def update_scan_job_stage(
+        self,
+        job_id: str,
+        *,
+        stage: str | None = None,
+        status: str | None = None,
+        found_count: int | None = None,
+        processed_count: int | None = None,
+        visible_count: int | None = None,
+        failed_count: int | None = None,
+        finished: bool = False,
+    ) -> None:
+        """Update scan job progress."""
+
+    def append_scan_event(
+        self,
+        job_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one scan event."""
+
+    def latest_scan_job(
+        self,
+        *,
+        root: str,
+        scope: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the newest scan job matching *root* and optional *scope*."""
+
+    def find_row_by_path(self, query: CollectionQuery, path: Path) -> int | None:
+        """Return a row index for *path* inside *query*."""
+
+    def find_live_partner(self, asset_id: str) -> dict[str, Any] | None:
+        """Return an asset's Live Photo partner row."""
 
     def apply_live_role_updates(
         self,

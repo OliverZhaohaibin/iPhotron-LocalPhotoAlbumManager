@@ -3,27 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional, TYPE_CHECKING
+from typing import Iterable, List, Optional
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from ...bootstrap.library_scan_service import (
-    LibraryScanService,
-    merge_scan_chunk_with_repository,
-)
+from ...bootstrap.library_scan_service import LibraryScanService
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
 
 LOGGER = get_logger()
 
-if TYPE_CHECKING:
-    from ...cache.index_store.repository import AssetRepository
 
 class ScannerSignals(QObject):
     """Signals emitted by :class:`ScannerWorker` while scanning."""
 
     progressUpdated = Signal(Path, int, int)
-    chunkReady = Signal(Path, list)
+    batchCommitted = Signal(object)
     finished = Signal(Path, list)
     error = Signal(Path, str)
     batchFailed = Signal(Path, int)
@@ -36,10 +31,9 @@ class ScannerWorker(QRunnable):
     When scanning a subfolder, the assets are stored with their library-relative paths.
     """
 
-    # Number of items to process before emitting a progressive update signal.
-    # A smaller chunk size makes the UI feel more responsive during the initial
-    # load, while a larger one reduces the overhead of signal emission.
-    SCAN_CHUNK_SIZE = 10
+    # GUI scans trade smaller commits for timely DB-backed gallery refreshes.
+    SCAN_CHUNK_SIZE = 100
+    SCAN_CHUNK_MAX_INTERVAL_MS = 250
 
     def __init__(
         self,
@@ -62,6 +56,8 @@ class ScannerWorker(QRunnable):
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
+        self._scan_job_id: str | None = None
+        self._scan_started_at_ms: int | None = None
 
     @property
     def root(self) -> Path:
@@ -107,6 +103,18 @@ class ScannerWorker(QRunnable):
 
         return self._failed_count
 
+    @property
+    def scan_job_id(self) -> str | None:
+        """Return the durable scan job id for the most recent run."""
+
+        return self._scan_job_id
+
+    @property
+    def scan_started_at_ms(self) -> int | None:
+        """Return the wall-clock start time for the most recent scan."""
+
+        return self._scan_started_at_ms
+
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         """Perform the scan and emit progress as files are processed."""
 
@@ -127,19 +135,19 @@ class ScannerWorker(QRunnable):
                 exclude=self._exclude,
                 progress_callback=progress_callback,
                 is_cancelled=lambda: self._is_cancelled,
-                chunk_callback=lambda chunk: self._signals.chunkReady.emit(
-                    self._root,
-                    chunk,
-                ),
+                scan_batch_callback=self._emit_batch_if_active,
                 batch_failed_callback=lambda count: self._signals.batchFailed.emit(
                     self._root,
                     count,
                 ),
                 chunk_size=self.SCAN_CHUNK_SIZE,
+                max_chunk_interval_ms=self.SCAN_CHUNK_MAX_INTERVAL_MS,
                 persist_chunks=True,
             )
             rows = result.rows
             self._failed_count += result.failed_count
+            self._scan_job_id = result.scan_job_id
+            self._scan_started_at_ms = result.scan_started_at_ms
 
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:
@@ -147,31 +155,17 @@ class ScannerWorker(QRunnable):
                 self._signals.error.emit(self._root, str(exc))
         finally:
             if not self._is_cancelled and not self._had_error:
-                # Consumers should use `chunkReady` for progressive UI updates.
+                # Consumers should use `batchCommitted` for progressive UI updates.
                 # The `finished` signal provides the complete dataset for
                 # authoritative operations (e.g. writing the index file).
                 self._signals.finished.emit(self._root, rows)
             else:
                 self._signals.finished.emit(self._root, [])
 
-    def _process_chunk(self, store: "AssetRepository", chunk: List[dict]) -> None:
-        """Compatibility wrapper for tests and legacy worker internals."""
-
-        self._failed_count += merge_scan_chunk_with_repository(
-            store,
-            root=self._root,
-            include=self._include,
-            exclude=self._exclude,
-            chunk=chunk,
-            chunk_callback=lambda emitted: self._signals.chunkReady.emit(
-                self._root,
-                emitted,
-            ),
-            batch_failed_callback=lambda count: self._signals.batchFailed.emit(
-                self._root,
-                count,
-            ),
-        )
+    def _emit_batch_if_active(self, batch: object) -> None:
+        if self._is_cancelled:
+            return
+        self._signals.batchCommitted.emit(batch)
 
     def cancel(self) -> None:
         """Request cancellation of the in-progress scan."""

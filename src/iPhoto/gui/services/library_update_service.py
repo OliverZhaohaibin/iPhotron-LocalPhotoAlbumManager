@@ -56,7 +56,7 @@ class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
     scanProgress = Signal(Path, int, int)
-    scanChunkReady = Signal(Path, list)
+    scanBatchCommitted = Signal(object)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
     indexUpdated = Signal(Path)
@@ -106,8 +106,15 @@ class LibraryUpdateService(QObject):
         )
 
         is_already_scanning = self._is_scan_active_for(scan_root)
+        is_scope_complete = True
+        is_scan_scope_complete = getattr(scan_service, "is_scan_scope_complete", None)
+        if callable(is_scan_scope_complete):
+            try:
+                is_scope_complete = bool(is_scan_scope_complete(scan_root))
+            except Exception:
+                is_scope_complete = False
         should_rescan_async = (
-            preparation.asset_count == 0
+            (preparation.asset_count == 0 or not is_scope_complete)
             and not preparation.scanned
             and not is_already_scanning
         )
@@ -181,7 +188,7 @@ class LibraryUpdateService(QObject):
             library_root=library_root,
             scan_service=scan_service,
             on_progress=self._relay_scan_progress,
-            on_chunk=self._relay_scan_chunk_ready,
+            on_batch_committed=self._relay_scan_batch_committed,
             on_batch_failed=self._relay_scan_batch_failed,
             on_cancelled=self._on_scan_cancelled,
             on_completed=self._on_scan_completed,
@@ -447,10 +454,10 @@ class LibraryUpdateService(QObject):
 
         self.scanProgress.emit(root, current, total)
 
-    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
-        """Forward worker chunks to listeners."""
+    def _relay_scan_batch_committed(self, batch: object) -> None:
+        """Forward explicit ready-only scan batches to listeners."""
 
-        self.scanChunkReady.emit(root, chunk)
+        self.scanBatchCommitted.emit(batch)
 
     def _relay_scan_batch_failed(self, root: Path, count: int) -> None:
         """Forward partial persistence failures to listeners."""
@@ -471,6 +478,8 @@ class LibraryUpdateService(QObject):
                 completion.root,
                 completion.rows,
                 pair_live=True,
+                preserve_modified_after_ms=completion.scan_started_at_ms,
+                current_scan_job_id=completion.scan_job_id,
             )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))

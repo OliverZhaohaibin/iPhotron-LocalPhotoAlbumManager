@@ -7,7 +7,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from unittest.mock import patch
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QModelIndex, QSize
 from PySide6.QtGui import QResizeEvent, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication
 
@@ -112,3 +112,30 @@ def test_resize_non_linux_no_forced_repaint(qapp: QApplication) -> None:
         event = QResizeEvent(QSize(800, 600), QSize(400, 300))
         AssetGrid.resizeEvent(grid, event)
         mock_repaint.assert_not_called()
+
+
+def test_visible_rows_ignores_empty_bottom_right_cell(qapp: QApplication) -> None:
+    grid = AssetGrid()
+    model = QStandardItemModel()
+    for i in range(10_000):
+        model.appendRow(QStandardItem(f"item-{i}"))
+    grid.setModel(model)
+    grid.resize(500, 300)
+    grid.show()
+    qapp.processEvents()
+
+    emitted: list[tuple[int, int]] = []
+    grid.visibleRowsChanged.connect(lambda first, last: emitted.append((first, last)))
+
+    def fake_index_at(point):
+        if point.x() > grid.viewport().rect().center().x():
+            return QModelIndex()
+        row = 100 + max(0, point.y()) // 20
+        return model.index(row, 0)
+
+    with patch.object(grid, "indexAt", side_effect=fake_index_at):
+        grid._visible_range = None
+        grid._emit_visible_rows()
+
+    assert emitted
+    assert emitted[-1][1] < 9_999

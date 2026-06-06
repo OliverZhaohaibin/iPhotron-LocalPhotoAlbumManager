@@ -130,6 +130,41 @@ def test_restore_uses_lifecycle_rows_to_resolve_destination(tmp_path: Path) -> N
     assert move_service.calls == [([trashed_asset], album_root, "restore")]
 
 
+def test_restore_with_plan_returns_submitted_destination_batches(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "AlbumA"
+    trash_root = library_root / RECENTLY_DELETED_DIR_NAME
+    album_root.mkdir(parents=True)
+    trash_root.mkdir()
+    trashed_asset = trash_root / "photo.jpg"
+    trashed_asset.write_bytes(b"data")
+
+    lifecycle = _FakeLifecycleService(
+        [
+            {
+                "rel": f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg",
+                "original_rel_path": "AlbumA/photo.jpg",
+            }
+        ]
+    )
+    library = _FakeLibrary(library_root, lifecycle)
+    move_service = _FakeMoveService()
+    service = RestorationService(
+        move_service=move_service,  # type: ignore[arg-type]
+        library_manager_getter=lambda: library,  # type: ignore[return-value]
+        model_provider_getter=lambda: None,
+        restore_prompt_getter=lambda: None,
+    )
+
+    result = service.restore_assets_with_plan([trashed_asset])
+
+    assert result.scheduled is True
+    assert [(batch.sources, batch.destination_root) for batch in result.batches] == [
+        ([trashed_asset], album_root)
+    ]
+    assert move_service.calls == [([trashed_asset], album_root, "restore")]
+
+
 def test_restore_uses_stale_original_rows_when_trash_rows_are_missing(
     tmp_path: Path,
 ) -> None:
@@ -241,6 +276,39 @@ def test_restore_live_photo_adds_same_stem_motion_without_model_metadata(
     assert scheduled is True
     assert move_service.calls == [
         ([still.resolve(), motion.resolve()], library_root, "restore")
+    ]
+
+
+def test_restore_with_plan_includes_live_photo_expanded_sources(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    trash_root = library_root / RECENTLY_DELETED_DIR_NAME
+    trash_root.mkdir(parents=True)
+    still = trash_root / "IMG_3686.HEIC"
+    motion = trash_root / "IMG_3686.MOV"
+    still.write_bytes(b"still")
+    motion.write_bytes(b"motion")
+
+    lifecycle = _FakeLifecycleService([])
+    lifecycle.rows_by_rel = {
+        "IMG_3686.HEIC": {"rel": "IMG_3686.HEIC"},
+        "IMG_3686.MOV": {"rel": "IMG_3686.MOV"},
+    }
+    library = _FakeLibrary(library_root, lifecycle)
+    move_service = _FakeMoveService()
+    service = RestorationService(
+        move_service=move_service,  # type: ignore[arg-type]
+        library_manager_getter=lambda: library,  # type: ignore[return-value]
+        model_provider_getter=lambda: None,
+        restore_prompt_getter=lambda: None,
+    )
+
+    result = service.restore_assets_with_plan([still])
+
+    assert result.scheduled is True
+    assert [(batch.sources, batch.destination_root) for batch in result.batches] == [
+        ([still.resolve(), motion.resolve()], library_root)
     ]
 
 

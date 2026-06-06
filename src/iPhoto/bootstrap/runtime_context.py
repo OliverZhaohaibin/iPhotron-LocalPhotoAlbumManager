@@ -121,7 +121,6 @@ class RuntimeContext:
 
         from ..config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
         from ..errors import LibraryError
-        from ..utils.pathutils import resolve_work_dir
 
         candidate = self._pending_basic_library_path
         self._pending_basic_library_path = None
@@ -134,20 +133,21 @@ class RuntimeContext:
         )
         if candidate.exists():
             try:
-                existing_work_dir = resolve_work_dir(candidate)
-                had_existing_index = (
-                    existing_work_dir is not None
-                    and (existing_work_dir / "global_index.db").exists()
-                )
                 self.open_library(candidate)
                 _logger.info(
                     "resume_startup_tasks: bind_path succeeded, root=%s",
                     self.library.root(),
                 )
-                if (
-                    not had_existing_index
-                    and not self.library.is_scanning_path(candidate)
-                ):
+                scan_service = getattr(self.library, "scan_service", None)
+                is_scan_scope_complete = getattr(
+                    scan_service,
+                    "is_scan_scope_complete",
+                    None,
+                )
+                scan_complete = False
+                if callable(is_scan_scope_complete):
+                    scan_complete = bool(is_scan_scope_complete(candidate))
+                if not scan_complete and not self.library.is_scanning_path(candidate):
                     self.facade.scan_root_async(
                         candidate,
                         include=DEFAULT_INCLUDE,

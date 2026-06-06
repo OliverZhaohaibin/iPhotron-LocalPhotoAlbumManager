@@ -51,6 +51,9 @@ class FakeScanService:
         self.prepared.append({"root": Path(root), **kwargs})
         return SimpleNamespace(asset_count=1, scanned=False)
 
+    def is_scan_scope_complete(self, _root: Path) -> bool:
+        return True
+
     def rescan_album(self, root: Path, **kwargs):
         self.rescanned.append({"root": Path(root), **kwargs})
         return [{"rel": "a.jpg"}]
@@ -102,6 +105,15 @@ class FakeOpenScanService(FakeScanService):
     def prepare_album_open(self, root: Path, **kwargs):
         self.prepared.append({"root": Path(root), **kwargs})
         return SimpleNamespace(asset_count=0, scanned=False)
+
+
+class FakeIncompleteOpenScanService(FakeScanService):
+    def prepare_album_open(self, root: Path, **kwargs):
+        self.prepared.append({"root": Path(root), **kwargs})
+        return SimpleNamespace(asset_count=3, scanned=False)
+
+    def is_scan_scope_complete(self, _root: Path) -> bool:
+        return False
 
 
 class DummyTaskManager:
@@ -233,6 +245,35 @@ def test_prepare_album_open_requests_async_rescan_when_scope_is_empty(
             "sync_manifest_favorites": True,
         }
     ]
+
+
+def test_prepare_album_open_requests_async_rescan_when_scope_incomplete(
+    tmp_path: Path,
+) -> None:
+    lib_root = tmp_path / "Library"
+    album_root = lib_root / "Album"
+    lib_root.mkdir()
+    album_root.mkdir()
+    scan_service = FakeIncompleteOpenScanService(lib_root)
+
+    service = lus.LibraryUpdateService(
+        task_manager=DummyTaskManager(),
+        current_album_getter=lambda: None,
+        library_manager_getter=lambda: DummyLibrary(
+            lib_root,
+            scan_service=scan_service,
+        ),
+    )
+
+    routing = service.prepare_album_open(
+        album_root,
+        autoscan=False,
+        hydrate_index=False,
+        sync_manifest_favorites=False,
+    )
+
+    assert routing.asset_count == 3
+    assert routing.should_rescan_async is True
 
 
 def test_rescan_album_async_routes_bound_library_scans_via_library_manager(
@@ -464,7 +505,14 @@ def test_scan_completion_uses_runtime_finalize_hook(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.completed: list[tuple[Path, list[dict], bool]] = []
 
-        def finalize_scan_result(self, root: Path, rows: list[dict], *, pair_live: bool):
+        def finalize_scan_result(
+            self,
+            root: Path,
+            rows: list[dict],
+            *,
+            pair_live: bool,
+            **_kwargs: object,
+        ):
             self.completed.append((Path(root), list(rows), pair_live))
             return list(rows)
 

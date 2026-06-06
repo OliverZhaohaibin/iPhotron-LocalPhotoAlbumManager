@@ -36,9 +36,10 @@ class AppFacade(QObject):
     linksUpdated = Signal(Path)
     errorRaised = Signal(str)
     scanProgress = Signal(Path, int, int)
-    scanChunkReady = Signal(Path, list)
+    scanBatchCommitted = Signal(object)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
+    assetReloadRequested = Signal(Path, bool, bool)
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
@@ -89,7 +90,7 @@ class AppFacade(QObject):
         )
 
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
-        self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
+        self._library_update_service.scanBatchCommitted.connect(self._relay_scan_batch_committed)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
         self._library_update_service.scanBatchFailed.connect(
             self._relay_scan_batch_failed
@@ -306,7 +307,7 @@ class AppFacade(QObject):
             try:
                 self._library_manager.treeUpdated.disconnect(self._on_library_tree_updated)
                 self._library_manager.scanProgress.disconnect(self._relay_scan_progress)
-                self._library_manager.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
+                self._library_manager.scanBatchCommitted.disconnect(self._relay_scan_batch_committed)
                 self._library_manager.scanFinished.disconnect(self._relay_scan_finished)
             except (RuntimeError, TypeError):
                 pass
@@ -317,13 +318,13 @@ class AppFacade(QObject):
 
         try:
             self._library_update_service.scanProgress.disconnect(self._relay_scan_progress)
-            self._library_update_service.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
+            self._library_update_service.scanBatchCommitted.disconnect(self._relay_scan_batch_committed)
             self._library_update_service.scanFinished.disconnect(self._relay_scan_finished)
         except (RuntimeError, TypeError):
             pass
 
         self._library_manager.scanProgress.connect(self._relay_scan_progress)
-        self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
+        self._library_manager.scanBatchCommitted.connect(self._relay_scan_batch_committed)
         self._library_manager.scanFinished.connect(self._relay_scan_finished)
         self._library_manager.scanBatchFailed.connect(self._relay_scan_batch_failed)
 
@@ -369,6 +370,11 @@ class AppFacade(QObject):
         """Return ``True`` when at least one trashed asset restore is scheduled."""
 
         return self._restoration_service.restore_assets(sources)
+
+    def restore_assets_with_plan(self, sources: Iterable[Path]):
+        """Schedule restores and return accepted source/destination batches."""
+
+        return self._restoration_service.restore_assets_with_plan(sources)
 
     def toggle_featured(self, ref: str) -> bool:
         """Toggle *ref* in the active album and mirror the change in the library."""
@@ -450,9 +456,9 @@ class AppFacade(QObject):
     def _relay_scan_progress(self, root: Path, current: int, total: int) -> None:
         self.scanProgress.emit(root, current, total)
 
-    @Slot(Path, list)
-    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
-        self.scanChunkReady.emit(root, chunk)
+    @Slot(object)
+    def _relay_scan_batch_committed(self, batch: object) -> None:
+        self.scanBatchCommitted.emit(batch)
 
     @Slot(Path, bool)
     def _relay_scan_finished(self, root: Path, success: bool) -> None:
@@ -477,6 +483,7 @@ class AppFacade(QObject):
         announce_index: bool,
         force_reload: bool,
     ) -> None:
+        self.assetReloadRequested.emit(root, announce_index, force_reload)
         # Legacy reload hook
         self.loadStarted.emit(root)
         self.loadFinished.emit(root, True)

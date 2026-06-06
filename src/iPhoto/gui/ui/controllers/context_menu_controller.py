@@ -26,6 +26,7 @@ from iPhoto.gui.ui.menus.style import apply_menu_style
 from ...services.people_service_resolver import resolve_people_service
 
 from ...facade import AppFacade
+from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.notification_toast import NotificationToast
 from .selection_controller import SelectionController
@@ -165,7 +166,8 @@ class ContextMenuController(QObject):
 
         try:
             self._prepare_file_mutation(paths)
-            queued_restore = self._facade.restore_assets(paths)
+            restore_result = self._facade.restore_assets_with_plan(paths)
+            queued_restore = bool(getattr(restore_result, "scheduled", False))
         except Exception:
             self._facade.rescan_current()
             raise
@@ -178,7 +180,21 @@ class ContextMenuController(QObject):
                 # Removing the rows only after the restore task has been accepted
                 # avoids hiding assets when the backend declined to queue any
                 # work (for example because the user rejected every fallback).
-                if not self._apply_optimistic_move(paths, is_delete=False):
+                optimistic_applied = False
+                for batch in getattr(restore_result, "batches", ()):
+                    destination_root = getattr(batch, "destination_root", None)
+                    batch_sources = list(getattr(batch, "sources", ()) or ())
+                    if destination_root is None or not batch_sources:
+                        continue
+                    optimistic_applied = (
+                        self._apply_optimistic_move(
+                            batch_sources,
+                            destination_root=Path(destination_root),
+                            is_delete=False,
+                        )
+                        or optimistic_applied
+                    )
+                if not optimistic_applied:
                     self._remove_selection_rows(selected_indexes)
             self._toast.show_toast("Restoring ...")
 
@@ -294,7 +310,11 @@ class ContextMenuController(QObject):
             ):
                 self._remove_selection_rows(selected_indexes)
         except Exception:
-            rollback = getattr(self._asset_model, "rollback_pending_moves", None)
+            rollback = getattr(
+                self._current_asset_model(),
+                "rollback_pending_moves",
+                None,
+            )
             if callable(rollback):
                 rollback()
             raise
@@ -307,6 +327,24 @@ class ContextMenuController(QObject):
     # ------------------------------------------------------------------
     def _selected_asset_paths(self) -> list[Path]:
         """Return absolute paths for all selected assets without duplicates."""
+
+        selection_model = self._grid_view.selectionModel()
+        if selection_model is not None:
+            paths: list[Path] = []
+            seen: set[Path] = set()
+            for index in selection_model.selectedIndexes():
+                if not index.isValid():
+                    continue
+                raw_path = index.data(Roles.ABS)
+                if not isinstance(raw_path, (str, Path)) or not raw_path:
+                    continue
+                path = Path(str(raw_path))
+                if path in seen:
+                    continue
+                seen.add(path)
+                paths.append(path)
+            if paths:
+                return paths
 
         return self._selected_paths_provider(self._selected_rows())
 
@@ -479,7 +517,8 @@ class ContextMenuController(QObject):
     def _remove_selection_rows(self, selected_indexes: list) -> None:
         if not selected_indexes:
             return
-        source_model = getattr(self._asset_model, "source_model", None)
+        model = self._current_asset_model()
+        source_model = getattr(model, "source_model", None)
         if callable(source_model):
             resolved_model = source_model()
         else:
@@ -487,11 +526,11 @@ class ContextMenuController(QObject):
         if resolved_model is not None and hasattr(resolved_model, "remove_rows"):
             resolved_model.remove_rows(selected_indexes)
             return
-        remove_rows = getattr(self._asset_model, "remove_rows", None)
+        remove_rows = getattr(model, "remove_rows", None)
         if callable(remove_rows):
             remove_rows(selected_indexes)
             return
-        remove_rows = getattr(self._asset_model, "removeRows", None)
+        remove_rows = getattr(model, "removeRows", None)
         if callable(remove_rows):
             rows = sorted({index.row() for index in selected_indexes}, reverse=True)
             for row in rows:
@@ -504,7 +543,7 @@ class ContextMenuController(QObject):
         destination_root: Path | None = None,
         is_delete: bool = False,
     ) -> bool:
-        handler = getattr(self._asset_model, "optimistic_move_paths", None)
+        handler = getattr(self._current_asset_model(), "optimistic_move_paths", None)
         if not callable(handler):
             return False
         if destination_root is None and is_delete:
@@ -515,6 +554,9 @@ class ContextMenuController(QObject):
         if destination_root is None:
             return False
         return bool(handler(paths, destination_root, is_delete=is_delete))
+
+    def _current_asset_model(self):
+        return self._grid_view.model() or self._asset_model
 
     def _prepare_file_mutation(self, paths: list[Path]) -> None:
         if self._prepare_paths_for_mutation is None or not paths:

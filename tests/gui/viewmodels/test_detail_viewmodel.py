@@ -5,8 +5,10 @@ from unittest.mock import Mock
 
 from iPhoto.application.ports import EditRenderingState
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
+from iPhoto.gui.viewmodels.signal import Signal
 
 _UNSET = object()
 
@@ -77,6 +79,61 @@ def test_next_and_previous_delegate_to_session():
     session.set_current_row.reset_mock()
     vm.previous()
     session.set_current_row.assert_called_with(1)
+
+
+class _LazyCollection:
+    def __init__(self) -> None:
+        self.data_changed = Signal()
+        self.row_changed = Signal()
+        self._dtos = [
+            _make_dto("/tmp/visible.jpg"),
+            _make_dto("/tmp/deep.jpg"),
+        ]
+        self._loaded_rows = {0}
+
+    def count(self) -> int:
+        return len(self._dtos)
+
+    def asset_at(self, row: int):
+        if row not in self._loaded_rows:
+            return None
+        return self._dtos[row]
+
+    def ensure_row_loaded(self, row: int, *, emit_signals: bool = True) -> bool:
+        del emit_signals
+        if 0 <= row < len(self._dtos):
+            self._loaded_rows.add(row)
+            return True
+        return False
+
+    def pin_row(self, row: int) -> None:
+        self.ensure_row_loaded(row)
+
+    def row_for_path(self, path: Path) -> int | None:
+        for row, dto in enumerate(self._dtos):
+            if dto.abs_path == path:
+                return row
+        return None
+
+
+def test_next_can_open_row_outside_current_store_window() -> None:
+    store = _LazyCollection()
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    vm = DetailViewModel(
+        collection_store=store,
+        media_session=session,
+        asset_state_service=Mock(),
+        adjustment_commit_port=None,
+        edit_service_getter=None,
+    )
+
+    vm.show_row(0)
+    vm.next()
+
+    assert vm.current_row.value == 1
+    assert vm.current_path.value == Path("/tmp/deep.jpg")
+    assert vm.presentation.value.path == Path("/tmp/deep.jpg")
 
 
 def test_toggle_favorite_updates_store_and_presentation():

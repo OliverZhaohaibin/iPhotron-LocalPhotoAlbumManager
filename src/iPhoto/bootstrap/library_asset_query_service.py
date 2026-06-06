@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import threading
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
@@ -13,8 +15,44 @@ from ..application.ports import AssetRepositoryPort
 from ..cache.index_store import get_global_repository
 from ..config import RECENTLY_DELETED_DIR_NAME
 from ..domain.models.core import MediaType
-from ..domain.models.query import AssetQuery, SortOrder
+from ..domain.models.query import (
+    AssetQuery,
+    CollectionQuery,
+    CollectionType,
+    PageCursor,
+    PageResult,
+    SortDirection,
+    SortOrder,
+    WindowResult,
+)
+from ..domain.models.scan import ScanBatchCommitted
+from ..io.scanner_adapter import ensure_scan_thumbnail
 from ..path_normalizer import compute_album_path
+from ..utils.pathutils import ensure_work_dir
+
+
+class _CallbackSignal:
+    """Small thread-safe callback signal for non-Qt application services."""
+
+    def __init__(self) -> None:
+        self._handlers: list[Callable[..., None]] = []
+        self._lock = threading.Lock()
+
+    def connect(self, handler: Callable[..., None]) -> None:
+        with self._lock:
+            if handler not in self._handlers:
+                self._handlers.append(handler)
+
+    def disconnect(self, handler: Callable[..., None]) -> None:
+        with self._lock:
+            if handler in self._handlers:
+                self._handlers.remove(handler)
+
+    def emit(self, *args: Any, **kwargs: Any) -> None:
+        with self._lock:
+            handlers = list(self._handlers)
+        for handler in handlers:
+            handler(*args, **kwargs)
 
 
 class _ScopedLocationCacheWriter:
@@ -44,6 +82,15 @@ class LibraryAssetQueryService:
     ) -> None:
         self.library_root = Path(library_root)
         self._repository_factory = repository_factory or get_global_repository
+        self._thumbnail_backfill_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="iPhotoThumbBackfill",
+        )
+        self._thumbnail_backfill_lock = threading.Lock()
+        self._thumbnail_backfill_pending: set[tuple[str, int, int, str]] = set()
+        self._thumbnail_backfill_shutdown = False
+        self.thumbnail_backfill_completed = _CallbackSignal()
+        self.thumbnail_backfill_progress = _CallbackSignal()
 
     def count_assets(
         self,
@@ -147,6 +194,11 @@ class LibraryAssetQueryService:
         """Return the number of indexed assets matching an application query."""
 
         count_query = self._count_query(query)
+        if self._can_use_collection_api(count_query):
+            count_collection = getattr(self._repository(), "count_collection", None)
+            if callable(count_collection):
+                return count_collection(self._collection_query_for_asset_query(count_query))
+
         if self._requires_in_memory_query(count_query):
             return sum(1 for _row in self._filtered_query_rows(count_query))
 
@@ -167,13 +219,255 @@ class LibraryAssetQueryService:
 
         read_query = copy.deepcopy(query)
         album_path = self.album_path_for(root)
-        if self._requires_in_memory_query(read_query):
+        if self._can_use_collection_api(read_query):
+            read_collection_window = getattr(self._repository(), "read_collection_window", None)
+            if callable(read_collection_window):
+                page_offset = max(0, int(read_query.offset or 0))
+                page_limit = read_query.limit
+                if page_limit is None:
+                    page_limit = self.count_query_assets(self._count_query(read_query))
+                window = read_collection_window(
+                    self._collection_query_for_asset_query(read_query),
+                    page_offset,
+                    max(0, int(page_limit)),
+                )
+                rows = window.rows
+            else:
+                rows = None
+        else:
+            rows = None
+
+        if rows is not None:
+            pass
+        elif self._requires_in_memory_query(read_query):
             rows = self._filtered_query_rows(read_query)
         else:
             filter_params = self._filter_params_for_query(read_query)
             rows = self._read_simple_query_rows(read_query, filter_params)
 
         yield from self._scoped_rows(rows, album_path)
+
+    def read_query_asset_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return one scoped gallery window with total count and revision."""
+
+        read_query = copy.deepcopy(query)
+        read_query.offset = max(0, int(first))
+        read_query.limit = max(0, int(limit))
+        album_path = self.album_path_for(root)
+        if self._can_use_collection_api(read_query):
+            read_collection_window = getattr(self._repository(), "read_collection_window", None)
+            if callable(read_collection_window):
+                window = read_collection_window(
+                    self._collection_query_for_asset_query(read_query),
+                    read_query.offset,
+                    read_query.limit or 0,
+                )
+                return WindowResult(
+                    first=window.first,
+                    rows=list(self._scoped_rows(window.rows, album_path)),
+                    total_count=window.total_count,
+                    collection_revision=window.collection_revision,
+                )
+
+        rows = list(self.read_query_asset_rows(root, read_query))
+        return WindowResult(
+            first=read_query.offset,
+            rows=rows,
+            total_count=self.count_query_assets(self._count_query(read_query)),
+            collection_revision=0,
+        )
+
+    def count_collection(self, query: CollectionQuery) -> int:
+        """Return the number of assets matching a SQL-first collection query."""
+
+        return self._repository().count_collection(query)
+
+    def read_collection_page(
+        self,
+        query: CollectionQuery,
+        cursor: PageCursor | None = None,
+        limit: int = 100,
+    ) -> PageResult:
+        """Return one SQL-first keyset page for *query*."""
+
+        return self._repository().read_collection_page(query, cursor=cursor, limit=limit)
+
+    def read_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a bounded SQL-first window for *query*."""
+
+        return self._repository().read_collection_window(query, first, limit)
+
+    def read_thumbnail_backfill_candidates(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return stale rows near a gallery window for thumbnail backfill."""
+
+        read_candidates = getattr(self._repository(), "read_thumbnail_backfill_candidates", None)
+        if not callable(read_candidates):
+            return []
+        if not self._can_use_collection_api(query):
+            return []
+        album_path = self.album_path_for(root)
+        return list(
+            self._scoped_rows(
+                read_candidates(
+                    self._collection_query_for_asset_query(query),
+                    first,
+                    limit,
+                ),
+                album_path,
+            )
+        )
+
+    def request_thumbnail_backfill(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> int:
+        """Queue low-priority stale thumbnail backfill near the visible window."""
+
+        repository = self._repository()
+        update_thumbnail_ready = getattr(repository, "update_thumbnail_ready", None)
+        if not callable(update_thumbnail_ready):
+            return 0
+        if self._thumbnail_backfill_shutdown:
+            return 0
+
+        album_path = self.album_path_for(root)
+        candidates = self.read_thumbnail_backfill_candidates(root, query, first, limit)
+        if not candidates:
+            return 0
+
+        request_key = (root.as_posix(), max(0, int(first)), max(0, int(limit)), repr(query))
+        with self._thumbnail_backfill_lock:
+            if request_key in self._thumbnail_backfill_pending:
+                return 0
+            self._thumbnail_backfill_pending.add(request_key)
+
+        self.thumbnail_backfill_progress.emit(Path(root), 0, len(candidates))
+        self._thumbnail_backfill_executor.submit(
+            self._run_thumbnail_backfill,
+            request_key,
+            Path(root),
+            album_path,
+            candidates,
+        )
+        return len(candidates)
+
+    def thumbnail_backfill_pending(self) -> bool:
+        """Return whether any queued stale thumbnail backfill is still active."""
+
+        with self._thumbnail_backfill_lock:
+            return bool(self._thumbnail_backfill_pending)
+
+    def shutdown(self) -> None:
+        """Stop background thumbnail backfill work during session teardown."""
+
+        self._thumbnail_backfill_shutdown = True
+        self._thumbnail_backfill_executor.shutdown(wait=False, cancel_futures=True)
+        with self._thumbnail_backfill_lock:
+            self._thumbnail_backfill_pending.clear()
+
+    def _run_thumbnail_backfill(
+        self,
+        request_key: tuple[str, int, int, str],
+        root: Path,
+        album_path: str | None,
+        candidates: list[dict[str, Any]],
+    ) -> None:
+        repository = self._repository()
+        update_thumbnail_ready = getattr(repository, "update_thumbnail_ready", None)
+        if not callable(update_thumbnail_ready):
+            with self._thumbnail_backfill_lock:
+                self._thumbnail_backfill_pending.discard(request_key)
+            return
+        try:
+            ready_rows: list[dict[str, Any]] = []
+            total = len(candidates)
+            for index, row in enumerate(candidates, start=1):
+                view_rel = row.get("rel")
+                if not isinstance(view_rel, str) or not view_rel:
+                    self.thumbnail_backfill_progress.emit(root, index, total)
+                    continue
+                library_rel = f"{album_path}/{view_rel}" if album_path else view_rel
+                abs_path = root / view_rel
+                thumbnail = ensure_scan_thumbnail(
+                    abs_path,
+                    str(row.get("id") or library_rel),
+                    thumbnail_cache_dir=self._thumbnail_cache_dir(),
+                )
+                if thumbnail.thumb_error:
+                    update_thumbnail_ready(library_rel, error=thumbnail.thumb_error)
+                    self.thumbnail_backfill_progress.emit(root, index, total)
+                    continue
+                update_thumbnail_ready(
+                    library_rel,
+                    micro_thumbnail=thumbnail.micro_thumbnail,
+                    thumb_cache_key=thumbnail.thumb_cache_key,
+                )
+                ready_row = dict(row)
+                ready_row["thumbnail_state"] = "ready"
+                ready_row["micro_thumbnail"] = thumbnail.micro_thumbnail
+                ready_row["thumb_cache_key"] = thumbnail.thumb_cache_key
+                ready_row["thumb_error"] = None
+                ready_rows.append(ready_row)
+                self.thumbnail_backfill_progress.emit(root, index, total)
+            batch = ScanBatchCommitted(
+                job_id=(
+                    "thumbnail-backfill:"
+                    f"{request_key[0]}:{request_key[1]}:{request_key[2]}"
+                ),
+                root=root,
+                collection_revision=0,
+                ready_count=len(ready_rows),
+                rows=ready_rows,
+                stage_elapsed_ms={},
+            )
+            with self._thumbnail_backfill_lock:
+                should_emit = not self._thumbnail_backfill_shutdown
+            if should_emit:
+                self.thumbnail_backfill_completed.emit(batch)
+        finally:
+            with self._thumbnail_backfill_lock:
+                self._thumbnail_backfill_pending.discard(request_key)
+
+    def find_row_by_path(self, query: CollectionQuery | AssetQuery, path: Path) -> int | None:
+        """Locate *path* in a collection without materialising every row."""
+
+        collection_query = (
+            self._collection_query_for_asset_query(query)
+            if isinstance(query, AssetQuery)
+            else query
+        )
+        find_row_by_path = getattr(self._repository(), "find_row_by_path", None)
+        if not callable(find_row_by_path):
+            return None
+        return find_row_by_path(collection_query, path)
+
+    def find_live_partner(self, asset_id: str) -> dict[str, Any] | None:
+        """Return an asset's Live Photo partner row."""
+
+        find_live_partner = getattr(self._repository(), "find_live_partner", None)
+        if not callable(find_live_partner):
+            return None
+        return find_live_partner(asset_id)
 
     def read_geotagged_rows(self) -> Iterator[dict[str, Any]]:
         """Yield library-relative rows that contain GPS metadata."""
@@ -226,6 +520,9 @@ class LibraryAssetQueryService:
 
     def _repository(self) -> AssetRepositoryPort:
         return self._repository_factory(self.library_root)
+
+    def _thumbnail_cache_dir(self) -> Path:
+        return ensure_work_dir(self.library_root) / "cache" / "thumbs"
 
     def _filtered_query_rows(self, query: AssetQuery) -> Iterator[dict[str, Any]]:
         repository = self._repository()
@@ -374,7 +671,9 @@ class LibraryAssetQueryService:
         return params or None
 
     def _requires_in_memory_query(self, query: AssetQuery) -> bool:
-        if query.asset_ids or query.album_id or query.has_gps is not None:
+        if query.asset_ids or query.album_id:
+            return True
+        if query.has_gps is not None:
             return True
         if query.date_from is not None or query.date_to is not None:
             return True
@@ -395,6 +694,56 @@ class LibraryAssetQueryService:
         if media_values not in simple_sets:
             return True
         return query.is_favorite is True and media_values == {MediaType.LIVE_PHOTO.value}
+
+    def _can_use_collection_api(self, query: AssetQuery) -> bool:
+        if query.asset_ids or query.album_id:
+            return False
+        if query.order != SortOrder.DESC or not self._sort_by_date(query):
+            return False
+        media_values = {media_type.value for media_type in query.media_types}
+        if MediaType.LIVE_PHOTO.value in media_values:
+            return False
+        return media_values <= {MediaType.IMAGE.value, MediaType.PHOTO.value, MediaType.VIDEO.value}
+
+    def _collection_query_for_asset_query(self, query: AssetQuery) -> CollectionQuery:
+        media_values = {media_type.value for media_type in query.media_types}
+        media_types: tuple[int, ...] = ()
+        if media_values == {MediaType.VIDEO.value}:
+            media_types = (1,)
+        elif media_values and media_values <= {MediaType.IMAGE.value, MediaType.PHOTO.value}:
+            media_types = (0,)
+        elif media_values == {MediaType.IMAGE.value, MediaType.PHOTO.value, MediaType.VIDEO.value}:
+            media_types = (0, 1)
+
+        collection_type = CollectionType.ALL_PHOTOS
+        if query.album_path:
+            collection_type = CollectionType.ALBUM
+        elif query.is_favorite is True:
+            collection_type = CollectionType.FAVORITES
+        elif media_types == (1,):
+            collection_type = CollectionType.VIDEOS
+        elif query.has_gps is True:
+            collection_type = CollectionType.MAP
+
+        min_thumbnail_state = (
+            None
+            if query.album_path == RECENTLY_DELETED_DIR_NAME
+            else "ready"
+        )
+
+        return CollectionQuery(
+            collection_type=collection_type,
+            album_path=query.album_path,
+            include_subalbums=query.include_subalbums,
+            media_types=media_types,
+            is_favorite=query.is_favorite,
+            has_gps=query.has_gps,
+            date_from=query.date_from,
+            date_to=query.date_to,
+            sort_key="sort_ts",
+            sort_direction=SortDirection.DESC,
+            min_thumbnail_state=min_thumbnail_state,
+        )
 
     @staticmethod
     def _slice_rows(

@@ -1525,20 +1525,21 @@ def test_face_scan_worker_reports_unexpected_batch_error_reason(
     assert messages == ["Face scanning paused: compiled dependency missing"]
 
 
-def test_scanner_worker_does_not_emit_chunk_ready_for_failed_persist(tmp_path: Path) -> None:
-    class FailingStore:
-        def merge_scan_rows(self, chunk: list[dict]) -> list[dict]:
-            raise RuntimeError("db write failed")
+def test_scanner_worker_does_not_emit_batch_for_failed_persist(tmp_path: Path) -> None:
+    class FailingScanService:
+        def scan_album(self, root: Path, **kwargs):
+            kwargs["batch_failed_callback"](1)
+            return SimpleNamespace(rows=[], failed_count=1)
 
     signals = ScannerSignals()
-    emitted_chunks: list[tuple[Path, list[dict]]] = []
+    emitted_batches: list[object] = []
     failed_batches: list[tuple[Path, int]] = []
-    signals.chunkReady.connect(lambda root, chunk: emitted_chunks.append((root, chunk)))
+    signals.batchCommitted.connect(emitted_batches.append)
     signals.batchFailed.connect(lambda root, count: failed_batches.append((root, count)))
 
-    worker = ScannerWorker(tmp_path, [], [], signals)
-    worker._process_chunk(FailingStore(), [{"id": "asset-1", "rel": "album/a.jpg"}])
+    worker = ScannerWorker(tmp_path, [], [], signals, scan_service=FailingScanService())
+    worker.run()
 
-    assert emitted_chunks == []
+    assert emitted_batches == []
     assert failed_batches == [(tmp_path, 1)]
     assert worker.failed_count == 1

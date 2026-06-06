@@ -442,15 +442,16 @@ class MainCoordinator(QObject):
         self._context.library.albumRenamed.connect(self._on_album_renamed)
         # Library watcher rescans still emit through the bound LibraryRuntimeController,
         # while facade-initiated rescans emit through LibraryUpdateService.
-        self._context.library.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
+        self._context.library.scanBatchCommitted.connect(self._asset_list_vm.handle_scan_batch)
+        self._context.library.scanBatchCommitted.connect(self._gallery_vm.handle_location_scan_batch)
         self._context.library.scanFinished.connect(self._gallery_store.handle_scan_finished)
-        self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
         self._context.library.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
-        updates.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
+        updates.scanBatchCommitted.connect(self._asset_list_vm.handle_scan_batch)
+        updates.scanBatchCommitted.connect(self._gallery_vm.handle_location_scan_batch)
         updates.scanFinished.connect(self._gallery_store.handle_scan_finished)
-        updates.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
         updates.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
         self._gallery_vm.message_requested.connect(self._status_bar.show_message)
+        self._facade.assetReloadRequested.connect(self._handle_asset_reload_requested)
 
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
@@ -536,6 +537,9 @@ class MainCoordinator(QObject):
         self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)
         self._facade.scanProgress.connect(self._status_bar.handle_scan_progress)
         self._facade.scanFinished.connect(self._status_bar.handle_scan_finished)
+        self._asset_list_vm.thumbnailBackfillProgress.connect(
+            self._status_bar.handle_thumbnail_backfill_progress
+        )
 
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)
@@ -551,6 +555,10 @@ class MainCoordinator(QObject):
         move_service.moveProgress.connect(self._status_bar.handle_move_progress)
         move_service.moveFinished.connect(self._status_bar.handle_move_finished)
         move_service.moveFinished.connect(self._handle_move_finished_toast)
+        move_service.moveFinished.connect(self._handle_move_finished_pending_cleanup)
+        move_service.moveCompletedDetailed.connect(
+            self._handle_move_completed_pending_cleanup
+        )
 
         # Error Reporting
         self._facade.errorRaised.connect(self._dialog.show_error)
@@ -719,6 +727,72 @@ class MainCoordinator(QObject):
             return
 
         self._window.ui.notification_toast.show_toast("Moved")
+
+    def _handle_move_finished_pending_cleanup(
+        self,
+        _source: Path,
+        _destination: Path,
+        success: bool,
+        _message: str,
+    ) -> None:
+        if success:
+            return
+        rollback = getattr(self._asset_list_vm, "rollback_pending_moves", None)
+        if callable(rollback):
+            rollback()
+
+    def _handle_move_completed_pending_cleanup(
+        self,
+        _source_root: Path,
+        _destination_root: Path,
+        moved_pairs_raw: list,
+        source_ok: bool,
+        destination_ok: bool,
+        _is_trash_destination: bool,
+        _is_restore_operation: bool,
+    ) -> None:
+        if not moved_pairs_raw:
+            return
+        if not (source_ok and destination_ok):
+            rollback = getattr(self._asset_list_vm, "rollback_pending_moves", None)
+            if callable(rollback):
+                rollback()
+            return
+        paths: list[Path] = []
+        for entry in moved_pairs_raw:
+            if isinstance(entry, (tuple, list)) and len(entry) == 2:
+                paths.extend([Path(entry[0]), Path(entry[1])])
+        clear_pending = getattr(self._asset_list_vm, "clear_pending_moves_for_paths", None)
+        if callable(clear_pending):
+            clear_pending(paths)
+
+    def _handle_asset_reload_requested(
+        self,
+        root: Path,
+        _announce_index: bool,
+        _force_reload: bool,
+    ) -> None:
+        if not self._current_gallery_selection_contains_root(root):
+            return
+        self._gallery_store.reload_current_selection()
+
+    def _current_gallery_selection_contains_root(self, root: Path) -> bool:
+        active_root = self._gallery_store.active_root()
+        if active_root is None:
+            return False
+        if self._paths_equal(active_root, root):
+            return True
+        library_root = self._gallery_store.library_root()
+        query = self._gallery_store.current_query()
+        if (
+            library_root is not None
+            and query is not None
+            and query.album_path is None
+            and self._paths_equal(active_root, library_root)
+            and self._path_is_descendant(root, library_root)
+        ):
+            return True
+        return False
 
     def _is_recently_deleted_move(self, source: Path, destination: Path) -> bool:
         """Return whether a move completion belongs to delete or restore flows."""

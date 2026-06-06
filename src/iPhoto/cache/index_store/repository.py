@@ -18,10 +18,18 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
+from ...infrastructure.services.performance_events import (
+    audit_full_scan_query,
+    emit_perf_event,
+    explain_enabled,
+    monotonic_ms,
+)
 from ...people.status import normalize_face_status
 from ...utils.logging import get_logger
 from ...utils.pathutils import ensure_work_dir
@@ -42,6 +50,9 @@ GLOBAL_INDEX_DB_NAME = "global_index.db"
 # conservative chunk size so large scans never hit the limit regardless of
 # the SQLite version in use.
 _SQLITE_PARAM_CHUNK_SIZE = 900
+_DEEP_OFFSET_LIMIT = 5_000
+_DEEP_SEEK_CHUNK_SIZE = 1_024
+_MAX_COLLECTION_ANCHORS_PER_QUERY = 64
 _OMIT_METADATA_VALUE = object()
 
 # Global singleton instance and lock for thread-safe access
@@ -83,6 +94,10 @@ def _sanitize_metadata_for_json(metadata: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(sanitized, dict):
         return sanitized
     return {}
+
+
+def _utc_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def get_global_repository(library_root: Path) -> "AssetRepository":
@@ -158,6 +173,11 @@ class AssetRepository:
         
         self._db_manager = DatabaseManager(self.path)
         self._conn: Optional[sqlite3.Connection] = None
+        self._collection_anchor_cache: dict[
+            CollectionQuery,
+            dict[int, PageCursor | None],
+        ] = {}
+        self._collection_meta_cache: dict[CollectionQuery, tuple[int, int]] = {}
         self._init_db()
 
     def _init_db(self) -> None:
@@ -204,14 +224,18 @@ class AssetRepository:
 
     def write_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Rewrite the entire index with *rows*."""
+        stamped_rows = self._stamp_rows(rows)
         with self.transaction() as conn:
             conn.execute("DELETE FROM assets")
-            self._insert_rows(conn, rows)
+            self._insert_rows(conn, stamped_rows)
+        self._clear_collection_anchor_cache()
 
     def append_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
+        stamped_rows = self._stamp_rows(rows)
         with self.transaction() as conn:
-            self._insert_rows(conn, rows)
+            self._insert_rows(conn, stamped_rows)
+        self._clear_collection_anchor_cache()
 
     def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Merge scanned rows while preserving persisted library-managed state.
@@ -227,7 +251,7 @@ class AssetRepository:
         ``index_sync_service.update_index_snapshot``).
         """
 
-        materialized_rows = [dict(row) for row in rows]
+        materialized_rows = self._stamp_rows(rows)
         if not materialized_rows:
             return []
 
@@ -258,14 +282,26 @@ class AssetRepository:
             merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)
             self._insert_rows(conn, merged_rows)
 
+        self._clear_collection_anchor_cache()
         return merged_rows
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""
         row_data = row.copy()
         row_data["rel"] = rel
+        row_data["index_updated_at_ms"] = _utc_ms()
         with self.transaction() as conn:
             self._insert_rows(conn, [row_data])
+        self._clear_collection_anchor_cache()
+
+    def _stamp_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        now = _utc_ms()
+        stamped: List[Dict[str, Any]] = []
+        for row in rows:
+            row_data = dict(row)
+            row_data["index_updated_at_ms"] = now
+            stamped.append(row_data)
+        return stamped
 
     def remove_rows(self, rels: Iterable[str]) -> None:
         """Drop any index rows whose ``rel`` key matches *rels*."""
@@ -276,6 +312,7 @@ class AssetRepository:
         placeholders = ", ".join(["?"] * len(removable))
         query = f"DELETE FROM assets WHERE rel IN ({placeholders})"
         self._db_manager.execute_in_transaction(query, removable)
+        self._clear_collection_anchor_cache()
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:
         """Return a mapping of ``rel`` → row dict for the given *rels*.
@@ -425,8 +462,15 @@ class AssetRepository:
             sort_by_date: If True, order results by 'dt' descending (newest first).
             filter_hidden: If True, exclude hidden assets (e.g. motion components).
         """
+        audit_full_scan_query(
+            "read_all_full_scan",
+            sort_by_date=sort_by_date,
+            filter_hidden=filter_hidden,
+        )
+        started = monotonic_ms()
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
+        yielded = 0
 
         try:
             query = "SELECT * FROM assets"
@@ -445,8 +489,16 @@ class AssetRepository:
             cursor = conn.cursor()
             cursor.execute(query)
             for row in cursor:
+                yielded += 1
                 yield self._db_row_to_dict(row)
         finally:
+            emit_perf_event(
+                "repository_read_all",
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                rows=yielded,
+                sort_by_date=sort_by_date,
+                filter_hidden=filter_hidden,
+            )
             if should_close:
                 conn.close()
 
@@ -508,6 +560,7 @@ class AssetRepository:
 
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
+        started = monotonic_ms()
 
         try:
             conn.row_factory = sqlite3.Row
@@ -517,6 +570,14 @@ class AssetRepository:
             results = []
             for row in cursor:
                 results.append(self._db_row_to_dict(row))
+            emit_perf_event(
+                "asset_page_query",
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                rows=len(results),
+                limit=limit,
+                offset=offset,
+                album_path=album_path,
+            )
             return results
         finally:
             if should_close:
@@ -543,11 +604,11 @@ class AssetRepository:
         # Columns needed for the lightweight "viewport-first" loading strategy
         columns = [
             "id", "rel", "aspect_ratio", "media_type", "live_partner_rel",
-            "dur", "year", "month", "dt", "ts", "content_id", "bytes",
+            "dur", "year", "month", "dt", "ts", "sort_ts", "content_id", "bytes",
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
-            "face_status",
-            "micro_thumbnail"
+            "face_status", "thumbnail_state", "thumb_cache_key",
+            "index_revision", "micro_thumbnail"
         ]
 
         logger.debug(
@@ -570,12 +631,15 @@ class AssetRepository:
 
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
+        started = monotonic_ms()
+        yielded = 0
 
         try:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(query, params)
             for row in cursor:
+                yielded += 1
                 d = dict(row)
                 # Parse GPS if present (stored as JSON string)
                 if d.get("gps"):
@@ -585,6 +649,12 @@ class AssetRepository:
                         d["gps"] = None
                 yield d
         finally:
+            emit_perf_event(
+                "read_geometry_only",
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                rows=yielded,
+                album_path=album_path,
+            )
             if should_close:
                 conn.close()
 
@@ -618,6 +688,8 @@ class AssetRepository:
 
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
+        started = monotonic_ms()
+        yielded = 0
 
         try:
             conn.row_factory = sqlite3.Row
@@ -625,8 +697,16 @@ class AssetRepository:
             cursor.execute(query, params)
 
             for row in cursor:
+                yielded += 1
                 yield self._db_row_to_dict(row)
         finally:
+            emit_perf_event(
+                "read_album_assets",
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                rows=yielded,
+                album_path=album_path,
+                include_subalbums=include_subalbums,
+            )
             if should_close:
                 conn.close()
 
@@ -659,11 +739,663 @@ class AssetRepository:
 
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
+        started = monotonic_ms()
 
         try:
             cursor = conn.execute(query, params)
             result = cursor.fetchone()
-            return result[0] if result else 0
+            count = result[0] if result else 0
+            emit_perf_event(
+                "repository_count",
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                rows=count,
+                album_path=album_path,
+                include_subalbums=include_subalbums,
+                filter_hidden=filter_hidden,
+            )
+            return count
+        finally:
+            if should_close:
+                conn.close()
+
+    def count_collection(self, query: CollectionQuery) -> int:
+        """Return the number of visible rows matching a collection query."""
+
+        sql, params = QueryBuilder.build_collection_query(
+            query,
+            select_clause="SELECT COUNT(*)",
+            include_order=False,
+        )
+        started = monotonic_ms()
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            result = conn.execute(sql, params).fetchone()
+            count = int(result[0] if result else 0)
+            emit_perf_event(
+                "collection_count_query",
+                collection=query.collection_type.value,
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                rows=count,
+                query_plan=self._explain_query_plan(conn, sql, params),
+            )
+            return count
+        finally:
+            if should_close:
+                conn.close()
+
+    def create_scan_job(
+        self,
+        *,
+        job_id: str,
+        root: str,
+        scope: str,
+        status: str = "running",
+        stage: str = "discover",
+    ) -> None:
+        """Create or replace scan job bookkeeping for an active scan."""
+
+        now = _utc_ms()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scan_jobs (
+                    job_id, root, scope, status, stage, found_count,
+                    processed_count, visible_count, failed_count,
+                    started_at, updated_at, finished_at
+                )
+                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, NULL)
+                """,
+                [job_id, root, scope, status, stage, now, now],
+            )
+
+    def update_scan_job_stage(
+        self,
+        job_id: str,
+        *,
+        stage: str | None = None,
+        status: str | None = None,
+        found_count: int | None = None,
+        processed_count: int | None = None,
+        visible_count: int | None = None,
+        failed_count: int | None = None,
+        finished: bool = False,
+    ) -> None:
+        """Update scan job progress without requiring callers to know SQL."""
+
+        assignments = ["updated_at = ?"]
+        params: list[Any] = [_utc_ms()]
+        for column, value in (
+            ("stage", stage),
+            ("status", status),
+            ("found_count", found_count),
+            ("processed_count", processed_count),
+            ("visible_count", visible_count),
+            ("failed_count", failed_count),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                params.append(value)
+        if finished:
+            assignments.append("finished_at = ?")
+            params.append(_utc_ms())
+        params.append(job_id)
+        with self.transaction() as conn:
+            conn.execute(
+                f"UPDATE scan_jobs SET {', '.join(assignments)} WHERE job_id = ?",
+                params,
+            )
+
+    def append_scan_event(
+        self,
+        job_id: str,
+        event_type: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> None:
+        """Append a compact scan event payload."""
+
+        payload_json = json.dumps(
+            _sanitize_metadata_for_json(payload or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO scan_events (job_id, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [job_id, event_type, payload_json, _utc_ms()],
+            )
+
+    def latest_scan_job(
+        self,
+        *,
+        root: str,
+        scope: str | None = None,
+    ) -> Dict[str, Any] | None:
+        """Return the newest scan job matching *root* and optional *scope*."""
+
+        where = ["root = ?"]
+        params: list[Any] = [root]
+        if scope is not None:
+            where.append("scope = ?")
+            params.append(scope)
+        sql = (
+            "SELECT * FROM scan_jobs WHERE "
+            + " AND ".join(where)
+            + " ORDER BY COALESCE(updated_at, started_at, 0) DESC, "
+            "COALESCE(finished_at, 0) DESC LIMIT 1"
+        )
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(sql, params).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            if should_close:
+                conn.close()
+
+    def read_collection_page(
+        self,
+        query: CollectionQuery,
+        cursor: PageCursor | None = None,
+        limit: int = 100,
+    ) -> PageResult:
+        """Return one keyset-paginated collection page."""
+
+        limit = max(0, int(limit))
+        sql, params = QueryBuilder.build_collection_query(
+            query,
+            cursor=cursor,
+            limit=limit,
+        )
+        started = monotonic_ms()
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+            next_cursor = self._page_cursor_from_row(query, rows[-1]) if rows else None
+            result = PageResult(
+                rows=rows,
+                next_cursor=next_cursor,
+                total_count=self.count_collection(query),
+                collection_revision=self._collection_revision(conn, query),
+            )
+            emit_perf_event(
+                "collection_page_query",
+                collection=query.collection_type.value,
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                rows=len(rows),
+                limit=limit,
+                cursor="present" if cursor else "none",
+                query_plan=self._explain_query_plan(conn, sql, params),
+            )
+            return result
+        finally:
+            if should_close:
+                conn.close()
+
+    def read_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a bounded window for a gallery collection."""
+
+        first = max(0, int(first))
+        limit = max(0, int(limit))
+
+        started = monotonic_ms()
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            if first > _DEEP_OFFSET_LIMIT:
+                sql, params = self._build_deep_collection_window_query(conn, query, first, limit)
+                if sql is None:
+                    rows: list[dict[str, Any]] = []
+                else:
+                    rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+            else:
+                sql, params = QueryBuilder.build_collection_query(
+                    query,
+                    limit=limit,
+                    offset=first,
+                )
+                rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+            self._remember_collection_window(query, first, rows)
+            total_count, collection_revision = self._collection_count_and_revision(conn, query)
+            result = WindowResult(
+                first=first,
+                rows=rows,
+                total_count=total_count,
+                collection_revision=collection_revision,
+            )
+            emit_perf_event(
+                "collection_window_reload",
+                collection=query.collection_type.value,
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                first=first,
+                limit=limit,
+                rows=len(rows),
+                total_count=result.total_count,
+                query_plan=(
+                    self._explain_query_plan(conn, sql, params)
+                    if sql is not None
+                    else "anchor_not_found"
+                ),
+            )
+            return result
+        finally:
+            if should_close:
+                conn.close()
+
+    def _build_deep_collection_window_query(
+        self,
+        conn: sqlite3.Connection,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> tuple[str | None, list[Any]]:
+        if first <= 0:
+            return QueryBuilder.build_collection_query(query, limit=limit)
+
+        cursor = self._cursor_for_collection_offset(conn, query, first)
+        if cursor is None and first > 0:
+            return None, []
+
+        return QueryBuilder.build_collection_query(query, cursor=cursor, limit=limit)
+
+    def read_thumbnail_backfill_candidates(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return stale thumbnail rows matching the same collection scope."""
+
+        first = max(0, int(first))
+        limit = max(0, int(limit))
+        if limit <= 0:
+            return []
+
+        stale_query = self._collection_query_with_thumbnail_state(query, "stale")
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            window_rows, _window_sql, _window_params = self._collection_window_rows_for_backfill(
+                conn,
+                query,
+                first,
+                limit,
+            )
+            if not window_rows:
+                sql, params = QueryBuilder.build_collection_query(
+                    stale_query,
+                    limit=limit,
+                    offset=first,
+                )
+                return [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+
+            sql, params = self._build_stale_window_query(
+                stale_query,
+                window_rows,
+                first=first,
+                limit=limit,
+            )
+            if sql is None:
+                return []
+            candidates = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+            if (
+                query.min_thumbnail_state == "ready"
+                and len(candidates) < limit
+                and self._collection_window_reaches_end(conn, query, first, window_rows)
+            ):
+                candidates.extend(
+                    self._stale_candidates_after_window(
+                        conn,
+                        stale_query,
+                        window_rows,
+                        limit=limit - len(candidates),
+                        exclude_rels={
+                            str(row.get("rel"))
+                            for row in candidates
+                            if row.get("rel") is not None
+                        },
+                    )
+                )
+            return candidates
+        finally:
+            if should_close:
+                conn.close()
+
+    @staticmethod
+    def _collection_window_reaches_end(
+        conn: sqlite3.Connection,
+        query: CollectionQuery,
+        first: int,
+        window_rows: list[dict[str, Any]],
+    ) -> bool:
+        sql, params = QueryBuilder.build_collection_query(
+            query,
+            select_clause="SELECT COUNT(*)",
+            include_order=False,
+        )
+        row = conn.execute(sql, params).fetchone()
+        total = int(row[0] if row else 0)
+        return first + len(window_rows) >= total
+
+    def _stale_candidates_after_window(
+        self,
+        conn: sqlite3.Connection,
+        stale_query: CollectionQuery,
+        window_rows: list[dict[str, Any]],
+        *,
+        limit: int,
+        exclude_rels: set[str],
+    ) -> list[dict[str, Any]]:
+        if limit <= 0 or not window_rows:
+            return []
+        sort_col = QueryBuilder._collection_sort_column(stale_query)
+        bottom_bound = self._collection_sort_bound(window_rows[-1], sort_col)
+        if bottom_bound is None:
+            return []
+
+        where_clauses, params = QueryBuilder.build_collection_where(stale_query)
+        clause, clause_params = self._collection_range_clause(
+            sort_col,
+            bottom_bound,
+            stale_query.sort_direction.value,
+            lower=False,
+        )
+        where_clauses.append(clause)
+        params.extend(clause_params)
+        sql = "SELECT * FROM assets WHERE " + " AND ".join(where_clauses)
+        sql += " " + QueryBuilder.build_collection_order(stale_query)
+        sql += " LIMIT ?"
+        params.append(limit + len(exclude_rels))
+        rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+        return [
+            row
+            for row in rows
+            if str(row.get("rel")) not in exclude_rels
+        ][:limit]
+
+    def _collection_window_rows_for_backfill(
+        self,
+        conn: sqlite3.Connection,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], str | None, list[Any]]:
+        if first > _DEEP_OFFSET_LIMIT:
+            sql, params = self._build_deep_collection_window_query(
+                conn,
+                query,
+                first,
+                limit,
+            )
+            if sql is None:
+                return [], None, []
+        else:
+            sql, params = QueryBuilder.build_collection_query(
+                query,
+                limit=limit,
+                offset=first,
+            )
+        rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+        return rows, sql, params
+
+    def _build_stale_window_query(
+        self,
+        stale_query: CollectionQuery,
+        window_rows: list[dict[str, Any]],
+        *,
+        first: int,
+        limit: int,
+    ) -> tuple[str | None, list[Any]]:
+        if not window_rows:
+            return None, []
+
+        sort_col = QueryBuilder._collection_sort_column(stale_query)
+        top_bound = self._collection_sort_bound(window_rows[0], sort_col)
+        bottom_bound = self._collection_sort_bound(window_rows[-1], sort_col)
+        if top_bound is None or bottom_bound is None:
+            return None, []
+
+        where_clauses, params = QueryBuilder.build_collection_where(stale_query)
+        if first > 0:
+            clause, clause_params = self._collection_range_clause(
+                sort_col,
+                top_bound,
+                stale_query.sort_direction.value,
+                lower=False,
+            )
+            where_clauses.append(clause)
+            params.extend(clause_params)
+
+        clause, clause_params = self._collection_range_clause(
+            sort_col,
+            bottom_bound,
+            stale_query.sort_direction.value,
+            lower=True,
+        )
+        where_clauses.append(clause)
+        params.extend(clause_params)
+
+        sql = "SELECT * FROM assets WHERE " + " AND ".join(where_clauses)
+        sql += " " + QueryBuilder.build_collection_order(stale_query)
+        sql += " LIMIT ?"
+        params.append(limit)
+        return sql, params
+
+    @staticmethod
+    def _collection_sort_bound(
+        row: dict[str, Any],
+        sort_col: str,
+    ) -> tuple[Any, str, str] | None:
+        sort_value = row.get(sort_col)
+        asset_id = row.get("id")
+        asset_rel = row.get("rel")
+        if sort_value is None or asset_id is None or asset_rel is None:
+            return None
+        return sort_value, str(asset_id), str(asset_rel)
+
+    @staticmethod
+    def _collection_range_clause(
+        sort_col: str,
+        bound: tuple[Any, str, str],
+        direction: str,
+        *,
+        lower: bool,
+    ) -> tuple[str, list[Any]]:
+        sort_value, asset_id, asset_rel = bound
+        if direction == "ASC":
+            operator = "<" if lower else ">"
+            id_operator = "<" if lower else ">"
+            rel_operator = "<=" if lower else ">="
+        else:
+            operator = ">" if lower else "<"
+            id_operator = ">" if lower else "<"
+            rel_operator = ">=" if lower else "<="
+        return (
+            f"({sort_col} {operator} ? OR ({sort_col} = ? AND "
+            f"(id {id_operator} ? OR (id = ? AND rel {rel_operator} ?))))",
+            [sort_value, sort_value, asset_id, asset_id, asset_rel],
+        )
+
+    @staticmethod
+    def _collection_query_with_thumbnail_state(
+        query: CollectionQuery,
+        state: str,
+    ) -> CollectionQuery:
+        return CollectionQuery(
+            collection_type=query.collection_type,
+            album_path=query.album_path,
+            include_subalbums=query.include_subalbums,
+            media_types=query.media_types,
+            is_favorite=query.is_favorite,
+            has_gps=query.has_gps,
+            date_from=query.date_from,
+            date_to=query.date_to,
+            search_text=query.search_text,
+            sort_key=query.sort_key,
+            sort_direction=query.sort_direction,
+            min_thumbnail_state=state,
+        )
+
+    def update_thumbnail_ready(
+        self,
+        rel: str,
+        *,
+        micro_thumbnail: bytes | None = None,
+        thumb_cache_key: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Update thumbnail readiness for a single asset row."""
+
+        normalized_rel = unicodedata.normalize("NFC", str(rel))
+        if error:
+            self._db_manager.execute_in_transaction(
+                """
+                UPDATE assets
+                SET thumbnail_state = 'failed',
+                    thumb_error = ?,
+                    thumb_updated_at = ?,
+                    index_revision = COALESCE(index_revision, 0) + 1
+                WHERE rel = ?
+                """,
+                [str(error), _utc_ms(), normalized_rel],
+            )
+        else:
+            if not str(thumb_cache_key or "").strip():
+                raise ValueError("ready thumbnails require thumb_cache_key")
+            self._db_manager.execute_in_transaction(
+                """
+                UPDATE assets
+                SET thumbnail_state = 'ready',
+                    micro_thumbnail = COALESCE(?, micro_thumbnail),
+                    thumb_cache_key = COALESCE(?, thumb_cache_key),
+                    thumb_error = NULL,
+                    thumb_updated_at = ?,
+                    index_revision = COALESCE(index_revision, 0) + 1
+                WHERE rel = ?
+                """,
+                [micro_thumbnail, thumb_cache_key, _utc_ms(), normalized_rel],
+            )
+        self._clear_collection_anchor_cache()
+
+    def _cursor_for_collection_offset(
+        self,
+        conn: sqlite3.Connection,
+        query: CollectionQuery,
+        offset: int,
+    ) -> PageCursor | None:
+        """Return the keyset cursor immediately before *offset* without deep OFFSET."""
+
+        if offset <= 0:
+            return None
+
+        anchors = self._collection_anchor_cache.setdefault(query, {0: None})
+        anchor_index = max(index for index in anchors if index <= offset)
+        cursor = anchors[anchor_index]
+
+        while anchor_index < offset:
+            step = min(_DEEP_SEEK_CHUNK_SIZE, offset - anchor_index)
+            sql, params = QueryBuilder.build_collection_query(
+                query,
+                cursor=cursor,
+                limit=step,
+            )
+            rows = conn.execute(sql, params).fetchall()
+            if not rows:
+                return None
+
+            anchor_index += len(rows)
+            cursor = self._page_cursor_from_row(query, dict(rows[-1]))
+            anchors[anchor_index] = cursor
+            self._prune_collection_anchor_cache(query)
+
+            if len(rows) < step:
+                return None
+
+        return cursor
+
+    def find_row_by_path(self, query: CollectionQuery, path: Path) -> int | None:
+        """Return a path's row number within *query* without scanning rows in Python."""
+
+        rel = self._library_relative_path(path)
+        row = self.get_rows_by_rels([rel]).get(rel)
+        if row is None:
+            return None
+        asset_id = str(row.get("id") or "")
+        asset_rel = str(row.get("rel") or "")
+        sort_col = QueryBuilder._collection_sort_column(query)
+        sort_value = row.get(sort_col)
+        if sort_value is None and sort_col == "sort_ts":
+            sort_value = row.get("ts")
+        if not asset_id or not asset_rel or sort_value is None:
+            return None
+
+        match_sql, match_params = QueryBuilder.build_collection_query(
+            query,
+            select_clause="SELECT COUNT(*)",
+            include_order=False,
+        )
+        match_sql += " AND rel = ?" if " WHERE " in match_sql else " WHERE rel = ?"
+        match_params.append(rel)
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            matched = conn.execute(match_sql, match_params).fetchone()
+            if not matched or int(matched[0] or 0) == 0:
+                return None
+
+            before_where, before_params = QueryBuilder.build_collection_where(query)
+            if query.sort_direction.value == "ASC":
+                before_where.append(
+                    f"({sort_col} < ? OR ({sort_col} = ? AND "
+                    "(id < ? OR (id = ? AND rel < ?))))"
+                )
+            else:
+                before_where.append(
+                    f"({sort_col} > ? OR ({sort_col} = ? AND "
+                    "(id > ? OR (id = ? AND rel > ?))))"
+                )
+            before_params.extend(
+                [sort_value, sort_value, asset_id, asset_id, asset_rel]
+            )
+            before_sql = "SELECT COUNT(*) FROM assets WHERE " + " AND ".join(before_where)
+            before = conn.execute(before_sql, before_params).fetchone()
+            return int(before[0] if before else 0)
+        finally:
+            if should_close:
+                conn.close()
+
+    def find_live_partner(self, asset_id: str) -> Dict[str, Any] | None:
+        """Return the row for an asset's Live Photo partner, if indexed."""
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT partner.*
+                FROM assets AS source
+                JOIN assets AS partner ON partner.rel = source.live_partner_rel
+                WHERE source.id = ?
+                LIMIT 1
+                """,
+                (asset_id,),
+            ).fetchone()
+            return self._db_row_to_dict(row) if row is not None else None
         finally:
             if should_close:
                 conn.close()
@@ -675,6 +1407,7 @@ class AssetRepository:
             "UPDATE assets SET is_favorite = ? WHERE rel = ?",
             (val, rel),
         )
+        self._clear_collection_anchor_cache()
 
     def sync_favorites(self, featured_rels: Iterable[str]) -> None:
         """Synchronise the DB 'is_favorite' column with the provided list."""
@@ -722,6 +1455,7 @@ class AssetRepository:
                     "UPDATE assets SET is_favorite = 1 WHERE rel = ?",
                     [(r,) for r in to_add_original],
                 )
+        self._clear_collection_anchor_cache()
 
     def update_location(self, rel: str, location: str) -> None:
         """Update the location string for a single asset."""
@@ -741,9 +1475,10 @@ class AssetRepository:
         """Atomically update GPS/location columns and JSON metadata for one asset."""
 
         gps_payload = json.dumps(gps) if gps is not None else None
+        has_gps = 1 if gps is not None else 0
         with self.transaction() as conn:
-            update_parts = ["gps = ?", "location = ?"]
-            params: list[Any] = [gps_payload, location]
+            update_parts = ["gps = ?", "has_gps = ?", "location = ?"]
+            params: list[Any] = [gps_payload, has_gps, location]
 
             columns = {
                 str(row[1])
@@ -793,6 +1528,7 @@ class AssetRepository:
                 f"UPDATE assets SET {', '.join(update_parts)} WHERE rel = ?",
                 params,
             )
+        self._clear_collection_anchor_cache()
 
     def apply_live_role_updates(
         self,
@@ -807,6 +1543,7 @@ class AssetRepository:
             self._db_manager.execute_in_transaction(
                 "UPDATE assets SET live_role = 0, live_partner_rel = NULL"
             )
+            self._clear_collection_anchor_cache()
             return
 
         with self.transaction() as conn:
@@ -814,6 +1551,7 @@ class AssetRepository:
             query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
+        self._clear_collection_anchor_cache()
 
     def apply_live_role_updates_for_prefix(
         self,
@@ -832,6 +1570,7 @@ class AssetRepository:
             query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
+        self._clear_collection_anchor_cache()
 
     def list_albums(self) -> List[str]:
         """Return a list of distinct album paths in the index."""
@@ -870,6 +1609,110 @@ class AssetRepository:
             album_path=album_path,
             include_subalbums=include_subalbums,
         )
+
+    def _collection_revision(
+        self,
+        conn: sqlite3.Connection,
+        query: CollectionQuery,
+    ) -> int:
+        sql, params = QueryBuilder.build_collection_query(
+            query,
+            select_clause="SELECT COALESCE(MAX(index_revision), 0)",
+            include_order=False,
+        )
+        row = conn.execute(sql, params).fetchone()
+        return int(row[0] if row else 0)
+
+    def _collection_count_and_revision(
+        self,
+        conn: sqlite3.Connection,
+        query: CollectionQuery,
+    ) -> tuple[int, int]:
+        cached = self._collection_meta_cache.get(query)
+        if cached is not None:
+            return cached
+        count = self.count_collection(query)
+        revision = self._collection_revision(conn, query)
+        self._collection_meta_cache[query] = (count, revision)
+        return count, revision
+
+    def _explain_query_plan(
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        params: list[Any],
+    ) -> str | None:
+        if not explain_enabled():
+            return None
+        try:
+            rows = conn.execute(f"EXPLAIN QUERY PLAN {query}", params).fetchall()
+        except sqlite3.Error as exc:
+            return f"explain_failed:{exc}"
+        return " | ".join(" ".join(str(part) for part in row) for row in rows)
+
+    def _remember_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        if not rows:
+            return
+        anchors = self._collection_anchor_cache.setdefault(query, {0: None})
+        if first <= 0:
+            anchors[0] = None
+        cursor = self._page_cursor_from_row(query, rows[-1])
+        if cursor is not None:
+            anchors[max(0, first) + len(rows)] = cursor
+            self._prune_collection_anchor_cache(query)
+
+    def _prune_collection_anchor_cache(self, query: CollectionQuery) -> None:
+        anchors = self._collection_anchor_cache.get(query)
+        if not anchors or len(anchors) <= _MAX_COLLECTION_ANCHORS_PER_QUERY:
+            return
+        overflow = len(anchors) - _MAX_COLLECTION_ANCHORS_PER_QUERY
+        largest = max(anchors)
+        candidates = [index for index in sorted(anchors) if index not in {0, largest}]
+        for index in candidates[:overflow]:
+            anchors.pop(index, None)
+
+    def _clear_collection_anchor_cache(self) -> None:
+        self._collection_anchor_cache.clear()
+        self._collection_meta_cache.clear()
+
+    @staticmethod
+    def _page_cursor_from_row(
+        query: CollectionQuery,
+        row: dict[str, Any],
+    ) -> PageCursor | None:
+        asset_id = row.get("id")
+        asset_rel = row.get("rel")
+        sort_ts = row.get("sort_ts") if row.get("sort_ts") is not None else row.get("ts")
+        if asset_id is None or asset_rel is None or sort_ts is None:
+            return None
+        sort_col = QueryBuilder._collection_sort_column(query)
+        sort_value = row.get(sort_col)
+        if sort_value is None and sort_col == "sort_ts":
+            sort_value = sort_ts
+        cursor_sort_value = None if sort_col == "sort_ts" else sort_value
+        return PageCursor(
+            sort_ts=int(sort_ts),
+            asset_id=str(asset_id),
+            sort_value=cursor_sort_value,
+            asset_rel=str(asset_rel),
+        )
+
+    def _library_relative_path(self, path: Path) -> str:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            return candidate.as_posix()
+        try:
+            return candidate.resolve().relative_to(self.library_root.resolve()).as_posix()
+        except (OSError, ValueError):
+            try:
+                return candidate.relative_to(self.library_root).as_posix()
+            except ValueError:
+                return candidate.as_posix()
 
     # Helper methods delegating to standalone functions in row_mapper
     def _insert_rows(

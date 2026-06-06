@@ -45,6 +45,33 @@ def test_prune_index_scope_removes_only_rows_within_scan_prefix(tmp_path: Path) 
     assert remaining == {"album-a/keep.jpg", "album-b/other.jpg"}
 
 
+def test_prune_index_scope_preserves_concurrent_non_scan_writes(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {"rel": "AlbumA/stale-from-scan.jpg", "id": "stale", "scan_job_id": "scan_1"},
+            {"rel": "AlbumB/moved-during-scan.jpg", "id": "moved", "scan_job_id": None},
+        ]
+    )
+
+    removed = prune_index_scope(
+        library_root,
+        [],
+        library_root=library_root,
+        repository=store,
+        preserve_modified_after_ms=1,
+        current_scan_job_id="scan_1",
+    )
+
+    remaining = {row["rel"] for row in store.read_all(filter_hidden=False)}
+    assert removed == 1
+    assert remaining == {"AlbumB/moved-during-scan.jpg"}
+
+
 def test_prune_index_scope_keeps_excluded_trash_rows_during_library_rescan(
     tmp_path: Path,
 ) -> None:

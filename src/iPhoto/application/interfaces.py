@@ -24,6 +24,6 @@ class IThumbnailGenerator(ABC):
     """Interface for generating thumbnails."""
 
     @abstractmethod
-    def generate_micro_thumbnail(self, path: Path) -> Optional[str]:
-        """Generate a base64 encoded micro-thumbnail."""
+    def generate_micro_thumbnail(self, path: Path) -> Optional[bytes]:
+        """Generate encoded micro-thumbnail bytes."""
         pass

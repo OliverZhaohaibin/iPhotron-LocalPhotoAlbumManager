@@ -2,8 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from iPhoto.bootstrap.runtime_context import RuntimeContext
+from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.events.bus import EventBus
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_repository() -> None:
+    reset_global_repository()
+    yield
+    reset_global_repository()
 
 
 class _FakeAssetRuntime:
@@ -118,6 +128,12 @@ class _FakeLibrary:
     def bind_scan_service(self, scan_service: object | None) -> None:
         self.bound_scan_services.append(scan_service)
 
+    @property
+    def scan_service(self) -> object | None:
+        if not self.bound_scan_services:
+            return None
+        return self.bound_scan_services[-1]
+
     def bind_asset_query_service(self, asset_query_service: object | None) -> None:
         self.bound_asset_query_services.append(asset_query_service)
 
@@ -206,7 +222,9 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert [request[0] for request in context.facade.scan_requests] == [library_root]
 
 
-def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) -> None:
+def test_resume_startup_tasks_scans_when_index_preexists_without_completed_job(
+    tmp_path: Path,
+) -> None:
     library_root = tmp_path / "library"
     work_dir = library_root / ".iPhoto"
     work_dir.mkdir(parents=True)
@@ -229,6 +247,26 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
+    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+
+
+def test_resume_startup_tasks_skips_scan_when_scope_complete(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    repo = get_global_repository(library_root)
+    repo.create_scan_job(
+        job_id="scan_complete",
+        root=library_root.as_posix(),
+        scope="library",
+    )
+    repo.update_scan_job_stage("scan_complete", status="completed", finished=True)
+    reset_global_repository()
+    context, library, asset_runtime = _runtime_context(library_root)
+
+    context.resume_startup_tasks()
+
+    assert asset_runtime.bound_roots == [library_root]
+    assert library.bound_scan_services[-1] is not None
     assert context.facade.scan_requests == []
 
 

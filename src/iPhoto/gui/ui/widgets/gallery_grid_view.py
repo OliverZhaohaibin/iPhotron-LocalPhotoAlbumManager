@@ -159,13 +159,22 @@ class GalleryGridView(AssetGrid):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        viewport_width = self.viewport().width()
-        if viewport_width <= 0:
-            return
 
         if self._empty_label is not None:
             self._empty_label.setGeometry(self.viewport().rect())
 
+        self._apply_responsive_tile_size()
+
+    def setItemDelegate(self, delegate) -> None:  # type: ignore[override]
+        super().setItemDelegate(delegate)
+        if self._apply_responsive_tile_size():
+            self.doItemsLayout()
+            self.viewport().update()
+
+    def _apply_responsive_tile_size(self) -> bool:
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            return False
 
         # Determine how many columns can fit with the minimum size constraint.
         # We model the grid cell as (item_width + gap), which provides 1px padding
@@ -183,17 +192,20 @@ class GalleryGridView(AssetGrid):
         cell_size = int((viewport_width - self.SAFETY_MARGIN) / num_cols)
         new_item_width = cell_size - self.ITEM_GAP
         if new_item_width < self.MIN_ITEM_WIDTH:
-            return  # Don't update if it would make items too small
+            return False  # Don't update if it would make items too small
 
         current_size = self.iconSize().width()
-        if current_size != new_item_width:
+        current_grid_width = self.gridSize().width()
+        if current_size != new_item_width or current_grid_width != cell_size:
             new_size = QSize(new_item_width, new_item_width)
             self.setIconSize(new_size)
             self.setGridSize(QSize(cell_size, cell_size))
 
-            delegate = self.itemDelegate()
-            if hasattr(delegate, "set_base_size"):
-                delegate.set_base_size(new_item_width)
+        delegate = self.itemDelegate()
+        if hasattr(delegate, "set_base_size"):
+            delegate.set_base_size(new_item_width)
+
+        return True
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:

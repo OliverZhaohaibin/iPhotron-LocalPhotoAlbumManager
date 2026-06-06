@@ -8,11 +8,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 import logging
 
 from ..errors import ExternalToolError
+from .media_access import media_access
 
 LOGGER = logging.getLogger(__name__)
 
@@ -146,7 +148,8 @@ def get_metadata_batch(paths: list[Path]) -> list[dict[str, Any]]:
             tmp_arg_path,
         ]
         try:
-            process = _run_exiftool_command(cmd)
+            with media_access.read_many(paths):
+                process = _run_exiftool_command(cmd)
             return json.loads(process.stdout)
         except json.JSONDecodeError as exc:
             raise ExternalToolError(f"Failed to parse JSON output from ExifTool: {exc}") from exc
@@ -172,10 +175,62 @@ def write_gps_metadata(
     """Write GPS metadata in-place without generating a sidecar file."""
 
     executable = _resolve_exiftool_executable()
-    safe_path = _safe_exiftool_path(path)
+    target = _validated_source_file(path)
+    use_in_place = os.name == "nt" and is_video
+    delays = (0.2, 0.5, 1.0, 2.0)
+    last_error: ExternalToolError | None = None
+
+    with media_access.write(target):
+        for attempt in range(5):
+            try:
+                _write_gps_metadata_once(
+                    executable,
+                    target,
+                    latitude=latitude,
+                    longitude=longitude,
+                    is_video=is_video,
+                    overwrite_in_place=use_in_place,
+                )
+                return
+            except ExternalToolError as exc:
+                last_error = exc
+                message = str(exc)
+                if _is_rename_temporary_file_error(message) and not use_in_place:
+                    use_in_place = True
+                if not _is_transient_write_error(message, target):
+                    raise
+                if attempt < len(delays):
+                    time.sleep(delays[attempt])
+
+    if last_error is not None:
+        raise last_error
+
+
+def _validated_source_file(path: Path) -> Path:
+    try:
+        resolved = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ExternalToolError(f"Source media file is unavailable: {path}") from exc
+    try:
+        if not resolved.is_file():
+            raise ExternalToolError(f"Source media path is not a file: {resolved}")
+    except OSError as exc:
+        raise ExternalToolError(f"Source media file is unavailable: {resolved}") from exc
+    return resolved
+
+
+def _write_gps_metadata_once(
+    executable: str,
+    path: Path,
+    *,
+    latitude: float,
+    longitude: float,
+    is_video: bool,
+    overwrite_in_place: bool,
+) -> None:
     cmd = [
         executable,
-        "-overwrite_original",
+        "-overwrite_original_in_place" if overwrite_in_place else "-overwrite_original",
         "-charset",
         "filename=utf8",
     ]
@@ -191,8 +246,38 @@ def write_gps_metadata(
                 f"-GPSLongitudeRef={'W' if longitude < 0 else 'E'}",
             ]
         )
-    cmd.append(safe_path)
-    _run_exiftool_command(cmd)
+    tmp_arg_path = _write_single_path_arg_file(path)
+    try:
+        cmd.extend(["-@", tmp_arg_path])
+        _run_exiftool_command(cmd)
+    finally:
+        try:
+            os.remove(tmp_arg_path)
+        except OSError:
+            pass
+
+
+def _write_single_path_arg_file(path: Path) -> str:
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as tmp_arg_file:
+        tmp_arg_file.write(_safe_exiftool_path(path) + "\n")
+        return tmp_arg_file.name
+
+
+def _is_rename_temporary_file_error(message: str) -> bool:
+    lowered = message.lower()
+    return "renaming temporary file" in lowered or "rename" in lowered and "temporary" in lowered
+
+
+def _is_transient_write_error(message: str, path: Path) -> bool:
+    lowered = message.lower()
+    if _is_rename_temporary_file_error(message):
+        return True
+    if "no matching files" in lowered:
+        try:
+            return path.is_file()
+        except OSError:
+            return False
+    return False
 
 
 __all__ = ["get_metadata_batch", "write_gps_metadata"]

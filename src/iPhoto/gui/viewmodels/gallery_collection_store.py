@@ -9,13 +9,21 @@ from typing import Dict, Iterable, List, Optional, Protocol
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models.query import AssetQuery
-from iPhoto.gui.viewmodels.signal import Signal
-
+from iPhoto.domain.models.query import WindowResult
+from iPhoto.infrastructure.services.performance_events import emit_perf_event
 from iPhoto.gui.viewmodels.asset_dto_converter import (
     geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
+)
+from iPhoto.gui.viewmodels.asset_dto_converter import (
     is_legacy_thumb_path as _is_legacy_thumb_path_fn,
+)
+from iPhoto.gui.viewmodels.asset_dto_converter import (
     resolve_abs_path as _resolve_abs_path_fn,
+)
+from iPhoto.gui.viewmodels.asset_dto_converter import (
     scan_row_is_thumbnail as _scan_row_is_thumbnail_fn,
+)
+from iPhoto.gui.viewmodels.asset_dto_converter import (
     scan_row_to_dto as _scan_row_to_dto_fn,
 )
 from iPhoto.gui.viewmodels.asset_paging import (
@@ -24,8 +32,14 @@ from iPhoto.gui.viewmodels.asset_paging import (
 from iPhoto.gui.viewmodels.path_cache import PathExistsCache
 from iPhoto.gui.viewmodels.pending_move_buffer import (
     _PendingMove,
+)
+from iPhoto.gui.viewmodels.pending_move_buffer import (
+    pending_source_matches_query as _pending_source_matches_query_fn,
+)
+from iPhoto.gui.viewmodels.pending_move_buffer import (
     should_include_pending as _should_include_pending_fn,
 )
+from iPhoto.gui.viewmodels.signal import Signal
 
 
 class GalleryAssetQuerySurface(Protocol):
@@ -42,6 +56,29 @@ class GalleryAssetQuerySurface(Protocol):
         query: AssetQuery,
     ) -> Iterable[dict]:
         """Yield rows matching *query*, scoped to *root*."""
+
+    def read_query_asset_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a bounded scoped window for *query*."""
+
+    def find_row_by_path(self, query: AssetQuery, path: Path) -> Optional[int]:
+        """Return a row index for *path* inside *query*."""
+
+    def find_live_partner(self, asset_id: str) -> Optional[dict]:
+        """Return a live partner row for *asset_id*."""
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 class GalleryCollectionStore:
@@ -64,6 +101,7 @@ class GalleryCollectionStore:
         self.window_changed = Signal()
         self.count_changed = Signal()
         self.row_changed = Signal()
+        self.thumbnail_backfill_scheduled = Signal()
 
         self._asset_query_service = asset_query_service
         self._library_root = library_root or getattr(asset_query_service, "library_root", None)
@@ -83,13 +121,17 @@ class GalleryCollectionStore:
         self._pending_scan_refresh = False
         self._pending_scan_rels: set[str] = set()
         self._pending_scan_sort_keys: set[tuple[str, str]] = set()
+        self._thumbnail_backfill_windows: set[tuple[int, int]] = set()
+        self._thumbnail_backfill_pending = False
         self._direct_mode = False
+        self._collection_revision = 0
+        self._request_generation = 0
 
     def set_library_root(self, root: Optional[Path]) -> None:
         if self._library_root == root:
             return
         self._library_root = root
-        self._reset_window_state()
+        self._reset_window_state(clear_pending=True)
         self.data_changed.emit()
 
     def set_asset_query_service(
@@ -109,6 +151,10 @@ class GalleryCollectionStore:
     ) -> None:
         self.set_asset_query_service(asset_query_service)
         self.set_library_root(library_root)
+
+    @property
+    def asset_query_service(self) -> GalleryAssetQuerySurface | None:
+        return self._asset_query_service
 
     def set_active_root(self, root: Optional[Path]) -> None:
         self._active_root = root
@@ -183,7 +229,7 @@ class GalleryCollectionStore:
         next_index = 0
         for asset in stored_assets:
             dto = self._geotagged_asset_to_dto(asset, library_root)
-            if dto is not None:
+            if dto is not None and not self._dto_matches_pending_source(dto):
                 self._row_cache[next_index] = dto
                 next_index += 1
 
@@ -207,20 +253,44 @@ class GalleryCollectionStore:
             return dto
         if index < 0 or index >= self._total_count:
             return None
-        if self._visible_range is not None:
-            visible_first, visible_last = self._visible_range
-            if visible_first <= index <= visible_last:
-                self._ensure_row_loaded(index, emit_signals=False)
-                return self._row_cache.get(index)
-        if self._pinned_row == index:
-            self._ensure_row_loaded(index, emit_signals=False)
-            return self._row_cache.get(index)
-        # Broad queries like All Photos may request rows outside the initial
-        # paging window before the view emits a new visible-range signal.
-        # Fetching on demand keeps those items interactive instead of
-        # rendering as inert black cells.
-        self._ensure_row_loaded(index, emit_signals=False)
-        return self._row_cache.get(index)
+        return None
+
+    def ensure_row_loaded(self, row: int, *, emit_signals: bool = True) -> bool:
+        """Load the bounded gallery window containing *row* if needed."""
+
+        if row < 0:
+            return False
+        if row in self._row_cache:
+            return True
+        if self._direct_mode:
+            return self.asset_at(row) is not None
+        if self._current_query is None:
+            return False
+        if self._total_count == 0 and self._window_range is None:
+            self._load_initial_window()
+        if row >= self._total_count:
+            return False
+
+        self._reload_window_for_visible_range(row, row, emit_signals=emit_signals)
+        return row in self._row_cache
+
+    def snapshot_signature(self) -> tuple[int, Optional[tuple[int, int]], int]:
+        return (self._total_count, self._window_range, self._collection_revision)
+
+    def live_partner_for(self, asset_id: str, root: Optional[Path] = None) -> Optional[AssetDTO]:
+        find_live_partner = getattr(self._asset_query_service, "find_live_partner", None)
+        if not callable(find_live_partner):
+            return None
+        row = find_live_partner(asset_id)
+        if not isinstance(row, dict):
+            return None
+        active_root = root or self._library_root
+        if active_root is None:
+            return None
+        rel = row.get("rel")
+        if not isinstance(rel, str) or not rel:
+            return None
+        return self._scan_row_to_dto(active_root, rel, row)
 
     def find_dto_by_path(self, path: Path) -> Optional[AssetDTO]:
         target = self._normalize_abs_key(path)
@@ -233,12 +303,18 @@ class GalleryCollectionStore:
                     asset,
                     self._selection_library_root or self._library_root or path.parent,
                 )
-                if dto is not None and self._normalize_abs_key(dto.abs_path) == target:
+                if (
+                    dto is not None
+                    and not self._dto_matches_pending_source(dto)
+                    and self._normalize_abs_key(dto.abs_path) == target
+                ):
                     return dto
         return None
 
     def row_for_path(self, path: Path) -> Optional[int]:
         target = self._normalize_abs_key(path)
+        if target in self._pending_paths:
+            return None
         for row, dto in self._row_cache.items():
             if self._normalize_abs_key(dto.abs_path) == target:
                 return row
@@ -250,7 +326,7 @@ class GalleryCollectionStore:
             next_index = 0
             for asset in self._selection_direct_assets:
                 dto = self._geotagged_asset_to_dto(asset, library_root)
-                if dto is None:
+                if dto is None or self._dto_matches_pending_source(dto):
                     continue
                 if self._normalize_abs_key(dto.abs_path) == target:
                     return next_index
@@ -260,14 +336,16 @@ class GalleryCollectionStore:
         if self._current_query is None or self._total_count <= 0:
             return None
 
-        batch_size = 200
-        for offset in range(0, self._total_count, batch_size):
-            batch = self._fetch_rows(offset, min(self._total_count - 1, offset + batch_size - 1))
-            for row, dto in batch.items():
-                if self._normalize_abs_key(dto.abs_path) == target:
-                    self._row_cache.setdefault(row, dto)
-                    return row
-        return None
+        find_row_by_path = getattr(self._asset_query_service, "find_row_by_path", None)
+        if not callable(find_row_by_path):
+            return None
+        raw_row = find_row_by_path(self._current_query, path)
+        if raw_row is None:
+            return None
+        return self._pending_adjusted_view_row_for_raw_row(
+            self._current_query,
+            int(raw_row),
+        )
 
     def count(self) -> int:
         return self._total_count
@@ -354,10 +432,11 @@ class GalleryCollectionStore:
         removed_rows: list[int] = []
         inserted_dtos: list[AssetDTO] = []
         cached_map = {
-            str(dto.abs_path): (idx, dto) for idx, dto in self._iter_cached_rows()
+            self._normalize_abs_key(dto.abs_path): (idx, dto)
+            for idx, dto in self._iter_cached_rows()
         }
         for path in paths:
-            key = str(path)
+            key = self._normalize_abs_key(path)
             if key in self._pending_paths:
                 continue
             found = cached_map.get(key)
@@ -366,6 +445,7 @@ class GalleryCollectionStore:
             row, dto = found
             removed_rows.append(row)
             destination_abs = destination_root / path.name
+            source_library_rel = self._rel_path_for_abs(path)
             destination_rel = self._rel_path_for_abs(destination_abs)
             moved_dto = AssetDTO(
                 id=dto.id,
@@ -385,7 +465,10 @@ class GalleryCollectionStore:
             )
             pending = _PendingMove(
                 dto=moved_dto,
+                source_id=str(dto.id) if dto.id else None,
                 source_abs=path,
+                source_library_rel=source_library_rel,
+                source_album_path=self._album_path_for_rel(source_library_rel),
                 destination_root=destination_root,
                 destination_album_path=destination_album_path,
                 destination_abs=destination_abs,
@@ -397,6 +480,33 @@ class GalleryCollectionStore:
             if self._current_query and self._should_include_pending(pending, self._current_query):
                 inserted_dtos.append(moved_dto)
         return removed_rows, inserted_dtos
+
+    def clear_pending_moves_for_paths(self, paths: Iterable[Path]) -> bool:
+        """Clear pending mutations whose source or destination matches *paths*."""
+
+        keys = {self._normalize_abs_key(Path(path)) for path in paths}
+        if not keys:
+            return False
+        before = len(self._pending_moves)
+        self._pending_moves = [
+            pending
+            for pending in self._pending_moves
+            if self._normalize_abs_key(pending.source_abs) not in keys
+            and self._normalize_abs_key(pending.destination_abs) not in keys
+        ]
+        self._pending_paths = {
+            self._normalize_abs_key(pending.source_abs)
+            for pending in self._pending_moves
+        }
+        return len(self._pending_moves) != before
+
+    def clear_all_pending_moves(self) -> bool:
+        """Drop every optimistic mutation overlay for this collection store."""
+
+        had_pending = bool(self._pending_moves or self._pending_paths)
+        self._pending_moves.clear()
+        self._pending_paths.clear()
+        return had_pending
 
     def append_dtos(self, dtos: List[AssetDTO]) -> None:
         if not dtos:
@@ -427,21 +537,28 @@ class GalleryCollectionStore:
             first == 0 or self._window_rel_intersects_pending_scan(first, last)
         )
         if should_refresh or self._window_needs_reload(first, last):
-            self._reload_window_for_visible_range(first, last, emit_signals=True)
+            self._reload_window_for_visible_range(
+                first,
+                last,
+                emit_signals=True,
+                emit_source_changed=should_refresh,
+            )
 
     def pin_row(self, row: int) -> None:
         if row < 0 or row >= self._total_count:
             self._pinned_row = None
             return
         self._pinned_row = row
-        self._ensure_row_loaded(row, emit_signals=True)
+        self.ensure_row_loaded(row, emit_signals=True)
 
-    def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
-        if not chunk or self._current_query is None or self._active_root is None:
-            return
-        mapped_entries = self._map_scan_rows_to_active_entries(scan_root, chunk)
+    def _record_scan_rows(self, scan_root: Path, rows: List[dict]) -> bool:
+        """Record ready batch rows and defer the visible-window refresh."""
+
+        if not rows or self._current_query is None or self._active_root is None:
+            return False
+        mapped_entries = self._map_scan_rows_to_active_entries(scan_root, rows)
         if not mapped_entries:
-            return
+            return False
 
         self._pending_scan_rels.update(view_rel for view_rel, _row in mapped_entries)
         self._pending_scan_sort_keys.update(
@@ -451,13 +568,40 @@ class GalleryCollectionStore:
             if sort_key is not None
         )
         self._pending_scan_refresh = True
+        return True
 
-        if self._visible_range is None:
-            return
+    def handle_scan_batch(self, batch: object) -> None:
+        """Consume an explicit ready-only scan batch without depending on legacy chunks."""
 
-        visible_first, visible_last = self._visible_range
-        if visible_first == 0 or self._pending_scan_affects_visible_window(visible_first, visible_last):
-            self._flush_pending_scan_refresh()
+        if self.record_scan_batch(batch):
+            self.flush_pending_scan_refresh()
+
+    def record_scan_batch(self, batch: object) -> bool:
+        """Record a ready-only scan batch and defer any GUI refresh."""
+
+        rows = getattr(batch, "rows", None)
+        root = getattr(batch, "root", None)
+        job_id = str(getattr(batch, "job_id", "") or "")
+        is_thumbnail_backfill = job_id.startswith("thumbnail-backfill:")
+        revision = getattr(batch, "collection_revision", None)
+        if isinstance(revision, int):
+            self._collection_revision = max(self._collection_revision, revision)
+        if is_thumbnail_backfill:
+            self._thumbnail_backfill_windows.clear()
+            self._thumbnail_backfill_pending = False
+        if root is None:
+            return False
+        if not rows:
+            if (
+                is_thumbnail_backfill
+                and self._current_query is not None
+                and self._active_root is not None
+                and self._scan_root_matches_active_root(Path(root))
+            ):
+                self._pending_scan_refresh = True
+                return True
+            return False
+        return self._record_scan_rows(Path(root), list(rows))
 
     def handle_scan_finished(self, root: Path, success: bool) -> None:
         if not success or self._current_query is None or self._active_root is None:
@@ -467,54 +611,90 @@ class GalleryCollectionStore:
         self._pending_scan_refresh = True
         if self._visible_range is not None:
             first, last = self._visible_range
-            self._reload_window_for_visible_range(first, last, emit_signals=True)
+            self._reload_window_for_visible_range(
+                first,
+                last,
+                emit_signals=True,
+                emit_source_changed=True,
+            )
 
-    def _flush_pending_scan_refresh(self) -> None:
+    def flush_pending_scan_refresh(self) -> None:
+        """Refresh the visible window after recorded scan/backfill rows."""
+
         if not self._pending_scan_refresh or self._current_query is None:
             self._pending_scan_refresh = False
             self._pending_scan_rels.clear()
             self._pending_scan_sort_keys.clear()
             return
         if self._visible_range is None:
-            self._pending_scan_refresh = False
-            self._pending_scan_rels.clear()
-            self._pending_scan_sort_keys.clear()
-            return
-        first, last = self._visible_range
-        if first != 0 and not self._pending_scan_affects_visible_window(first, last):
-            return
-        self._reload_window_for_visible_range(first, last, emit_signals=True)
+            first = 0
+            last = max(0, self.INITIAL_VISIBLE_ROWS - 1)
+        else:
+            first, last = self._visible_range
+            if first != 0 and not self._pending_scan_affects_visible_window(first, last):
+                return
+        self._reload_window_for_visible_range(
+            first,
+            last,
+            emit_signals=True,
+            emit_source_changed=True,
+        )
 
     def _load_initial_window(self) -> None:
         visible_last = max(0, self.INITIAL_VISIBLE_ROWS - 1)
         self._visible_range = (0, visible_last)
         self._reload_window_for_visible_range(0, visible_last, emit_signals=False)
 
-    def _reload_window_for_visible_range(self, first: int, last: int, *, emit_signals: bool) -> None:
+    def _reload_window_for_visible_range(
+        self,
+        first: int,
+        last: int,
+        *,
+        emit_signals: bool,
+        emit_source_changed: bool = False,
+    ) -> None:
         if self._current_query is None:
             return
+        request_generation = self._request_generation + 1
+        self._request_generation = request_generation
 
-        count_query = self._count_query(self._current_query)
-        if self._asset_query_service is None:
-            new_total = 0
-        else:
-            new_total = self._asset_query_service.count_query_assets(count_query)
+        fetch_result = self._fetch_window_for_visible_range(first, last)
+        new_total = fetch_result[0]
         if new_total <= 0:
-            old_total = self._total_count
-            self._reset_window_state()
-            if emit_signals and old_total != 0:
-                self.count_changed.emit(old_total, 0)
-                self.data_changed.emit()
-            return
+            queued_backfill = self._request_visible_thumbnail_backfill(first, last)
+            if new_total <= 0:
+                old_total = self._total_count
+                if queued_backfill > 0 or self._thumbnail_backfill_pending:
+                    self._row_cache.clear()
+                    self._total_count = 0
+                    self._window_range = None
+                    self._visible_range = (first, last)
+                    self._pinned_row = None
+                else:
+                    self._reset_window_state()
+                if emit_signals and old_total != 0:
+                    self.count_changed.emit(old_total, 0)
+                    self.data_changed.emit()
+                return
 
         first = max(0, min(first, new_total - 1))
         last = max(first, min(last, new_total - 1))
-        window_first, window_last = self._compute_target_window(first, last, new_total)
-        fetched_rows = self._fetch_rows(window_first, window_last)
+        _new_total, window_first, window_last, fetched_rows, collection_revision = fetch_result
+        if window_last < window_first:
+            window_first, window_last = self._compute_target_window(first, last, new_total)
+        if request_generation != self._request_generation:
+            return
 
         old_total = self._total_count
         previous_cache = self._row_cache
         new_cache = dict(fetched_rows)
+        pending_insertions = (
+            self._pending_insertions_for_query(self._current_query, new_cache.values())
+            if self._current_query is not None
+            else []
+        )
+        for offset, dto in enumerate(pending_insertions):
+            new_cache[new_total - len(pending_insertions) + offset] = dto
 
         pinned_row = self._pinned_row
         if pinned_row is not None and pinned_row not in new_cache and 0 <= pinned_row < new_total:
@@ -531,14 +711,144 @@ class GalleryCollectionStore:
         self._pending_scan_refresh = False
         self._pending_scan_rels.clear()
         self._pending_scan_sort_keys.clear()
+        self._collection_revision = max(self._collection_revision + 1, collection_revision)
 
         if emit_signals:
             if old_total != new_total:
                 self.count_changed.emit(old_total, new_total)
+                emit_source_changed = True
+            if emit_source_changed:
+                self.data_changed.emit()
             self.window_changed.emit(window_first, window_last)
             if pinned_row is not None and pinned_row not in fetched_rows and pinned_row in self._row_cache:
                 self.window_changed.emit(pinned_row, pinned_row)
-            self.data_changed.emit()
+
+        if self._request_visible_thumbnail_backfill(first, last) > 0:
+            self._pending_scan_refresh = True
+
+    def flush_pending_thumbnail_backfill(self) -> bool:
+        """Reload the visible window after queued stale thumbnail backfill work."""
+
+        if not self._thumbnail_backfill_pending:
+            return False
+        if self._visible_range is None or self._current_query is None:
+            self._thumbnail_backfill_pending = False
+            return False
+        first, last = self._visible_range
+        self._reload_window_for_visible_range(
+            first,
+            last,
+            emit_signals=True,
+            emit_source_changed=True,
+        )
+        pending_check = getattr(self._asset_query_service, "thumbnail_backfill_pending", None)
+        still_pending = bool(pending_check()) if callable(pending_check) else False
+        if not still_pending:
+            self._thumbnail_backfill_pending = False
+        return still_pending
+
+    def _fetch_window_for_visible_range(
+        self,
+        first: int,
+        last: int,
+    ) -> tuple[int, int, int, Dict[int, AssetDTO], int]:
+        if self._current_query is None:
+            return 0, 0, -1, {}, self._collection_revision
+
+        active_root = self._active_root or self._library_root
+        if active_root is None or self._asset_query_service is None:
+            return 0, 0, -1, {}, self._collection_revision
+
+        read_window = getattr(self._asset_query_service, "read_query_asset_window", None)
+        if callable(read_window):
+            window_first, window_limit = self._compute_target_window_unbounded(first, last)
+            raw_window_first = self._pending_adjusted_raw_offset_for_view_offset(
+                self._current_query,
+                window_first,
+            )
+            try:
+                window = read_window(
+                    active_root,
+                    self._current_query,
+                    raw_window_first,
+                    window_limit,
+                )
+            except Exception as exc:
+                emit_perf_event(
+                    "gallery_window_fetch_failed",
+                    first=window_first,
+                    last=window_first + max(0, window_limit) - 1,
+                    error=type(exc).__name__,
+                )
+                return self._total_count, window_first, window_first + max(0, window_limit) - 1, {}, self._collection_revision
+            pending_source_count = self._pending_source_count_for_query(
+                self._current_query
+            )
+            extra_limit = pending_source_count if pending_source_count > 0 else 0
+            if extra_limit > 0:
+                try:
+                    window = read_window(
+                        active_root,
+                        self._current_query,
+                        raw_window_first,
+                        window_limit + extra_limit,
+                    )
+                except Exception:
+                    pass
+            rows = self._rows_to_dtos(window_first, window.rows)
+            total_count = self._pending_adjusted_total_count(
+                window.total_count,
+                self._current_query,
+                rows.values(),
+            )
+            fetched_last = window_first + len(window.rows) - 1
+            if not rows and window.total_count > 0:
+                fetched_last = window_first + max(0, window_limit) - 1
+            return (
+                total_count,
+                window_first,
+                min(max(window_first, fetched_last), max(0, total_count - 1)),
+                rows,
+                window.collection_revision,
+            )
+
+        count_query = self._count_query(self._current_query)
+        new_total = self._pending_adjusted_total_count(
+            self._asset_query_service.count_query_assets(count_query),
+            count_query,
+            (),
+        )
+        if new_total <= 0:
+            return 0, 0, -1, {}, self._collection_revision
+        bounded_first = max(0, min(first, new_total - 1))
+        bounded_last = max(bounded_first, min(last, new_total - 1))
+        window_first, window_last = self._compute_target_window(
+            bounded_first,
+            bounded_last,
+            new_total,
+        )
+        return (
+            new_total,
+            window_first,
+            window_last,
+            self._fetch_rows(window_first, window_last),
+            self._collection_revision + 1,
+        )
+
+    def _compute_target_window_unbounded(self, first: int, last: int) -> tuple[int, int]:
+        first = max(0, first)
+        last = max(first, last)
+        visible_count = max(1, last - first + 1)
+        target_size = min(
+            self.MAX_WINDOW_SIZE,
+            max(self.MIN_WINDOW_SIZE, visible_count * self.WINDOW_MULTIPLIER),
+        )
+        if visible_count >= target_size:
+            return first, target_size
+
+        lookbehind = visible_count * self.LOOKBEHIND_SCREENS
+        window_first = max(0, first - lookbehind)
+        return window_first, target_size
 
     def _compute_target_window(self, first: int, last: int, total_count: int) -> tuple[int, int]:
         visible_count = max(1, last - first + 1)
@@ -546,6 +856,13 @@ class GalleryCollectionStore:
             self.MAX_WINDOW_SIZE,
             max(self.MIN_WINDOW_SIZE, visible_count * self.WINDOW_MULTIPLIER),
         )
+        if visible_count >= target_size:
+            window_first = max(0, min(first, total_count - 1))
+            window_last = min(total_count - 1, window_first + target_size - 1)
+            if window_last - window_first + 1 < target_size:
+                window_first = max(0, window_last - target_size + 1)
+            return window_first, window_last
+
         lookbehind = visible_count * self.LOOKBEHIND_SCREENS
         lookahead = visible_count * self.LOOKAHEAD_SCREENS
 
@@ -559,6 +876,8 @@ class GalleryCollectionStore:
             deficit -= extend_ahead
             if deficit > 0:
                 window_first = max(0, window_first - deficit)
+        if window_last - window_first + 1 > self.MAX_WINDOW_SIZE:
+            window_last = min(total_count - 1, window_first + self.MAX_WINDOW_SIZE - 1)
         return window_first, window_last
 
     def _window_needs_reload(self, first: int, last: int) -> bool:
@@ -587,26 +906,69 @@ class GalleryCollectionStore:
         if self._current_query is None or last < first:
             return {}
 
-        query = self._slice_query(self._current_query, first, last - first + 1)
+        pending_source_count = self._pending_source_count_for_query(self._current_query)
+        raw_first = self._pending_adjusted_raw_offset_for_view_offset(
+            self._current_query,
+            first,
+        )
+        query = self._slice_query(
+            self._current_query,
+            raw_first,
+            last - first + 1 + pending_source_count,
+        )
         validate_paths = self._should_validate_paths(self._current_query)
         rows: Dict[int, AssetDTO] = {}
         active_root = self._active_root or self._library_root
         if active_root is None or self._asset_query_service is None:
             return {}
-        for offset, row in enumerate(
-            self._asset_query_service.read_query_asset_rows(active_root, query)
-        ):
-            row_index = first + offset
+        try:
+            rows = self._rows_to_dtos(
+                first,
+                self._asset_query_service.read_query_asset_rows(active_root, query),
+                active_root=active_root,
+                validate_paths=validate_paths,
+            )
+        except Exception as exc:
+            emit_perf_event(
+                "gallery_window_fetch_failed",
+                first=first,
+                last=last,
+                error=type(exc).__name__,
+            )
+            return {}
+        return rows
+
+    def _rows_to_dtos(
+        self,
+        first: int,
+        raw_rows: Iterable[dict],
+        *,
+        active_root: Path | None = None,
+        validate_paths: bool | None = None,
+    ) -> Dict[int, AssetDTO]:
+        rows: Dict[int, AssetDTO] = {}
+        root = active_root or self._active_root or self._library_root
+        if root is None:
+            return rows
+        if validate_paths is None:
+            validate_paths = (
+                self._current_query is not None
+                and self._should_validate_paths(self._current_query)
+            )
+        for offset, row in enumerate(raw_rows):
             view_rel = row.get("rel") if isinstance(row, dict) else None
             if not isinstance(view_rel, str) or not view_rel:
                 continue
             if self._scan_row_is_thumbnail(view_rel, row):
                 continue
-            dto = self._scan_row_to_dto(active_root, view_rel, row)
+            dto = self._scan_row_to_dto(root, view_rel, row)
             if dto is None:
                 continue
             if validate_paths and not self._path_exists_cached(dto.abs_path):
                 continue
+            if self._dto_matches_pending_source(dto):
+                continue
+            row_index = first + len(rows)
             rows[row_index] = dto
         return rows
 
@@ -615,6 +977,39 @@ class GalleryCollectionStore:
             return None
         fetched = self._fetch_rows(row, row)
         return fetched.get(row)
+
+    def _request_visible_thumbnail_backfill(self, first: int, last: int) -> int:
+        if self._current_query is None or self._asset_query_service is None:
+            return 0
+        active_root = self._active_root or self._library_root
+        if active_root is None:
+            return 0
+        window_first, window_limit = self._compute_target_window_unbounded(first, last)
+        request_key = (window_first, window_limit)
+        window_end = window_first + window_limit
+        for requested_first, requested_limit in self._thumbnail_backfill_windows:
+            if requested_first <= window_first and requested_first + requested_limit >= window_end:
+                return 0
+        if request_key in self._thumbnail_backfill_windows:
+            return 0
+        request_backfill = getattr(self._asset_query_service, "request_thumbnail_backfill", None)
+        if not callable(request_backfill):
+            return 0
+        self._thumbnail_backfill_windows.add(request_key)
+        try:
+            queued = int(request_backfill(active_root, self._current_query, window_first, window_limit) or 0)
+            if queued > 0:
+                self._thumbnail_backfill_pending = True
+                self.thumbnail_backfill_scheduled.emit()
+            return queued
+        except Exception as exc:
+            emit_perf_event(
+                "gallery_thumbnail_backfill_failed",
+                first=window_first,
+                limit=window_limit,
+                error=type(exc).__name__,
+            )
+            return 0
 
     def _ensure_row_loaded(self, row: int, *, emit_signals: bool) -> None:
         if row in self._row_cache:
@@ -650,8 +1045,6 @@ class GalleryCollectionStore:
                 raw_rel,
                 scan_root_resolved,
                 view_root_resolved,
-                is_scan_parent=is_scan_parent,
-                is_scan_child=is_scan_child,
             )
             if view_rel:
                 mapped.append((view_rel, row))
@@ -732,26 +1125,39 @@ class GalleryCollectionStore:
         raw_rel: str,
         scan_root: Path,
         view_root: Path,
-        *,
-        is_scan_parent: bool,
-        is_scan_child: bool,
     ) -> Optional[str]:
-        if scan_root == view_root:
-            return raw_rel
-        if is_scan_parent:
-            full_path = scan_root / raw_rel
+        for candidate in self._scan_row_abs_path_candidates(raw_rel, scan_root):
             try:
-                return full_path.relative_to(view_root).as_posix()
-            except (OSError, ValueError):
-                return None
-        if is_scan_child:
-            try:
-                prefix = scan_root.relative_to(view_root).as_posix()
+                return candidate.relative_to(view_root).as_posix()
             except ValueError:
-                return None
-            prefix_slash = f"{prefix}/" if prefix else ""
-            return f"{prefix_slash}{raw_rel}" if prefix_slash else raw_rel
+                continue
         return None
+
+    def _scan_row_abs_path_candidates(
+        self,
+        raw_rel: str,
+        scan_root: Path,
+    ) -> list[Path]:
+        candidates: list[Path] = []
+        if self._library_root is not None:
+            library_candidate = self._library_root.resolve() / raw_rel
+            scan_candidate = scan_root / raw_rel
+            if _path_is_relative_to(library_candidate, scan_root):
+                candidates.extend([library_candidate, scan_candidate])
+            else:
+                candidates.extend([scan_candidate, library_candidate])
+        else:
+            candidates.append(scan_root / raw_rel)
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = os.path.normcase(str(candidate))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
 
     def _geotagged_asset_to_dto(self, asset: object, library_root: Path) -> Optional[AssetDTO]:
         return _geotagged_asset_to_dto_fn(asset, library_root)
@@ -771,6 +1177,10 @@ class GalleryCollectionStore:
             resolved = path
         return os.path.normcase(str(resolved))
 
+    @staticmethod
+    def _normalize_rel_key(path: Path) -> str:
+        return os.path.normcase(Path(path).as_posix())
+
     def _resolve_abs_path(self, rel_path: Path) -> Path:
         return _resolve_abs_path_fn(rel_path, self._library_root)
 
@@ -789,6 +1199,156 @@ class GalleryCollectionStore:
     def _should_include_pending(self, pending: _PendingMove, query: AssetQuery) -> bool:
         return _should_include_pending_fn(pending, query)
 
+    def _pending_source_matches_query(self, pending: _PendingMove, query: AssetQuery) -> bool:
+        return _pending_source_matches_query_fn(pending, query)
+
+    def _pending_source_count_for_query(self, query: AssetQuery) -> int:
+        return sum(
+            1
+            for pending in self._pending_moves
+            if self._pending_source_matches_query(pending, query)
+        )
+
+    def _pending_source_rows_for_query(self, query: AssetQuery) -> list[int]:
+        if self._asset_query_service is None or not self._pending_moves:
+            return []
+        find_row_by_path = getattr(self._asset_query_service, "find_row_by_path", None)
+        if not callable(find_row_by_path):
+            return []
+        rows: list[int] = []
+        for pending in self._pending_moves:
+            if not self._pending_source_matches_query(pending, query):
+                continue
+            raw_row = find_row_by_path(query, pending.source_abs)
+            if raw_row is None:
+                raw_row = find_row_by_path(query, pending.source_library_rel)
+            if raw_row is not None:
+                rows.append(int(raw_row))
+        return sorted(set(rows))
+
+    def _pending_adjusted_raw_offset_for_view_offset(
+        self,
+        query: AssetQuery,
+        view_offset: int,
+    ) -> int:
+        raw_offset = max(0, int(view_offset))
+        for source_row in self._pending_source_rows_for_query(query):
+            if source_row <= raw_offset:
+                raw_offset += 1
+                continue
+            break
+        return raw_offset
+
+    def _pending_adjusted_view_row_for_raw_row(
+        self,
+        query: AssetQuery,
+        raw_row: int,
+    ) -> int:
+        hidden_before = sum(
+            1
+            for source_row in self._pending_source_rows_for_query(query)
+            if source_row < raw_row
+        )
+        return max(0, int(raw_row) - hidden_before)
+
+    def _pending_adjusted_total_count(
+        self,
+        raw_total_count: int,
+        query: AssetQuery,
+        existing_rows: Iterable[AssetDTO],
+    ) -> int:
+        pending_sources = self._pending_source_count_for_query(query)
+        pending_insertions = len(
+            self._pending_insertions_for_query(query, existing_rows)
+        )
+        return max(0, int(raw_total_count) - pending_sources) + pending_insertions
+
+    def _pending_insertions_for_query(
+        self,
+        query: AssetQuery,
+        existing_rows: Iterable[AssetDTO],
+    ) -> list[AssetDTO]:
+        if not self._pending_moves:
+            return []
+        existing_keys: set[str] = set()
+        for dto in existing_rows:
+            existing_keys.update(self._dto_destination_keys(dto, include_id=True))
+        inserted: list[AssetDTO] = []
+        for pending in self._pending_moves:
+            if not self._should_include_pending(pending, query):
+                continue
+            dto = pending.dto
+            pending_keys = self._pending_destination_keys(pending, include_id=True)
+            if existing_keys.intersection(pending_keys):
+                continue
+            inserted.append(dto)
+            existing_keys.update(pending_keys)
+        return inserted
+
+    def _dto_matches_pending_source(self, dto: AssetDTO) -> bool:
+        if not self._pending_paths:
+            return False
+        dto_abs_key = self._normalize_abs_key(dto.abs_path)
+        dto_rel_key = self._normalize_rel_key(self._rel_path_for_abs(dto.abs_path))
+        dto_fallback_rel_key = self._normalize_rel_key(dto.rel_path)
+        dto_id = str(dto.id) if dto.id else None
+        return any(
+            not self._dto_matches_pending_destination(dto, pending)
+            and (
+                dto_abs_key == self._normalize_abs_key(pending.source_abs)
+                or dto_rel_key == self._normalize_rel_key(pending.source_library_rel)
+                or dto_fallback_rel_key == self._normalize_rel_key(
+                    pending.source_library_rel
+                )
+                or (
+                    dto_id is not None
+                    and pending.source_id is not None
+                    and dto_id == pending.source_id
+                )
+            )
+            for pending in self._pending_moves
+        )
+
+    def _dto_matches_pending_destination(
+        self,
+        dto: AssetDTO,
+        pending: _PendingMove,
+    ) -> bool:
+        return bool(
+            self._dto_destination_keys(dto).intersection(
+                self._pending_destination_keys(pending)
+            )
+        )
+
+    def _dto_destination_keys(
+        self,
+        dto: AssetDTO,
+        *,
+        include_id: bool = False,
+    ) -> set[str]:
+        keys = {
+            f"abs:{self._normalize_abs_key(dto.abs_path)}",
+            f"rel:{self._normalize_rel_key(self._rel_path_for_abs(dto.abs_path))}",
+            f"rel:{self._normalize_rel_key(dto.rel_path)}",
+        }
+        if include_id and dto.id:
+            keys.add(f"id:{dto.id}")
+        return keys
+
+    def _pending_destination_keys(
+        self,
+        pending: _PendingMove,
+        *,
+        include_id: bool = False,
+    ) -> set[str]:
+        keys = {
+            f"abs:{self._normalize_abs_key(pending.destination_abs)}",
+            f"rel:{self._normalize_rel_key(pending.destination_rel)}",
+        }
+        if include_id and pending.dto.id:
+            keys.add(f"id:{pending.dto.id}")
+        return keys
+
     def _album_path_for_root(self, root: Path) -> str:
         if self._library_root is None:
             return root.name
@@ -800,6 +1360,12 @@ class GalleryCollectionStore:
             except ValueError:
                 return root.name
         return rel.as_posix()
+
+    @staticmethod
+    def _album_path_for_rel(rel_path: Path) -> str:
+        parent = rel_path.parent
+        rel = parent.as_posix()
+        return "" if rel == "." else rel
 
     def _rel_path_for_abs(self, path: Path) -> Path:
         if self._library_root is None:
@@ -831,15 +1397,20 @@ class GalleryCollectionStore:
     def _iter_cached_rows(self) -> List[tuple[int, AssetDTO]]:
         return sorted(self._row_cache.items(), key=lambda item: item[0])
 
-    def _reset_window_state(self) -> None:
+    def _reset_window_state(self, *, clear_pending: bool = False) -> None:
         self._row_cache.clear()
         self._total_count = 0
         self._window_range = None
         self._visible_range = None
         self._pinned_row = None
         self._path_cache.clear()
-        self._pending_moves.clear()
-        self._pending_paths.clear()
+        if clear_pending:
+            self._pending_moves.clear()
+            self._pending_paths.clear()
         self._pending_scan_refresh = False
         self._pending_scan_rels.clear()
         self._pending_scan_sort_keys.clear()
+        self._thumbnail_backfill_windows.clear()
+        self._thumbnail_backfill_pending = False
+        self._collection_revision += 1
+        self._request_generation += 1

@@ -14,6 +14,7 @@ class _CollectionReader(Protocol):
 
     def count(self) -> int: ...
     def asset_at(self, row: int): ...
+    def ensure_row_loaded(self, row: int, *, emit_signals: bool = True) -> bool: ...
     def row_for_path(self, path: Path) -> int | None: ...
 
 
@@ -46,6 +47,11 @@ class MediaSelectionSession:
         if row < 0 or row >= self._collection.count():
             return None
         dto = self._collection.asset_at(row)
+        if dto is None:
+            ensure_row_loaded = getattr(self._collection, "ensure_row_loaded", None)
+            if callable(ensure_row_loaded):
+                ensure_row_loaded(row)
+                dto = self._collection.asset_at(row)
         if dto is None:
             return None
         self._current_row = row

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
 
@@ -16,6 +17,25 @@ from .session_service_resolver import bound_asset_operation_service
 if TYPE_CHECKING:
     from ...library.runtime_controller import LibraryRuntimeController
     from .asset_move_service import AssetMoveService
+
+
+@dataclass(frozen=True)
+class RestoreBatch:
+    """One submitted restore group with its resolved destination album."""
+
+    sources: list[Path]
+    destination_root: Path
+
+
+@dataclass(frozen=True)
+class RestoreScheduleResult:
+    """Result returned after restore planning and task submission."""
+
+    batches: list[RestoreBatch] = field(default_factory=list)
+
+    @property
+    def scheduled(self) -> bool:
+        return bool(self.batches)
 
 
 class RestorationService(QObject):
@@ -41,24 +61,29 @@ class RestorationService(QObject):
     def restore_assets(self, sources: Iterable[Path]) -> bool:
         """Return ``True`` when at least one trashed asset restore is scheduled."""
 
+        return self.restore_assets_with_plan(sources).scheduled
+
+    def restore_assets_with_plan(self, sources: Iterable[Path]) -> RestoreScheduleResult:
+        """Schedule restores and return the accepted source/destination groups."""
+
         requested_sources = list(sources)
         if not requested_sources:
-            return False
+            return RestoreScheduleResult()
 
         library = self._library_manager_getter()
         if library is None:
             self.errorRaised.emit("Basic Library has not been configured.")
-            return False
+            return RestoreScheduleResult()
 
         library_root = library.root()
         if library_root is None:
             self.errorRaised.emit("Basic Library has not been configured.")
-            return False
+            return RestoreScheduleResult()
 
         trash_root = library.deleted_directory()
         if trash_root is None:
             self.errorRaised.emit("Recently Deleted folder is unavailable.")
-            return False
+            return RestoreScheduleResult()
 
         model_provider = self._model_provider_getter()
         model = model_provider() if model_provider else None
@@ -72,7 +97,7 @@ class RestorationService(QObject):
             operation_service = self._operation_service(library, library_root)
         except RuntimeError as exc:
             self.errorRaised.emit(str(exc))
-            return False
+            return RestoreScheduleResult()
         restore_plan = operation_service.plan_restore_request(
             requested_sources,
             trash_root=trash_root,
@@ -83,12 +108,19 @@ class RestorationService(QObject):
         for message in restore_plan.errors:
             self.errorRaised.emit(message)
 
-        scheduled_restore = False
+        submitted_batches: list[RestoreBatch] = []
         for batch in restore_plan.batches:
+            if batch.destination_root is None:
+                continue
             if self._submit_batch(batch):
-                scheduled_restore = True
+                submitted_batches.append(
+                    RestoreBatch(
+                        sources=list(batch.sources),
+                        destination_root=Path(batch.destination_root),
+                    )
+                )
 
-        return scheduled_restore
+        return RestoreScheduleResult(batches=submitted_batches)
 
     def _submit_batch(self, batch: AssetMovePlan) -> bool:
         submit_plan = getattr(self._move_service, "submit_plan", None)
@@ -126,4 +158,4 @@ class RestorationService(QObject):
         return candidate.__class__.__module__.startswith("unittest.mock")
 
 
-__all__ = ["RestorationService"]
+__all__ = ["RestorationService", "RestoreBatch", "RestoreScheduleResult"]

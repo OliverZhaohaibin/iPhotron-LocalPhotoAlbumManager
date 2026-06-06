@@ -8,7 +8,7 @@ from typing import Callable, Optional, Set
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QStackedWidget, QWidget
+from PySide6.QtWidgets import QLabel, QStackedWidget, QWidget
 
 from ....application.ports import EditServicePort
 from ....gui.detail_profile import log_detail_profile
@@ -131,6 +131,9 @@ class PlayerViewController(QObject):
         self._image_viewer = image_viewer
         self._video_area = video_area
         self._placeholder = placeholder
+        self._placeholder_default_text = (
+            placeholder.text() if isinstance(placeholder, QLabel) else None
+        )
         self._live_badge = live_badge
         self._edit_service_getter = edit_service_getter
         self._image_viewer_index = player_stack.indexOf(image_viewer)
@@ -193,8 +196,12 @@ class PlayerViewController(QObject):
                 break
             widget = widget.parent()
 
-    def show_placeholder(self) -> None:
+    def show_placeholder(self, message: str | None = None) -> None:
         """Display the placeholder widget and clear any previous image."""
+        if isinstance(self._placeholder, QLabel):
+            self._placeholder.setText(
+                self._placeholder_default_text if message is None else message
+            )
         self._video_area.hide_controls(animate=False)
         self.hide_live_badge()
         if self._player_stack.currentWidget() is not self._placeholder:

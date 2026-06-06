@@ -124,6 +124,9 @@ class LibrarySession:
         return AssignLocationService(self.state, ExifToolLocationMetadataService())
 
     def shutdown(self) -> None:
+        shutdown_queries = getattr(self.asset_queries, "shutdown", None)
+        if callable(shutdown_queries):
+            shutdown_queries()
         bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
         if callable(bind_edit_service):
             bind_edit_service(None)

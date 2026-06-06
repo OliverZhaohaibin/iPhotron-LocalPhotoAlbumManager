@@ -2,27 +2,34 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, Slot
-
-from iPhoto.application.ports import EditServicePort
+from PySide6.QtCore import (
+    QAbstractListModel,
+    QModelIndex,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    Signal as QtSignal,
+    Slot,
+)
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.ports import EditServicePort
 from iPhoto.gui.ui.models.roles import Roles, role_names
+from iPhoto.infrastructure.services.performance_events import emit_perf_event
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 from iPhoto.utils.geocoding import resolve_location_name
 
 from .gallery_collection_store import GalleryCollectionStore
 
 
-_SNAPSHOT_SEPARATOR = b"\x00"
-_SNAPSHOT_NULL_MARKER = b"\xff"
-
-
 class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
+
+    _scan_batch_received = QtSignal(object)
+    thumbnailBackfillProgress = QtSignal(Path, int, int)
 
     def __init__(
         self,
@@ -37,13 +44,31 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._edit_service_getter = edit_service_getter
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
-        self._last_snapshot: Optional[tuple[int, bytes]] = None
+        self._last_snapshot: Optional[tuple[int, Optional[tuple[int, int]], int]] = None
+        self._last_selection_signature: tuple[str, str, str] | None = None
+        self._last_window_identity_signature: tuple[str, ...] | None = None
         self._duration_cache: dict[Path, float] = {}
+        self._pending_prioritize_range: tuple[int, int] | None = None
+        self._pending_scan_batch_count = 0
+        self._backfill_completion_source: Any | None = None
+        self._prioritize_timer = QTimer(self)
+        self._prioritize_timer.setSingleShot(True)
+        self._prioritize_timer.setInterval(16)
+        self._prioritize_timer.timeout.connect(self._flush_pending_prioritize_rows)
+        self._scan_batch_timer = QTimer(self)
+        self._scan_batch_timer.setSingleShot(True)
+        self._scan_batch_timer.setInterval(150)
+        self._scan_batch_timer.timeout.connect(self._flush_pending_scan_batches)
+        self._scan_batch_received.connect(
+            self._enqueue_scan_batch_on_ui_thread,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._store.window_changed.connect(self._on_window_changed)
         self._store.data_changed.connect(self._on_source_changed)
         self._store.row_changed.connect(self._on_row_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
+        self._bind_backfill_completion_signal(self._current_asset_query_service())
 
     @classmethod
     def create(
@@ -89,13 +114,20 @@ class GalleryListModelAdapter(QAbstractListModel):
             return False
 
         asset: Optional[AssetDTO] = self._store.asset_at(row)
+        if asset is None:
+            self._store.ensure_row_loaded(row, emit_signals=False)
+            asset = self._store.asset_at(row)
         if not asset:
             return None
 
         if role_int == Qt.ItemDataRole.DisplayRole:
             return asset.rel_path.name
         if role_int == Qt.DecorationRole:
-            return self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size)
+            return self._thumbnails.get_thumbnail(
+                asset.abs_path,
+                self._thumb_size,
+                priority="visible",
+            )
         if role_int == Qt.ItemDataRole.ToolTipRole:
             return str(asset.abs_path)
 
@@ -183,7 +215,66 @@ class GalleryListModelAdapter(QAbstractListModel):
         return self._store.row_for_path(path)
 
     def prioritize_rows(self, first: int, last: int) -> None:
-        self._store.prioritize_rows(first, last)
+        first = max(0, int(first))
+        last = max(first, int(last))
+        if self._pending_prioritize_range is None:
+            self._pending_prioritize_range = (first, last)
+        else:
+            pending_first, pending_last = self._pending_prioritize_range
+            self._pending_prioritize_range = (
+                min(pending_first, first),
+                max(pending_last, last),
+            )
+        if not self._prioritize_timer.isActive():
+            self._prioritize_timer.start()
+
+    @Slot()
+    def _flush_pending_prioritize_rows(self) -> None:
+        pending = self._pending_prioritize_range
+        self._pending_prioritize_range = None
+        if pending is None:
+            return
+        self._store.prioritize_rows(*pending)
+
+    @Slot(object)
+    def handle_scan_batch(self, batch: object) -> None:
+        """Queue ready scan/backfill batches onto the adapter's Qt thread."""
+
+        if QThread.currentThread() is self.thread():
+            self._enqueue_scan_batch_on_ui_thread(batch)
+        else:
+            self._scan_batch_received.emit(batch)
+
+    @Slot(object)
+    def _enqueue_scan_batch_on_ui_thread(self, batch: object) -> None:
+        record_batch = getattr(self._store, "record_scan_batch", None)
+        if callable(record_batch):
+            if record_batch(batch):
+                self._pending_scan_batch_count += 1
+                if not self._scan_batch_timer.isActive():
+                    self._scan_batch_timer.start()
+            return
+
+        handle_batch = getattr(self._store, "handle_scan_batch", None)
+        if callable(handle_batch):
+            handle_batch(batch)
+
+    @Slot()
+    def _flush_pending_scan_batches(self) -> None:
+        if self._pending_scan_batch_count <= 0:
+            return
+        self._pending_scan_batch_count = 0
+        flush = getattr(self._store, "flush_pending_scan_refresh", None)
+        if callable(flush):
+            flush()
+        else:
+            self._on_source_changed()
+
+    def _schedule_thumbnail_backfill_refresh(self) -> None:
+        """Compatibility no-op for old tests/fakes that emit this signal."""
+
+    def _flush_pending_thumbnail_backfill(self) -> None:
+        """Compatibility no-op after backfill completion became event-driven."""
 
     def pin_row(self, row: int) -> None:
         self._store.pin_row(row)
@@ -194,8 +285,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         library_root: Optional[Path],
     ) -> None:
         self._last_snapshot = None
+        self._last_selection_signature = None
+        self._last_window_identity_signature = None
         self._duration_cache.clear()
         self._store.rebind_asset_query_service(asset_query_service, library_root)
+        self._bind_backfill_completion_signal(asset_query_service)
 
     def invalidate_thumbnail(self, path_str: str) -> None:
         path = Path(path_str)
@@ -233,6 +327,18 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._store.append_dtos(inserted_dtos)
             self.endInsertRows()
         return bool(removed_rows or inserted_dtos)
+
+    def clear_pending_moves_for_paths(self, paths: list[Path]) -> bool:
+        changed = self._store.clear_pending_moves_for_paths(paths)
+        if changed:
+            self._store.reload_current_selection()
+        return changed
+
+    def rollback_pending_moves(self) -> bool:
+        changed = self._store.clear_all_pending_moves()
+        if changed:
+            self._store.reload_current_selection()
+        return changed
 
     def removeRows(self, row: int, count: int, parent: QModelIndex = QModelIndex()) -> bool:  # type: ignore[override]
         if count <= 0 or row < 0:
@@ -295,27 +401,121 @@ class GalleryListModelAdapter(QAbstractListModel):
         group_id = metadata.get("live_photo_group_id")
         if not group_id:
             return None, None
-        for row in range(self._store.count()):
-            candidate = self._store.asset_at(row)
-            if candidate is None or not candidate.is_video:
-                continue
-            candidate_group = (candidate.metadata or {}).get("live_photo_group_id")
-            if candidate_group == group_id:
-                return candidate.rel_path, candidate.abs_path
+        partner = self._store.live_partner_for(asset.id, self._store.library_root())
+        if partner is not None and partner.is_video:
+            return partner.rel_path, partner.abs_path
         return None, None
 
     def _on_source_changed(self) -> None:
         count = self._store.count()
-        current_hash = self._snapshot_hash(count)
-        current_snapshot = (count, current_hash)
-        if self._last_snapshot == current_snapshot:
+        current_snapshot = self._store.snapshot_signature()
+        current_selection_signature = self._selection_signature()
+        current_window_identity = self._window_identity_signature(current_snapshot[1])
+        if (
+            self._last_snapshot == current_snapshot
+            and self._last_selection_signature == current_selection_signature
+            and self._last_window_identity_signature == current_window_identity
+        ):
             return
         self._duration_cache.clear()
+        old_snapshot = self._last_snapshot
+        old_selection_signature = self._last_selection_signature
+        old_window_identity = self._last_window_identity_signature
+        self._last_snapshot = current_snapshot
+        self._last_selection_signature = current_selection_signature
+        self._last_window_identity_signature = current_window_identity
+        if (
+            old_snapshot is not None
+            and old_selection_signature == current_selection_signature
+            and old_window_identity == current_window_identity
+            and old_snapshot[0] == count
+        ):
+            self._emit_data_refresh(old_snapshot[1], current_snapshot[1])
+            if self._current_row >= count:
+                self._current_row = -1
+            return
+        emit_perf_event(
+            "gallery_model_reset",
+            rows=count,
+            window=current_snapshot[1],
+            collection_revision=current_snapshot[2],
+        )
         self.beginResetModel()
         self.endResetModel()
-        self._last_snapshot = current_snapshot
         if self._current_row >= count:
             self._current_row = -1
+
+    def _emit_data_refresh(
+        self,
+        previous_window: Optional[tuple[int, int]],
+        current_window: Optional[tuple[int, int]],
+    ) -> None:
+        count = self.rowCount()
+        if count <= 0:
+            return
+        windows = [
+            window
+            for window in (previous_window, current_window)
+            if window is not None
+        ]
+        if windows:
+            first = min(window[0] for window in windows)
+            last = max(window[1] for window in windows)
+        else:
+            first = 0
+            last = count - 1
+        first = max(0, min(first, count - 1))
+        last = max(first, min(last, count - 1))
+        emit_perf_event(
+            "gallery_model_data_refresh",
+            rows=count,
+            first=first,
+            last=last,
+        )
+        top = self.index(first, 0)
+        bottom = self.index(last, 0)
+        if top.isValid() and bottom.isValid():
+            self.dataChanged.emit(top, bottom, [])
+
+    def _window_identity_signature(
+        self,
+        window: Optional[tuple[int, int]],
+    ) -> tuple[str, ...] | None:
+        count = self.rowCount()
+        if count <= 0:
+            return ()
+        if window is None:
+            return None
+        first = max(0, min(window[0], count - 1))
+        last = max(first, min(window[1], count - 1))
+        identity: list[str] = []
+        for row in range(first, last + 1):
+            asset = self._store.asset_at(row)
+            if asset is None:
+                return None
+            key = (
+                getattr(asset, "id", None)
+                or getattr(asset, "abs_path", None)
+                or getattr(asset, "rel_path", None)
+            )
+            if key is None:
+                return None
+            identity.append(str(key))
+        return tuple(identity)
+
+    def _selection_signature(self) -> tuple[str, str, str]:
+        active_root = getattr(self._store, "active_root", lambda: None)()
+        current_query = getattr(self._store, "current_query", lambda: None)()
+        current_direct = getattr(self._store, "current_direct_assets", lambda: None)()
+        direct_key = ""
+        if current_direct is not None:
+            direct_key = repr(
+                [
+                    str(getattr(asset, "abs_path", None) or getattr(asset, "path", ""))
+                    for asset in current_direct
+                ]
+            )
+        return (str(active_root), repr(current_query), direct_key)
 
     def _on_window_changed(self, first: int, last: int) -> None:
         count = self.rowCount()
@@ -345,16 +545,57 @@ class GalleryListModelAdapter(QAbstractListModel):
                 [Roles.FEATURED, Roles.INFO, Roles.LOCATION, Roles.SIZE],
             )
 
+    def _current_asset_query_service(self) -> Any | None:
+        return getattr(self._store, "asset_query_service", None)
+
+    def _bind_backfill_completion_signal(self, asset_query_service: Any | None) -> None:
+        if asset_query_service is self._backfill_completion_source:
+            return
+
+        old_signal = getattr(
+            self._backfill_completion_source,
+            "thumbnail_backfill_completed",
+            None,
+        )
+        old_disconnect = getattr(old_signal, "disconnect", None)
+        if callable(old_disconnect):
+            try:
+                old_disconnect(self.handle_scan_batch)
+            except (RuntimeError, TypeError, ValueError):
+                pass
+        old_progress = getattr(
+            self._backfill_completion_source,
+            "thumbnail_backfill_progress",
+            None,
+        )
+        old_progress_disconnect = getattr(old_progress, "disconnect", None)
+        if callable(old_progress_disconnect):
+            try:
+                old_progress_disconnect(self._handle_thumbnail_backfill_progress)
+            except (RuntimeError, TypeError, ValueError):
+                pass
+
+        self._backfill_completion_source = asset_query_service
+        new_signal = getattr(asset_query_service, "thumbnail_backfill_completed", None)
+        new_connect = getattr(new_signal, "connect", None)
+        if callable(new_connect):
+            new_connect(self.handle_scan_batch)
+        new_progress = getattr(asset_query_service, "thumbnail_backfill_progress", None)
+        new_progress_connect = getattr(new_progress, "connect", None)
+        if callable(new_progress_connect):
+            new_progress_connect(self._handle_thumbnail_backfill_progress)
+
+    def _handle_thumbnail_backfill_progress(
+        self,
+        root: Path,
+        current: int,
+        total: int,
+    ) -> None:
+        self.thumbnailBackfillProgress.emit(Path(root), int(current), int(total))
+
     def _snapshot_hash(self, count: int) -> bytes:
-        digest = hashlib.blake2b(digest_size=16)
-        for row in range(count):
-            asset = self._store.asset_at(row)
-            if asset is None:
-                digest.update(_SNAPSHOT_NULL_MARKER)
-            else:
-                digest.update(self._get_asset_path_bytes(asset))
-            digest.update(_SNAPSHOT_SEPARATOR)
-        return digest.digest()
+        del count
+        return repr(self._store.snapshot_signature()).encode("utf-8")
 
     @staticmethod
     def _get_asset_path_bytes(asset: object) -> bytes:

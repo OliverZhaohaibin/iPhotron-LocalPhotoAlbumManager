@@ -27,6 +27,8 @@ class AssetGrid(QListView):
     previewReleased = Signal()
     previewCancelled = Signal()
     visibleRowsChanged = Signal(int, int)
+    modelAboutToChange = Signal(object)
+    modelChanged = Signal(object)
 
     _DRAG_CANCEL_THRESHOLD = 6
 
@@ -240,6 +242,8 @@ class AssetGrid(QListView):
         self._drop_handler(paths)
 
     def setModel(self, model) -> None:  # type: ignore[override]
+        previous_model = self._model
+        self.modelAboutToChange.emit(previous_model)
         if self._model is not None:
             try:
                 self._model.modelReset.disconnect(self._schedule_visible_rows_update)
@@ -260,6 +264,7 @@ class AssetGrid(QListView):
             model.rowsInserted.connect(self._schedule_visible_rows_update)
             model.rowsRemoved.connect(self._schedule_visible_rows_update)
         self._schedule_visible_rows_update()
+        self.modelChanged.emit(model)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -349,18 +354,10 @@ class AssetGrid(QListView):
         if viewport_rect.isEmpty():
             return
 
-        top_index = self.indexAt(viewport_rect.topLeft())
-        bottom_index = self.indexAt(viewport_rect.bottomRight())
-
-        first = top_index.row()
-        last = bottom_index.row()
-
-        if first == -1 and last == -1:
+        visible_bounds = self._visible_row_bounds(viewport_rect)
+        if visible_bounds is None:
             return
-        if first == -1:
-            first = 0
-        if last == -1:
-            last = row_count - 1
+        first, last = visible_bounds
 
         buffer = 20
         first = max(0, first - buffer)
@@ -374,6 +371,52 @@ class AssetGrid(QListView):
 
         self._visible_range = visible_range
         self.visibleRowsChanged.emit(first, last)
+
+    def _visible_row_bounds(self, viewport_rect) -> Optional[tuple[int, int]]:
+        first = self._find_visible_row(viewport_rect, from_bottom=False)
+        last = self._find_visible_row(viewport_rect, from_bottom=True)
+        if first is None or last is None:
+            return None
+        if first > last:
+            first, last = last, first
+        return first, last
+
+    def _find_visible_row(self, viewport_rect, *, from_bottom: bool) -> Optional[int]:
+        x_positions = self._sample_viewport_x_positions(viewport_rect)
+        top = viewport_rect.top()
+        bottom = viewport_rect.bottom()
+        step = max(1, min(24, max(1, viewport_rect.height()) // 12 or 1))
+        if from_bottom:
+            y_values = range(bottom, top - 1, -step)
+            row_selector = max
+        else:
+            y_values = range(top, bottom + 1, step)
+            row_selector = min
+
+        for y in y_values:
+            rows: list[int] = []
+            for x in x_positions:
+                index = self.indexAt(QPoint(x, y))
+                if index.isValid():
+                    rows.append(index.row())
+            if rows:
+                return row_selector(rows)
+        return None
+
+    @staticmethod
+    def _sample_viewport_x_positions(viewport_rect) -> list[int]:
+        left = viewport_rect.left()
+        right = viewport_rect.right()
+        center = viewport_rect.center().x()
+        width = max(1, viewport_rect.width())
+        candidates = [
+            left,
+            left + width // 4,
+            center,
+            right - width // 4,
+            right,
+        ]
+        return sorted({max(left, min(right, x)) for x in candidates})
 
     def _extract_local_files(self, event: QDropEvent | QDragEnterEvent | QDragMoveEvent) -> List[Path]:
         """Return all unique local file paths advertised by *event*.

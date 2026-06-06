@@ -68,25 +68,20 @@ class ScanCoordinatorMixin:
         
         All scanned assets are written to the global database at the library root.
         """
-        # Prepare signals outside the lock
         signals = ScannerSignals()
-        signals.progressUpdated.connect(self.scanProgress)
-        signals.chunkReady.connect(self._on_scan_chunk)
-        signals.finished.connect(self._on_scan_finished)
-        signals.error.connect(self._on_scan_error)
-        signals.batchFailed.connect(self._on_scan_batch_failed)
 
         # Check if already scanning the same root (thread-safe)
         locker = QMutexLocker(self._scan_buffer_lock)
         if self._current_scanner_worker is not None:
             if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
                 return
-            # Cancel the old scan before starting new one (inline to avoid deadlock)
-            self._current_scanner_worker.cancel()
-            self._current_scanner_worker = None
-            self._live_scan_root = None
+            self._queue_deferred_scan(root, include, exclude)
+            return
         if self._current_face_scanner is not None:
-            self._current_face_scanner.cancel()
+            is_running = getattr(self._current_face_scanner, "isRunning", None)
+            if callable(is_running) and is_running():
+                self._queue_deferred_scan(root, include, exclude)
+                return
             self._current_face_scanner = None
 
         self._live_scan_root = root
@@ -102,6 +97,23 @@ class ScanCoordinatorMixin:
             scan_service=getattr(self, "_scan_service", None),
         )
         self._current_scanner_worker = worker
+        signals.progressUpdated.connect(self.scanProgress)
+        signals.batchCommitted.connect(self._on_scan_batch_committed)
+        signals.finished.connect(
+            lambda emitted_root, rows, scan_worker=worker: self._on_scan_finished(
+                scan_worker,
+                emitted_root,
+                rows,
+            )
+        )
+        signals.error.connect(
+            lambda emitted_root, message, scan_worker=worker: self._on_scan_error(
+                scan_worker,
+                emitted_root,
+                message,
+            )
+        )
+        signals.batchFailed.connect(self._on_scan_batch_failed)
         self._face_scan_status_message = None
         self.faceScanStatusChanged.emit("")
         face_library_root = self._root if self._root is not None else root
@@ -111,7 +123,9 @@ class ScanCoordinatorMixin:
             people_service=getattr(self, "_people_service", None),
         )
         face_worker.statusChanged.connect(self._on_face_scan_status_changed)
-        face_worker.finished.connect(self._on_face_scan_finished)
+        face_worker.finished.connect(
+            lambda face_worker=face_worker: self._on_face_scan_finished(face_worker)
+        )
         self._current_face_scanner = face_worker
         # Release lock before starting the worker
         del locker
@@ -119,18 +133,83 @@ class ScanCoordinatorMixin:
         face_worker.start()
         self._scan_thread_pool.start(worker)
 
-    def stop_scanning(self) -> None:
+    def stop_scanning(self, *, wait: bool = False, timeout_ms: int = 2000) -> None:
         """Cancel the currently running scan, if any."""
         locker = QMutexLocker(self._scan_buffer_lock)
+        scanner_worker = self._current_scanner_worker
+        face_scanner = self._current_face_scanner
         if self._current_scanner_worker:
-            self._current_scanner_worker.cancel()
+            worker = self._current_scanner_worker
+            worker.cancel()
+            cancelled_workers = getattr(self, "_cancelled_scanner_workers", None)
+            if cancelled_workers is not None:
+                cancelled_workers.add(id(worker))
             self._current_scanner_worker = None
             # We don't clear the buffer immediately on stop, as the UI might still need it
             # until a new scan starts or the app closes. Setting root to None invalidates it contextually.
             self._live_scan_root = None
+        deferred_queue = getattr(self, "_deferred_scan_queue", None)
+        if deferred_queue is not None:
+            deferred_queue.clear()
         if self._current_face_scanner is not None:
             self._current_face_scanner.cancel()
             self._current_face_scanner = None
+        del locker
+
+        if wait:
+            self._wait_for_scan_workers(
+                scanner_worker=scanner_worker,
+                face_scanner=face_scanner,
+                timeout_ms=timeout_ms,
+            )
+
+    def _wait_for_scan_workers(
+        self,
+        *,
+        scanner_worker: ScannerWorker | None,
+        face_scanner: FaceScanWorker | None,
+        timeout_ms: int,
+    ) -> None:
+        """Best-effort bounded wait for cancelled scan workers during teardown."""
+
+        if face_scanner is not None:
+            wait = getattr(face_scanner, "wait", None)
+            if callable(wait):
+                try:
+                    wait(timeout_ms)
+                except RuntimeError:
+                    LOGGER.debug("Face scanner wait failed during teardown", exc_info=True)
+            is_running = getattr(face_scanner, "isRunning", None)
+            if callable(is_running):
+                try:
+                    if is_running():
+                        LOGGER.warning(
+                            "Face scan worker did not exit within %d ms after cancel(); "
+                            "detaching without terminate() to avoid DB corruption.",
+                            timeout_ms,
+                        )
+                except RuntimeError:
+                    LOGGER.debug(
+                        "Face scanner state check failed during teardown",
+                        exc_info=True,
+                    )
+
+        if scanner_worker is None:
+            return
+        wait_for_done = getattr(self._scan_thread_pool, "waitForDone", None)
+        if not callable(wait_for_done):
+            return
+        try:
+            completed = wait_for_done(timeout_ms)
+        except RuntimeError:
+            LOGGER.debug("Scanner thread-pool wait failed during teardown", exc_info=True)
+            return
+        if completed is False:
+            LOGGER.warning(
+                "Scanner thread pool did not quiesce within %d ms after cancel(); "
+                "continuing teardown.",
+                timeout_ms,
+            )
 
     def is_scanning_path(self, path: Path) -> bool:
         """Return True if the given path is covered by the active scan."""
@@ -298,72 +377,100 @@ class ScanCoordinatorMixin:
 
         return []
 
-    def _on_scan_chunk(self, root: Path, chunk: List[dict]) -> None:
-        """Handle incoming scan chunks after persistence.
+    def _on_scan_batch_committed(self, batch: object) -> None:
+        """Handle explicit ready-only scan batches after persistence."""
 
-        The scan worker already persists each chunk to disk before this signal is
-        observed. The browsing layer now treats the database as the source of
-        truth, so we only relay the invalidation event here.
-        """
+        rows = getattr(batch, "rows", None)
+        if rows:
+            self.invalidate_geotagged_assets_cache()
+            if self._current_face_scanner is not None:
+                self._current_face_scanner.enqueue_rows(rows)
+        self.scanBatchCommitted.emit(batch)
 
-        if not chunk:
+    def _on_scan_chunk(self, _root: Path, rows: List[dict]) -> None:
+        """Compatibility hook for callers that still relay raw scan chunks."""
+
+        if not rows:
             return
-
         self.invalidate_geotagged_assets_cache()
         if self._current_face_scanner is not None:
-            self._current_face_scanner.enqueue_rows(chunk)
-        self.scanChunkReady.emit(root, chunk)
+            self._current_face_scanner.enqueue_rows(rows)
 
-    def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
-        self.invalidate_geotagged_assets_cache()
-
+    def _on_scan_finished(
+        self,
+        worker: ScannerWorker,
+        root: Path,
+        rows: List[dict],
+    ) -> None:
         # Clear worker reference before downstream listeners react so a completed
         # scan does not still appear in-flight while final post-processing runs.
         locker = QMutexLocker(self._scan_buffer_lock)
-        worker = self._current_scanner_worker
+        if self._current_scanner_worker is not worker:
+            cancelled_workers = getattr(self, "_cancelled_scanner_workers", set())
+            if getattr(worker, "cancelled", False) and id(worker) in cancelled_workers:
+                cancelled_workers.discard(id(worker))
+                del locker
+                self.invalidate_geotagged_assets_cache()
+                self.scanFinished.emit(root, False)
+                return
+            return
         self._current_scanner_worker = None
         face_scanner = self._current_face_scanner
+        self._live_scan_root = None
         del locker
+        self.invalidate_geotagged_assets_cache()
 
-        if worker is None:
-            if self._live_scan_root is None:
-                self.scanFinished.emit(root, True)
-            return
         if face_scanner is not None:
             face_scanner.finish_input()
 
         if worker.cancelled:
-            self.scanFinished.emit(root, True)
+            self.scanFinished.emit(root, False)
+            self._start_next_deferred_scan()
             return
         if worker.failed:
             self.scanFinished.emit(root, False)
+            self._start_next_deferred_scan()
             return
 
         # Persist Live Photo pairings once a scan completes so the database and
         # links.json reflect the latest scan results.
         scan_service = worker.scan_service
         try:
-            scan_service.finalize_scan_result(root, rows, pair_live=False)
+            scan_service.finalize_scan_result(
+                root,
+                rows,
+                pair_live=False,
+                preserve_modified_after_ms=worker.scan_started_at_ms,
+                current_scan_job_id=worker.scan_job_id,
+            )
         except Exception as exc:
             LOGGER.warning("Failed to persist scan finalization for %s: %s", root, exc)
+            self.scanFinished.emit(root, False)
+            self._start_next_deferred_scan()
+            return
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.
         self.scanFinished.emit(root, True)
+        self._start_next_deferred_scan()
 
         # Persist live-photo pairings in the background to avoid blocking the
         # main thread while downstream listeners start refreshing.
         self._scan_thread_pool.start(_PairingWorker(root, scan_service))
 
-    def _on_scan_error(self, root: Path, message: str) -> None:
+    def _on_scan_error(self, worker: ScannerWorker, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)
+        if self._current_scanner_worker is not worker:
+            return
         self._current_scanner_worker = None
         face_scanner = self._current_face_scanner
+        self._live_scan_root = None
         del locker
         if face_scanner is not None:
             face_scanner.finish_input()
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
+        self._start_next_deferred_scan()
 
     def _on_scan_batch_failed(self, root: Path, count: int) -> None:
         """Propagate partial failure notifications to the UI."""
@@ -375,9 +482,41 @@ class ScanCoordinatorMixin:
         except OSError:
             return p1 == p2
 
+    def _queue_deferred_scan(
+        self,
+        root: Path,
+        include: Iterable[str],
+        exclude: Iterable[str],
+    ) -> None:
+        queue = getattr(self, "_deferred_scan_queue", None)
+        if queue is None:
+            queue = []
+            setattr(self, "_deferred_scan_queue", queue)
+        for queued_root, _queued_include, _queued_exclude in queue:
+            if self._paths_equal(queued_root, root):
+                return
+        queue.append((Path(root), list(include), list(exclude)))
+
+    def _start_next_deferred_scan(self) -> None:
+        queue = getattr(self, "_deferred_scan_queue", None)
+        if not queue:
+            return
+        if getattr(self, "_current_scanner_worker", None) is not None:
+            return
+        face_scanner = getattr(self, "_current_face_scanner", None)
+        if face_scanner is not None:
+            is_running = getattr(face_scanner, "isRunning", None)
+            if not callable(is_running) or is_running():
+                return
+            self._current_face_scanner = None
+        root, include, exclude = queue.pop(0)
+        self.start_scanning(root, include, exclude)
+
     def _on_face_scan_status_changed(self, message: str) -> None:
         self._face_scan_status_message = message or None
         self.faceScanStatusChanged.emit(message)
 
-    def _on_face_scan_finished(self) -> None:
-        self._current_face_scanner = None
+    def _on_face_scan_finished(self, worker: FaceScanWorker | None = None) -> None:
+        if worker is None or self._current_face_scanner is worker:
+            self._current_face_scanner = None
+            self._start_next_deferred_scan()

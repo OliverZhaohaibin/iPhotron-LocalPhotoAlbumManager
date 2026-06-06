@@ -5,8 +5,12 @@ SQL queries, particularly for filtering and cursor-based pagination.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from ...config import RECENTLY_DELETED_DIR_NAME
+from ...domain.models.query import CollectionQuery, CollectionType, PageCursor, SortDirection
 
 ESCAPE_CLAUSE = "ESCAPE '\\'"
 
@@ -44,6 +48,7 @@ class QueryBuilder:
 
     # Whitelist of allowed filter modes to prevent injection and logic errors
     _VALID_FILTER_MODES = frozenset({"videos", "live", "favorites"})
+    _COLLECTION_SORT_COLUMNS = frozenset({"sort_ts", "ts", "dt", "id", "rel", "bytes"})
 
     @staticmethod
     def build_filter_clauses(
@@ -238,3 +243,161 @@ class QueryBuilder:
                 params.append(offset)
 
         return query, params
+
+    @staticmethod
+    def build_collection_query(
+        collection_query: CollectionQuery,
+        *,
+        select_clause: str = "SELECT *",
+        cursor: PageCursor | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        include_order: bool = True,
+    ) -> Tuple[str, List[Any]]:
+        """Build a SQL-first collection query with keyset pagination support."""
+
+        where_clauses, params = QueryBuilder.build_collection_where(collection_query)
+
+        if cursor is not None:
+            sort_col = QueryBuilder._collection_sort_column(collection_query)
+            direction = collection_query.sort_direction
+            sort_value = cursor.sort_value
+            if sort_value is None:
+                sort_value = cursor.sort_ts
+            if cursor.asset_rel is None:
+                if direction == SortDirection.ASC:
+                    where_clauses.append(
+                        f"({sort_col} > ? OR ({sort_col} = ? AND id > ?))"
+                    )
+                else:
+                    where_clauses.append(
+                        f"({sort_col} < ? OR ({sort_col} = ? AND id < ?))"
+                    )
+                params.extend([sort_value, sort_value, cursor.asset_id])
+            elif direction == SortDirection.ASC:
+                where_clauses.append(
+                    f"({sort_col} > ? OR ({sort_col} = ? AND "
+                    "(id > ? OR (id = ? AND rel > ?))))"
+                )
+                params.extend(
+                    [
+                        sort_value,
+                        sort_value,
+                        cursor.asset_id,
+                        cursor.asset_id,
+                        cursor.asset_rel,
+                    ]
+                )
+            else:
+                where_clauses.append(
+                    f"({sort_col} < ? OR ({sort_col} = ? AND "
+                    "(id < ? OR (id = ? AND rel < ?))))"
+                )
+                params.extend(
+                    [
+                        sort_value,
+                        sort_value,
+                        cursor.asset_id,
+                        cursor.asset_id,
+                        cursor.asset_rel,
+                    ]
+                )
+
+        query = f"{select_clause} FROM assets"
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+
+        if include_order:
+            query += " " + QueryBuilder.build_collection_order(collection_query)
+
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
+            if offset > 0:
+                query += " OFFSET ?"
+                params.append(max(0, int(offset)))
+
+        return query, params
+
+    @staticmethod
+    def build_collection_where(
+        collection_query: CollectionQuery,
+    ) -> Tuple[List[str], List[Any]]:
+        album_path = collection_query.album_path
+        is_trash_collection = album_path == RECENTLY_DELETED_DIR_NAME
+        where_clauses: List[str] = ["live_role = 0"]
+        if not is_trash_collection:
+            where_clauses.append("is_deleted = 0")
+        params: List[Any] = []
+
+        if collection_query.min_thumbnail_state:
+            where_clauses.append("thumbnail_state = ?")
+            params.append(collection_query.min_thumbnail_state)
+            if collection_query.min_thumbnail_state == "ready":
+                where_clauses.append(
+                    "TRIM(COALESCE(thumb_cache_key, '')) != ''"
+                )
+
+        if collection_query.collection_type == CollectionType.ALBUM or album_path:
+            album_where, album_params = QueryBuilder.build_album_filter(
+                album_path,
+                collection_query.include_subalbums,
+            )
+            where_clauses.extend(album_where)
+            params.extend(album_params)
+
+        if collection_query.collection_type == CollectionType.FAVORITES:
+            where_clauses.append("is_favorite = 1")
+        elif collection_query.is_favorite is not None:
+            where_clauses.append("is_favorite = ?")
+            params.append(1 if collection_query.is_favorite else 0)
+
+        media_types = tuple(int(value) for value in collection_query.media_types)
+        if collection_query.collection_type == CollectionType.VIDEOS and not media_types:
+            media_types = (1,)
+        if media_types:
+            placeholders = ", ".join(["?"] * len(media_types))
+            where_clauses.append(f"media_type IN ({placeholders})")
+            params.extend(media_types)
+
+        if collection_query.has_gps is not None:
+            if collection_query.has_gps:
+                where_clauses.append("has_gps = 1")
+            else:
+                where_clauses.append("has_gps = 0")
+
+        if collection_query.date_from is not None:
+            where_clauses.append("sort_ts >= ?")
+            params.append(QueryBuilder._datetime_to_microseconds(collection_query.date_from))
+        if collection_query.date_to is not None:
+            where_clauses.append("sort_ts <= ?")
+            params.append(QueryBuilder._datetime_to_microseconds(collection_query.date_to))
+
+        if collection_query.search_text:
+            pattern = f"%{escape_like_pattern(collection_query.search_text)}%"
+            where_clauses.append(f"rel LIKE ? {ESCAPE_CLAUSE}")
+            params.append(pattern)
+
+        return where_clauses, params
+
+    @staticmethod
+    def build_collection_order(collection_query: CollectionQuery) -> str:
+        sort_col = QueryBuilder._collection_sort_column(collection_query)
+        direction = "ASC" if collection_query.sort_direction == SortDirection.ASC else "DESC"
+        return f"ORDER BY {sort_col} {direction}, id {direction}, rel {direction}"
+
+    @staticmethod
+    def _collection_sort_column(collection_query: CollectionQuery) -> str:
+        sort_key = collection_query.sort_key
+        if sort_key in {"created_at", "capture_ts"}:
+            return "sort_ts"
+        if sort_key not in QueryBuilder._COLLECTION_SORT_COLUMNS:
+            return "sort_ts"
+        return sort_key
+
+    @staticmethod
+    def _datetime_to_microseconds(value: datetime) -> int:
+        normalized = value
+        if normalized.tzinfo is not None:
+            normalized = normalized.astimezone(timezone.utc).replace(tzinfo=None)
+        return int(normalized.replace(tzinfo=timezone.utc).timestamp() * 1_000_000)

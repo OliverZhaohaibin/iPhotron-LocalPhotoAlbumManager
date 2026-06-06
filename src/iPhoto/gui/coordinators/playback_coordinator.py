@@ -55,6 +55,7 @@ _INFO_PANEL_METADATA_CACHE_MAX = 200
 _LOCATION_SEARCH_RESULT_LIMIT = 5
 _LOCATION_SEARCH_DEBOUNCE_MS = 80
 _LOCATION_EXTENSION_PROMPT = "Install the map extension to use Assign a Location."
+_LOCATION_VIDEO_WRITE_PLACEHOLDER = "Writing data, please wait..."
 _LOCATION_EXIFTOOL_LIMITED_TITLE = "功能受限"
 _LOCATION_EXIFTOOL_LIMITED_MESSAGE = (
     "地点已保存到本机图库数据库。\n\n"
@@ -155,8 +156,13 @@ class PlaybackCoordinator(QObject):
         self._location_assign_path: Path | None = None
         self._location_preview_path: Path | None = None
         self._location_preview_metadata: dict[str, Any] | None = None
+        self._confirmed_location_metadata: dict[Path, dict[str, Any]] = {}
         self._pending_location_query = ""
         self._location_search_target_path: Path | None = None
+        self._location_released_video_path: Path | None = None
+        self._location_released_video_was_playing = False
+        self._location_released_video_position_ms: int | None = None
+        self._location_video_write_inflight_paths: set[Path] = set()
 
         self._pending_play_row: int | None = None
         self._show_face_names = False
@@ -444,6 +450,18 @@ class PlaybackCoordinator(QObject):
         previous = self._current_presentation
         if previous is not None:
             presentation = self._preserve_live_presentation(previous, presentation)
+        confirmed_metadata = self._confirmed_location_metadata_for_path(presentation.path)
+        if confirmed_metadata is not None:
+            presentation = self._apply_location_metadata_to_presentation(
+                presentation,
+                confirmed_metadata,
+            )
+        preview_metadata = self._location_preview_metadata_for_path(presentation.path)
+        if preview_metadata is not None:
+            presentation = self._apply_location_metadata_to_presentation(
+                presentation,
+                preview_metadata,
+            )
         if not self._router.is_detail_view_active():
             self._clear_play_profile(presentation.row)
             return
@@ -526,34 +544,42 @@ class PlaybackCoordinator(QObject):
 
         if presentation.is_video:
             self._hide_face_name_overlay(clear_annotations=True)
-            self._player_view.show_video_surface(interactive=True)
-            trim_range_ms = presentation.video_trim_range_ms
-            if trim_range_ms is not None:
-                self._trim_in_ms, self._trim_out_ms = trim_range_ms
+            if self._is_location_video_write_inflight(source):
+                self._player_view.show_placeholder(_LOCATION_VIDEO_WRITE_PLACEHOLDER)
+                if self._player_view.video_area.has_video():
+                    self._player_view.video_area.stop()
+                self._player_bar.setEnabled(False)
+                self._zoom_handler.set_viewer(self._player_view.video_area)
+                self._zoom_widget.show()
             else:
-                self._trim_in_ms = 0
-                self._trim_out_ms = 0
-            has_trim = trim_range_ms is not None
-            load_started = time.perf_counter()
-            self._player_view.video_area.load_video(
-                source,
-                adjustments=presentation.video_adjustments,
-                trim_range_ms=trim_range_ms,
-                adjusted_preview=presentation.video_adjusted_preview,
-            )
-            log_detail_profile(
-                "playback",
-                "video.load_video",
-                (time.perf_counter() - load_started) * 1000.0,
-                path=source.name,
-                adjusted_preview=presentation.video_adjusted_preview,
-                has_trim=has_trim,
-            )
-            self._player_view.video_area.play()
-            self._player_bar.setEnabled(True)
-            self._zoom_handler.set_viewer(self._player_view.video_area)
-            self._player_view.video_area.reset_zoom()
-            self._zoom_widget.show()
+                self._player_view.show_video_surface(interactive=True)
+                trim_range_ms = presentation.video_trim_range_ms
+                if trim_range_ms is not None:
+                    self._trim_in_ms, self._trim_out_ms = trim_range_ms
+                else:
+                    self._trim_in_ms = 0
+                    self._trim_out_ms = 0
+                has_trim = trim_range_ms is not None
+                load_started = time.perf_counter()
+                self._player_view.video_area.load_video(
+                    source,
+                    adjustments=presentation.video_adjustments,
+                    trim_range_ms=trim_range_ms,
+                    adjusted_preview=presentation.video_adjusted_preview,
+                )
+                log_detail_profile(
+                    "playback",
+                    "video.load_video",
+                    (time.perf_counter() - load_started) * 1000.0,
+                    path=source.name,
+                    adjusted_preview=presentation.video_adjusted_preview,
+                    has_trim=has_trim,
+                )
+                self._player_view.video_area.play()
+                self._player_bar.setEnabled(True)
+                self._zoom_handler.set_viewer(self._player_view.video_area)
+                self._player_view.video_area.reset_zoom()
+                self._zoom_widget.show()
         else:
             if self._player_view.video_area.has_video():
                 self._player_view.video_area.stop()
@@ -598,6 +624,39 @@ class PlaybackCoordinator(QObject):
             is_video=presentation.is_video,
         )
         self._clear_play_profile(presentation.row)
+
+    def _is_location_video_write_inflight(self, path: Path) -> bool:
+        inflight = getattr(self, "_location_video_write_inflight_paths", set())
+        return Path(path) in inflight
+
+    def _defer_location_video_loading(self, path: Path) -> None:
+        if not hasattr(self, "_location_video_write_inflight_paths"):
+            self._location_video_write_inflight_paths = set()
+        self._location_video_write_inflight_paths.add(Path(path))
+
+    def _allow_location_video_loading(self, path: Path) -> None:
+        inflight = getattr(self, "_location_video_write_inflight_paths", None)
+        if inflight is not None:
+            inflight.discard(Path(path))
+
+    def _maybe_render_location_video_after_file_write(self, path: Path) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        if (
+            presentation is None
+            or presentation.path != Path(path)
+            or not presentation.is_video
+            or not self._router.is_detail_view_active()
+        ):
+            return
+        self._render_presentation(presentation)
+
+    def _complete_location_video_file_write(self, path: Path) -> None:
+        path = Path(path)
+        self._allow_location_video_loading(path)
+        if getattr(self, "_location_released_video_path", None) == path:
+            self._restore_video_released_for_location_write()
+            return
+        self._maybe_render_location_video_after_file_write(path)
 
     def _autoplay_live_motion(self, presentation: DetailPresentation) -> None:
         motion_path = presentation.live_motion_abs
@@ -859,6 +918,7 @@ class PlaybackCoordinator(QObject):
         if self._info_panel:
             self._info_panel.close()
         self._clear_info_panel_metadata_state()
+        self._clear_confirmed_location_metadata()
 
     def shutdown(self) -> None:
         self._clear_play_request_state()
@@ -878,6 +938,7 @@ class PlaybackCoordinator(QObject):
             self._info_panel.shutdown()
             self._info_panel.close()
         self._clear_info_panel_metadata_state()
+        self._clear_confirmed_location_metadata()
 
     def _update_header(self, presentation: DetailPresentation | None) -> None:
         if not self._header_controller:
@@ -1261,7 +1322,18 @@ class PlaybackCoordinator(QObject):
             self._info_panel.set_location_busy(True)
             self._info_panel.set_location_suggestions([])
 
-        existing_metadata = self._asset_model.metadata_for_path(presentation.path) or dict(presentation.info)
+        self._apply_location_assignment_to_current_presentation(
+            presentation.path,
+            self._location_preview_metadata,
+            display_name=display_name,
+            refresh_info_panel=False,
+        )
+        if presentation.is_video:
+            self._defer_location_video_loading(presentation.path)
+        self._release_current_video_for_location_write(presentation)
+        existing_metadata = self._asset_model.metadata_for_path(presentation.path) or dict(
+            presentation.info
+        )
         worker = AssignLocationWorker(
             AssignLocationRequest(
                 library_root=Path(library_root),
@@ -1275,16 +1347,72 @@ class PlaybackCoordinator(QObject):
             )
         )
         worker.signals.ready.connect(self._handle_location_assignment_ready)
+        worker.signals.file_write_finished.connect(
+            self._handle_location_assignment_file_write_finished
+        )
+        worker.signals.file_write_error.connect(self._handle_location_assignment_file_write_error)
         worker.signals.error.connect(self._handle_location_assignment_error)
         worker.signals.finished.connect(self._handle_location_assignment_finished)
         try:
             QThreadPool.globalInstance().start(worker, -1)
         except Exception:  # noqa: BLE001
             LOGGER.warning("Failed to start location assignment worker", exc_info=True)
+            self._allow_location_video_loading(presentation.path)
+            self._restore_video_released_for_location_write()
+            if self._location_preview_path == presentation.path:
+                self._location_preview_path = None
+                self._location_preview_metadata = None
+                self._detail_vm.refresh_current()
             self._location_assign_inflight = False
             self._location_assign_path = None
             if self._info_panel is not None:
                 self._info_panel.set_location_busy(False)
+
+    def _release_current_video_for_location_write(self, presentation: DetailPresentation) -> None:
+        if not presentation.is_video:
+            return
+        video_area = getattr(getattr(self, "_player_view", None), "video_area", None)
+        current_source = getattr(video_area, "current_source", None)
+        stop = getattr(video_area, "stop", None)
+        is_playing = getattr(video_area, "is_playing", None)
+        current_position = getattr(video_area, "current_position", None)
+        if not callable(current_source) or not callable(stop):
+            return
+        if current_source() != presentation.path:
+            return
+        self._location_released_video_path = presentation.path
+        self._location_released_video_was_playing = (
+            bool(is_playing()) if callable(is_playing) else False
+        )
+        self._location_released_video_position_ms = (
+            max(0, int(current_position())) if callable(current_position) else None
+        )
+        self._player_view.show_placeholder(_LOCATION_VIDEO_WRITE_PLACEHOLDER)
+        self._player_bar.setEnabled(False)
+        stop()
+
+    def _restore_video_released_for_location_write(self) -> None:
+        released_path = getattr(self, "_location_released_video_path", None)
+        if released_path is None:
+            return
+        was_playing = bool(getattr(self, "_location_released_video_was_playing", False))
+        position_ms = getattr(self, "_location_released_video_position_ms", None)
+        self._location_released_video_path = None
+        self._location_released_video_was_playing = False
+        self._location_released_video_position_ms = None
+        presentation = getattr(self, "_current_presentation", None)
+        if (
+            presentation is None
+            or presentation.path != released_path
+            or not presentation.is_video
+            or not self._router.is_detail_view_active()
+        ):
+            return
+        self._render_presentation(presentation)
+        if isinstance(position_ms, int) and position_ms > 0:
+            self._player_view.video_area.seek(position_ms)
+        if not was_playing:
+            self._player_view.video_area.pause()
 
     @Slot(object)
     def _handle_location_assignment_ready(self, result: object) -> None:
@@ -1317,11 +1445,23 @@ class PlaybackCoordinator(QObject):
         self._info_panel_metadata_cache[path_key] = dict(metadata)
         self._info_panel_metadata_attempted.add(path_key)
         self._info_panel_metadata_inflight.discard(path_key)
-        if self._location_preview_path == asset_path:
+        should_clear_location_preview = self._location_preview_path == asset_path
+        self._remember_confirmed_location_metadata(asset_path, metadata)
+
+        self._apply_location_assignment_to_current_presentation(
+            asset_path,
+            metadata,
+            display_name=getattr(result, "display_name", None),
+            refresh_info_panel=False,
+        )
+        if not self._is_location_video_write_inflight(asset_path):
+            self._restore_video_released_for_location_write()
+        if getattr(self, "_location_assign_path", None) == asset_path:
+            self._location_assign_inflight = False
+            self._location_assign_path = None
+        if should_clear_location_preview:
             self._location_preview_path = None
             self._location_preview_metadata = None
-
-        self._detail_vm.refresh_current()
 
         library_manager = getattr(self, "_library_manager", None)
         invalidate = getattr(library_manager, "invalidate_geotagged_assets_cache", None)
@@ -1336,6 +1476,96 @@ class PlaybackCoordinator(QObject):
                 invalidate_location_session()
             except Exception:  # noqa: BLE001
                 LOGGER.warning("Failed to invalidate cached location-session data", exc_info=True)
+
+    def _remember_confirmed_location_metadata(
+        self,
+        path: Path,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not hasattr(self, "_confirmed_location_metadata"):
+            self._confirmed_location_metadata = {}
+        location_metadata = {
+            key: metadata[key]
+            for key in ("gps", "location", "location_name", "place")
+            if key in metadata
+        }
+        self._confirmed_location_metadata[Path(path)] = location_metadata
+
+    def _confirmed_location_metadata_for_path(self, path: Path) -> dict[str, Any] | None:
+        confirmed = getattr(self, "_confirmed_location_metadata", None)
+        if not isinstance(confirmed, dict):
+            return None
+        metadata = confirmed.get(Path(path))
+        return metadata if isinstance(metadata, dict) else None
+
+    def _clear_confirmed_location_metadata(self) -> None:
+        confirmed = getattr(self, "_confirmed_location_metadata", None)
+        if isinstance(confirmed, dict):
+            confirmed.clear()
+
+    def _location_preview_metadata_for_path(self, path: Path) -> dict[str, Any] | None:
+        preview_path = getattr(self, "_location_preview_path", None)
+        preview_metadata = getattr(self, "_location_preview_metadata", None)
+        if preview_path == Path(path) and isinstance(preview_metadata, dict):
+            return preview_metadata
+        return None
+
+    def _apply_location_metadata_to_presentation(
+        self,
+        presentation: DetailPresentation,
+        metadata: dict[str, Any],
+        *,
+        display_name: object = None,
+    ) -> DetailPresentation:
+        merged_info = self._merge_info_panel_metadata(presentation.info, metadata)
+        location_value = (
+            metadata.get("location")
+            or metadata.get("place")
+            or metadata.get("location_name")
+            or display_name
+        )
+        location = (
+            str(location_value).strip()
+            if isinstance(location_value, str) and str(location_value).strip()
+            else presentation.location
+        )
+        if location:
+            merged_info["location"] = location
+
+        return replace(
+            presentation,
+            info=merged_info,
+            location=location,
+        )
+
+    def _apply_location_assignment_to_current_presentation(
+        self,
+        asset_path: Path,
+        metadata: dict[str, Any],
+        *,
+        display_name: object = None,
+        refresh_info_panel: bool = True,
+    ) -> DetailPresentation | None:
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or presentation.path != asset_path:
+            return None
+
+        updated = self._apply_location_metadata_to_presentation(
+            presentation,
+            metadata,
+            display_name=display_name,
+        )
+        if updated == presentation:
+            return presentation
+        self._current_presentation = updated
+        self._update_header(updated)
+        if (
+            refresh_info_panel
+            and self._info_panel is not None
+            and updated.info_panel_visible
+        ):
+            self._refresh_info_panel(updated.info)
+        return updated
 
     def _is_missing_exiftool_error(self, message: str) -> bool:
         normalized = message.casefold()
@@ -1376,35 +1606,57 @@ class PlaybackCoordinator(QObject):
             title=_LOCATION_FILE_WRITE_LIMITED_TITLE,
         )
 
+    @Slot(object)
+    def _handle_location_assignment_file_write_finished(self, path: object) -> None:
+        if not isinstance(path, Path):
+            return
+        self._complete_location_video_file_write(path)
+
+    @Slot(object, str)
+    def _handle_location_assignment_file_write_error(self, path: object, message: str) -> None:
+        if not isinstance(path, Path):
+            return
+        LOGGER.warning(
+            "Location saved in the library, but GPS metadata was not written to %s: %s",
+            path,
+            message,
+        )
+        if self._is_missing_exiftool_error(message):
+            self._queue_location_exiftool_missing_warning()
+        else:
+            self._queue_location_file_write_warning(message)
+        self._complete_location_video_file_write(path)
+
     @Slot(str)
     def _handle_location_assignment_error(self, message: str) -> None:
         LOGGER.warning("Failed to assign location: %s", message)
-        if self._location_preview_path == self._location_assign_path:
+        location_assign_path = getattr(self, "_location_assign_path", None)
+        if location_assign_path is not None:
+            self._allow_location_video_loading(location_assign_path)
+        self._restore_video_released_for_location_write()
+        if self._location_preview_path == location_assign_path:
             self._location_preview_path = None
             self._location_preview_metadata = None
+            detail_vm = getattr(self, "_detail_vm", None)
+            refresh_current = getattr(detail_vm, "refresh_current", None)
+            if callable(refresh_current):
+                refresh_current()
         info_panel = getattr(self, "_info_panel", None)
-        presentation = getattr(self, "_current_presentation", None)
-        if (
-            info_panel is not None
-            and presentation is not None
-            and info_panel.isVisible()
-            and self._location_assign_path is not None
-            and presentation.path == self._location_assign_path
-        ):
-            self._refresh_info_panel(presentation.info)
-        elif info_panel is not None:
+        if info_panel is not None:
             info_panel.set_location_busy(False)
 
     @Slot()
     def _handle_location_assignment_finished(self) -> None:
+        location_assign_path = getattr(self, "_location_assign_path", None)
+        if (
+            location_assign_path is not None
+            and not self._is_location_video_write_inflight(location_assign_path)
+        ):
+            self._restore_video_released_for_location_write()
         self._location_assign_inflight = False
         self._location_assign_path = None
         info_panel = getattr(self, "_info_panel", None)
-        presentation = getattr(self, "_current_presentation", None)
         if info_panel is None:
-            return
-        if presentation is not None and info_panel.isVisible():
-            self._refresh_info_panel(presentation.info)
             return
         info_panel.set_location_busy(False)
 

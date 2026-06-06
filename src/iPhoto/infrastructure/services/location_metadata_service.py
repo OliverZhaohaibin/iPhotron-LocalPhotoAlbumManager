@@ -9,6 +9,7 @@ from ...application.ports import LocationMetadataPort
 from ...errors import ExternalToolError
 from ...io.metadata import read_image_meta_with_exiftool, read_video_meta
 from ...utils.exiftool import get_metadata_batch, write_gps_metadata
+from ...utils.media_access import media_access
 
 
 class ExifToolLocationMetadataService(LocationMetadataPort):
@@ -36,16 +37,17 @@ class ExifToolLocationMetadataService(LocationMetadataPort):
         is_video: bool,
         existing_metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        try:
-            exif_batch = get_metadata_batch([path])
-            exif_payload = exif_batch[0] if exif_batch else None
-        except (ExternalToolError, OSError):
-            exif_payload = None
+        with media_access.write(path):
+            try:
+                exif_batch = get_metadata_batch([path])
+                exif_payload = exif_batch[0] if exif_batch else None
+            except (ExternalToolError, OSError):
+                exif_payload = None
 
-        if is_video:
-            metadata = read_video_meta(path, exif_payload)
-        else:
-            metadata = read_image_meta_with_exiftool(path, exif_payload)
+            if is_video:
+                metadata = read_video_meta(path, exif_payload)
+            else:
+                metadata = read_image_meta_with_exiftool(path, exif_payload)
 
         return self._merge_metadata(existing_metadata, metadata)
 

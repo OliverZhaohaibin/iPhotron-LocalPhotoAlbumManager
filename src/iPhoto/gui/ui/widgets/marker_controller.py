@@ -9,6 +9,7 @@ from typing import Callable, Dict, Iterable, Optional, Sequence
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
 
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.map_renderer import CityAnnotation
@@ -291,6 +292,9 @@ class MarkerController(QObject):
         self._view_center_y = 0.5
         self._view_zoom = float(self._map_widget.zoom)
         self._is_panning = False
+        self._pending_click_assets: list[GeotaggedAsset] = []
+        self._pending_click_position = QPointF()
+        self._pending_click_rect = QRectF()
         self._prefer_exact_screen_projection = bool(
             getattr(self._map_widget, "prefers_exact_screen_projection", lambda: False)()
         )
@@ -327,6 +331,8 @@ class MarkerController(QObject):
             self._schedule_cluster_update()
             return
 
+        if not self._pending_click_survives_asset_update(normalized_assets, same_root):
+            self._clear_pending_click()
         self._assets = normalized_assets
         self._library_root = library_root
         self._city_annotations = []
@@ -346,6 +352,7 @@ class MarkerController(QObject):
         self._city_annotations = []
         self._library_root = None
         self._is_panning = False
+        self._clear_pending_click()
         self._view_center_x = 0.5
         self._view_center_y = 0.5
         self._view_zoom = float(self._map_widget.zoom)
@@ -408,12 +415,38 @@ class MarkerController(QObject):
         self.markerActivated.emit(list(cluster.assets))
 
     def handle_pointer_press(self, position: QPointF) -> bool:
-        """Resolve a click position into a marker activation when possible."""
+        """Record a candidate marker activation without consuming the press."""
 
         cluster = self.cluster_at(position)
         if cluster is None:
+            self._clear_pending_click()
             return False
-        self.handle_marker_click(cluster)
+        self._pending_click_assets = list(cluster.assets)
+        self._pending_click_position = QPointF(position)
+        self._pending_click_rect = QRectF(cluster.bounding_rect)
+        return True
+
+    def handle_pointer_move(self, position: QPointF) -> None:
+        """Cancel pending marker activation once the gesture becomes a drag."""
+
+        if not self._pending_click_assets:
+            return
+        if self.distance(self._pending_click_position, position) > self._click_drag_threshold():
+            self._clear_pending_click()
+
+    def handle_pointer_release(self, position: QPointF) -> bool:
+        """Activate the pending marker only for a completed click gesture."""
+
+        assets = list(self._pending_click_assets)
+        release_rect = QRectF(self._pending_click_rect)
+        if not assets:
+            return False
+
+        self._clear_pending_click()
+        if not release_rect.contains(position):
+            return False
+
+        QTimer.singleShot(0, lambda: self.markerActivated.emit(list(assets)))
         return True
 
     def handle_thumbnail_ready(self, root: Path, rel: str, pixmap: QPixmap) -> None:
@@ -432,6 +465,41 @@ class MarkerController(QObject):
             if cluster.bounding_rect.contains(position):
                 return cluster
         return None
+
+    def _clear_pending_click(self) -> None:
+        self._pending_click_assets = []
+        self._pending_click_position = QPointF()
+        self._pending_click_rect = QRectF()
+
+    def _pending_click_survives_asset_update(
+        self,
+        incoming_assets: Sequence[GeotaggedAsset],
+        same_root: bool,
+    ) -> bool:
+        if not self._pending_click_assets:
+            return True
+        if not same_root:
+            return False
+        incoming_keys = {self._asset_key(asset) for asset in incoming_assets}
+        return all(
+            self._asset_key(asset) in incoming_keys
+            for asset in self._pending_click_assets
+        )
+
+    @staticmethod
+    def _asset_key(asset: GeotaggedAsset) -> tuple[str, str, str]:
+        return (
+            str(asset.asset_id),
+            str(asset.library_relative),
+            str(asset.album_relative),
+        )
+
+    @staticmethod
+    def _click_drag_threshold() -> int:
+        try:
+            return max(1, int(QApplication.startDragDistance()))
+        except RuntimeError:
+            return 3
 
     def _schedule_cluster_update(self) -> None:
         if self._is_panning:

@@ -152,6 +152,35 @@ def test_gallery_responsive_layout(qapp_instance, monkeypatch):
     assert view.iconSize().width() == item
 
 
+def test_delegate_assigned_after_show_uses_responsive_tile_size(qapp_instance, monkeypatch):
+    patch_delegate_icons(monkeypatch)
+
+    view = GalleryGridView()
+    model = QStandardItemModel()
+    for _ in range(6):
+        item = QStandardItem()
+        item.setData(False, Roles.IS_SPACER)
+        pix = QPixmap(100, 100)
+        pix.fill(Qt.red)
+        item.setData(pix, Qt.DecorationRole)
+        model.appendRow(item)
+
+    view.resize(1200, 720)
+    view.show()
+    qapp_instance.processEvents()
+
+    view.setModel(model)
+    delegate = AssetGridDelegate(view)
+    view.setItemDelegate(delegate)
+    qapp_instance.processEvents()
+
+    assert view.iconSize().width() != GalleryGridView.MIN_ITEM_WIDTH
+    assert delegate._base_size == view.iconSize().width()
+
+    first_rect = view.visualRect(model.index(0, 0))
+    assert first_rect.width() == view.iconSize().width()
+
+
 def test_favorite_badge_click_uses_viewport_coordinates(qapp_instance, monkeypatch):
     patch_delegate_icons(monkeypatch)
 

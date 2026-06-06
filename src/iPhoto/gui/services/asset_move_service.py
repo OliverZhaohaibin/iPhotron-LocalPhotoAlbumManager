@@ -68,9 +68,6 @@ class AssetMoveService(QObject):
         """
 
         album = self._current_album_getter()
-        if album is None and operation.lower() == "move":
-            self.errorRaised.emit("No album is currently open.")
-            return False
         library_manager = self._library_manager_getter()
         try:
             operation_service = self._operation_service(
@@ -225,12 +222,7 @@ class AssetMoveService(QObject):
             return True
         if operation_normalized == "restore":
             return self._path_is_descendant(destination, library_root)
-        if current_album_root is None:
-            return False
-        return self._path_is_descendant(
-            current_album_root,
-            library_root,
-        ) and self._path_is_descendant(destination, library_root)
+        return self._path_is_descendant(destination, library_root)
 
     @staticmethod
     def _path_is_descendant(candidate: Path, ancestor: Path) -> bool:
@@ -270,7 +262,9 @@ class AssetMoveService(QObject):
             )
             return
 
-        success = bool(moved_pairs) and source_ok and destination_ok
+        requested_count = int(getattr(worker, "source_count", len(moved_pairs)))
+        completed_all = bool(moved_pairs) and len(moved_pairs) == requested_count
+        success = completed_all and source_ok and destination_ok
 
         # Surface the rich completion payload so listeners can distinguish
         # between deletes, restores, and plain moves without replicating the
@@ -303,7 +297,11 @@ class AssetMoveService(QObject):
             label = "item" if len(moved_pairs) == 1 else "items"
             if restore_operation:
                 verb = "Restored"
-                if source_ok and destination_ok:
+                if source_ok and destination_ok and not completed_all:
+                    message = (
+                        f"{verb} {len(moved_pairs)} {label}, but some items could not be restored."
+                    )
+                elif source_ok and destination_ok:
                     message = f"{verb} {len(moved_pairs)} {label}."
                 elif source_ok and not destination_ok:
                     message = (
@@ -320,7 +318,12 @@ class AssetMoveService(QObject):
                     )
             else:
                 verb = "Deleted" if delete_operation else "Moved"
-                if source_ok and destination_ok:
+                if source_ok and destination_ok and not completed_all:
+                    action = "deleted" if delete_operation else "moved"
+                    message = (
+                        f"{verb} {len(moved_pairs)} {label}, but some items could not be {action}."
+                    )
+                elif source_ok and destination_ok:
                     message = f"{verb} {len(moved_pairs)} {label}."
                 elif delete_operation:
                     if source_ok and not destination_ok:

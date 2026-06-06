@@ -11,7 +11,8 @@ from iPhoto.cache.index_store import (
     reset_global_repository,
     GLOBAL_INDEX_DB_NAME,
 )
-from iPhoto.config import WORK_DIR_NAME
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from iPhoto.domain.models.query import CollectionQuery, CollectionType
 
 
 @pytest.fixture(autouse=True)
@@ -120,6 +121,110 @@ class TestGlobalRepositorySingleton:
 
         assert rows["asset-photo"]["face_status"] == "pending"
         assert rows["asset-video"]["face_status"] == "skipped"
+
+    def test_global_repository_migrates_legacy_trash_rows_to_deleted(
+        self, tmp_path: Path
+    ) -> None:
+        library_root = tmp_path / "Library"
+        db_dir = library_root / WORK_DIR_NAME
+        db_dir.mkdir(parents=True)
+        db_path = db_dir / GLOBAL_INDEX_DB_NAME
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE assets (
+                    rel TEXT PRIMARY KEY,
+                    id TEXT,
+                    parent_album_path TEXT,
+                    dt TEXT,
+                    ts INTEGER,
+                    sort_ts INTEGER,
+                    mime TEXT,
+                    gps TEXT,
+                    media_type INTEGER,
+                    live_role INTEGER DEFAULT 0,
+                    is_deleted INTEGER DEFAULT 0,
+                    has_gps INTEGER DEFAULT 0,
+                    thumbnail_state TEXT DEFAULT 'ready',
+                    thumb_cache_key TEXT
+                )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO assets (
+                    rel, id, parent_album_path, dt, ts, sort_ts, mime, gps, media_type,
+                    live_role, is_deleted, has_gps, thumbnail_state, thumb_cache_key
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        "Album/keep.jpg",
+                        "asset-keep",
+                        "Album",
+                        "2024-01-01T00:00:00Z",
+                        1,
+                        1,
+                        "image/jpeg",
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "ready",
+                        "thumb-keep",
+                    ),
+                    (
+                        "Album/gps.jpg",
+                        "asset-gps",
+                        "Album",
+                        "2024-01-01T00:00:02Z",
+                        3,
+                        3,
+                        "image/jpeg",
+                        '{"lat": 1.0, "lon": 2.0}',
+                        0,
+                        0,
+                        0,
+                        0,
+                        "ready",
+                        "thumb-gps",
+                    ),
+                    (
+                        f"{RECENTLY_DELETED_DIR_NAME}/deleted.jpg",
+                        "asset-deleted",
+                        RECENTLY_DELETED_DIR_NAME,
+                        "2024-01-01T00:00:01Z",
+                        2,
+                        2,
+                        "image/jpeg",
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "ready",
+                        "thumb-deleted",
+                    ),
+                ],
+            )
+
+        repo = get_global_repository(library_root)
+        rows = repo.get_rows_by_ids(["asset-keep", "asset-gps", "asset-deleted"])
+
+        assert rows["asset-keep"]["is_deleted"] == 0
+        assert rows["asset-gps"]["has_gps"] == 1
+        assert rows["asset-deleted"]["is_deleted"] == 1
+        all_photos = CollectionQuery(collection_type=CollectionType.ALL_PHOTOS)
+        assert [
+            row["id"] for row in repo.read_collection_window(all_photos, 0, 10).rows
+        ] == ["asset-gps", "asset-keep"]
+        map_query = CollectionQuery(collection_type=CollectionType.MAP, has_gps=True)
+        assert [
+            row["id"] for row in repo.read_collection_window(map_query, 0, 10).rows
+        ] == ["asset-gps"]
 
     def test_face_status_helpers_round_trip(self, tmp_path: Path) -> None:
         repo = get_global_repository(tmp_path)
@@ -594,6 +699,31 @@ class TestMultipleScanEntryPoints:
         
         rows = list(repo.read_all())
         assert len(rows) == 3
+
+
+def test_latest_scan_job_returns_newest_matching_scope(tmp_path: Path) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.create_scan_job(
+        job_id="older",
+        root=tmp_path.as_posix(),
+        scope="library",
+        status="running",
+    )
+    repo.update_scan_job_stage("older", status="completed", finished=True)
+    time.sleep(0.002)
+    repo.create_scan_job(
+        job_id="newer",
+        root=tmp_path.as_posix(),
+        scope="library",
+        status="running",
+    )
+    repo.update_scan_job_stage("newer", status="cancelled", finished=True)
+
+    job = repo.latest_scan_job(root=tmp_path.as_posix(), scope="library")
+
+    assert job is not None
+    assert job["job_id"] == "newer"
+    assert job["status"] == "cancelled"
 
 
 class TestSingleWriteGateway:

@@ -10,8 +10,8 @@ from typing import Any
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from iPhoto.application.services.assign_location_service import (
-    AssignLocationService,
     AssignedLocationResult,
+    AssignLocationService,
 )
 from iPhoto.infrastructure.repositories.library_state_repository import (
     IndexStoreLibraryStateRepository,
@@ -37,6 +37,8 @@ class AssignLocationRequest:
 
 class AssignLocationSignals(QObject):
     ready = Signal(object)
+    file_write_finished = Signal(object)
+    file_write_error = Signal(object, str)
     error = Signal(str)
     finished = Signal()
 
@@ -55,10 +57,38 @@ class AssignLocationWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - exercised through GUI integration
         try:
+            metadata_service = ExifToolLocationMetadataService()
             service = AssignLocationService(
                 IndexStoreLibraryStateRepository(self._request.library_root),
-                ExifToolLocationMetadataService(),
+                metadata_service,
             )
+            if self._request.is_video:
+                result = service.persist_library_assignment(
+                    asset_path=self._request.asset_path,
+                    asset_rel=self._request.asset_rel,
+                    display_name=self._request.display_name,
+                    latitude=self._request.latitude,
+                    longitude=self._request.longitude,
+                    existing_metadata=self._request.existing_metadata,
+                )
+                self.signals.ready.emit(result)
+                try:
+                    metadata_service.write_gps_metadata(
+                        self._request.asset_path,
+                        latitude=float(self._request.latitude),
+                        longitude=float(self._request.longitude),
+                        is_video=True,
+                    )
+                except Exception as exc:  # noqa: BLE001 - convert file-write failures to UI cleanup
+                    _LOGGER.exception(
+                        "Failed to write GPS metadata for %s",
+                        self._request.asset_path,
+                    )
+                    self.signals.file_write_error.emit(self._request.asset_path, str(exc))
+                else:
+                    self.signals.file_write_finished.emit(self._request.asset_path)
+                return
+
             result = service.assign(
                 asset_path=self._request.asset_path,
                 asset_rel=self._request.asset_rel,
@@ -69,7 +99,7 @@ class AssignLocationWorker(QRunnable):
                 existing_metadata=self._request.existing_metadata,
             )
             self.signals.ready.emit(result)
-        except Exception as exc:  # noqa: BLE001 - keep worker failures isolated
+        except Exception as exc:
             _LOGGER.exception("Failed to assign location for %s", self._request.asset_path)
             self.signals.error.emit(str(exc))
         finally:

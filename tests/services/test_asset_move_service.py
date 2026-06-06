@@ -77,12 +77,12 @@ def _build_operation_service(
     )
 
 
-def test_move_assets_requires_active_album(
+def test_move_assets_requires_bound_session_without_active_album(
     mocker,
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
-    """No album should result in an error and a rollback of optimistic moves."""
+    """Aggregate-style moves without an album still require a bound library."""
 
     task_manager = mocker.MagicMock()
 
@@ -97,8 +97,92 @@ def test_move_assets_requires_active_album(
     accepted = service.move_assets([tmp_path / "file.jpg"], tmp_path / "dest")
 
     assert accepted is False
-    assert errors == ["No album is currently open."]
+    assert errors
+    assert "bound LibrarySession" in errors[0]
     task_manager.submit_task.assert_not_called()
+
+
+def test_move_assets_allows_aggregate_source_without_current_album(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    library_root = tmp_path / "Library"
+    source_root = library_root / "AlbumA"
+    destination_root = library_root / "AlbumB"
+    source_root.mkdir(parents=True)
+    destination_root.mkdir()
+    asset = source_root / "photo.jpg"
+    asset.write_bytes(b"data")
+
+    task_manager = mocker.MagicMock()
+    library_manager = mocker.MagicMock()
+    library_manager.root.return_value = library_root
+    library_manager.asset_operation_service = _build_operation_service(
+        library_root,
+        lifecycle_service=_LifecycleRecorder(),  # type: ignore[arg-type]
+    )
+    service = _create_service(
+        task_manager=task_manager,
+        current_album=lambda: None,
+        library_manager=library_manager,
+    )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
+
+    accepted = service.move_assets([asset], destination_root)
+
+    assert accepted is True
+    assert errors == []
+    kwargs = task_manager.submit_task.call_args.kwargs
+    worker = kwargs["worker"]
+    assert isinstance(worker, MoveWorker)
+    assert worker.source_count == 1
+    assert kwargs["task_id"].startswith(
+        f"move:move:{library_root}->{destination_root}:"
+    )
+
+
+def test_move_assets_uses_library_scope_when_source_is_outside_active_album(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    library_root = tmp_path / "Library"
+    active_root = library_root / "AlbumA"
+    source_root = library_root / "AlbumB"
+    destination_root = library_root / "AlbumC"
+    active_root.mkdir(parents=True)
+    source_root.mkdir()
+    destination_root.mkdir()
+    asset = source_root / "photo.jpg"
+    asset.write_bytes(b"data")
+
+    task_manager = mocker.MagicMock()
+    album = mocker.MagicMock()
+    album.root = active_root
+    library_manager = mocker.MagicMock()
+    library_manager.root.return_value = library_root
+    library_manager.asset_operation_service = _build_operation_service(
+        library_root,
+        lifecycle_service=_LifecycleRecorder(),  # type: ignore[arg-type]
+    )
+    service = _create_service(
+        task_manager=task_manager,
+        current_album=lambda: album,
+        library_manager=library_manager,
+    )
+    errors: list[str] = []
+    service.errorRaised.connect(errors.append)
+
+    accepted = service.move_assets([asset], destination_root)
+
+    assert accepted is True
+    assert errors == []
+    kwargs = task_manager.submit_task.call_args.kwargs
+    assert kwargs["task_id"].startswith(
+        f"move:move:{library_root}->{destination_root}:"
+    )
 
 
 def test_move_assets_submits_worker_and_emits_completion(
@@ -177,6 +261,65 @@ def test_move_assets_submits_worker_and_emits_completion(
     assert destination_ok is True
     assert is_trash is False
     assert is_restore is False
+
+
+def test_move_assets_marks_partial_completion_as_failure(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    source_root = tmp_path / "Source"
+    destination_root = tmp_path / "Destination"
+    source_root.mkdir()
+    destination_root.mkdir()
+    first = source_root / "first.jpg"
+    second = source_root / "second.jpg"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    task_manager = mocker.MagicMock()
+    album = mocker.MagicMock()
+    album.root = source_root
+    library_manager = mocker.MagicMock()
+    library_manager.root.return_value = tmp_path
+    library_manager.asset_operation_service = _build_operation_service(
+        tmp_path,
+        lifecycle_service=_LifecycleRecorder(),  # type: ignore[arg-type]
+    )
+    service = _create_service(
+        task_manager=task_manager,
+        current_album=lambda: album,
+        library_manager=library_manager,
+    )
+    results: list[tuple[Path, Path, bool, str]] = []
+    detailed_results: list[list[tuple[Path, Path]]] = []
+    service.moveFinished.connect(
+        lambda src, dest, success, message: results.append((src, dest, success, message))
+    )
+    service.moveCompletedDetailed.connect(
+        lambda _src, _dest, pairs, *_args: detailed_results.append(list(pairs))
+    )
+
+    accepted = service.move_assets([first, second], destination_root)
+    kwargs = task_manager.submit_task.call_args.kwargs
+    kwargs["on_finished"](
+        source_root,
+        destination_root,
+        [(first, destination_root / first.name)],
+        True,
+        True,
+    )
+
+    assert accepted is True
+    assert detailed_results == [[(first, destination_root / first.name)]]
+    assert results == [
+        (
+            source_root,
+            destination_root,
+            False,
+            "Moved 1 item, but some items could not be moved.",
+        )
+    ]
 
 
 def test_move_assets_requires_session_when_library_is_unbound(

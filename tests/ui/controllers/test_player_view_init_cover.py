@@ -158,3 +158,17 @@ class TestInitCoverTracking:
         controller._on_video_first_render()
         mock_hide.assert_not_called()
         assert controller._video_renderer_rendered is True
+
+
+class TestPlaceholderMessage:
+    def test_show_placeholder_supports_custom_message(self, controller):
+        controller.show_placeholder("Writing data, please wait...")
+
+        assert controller._placeholder.text() == "Writing data, please wait..."
+
+    def test_show_placeholder_restores_default_message(self, controller):
+        controller.show_placeholder("Writing data, please wait...")
+
+        controller.show_placeholder()
+
+        assert controller._placeholder.text() == "placeholder"

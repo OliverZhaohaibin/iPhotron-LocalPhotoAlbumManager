@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtGui import QImage
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.models.roles import Roles
@@ -14,12 +15,40 @@ from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAda
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 
+class _Signal:
+    def __init__(self) -> None:
+        self.handlers = []
+
+    def connect(self, handler) -> None:
+        if handler not in self.handlers:
+            self.handlers.append(handler)
+
+    def disconnect(self, handler) -> None:
+        self.handlers.remove(handler)
+
+    def emit(self, *args) -> None:
+        for handler in list(self.handlers):
+            handler(*args)
+
+
+class _BackfillService:
+    def __init__(self) -> None:
+        self.thumbnail_backfill_completed = _Signal()
+        self.thumbnail_backfill_progress = _Signal()
+
+
+@pytest.fixture(autouse=True)
+def _qt_app(qapp):
+    return qapp
+
+
 @pytest.fixture
 def mock_store():
     store = MagicMock(spec=GalleryCollectionStore)
     store.data_changed = MagicMock()
     store.window_changed = MagicMock()
     store.row_changed = MagicMock()
+    store.thumbnail_backfill_scheduled = MagicMock()
     store.count.return_value = 0
     return store
 
@@ -93,7 +122,142 @@ def test_row_for_path_delegates_to_store(adapter, mock_store):
 
 def test_prioritize_rows_delegates_to_store(adapter, mock_store):
     adapter.prioritize_rows(10, 25)
+    adapter._flush_pending_prioritize_rows()
     mock_store.prioritize_rows.assert_called_once_with(10, 25)
+
+
+def test_prioritize_rows_coalesces_fast_scroll_requests(adapter, mock_store):
+    adapter.prioritize_rows(10, 25)
+    adapter.prioritize_rows(20, 60)
+    adapter.prioritize_rows(5, 15)
+    adapter._flush_pending_prioritize_rows()
+
+    mock_store.prioritize_rows.assert_called_once_with(5, 60)
+
+
+def test_scan_batches_are_coalesced_before_store_flush(adapter, mock_store):
+    mock_store.record_scan_batch.return_value = True
+
+    adapter.handle_scan_batch(SimpleNamespace(rows=[{"rel": "a.jpg"}]))
+    adapter.handle_scan_batch(SimpleNamespace(rows=[{"rel": "b.jpg"}]))
+    adapter._flush_pending_scan_batches()
+
+    assert adapter._scan_batch_timer.interval() == 150
+    assert mock_store.record_scan_batch.call_count == 2
+    mock_store.flush_pending_scan_refresh.assert_called_once_with()
+
+
+def test_backfill_completion_event_queues_scan_batch(mock_thumb_service):
+    service = _BackfillService()
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = MagicMock()
+    store.window_changed = MagicMock()
+    store.row_changed = MagicMock()
+    store.count.return_value = 0
+    store.asset_query_service = service
+    store.record_scan_batch.return_value = True
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    batch = SimpleNamespace(rows=[{"rel": "ready.jpg"}])
+
+    service.thumbnail_backfill_completed.emit(batch)
+    adapter._flush_pending_scan_batches()
+
+    store.record_scan_batch.assert_called_once_with(batch)
+    store.flush_pending_scan_refresh.assert_called_once_with()
+
+
+def test_rebind_asset_query_service_moves_backfill_completion_signal(
+    mock_store,
+    mock_thumb_service,
+):
+    old_service = _BackfillService()
+    new_service = _BackfillService()
+    mock_store.asset_query_service = old_service
+    adapter = GalleryListModelAdapter(mock_store, mock_thumb_service)
+
+    adapter.rebind_asset_query_service(new_service, Path("/library"))
+
+    assert adapter.handle_scan_batch not in old_service.thumbnail_backfill_completed.handlers
+    assert adapter.handle_scan_batch in new_service.thumbnail_backfill_completed.handlers
+    assert adapter._handle_thumbnail_backfill_progress not in old_service.thumbnail_backfill_progress.handlers
+    assert adapter._handle_thumbnail_backfill_progress in new_service.thumbnail_backfill_progress.handlers
+    mock_store.rebind_asset_query_service.assert_called_once_with(
+        new_service,
+        Path("/library"),
+    )
+
+
+def test_backfill_progress_is_relayed_from_query_service(mock_thumb_service):
+    service = _BackfillService()
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = MagicMock()
+    store.window_changed = MagicMock()
+    store.row_changed = MagicMock()
+    store.count.return_value = 0
+    store.asset_query_service = service
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    progress: list[tuple[Path, int, int]] = []
+    adapter.thumbnailBackfillProgress.connect(
+        lambda root, current, total: progress.append((root, current, total))
+    )
+
+    service.thumbnail_backfill_progress.emit(Path("/library"), 2, 5)
+
+    assert progress == [(Path("/library"), 2, 5)]
+
+
+def test_decoration_role_uses_full_size_thumbnail_even_with_micro_fallback(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    full_size = object()
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(micro_thumbnail=micro)
+    mock_thumb_service.get_thumbnail.return_value = full_size
+
+    result = adapter.data(adapter.index(0, 0), Qt.DecorationRole)
+
+    assert result is full_size
+    mock_thumb_service.get_thumbnail.assert_called_once_with(
+        Path("photo.jpg"),
+        adapter._thumb_size,
+        priority="visible",
+    )
+
+
+def test_decoration_role_miss_leaves_micro_thumbnail_for_delegate_fallback(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(micro_thumbnail=micro)
+    mock_thumb_service.get_thumbnail.return_value = None
+
+    index = adapter.index(0, 0)
+
+    assert adapter.data(index, Qt.DecorationRole) is None
+    assert adapter.data(index, Roles.MICRO_THUMBNAIL) is micro
+    mock_thumb_service.get_thumbnail.assert_called_once()
+
+
+def test_decoration_role_schedules_full_size_even_when_micro_thumbnail_is_not_drawable(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    fallback = object()
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(micro_thumbnail=b"jpeg-bytes")
+    mock_thumb_service.get_thumbnail.return_value = fallback
+
+    result = adapter.data(adapter.index(0, 0), Qt.DecorationRole)
+
+    assert result is fallback
+    mock_thumb_service.get_thumbnail.assert_called_once()
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):
@@ -159,3 +323,107 @@ def test_row_changed_emits_targeted_favorite_update(adapter, mock_store):
     adapter._on_row_changed(0)
 
     assert Roles.FEATURED in emitted_roles
+
+
+def test_source_change_same_selection_and_count_emits_data_changed_not_model_reset(
+    adapter,
+    mock_store,
+):
+    assets = [
+        _make_dto(id="a", abs_path=Path("/library/a.jpg")),
+        _make_dto(id="b", abs_path=Path("/library/b.jpg")),
+    ]
+    mock_store.count.return_value = 2
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.current_query.return_value = "all"
+    mock_store.current_direct_assets.return_value = None
+    mock_store.asset_at.side_effect = lambda row: assets[row]
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 1)
+    reset_count = 0
+    changed_ranges: list[tuple[int, int]] = []
+
+    def _record_reset() -> None:
+        nonlocal reset_count
+        reset_count += 1
+
+    adapter.modelReset.connect(_record_reset)
+    adapter.dataChanged.connect(
+        lambda top, bottom, _roles: changed_ranges.append((top.row(), bottom.row()))
+    )
+
+    adapter._on_source_changed()
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 2)
+    adapter._on_source_changed()
+
+    assert reset_count == 1
+    assert changed_ranges == [(0, 1)]
+
+
+def test_source_change_same_count_with_reordered_rows_resets_model(
+    adapter,
+    mock_store,
+):
+    first_assets = [
+        _make_dto(id="a", abs_path=Path("/library/a.jpg")),
+        _make_dto(id="b", abs_path=Path("/library/b.jpg")),
+    ]
+    reordered_assets = [first_assets[1], first_assets[0]]
+    visible_assets = first_assets
+    mock_store.count.return_value = 2
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.current_query.return_value = "all"
+    mock_store.current_direct_assets.return_value = None
+    mock_store.asset_at.side_effect = lambda row: visible_assets[row]
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 1)
+    reset_count = 0
+    changed_ranges: list[tuple[int, int]] = []
+
+    def _record_reset() -> None:
+        nonlocal reset_count
+        reset_count += 1
+
+    adapter.modelReset.connect(_record_reset)
+    adapter.dataChanged.connect(
+        lambda top, bottom, _roles: changed_ranges.append((top.row(), bottom.row()))
+    )
+
+    adapter._on_source_changed()
+    visible_assets = reordered_assets
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 2)
+    adapter._on_source_changed()
+
+    assert reset_count == 2
+    assert changed_ranges == []
+
+
+def test_source_change_count_change_still_resets_model(adapter, mock_store):
+    assets = [
+        _make_dto(id="a", abs_path=Path("/library/a.jpg")),
+        _make_dto(id="b", abs_path=Path("/library/b.jpg")),
+        _make_dto(id="c", abs_path=Path("/library/c.jpg")),
+    ]
+    mock_store.count.return_value = 2
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.current_query.return_value = "all"
+    mock_store.current_direct_assets.return_value = None
+    mock_store.asset_at.side_effect = lambda row: assets[row]
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 1)
+    reset_count = 0
+    changed_ranges: list[tuple[int, int]] = []
+
+    def _record_reset() -> None:
+        nonlocal reset_count
+        reset_count += 1
+
+    adapter.modelReset.connect(_record_reset)
+    adapter.dataChanged.connect(
+        lambda top, bottom, _roles: changed_ranges.append((top.row(), bottom.row()))
+    )
+
+    adapter._on_source_changed()
+    mock_store.count.return_value = 3
+    mock_store.snapshot_signature.return_value = (3, (0, 2), 2)
+    adapter._on_source_changed()
+
+    assert reset_count == 2
+    assert changed_ranges == []

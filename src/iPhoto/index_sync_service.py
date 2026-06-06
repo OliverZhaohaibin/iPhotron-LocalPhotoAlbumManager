@@ -223,6 +223,8 @@ def prune_index_scope(
     *,
     repository: "AssetRepositoryPort",
     exclude_globs: Iterable[str] | None = None,
+    preserve_modified_after_ms: int | None = None,
+    current_scan_job_id: str | None = None,
 ) -> int:
     """Delete rows under *root* that were not rediscovered by the completed scan.
 
@@ -266,6 +268,12 @@ def prune_index_scope(
         if preserve_existing_trash_rows and rel_key.startswith(trash_prefix):
             continue
         if rel_key not in fresh_rels:
+            if _row_modified_after_scan_start_by_other_job(
+                row,
+                preserve_modified_after_ms=preserve_modified_after_ms,
+                current_scan_job_id=current_scan_job_id,
+            ):
+                continue
             removable.append(rel_key)
 
     if not removable:
@@ -273,6 +281,26 @@ def prune_index_scope(
 
     repository.remove_rows(removable)
     return len(removable)
+
+
+def _row_modified_after_scan_start_by_other_job(
+    row: dict,
+    *,
+    preserve_modified_after_ms: int | None,
+    current_scan_job_id: str | None,
+) -> bool:
+    if preserve_modified_after_ms is None:
+        return False
+    try:
+        updated_at = int(row.get("index_updated_at_ms") or 0)
+    except (TypeError, ValueError):
+        return False
+    if updated_at <= int(preserve_modified_after_ms):
+        return False
+    row_scan_job_id = row.get("scan_job_id")
+    if current_scan_job_id and row_scan_job_id == current_scan_job_id:
+        return False
+    return True
 
 
 __all__ = [

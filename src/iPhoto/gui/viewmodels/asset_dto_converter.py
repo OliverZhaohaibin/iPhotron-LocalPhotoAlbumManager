@@ -11,6 +11,7 @@ from iPhoto.domain.models import Asset
 from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.utils import image_loader
+from PySide6.QtGui import QImage
 
 # ── thumbnail-detection constants ────────────────────────────────────────────
 THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)", re.IGNORECASE)
@@ -337,6 +338,7 @@ def scan_row_to_dto(
     size_bytes = row.get("bytes") or 0
     is_favorite = bool(row.get("featured") or row.get("favorite") or row.get("is_favorite"))
     is_pano = bool(row.get("is_pano"))
+    micro_thumbnail = _decode_micro_thumbnail(row.get("micro_thumbnail"))
 
     return AssetDTO(
         id=str(row.get("id") or abs_path),
@@ -353,8 +355,18 @@ def scan_row_to_dto(
         face_status=row.get("face_status"),
         is_live=is_live,
         is_pano=is_pano,
-        micro_thumbnail=row.get("micro_thumbnail"),
+        micro_thumbnail=micro_thumbnail,
     )
+
+
+def _decode_micro_thumbnail(value: object) -> Optional[QImage]:
+    if isinstance(value, QImage):
+        return value if not value.isNull() else None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        image = image_loader.qimage_from_bytes(bytes(value))
+        if image is not None and not image.isNull():
+            return image
+    return None
 
 
 def scan_row_matches_query(

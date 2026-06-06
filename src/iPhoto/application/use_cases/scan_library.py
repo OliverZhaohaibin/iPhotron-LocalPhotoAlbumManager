@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...domain.models.scan import ScanBatchCommitted
 from ..ports import AssetRepositoryPort, MediaScannerPort
 
 LOGGER = logging.getLogger(__name__)
@@ -22,16 +24,23 @@ class ScanLibraryRequest:
     progress_callback: Callable[[int, int], None] | None = None
     is_cancelled: Callable[[], bool] | None = None
     row_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None
-    chunk_callback: Callable[[list[dict[str, Any]]], None] | None = None
+    scan_batch_callback: Callable[[ScanBatchCommitted], None] | None = None
     batch_failed_callback: Callable[[int], None] | None = None
-    chunk_size: int = 50
+    chunk_size: int = 500
+    visible_publish_size: int = 100
+    max_chunk_interval_ms: float | None = None
     persist_chunks: bool = True
+    scan_job_id: str | None = None
+    scan_started_at_ms: int | None = None
+    scan_stage_elapsed_ms: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
 class ScanLibraryResult:
     rows: list[dict[str, Any]]
     failed_count: int = 0
+    scan_job_id: str | None = None
+    scan_started_at_ms: int | None = None
 
 
 class ScanLibraryUseCase:
@@ -51,6 +60,8 @@ class ScanLibraryUseCase:
         chunk: list[dict[str, Any]] = []
         failed_count = 0
         chunk_size = max(1, int(request.chunk_size))
+        scan_started = _monotonic_ms()
+        last_chunk_flush = scan_started
 
         for scanned_row in self._scanner.scan(
             request.root,
@@ -68,45 +79,166 @@ class ScanLibraryUseCase:
 
             rows.append(row)
             if request.persist_chunks:
-                chunk.append(row)
-                if len(chunk) >= chunk_size:
-                    failed_count += self._merge_chunk(chunk, request)
+                chunk_row = dict(row)
+                if request.scan_job_id:
+                    chunk_row["scan_job_id"] = request.scan_job_id
+                chunk.append(chunk_row)
+                now = _monotonic_ms()
+                if _should_flush_chunk(
+                    chunk,
+                    chunk_size=chunk_size,
+                    max_interval_ms=request.max_chunk_interval_ms,
+                    last_flush_ms=last_chunk_flush,
+                    now_ms=now,
+                ):
+                    failed_count += self._merge_chunk(
+                        chunk,
+                        request,
+                        metadata_elapsed_ms=round(now - scan_started, 3),
+                    )
                     chunk = []
+                    last_chunk_flush = _monotonic_ms()
 
         if (
             request.persist_chunks
             and chunk
             and not (request.is_cancelled is not None and request.is_cancelled())
         ):
-            failed_count += self._merge_chunk(chunk, request)
+            failed_count += self._merge_chunk(
+                chunk,
+                request,
+                metadata_elapsed_ms=round(_monotonic_ms() - scan_started, 3),
+            )
 
-        return ScanLibraryResult(rows=rows, failed_count=failed_count)
-
-    def merge_chunk(
-        self,
-        chunk: list[dict[str, Any]],
-        request: ScanLibraryRequest,
-    ) -> int:
-        """Persist one already-discovered chunk through the same merge policy."""
-
-        return self._merge_chunk(chunk, request)
+        return ScanLibraryResult(
+            rows=rows,
+            failed_count=failed_count,
+            scan_job_id=request.scan_job_id,
+            scan_started_at_ms=request.scan_started_at_ms,
+        )
 
     def _merge_chunk(
         self,
         chunk: list[dict[str, Any]],
         request: ScanLibraryRequest,
+        *,
+        metadata_elapsed_ms: float | None = None,
     ) -> int:
+        started = _monotonic_ms()
         try:
             emitted_chunk = self._asset_repository.merge_scan_rows(chunk)
         except Exception:
             LOGGER.exception("Failed to persist scan chunk of %s items", len(chunk))
+            LOGGER.debug(
+                "scan_batch_failed rows=%s elapsed_ms=%s",
+                len(chunk),
+                round(_monotonic_ms() - started, 3),
+            )
             if request.batch_failed_callback is not None:
                 request.batch_failed_callback(len(chunk))
             return len(chunk)
 
-        if request.chunk_callback is not None:
-            request.chunk_callback(emitted_chunk)
+        LOGGER.debug(
+            "scan_batch_committed rows=%s requested_rows=%s elapsed_ms=%s",
+            len(emitted_chunk),
+            len(chunk),
+            round(_monotonic_ms() - started, 3),
+        )
+        commit_elapsed_ms = round(_monotonic_ms() - started, 3)
+        ready_chunk = _ready_visible_rows(emitted_chunk)
+        collection_revision = _collection_revision_from_rows(emitted_chunk)
+        stage_elapsed_ms = dict(request.scan_stage_elapsed_ms or {})
+        if metadata_elapsed_ms is not None:
+            stage_elapsed_ms["metadata_extraction"] = metadata_elapsed_ms
+        stage_elapsed_ms["db_commit"] = commit_elapsed_ms
+        ui_batches: list[ScanBatchCommitted] = []
+        if request.scan_job_id and ready_chunk:
+            visible_publish_size = max(1, int(request.visible_publish_size))
+            for ready_rows in _batched_rows(ready_chunk, visible_publish_size):
+                ui_batches.append(
+                    ScanBatchCommitted(
+                        job_id=request.scan_job_id,
+                        root=request.root,
+                        collection_revision=collection_revision,
+                        ready_count=len(ready_rows),
+                        rows=ready_rows,
+                        stage_elapsed_ms=stage_elapsed_ms,
+                    )
+                )
+        append_scan_event = getattr(self._asset_repository, "append_scan_event", None)
+        if request.scan_job_id and callable(append_scan_event):
+            append_scan_event(
+                request.scan_job_id,
+                "batch_committed",
+                {
+                    "requested_rows": len(chunk),
+                    "rows": len(emitted_chunk),
+                    "ready_rows": len(ready_chunk),
+                    "commit_elapsed_ms": commit_elapsed_ms,
+                    "stage_elapsed_ms": stage_elapsed_ms,
+                    "collection_revision": collection_revision,
+                },
+            )
+        if request.scan_batch_callback is not None:
+            for batch in ui_batches:
+                request.scan_batch_callback(batch)
         return 0
+
+
+def _monotonic_ms() -> float:
+    return time.perf_counter() * 1000
+
+
+def _should_flush_chunk(
+    chunk: list[dict[str, Any]],
+    *,
+    chunk_size: int,
+    max_interval_ms: float | None,
+    last_flush_ms: float,
+    now_ms: float,
+) -> bool:
+    if not chunk:
+        return False
+    if len(chunk) >= chunk_size:
+        return True
+    if max_interval_ms is None:
+        return False
+    try:
+        interval = float(max_interval_ms)
+    except (TypeError, ValueError):
+        return False
+    return interval >= 0 and now_ms - last_flush_ms >= interval
+
+
+def _ready_visible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ready: list[dict[str, Any]] = []
+    for row in rows:
+        if _row_is_ready_visible(row):
+            ready.append(row)
+    return ready
+
+
+def _row_is_ready_visible(row: dict[str, Any]) -> bool:
+    return row.get("thumbnail_state") == "ready" and bool(
+        str(row.get("thumb_cache_key") or "").strip()
+    )
+
+
+def _batched_rows(
+    rows: list[dict[str, Any]],
+    batch_size: int,
+) -> list[list[dict[str, Any]]]:
+    return [rows[index : index + batch_size] for index in range(0, len(rows), batch_size)]
+
+
+def _collection_revision_from_rows(rows: list[dict[str, Any]]) -> int:
+    revision = 0
+    for row in rows:
+        try:
+            revision = max(revision, int(row.get("index_revision") or 0))
+        except (TypeError, ValueError):
+            continue
+    return revision
 
 
 __all__ = ["ScanLibraryRequest", "ScanLibraryResult", "ScanLibraryUseCase"]

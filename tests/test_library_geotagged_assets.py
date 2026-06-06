@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -232,7 +232,10 @@ def test_scan_finished_invalidates_geotagged_cache(tmp_path: Path) -> None:
         patch("iPhoto.library.scan_coordinator.LOGGER.warning"),
     ):
         manager.get_geotagged_assets()
-        manager._on_scan_finished(root, [row])
+        worker = Mock(cancelled=False, failed=False, scan_service=Mock())
+        manager._current_scanner_worker = worker
+        manager._live_scan_root = root
+        manager._on_scan_finished(worker, root, [row])
         manager.get_geotagged_assets()
 
     assert repo.calls == 2

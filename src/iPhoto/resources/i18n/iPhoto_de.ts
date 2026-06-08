@@ -1033,6 +1033,30 @@
             <source>Rotate counter-clockwise</source>
             <translation>Gegen den Uhrzeigersinn drehen</translation>
         </message>
+        <message>
+            <source>Adjust</source>
+            <translation>Anpassen</translation>
+        </message>
+        <message>
+            <source>Crop</source>
+            <translation>Zuschneiden</translation>
+        </message>
+        <message>
+            <source>Press and hold to preview the unedited photo</source>
+            <translation>Gedrückt halten, um das unbearbeitete Foto anzuzeigen</translation>
+        </message>
+        <message>
+            <source>Revert to Original</source>
+            <translation>Zum Original zurückkehren</translation>
+        </message>
+        <message>
+            <source>Restore every adjustment to its original value</source>
+            <translation>Alle Anpassungen auf ihre Originalwerte zurücksetzen</translation>
+        </message>
+        <message>
+            <source>Done</source>
+            <translation>Fertig</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>
@@ -1436,6 +1460,36 @@
         <message>
             <source>Temperature/Tint</source>
             <translation>Temperatur/Farbton</translation>
+        </message>
+    </context>
+    <context>
+        <name>InfoLocationMap</name>
+        <message>
+            <source>Map preview unavailable</source>
+            <translation>Kartenvorschau nicht verfügbar</translation>
+        </message>
+    </context>
+    <context>
+        <name>VideoTrimBar</name>
+        <message>
+            <source>Adjust trim start</source>
+            <translation>Trimmanfang anpassen</translation>
+        </message>
+        <message>
+            <source>Adjust trim end</source>
+            <translation>Trimmende anpassen</translation>
+        </message>
+        <message>
+            <source>Drag to scrub video</source>
+            <translation>Ziehen, um das Video zu durchsuchen</translation>
+        </message>
+        <message>
+            <source>Pause</source>
+            <translation>Pause</translation>
+        </message>
+        <message>
+            <source>Play</source>
+            <translation>Wiedergabe</translation>
         </message>
     </context>
 </TS>

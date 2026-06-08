@@ -1033,6 +1033,30 @@
             <source>Rotate counter-clockwise</source>
             <translation>逆时针旋转</translation>
         </message>
+        <message>
+            <source>Adjust</source>
+            <translation>调整</translation>
+        </message>
+        <message>
+            <source>Crop</source>
+            <translation>裁剪</translation>
+        </message>
+        <message>
+            <source>Press and hold to preview the unedited photo</source>
+            <translation>按住可预览未编辑照片</translation>
+        </message>
+        <message>
+            <source>Revert to Original</source>
+            <translation>还原为原片</translation>
+        </message>
+        <message>
+            <source>Restore every adjustment to its original value</source>
+            <translation>将所有调整恢复为原始值</translation>
+        </message>
+        <message>
+            <source>Done</source>
+            <translation>完成</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>
@@ -1436,6 +1460,36 @@
         <message>
             <source>Temperature/Tint</source>
             <translation>色温/色调</translation>
+        </message>
+    </context>
+    <context>
+        <name>InfoLocationMap</name>
+        <message>
+            <source>Map preview unavailable</source>
+            <translation>地图预览不可用</translation>
+        </message>
+    </context>
+    <context>
+        <name>VideoTrimBar</name>
+        <message>
+            <source>Adjust trim start</source>
+            <translation>调整修剪起点</translation>
+        </message>
+        <message>
+            <source>Adjust trim end</source>
+            <translation>调整修剪终点</translation>
+        </message>
+        <message>
+            <source>Drag to scrub video</source>
+            <translation>拖动以浏览视频</translation>
+        </message>
+        <message>
+            <source>Pause</source>
+            <translation>暂停</translation>
+        </message>
+        <message>
+            <source>Play</source>
+            <translation>播放</translation>
         </message>
     </context>
 </TS>

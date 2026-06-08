@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iPhoto.gui.i18n import tr
+
 from ..icon import load_icon
 
 BAR_HEIGHT = 50
@@ -469,6 +471,13 @@ class VideoTrimBar(QWidget):
         self._canvas.playheadSeeked.connect(self.playheadSeeked)
         self._canvas.playheadDragStarted.connect(self.playheadDragStarted)
         self._canvas.playheadDragFinished.connect(self.playheadDragFinished)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self._play_button.setToolTip(self._play_button_tooltip())
+        self._left_handle.setToolTip(tr("VideoTrimBar", "Adjust trim start"))
+        self._right_handle.setToolTip(tr("VideoTrimBar", "Adjust trim end"))
+        self._canvas.setToolTip(tr("VideoTrimBar", "Drag to scrub video"))
 
     def clear(self) -> None:
         self._pixmaps.clear()
@@ -537,6 +546,7 @@ class VideoTrimBar(QWidget):
         else:
             self._play_button.setIcon(icon)
             self._play_button.setText(fallback_text)
+        self._play_button.setToolTip(self._play_button_tooltip())
 
     def resizeEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().resizeEvent(event)
@@ -618,6 +628,11 @@ class VideoTrimBar(QWidget):
         self._apply_left_style()
         self._apply_right_style()
         self._canvas.set_border_color(QColor(THEME_COLOR))
+
+    def _play_button_tooltip(self) -> str:
+        if self._playing:
+            return tr("VideoTrimBar", "Pause")
+        return tr("VideoTrimBar", "Play")
 
 
 __all__ = ["VideoTrimBar"]

@@ -27,16 +27,13 @@ from PySide6.QtGui import (
     QWindow,
 )
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
-from ....application.ports import MapRuntimePort
 from maps.map_sources import MapSourceSpec
 from maps.map_widget.drag_cursor import DragCursorManager
 
-from .photo_map_view import (
-    _configure_opaque_map_container,
-)
-from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
+from ....application.ports import MapRuntimePort
+from ....gui.i18n import tr
 from .map_widget_factory import (
     MapGLWidget,
     MapGLWindowWidget,
@@ -48,6 +45,10 @@ from .map_widget_factory import (
     check_opengl_support,
     choose_map_widget_backend,
     resolve_map_package_root,
+)
+from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
+from .photo_map_view import (
+    _configure_opaque_map_container,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -328,6 +329,10 @@ class InfoLocationMapView(QWidget):
         self._overlay = _PinOverlay(self, self._map_host)
         self._overlay.hide()
 
+    def retranslate_ui(self) -> None:
+        if not self._message_label.isHidden():
+            self._message_label.setText(self._unavailable_text())
+
     def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
         """Bind the session-owned runtime snapshot used for mini-map creation."""
 
@@ -374,7 +379,7 @@ class InfoLocationMapView(QWidget):
         if self._map_widget is None:
             self._create_map_widget()
         if self._map_widget is None:
-            self._message_label.setText("Map preview unavailable")
+            self._message_label.setText(self._unavailable_text())
             self._message_label.show()
             self._map_clip_frame.hide()
             self._map_host.hide()
@@ -819,7 +824,7 @@ class InfoLocationMapView(QWidget):
 
         if self._map_widget is None:
             self._map_host.hide()
-            self._message_label.setText("Map preview unavailable")
+            self._message_label.setText(self._unavailable_text())
             self._message_label.show()
             return
 
@@ -905,6 +910,10 @@ class InfoLocationMapView(QWidget):
             request_full_update()
         elif isinstance(self._map_widget, QWidget):
             self._map_widget.update()
+
+    @staticmethod
+    def _unavailable_text() -> str:
+        return tr("InfoLocationMap", "Map preview unavailable")
 
 
 __all__ = ["InfoLocationMapView"]

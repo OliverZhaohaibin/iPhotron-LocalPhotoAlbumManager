@@ -17,14 +17,14 @@ from PySide6.QtGui import QMouseEvent, QPainter, QPixmap, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.i18n import formatters
+from iPhoto.gui.ui.widgets import info_location_map as info_location_map_module
+from iPhoto.gui.ui.widgets import info_panel as info_panel_module
 from iPhoto.gui.ui.widgets.info_panel import (
-    InfoPanel,
     _FACE_ADD_BUTTON_SIZE,
     _FACE_ADD_ICON_SIZE,
     _FACE_AVATAR_DIAMETER,
+    InfoPanel,
 )
-from iPhoto.gui.ui.widgets import info_panel as info_panel_module
-from iPhoto.gui.ui.widgets import info_location_map as info_location_map_module
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 
@@ -1411,6 +1411,56 @@ def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
     assert panel._location_map._message_label.isHidden()
     assert not panel._location_map.isHidden()
     panel.close()
+
+
+def test_info_location_map_unavailable_message_retranslates(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnavailableMiniMapWidget(QWidget):
+        def __init__(
+            self,
+            parent: QWidget | None = None,
+            *,
+            map_source: MapSourceSpec | None = None,
+        ) -> None:
+            del parent, map_source
+            raise RuntimeError("backend unavailable")
+
+    def _fake_unavailable_map_widget_backend(
+        _map_source: MapSourceSpec | None,
+        *,
+        use_opengl: bool,
+    ) -> tuple[type[_UnavailableMiniMapWidget], MapSourceSpec, str]:
+        del use_opengl
+        return (
+            _UnavailableMiniMapWidget,
+            MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+            "legacy_python",
+        )
+
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_unavailable_map_widget_backend,
+    )
+
+    view = info_location_map_module.InfoLocationMapView()
+    try:
+        view.set_location(37.7749, -122.4194)
+        qapp.processEvents()
+
+        assert not view._message_label.isHidden()
+        assert view._message_label.text() == "Map preview unavailable"
+
+        view._message_label.setText("stale")
+        view.retranslate_ui()
+
+        assert view._message_label.text() == "Map preview unavailable"
+    finally:
+        view.shutdown()
+        view.close()
 
 
 def test_info_panel_map_runtime_package_root_controls_embedded_map_source(

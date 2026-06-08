@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
@@ -18,8 +19,8 @@ from iPhoto.gui.ui.widgets.video_trim_bar import (
     THEME_COLOR,
     TRIM_HIGHLIGHT_COLOR,
     VideoTrimBar,
-    _ThumbnailCanvas,
     _HandleButton,
+    _ThumbnailCanvas,
 )
 
 
@@ -91,6 +92,23 @@ def test_set_playing_tracks_transport_state(qapp) -> None:
 
     bar.set_playing(False)
     assert bar.is_playing() is False
+
+
+def test_video_trim_bar_retranslate_updates_transport_tooltips(qapp) -> None:
+    """Transport and trim affordances should have refreshable user-facing tooltips."""
+
+    bar = VideoTrimBar()
+
+    assert bar._play_button.toolTip() == "Play"
+    assert bar._left_handle.toolTip() == "Adjust trim start"
+    assert bar._right_handle.toolTip() == "Adjust trim end"
+    assert bar._canvas.toolTip() == "Drag to scrub video"
+
+    bar.set_playing(True)
+    assert bar._play_button.toolTip() == "Pause"
+
+    bar.set_playing(False)
+    assert bar._play_button.toolTip() == "Play"
 
 
 def test_handle_drag_uses_parent_global_position_not_local_clip() -> None:

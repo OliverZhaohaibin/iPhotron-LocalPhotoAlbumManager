@@ -17,14 +17,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iPhoto.gui.i18n import tr
+
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
-from ..models.edit_session import EditSession
 from ..icon import load_icon
+from ..models.edit_session import EditSession
 
 # Import extracted classes from their new modules
 from ._styled_combo_box import _StyledComboBox
-from .input_level_sliders import InputLevelSliders
 from .curve_graph import CurveGraph
+from .input_level_sliders import InputLevelSliders
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,8 +62,9 @@ class EditCurveSection(QWidget):
 
         # Channel selector
         self.channel_combo = _StyledComboBox(self)
-        self.channel_combo.addItems(["RGB", "Red", "Green", "Blue"])
-        self.channel_combo.currentTextChanged.connect(self._on_channel_changed)
+        self._channel_sources = ["RGB", "Red", "Green", "Blue"]
+        self.channel_combo.addItems(self._channel_sources)
+        self.channel_combo.currentIndexChanged.connect(self._on_channel_index_changed)
         self.channel_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.channel_combo, alignment=Qt.AlignLeft)
 
@@ -89,19 +92,16 @@ class EditCurveSection(QWidget):
 
         self.btn_black = QToolButton()
         self.btn_black.setIcon(load_icon("eyedropper.full.svg", color="white"))
-        self.btn_black.setToolTip("Set Black Point - Click to pick darkest point in image")
         self.btn_black.setCheckable(True)
         self.btn_black.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
 
         self.btn_gray = QToolButton()
         self.btn_gray.setIcon(load_icon("eyedropper.halffull.svg", color="white"))
-        self.btn_gray.setToolTip("Set Gray Point - Click to pick mid-tone in image")
         self.btn_gray.setCheckable(True)
         self.btn_gray.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
 
         self.btn_white = QToolButton()
         self.btn_white.setIcon(load_icon("eyedropper.svg", color="white"))
-        self.btn_white.setToolTip("Set White Point - Click to pick brightest point in image")
         self.btn_white.setCheckable(True)
         self.btn_white.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
 
@@ -136,7 +136,6 @@ class EditCurveSection(QWidget):
 
         self.btn_add_point = QToolButton()
         self.btn_add_point.setIcon(load_icon("circle.cross.svg"))
-        self.btn_add_point.setToolTip("Add Point to Curve")
         self.btn_add_point.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
         self.btn_add_point.clicked.connect(self._on_add_point_clicked)
         self.btn_add_point.setStyleSheet("""
@@ -168,6 +167,35 @@ class EditCurveSection(QWidget):
         layout.addLayout(graph_sliders_layout)
         layout.addStretch(1)
         self._update_control_sizes(self.width())
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        """Refresh user-visible curve controls after the language changes."""
+
+        current = self._current_channel_source()
+        self.channel_combo.blockSignals(True)
+        try:
+            for index, source_text in enumerate(self._channel_sources):
+                self.channel_combo.setItemText(index, _channel_label(source_text))
+            self.channel_combo.setCurrentIndex(self._channel_sources.index(current))
+        finally:
+            self.channel_combo.blockSignals(False)
+        self.btn_black.setToolTip(
+            tr("EditCurve", "Set Black Point - Click to pick darkest point in image")
+        )
+        self.btn_gray.setToolTip(
+            tr("EditCurve", "Set Gray Point - Click to pick mid-tone in image")
+        )
+        self.btn_white.setToolTip(
+            tr("EditCurve", "Set White Point - Click to pick brightest point in image")
+        )
+        self.btn_add_point.setToolTip(tr("EditCurve", "Add Point to Curve"))
+
+    def _current_channel_source(self) -> str:
+        index = self.channel_combo.currentIndex()
+        if 0 <= index < len(self._channel_sources):
+            return self._channel_sources[index]
+        return "RGB"
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -332,8 +360,9 @@ class EditCurveSection(QWidget):
     def _on_session_reset(self) -> None:
         self.refresh_from_session()
 
-    def _on_channel_changed(self, channel: str) -> None:
-        self.curve_graph.set_channel(channel)
+    def _on_channel_index_changed(self, index: int) -> None:
+        if 0 <= index < len(self._channel_sources):
+            self.curve_graph.set_channel(self._channel_sources[index])
 
     def _on_add_point_clicked(self) -> None:
         self.interactionStarted.emit()
@@ -535,6 +564,18 @@ class EditCurveSection(QWidget):
         }
         self._session.set_values(updates)
         self.curveParamsCommitted.emit(curve_data)
+
+
+def _channel_label(source_text: str) -> str:
+    if source_text == "RGB":
+        return tr("EditCurve", "RGB")
+    if source_text == "Red":
+        return tr("EditCurve", "Red")
+    if source_text == "Green":
+        return tr("EditCurve", "Green")
+    if source_text == "Blue":
+        return tr("EditCurve", "Blue")
+    return source_text
 
 
 __all__ = ["EditCurveSection"]

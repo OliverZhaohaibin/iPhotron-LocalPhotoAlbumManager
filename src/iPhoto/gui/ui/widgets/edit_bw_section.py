@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Dict, Optional
 
-from PySide6.QtCore import QThreadPool, Qt, Signal, Slot
+from PySide6.QtCore import Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QVBoxLayout, QWidget
+
+from iPhoto.gui.i18n import tr
 
 from ....core.bw_resolver import BWParams, apply_bw_preview, params_from_master
 from ..models.edit_session import EditSession
@@ -112,6 +114,20 @@ class EditBWSection(QWidget):
         self.options_section.set_expanded(False)
         layout.addWidget(self.options_section)
         layout.addStretch(1)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        """Refresh user-visible labels after the application language changes."""
+
+        labels = {
+            "BW_Intensity": tr("EditBW", "Intensity"),
+            "BW_Neutrals": tr("EditBW", "Neutrals"),
+            "BW_Tone": tr("EditBW", "Tone"),
+            "BW_Grain": tr("EditBW", "Grain"),
+        }
+        for key, row in self._rows.items():
+            row.set_label(labels[key])
+        self.options_section.set_title(tr("EditSidebar", "Options"))
 
     def set_video_mode(self, enabled: bool) -> None:
         """Flatten the section for video editing while preserving image behaviour."""
@@ -367,6 +383,9 @@ class _SliderRow(QFrame):
         super().setEnabled(True)
         self.slider.setEnabled(enabled)
         self._opacity_effect.setOpacity(1.0 if enabled else 0.5)
+
+    def set_label(self, label: str) -> None:
+        self.slider.setName(label)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """Forward left clicks to the slider even while disabled."""

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPalette, QFont
+from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -124,6 +123,12 @@ class CollapsibleSection(QFrame):
         if layout is None:
             return
         self._custom_controls_layout.addWidget(widget)
+
+    # ------------------------------------------------------------------
+    def set_title(self, title: str) -> None:
+        """Update the section header title."""
+
+        self._title_label.setText(title)
 
     # ------------------------------------------------------------------
     def set_expanded(self, expanded: bool) -> None:

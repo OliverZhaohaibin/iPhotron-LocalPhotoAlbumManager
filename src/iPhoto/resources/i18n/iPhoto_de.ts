@@ -1049,4 +1049,295 @@
             <translation>Stummschalten</translation>
         </message>
     </context>
+    <context>
+        <name>ExportController</name>
+        <message>
+            <source>Scanning library for edited images...</source>
+            <translation>Bibliothek wird nach bearbeiteten Bildern durchsucht...</translation>
+        </message>
+        <message>
+            <source>Active library session is unavailable; export requires a bound LibrarySession.</source>
+            <translation>Die aktive Bibliothekssitzung ist nicht verfügbar; für den Export ist eine verbundene LibrarySession erforderlich.</translation>
+        </message>
+        <message>
+            <source>Exporting {total} edited images...</source>
+            <translation>{total} bearbeitete Bilder werden exportiert...</translation>
+        </message>
+        <message>
+            <source>Library not bound.</source>
+            <translation>Bibliothek nicht verbunden.</translation>
+        </message>
+        <message>
+            <source>Could not create export folder: {error}</source>
+            <translation>Exportordner konnte nicht erstellt werden: {error}</translation>
+        </message>
+        <message>
+            <source>Select Export Destination</source>
+            <translation>Exportziel auswählen</translation>
+        </message>
+        <message>
+            <source>No items selected.</source>
+            <translation>Keine Objekte ausgewählt.</translation>
+        </message>
+        <message>
+            <source>Starting export...</source>
+            <translation>Export wird gestartet...</translation>
+        </message>
+        <message>
+            <source>Exporting {current}/{total}...</source>
+            <translation>{current}/{total} wird exportiert...</translation>
+        </message>
+        <message>
+            <source>{success} media exported</source>
+            <translation>{success} Medien exportiert</translation>
+        </message>
+        <message>
+            <source>, {fail} failed</source>
+            <translation>, {fail} fehlgeschlagen</translation>
+        </message>
+    </context>
+    <context>
+        <name>ShareController</name>
+        <message>
+            <source>No item selected to share.</source>
+            <translation>Kein Objekt zum Teilen ausgewählt.</translation>
+        </message>
+        <message>
+            <source>File not found: {filename}</source>
+            <translation>Datei nicht gefunden: {filename}</translation>
+        </message>
+        <message>
+            <source>Copied to Clipboard</source>
+            <translation>In Zwischenablage kopiert</translation>
+        </message>
+        <message>
+            <source>Preparing image...</source>
+            <translation>Bild wird vorbereitet...</translation>
+        </message>
+        <message>
+            <source>Copied Original File</source>
+            <translation>Originaldatei kopiert</translation>
+        </message>
+        <message>
+            <source>Preparing video...</source>
+            <translation>Video wird vorbereitet...</translation>
+        </message>
+        <message>
+            <source>Revealed {filename} in file manager.</source>
+            <translation>{filename} im Dateimanager angezeigt.</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditColor</name>
+        <message>
+            <source>Saturation</source>
+            <translation>Sättigung</translation>
+        </message>
+        <message>
+            <source>Vibrance</source>
+            <translation>Lebendigkeit</translation>
+        </message>
+        <message>
+            <source>Cast</source>
+            <translation>Farbstich</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditSidebar</name>
+        <message>
+            <source>Options</source>
+            <translation>Optionen</translation>
+        </message>
+        <message>
+            <source>Reset {section} adjustments</source>
+            <translation>Anpassungen für „{section}“ zurücksetzen</translation>
+        </message>
+        <message>
+            <source>Toggle {section} adjustments</source>
+            <translation>Anpassungen für „{section}“ ein-/ausschalten</translation>
+        </message>
+        <message>
+            <source>Light</source>
+            <translation>Licht</translation>
+        </message>
+        <message>
+            <source>Color</source>
+            <translation>Farbe</translation>
+        </message>
+        <message>
+            <source>Black &amp; White</source>
+            <translation>Schwarzweiß</translation>
+        </message>
+        <message>
+            <source>White Balance</source>
+            <translation>Weißabgleich</translation>
+        </message>
+        <message>
+            <source>Curve</source>
+            <translation>Kurven</translation>
+        </message>
+        <message>
+            <source>Levels</source>
+            <translation>Tonwerte</translation>
+        </message>
+        <message>
+            <source>Definition</source>
+            <translation>Auflösung</translation>
+        </message>
+        <message>
+            <source>Selective Color</source>
+            <translation>Selektive Farbe</translation>
+        </message>
+        <message>
+            <source>Noise Reduction</source>
+            <translation>Bildrauschen reduzieren</translation>
+        </message>
+        <message>
+            <source>Sharpen</source>
+            <translation>Scharfzeichnen</translation>
+        </message>
+        <message>
+            <source>Vignette</source>
+            <translation>Vignette</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditCurve</name>
+        <message>
+            <source>Set Black Point - Click to pick darkest point in image</source>
+            <translation>Schwarzpunkt festlegen - Klicken, um den dunkelsten Punkt im Bild auszuwählen</translation>
+        </message>
+        <message>
+            <source>Set Gray Point - Click to pick mid-tone in image</source>
+            <translation>Graupunkt festlegen - Klicken, um einen Mittelton im Bild auszuwählen</translation>
+        </message>
+        <message>
+            <source>Set White Point - Click to pick brightest point in image</source>
+            <translation>Weißpunkt festlegen - Klicken, um den hellsten Punkt im Bild auszuwählen</translation>
+        </message>
+        <message>
+            <source>Add Point to Curve</source>
+            <translation>Punkt zur Kurve hinzufügen</translation>
+        </message>
+        <message>
+            <source>RGB</source>
+            <translation>RGB</translation>
+        </message>
+        <message>
+            <source>Red</source>
+            <translation>Rot</translation>
+        </message>
+        <message>
+            <source>Green</source>
+            <translation>Grün</translation>
+        </message>
+        <message>
+            <source>Blue</source>
+            <translation>Blau</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditLight</name>
+        <message>
+            <source>Brilliance</source>
+            <translation>Brillanz</translation>
+        </message>
+        <message>
+            <source>Exposure</source>
+            <translation>Belichtung</translation>
+        </message>
+        <message>
+            <source>Highlights</source>
+            <translation>Glanzlichter</translation>
+        </message>
+        <message>
+            <source>Shadows</source>
+            <translation>Schatten</translation>
+        </message>
+        <message>
+            <source>Brightness</source>
+            <translation>Helligkeit</translation>
+        </message>
+        <message>
+            <source>Contrast</source>
+            <translation>Kontrast</translation>
+        </message>
+        <message>
+            <source>Black Point</source>
+            <translation>Schwarzpunkt</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditPerspective</name>
+        <message>
+            <source>Straighten</source>
+            <translation>Begradigen</translation>
+        </message>
+        <message>
+            <source>Vertical</source>
+            <translation>Vertikal</translation>
+        </message>
+        <message>
+            <source>Horizontal</source>
+            <translation>Horizontal</translation>
+        </message>
+        <message>
+            <source>Flip</source>
+            <translation>Spiegeln</translation>
+        </message>
+        <message>
+            <source>Aspect</source>
+            <translation>Seitenverhältnis</translation>
+        </message>
+        <message>
+            <source>Freeform</source>
+            <translation>Frei</translation>
+        </message>
+        <message>
+            <source>Original</source>
+            <translation>Original</translation>
+        </message>
+        <message>
+            <source>Square</source>
+            <translation>Quadrat</translation>
+        </message>
+    </context>
+    <context>
+        <name>FaceNameOverlay</name>
+        <message>
+            <source>Click to Name</source>
+            <translation>Zum Benennen klicken</translation>
+        </message>
+        <message>
+            <source>unnamed</source>
+            <translation>unbenannt</translation>
+        </message>
+        <message>
+            <source>Please enter a name before saving the face.</source>
+            <translation>Geben Sie vor dem Sichern des Gesichts einen Namen ein.</translation>
+        </message>
+        <message>
+            <source>Please place the circle on the face before saving.</source>
+            <translation>Platzieren Sie vor dem Sichern den Kreis auf dem Gesicht.</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditBW</name>
+        <message>
+            <source>Intensity</source>
+            <translation>Intensität</translation>
+        </message>
+        <message>
+            <source>Neutrals</source>
+            <translation>Neutraltöne</translation>
+        </message>
+        <message>
+            <source>Tone</source>
+            <translation>Farbton</translation>
+        </message>
+        <message>
+            <source>Grain</source>
+            <translation>Körnung</translation>
+        </message>
+    </context>
 </TS>

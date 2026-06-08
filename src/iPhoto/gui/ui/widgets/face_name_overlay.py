@@ -6,13 +6,24 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QEnterEvent, QIcon, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (
+    QColor,
+    QEnterEvent,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import QCompleter, QLabel, QLineEdit, QListView, QToolTip, QWidget
 
+from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
 
-_FALLBACK_FACE_NAME = "unnamed"
 _LABEL_MARGIN_X = 10
 _LABEL_MARGIN_Y = 4
 _LABEL_GAP = 8
@@ -273,7 +284,7 @@ class FaceNameOverlayWidget(QWidget):
         self._ensure_manual_editor()
         if self._manual_editor is not None:
             self._manual_editor.clear()
-            self._manual_editor.setPlaceholderText("Click to Name")
+            self._manual_editor.setPlaceholderText(tr("FaceNameOverlay", "Click to Name"))
             self._manual_editor.reset_closing_state()
             self._manual_editor.show()
         self._relayout()
@@ -459,7 +470,19 @@ class FaceNameOverlayWidget(QWidget):
 
     def _display_name(self, annotation: AssetFaceAnnotation) -> str:
         name = annotation.display_name
-        return name.strip() if isinstance(name, str) and name.strip() else _FALLBACK_FACE_NAME
+        return (
+            name.strip()
+            if isinstance(name, str) and name.strip()
+            else tr("FaceNameOverlay", "unnamed")
+        )
+
+    def retranslate_ui(self) -> None:
+        """Refresh overlay labels after the application language changes."""
+
+        for state in self._states.values():
+            state.chip.setText(self._display_name(state.annotation))
+        if self._manual_editor is not None:
+            self._manual_editor.setPlaceholderText(tr("FaceNameOverlay", "Click to Name"))
 
     def _sync_child_visibility(self) -> None:
         viewer_ready = self._viewer_has_image_content()
@@ -715,7 +738,7 @@ class FaceNameOverlayWidget(QWidget):
         if self._manual_editor is None:
             editor = _FaceNameEditor(self.parentWidget() or self)
             editor.set_name_suggestions(self._name_suggestions)
-            editor.setPlaceholderText("Click to Name")
+            editor.setPlaceholderText(tr("FaceNameOverlay", "Click to Name"))
             editor.commitRequested.connect(self._submit_manual_face)
             editor.cancelRequested.connect(self.clear_manual_face_draft)
             self._manual_editor = editor
@@ -725,12 +748,16 @@ class FaceNameOverlayWidget(QWidget):
             return
         trimmed = self._manual_editor.text().strip()
         if not trimmed:
-            self.show_manual_error("Please enter a name before saving the face.")
+            self.show_manual_error(
+                tr("FaceNameOverlay", "Please enter a name before saving the face.")
+            )
             self._manual_editor.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         requested_box = self._manual_requested_box()
         if requested_box is None:
-            self.show_manual_error("Please place the circle on the face before saving.")
+            self.show_manual_error(
+                tr("FaceNameOverlay", "Please place the circle on the face before saving.")
+            )
             return
         self._manual_busy = True
         self._manual_editor.setEnabled(False)

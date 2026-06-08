@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QScrollArea,
     QStackedWidget,
@@ -17,11 +17,11 @@ from ....core.bw_resolver import BWParams
 from ....core.color_resolver import ColorStats
 from ....core.wb_resolver import WBParams
 from ..models.edit_session import EditSession
+from ..palette import SIDEBAR_BACKGROUND_COLOR
 from .edit_perspective_controls import PerspectiveControls
+from .edit_section_coordinator import EditSessionCoordinator
 from .edit_sidebar_sections import SECTION_CONFIGS, EditSectionRegistry
 from .edit_sidebar_signals import EditSignalRouter
-from .edit_section_coordinator import EditSessionCoordinator
-from ..palette import SIDEBAR_BACKGROUND_COLOR
 
 
 class EditSidebar(QWidget):
@@ -250,6 +250,15 @@ class EditSidebar(QWidget):
         self.vignette_toggle_button = _b["vignette"].toggle_button
 
         self.set_mode("adjust")
+
+    # ------------------------------------------------------------------
+    def retranslate_ui(self) -> None:
+        """Refresh edit sidebar labels after the application language changes."""
+
+        self._registry.retranslate_ui()
+        method = getattr(self._perspective_controls, "retranslate_ui", None)
+        if callable(method):
+            method()
 
     # ------------------------------------------------------------------
     def set_session(self, session: Optional[EditSession]) -> None:

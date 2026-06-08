@@ -1049,4 +1049,295 @@
             <translation>静音</translation>
         </message>
     </context>
+    <context>
+        <name>ExportController</name>
+        <message>
+            <source>Scanning library for edited images...</source>
+            <translation>正在扫描图库中的已编辑图像...</translation>
+        </message>
+        <message>
+            <source>Active library session is unavailable; export requires a bound LibrarySession.</source>
+            <translation>当前图库会话不可用；导出需要已绑定的 LibrarySession。</translation>
+        </message>
+        <message>
+            <source>Exporting {total} edited images...</source>
+            <translation>正在导出 {total} 张已编辑图像...</translation>
+        </message>
+        <message>
+            <source>Library not bound.</source>
+            <translation>图库未绑定。</translation>
+        </message>
+        <message>
+            <source>Could not create export folder: {error}</source>
+            <translation>无法创建导出文件夹：{error}</translation>
+        </message>
+        <message>
+            <source>Select Export Destination</source>
+            <translation>选择导出目标位置</translation>
+        </message>
+        <message>
+            <source>No items selected.</source>
+            <translation>未选择项目。</translation>
+        </message>
+        <message>
+            <source>Starting export...</source>
+            <translation>正在开始导出...</translation>
+        </message>
+        <message>
+            <source>Exporting {current}/{total}...</source>
+            <translation>正在导出 {current}/{total}...</translation>
+        </message>
+        <message>
+            <source>{success} media exported</source>
+            <translation>已导出 {success} 个媒体项目</translation>
+        </message>
+        <message>
+            <source>, {fail} failed</source>
+            <translation>，{fail} 个失败</translation>
+        </message>
+    </context>
+    <context>
+        <name>ShareController</name>
+        <message>
+            <source>No item selected to share.</source>
+            <translation>未选择要共享的项目。</translation>
+        </message>
+        <message>
+            <source>File not found: {filename}</source>
+            <translation>找不到文件：{filename}</translation>
+        </message>
+        <message>
+            <source>Copied to Clipboard</source>
+            <translation>已复制到剪贴板</translation>
+        </message>
+        <message>
+            <source>Preparing image...</source>
+            <translation>正在准备图像...</translation>
+        </message>
+        <message>
+            <source>Copied Original File</source>
+            <translation>已复制原始文件</translation>
+        </message>
+        <message>
+            <source>Preparing video...</source>
+            <translation>正在准备视频...</translation>
+        </message>
+        <message>
+            <source>Revealed {filename} in file manager.</source>
+            <translation>已在文件管理器中显示 {filename}。</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditColor</name>
+        <message>
+            <source>Saturation</source>
+            <translation>饱和度</translation>
+        </message>
+        <message>
+            <source>Vibrance</source>
+            <translation>自然饱和度</translation>
+        </message>
+        <message>
+            <source>Cast</source>
+            <translation>色偏</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditSidebar</name>
+        <message>
+            <source>Options</source>
+            <translation>选项</translation>
+        </message>
+        <message>
+            <source>Reset {section} adjustments</source>
+            <translation>还原“{section}”调整</translation>
+        </message>
+        <message>
+            <source>Toggle {section} adjustments</source>
+            <translation>切换“{section}”调整</translation>
+        </message>
+        <message>
+            <source>Light</source>
+            <translation>光效</translation>
+        </message>
+        <message>
+            <source>Color</source>
+            <translation>颜色</translation>
+        </message>
+        <message>
+            <source>Black &amp; White</source>
+            <translation>黑白</translation>
+        </message>
+        <message>
+            <source>White Balance</source>
+            <translation>白平衡</translation>
+        </message>
+        <message>
+            <source>Curve</source>
+            <translation>曲线</translation>
+        </message>
+        <message>
+            <source>Levels</source>
+            <translation>色阶</translation>
+        </message>
+        <message>
+            <source>Definition</source>
+            <translation>清晰度</translation>
+        </message>
+        <message>
+            <source>Selective Color</source>
+            <translation>可选颜色</translation>
+        </message>
+        <message>
+            <source>Noise Reduction</source>
+            <translation>减少噪点</translation>
+        </message>
+        <message>
+            <source>Sharpen</source>
+            <translation>锐化</translation>
+        </message>
+        <message>
+            <source>Vignette</source>
+            <translation>晕影</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditCurve</name>
+        <message>
+            <source>Set Black Point - Click to pick darkest point in image</source>
+            <translation>设置黑点 - 点按以选取图像中最暗的点</translation>
+        </message>
+        <message>
+            <source>Set Gray Point - Click to pick mid-tone in image</source>
+            <translation>设置灰点 - 点按以选取图像中的中间调</translation>
+        </message>
+        <message>
+            <source>Set White Point - Click to pick brightest point in image</source>
+            <translation>设置白点 - 点按以选取图像中最亮的点</translation>
+        </message>
+        <message>
+            <source>Add Point to Curve</source>
+            <translation>向曲线添加点</translation>
+        </message>
+        <message>
+            <source>RGB</source>
+            <translation>RGB</translation>
+        </message>
+        <message>
+            <source>Red</source>
+            <translation>红色</translation>
+        </message>
+        <message>
+            <source>Green</source>
+            <translation>绿色</translation>
+        </message>
+        <message>
+            <source>Blue</source>
+            <translation>蓝色</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditLight</name>
+        <message>
+            <source>Brilliance</source>
+            <translation>鲜明度</translation>
+        </message>
+        <message>
+            <source>Exposure</source>
+            <translation>曝光</translation>
+        </message>
+        <message>
+            <source>Highlights</source>
+            <translation>高光</translation>
+        </message>
+        <message>
+            <source>Shadows</source>
+            <translation>阴影</translation>
+        </message>
+        <message>
+            <source>Brightness</source>
+            <translation>亮度</translation>
+        </message>
+        <message>
+            <source>Contrast</source>
+            <translation>对比度</translation>
+        </message>
+        <message>
+            <source>Black Point</source>
+            <translation>黑点</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditPerspective</name>
+        <message>
+            <source>Straighten</source>
+            <translation>校正</translation>
+        </message>
+        <message>
+            <source>Vertical</source>
+            <translation>垂直</translation>
+        </message>
+        <message>
+            <source>Horizontal</source>
+            <translation>水平</translation>
+        </message>
+        <message>
+            <source>Flip</source>
+            <translation>翻转</translation>
+        </message>
+        <message>
+            <source>Aspect</source>
+            <translation>宽高比</translation>
+        </message>
+        <message>
+            <source>Freeform</source>
+            <translation>自由格式</translation>
+        </message>
+        <message>
+            <source>Original</source>
+            <translation>原始</translation>
+        </message>
+        <message>
+            <source>Square</source>
+            <translation>正方形</translation>
+        </message>
+    </context>
+    <context>
+        <name>FaceNameOverlay</name>
+        <message>
+            <source>Click to Name</source>
+            <translation>点按以命名</translation>
+        </message>
+        <message>
+            <source>unnamed</source>
+            <translation>未命名</translation>
+        </message>
+        <message>
+            <source>Please enter a name before saving the face.</source>
+            <translation>请先输入名称再存储人脸。</translation>
+        </message>
+        <message>
+            <source>Please place the circle on the face before saving.</source>
+            <translation>请先将圆圈放在人脸上再存储。</translation>
+        </message>
+    </context>
+    <context>
+        <name>EditBW</name>
+        <message>
+            <source>Intensity</source>
+            <translation>强度</translation>
+        </message>
+        <message>
+            <source>Neutrals</source>
+            <translation>中性色调</translation>
+        </message>
+        <message>
+            <source>Tone</source>
+            <translation>色调</translation>
+        </message>
+        <message>
+            <source>Grain</source>
+            <translation>颗粒</translation>
+        </message>
+    </context>
 </TS>

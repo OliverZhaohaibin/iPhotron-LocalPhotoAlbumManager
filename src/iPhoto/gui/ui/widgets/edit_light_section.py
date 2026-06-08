@@ -6,25 +6,24 @@ import logging
 from functools import partial
 from typing import Dict, Optional
 
-
-from PySide6.QtCore import QThreadPool, Signal, Slot, Qt
+from PySide6.QtCore import Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsOpacityEffect,
     QVBoxLayout,
     QWidget,
-    QGraphicsOpacityEffect,
 )
 
-from ..palette import Edit_SIDEBAR_SUB_FONT
+from iPhoto.gui.i18n import tr
+
 from ....core.light_resolver import LIGHT_KEYS, _clamp, resolve_light_vector
 from ..models.edit_session import EditSession
-from .collapsible_section import CollapsibleSection, CollapsibleSubSection
+from ..tasks.thumbnail_generator_worker import ThumbnailGeneratorWorker
+from .collapsible_section import CollapsibleSubSection
 from .edit_strip import BWSlider
 from .thumbnail_strip_slider import ThumbnailStripSlider
-from ..tasks.thumbnail_generator_worker import ThumbnailGeneratorWorker
-
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +95,23 @@ class EditLightSection(QWidget):
         self.options_section.set_expanded(False)
         layout.addWidget(self.options_section)
         layout.addStretch(1)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        """Refresh user-visible labels after the application language changes."""
+
+        labels = {
+            "Brilliance": tr("EditLight", "Brilliance"),
+            "Exposure": tr("EditLight", "Exposure"),
+            "Highlights": tr("EditLight", "Highlights"),
+            "Shadows": tr("EditLight", "Shadows"),
+            "Brightness": tr("EditLight", "Brightness"),
+            "Contrast": tr("EditLight", "Contrast"),
+            "BlackPoint": tr("EditLight", "Black Point"),
+        }
+        for key, row in self._rows.items():
+            row.set_label(labels[key])
+        self.options_section.set_title(tr("EditSidebar", "Options"))
 
     def set_video_mode(self, enabled: bool) -> None:
         """Flatten the section for video editing while preserving image behaviour."""
@@ -338,6 +354,9 @@ class _SliderRow(QFrame):
             self.slider.setValue(value, emit=False)
         finally:
             self.slider.blockSignals(block)
+
+    def set_label(self, label: str) -> None:
+        self.slider.setName(label)
 
     # ------------------------------------------------------------------
     def _handle_slider_changed(self, new_value: float) -> None:

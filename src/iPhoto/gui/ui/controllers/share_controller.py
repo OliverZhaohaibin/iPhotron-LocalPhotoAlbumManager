@@ -27,6 +27,7 @@ from ....core.export import probe_duration_seconds, render_image, render_video
 from ....errors import ExternalToolError
 from ....media_classifier import VIDEO_EXTENSIONS
 from ....utils.ffmpeg import probe_media
+from ...i18n import tr
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
 
@@ -175,7 +176,10 @@ class ShareController(QObject):
     def _handle_share_requested(self) -> None:
         file_path = self._current_path_provider()
         if file_path is None:
-            self._status_bar.show_message("No item selected to share.", 3000)
+            self._status_bar.show_message(
+                tr("ShareController", "No item selected to share."),
+                3000,
+            )
             return
 
         share_action = self._settings.get("ui.share_action", "reveal_file")
@@ -192,7 +196,12 @@ class ShareController(QObject):
     # ------------------------------------------------------------------
     def _copy_file_to_clipboard(self, path: Path) -> None:
         if not path.exists():
-            self._status_bar.show_message(f"File not found: {path.name}", 3000)
+            self._status_bar.show_message(
+                tr("ShareController", "File not found: {filename}").format(
+                    filename=path.name
+                ),
+                3000,
+            )
             return
 
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
@@ -214,48 +223,48 @@ class ShareController(QObject):
                 else:
                     mime_data = self._build_file_mime_data(path)
                     QGuiApplication.clipboard().setMimeData(mime_data)
-                    self._toast.show_toast("Copied to Clipboard")
+                    self._toast.show_toast(tr("ShareController", "Copied to Clipboard"))
                 return
             self._copy_rendered_image_to_clipboard(path)
             return
 
         mime_data = self._build_file_mime_data(path)
         QGuiApplication.clipboard().setMimeData(mime_data)
-        self._toast.show_toast("Copied to Clipboard")
+        self._toast.show_toast(tr("ShareController", "Copied to Clipboard"))
 
     def _copy_rendered_image_to_clipboard(self, path: Path) -> None:
-        self._toast.show_toast("Preparing image...")
+        self._toast.show_toast(tr("ShareController", "Preparing image..."))
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
         worker = RenderClipboardWorker(path, edit_service=edit_service)
 
         def _on_success(image: QImage):
             QGuiApplication.clipboard().setImage(image)
-            self._toast.show_toast("Copied to Clipboard")
+            self._toast.show_toast(tr("ShareController", "Copied to Clipboard"))
 
         def _on_failure(message: str):
             # Fallback to file copy if rendering fails
             mime_data = self._build_file_mime_data(path)
             QGuiApplication.clipboard().setMimeData(mime_data)
-            self._toast.show_toast("Copied Original File")
+            self._toast.show_toast(tr("ShareController", "Copied Original File"))
 
         worker.signals.success.connect(_on_success)
         worker.signals.failed.connect(_on_failure)
         QThreadPool.globalInstance().start(worker)
 
     def _copy_rendered_video_to_clipboard(self, path: Path) -> None:
-        self._toast.show_toast("Preparing video...")
+        self._toast.show_toast(tr("ShareController", "Preparing video..."))
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
         worker = RenderVideoClipboardWorker(path, edit_service=edit_service)
 
         def _on_success(rendered_path: str):
             mime_data = self._build_file_mime_data(Path(rendered_path))
             QGuiApplication.clipboard().setMimeData(mime_data)
-            self._toast.show_toast("Copied to Clipboard")
+            self._toast.show_toast(tr("ShareController", "Copied to Clipboard"))
 
         def _on_failure(_message: str):
             mime_data = self._build_file_mime_data(path)
             QGuiApplication.clipboard().setMimeData(mime_data)
-            self._toast.show_toast("Copied Original File")
+            self._toast.show_toast(tr("ShareController", "Copied Original File"))
 
         worker.signals.success.connect(_on_success)
         worker.signals.failed.connect(_on_failure)
@@ -263,11 +272,16 @@ class ShareController(QObject):
 
     def _copy_path_to_clipboard(self, path: Path) -> None:
         QGuiApplication.clipboard().setText(str(path))
-        self._toast.show_toast("Copied to Clipboard")
+        self._toast.show_toast(tr("ShareController", "Copied to Clipboard"))
 
     def _reveal_in_file_manager(self, path: Path) -> None:
         if not path.exists():
-            self._status_bar.show_message(f"File not found: {path.name}", 3000)
+            self._status_bar.show_message(
+                tr("ShareController", "File not found: {filename}").format(
+                    filename=path.name
+                ),
+                3000,
+            )
             return
 
         if sys.platform == "win32":
@@ -276,7 +290,12 @@ class ShareController(QObject):
             subprocess.run(["open", "-R", str(path)], check=False)
         else:
             subprocess.run(["xdg-open", str(path.parent)], check=False)
-        self._status_bar.show_message(f"Revealed {path.name} in file manager.", 3000)
+        self._status_bar.show_message(
+            tr("ShareController", "Revealed {filename} in file manager.").format(
+                filename=path.name
+            ),
+            3000,
+        )
 
     def _build_file_mime_data(self, path: Path) -> QMimeData:
         mime_data = QMimeData()

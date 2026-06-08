@@ -6,20 +6,22 @@ from dataclasses import dataclass
 
 from PySide6.QtWidgets import QFrame, QToolButton, QWidget
 
+from iPhoto.gui.i18n import tr
+
+from ..icon import load_icon
+from ..palette import Edit_SIDEBAR_FONT
 from .collapsible_section import CollapsibleSection
 from .edit_bw_section import EditBWSection
 from .edit_color_section import EditColorSection
 from .edit_curve_section import EditCurveSection
 from .edit_definition_section import EditDefinitionSection
 from .edit_denoise_section import EditDenoiseSection
-from .edit_sharpen_section import EditSharpenSection
-from .edit_vignette_section import EditVignetteSection
 from .edit_levels_section import EditLevelsSection
 from .edit_light_section import EditLightSection
 from .edit_selective_color_section import EditSelectiveColorSection
+from .edit_sharpen_section import EditSharpenSection
+from .edit_vignette_section import EditVignetteSection
 from .edit_wb_section import EditWBSection
-from ..palette import Edit_SIDEBAR_FONT
-from ..icon import load_icon
 
 
 @dataclass
@@ -108,7 +110,7 @@ class EditSectionRegistry:
             kwargs["icon_scale"] = config.icon_scale
 
         container = CollapsibleSection(
-            config.title,
+            _section_title(config.title),
             config.icon,
             section,
             parent,
@@ -121,13 +123,13 @@ class EditSectionRegistry:
         reset_button = QToolButton(container)
         reset_button.setAutoRaise(True)
         reset_button.setIcon(load_icon("arrow.uturn.left.svg"))
-        reset_button.setToolTip(f"Reset {config.title} adjustments")
+        reset_button.setToolTip(_reset_tooltip(config.title))
 
         toggle_button = QToolButton(container)
         toggle_button.setAutoRaise(True)
         toggle_button.setCheckable(True)
         toggle_button.setIcon(load_icon("circle.svg"))
-        toggle_button.setToolTip(f"Toggle {config.title} adjustments")
+        toggle_button.setToolTip(_toggle_tooltip(config.title))
 
         container.add_header_control(reset_button)
         container.add_header_control(toggle_button)
@@ -135,6 +137,20 @@ class EditSectionRegistry:
         bundle = SectionBundle(section, container, reset_button, toggle_button)
         self.bundles[config.key] = bundle
         return bundle
+
+    def retranslate_ui(self) -> None:
+        """Refresh section titles and header controls after a language change."""
+
+        for config in SECTION_CONFIGS:
+            bundle = self.bundles.get(config.key)
+            if bundle is None:
+                continue
+            bundle.container.set_title(_section_title(config.title))
+            bundle.reset_button.setToolTip(_reset_tooltip(config.title))
+            bundle.toggle_button.setToolTip(_toggle_tooltip(config.title))
+            method = getattr(bundle.section, "retranslate_ui", None)
+            if callable(method):
+                method()
 
     @staticmethod
     def build_separator(parent: QWidget) -> QFrame:
@@ -146,3 +162,41 @@ class EditSectionRegistry:
         separator.setStyleSheet("QFrame { background-color: palette(mid); }")
         separator.setFixedHeight(1)
         return separator
+
+
+def _section_title(source_text: str) -> str:
+    if source_text == "Light":
+        return tr("EditSidebar", "Light")
+    if source_text == "Color":
+        return tr("EditSidebar", "Color")
+    if source_text == "Black & White":
+        return tr("EditSidebar", "Black & White")
+    if source_text == "White Balance":
+        return tr("EditSidebar", "White Balance")
+    if source_text == "Curve":
+        return tr("EditSidebar", "Curve")
+    if source_text == "Levels":
+        return tr("EditSidebar", "Levels")
+    if source_text == "Definition":
+        return tr("EditSidebar", "Definition")
+    if source_text == "Selective Color":
+        return tr("EditSidebar", "Selective Color")
+    if source_text == "Noise Reduction":
+        return tr("EditSidebar", "Noise Reduction")
+    if source_text == "Sharpen":
+        return tr("EditSidebar", "Sharpen")
+    if source_text == "Vignette":
+        return tr("EditSidebar", "Vignette")
+    return source_text
+
+
+def _reset_tooltip(section_title: str) -> str:
+    return tr("EditSidebar", "Reset {section} adjustments").format(
+        section=_section_title(section_title)
+    )
+
+
+def _toggle_tooltip(section_title: str) -> str:
+    return tr("EditSidebar", "Toggle {section} adjustments").format(
+        section=_section_title(section_title)
+    )

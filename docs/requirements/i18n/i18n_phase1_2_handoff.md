@@ -1,7 +1,7 @@
 # iPhotron 国际化阶段 1-3 交接文档
 
 > 日期：2026-06-08
-> 状态：阶段 1-2 已实现；阶段 3 已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 首批业务页面迁移；Python-aware 提取工具已补齐；待后续阶段继续迁移其余业务页面
+> 状态：阶段 1-2 已实现；阶段 3 已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、share/export 首批反馈、face overlay 和 edit sidebar 首批控件迁移；Python-aware 提取工具已补齐；待后续阶段继续迁移其余业务页面
 > 对应指南：`docs/requirements/i18n/i18n_multilingual_architecture_guide.md`
 
 ---
@@ -10,7 +10,7 @@
 
 前序实施覆盖架构指南中的阶段 1「基础设施」和阶段 2「核心壳层 UI」。目标是先把国际化作为运行时服务接入应用，并让桌面主窗口的基础菜单、标题栏、核心操作和基础提示可以在运行时切换语言。
 
-本轮继续推进阶段 3「主要业务页面」，已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu 与 detail/player 控制区迁移，并补齐首个 locale-aware formatter helper。
+本轮继续推进阶段 3「主要业务页面」，已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、share/export 首批反馈、face overlay 和 edit sidebar 首批控件迁移，并补齐首个 locale-aware formatter helper。
 
 已完成内容：
 
@@ -77,6 +77,11 @@
   - `DetailPageWidget.retranslate_ui()` 已支持运行时刷新长期存在页面固定文案，并会递归刷新 `PlayerBar`。
   - `PlayerBar` 播放/暂停、音量、静音 tooltip 已迁移，并新增 `retranslate_ui()`。
   - `PlayerViewController.show_placeholder(message=None)` 对默认占位文案改为按当前语言即时计算，避免语言切换后从缓存写回英文；调用方传入的自定义 `message` 仍按调用方负责翻译。
+  - `ShareController` 状态栏/toast 反馈已迁移，包括未选择项目、文件不存在、复制到剪贴板、准备渲染图像/视频、复制原始文件和在文件管理器中显示；文件名继续通过 `{filename}` 占位符插入，不进入翻译资源。
+  - `ExportController` 状态栏、toast、目录选择标题和基础错误提示已迁移；导出数量和错误详情使用 `{current}`、`{total}`、`{success}`、`{fail}`、`{error}` 占位符。
+  - `FaceNameOverlayWidget` 默认未命名人脸、手动人脸命名 placeholder 和保存前校验 tooltip 已迁移；人物真实姓名、用户输入姓名和建议列表不翻译。
+  - `EditSidebar` section 标题、Reset/Toggle tooltip 和首批 edit/crop 控件文案已迁移，并通过 `retranslate_ui()` 刷新 `CollapsibleSection` 标题、header control tooltip、Light/Color/Black & White slider label、Curve 通道/tooltip 和 Perspective/Aspect label。
+  - 本轮新增/补齐 edit 术语优先对齐 Apple 官方「照片/Fotos」使用手册命名：中文使用“光效、颜色、黑白、白平衡、曲线、色阶、清晰度、可选颜色、减少噪点、锐化、晕影、鲜明度、黑点、中性色调、颗粒、校正、宽高比、自由格式”；德文使用“Licht、Farbe、Schwarzweiß、Weißabgleich、Kurven、Tonwerte、Auflösung、Selektive Farbe、Bildrauschen reduzieren、Scharfzeichnen、Vignette、Brillanz、Schwarzpunkt、Neutraltöne、Körnung、Begradigen、Seitenverhältnis、Frei”。
   - 继续不翻译文件名、路径、人物名、地点搜索结果、相机/镜头/codec 原始值等用户数据或技术原始值。
 
 ---
@@ -475,15 +480,83 @@ python -m ruff check --select I,F \
 All checks passed
 ```
 
+阶段 3 share/export、face overlay、edit sidebar 首批控件迁移后工具链验证：
+
+```bash
+bash scripts/i18n_extract.sh
+```
+
+结果：
+
+```text
+Extracted 317 translation messages.
+```
+
+说明：317 是当前源码中已包裹翻译调用去重后的可提取 message 数；当前 `iPhoto_de.ts` 和 `iPhoto_zh_CN.ts` 各包含 317 条 message，0 条 unfinished。本轮新增 edit 术语按 Apple 官方「照片/Fotos」中文和德文使用手册命名补齐。
+
+```bash
+bash scripts/i18n_compile.sh
+```
+
+结果：
+
+```text
+Generated 317 translation(s) (317 finished and 0 unfinished)
+Generated 317 translation(s) (317 finished and 0 unfinished)
+```
+
+本轮 share/export、face overlay、edit sidebar/i18n 目标回归：
+
+```bash
+pytest tests/ui/controllers/test_share_controller.py \
+  tests/ui/controllers/test_export_controller.py \
+  tests/ui/widgets/test_face_name_overlay.py \
+  tests/ui/widgets/test_edit_sidebar.py \
+  tests/test_i18n_translation_manager.py \
+  tests/test_i18n_extract_tool.py -q
+```
+
+结果：
+
+```text
+35 passed, 1 warning
+```
+
+说明：warning 为仓库既有 `pytest.ini` 中 `env` 配置未被当前 pytest 识别。
+
+本轮窄范围静态检查：
+
+```bash
+python -m ruff check --select I,F \
+  src/iPhoto/gui/ui/controllers/share_controller.py \
+  src/iPhoto/gui/ui/controllers/export_controller.py \
+  src/iPhoto/gui/ui/widgets/face_name_overlay.py \
+  src/iPhoto/gui/ui/widgets/collapsible_section.py \
+  src/iPhoto/gui/ui/widgets/edit_sidebar.py \
+  src/iPhoto/gui/ui/widgets/edit_sidebar_sections.py \
+  src/iPhoto/gui/ui/widgets/edit_bw_section.py \
+  src/iPhoto/gui/ui/widgets/edit_light_section.py \
+  src/iPhoto/gui/ui/widgets/edit_color_section.py \
+  src/iPhoto/gui/ui/widgets/edit_curve_section.py \
+  src/iPhoto/gui/ui/widgets/edit_perspective_controls.py \
+  tests/test_i18n_translation_manager.py
+```
+
+结果：
+
+```text
+All checks passed
+```
+
 ---
 
 ## 3. 已知限制
 
-当前完成的是核心壳层国际化，以及 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区首批业务页面迁移，不是全应用文案迁移。
+当前完成的是核心壳层国际化，以及 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、share/export 首批反馈、face overlay 和 edit sidebar 首批控件迁移，不是全应用文案迁移。
 
 仍未完成的主要区域：
 
-- edit sidebar、face overlay、share controller 和部分 detail/edit 子组件中仍有 tooltip、按钮、状态文案未完整迁移。
+- edit sidebar 剩余子组件、edit preview/fullscreen/history/zoom 相关 controller、部分 detail/edit 子组件中仍有 tooltip、按钮、状态文案未完整迁移。
 - `src/maps/main.py` 独立地图预览入口未迁移。
 - `tools/check_i18n_strings.py` 硬编码文案门禁尚未实现。
 - locale-aware formatter 已具备日期时间、整数、小数和文件大小能力，但百分比、复数和更完整的 domain-specific 格式化仍未系统接入。
@@ -499,6 +572,8 @@ All checks passed
 - `PeopleDashboardWidget` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；运行时切换语言会刷新页面标题、按钮、section 标题和当前状态文案，但不会重载或重建已有卡片。
 - `AlbumSidebar` 和 `AlbumsDashboard` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；`AlbumTreeModel` 只刷新 DisplayRole，内部英文 key 保持不变。
 - `DetailPageWidget` 与 `PlayerBar` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；默认预览占位文本由 `PlayerViewController` 按当前语言即时计算。
+- `EditSidebar` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；section 标题通过稳定英文 source text 翻译，session key、slider key、aspect ratio 数值和用户数据保持不变。
+- `FaceNameOverlayWidget` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；只刷新 fallback/placeholder/校验提示，不翻译人物真实姓名或用户输入。
 - 后续迁移 context menu 时不要用 `action.text()` 判断命令；应依赖 `MenuActionSpec.action_id` / `QAction.data()`。
 - 如果传入 `InfoPanel.set_location_capability(fallback_text=...)` 的是外部自定义文案，该文案按调用方负责翻译；默认 fallback 已由 `InfoPanel` 自身翻译。
 - 如果传入 `GroupPeopleDialog(title_text=..., prompt_text=..., confirm_text=...)` 或 `MergeConfirmDialog.confirm_action(...)` 的是自定义文案，该文案按调用方负责翻译；People Dashboard 内部调用已完成翻译。

@@ -5,17 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QThreadPool, QRunnable, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QAction, QActionGroup
-from PySide6.QtWidgets import QWidget, QFileDialog
+from PySide6.QtWidgets import QFileDialog, QWidget
 
 from ....application.ports import EditServicePort
-from ....core.export import export_asset, DEFAULT_EXPORT_FORMAT
 from ....config import EXPORT_DIR_NAME
+from ....core.export import DEFAULT_EXPORT_FORMAT, export_asset
 from ....library.runtime_controller import LibraryRuntimeController
+from ...i18n import tr
+from ...ui.widgets.dialogs import show_error
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
-from ...ui.widgets.dialogs import show_error
 
 
 class ExportSignals(QObject):
@@ -81,7 +82,9 @@ class LibraryExportWorker(QRunnable):
         self.signals = ExportSignals()
 
     def run(self) -> None:
-        self.signals.message.emit("Scanning library for edited images...")
+        self.signals.message.emit(
+            tr("ExportController", "Scanning library for edited images...")
+        )
         root = self._library.root()
         if not root:
             self.signals.finished.emit(0, 0)
@@ -92,7 +95,10 @@ class LibraryExportWorker(QRunnable):
         query_service = getattr(self._library, "asset_query_service", None)
         if query_service is None:
             self.signals.message.emit(
-                "Active library session is unavailable; export requires a bound LibrarySession."
+                tr(
+                    "ExportController",
+                    "Active library session is unavailable; export requires a bound LibrarySession.",
+                )
             )
             self.signals.finished.emit(0, 0)
             return
@@ -118,7 +124,11 @@ class LibraryExportWorker(QRunnable):
             self.signals.finished.emit(0, 0)
             return
 
-        self.signals.message.emit(f"Exporting {total} edited images...")
+        self.signals.message.emit(
+            tr("ExportController", "Exporting {total} edited images...").format(
+                total=total
+            )
+        )
 
         success = 0
         fail = 0
@@ -219,7 +229,7 @@ class ExportController(QObject):
         dest = self._settings.get("ui.export_destination", "library")
         library_root = self._library.root()
         if not library_root:
-            show_error(self._main_window, "Library not bound.")
+            show_error(self._main_window, tr("ExportController", "Library not bound."))
             return None
 
         if dest == "library":
@@ -227,11 +237,19 @@ class ExportController(QObject):
             try:
                 path.mkdir(exist_ok=True)
             except OSError as exc:
-                show_error(self._main_window, f"Could not create export folder: {exc}")
+                show_error(
+                    self._main_window,
+                    tr("ExportController", "Could not create export folder: {error}").format(
+                        error=exc
+                    ),
+                )
                 return None
             return path
         else:
-            selected = QFileDialog.getExistingDirectory(self._main_window, "Select Export Destination")
+            selected = QFileDialog.getExistingDirectory(
+                self._main_window,
+                tr("ExportController", "Select Export Destination"),
+            )
             if not selected:
                 return None
             return Path(selected)
@@ -239,7 +257,10 @@ class ExportController(QObject):
     def _handle_export_selected(self) -> None:
         paths = self._get_selection()
         if not paths:
-            self._status_bar.show_message("No items selected.", 3000)
+            self._status_bar.show_message(
+                tr("ExportController", "No items selected."),
+                3000,
+            )
             return
 
         export_root = self._resolve_export_root()
@@ -248,7 +269,7 @@ class ExportController(QObject):
 
         library_root = self._library.root()
         if not library_root:
-            show_error(self._main_window, "Library not bound.")
+            show_error(self._main_window, tr("ExportController", "Library not bound."))
             return
 
         fmt = self._settings.get("ui.export_format", DEFAULT_EXPORT_FORMAT)
@@ -275,15 +296,22 @@ class ExportController(QObject):
         worker.signals.finished.connect(self._on_finished)
         worker.signals.message.connect(self._status_bar.show_message)
 
-        self._status_bar.show_message("Starting export...", 0)
+        self._status_bar.show_message(tr("ExportController", "Starting export..."), 0)
         QThreadPool.globalInstance().start(worker)
 
     def _on_progress(self, current: int, total: int) -> None:
-        self._status_bar.show_message(f"Exporting {current}/{total}...")
+        self._status_bar.show_message(
+            tr("ExportController", "Exporting {current}/{total}...").format(
+                current=current,
+                total=total,
+            )
+        )
 
     def _on_finished(self, success: int, fail: int) -> None:
-        msg = f"{success} media exported"
+        msg = tr("ExportController", "{success} media exported").format(
+            success=success
+        )
         if fail > 0:
-            msg += f", {fail} failed"
+            msg += tr("ExportController", ", {fail} failed").format(fail=fail)
         self._status_bar.show_message(msg, 5000)
         self._toast.show_toast(msg)

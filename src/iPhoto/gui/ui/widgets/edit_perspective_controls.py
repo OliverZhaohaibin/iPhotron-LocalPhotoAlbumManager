@@ -1,7 +1,6 @@
-from __future__ import annotations
 """Perspective correction controls for the crop sidebar page."""
 
-
+from __future__ import annotations
 
 from typing import Optional
 
@@ -19,12 +18,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..icon import load_icon
+from iPhoto.gui.i18n import tr
+
 from ..icon import icon_path as _icon_path
+from ..icon import load_icon
 from ..models.edit_session import EditSession
 from ..palette import Edit_SIDEBAR_FONT
 from .edit_strip import BWSlider
-
 
 _PERSPECTIVE_VERTICAL_KEY = "Perspective_Vertical"
 _PERSPECTIVE_HORIZONTAL_KEY = "Perspective_Horizontal"
@@ -90,6 +90,9 @@ class _PerspectiveSliderRow(QWidget):
 
     def value(self) -> float:
         return self._slider.value()
+
+    def set_label(self, label: str) -> None:
+        self._slider.setName(label)
 
 
 class PerspectiveControls(QWidget):
@@ -160,6 +163,17 @@ class PerspectiveControls(QWidget):
         self._vertical_row.interactionFinished.connect(self.interactionFinished)
         self._horizontal_row.interactionFinished.connect(self.interactionFinished)
         self._flip_row.interactionFinished.connect(self.interactionFinished)
+        self.retranslate_ui()
+
+    # ------------------------------------------------------------------
+    def retranslate_ui(self) -> None:
+        """Refresh crop correction labels after the application language changes."""
+
+        self._straighten_row.set_label(tr("EditPerspective", "Straighten"))
+        self._vertical_row.set_label(tr("EditPerspective", "Vertical"))
+        self._horizontal_row.set_label(tr("EditPerspective", "Horizontal"))
+        self._flip_row.set_label(tr("EditPerspective", "Flip"))
+        self._aspect_section.retranslate_ui()
 
     # ------------------------------------------------------------------
     def bind_session(self, session: Optional[EditSession]) -> None:
@@ -295,6 +309,9 @@ class _FlipToggleRow(QWidget):
         self._label_button.clicked.connect(self._toggle)
         layout.addWidget(self._label_button, 1)
 
+    def set_label(self, label: str) -> None:
+        self._label_button.setText(label)
+
     def set_checked(self, checked: bool) -> None:
         if self._button.isChecked() == checked:
             return
@@ -368,6 +385,7 @@ class _AspectRatioSection(QWidget):
         title_layout.addWidget(icon_label)
         title_text = QLabel("Aspect", self)
         title_text.setFont(Edit_SIDEBAR_FONT)
+        self._title_text = title_text
         title_layout.addWidget(title_text)
         title_layout.addStretch()
         layout.addLayout(title_layout)
@@ -386,6 +404,7 @@ class _AspectRatioSection(QWidget):
         self.setStyleSheet(stylesheet)
 
         self._button_group = QButtonGroup(self)
+        self._ratio_buttons: list[tuple[str, QRadioButton]] = []
         # Store the canonical ratio (always ≥ 1 for non-square presets) and
         # the default orientation so that the orientation buttons start in the
         # correct state for each preset.
@@ -395,6 +414,7 @@ class _AspectRatioSection(QWidget):
 
         for idx, (label, dims) in enumerate(_ASPECT_OPTIONS):
             btn = QRadioButton(label, self)
+            self._ratio_buttons.append((label, btn))
             self._button_group.addButton(btn, idx)
             options_layout.addWidget(btn)
             self._dims_map[idx] = dims
@@ -462,6 +482,17 @@ class _AspectRatioSection(QWidget):
 
         self._button_group.idToggled.connect(self._on_button_toggled)
         self._orient_group.idToggled.connect(self._on_orientation_toggled)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        """Refresh aspect-ratio labels after the application language changes."""
+
+        self._title_text.setText(tr("EditPerspective", "Aspect"))
+        for source_text, button in self._ratio_buttons:
+            if ":" in source_text:
+                button.setText(source_text)
+            else:
+                button.setText(_aspect_label(source_text))
 
     # ------------------------------------------------------------------
     def _make_orientation_pixmap(
@@ -581,3 +612,12 @@ class _AspectRatioSection(QWidget):
         btn_id = self._current_button_id()
         self.ratioSelected.emit(self._effective_ratio(btn_id))
 
+
+def _aspect_label(source_text: str) -> str:
+    if source_text == "Freeform":
+        return tr("EditPerspective", "Freeform")
+    if source_text == "Original":
+        return tr("EditPerspective", "Original")
+    if source_text == "Square":
+        return tr("EditPerspective", "Square")
+    return source_text

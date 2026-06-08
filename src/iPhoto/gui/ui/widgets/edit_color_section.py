@@ -6,26 +6,32 @@ import logging
 from functools import partial
 from typing import Dict, Optional
 
-from PySide6.QtCore import QThreadPool, Signal, Slot, Qt
+from PySide6.QtCore import Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsOpacityEffect,
     QVBoxLayout,
     QWidget,
-    QGraphicsOpacityEffect,
 )
 
-from ..palette import Edit_SIDEBAR_SUB_FONT
-from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorResolver, ColorStats
-from ....core.color_resolver import compute_color_statistics
+from iPhoto.gui.i18n import tr
+
+from ....core.color_resolver import (
+    COLOR_KEYS,
+    COLOR_RANGES,
+    ColorResolver,
+    ColorStats,
+    compute_color_statistics,
+)
 from ....core.image_filters import apply_adjustments
 from ..models.edit_session import EditSession
+from ..palette import Edit_SIDEBAR_SUB_FONT
+from ..tasks.thumbnail_generator_worker import ThumbnailGeneratorWorker
 from .collapsible_section import CollapsibleSection
 from .edit_strip import BWSlider
 from .thumbnail_strip_slider import ThumbnailStripSlider
-from ..tasks.thumbnail_generator_worker import ThumbnailGeneratorWorker
-
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +101,19 @@ class EditColorSection(QWidget):
         self.options_section.set_expanded(False)
         layout.addWidget(self.options_section)
         layout.addStretch(1)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        """Refresh user-visible labels after the application language changes."""
+
+        labels = {
+            "Saturation": tr("EditColor", "Saturation"),
+            "Vibrance": tr("EditColor", "Vibrance"),
+            "Cast": tr("EditColor", "Cast"),
+        }
+        for key, row in self._rows.items():
+            row.set_label(labels[key])
+        self.options_section.set_title(tr("EditSidebar", "Options"))
 
     def set_video_mode(self, enabled: bool) -> None:
         """Flatten the section for video editing while preserving image behaviour."""
@@ -382,6 +401,9 @@ class _SliderRow(QFrame):
         finally:
             self.slider.blockSignals(block)
 
+    def set_label(self, label: str) -> None:
+        self.slider.setName(label)
+
     # ------------------------------------------------------------------
     def _handle_slider_changed(self, new_value: float) -> None:
         """Relay the updated slider value while tagging it with the adjustment *key*."""
@@ -395,4 +417,3 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     if value > maximum:
         return maximum
     return value
-

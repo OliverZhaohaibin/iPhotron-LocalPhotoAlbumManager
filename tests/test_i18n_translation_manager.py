@@ -108,6 +108,11 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
     assert QCoreApplication.translate("GalleryContextMenu", "Deleted", None) == "已删除"
     assert QCoreApplication.translate("DetailPage", "Rotate Left", None) == "向左旋转"
     assert QCoreApplication.translate("PlayerBar", "Volume", None) == "音量"
+    assert QCoreApplication.translate("EditSidebar", "Light", None) == "光效"
+    assert QCoreApplication.translate("EditLight", "Brilliance", None) == "鲜明度"
+    assert QCoreApplication.translate("EditBW", "Neutrals", None) == "中性色调"
+    assert QCoreApplication.translate("EditPerspective", "Aspect", None) == "宽高比"
+    assert QCoreApplication.translate("ShareController", "Copied to Clipboard", None) == "已复制到剪贴板"
 
     panel = InfoPanel()
     try:

@@ -113,6 +113,9 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
     assert QCoreApplication.translate("EditBW", "Neutrals", None) == "中性"
     assert QCoreApplication.translate("EditPerspective", "Aspect", None) == "宽高比"
     assert QCoreApplication.translate("ShareController", "Copied to Clipboard", None) == "已复制到剪贴板"
+    assert QCoreApplication.translate("MainCoordinator", "Moved", None) == "已移动"
+    assert QCoreApplication.translate("InformationPopup", "Information", None) == "信息"
+    assert QCoreApplication.translate("GalleryPage", "Return to Map", None) == "返回地图"
 
     panel = InfoPanel()
     try:

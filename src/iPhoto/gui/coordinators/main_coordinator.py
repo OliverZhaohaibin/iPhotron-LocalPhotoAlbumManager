@@ -26,6 +26,11 @@ from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.services.location_trash_navigation_service import (
+    LocationTrashNavigationService,
+)
+from iPhoto.gui.services.people_service_resolver import resolve_people_service
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
 from iPhoto.gui.ui.controllers.dialog_controller import DialogController
 from iPhoto.gui.ui.controllers.export_controller import ExportController
@@ -41,11 +46,6 @@ from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeControl
 from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
-from iPhoto.gui.services.location_trash_navigation_service import (
-    LocationTrashNavigationService,
-)
-from iPhoto.gui.services.people_service_resolver import resolve_people_service
-from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
@@ -726,7 +726,9 @@ class MainCoordinator(QObject):
         if not success or self._is_recently_deleted_move(source, destination):
             return
 
-        self._window.ui.notification_toast.show_toast("Moved")
+        self._window.ui.notification_toast.show_toast(
+            QCoreApplication.translate("MainCoordinator", "Moved", None),
+        )
 
     def _handle_move_finished_pending_cleanup(
         self,

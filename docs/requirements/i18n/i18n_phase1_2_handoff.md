@@ -1,18 +1,22 @@
-# iPhotron 国际化阶段 1-4 交接文档
+# iPhotron 国际化阶段 1-5 收口交接文档
 
 > 日期：2026-06-09
-> 状态：阶段 1-2 已实现；阶段 3 已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件和 edit sidebar 剩余 Apple Photos 对齐控件迁移；阶段 4 已完成 `src/maps/main.py` 独立地图预览入口菜单、对话框、状态栏、窗口标题和 CLI help 迁移；Python-aware 提取工具已补齐；待后续阶段继续迁移主应用 map view 可能遗漏文案和其余业务页面
+> 状态：阶段 1-2 已实现；阶段 3 已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件、edit sidebar 剩余 Apple Photos 对齐控件迁移和最后一批已发现主应用边缘文案迁移；阶段 4 已完成 `src/maps/main.py` 独立地图预览入口菜单、对话框、状态栏、窗口标题和 CLI help 迁移；阶段 5 硬编码文案门禁已实现；Python-aware 提取工具已补齐；当前 i18n 收口验证通过
 > 对应指南：`docs/requirements/i18n/i18n_multilingual_architecture_guide.md`
 
 ---
 
 ## 1. 当前完成范围
 
+完成判定：截至 2026-06-09，架构指南中规划的 i18n 阶段 1-5 已完成。当前没有已知必须继续迁移的用户可见文案；后续工作归类为新增功能随手国际化、静态门禁维护、格式化能力增强和人工 UI 抽查。
+
 前序实施覆盖架构指南中的阶段 1「基础设施」和阶段 2「核心壳层 UI」。目标是先把国际化作为运行时服务接入应用，并让桌面主窗口的基础菜单、标题栏、核心操作和基础提示可以在运行时切换语言。
 
-本轮继续推进阶段 3「主要业务页面」，已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件和 edit sidebar 剩余 Apple Photos 对齐控件迁移，并补齐首个 locale-aware formatter helper。
+阶段 3「主要业务页面」已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件和 edit sidebar 剩余 Apple Photos 对齐控件迁移，并补齐首个 locale-aware formatter helper。
 
-最新一轮继续推进阶段 4「地图独立预览与边缘入口」，已完成 `src/maps/main.py` 独立地图预览入口迁移，并继续复用主应用 `iPhoto_*.ts/.qm` 翻译资源。
+阶段 4「地图独立预览与边缘入口」已完成 `src/maps/main.py` 独立地图预览入口迁移，并继续复用主应用 `iPhoto_*.ts/.qm` 翻译资源。
+
+阶段 5「硬编码门禁」已完成 `tools/check_i18n_strings.py` 和 `tests/architecture/test_i18n_string_gate.py`，当前源码扫描通过。
 
 已完成内容：
 
@@ -92,6 +96,8 @@
   - `EditSidebar` section 标题、Reset/Toggle tooltip 和首批 edit/crop 控件文案已迁移，并通过 `retranslate_ui()` 刷新 `CollapsibleSection` 标题、header control tooltip、Light/Color/Black & White slider label、Curve 通道/tooltip 和 Perspective/Aspect label。
   - `EditSidebar` 剩余 Apple Photos 对齐控件已迁移：White Balance 模式/slider、Definition、Selective Color、Noise Reduction、Sharpen 和 Vignette 的可见 label/tooltip 支持运行时刷新。
   - White Balance combo 逻辑已改为稳定 mode id，不再依赖翻译后的显示文本判断 `Neutral Gray`、`Skin Tone`、`Temperature/Tint` 模式。
+  - 最后收口迁移已发现的主应用边缘文案：普通移动完成 toast、GalleryPage 地图/人物聚类返回 tooltip、InformationPopup 默认标题和关闭 tooltip。
+  - `MainHeaderWidget` 的 `QAction` 初始化英文占位已移除，统一由 `retranslate_ui()` 设置可翻译文案，避免绕过硬编码门禁。
   - 本轮新增/补齐 edit 术语优先对齐 Apple 官方「照片/Fotos」支持文档命名，并新增 `docs/requirements/i18n/apple_photos_edit_glossary.md` 作为过程性术语表。中文使用“光效、颜色、黑白、白平衡、曲线、色阶、清晰度、可选颜色、减少噪点、锐化、晕影、鲜明度、黑点、中性、颗粒、校正、宽高比、自由格式、色温/色调、亮度、范围”；德文使用“Licht、Farbe、Schwarzweiß、Weißabgleich、Kurven、Tonwerte、Auflösung、Selektive Farbe、Bildrauschen reduzieren、Scharfzeichnen、Vignette、Brillanz、Schwarzpunkt、Neutraltöne、Körnung、Begradigen、Seitenverhältnis、Frei、Temperatur/Farbton、Leuchtkraft、Bereich”。
   - 继续不翻译文件名、路径、人物名、地点搜索结果、相机/镜头/codec 原始值等用户数据或技术原始值。
 
@@ -118,6 +124,10 @@
   - 当前扫描 `src/iPhoto/gui` 和 `src/maps`。
   - 更新 `src/iPhoto/resources/i18n/iPhoto_de.ts` 和 `src/iPhoto/resources/i18n/iPhoto_zh_CN.ts`。
   - 脚本已加保护：如果提取结果不包含 `<message>`，会恢复原 `.ts` 并退出失败，避免误清空已有翻译。
+- `tools/check_i18n_strings.py`
+  - 使用 Python `ast` 扫描 `src/iPhoto/gui` 和 `src/maps` 高风险 UI API 直接字符串。
+  - 覆盖 `QAction(...)`、`addAction(...)`、`addMenu(...)`、`setText(...)`、`setToolTip(...)`、`setPlaceholderText(...)`、`setWindowTitle(...)`、`QMessageBox.*(...)`、`QInputDialog.getText(...)`、`QFileDialog.*(...)` 和 `showMessage(...)`。
+  - 允许空字符串、符号按钮、语言原生名称和明确 demo `__main__` 标题；仓库当前源码扫描通过。
 
 阶段 1-2 原始验证：
 
@@ -746,18 +756,55 @@ All checks passed
 
 说明：ruff 仍提示仓库顶层 linter 配置项迁移 warning，这是既有 `pyproject.toml` 配置风格问题，不影响本轮检查结果。
 
+最后收口阶段验证：
+
+```bash
+python tools/check_i18n_strings.py src/iPhoto/gui src/maps
+
+bash scripts/i18n_extract.sh
+bash scripts/i18n_compile.sh
+
+QT_QPA_PLATFORM=offscreen pytest tests/test_i18n_translation_manager.py \
+  tests/test_i18n_extract_tool.py \
+  tests/test_information_popup.py \
+  tests/test_navigation_coordinator_cluster_gallery.py \
+  tests/gui/viewmodels/test_gallery_viewmodel.py \
+  tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py \
+  tests/architecture/test_i18n_string_gate.py -q
+
+python -m ruff check --select I,F \
+  tools/check_i18n_strings.py \
+  src/iPhoto/gui/coordinators/main_coordinator.py \
+  src/iPhoto/gui/ui/widgets/gallery_page.py \
+  src/iPhoto/gui/ui/widgets/information_popup.py \
+  src/iPhoto/gui/ui/widgets/main_header.py \
+  tests/architecture/test_i18n_string_gate.py \
+  tests/test_i18n_translation_manager.py
+```
+
+结果：
+
+```text
+Extracted 414 translation messages.
+Generated 414 translation(s) (414 finished and 0 unfinished)
+Generated 414 translation(s) (414 finished and 0 unfinished)
+98 passed, 1 warning
+All checks passed
+```
+
+说明：warning 为仓库既有 `pytest.ini` 中 `env` 配置未被当前 pytest 识别；ruff 仍提示仓库顶层 linter 配置项迁移 warning，不影响本轮检查结果。
+
 ---
 
 ## 3. 已知限制
 
-当前完成的是核心壳层国际化，以及 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件、edit sidebar 剩余 Apple Photos 对齐控件和 `src/maps/main.py` 独立地图预览入口迁移，不是全应用文案迁移。
+当前完成的是核心壳层国际化，以及 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件、edit sidebar 剩余 Apple Photos 对齐控件、`src/maps/main.py` 独立地图预览入口和已发现主应用边缘文案迁移。高风险 UI API 的直接英文硬编码门禁已落地并通过当前源码扫描。
 
-仍未完成的主要区域：
+仍需后续持续维护的主要区域：
 
-- 主应用 map view 中仍可能存在用户可见状态文案未系统迁移。
-- `tools/check_i18n_strings.py` 硬编码文案门禁尚未实现。
+- `tools/check_i18n_strings.py` 采用高风险 UI API 静态扫描，不等价于完整自然语言审计；后续发现新的文案承载 API 时应扩展扫描范围。
 - locale-aware formatter 已具备日期时间、整数、小数和文件大小能力，但百分比、复数和更完整的 domain-specific 格式化仍未系统接入。
-- `tools/extract_i18n_strings.py` 只提取已经包裹的翻译调用；未包裹硬编码文案仍需要页面迁移和后续门禁识别。
+- `tools/extract_i18n_strings.py` 只提取已经包裹的翻译调用；新增页面仍必须先按规范使用 `tr()` / `QCoreApplication.translate()`。
 - 当前提取器故意跳过动态 context/source text。后续迁移时应把用户可见文案改成稳定字面量加 `.format(...)` 占位符，而不是动态拼接。
 
 运行时注意点：
@@ -778,25 +825,19 @@ All checks passed
 
 ---
 
-## 4. 下一步建议
+## 4. 后续维护建议
 
-建议按架构指南继续推进阶段 3-5。
+当前 i18n 计划内工作已完成；以下不是阻塞项，而是后续新增功能和质量维护建议。
 
-优先级 1：迁移主要业务页面
+优先级 1：新增 UI 随手国际化
 
-建议按用户可见度排序：
-
-1. 主应用 map view 中后续发现的用户可见状态文案
-2. 新增或后续发现的 detail/edit 边缘控件继续按 widget/controller 小批次迁移
-3. 后续新增 gallery context menu 文案继续使用 `GalleryMenu` / `GalleryContextMenu` context，并保持 `QAction.data()` 作为命令契约。
-
-每个 widget/controller 迁移时需要同步完成：
+每个新增 widget/controller 需要同步完成：
 
 - 将用户可见文案改为 `QCoreApplication.translate()` 或 `tr()`。
 - 为长期存在的 widget 增加 `retranslate_ui()`。
 - 避免拼接自然语言句子，动态值使用 `{name}`、`{count}` 等占位符。
 - 不翻译文件名、路径、相册名、人物名、EXIF 原始值和内部诊断。
-- 每完成一个页面后运行 `bash scripts/i18n_extract.sh`，补齐 `.ts` 中新增 message，再运行 `bash scripts/i18n_compile.sh`。
+- 每完成一个页面后运行 `python tools/check_i18n_strings.py src/iPhoto/gui src/maps`、`bash scripts/i18n_extract.sh` 和 `bash scripts/i18n_compile.sh`。
 
 优先级 2：地图独立入口后续维护
 
@@ -812,21 +853,11 @@ All checks passed
 - 更多页面接入 formatter，避免 widget 直接调用 `QLocale.system()`。
 - 对数量文案优先使用 Qt `%n` plural 机制，而不是自行拼接。
 
-优先级 4：硬编码门禁
+优先级 4：硬编码门禁维护
 
-新增 `tools/check_i18n_strings.py` 并接入架构测试：
-
-- 扫描 GUI 层高风险 API：
-  - `QAction(...)`
-  - `addMenu(...)`
-  - `setText(...)`
-  - `setToolTip(...)`
-  - `setPlaceholderText(...)`
-  - `setWindowTitle(...)`
-  - `QMessageBox.*(...)`
-  - `showMessage(...)`
-- 允许历史 allowlist，但新增 UI 文案不应进入 allowlist。
-- 明确排除 objectName、CSS、icon filename、enum、logger、test fixture。
+- `tools/check_i18n_strings.py` 已接入 `tests/architecture/test_i18n_string_gate.py`。
+- 后续新增 UI 文案承载 API 时，应同步扩展 checker 和测试样例。
+- 如果确需 allowlist，必须限定为非用户文案或明确不可翻译内容。
 
 ---
 
@@ -842,8 +873,10 @@ pytest tests/test_i18n_translation_manager.py \
   tests/application/test_appctx_runtime_context.py \
   tests/gui/test_main.py \
   tests/application/test_runtime_context.py \
-  tests/architecture/test_layer_boundaries.py -q
+  tests/architecture/test_layer_boundaries.py \
+  tests/architecture/test_i18n_string_gate.py -q
 
+python tools/check_i18n_strings.py src/iPhoto/gui src/maps
 bash scripts/i18n_extract.sh
 bash scripts/i18n_compile.sh
 ```

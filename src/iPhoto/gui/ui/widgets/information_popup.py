@@ -13,8 +13,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iPhoto.gui.i18n import tr
+
 from ..icons import load_icon
-from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
+from .main_window_metrics import (
+    TITLE_BAR_HEIGHT,
+    WINDOW_CONTROL_BUTTON_SIZE,
+    WINDOW_CONTROL_GLYPH_SIZE,
+)
 
 
 class InformationPopup(QWidget):
@@ -56,6 +62,7 @@ class InformationPopup(QWidget):
 
         self._drag_active = False
         self._drag_offset = None
+        self._uses_default_title = title == "Information"
 
         # -- root layout ---------------------------------------------------
         root_layout = QVBoxLayout(self)
@@ -88,7 +95,7 @@ class InformationPopup(QWidget):
         self._close_button.setAutoRaise(True)
         self._close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._close_button.setToolTip("Close")
+        self._close_button.setToolTip(tr("InformationPopup", "Close"))
         self._apply_close_button_style()
         self._close_button.clicked.connect(self.close)
         title_layout.addWidget(
@@ -114,6 +121,7 @@ class InformationPopup(QWidget):
         self._message_label.setContentsMargins(16, 8, 16, 16)
         root_layout.addWidget(self._message_label, 1)
         self._apply_content_style()
+        self.retranslate_ui()
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,6 +135,7 @@ class InformationPopup(QWidget):
     def set_title(self, title: str) -> None:
         """Update the popup title text."""
 
+        self._uses_default_title = False
         self._title_label.setText(title)
 
     def title(self) -> str:
@@ -143,6 +152,11 @@ class InformationPopup(QWidget):
         """Return the current information message."""
 
         return self._message_label.text()
+
+    def retranslate_ui(self) -> None:
+        if self._uses_default_title:
+            self._title_label.setText(tr("InformationPopup", "Information"))
+        self._close_button.setToolTip(tr("InformationPopup", "Close"))
 
     def center_on(self, widget: QWidget | None) -> None:
         """Move the popup to the centre of the hosting top-level window."""

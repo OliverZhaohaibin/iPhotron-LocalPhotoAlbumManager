@@ -5,6 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QToolButton, QVBoxLayout, QWidget
 
+from iPhoto.gui.i18n import tr
+
 from ..icon import load_icon
 from .gallery_grid_view import GalleryGridView
 from .main_window_metrics import HEADER_BUTTON_SIZE, HEADER_ICON_GLYPH_SIZE
@@ -19,6 +21,7 @@ class GalleryPageWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("galleryPage")
+        self._back_tooltip_source = "Return to Map"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -37,7 +40,6 @@ class GalleryPageWidget(QWidget):
         self.back_button.setIconSize(HEADER_ICON_GLYPH_SIZE)
         self.back_button.setFixedSize(HEADER_BUTTON_SIZE)
         self.back_button.setAutoRaise(True)
-        self.back_button.setToolTip("Return to Map")
         self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_button.clicked.connect(self.backRequested.emit)
         header_layout.addWidget(self.back_button)
@@ -50,6 +52,7 @@ class GalleryPageWidget(QWidget):
         self.grid_view = GalleryGridView()
         self.grid_view.setObjectName("galleryGridView")
         layout.addWidget(self.grid_view)
+        self.retranslate_ui()
 
     def set_cluster_gallery_mode(self, enabled: bool, back_tooltip: str = "Return") -> None:
         """Show or hide the header with back button for cluster gallery mode.
@@ -58,8 +61,19 @@ class GalleryPageWidget(QWidget):
             enabled: True to show the back button header (cluster gallery mode),
                      False to hide it (normal gallery mode).
         """
-        self.back_button.setToolTip(back_tooltip)
+        self._back_tooltip_source = back_tooltip
+        self.back_button.setToolTip(self._back_tooltip())
         self._header.setVisible(enabled)
+
+    def retranslate_ui(self) -> None:
+        self.back_button.setToolTip(self._back_tooltip())
+
+    def _back_tooltip(self) -> str:
+        if self._back_tooltip_source == "Return to People":
+            return tr("GalleryPage", "Return to People")
+        if self._back_tooltip_source == "Return to Map":
+            return tr("GalleryPage", "Return to Map")
+        return self._back_tooltip_source
 
 
 __all__ = ["GalleryPageWidget"]

@@ -1752,4 +1752,33 @@ Select a tile directory to switch back to the legacy backend.</source>
             <translation>执行 --screenshot 前等待的时间（默认：1500）。</translation>
         </message>
     </context>
+    <context>
+        <name>MainCoordinator</name>
+        <message>
+            <source>Moved</source>
+            <translation>已移动</translation>
+        </message>
+    </context>
+    <context>
+        <name>InformationPopup</name>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Information</source>
+            <translation>信息</translation>
+        </message>
+    </context>
+    <context>
+        <name>GalleryPage</name>
+        <message>
+            <source>Return to People</source>
+            <translation>返回人物</translation>
+        </message>
+        <message>
+            <source>Return to Map</source>
+            <translation>返回地图</translation>
+        </message>
+    </context>
 </TS>

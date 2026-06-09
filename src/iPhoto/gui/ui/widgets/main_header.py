@@ -87,25 +87,25 @@ class MainHeaderWidget(QWidget):
     def _create_actions(self, main_window: QWidget) -> None:
         """Instantiate the :class:`QAction` objects exposed to controllers."""
 
-        self.open_album_action = QAction("Open Album Folder…", main_window)
-        self.rescan_action = QAction("Rescan", main_window)
-        self.rebuild_links_action = QAction("Rebuild Live Links", main_window)
-        self.bind_library_action = QAction("Set Basic Library…", main_window)
-        self.download_map_extension_action = QAction("Download Map Extension…", main_window)
-        self.toggle_filmstrip_action = QAction("Show Filmstrip", main_window, checkable=True)
+        self.open_album_action = QAction("", main_window)
+        self.rescan_action = QAction("", main_window)
+        self.rebuild_links_action = QAction("", main_window)
+        self.bind_library_action = QAction("", main_window)
+        self.download_map_extension_action = QAction("", main_window)
+        self.toggle_filmstrip_action = QAction("", main_window, checkable=True)
         self.toggle_filmstrip_action.setChecked(True)
-        self.toggle_face_names_action = QAction("Show face names", main_window, checkable=True)
+        self.toggle_face_names_action = QAction("", main_window, checkable=True)
         self.toggle_face_names_action.setChecked(False)
         self.toggle_hidden_people_action = QAction(
-            "Show Hidden People", main_window, checkable=True
+            "", main_window, checkable=True
         )
         self.toggle_hidden_people_action.setChecked(False)
 
         self.share_action_group = QActionGroup(main_window)
-        self.share_action_copy_file = QAction("Copy File", main_window, checkable=True)
-        self.share_action_copy_path = QAction("Copy Path", main_window, checkable=True)
+        self.share_action_copy_file = QAction("", main_window, checkable=True)
+        self.share_action_copy_path = QAction("", main_window, checkable=True)
         self.share_action_reveal_file = QAction(
-            "Reveal in File Manager", main_window, checkable=True
+            "", main_window, checkable=True
         )
         self.share_action_group.addAction(self.share_action_copy_file)
         self.share_action_group.addAction(self.share_action_copy_path)
@@ -113,18 +113,18 @@ class MainHeaderWidget(QWidget):
         self.share_action_reveal_file.setChecked(True)
 
         self.wheel_action_group = QActionGroup(main_window)
-        self.wheel_action_navigate = QAction("Navigate", main_window, checkable=True)
-        self.wheel_action_zoom = QAction("Zoom", main_window, checkable=True)
+        self.wheel_action_navigate = QAction("", main_window, checkable=True)
+        self.wheel_action_zoom = QAction("", main_window, checkable=True)
         self.wheel_action_group.addAction(self.wheel_action_navigate)
         self.wheel_action_group.addAction(self.wheel_action_zoom)
         self.wheel_action_navigate.setChecked(True)
 
-        self.export_all_edited_action = QAction("Export All Edited", main_window)
-        self.export_selected_action = QAction("Export Selected", main_window)
+        self.export_all_edited_action = QAction("", main_window)
+        self.export_selected_action = QAction("", main_window)
 
         self.export_destination_group = QActionGroup(main_window)
-        self.export_destination_library = QAction("Basic Library", main_window, checkable=True)
-        self.export_destination_ask = QAction("Ask Every Time", main_window, checkable=True)
+        self.export_destination_library = QAction("", main_window, checkable=True)
+        self.export_destination_ask = QAction("", main_window, checkable=True)
         self.export_destination_group.addAction(self.export_destination_library)
         self.export_destination_group.addAction(self.export_destination_ask)
         self.export_destination_library.setChecked(True)
@@ -139,9 +139,9 @@ class MainHeaderWidget(QWidget):
         self.export_format_jpg.setChecked(True)
 
         self.theme_group = QActionGroup(main_window)
-        self.theme_system = QAction("System Default", main_window, checkable=True)
-        self.theme_light = QAction("Light Mode", main_window, checkable=True)
-        self.theme_dark = QAction("Dark Mode", main_window, checkable=True)
+        self.theme_system = QAction("", main_window, checkable=True)
+        self.theme_light = QAction("", main_window, checkable=True)
+        self.theme_dark = QAction("", main_window, checkable=True)
         self.theme_group.addAction(self.theme_system)
         self.theme_group.addAction(self.theme_light)
         self.theme_group.addAction(self.theme_dark)
@@ -149,7 +149,7 @@ class MainHeaderWidget(QWidget):
 
         self.language_group = QActionGroup(main_window)
         self.language_group.setExclusive(True)
-        self.language_system = QAction("System", main_window, checkable=True)
+        self.language_system = QAction("", main_window, checkable=True)
         self.language_de = QAction("Deutsch", main_window, checkable=True)
         self.language_zh_cn = QAction("简体中文", main_window, checkable=True)
         self.language_system.setData("system")

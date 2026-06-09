@@ -1752,4 +1752,33 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
             <translation>Wartezeit vor --screenshot (Standard: 1500).</translation>
         </message>
     </context>
+    <context>
+        <name>MainCoordinator</name>
+        <message>
+            <source>Moved</source>
+            <translation>Verschoben</translation>
+        </message>
+    </context>
+    <context>
+        <name>InformationPopup</name>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Information</source>
+            <translation>Information</translation>
+        </message>
+    </context>
+    <context>
+        <name>GalleryPage</name>
+        <message>
+            <source>Return to People</source>
+            <translation>Zurück zu Personen</translation>
+        </message>
+        <message>
+            <source>Return to Map</source>
+            <translation>Zurück zur Karte</translation>
+        </message>
+    </context>
 </TS>

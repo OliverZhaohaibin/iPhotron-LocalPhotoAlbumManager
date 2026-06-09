@@ -209,7 +209,7 @@ def test_main_header_language_menu_actions_are_exclusive(qapp: QApplication) -> 
         assert header.language_menu.title() == "Language"
         assert [action.data() for action in language_actions] == ["system", "de", "zh-CN"]
         assert [action.text() for action in language_actions] == [
-            "System",
+            "English",
             "Deutsch",
             "简体中文",
         ]

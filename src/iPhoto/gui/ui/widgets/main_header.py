@@ -268,7 +268,7 @@ class MainHeaderWidget(QWidget):
         self.theme_light.setText(tr("MainHeader", "Light Mode", None))
         self.theme_dark.setText(tr("MainHeader", "Dark Mode", None))
 
-        self.language_system.setText(tr("MainHeader", "System", None))
+        self.language_system.setText(tr("MainHeader", "English", None))
         self.language_de.setText("Deutsch")
         self.language_zh_cn.setText("简体中文")
 

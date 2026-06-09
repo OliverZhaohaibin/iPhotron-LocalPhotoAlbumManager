@@ -86,6 +86,7 @@ Small behavior contracts that are easy to break during feature work live in
 | Move/restore optimistic UI | [MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md) |
 | Project popups and People UI regressions | [PROJECT_POPUP_GUARDRAILS.md](misc/PROJECT_POPUP_GUARDRAILS.md) |
 | macOS map GL transparency | [MACOS_MAP_GL_TRANSPARENCY_NOTES.md](misc/MACOS_MAP_GL_TRANSPARENCY_NOTES.md) |
+| GUI internationalization | [I18N_UI_TEXT_GUARDRAILS.md](misc/I18N_UI_TEXT_GUARDRAILS.md) |
 
 Useful focused checks when touching scan, query, trash, move, or restore:
 
@@ -95,6 +96,55 @@ Useful focused checks when touching scan, query, trash, move, or restore:
 .venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py -q
 .venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/gui/coordinators/test_main_coordinator_pending_moves.py -q
 ```
+
+---
+
+## Internationalization Development Workflow
+
+The desktop GUI has runtime language support through
+`RuntimeContext.translation` and the `ui.language` setting. Current supported
+stored choices are `system`, `de`, and `zh-CN`; the menu shows the `system`
+choice as `English`, and English is the fallback when no translator is
+installed.
+
+When adding or changing UI text:
+
+- Wrap user-visible strings with `iPhoto.gui.i18n.tr(context, source_text)` or
+  `QCoreApplication.translate(...)`.
+- Keep source strings in English and use a stable context name.
+- Use named placeholders for dynamic values. File names, paths, people names,
+  place results, camera/lens/codec values, backend names, environment
+  variables, and exception details should stay as original data.
+- Use `iPhoto.gui.i18n.formatters` for UI-facing dates, counts, decimals, and
+  file sizes.
+- Add `retranslate_ui()` on long-lived widgets that own labels, tooltips,
+  placeholders, menus, or status text.
+- Drive menu and control behavior from stable ids, callbacks, node types, or
+  `QAction.data()`, not translated labels.
+
+Update and compile translation resources after text changes:
+
+```bash
+bash scripts/i18n_extract.sh
+bash scripts/i18n_compile.sh
+```
+
+Run focused i18n checks before merging:
+
+```bash
+python tools/check_i18n_strings.py src/iPhoto/gui src/maps
+.venv/bin/python -m pytest tests/test_i18n_extract_tool.py tests/test_i18n_translation_manager.py tests/architecture/test_i18n_string_gate.py -q
+```
+
+Process notes and terminology references live under `docs/requirements/i18n/`.
+Those files document the completed i18n rollout and Apple Photos-aligned edit
+terminology; the long-term regression contract is
+[`docs/misc/I18N_UI_TEXT_GUARDRAILS.md`](misc/I18N_UI_TEXT_GUARDRAILS.md).
+
+The pet recognition and clustering materials under
+`docs/requirements/pets-cluster/` are requirements and development planning
+documents. Do not treat them as implemented runtime behavior until production
+code and tests land.
 
 ---
 

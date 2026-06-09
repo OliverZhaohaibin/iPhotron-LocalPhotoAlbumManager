@@ -127,8 +127,8 @@
             <translation>深色模式</translation>
         </message>
         <message>
-            <source>System</source>
-            <translation>系统</translation>
+            <source>English</source>
+            <translation>英语</translation>
         </message>
     </context>
     <context>

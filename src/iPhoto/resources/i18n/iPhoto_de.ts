@@ -127,8 +127,8 @@
             <translation>Dunkler Modus</translation>
         </message>
         <message>
-            <source>System</source>
-            <translation>System</translation>
+            <source>English</source>
+            <translation>Englisch</translation>
         </message>
     </context>
     <context>

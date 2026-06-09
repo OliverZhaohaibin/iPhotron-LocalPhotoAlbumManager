@@ -137,6 +137,7 @@ production runtime -> iPhoto.models.*
 ```text
 RuntimeContext
   settings
+  translation
   theme
   library
   facade
@@ -183,6 +184,12 @@ CLI and other non-GUI callers create the same session boundary through
 Production GUI and CLI do not create standalone fallback services. If no active
 session exists, GUI services should fail explicitly or no-op safely according to
 their presentation responsibility.
+
+`TranslationManager` is created after settings and before theme initialization.
+It reads `ui.language`, installs the active Qt translator, exposes
+`languageChanged`, and falls back to English when the requested or system
+language has no bundled resource. The active stored language values are
+`system`, `de`, and `zh-CN`; the language menu presents `system` as `English`.
 
 ## Layer Boundaries
 
@@ -259,6 +266,26 @@ GUI modules or own product workflow decisions.
 coordinators, menus, shortcuts, Qt workers, and signal adapters. GUI code calls
 session/application surfaces and does not directly write durable state or call
 concrete repository singletons.
+
+User-visible GUI text goes through the Qt translation boundary. New strings
+should use `iPhoto.gui.i18n.tr(context, source_text)` or
+`QCoreApplication.translate(...)` with a stable context. Long-lived widgets
+refresh translated labels through `retranslate_ui()`; the main window wires
+`TranslationManager.languageChanged` to `retranslate_ui_tree()` so runtime
+language switches update menus, tooltips, pages, and status text without
+rebuilding the active library session. Business logic must use stable command
+ids, node types, callbacks, or `QAction.data()` rather than translated labels.
+
+Bundled i18n resources live in `src/iPhoto/resources/i18n/`:
+
+| Resource | Responsibility |
+| --- | --- |
+| `languages.json` | Advertises supported UI language choices and Qt locales. |
+| `iPhoto_de.ts` / `iPhoto_zh_CN.ts` | Qt Linguist source translations. |
+| `iPhoto_de.qm` / `iPhoto_zh_CN.qm` | Compiled translators loaded at runtime. |
+
+Package data includes `.ts` and `.qm` files so editable installs and packaged
+builds can load the same resources.
 
 ### Library Runtime
 
@@ -431,6 +458,7 @@ Run:
 
 ```bash
 python3 tools/check_architecture.py
+python tools/check_i18n_strings.py src/iPhoto/gui src/maps
 .venv/bin/python -m pytest tests/architecture -q
 ```
 
@@ -443,6 +471,8 @@ The guardrails enforce:
 - `infrastructure/` does not import GUI;
 - production runtime does not import quarantined legacy paths or old model
   shims.
+- high-risk GUI APIs do not receive direct English literals that bypass the
+  translation boundary.
 
 The GitHub Actions workflow also runs `python tools/check_architecture.py`
 before the broader test suite.

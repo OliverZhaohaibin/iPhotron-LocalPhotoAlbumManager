@@ -161,8 +161,8 @@ class TranslationManager(QObject):
             return {
                 "system": LanguageInfo(
                     code="system",
-                    native_name="System",
-                    english_name="System",
+                    native_name="English",
+                    english_name="English",
                 )
             }
 
@@ -175,7 +175,7 @@ class TranslationManager(QObject):
                 languages[info.code] = info
         languages.setdefault(
             "system",
-            LanguageInfo(code="system", native_name="System", english_name="System"),
+            LanguageInfo(code="system", native_name="English", english_name="English"),
         )
         return languages
 

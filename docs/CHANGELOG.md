@@ -4,13 +4,47 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
-## 🚧 Unreleased — macOS Rendering, Map Runtime & Location Resilience
+## 🚀 v6.6.6 — i18n, macOS Rendering, Map Runtime & Location Resilience
 
-🖥️ *A platform-compatibility pass focused on macOS Metal/QRhi previews,
-transparent-window map rendering, safer location assignment, and packaged
-runtime coverage.*
+🌐 *A UI internationalization and platform-compatibility pass focused on
+runtime language switching, German and Simplified Chinese resources, macOS
+Metal/QRhi previews, transparent-window map rendering, safer location
+assignment, and packaged runtime coverage.*
 
 ### Key Updates
+
+#### 🌐 GUI Internationalization
+- Added `TranslationManager` as a runtime service on `RuntimeContext`, backed by
+  the `ui.language` setting and runtime `languageChanged` refresh signals.
+- Added bundled Qt translation resources for German and Simplified Chinese,
+  plus `languages.json` metadata and package-data coverage for `.ts` / `.qm`
+  resources.
+- Added a language menu under Settings with `English`, `Deutsch`, and
+  `简体中文` choices; English remains the fallback language.
+- Migrated major GUI surfaces to translated text, including main menus,
+  status-bar feedback, info panel, People dashboard, album navigation, gallery
+  context menus, detail/player controls, share/export feedback, face overlays,
+  edit sidebar controls, and the standalone map preview entry point.
+- Added locale-aware GUI formatters for dates, integers, decimals, and file
+  sizes so translated surfaces do not depend on the host system locale.
+
+#### 🧰 i18n Tooling & Guardrails
+- Added Python-aware i18n extraction through `tools/extract_i18n_strings.py`
+  and `scripts/i18n_extract.sh`, covering `src/iPhoto/gui` and `src/maps`
+  without depending on Qt's unavailable Python `lupdate` path.
+- Added `scripts/i18n_compile.sh` for rebuilding `.qm` resources with
+  `pyside6-lrelease`.
+- Added `tools/check_i18n_strings.py` and architecture tests that block direct
+  English literals in high-risk GUI APIs such as `setText`, `setToolTip`,
+  `QAction`, dialogs, and status messages.
+- Added Apple Photos-aligned edit terminology notes under
+  `docs/requirements/i18n/` and a long-term i18n UI text guardrail under
+  `docs/misc/`.
+
+#### 🐾 Requirements Planning
+- Added pet recognition and clustering requirements plus a development guide
+  under `docs/requirements/pets-cluster/`; these documents describe planned
+  work and do not yet represent shipped runtime behavior.
 
 #### 🍎 macOS Media Rendering
 - Added platform QRhi backend selection via `IPHOTO_RHI_BACKEND`; macOS now

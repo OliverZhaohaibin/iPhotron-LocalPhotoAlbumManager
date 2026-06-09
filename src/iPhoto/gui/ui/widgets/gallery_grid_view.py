@@ -6,6 +6,8 @@ from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent, QPalette, QColor, QGuiApplication
 from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel, QStyleOptionViewItem
 
+from iPhoto.gui.i18n import tr
+
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
 from ..models.roles import Roles
@@ -52,14 +54,12 @@ class GalleryGridView(AssetGrid):
         vp = self.viewport()
         vp.setAutoFillBackground(True)
 
-        self._empty_label = QLabel(
-            "No media found. Click Rescan to scan this library.",
-            vp,
-        )
+        self._empty_label = QLabel(vp)
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
         self._empty_label.setStyleSheet("color: #86868b; font-size: 15px;")
         self._empty_label.hide()
+        self.retranslate_ui()
 
         self._updating_style = False
         self._apply_scrollbar_style()
@@ -208,10 +208,21 @@ class GalleryGridView(AssetGrid):
         return True
 
     def changeEvent(self, event: QEvent) -> None:
-        if event.type() == QEvent.Type.PaletteChange:
+        if event.type() == QEvent.Type.LanguageChange:
+            self.retranslate_ui()
+        elif event.type() == QEvent.Type.PaletteChange:
             if not self._updating_style:
                 self._apply_scrollbar_style()
         super().changeEvent(event)
+
+    def retranslate_ui(self) -> None:
+        if self._empty_label is not None:
+            self._empty_label.setText(
+                tr(
+                    "GalleryGridView",
+                    "No media found. Click Rescan to scan this library.",
+                ),
+            )
 
     def _apply_scrollbar_style(self) -> None:
         # Fetch the global application palette to ensure we get the fresh theme colors,

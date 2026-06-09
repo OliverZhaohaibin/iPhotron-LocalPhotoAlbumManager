@@ -870,6 +870,13 @@
         </message>
     </context>
     <context>
+        <name>GalleryGridView</name>
+        <message>
+            <source>No media found. Click Rescan to scan this library.</source>
+            <translation>未找到媒体。点击“重新扫描”来扫描此图库。</translation>
+        </message>
+    </context>
+    <context>
         <name>GalleryContextMenu</name>
         <message>
             <source>Items inside Recently Deleted cannot be deleted again.</source>

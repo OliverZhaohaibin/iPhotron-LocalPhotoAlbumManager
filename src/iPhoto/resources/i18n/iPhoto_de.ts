@@ -1492,4 +1492,264 @@
             <translation>Wiedergabe</translation>
         </message>
     </context>
+    <context>
+        <name>MapsPreview</name>
+        <message>
+            <source>OpenGL support disabled by configuration. Falling back to CPU rendering.</source>
+            <translation>OpenGL-Unterstützung ist per Konfiguration deaktiviert. Es wird auf CPU-Rendering zurückgegriffen.</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section.</source>
+            <translation>OpenGL-Unterstützung erkannt. Es wird derselbe GPU-beschleunigte Python-Renderer wie im Bereich „Ort“ verwendet.</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Native widget disabled by configuration; using the Python OBF renderer.</source>
+            <translation>OpenGL-Unterstützung erkannt. Das native Widget ist per Konfiguration deaktiviert; der Python-OBF-Renderer wird verwendet.</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using GPU accelerated Python rendering.</source>
+            <translation>OpenGL-Unterstützung erkannt. GPU-beschleunigtes Python-Rendering wird verwendet.</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using the native OsmAnd widget when OBF data is selected.</source>
+            <translation>OpenGL-Unterstützung erkannt. Bei ausgewählten OBF-Daten wird das native OsmAnd-Widget verwendet.</translation>
+        </message>
+        <message>
+            <source>OpenGL support unavailable. Falling back to CPU rendering.</source>
+            <translation>OpenGL-Unterstützung ist nicht verfügbar. Es wird auf CPU-Rendering zurückgegriffen.</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Native widget disabled: {reason}. Using GPU accelerated Python rendering.</source>
+            <translation>OpenGL-Unterstützung erkannt. Natives Widget deaktiviert: {reason}. GPU-beschleunigtes Python-Rendering wird verwendet.</translation>
+        </message>
+        <message>
+            <source>GPU accelerated</source>
+            <translation>GPU-beschleunigt</translation>
+        </message>
+        <message>
+            <source>CPU</source>
+            <translation>CPU</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using the native OsmAnd widget.</source>
+            <translation>OpenGL-Unterstützung erkannt. Das native OsmAnd-Widget wird verwendet.</translation>
+        </message>
+        <message>
+            <source> Native widget unavailable: {reason}.</source>
+            <translation> Natives Widget nicht verfügbar: {reason}.</translation>
+        </message>
+        <message>
+            <source> Native widget disabled by configuration.</source>
+            <translation> Natives Widget ist per Konfiguration deaktiviert.</translation>
+        </message>
+        <message>
+            <source>Using the {renderer} Python OBF renderer.{detail}</source>
+            <translation>{renderer}er Python-OBF-Renderer wird verwendet.{detail}</translation>
+        </message>
+        <message>
+            <source> OBF helper unavailable: {reason}.</source>
+            <translation> OBF-Helfer nicht verfügbar: {reason}.</translation>
+        </message>
+        <message>
+            <source>Using the {renderer} legacy vector renderer.{native_detail}{detail}</source>
+            <translation>{renderer}er alter Vektor-Renderer wird verwendet.{native_detail}{detail}</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Forcing the native OsmAnd widget.</source>
+            <translation>OpenGL-Unterstützung erkannt. Das native OsmAnd-Widget wird erzwungen.</translation>
+        </message>
+        <message>
+            <source>Forcing the {renderer} Python OBF renderer.</source>
+            <translation>{renderer}er Python-OBF-Renderer wird erzwungen.</translation>
+        </message>
+        <message>
+            <source>Forcing the {renderer} legacy vector renderer.</source>
+            <translation>{renderer}er alter Vektor-Renderer wird erzwungen.</translation>
+        </message>
+        <message>
+            <source>OBF Raster</source>
+            <translation>OBF-Raster</translation>
+        </message>
+        <message>
+            <source>Legacy Vector Fallback</source>
+            <translation>Alter Vektor-Fallback</translation>
+        </message>
+        <message>
+            <source>Legacy Vector</source>
+            <translation>Alter Vektor</translation>
+        </message>
+        <message>
+            <source>{backend} | Zoom {zoom} | Center {latitude}, {longitude} | Source {source}</source>
+            <translation>{backend} | Zoom {zoom} | Mitte {latitude}, {longitude} | Quelle {source}</translation>
+        </message>
+        <message>
+            <source>Ready</source>
+            <translation>Bereit</translation>
+        </message>
+        <message>
+            <source>Zoom In</source>
+            <translation>Vergrößern</translation>
+        </message>
+        <message>
+            <source>Zoom Out</source>
+            <translation>Verkleinern</translation>
+        </message>
+        <message>
+            <source>Reset View</source>
+            <translation>Ansicht zurücksetzen</translation>
+        </message>
+        <message>
+            <source>Pan Left</source>
+            <translation>Nach links schwenken</translation>
+        </message>
+        <message>
+            <source>Pan Right</source>
+            <translation>Nach rechts schwenken</translation>
+        </message>
+        <message>
+            <source>Pan Up</source>
+            <translation>Nach oben schwenken</translation>
+        </message>
+        <message>
+            <source>Pan Down</source>
+            <translation>Nach unten schwenken</translation>
+        </message>
+        <message>
+            <source>Load Legacy Style...</source>
+            <translation>Alten Stil laden...</translation>
+        </message>
+        <message>
+            <source>Select Map Source...</source>
+            <translation>Kartenquelle auswählen...</translation>
+        </message>
+        <message>
+            <source>View</source>
+            <translation>Ansicht</translation>
+        </message>
+        <message>
+            <source>Navigate</source>
+            <translation>Navigieren</translation>
+        </message>
+        <message>
+            <source>File</source>
+            <translation>Datei</translation>
+        </message>
+        <message>
+            <source>Native OsmAnd widget unavailable, falling back to the Python renderer: {error}</source>
+            <translation>Natives OsmAnd-Widget nicht verfügbar, Rückgriff auf den Python-Renderer: {error}</translation>
+        </message>
+        <message>
+            <source>GPU Acceleration Disabled</source>
+            <translation>GPU-Beschleunigung deaktiviert</translation>
+        </message>
+        <message>
+            <source>The OpenGL based map view failed to initialize.
+The application will continue with the CPU renderer instead.
+
+Details: {error}</source>
+            <translation>Die OpenGL-basierte Kartenansicht konnte nicht initialisiert werden.
+Die Anwendung wird stattdessen mit dem CPU-Renderer fortgesetzt.
+
+Details: {error}</translation>
+        </message>
+        <message>
+            <source>Legacy Style Only</source>
+            <translation>Nur alter Stil</translation>
+        </message>
+        <message>
+            <source>The style.json picker only applies to the legacy PBF renderer.
+Select a tile directory to switch back to the legacy backend.</source>
+            <translation>Die style.json-Auswahl gilt nur für den alten PBF-Renderer.
+Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.</translation>
+        </message>
+        <message>
+            <source>Select style.json</source>
+            <translation>style.json auswählen</translation>
+        </message>
+        <message>
+            <source>JSON Files (*.json)</source>
+            <translation>JSON-Dateien (*.json)</translation>
+        </message>
+        <message>
+            <source>Error</source>
+            <translation>Fehler</translation>
+        </message>
+        <message>
+            <source>Unable to load the style file:
+{error}</source>
+            <translation>Die Stildatei konnte nicht geladen werden:
+{error}</translation>
+        </message>
+        <message>
+            <source>Unable to initialize tiles:
+{error}</source>
+            <translation>Kacheln konnten nicht initialisiert werden:
+{error}</translation>
+        </message>
+        <message>
+            <source>Select map source</source>
+            <translation>Kartenquelle auswählen</translation>
+        </message>
+        <message>
+            <source>OBF Files (*.obf);;All Files (*)</source>
+            <translation>OBF-Dateien (*.obf);;Alle Dateien (*)</translation>
+        </message>
+        <message>
+            <source>Unable to open the OBF source:
+{error}</source>
+            <translation>Die OBF-Quelle konnte nicht geöffnet werden:
+{error}</translation>
+        </message>
+        <message>
+            <source>Select tile directory</source>
+            <translation>Kachelverzeichnis auswählen</translation>
+        </message>
+        <message>
+            <source>Unable to open the tile directory:
+{error}</source>
+            <translation>Das Kachelverzeichnis konnte nicht geöffnet werden:
+{error}</translation>
+        </message>
+        <message>
+            <source>Map Preview - {backend} - Zoom {zoom}</source>
+            <translation>Kartenvorschau - {backend} - Zoom {zoom}</translation>
+        </message>
+        <message>
+            <source>OsmAnd native/helper backend is unavailable, so the preview is using the legacy vector fallback.</source>
+            <translation>Das native OsmAnd-/Helfer-Backend ist nicht verfügbar, daher verwendet die Vorschau den alten Vektor-Fallback.</translation>
+        </message>
+        <message>
+            <source>Failed to initialize map:
+{error}</source>
+            <translation>Karte konnte nicht initialisiert werden:
+{error}</translation>
+        </message>
+    </context>
+    <context>
+        <name>MapsPreviewCLI</name>
+        <message>
+            <source>Preview OsmAnd or legacy map backends</source>
+            <translation>OsmAnd- oder alte Karten-Backends in der Vorschau anzeigen</translation>
+        </message>
+        <message>
+            <source>Select the startup renderer explicitly instead of auto-detecting it.</source>
+            <translation>Start-Renderer explizit auswählen, statt ihn automatisch zu erkennen.</translation>
+        </message>
+        <message>
+            <source>Center the initial view on the provided longitude/latitude pair.</source>
+            <translation>Die Anfangsansicht auf das angegebene Längen-/Breitengradpaar zentrieren.</translation>
+        </message>
+        <message>
+            <source>Set the initial zoom level after the window has been created.</source>
+            <translation>Die anfängliche Zoomstufe nach dem Erstellen des Fensters festlegen.</translation>
+        </message>
+        <message>
+            <source>Save a screenshot after startup and exit once the image is written.</source>
+            <translation>Nach dem Start einen Screenshot speichern und nach dem Schreiben des Bilds beenden.</translation>
+        </message>
+        <message>
+            <source>How long to wait before taking --screenshot (default: 1500).</source>
+            <translation>Wartezeit vor --screenshot (Standard: 1500).</translation>
+        </message>
+    </context>
 </TS>

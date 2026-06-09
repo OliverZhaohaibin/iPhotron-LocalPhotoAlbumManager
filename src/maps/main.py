@@ -15,15 +15,18 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script bootstrap
 import argparse
 import os
 import sys
+import traceback
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Sequence
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QCoreApplication, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QOffscreenSurface, QOpenGLContext, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
+from iPhoto.gui.i18n import TranslationManager, formatters, tr
+from iPhoto.settings.manager import SettingsManager
 from maps.map_sources import (
     MapBackendMetadata,
     MapSourceSpec,
@@ -32,8 +35,8 @@ from maps.map_sources import (
     prefer_osmand_native_widget,
 )
 from maps.map_widget import MapGLWidget, MapGLWindowWidget, MapWidget, NativeOsmAndWidget
-from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
 from maps.map_widget._map_widget_base import MapWidgetBase
+from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
 from maps.style_resolver import StyleLoadError
 from maps.tile_backend import OsmAndRasterBackend
 from maps.tile_parser import TileLoadingError
@@ -142,26 +145,39 @@ def choose_native_widget_class(
     prefer_native_widget: bool = True,
 ) -> tuple[type[MapWidgetBase] | None, str]:
     if _opengl_explicitly_disabled():
-        return None, "OpenGL support disabled by configuration. Falling back to CPU rendering."
+        return None, tr("MapsPreview", "OpenGL support disabled by configuration. Falling back to CPU rendering.")
 
     if not prefer_native_widget:
-        return None, "OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section."
+        return None, tr(
+            "MapsPreview",
+            "OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section.",
+        )
 
     if not prefer_osmand_native_widget():
-        return None, "OpenGL support detected. Native widget disabled by configuration; using the Python OBF renderer."
+        return None, tr(
+            "MapsPreview",
+            "OpenGL support detected. Native widget disabled by configuration; using the Python OBF renderer.",
+        )
 
     if not has_usable_osmand_native_widget(package_root):
-        return None, "OpenGL support detected. Using GPU accelerated Python rendering."
+        return None, tr("MapsPreview", "OpenGL support detected. Using GPU accelerated Python rendering.")
 
     is_available, reason = probe_native_widget_runtime(package_root)
     if is_available:
-        return NativeOsmAndWidget, "OpenGL support detected. Using the native OsmAnd widget when OBF data is selected."
+        return NativeOsmAndWidget, tr(
+            "MapsPreview",
+            "OpenGL support detected. Using the native OsmAnd widget when OBF data is selected.",
+        )
 
     if not use_opengl:
-        return None, "OpenGL support unavailable. Falling back to CPU rendering."
+        return None, tr("MapsPreview", "OpenGL support unavailable. Falling back to CPU rendering.")
 
-    detail = f" Native widget disabled: {reason}." if reason else ""
-    return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
+    if reason:
+        return None, tr(
+            "MapsPreview",
+            "OpenGL support detected. Native widget disabled: {reason}. Using GPU accelerated Python rendering.",
+        ).format(reason=reason)
+    return None, tr("MapsPreview", "OpenGL support detected. Using GPU accelerated Python rendering.")
 
 
 def prepare_qt_runtime_for_backend(backend: str, package_root: Path | None = None) -> None:
@@ -225,37 +241,58 @@ def probe_python_obf_runtime(package_root: Path | None = None) -> tuple[bool, st
 def build_argument_parser() -> argparse.ArgumentParser:
     """Return the CLI parser used by the standalone preview entry point."""
 
-    parser = argparse.ArgumentParser(description="Preview OsmAnd or legacy map backends")
+    parser = argparse.ArgumentParser(description=tr("MapsPreviewCLI", "Preview OsmAnd or legacy map backends"))
     parser.add_argument(
         "--backend",
         choices=("auto", "native", "python", "legacy"),
         default="auto",
-        help="Select the startup renderer explicitly instead of auto-detecting it.",
+        help=tr("MapsPreviewCLI", "Select the startup renderer explicitly instead of auto-detecting it."),
     )
     parser.add_argument(
         "--center",
         nargs=2,
         metavar=("LON", "LAT"),
         type=float,
-        help="Center the initial view on the provided longitude/latitude pair.",
+        help=tr("MapsPreviewCLI", "Center the initial view on the provided longitude/latitude pair."),
     )
     parser.add_argument(
         "--zoom",
         type=float,
-        help="Set the initial zoom level after the window has been created.",
+        help=tr("MapsPreviewCLI", "Set the initial zoom level after the window has been created."),
     )
     parser.add_argument(
         "--screenshot",
         type=Path,
-        help="Save a screenshot after startup and exit once the image is written.",
+        help=tr("MapsPreviewCLI", "Save a screenshot after startup and exit once the image is written."),
     )
     parser.add_argument(
         "--capture-delay-ms",
         type=int,
         default=1500,
-        help="How long to wait before taking --screenshot (default: 1500).",
+        help=tr("MapsPreviewCLI", "How long to wait before taking --screenshot (default: 1500)."),
     )
     return parser
+
+
+def _argv_requests_help(arguments: Sequence[str]) -> bool:
+    return any(argument in {"-h", "--help"} for argument in arguments)
+
+
+def _install_preview_translation() -> TranslationManager | None:
+    """Install the same Qt translator used by the main desktop application."""
+
+    try:
+        settings = SettingsManager()
+        settings.load()
+        manager = TranslationManager(settings)
+        manager.apply_language()
+    except Exception:  # noqa: BLE001 - translation must not block the preview utility.
+        return None
+
+    app = QCoreApplication.instance()
+    if app is not None:
+        app.setProperty("iPhotronPreviewTranslationManager", manager)
+    return manager
 
 
 def configure_qt_opengl_defaults() -> None:
@@ -297,7 +334,7 @@ def choose_launch_configuration(
     else:
         widget_cls = MapGLWidget if use_opengl else MapWidget
     normalized_backend = backend.strip().lower()
-    renderer_label = "GPU accelerated" if use_opengl else "CPU"
+    renderer_label = tr("MapsPreview", "GPU accelerated") if use_opengl else tr("MapsPreview", "CPU")
 
     if normalized_backend == "auto":
         prefer_native_widget = use_opengl and prefer_osmand_native_widget()
@@ -308,11 +345,15 @@ def choose_launch_configuration(
                     map_source=MapSourceSpec.osmand_default(package_root),
                     widget_class=widget_cls,
                     native_widget_class=NativeOsmAndWidget,
-                    startup_message="OpenGL support detected. Using the native OsmAnd widget.",
+                    startup_message=tr("MapsPreview", "OpenGL support detected. Using the native OsmAnd widget."),
                 )
-            native_detail = f" Native widget unavailable: {reason}." if reason else ""
+            native_detail = (
+                tr("MapsPreview", " Native widget unavailable: {reason}.").format(reason=reason)
+                if reason
+                else ""
+            )
         elif use_opengl and not prefer_native_widget:
-            native_detail = " Native widget disabled by configuration."
+            native_detail = tr("MapsPreview", " Native widget disabled by configuration.")
         else:
             native_detail = ""
 
@@ -325,15 +366,26 @@ def choose_launch_configuration(
                 map_source=MapSourceSpec.osmand_default(package_root),
                 widget_class=widget_cls,
                 native_widget_class=None,
-                startup_message=f"Using the {renderer_label} Python OBF renderer.{native_detail}",
+                startup_message=tr("MapsPreview", "Using the {renderer} Python OBF renderer.{detail}").format(
+                    renderer=renderer_label,
+                    detail=native_detail,
+                ),
             )
 
-        detail = f" OBF helper unavailable: {helper_reason}." if helper_reason else ""
+        detail = (
+            tr("MapsPreview", " OBF helper unavailable: {reason}.").format(reason=helper_reason)
+            if helper_reason
+            else ""
+        )
         return PreviewLaunchConfig(
             map_source=MapSourceSpec.legacy_default(package_root),
             widget_class=widget_cls,
             native_widget_class=None,
-            startup_message=f"Using the {renderer_label} legacy vector renderer.{native_detail}{detail}",
+            startup_message=tr("MapsPreview", "Using the {renderer} legacy vector renderer.{native_detail}{detail}").format(
+                renderer=renderer_label,
+                native_detail=native_detail,
+                detail=detail,
+            ),
         )
 
     if normalized_backend == "native":
@@ -349,7 +401,7 @@ def choose_launch_configuration(
             map_source=MapSourceSpec.osmand_default(package_root),
             widget_class=widget_cls,
             native_widget_class=NativeOsmAndWidget,
-            startup_message="OpenGL support detected. Forcing the native OsmAnd widget.",
+            startup_message=tr("MapsPreview", "OpenGL support detected. Forcing the native OsmAnd widget."),
         )
 
     if normalized_backend == "python":
@@ -363,7 +415,9 @@ def choose_launch_configuration(
             map_source=MapSourceSpec.osmand_default(package_root),
             widget_class=widget_cls,
             native_widget_class=None,
-            startup_message=f"Forcing the {renderer_label} Python OBF renderer.",
+            startup_message=tr("MapsPreview", "Forcing the {renderer} Python OBF renderer.").format(
+                renderer=renderer_label,
+            ),
         )
 
     if normalized_backend == "legacy":
@@ -371,7 +425,9 @@ def choose_launch_configuration(
             map_source=MapSourceSpec.legacy_default(package_root),
             widget_class=widget_cls,
             native_widget_class=None,
-            startup_message=f"Forcing the {renderer_label} legacy vector renderer.",
+            startup_message=tr("MapsPreview", "Forcing the {renderer} legacy vector renderer.").format(
+                renderer=renderer_label,
+            ),
         )
 
     raise ValueError(f"unsupported backend mode: {backend}")
@@ -442,9 +498,9 @@ def describe_active_backend(
 
     if requested_source.kind == "osmand_obf":
         if metadata.tile_kind == "raster":
-            return "OBF Raster"
-        return "Legacy Vector Fallback"
-    return "Legacy Vector"
+            return tr("MapsPreview", "OBF Raster")
+        return tr("MapsPreview", "Legacy Vector Fallback")
+    return tr("MapsPreview", "Legacy Vector")
 
 
 def format_status_message(
@@ -458,11 +514,21 @@ def format_status_message(
     """Summarize the current map state for the status bar."""
 
     backend_label = describe_active_backend(requested_source, metadata)
-    source_path = Path(requested_source.data_path).name
-    return (
-        f"{backend_label} | Zoom {zoom:.2f} | Center {latitude:.4f}, {longitude:.4f}"
-        f" | Source {source_path}"
+    source_path = _source_display_name(requested_source.data_path)
+    return tr("MapsPreview", "{backend} | Zoom {zoom} | Center {latitude}, {longitude} | Source {source}").format(
+        backend=backend_label,
+        zoom=formatters.format_decimal(zoom, precision=2),
+        latitude=formatters.format_decimal(latitude, precision=4),
+        longitude=formatters.format_decimal(longitude, precision=4),
+        source=source_path,
     )
+
+
+def _source_display_name(path: str | Path) -> str:
+    text = str(path)
+    if "\\" in text:
+        return PureWindowsPath(text).name
+    return Path(text).name
 
 
 class MainWindow(QMainWindow):
@@ -480,7 +546,6 @@ class MainWindow(QMainWindow):
         native_widget_class: type[MapWidgetBase] | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("Map Preview")
         self.resize(1280, 860)
 
         self._package_root = Path(__file__).resolve().parent
@@ -489,6 +554,7 @@ class MainWindow(QMainWindow):
         self._widget_cls: type[MapWidgetBase] = widget_class or MapWidget
         self._native_widget_cls = native_widget_class
         self._runtime_diagnostics = ""
+        self._ui_ready = False
         chosen_source = map_source or choose_default_map_source(
             self._package_root,
             use_opengl=self._native_widget_cls is not None
@@ -505,73 +571,93 @@ class MainWindow(QMainWindow):
 
         self._create_actions()
         self._create_menus()
-        self.statusBar().showMessage("Ready")
+        self._ui_ready = True
+        self.statusBar().showMessage(tr("MapsPreview", "Ready"))
+        self.retranslate_ui()
         self._refresh_window_chrome()
         self._announce_backend_state()
 
     def _create_actions(self) -> None:
-        self._action_zoom_in = QAction("Zoom In", self)
+        self._action_zoom_in = QAction(self)
         self._action_zoom_in.setShortcuts([QKeySequence("+"), QKeySequence("=")])
         self._action_zoom_in.triggered.connect(self._zoom_in)
 
-        self._action_zoom_out = QAction("Zoom Out", self)
+        self._action_zoom_out = QAction(self)
         self._action_zoom_out.setShortcuts([QKeySequence("-"), QKeySequence("_")])
         self._action_zoom_out.triggered.connect(self._zoom_out)
 
-        self._action_reset_view = QAction("Reset View", self)
+        self._action_reset_view = QAction(self)
         self._action_reset_view.setShortcuts([QKeySequence("Home"), QKeySequence("R")])
         self._action_reset_view.triggered.connect(self._reset_view)
 
-        self._action_pan_left = QAction("Pan Left", self)
+        self._action_pan_left = QAction(self)
         self._action_pan_left.setShortcuts([QKeySequence("Left"), QKeySequence("A")])
         self._action_pan_left.triggered.connect(lambda: self._pan_by_fraction(-self.PAN_FRACTION, 0.0))
 
-        self._action_pan_right = QAction("Pan Right", self)
+        self._action_pan_right = QAction(self)
         self._action_pan_right.setShortcuts([QKeySequence("Right"), QKeySequence("D")])
         self._action_pan_right.triggered.connect(lambda: self._pan_by_fraction(self.PAN_FRACTION, 0.0))
 
-        self._action_pan_up = QAction("Pan Up", self)
+        self._action_pan_up = QAction(self)
         self._action_pan_up.setShortcuts([QKeySequence("Up"), QKeySequence("W")])
         self._action_pan_up.triggered.connect(lambda: self._pan_by_fraction(0.0, -self.PAN_FRACTION))
 
-        self._action_pan_down = QAction("Pan Down", self)
+        self._action_pan_down = QAction(self)
         self._action_pan_down.setShortcuts([QKeySequence("Down"), QKeySequence("S")])
         self._action_pan_down.triggered.connect(lambda: self._pan_by_fraction(0.0, self.PAN_FRACTION))
 
-        self._action_open_style = QAction("Load Legacy Style...", self)
+        self._action_open_style = QAction(self)
         self._action_open_style.triggered.connect(self._open_style)
 
-        self._action_open_map_source = QAction("Select Map Source...", self)
+        self._action_open_map_source = QAction(self)
         self._action_open_map_source.triggered.connect(self._open_map_source)
 
     def _create_menus(self) -> None:
         menu_bar = self.menuBar()
 
-        view_menu = menu_bar.addMenu("View")
-        view_menu.addAction(self._action_zoom_in)
-        view_menu.addAction(self._action_zoom_out)
-        view_menu.addAction(self._action_reset_view)
+        self._view_menu = menu_bar.addMenu("")
+        self._view_menu.addAction(self._action_zoom_in)
+        self._view_menu.addAction(self._action_zoom_out)
+        self._view_menu.addAction(self._action_reset_view)
 
-        navigate_menu = menu_bar.addMenu("Navigate")
-        navigate_menu.addAction(self._action_pan_left)
-        navigate_menu.addAction(self._action_pan_right)
-        navigate_menu.addAction(self._action_pan_up)
-        navigate_menu.addAction(self._action_pan_down)
+        self._navigate_menu = menu_bar.addMenu("")
+        self._navigate_menu.addAction(self._action_pan_left)
+        self._navigate_menu.addAction(self._action_pan_right)
+        self._navigate_menu.addAction(self._action_pan_up)
+        self._navigate_menu.addAction(self._action_pan_down)
 
-        file_menu = menu_bar.addMenu("File")
-        file_menu.addAction(self._action_open_style)
-        file_menu.addAction(self._action_open_map_source)
+        self._file_menu = menu_bar.addMenu("")
+        self._file_menu.addAction(self._action_open_style)
+        self._file_menu.addAction(self._action_open_map_source)
+
+    def retranslate_ui(self) -> None:
+        self._action_zoom_in.setText(tr("MapsPreview", "Zoom In"))
+        self._action_zoom_out.setText(tr("MapsPreview", "Zoom Out"))
+        self._action_reset_view.setText(tr("MapsPreview", "Reset View"))
+        self._action_pan_left.setText(tr("MapsPreview", "Pan Left"))
+        self._action_pan_right.setText(tr("MapsPreview", "Pan Right"))
+        self._action_pan_up.setText(tr("MapsPreview", "Pan Up"))
+        self._action_pan_down.setText(tr("MapsPreview", "Pan Down"))
+        self._action_open_style.setText(tr("MapsPreview", "Load Legacy Style..."))
+        self._action_open_map_source.setText(tr("MapsPreview", "Select Map Source..."))
+
+        self._view_menu.setTitle(tr("MapsPreview", "View"))
+        self._navigate_menu.setTitle(tr("MapsPreview", "Navigate"))
+        self._file_menu.setTitle(tr("MapsPreview", "File"))
+        self._refresh_window_chrome()
 
     def _create_map_widget(self, *, map_source: MapSourceSpec) -> MapWidgetBase:
         if map_source.kind == "osmand_obf" and self._native_widget_cls is not None:
             try:
                 return self._native_widget_cls(map_source=map_source)
             except Exception as exc:  # pragma: no cover - best effort error reporting
-                import sys, traceback
                 print(f"[main] NativeOsmAndWidget failed: {type(exc).__name__}: {exc}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
                 self.statusBar().showMessage(
-                    f"Native OsmAnd widget unavailable, falling back to the Python renderer: {exc}",
+                    tr(
+                        "MapsPreview",
+                        "Native OsmAnd widget unavailable, falling back to the Python renderer: {error}",
+                    ).format(error=exc),
                     8000,
                 )
 
@@ -585,10 +671,13 @@ class MainWindow(QMainWindow):
 
             QMessageBox.warning(
                 self,
-                "GPU Acceleration Disabled",
-                "The OpenGL based map view failed to initialize.\n"
-                "The application will continue with the CPU renderer instead.\n\n"
-                f"Details: {exc}",
+                tr("MapsPreview", "GPU Acceleration Disabled"),
+                tr(
+                    "MapsPreview",
+                    "The OpenGL based map view failed to initialize.\n"
+                    "The application will continue with the CPU renderer instead.\n\n"
+                    "Details: {error}",
+                ).format(error=exc),
             )
             self._widget_cls = MapWidget
             return MapWidget(map_source=map_source)
@@ -612,17 +701,20 @@ class MainWindow(QMainWindow):
         if self._map_source.kind != "legacy_pbf":
             QMessageBox.information(
                 self,
-                "Legacy Style Only",
-                "The style.json picker only applies to the legacy PBF renderer.\n"
-                "Select a tile directory to switch back to the legacy backend.",
+                tr("MapsPreview", "Legacy Style Only"),
+                tr(
+                    "MapsPreview",
+                    "The style.json picker only applies to the legacy PBF renderer.\n"
+                    "Select a tile directory to switch back to the legacy backend.",
+                ),
             )
             return
 
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select style.json",
+            tr("MapsPreview", "Select style.json"),
             self._style_path,
-            "JSON Files (*.json)",
+            tr("MapsPreview", "JSON Files (*.json)"),
         )
         if not path:
             return
@@ -636,10 +728,18 @@ class MainWindow(QMainWindow):
         try:
             widget = self._create_map_widget(map_source=new_source)
         except StyleLoadError as exc:
-            QMessageBox.critical(self, "Error", f"Unable to load the style file:\n{exc}")
+            QMessageBox.critical(
+                self,
+                tr("MapsPreview", "Error"),
+                tr("MapsPreview", "Unable to load the style file:\n{error}").format(error=exc),
+            )
             return
         except TileLoadingError as exc:
-            QMessageBox.critical(self, "Error", f"Unable to initialize tiles:\n{exc}")
+            QMessageBox.critical(
+                self,
+                tr("MapsPreview", "Error"),
+                tr("MapsPreview", "Unable to initialize tiles:\n{error}").format(error=exc),
+            )
             return
 
         self._style_path = path
@@ -651,9 +751,9 @@ class MainWindow(QMainWindow):
         default_osmand = MapSourceSpec.osmand_default(self._package_root).resolved(self._package_root)
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select map source",
+            tr("MapsPreview", "Select map source"),
             str(self._map_source.data_path),
-            "OBF Files (*.obf);;All Files (*)",
+            tr("MapsPreview", "OBF Files (*.obf);;All Files (*)"),
         )
         if path:
             new_source = MapSourceSpec(
@@ -665,7 +765,11 @@ class MainWindow(QMainWindow):
             try:
                 widget = self._create_map_widget(map_source=new_source)
             except (StyleLoadError, TileLoadingError) as exc:
-                QMessageBox.critical(self, "Error", f"Unable to open the OBF source:\n{exc}")
+                QMessageBox.critical(
+                    self,
+                    tr("MapsPreview", "Error"),
+                    tr("MapsPreview", "Unable to open the OBF source:\n{error}").format(error=exc),
+                )
                 return
 
             self._map_source = new_source
@@ -675,7 +779,7 @@ class MainWindow(QMainWindow):
 
         directory = QFileDialog.getExistingDirectory(
             self,
-            "Select tile directory",
+            tr("MapsPreview", "Select tile directory"),
             self._tile_root,
         )
         if not directory:
@@ -689,10 +793,18 @@ class MainWindow(QMainWindow):
         try:
             widget = self._create_map_widget(map_source=new_source)
         except StyleLoadError as exc:
-            QMessageBox.critical(self, "Error", f"Unable to load the style file:\n{exc}")
+            QMessageBox.critical(
+                self,
+                tr("MapsPreview", "Error"),
+                tr("MapsPreview", "Unable to load the style file:\n{error}").format(error=exc),
+            )
             return
         except TileLoadingError as exc:
-            QMessageBox.critical(self, "Error", f"Unable to open the tile directory:\n{exc}")
+            QMessageBox.critical(
+                self,
+                tr("MapsPreview", "Error"),
+                tr("MapsPreview", "Unable to open the tile directory:\n{error}").format(error=exc),
+            )
             return
 
         self._tile_root = directory
@@ -704,12 +816,17 @@ class MainWindow(QMainWindow):
         return describe_active_backend(self._map_source, self._map_widget.map_backend_metadata())
 
     def _refresh_window_chrome(self) -> None:
+        if not self._ui_ready:
+            return
         self._update_window_title()
         self._update_status_bar()
 
     def _update_window_title(self) -> None:
         self.setWindowTitle(
-            f"Map Preview - {self._active_backend_label()} - Zoom {self._map_widget.zoom:.2f}",
+            tr("MapsPreview", "Map Preview - {backend} - Zoom {zoom}").format(
+                backend=self._active_backend_label(),
+                zoom=formatters.format_decimal(self._map_widget.zoom, precision=2),
+            ),
         )
 
     def _update_status_bar(self) -> None:
@@ -729,7 +846,10 @@ class MainWindow(QMainWindow):
         metadata = self._map_widget.map_backend_metadata()
         if self._map_source.kind == "osmand_obf" and metadata.tile_kind != "raster":
             self.statusBar().showMessage(
-                "OsmAnd native/helper backend is unavailable, so the preview is using the legacy vector fallback.",
+                tr(
+                    "MapsPreview",
+                    "OsmAnd native/helper backend is unavailable, so the preview is using the legacy vector fallback.",
+                ),
                 10000,
             )
 
@@ -826,12 +946,21 @@ def _schedule_screenshot_capture(
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
-    parsed_args = build_argument_parser().parse_args(arguments)
     package_root = Path(__file__).resolve().parent
+    if _argv_requests_help(arguments):
+        app = QCoreApplication.instance() or QCoreApplication([Path(__file__).name, *arguments])
+        translation = _install_preview_translation()
+        try:
+            build_argument_parser().parse_args(arguments)
+            return 0
+        finally:
+            del app, translation
+
+    parsed_args = build_argument_parser().parse_args(arguments)
     prepare_qt_runtime_for_backend(parsed_args.backend, package_root)
     configure_qt_opengl_defaults()
     app = QApplication([Path(__file__).name, *arguments])
-
+    translation = _install_preview_translation()
     use_opengl = check_opengl_support()
     launch_config = choose_launch_configuration(
         package_root,
@@ -864,10 +993,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     native_widget_class=fallback_config.native_widget_class,
                 )
             except (StyleLoadError, TileLoadingError):
-                QMessageBox.critical(None, "Error", f"Failed to initialize map:\n{exc}")
+                QMessageBox.critical(
+                    None,
+                    tr("MapsPreview", "Error"),
+                    tr("MapsPreview", "Failed to initialize map:\n{error}").format(error=exc),
+                )
                 return 1
         else:
-            QMessageBox.critical(None, "Error", f"Failed to initialize map:\n{exc}")
+            QMessageBox.critical(
+                None,
+                tr("MapsPreview", "Error"),
+                tr("MapsPreview", "Failed to initialize map:\n{error}").format(error=exc),
+            )
             return 1
 
     if parsed_args.center is not None or parsed_args.zoom is not None:
@@ -882,7 +1019,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             parsed_args.screenshot,
             capture_delay_ms=parsed_args.capture_delay_ms,
         )
-    return app.exec()
+    exit_code = app.exec()
+    del translation
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -1,19 +1,95 @@
 import os
 from pathlib import Path
 
+import pytest
+from PySide6.QtCore import QPointF, Signal
+from PySide6.QtWidgets import QApplication, QWidget
+
+from iPhoto.gui.i18n import TranslationManager, formatters
+from iPhoto.gui.i18n import translation_manager as translation_manager_module
+from iPhoto.settings.manager import SettingsManager
+import maps.main as maps_main
 from maps.main import (
+    MainWindow,
     build_argument_parser,
     check_opengl_support,
-    configure_qt_opengl_defaults,
     choose_default_map_source,
     choose_launch_configuration,
     choose_native_widget_class,
+    configure_qt_opengl_defaults,
     describe_active_backend,
     format_map_runtime_diagnostics,
     format_status_message,
     prepare_qt_runtime_for_backend,
 )
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
+
+
+@pytest.fixture
+def qapp() -> QApplication:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def _settings(tmp_path: Path) -> SettingsManager:
+    manager = SettingsManager(path=tmp_path / "settings.json")
+    manager.load()
+    return manager
+
+
+def _reset_translation(app: QApplication) -> None:
+    translator = translation_manager_module._INSTALLED_TRANSLATOR
+    if translator is not None:
+        app.removeTranslator(translator)
+    translation_manager_module._INSTALLED_TRANSLATOR = None
+    formatters.set_current_locale(None)
+
+
+class _PreviewMapWidget(QWidget):
+    viewChanged = Signal(float, float, float)
+
+    def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
+        super().__init__(parent)
+        self._zoom = 4.25
+        self._center = (12.3456, 48.8566)
+        self._map_source = map_source
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = float(zoom)
+        longitude, latitude = self._center
+        self.viewChanged.emit(longitude, latitude, self._zoom)
+
+    def reset_view(self) -> None:
+        self.set_zoom(2.0)
+
+    def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
+        del delta_x, delta_y
+
+    def center_on(self, longitude: float, latitude: float) -> None:
+        self._center = (float(longitude), float(latitude))
+        self.viewChanged.emit(float(longitude), float(latitude), self._zoom)
+
+    def center_lonlat(self) -> tuple[float, float]:
+        return self._center
+
+    def project_lonlat(self, longitude: float, latitude: float) -> QPointF:
+        return QPointF(longitude, latitude)
+
+    def map_backend_metadata(self) -> MapBackendMetadata:
+        return MapBackendMetadata(2.0, 19.0, True, "raster", "xyz")
+
+    def event_target(self) -> QWidget:
+        return self
+
+    def shutdown(self) -> None:
+        return None
 
 
 def test_choose_default_map_source_prefers_obf_when_native_runtime_is_usable_without_helper(
@@ -182,6 +258,41 @@ def test_build_argument_parser_supports_debug_capture_flags() -> None:
     assert parsed.zoom == 7.47
     assert parsed.screenshot == Path("debug/native.png")
     assert parsed.capture_delay_ms == 2500
+
+
+@pytest.mark.parametrize("arguments", [["--bogus"], ["--center", "not-a-number", "51.2195"]])
+def test_main_rejects_invalid_cli_before_qapplication(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> None:
+    prepare_calls: list[tuple[object, ...]] = []
+
+    def fail_qapplication(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("QApplication should not be constructed for invalid CLI arguments")
+
+    monkeypatch.setattr(
+        maps_main,
+        "prepare_qt_runtime_for_backend",
+        lambda *args: prepare_calls.append(args),
+    )
+    monkeypatch.setattr(maps_main, "QApplication", fail_qapplication)
+
+    with pytest.raises(SystemExit) as exc_info:
+        maps_main.main(arguments)
+
+    assert exc_info.value.code == 2
+    assert prepare_calls == []
+
+
+def test_build_argument_parser_uses_installed_translations(tmp_path: Path, qapp: QApplication) -> None:
+    settings = _settings(tmp_path)
+    translations = TranslationManager(settings)
+    try:
+        translations.apply_language("zh-CN")
+
+        help_text = build_argument_parser().format_help()
+
+        assert "预览 OsmAnd 或旧版地图后端" in help_text
+        assert "选择启动渲染器" in help_text
+    finally:
+        _reset_translation(qapp)
 
 
 def test_check_opengl_support_accepts_valid_context_when_offscreen_make_current_fails(monkeypatch) -> None:
@@ -594,3 +705,36 @@ def test_format_status_message_includes_backend_zoom_and_center() -> None:
     assert "Zoom 4.25" in message
     assert "48.8566, 12.3456" in message
     assert "World_basemap_2.obf" in message
+
+
+def test_map_preview_window_retranslates_actions_and_status(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    settings = _settings(tmp_path)
+    translations = TranslationManager(settings)
+    window: MainWindow | None = None
+    try:
+        translations.apply_language("zh-CN")
+        source = MapSourceSpec(kind="osmand_obf", data_path=r"D:\maps\World_basemap_2.obf")
+
+        window = MainWindow(
+            map_source=source,
+            widget_class=_PreviewMapWidget,
+            native_widget_class=None,
+        )
+        window.retranslate_ui()
+
+        assert window._file_menu.title() == "文件"
+        assert window._view_menu.title() == "视图"
+        assert window._navigate_menu.title() == "导航"
+        assert window._action_zoom_in.text() == "放大"
+        assert window._action_open_map_source.text() == "选择地图源..."
+        assert window.windowTitle().startswith("地图预览 - OBF 栅格 - 缩放 4.25")
+        assert "缩放 4.25" in window.statusBar().currentMessage()
+        assert "中心 48.8566, 12.3456" in window.statusBar().currentMessage()
+        assert "来源 World_basemap_2.obf" in window.statusBar().currentMessage()
+    finally:
+        if window is not None:
+            window.close()
+        _reset_translation(qapp)

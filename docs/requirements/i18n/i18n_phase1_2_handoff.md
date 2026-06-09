@@ -1,7 +1,7 @@
-# iPhotron 国际化阶段 1-3 交接文档
+# iPhotron 国际化阶段 1-4 交接文档
 
-> 日期：2026-06-08
-> 状态：阶段 1-2 已实现；阶段 3 已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件和 edit sidebar 剩余 Apple Photos 对齐控件迁移；Python-aware 提取工具已补齐；待后续阶段继续迁移地图入口和其余业务页面
+> 日期：2026-06-09
+> 状态：阶段 1-2 已实现；阶段 3 已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件和 edit sidebar 剩余 Apple Photos 对齐控件迁移；阶段 4 已完成 `src/maps/main.py` 独立地图预览入口菜单、对话框、状态栏、窗口标题和 CLI help 迁移；Python-aware 提取工具已补齐；待后续阶段继续迁移主应用 map view 可能遗漏文案和其余业务页面
 > 对应指南：`docs/requirements/i18n/i18n_multilingual_architecture_guide.md`
 
 ---
@@ -11,6 +11,8 @@
 前序实施覆盖架构指南中的阶段 1「基础设施」和阶段 2「核心壳层 UI」。目标是先把国际化作为运行时服务接入应用，并让桌面主窗口的基础菜单、标题栏、核心操作和基础提示可以在运行时切换语言。
 
 本轮继续推进阶段 3「主要业务页面」，已完成 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件和 edit sidebar 剩余 Apple Photos 对齐控件迁移，并补齐首个 locale-aware formatter helper。
+
+最新一轮继续推进阶段 4「地图独立预览与边缘入口」，已完成 `src/maps/main.py` 独立地图预览入口迁移，并继续复用主应用 `iPhoto_*.ts/.qm` 翻译资源。
 
 已完成内容：
 
@@ -79,6 +81,10 @@
   - `DetailPageWidget` edit header 收尾文案已迁移，包括 Adjust/Crop segment、Compare tooltip、Revert to Original、Reset tooltip 和 Done。
   - `VideoTrimBar` 播放/暂停、trim 起止 handle 和 scrub 区域 tooltip 已迁移，并新增 `retranslate_ui()`；播放状态切换时会同步刷新当前 tooltip。
   - `InfoLocationMapView` 地图预览不可用状态已迁移，并新增 `retranslate_ui()`；地点名、坐标和地图诊断仍保持原始数据。
+  - `src/maps/main.py` 独立地图预览入口已迁移，包括菜单、action、窗口标题、状态栏、文件选择器、消息框、启动提示和 CLI help。
+  - 独立地图预览启动时会读取现有 `ui.language` 设置，创建 `TranslationManager` 并应用同一套 `iPhoto_*.qm`；`--help` 路径使用 `QCoreApplication` 安装 translator，不强制创建 GUI。
+  - 独立地图预览 `MainWindow.retranslate_ui()` 会刷新长期存在的菜单、action、窗口标题和状态栏；动态 zoom/center/source 使用占位符和 locale-aware decimal formatter。
+  - 独立地图预览的 runtime diagnostics、文件名、路径、异常详情、backend enum、环境变量和 OBF/JSON 等技术标识继续不翻译。
   - `PlayerViewController.show_placeholder(message=None)` 对默认占位文案改为按当前语言即时计算，避免语言切换后从缓存写回英文；调用方传入的自定义 `message` 仍按调用方负责翻译。
   - `ShareController` 状态栏/toast 反馈已迁移，包括未选择项目、文件不存在、复制到剪贴板、准备渲染图像/视频、复制原始文件和在文件管理器中显示；文件名继续通过 `{filename}` 占位符插入，不进入翻译资源。
   - `ExportController` 状态栏、toast、目录选择标题和基础错误提示已迁移；导出数量和错误详情使用 `{current}`、`{total}`、`{success}`、`{fail}`、`{error}` 占位符。
@@ -682,15 +688,72 @@ All checks passed
 
 说明：ruff 仍提示仓库顶层 linter 配置项迁移 warning，这是既有 `pyproject.toml` 配置风格问题，不影响本轮检查结果。
 
+阶段 4 `src/maps/main.py` 独立地图预览入口迁移后工具链验证：
+
+```bash
+bash scripts/i18n_extract.sh
+```
+
+结果：
+
+```text
+Extracted 409 translation messages.
+```
+
+说明：409 是当前源码中已包裹翻译调用去重后的可提取 message 数；当前 `iPhoto_de.ts` 和 `iPhoto_zh_CN.ts` 各包含 409 条 message，0 条 unfinished。本轮新增 `MapsPreview` 和 `MapsPreviewCLI` context，并继续使用同一套 `iPhoto_*.qm`。
+
+```bash
+bash scripts/i18n_compile.sh
+```
+
+结果：
+
+```text
+Generated 409 translation(s) (409 finished and 0 unfinished)
+Generated 409 translation(s) (409 finished and 0 unfinished)
+```
+
+本轮地图独立预览/i18n 目标回归：
+
+```bash
+QT_QPA_PLATFORM=offscreen pytest tests/test_maps_main.py \
+  tests/test_i18n_translation_manager.py \
+  tests/test_i18n_extract_tool.py -q
+```
+
+结果：
+
+```text
+50 passed, 1 warning
+```
+
+说明：warning 为仓库既有 `pytest.ini` 中 `env` 配置未被当前 pytest 识别。
+
+本轮窄范围静态检查：
+
+```bash
+python -m ruff check --select I,F \
+  src/maps/main.py \
+  tests/test_maps_main.py \
+  tests/test_i18n_extract_tool.py
+```
+
+结果：
+
+```text
+All checks passed
+```
+
+说明：ruff 仍提示仓库顶层 linter 配置项迁移 warning，这是既有 `pyproject.toml` 配置风格问题，不影响本轮检查结果。
+
 ---
 
 ## 3. 已知限制
 
-当前完成的是核心壳层国际化，以及 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件和 edit sidebar 剩余 Apple Photos 对齐控件迁移，不是全应用文案迁移。
+当前完成的是核心壳层国际化，以及 `InfoPanel`、People Dashboard、相册导航面、gallery context menu、detail/player 控制区、detail/edit 收尾控件、share/export 首批反馈、face overlay、edit sidebar 首批控件、edit sidebar 剩余 Apple Photos 对齐控件和 `src/maps/main.py` 独立地图预览入口迁移，不是全应用文案迁移。
 
 仍未完成的主要区域：
 
-- `src/maps/main.py` 独立地图预览入口未迁移。
 - 主应用 map view 中仍可能存在用户可见状态文案未系统迁移。
 - `tools/check_i18n_strings.py` 硬编码文案门禁尚未实现。
 - locale-aware formatter 已具备日期时间、整数、小数和文件大小能力，但百分比、复数和更完整的 domain-specific 格式化仍未系统接入。
@@ -708,6 +771,7 @@ All checks passed
 - `DetailPageWidget` 与 `PlayerBar` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；默认预览占位文本由 `PlayerViewController` 按当前语言即时计算。
 - `EditSidebar` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；section 标题通过稳定英文 source text 翻译，session key、slider key、aspect ratio 数值和用户数据保持不变。
 - `FaceNameOverlayWidget` 已实现 `retranslate_ui()`，并由 `MainWindow.retranslate_ui_tree()` 自动调用；只刷新 fallback/placeholder/校验提示，不翻译人物真实姓名或用户输入。
+- `src/maps/main.py` 独立地图预览入口已实现 `retranslate_ui()`，但它是独立窗口，不接入主应用 `MainWindow.retranslate_ui_tree()`；启动时读取 `ui.language` 并安装同一套 translator。
 - 后续迁移 context menu 时不要用 `action.text()` 判断命令；应依赖 `MenuActionSpec.action_id` / `QAction.data()`。
 - 如果传入 `InfoPanel.set_location_capability(fallback_text=...)` 的是外部自定义文案，该文案按调用方负责翻译；默认 fallback 已由 `InfoPanel` 自身翻译。
 - 如果传入 `GroupPeopleDialog(title_text=..., prompt_text=..., confirm_text=...)` 或 `MergeConfirmDialog.confirm_action(...)` 的是自定义文案，该文案按调用方负责翻译；People Dashboard 内部调用已完成翻译。
@@ -722,7 +786,7 @@ All checks passed
 
 建议按用户可见度排序：
 
-1. map view 中用户可见状态与 `src/maps/main.py` 独立入口
+1. 主应用 map view 中后续发现的用户可见状态文案
 2. 新增或后续发现的 detail/edit 边缘控件继续按 widget/controller 小批次迁移
 3. 后续新增 gallery context menu 文案继续使用 `GalleryMenu` / `GalleryContextMenu` context，并保持 `QAction.data()` 作为命令契约。
 
@@ -734,10 +798,10 @@ All checks passed
 - 不翻译文件名、路径、相册名、人物名、EXIF 原始值和内部诊断。
 - 每完成一个页面后运行 `bash scripts/i18n_extract.sh`，补齐 `.ts` 中新增 message，再运行 `bash scripts/i18n_compile.sh`。
 
-优先级 2：地图独立入口
+优先级 2：地图独立入口后续维护
 
-- 迁移 `src/maps/main.py` 的菜单、对话框、状态栏和窗口标题。
-- 初期可以继续使用同一 `iPhoto_*.qm`。
+- `src/maps/main.py` 已迁移菜单、对话框、状态栏、窗口标题和 CLI help。
+- 当前继续使用同一 `iPhoto_*.qm`。
 - 如果后续 maps 文案明显膨胀，再拆分 `maps_*.ts/.qm`。
 
 优先级 3：继续扩展格式化 helper

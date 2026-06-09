@@ -246,3 +246,22 @@ def test_apple_photos_edit_terms_are_translated() -> None:
     assert zh_wb_terms["Temperature/Tint"] == "色温/色调"
     assert de_wb_terms["Neutral Gray"] == "Neutrales Grau"
     assert de_wb_terms["Temperature/Tint"] == "Temperatur/Farbton"
+
+
+def test_maps_preview_terms_are_translated() -> None:
+    """Standalone map preview translations should stay complete."""
+
+    i18n_dir = Path(__file__).parent.parent / "src" / "iPhoto" / "resources" / "i18n"
+    zh_terms = _translations_for_context(i18n_dir / "iPhoto_zh_CN.ts", "MapsPreview")
+    de_terms = _translations_for_context(i18n_dir / "iPhoto_de.ts", "MapsPreview")
+    zh_cli_terms = _translations_for_context(i18n_dir / "iPhoto_zh_CN.ts", "MapsPreviewCLI")
+    de_cli_terms = _translations_for_context(i18n_dir / "iPhoto_de.ts", "MapsPreviewCLI")
+
+    assert zh_terms["Map Preview - {backend} - Zoom {zoom}"] == "地图预览 - {backend} - 缩放 {zoom}"
+    assert zh_terms["OBF Raster"] == "OBF 栅格"
+    assert de_terms["Map Preview - {backend} - Zoom {zoom}"] == "Kartenvorschau - {backend} - Zoom {zoom}"
+    assert de_terms["OBF Raster"] == "OBF-Raster"
+    assert zh_cli_terms["Preview OsmAnd or legacy map backends"] == "预览 OsmAnd 或旧版地图后端"
+    assert de_cli_terms["Preview OsmAnd or legacy map backends"] == (
+        "OsmAnd- oder alte Karten-Backends in der Vorschau anzeigen"
+    )

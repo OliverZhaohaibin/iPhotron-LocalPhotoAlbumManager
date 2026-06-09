@@ -1492,4 +1492,264 @@
             <translation>播放</translation>
         </message>
     </context>
+    <context>
+        <name>MapsPreview</name>
+        <message>
+            <source>OpenGL support disabled by configuration. Falling back to CPU rendering.</source>
+            <translation>OpenGL 支持已被配置禁用。正在回退到 CPU 渲染。</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section.</source>
+            <translation>检测到 OpenGL 支持。正在使用与“位置”区域相同的 GPU 加速 Python 渲染器。</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Native widget disabled by configuration; using the Python OBF renderer.</source>
+            <translation>检测到 OpenGL 支持。原生 widget 已被配置禁用；正在使用 Python OBF 渲染器。</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using GPU accelerated Python rendering.</source>
+            <translation>检测到 OpenGL 支持。正在使用 GPU 加速 Python 渲染。</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using the native OsmAnd widget when OBF data is selected.</source>
+            <translation>检测到 OpenGL 支持。选择 OBF 数据时将使用原生 OsmAnd widget。</translation>
+        </message>
+        <message>
+            <source>OpenGL support unavailable. Falling back to CPU rendering.</source>
+            <translation>OpenGL 支持不可用。正在回退到 CPU 渲染。</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Native widget disabled: {reason}. Using GPU accelerated Python rendering.</source>
+            <translation>检测到 OpenGL 支持。原生 widget 已禁用：{reason}。正在使用 GPU 加速 Python 渲染。</translation>
+        </message>
+        <message>
+            <source>GPU accelerated</source>
+            <translation>GPU 加速</translation>
+        </message>
+        <message>
+            <source>CPU</source>
+            <translation>CPU</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Using the native OsmAnd widget.</source>
+            <translation>检测到 OpenGL 支持。正在使用原生 OsmAnd widget。</translation>
+        </message>
+        <message>
+            <source> Native widget unavailable: {reason}.</source>
+            <translation> 原生 widget 不可用：{reason}。</translation>
+        </message>
+        <message>
+            <source> Native widget disabled by configuration.</source>
+            <translation> 原生 widget 已被配置禁用。</translation>
+        </message>
+        <message>
+            <source>Using the {renderer} Python OBF renderer.{detail}</source>
+            <translation>正在使用{renderer} Python OBF 渲染器。{detail}</translation>
+        </message>
+        <message>
+            <source> OBF helper unavailable: {reason}.</source>
+            <translation> OBF helper 不可用：{reason}。</translation>
+        </message>
+        <message>
+            <source>Using the {renderer} legacy vector renderer.{native_detail}{detail}</source>
+            <translation>正在使用{renderer}旧版矢量渲染器。{native_detail}{detail}</translation>
+        </message>
+        <message>
+            <source>OpenGL support detected. Forcing the native OsmAnd widget.</source>
+            <translation>检测到 OpenGL 支持。正在强制使用原生 OsmAnd widget。</translation>
+        </message>
+        <message>
+            <source>Forcing the {renderer} Python OBF renderer.</source>
+            <translation>正在强制使用{renderer} Python OBF 渲染器。</translation>
+        </message>
+        <message>
+            <source>Forcing the {renderer} legacy vector renderer.</source>
+            <translation>正在强制使用{renderer}旧版矢量渲染器。</translation>
+        </message>
+        <message>
+            <source>OBF Raster</source>
+            <translation>OBF 栅格</translation>
+        </message>
+        <message>
+            <source>Legacy Vector Fallback</source>
+            <translation>旧版矢量回退</translation>
+        </message>
+        <message>
+            <source>Legacy Vector</source>
+            <translation>旧版矢量</translation>
+        </message>
+        <message>
+            <source>{backend} | Zoom {zoom} | Center {latitude}, {longitude} | Source {source}</source>
+            <translation>{backend} | 缩放 {zoom} | 中心 {latitude}, {longitude} | 来源 {source}</translation>
+        </message>
+        <message>
+            <source>Ready</source>
+            <translation>就绪</translation>
+        </message>
+        <message>
+            <source>Zoom In</source>
+            <translation>放大</translation>
+        </message>
+        <message>
+            <source>Zoom Out</source>
+            <translation>缩小</translation>
+        </message>
+        <message>
+            <source>Reset View</source>
+            <translation>重置视图</translation>
+        </message>
+        <message>
+            <source>Pan Left</source>
+            <translation>向左平移</translation>
+        </message>
+        <message>
+            <source>Pan Right</source>
+            <translation>向右平移</translation>
+        </message>
+        <message>
+            <source>Pan Up</source>
+            <translation>向上平移</translation>
+        </message>
+        <message>
+            <source>Pan Down</source>
+            <translation>向下平移</translation>
+        </message>
+        <message>
+            <source>Load Legacy Style...</source>
+            <translation>加载旧版样式...</translation>
+        </message>
+        <message>
+            <source>Select Map Source...</source>
+            <translation>选择地图源...</translation>
+        </message>
+        <message>
+            <source>View</source>
+            <translation>视图</translation>
+        </message>
+        <message>
+            <source>Navigate</source>
+            <translation>导航</translation>
+        </message>
+        <message>
+            <source>File</source>
+            <translation>文件</translation>
+        </message>
+        <message>
+            <source>Native OsmAnd widget unavailable, falling back to the Python renderer: {error}</source>
+            <translation>原生 OsmAnd widget 不可用，正在回退到 Python 渲染器：{error}</translation>
+        </message>
+        <message>
+            <source>GPU Acceleration Disabled</source>
+            <translation>GPU 加速已禁用</translation>
+        </message>
+        <message>
+            <source>The OpenGL based map view failed to initialize.
+The application will continue with the CPU renderer instead.
+
+Details: {error}</source>
+            <translation>基于 OpenGL 的地图视图初始化失败。
+应用将改用 CPU 渲染器继续运行。
+
+详情：{error}</translation>
+        </message>
+        <message>
+            <source>Legacy Style Only</source>
+            <translation>仅限旧版样式</translation>
+        </message>
+        <message>
+            <source>The style.json picker only applies to the legacy PBF renderer.
+Select a tile directory to switch back to the legacy backend.</source>
+            <translation>style.json 选择器仅适用于旧版 PBF 渲染器。
+选择瓦片目录可切回旧版后端。</translation>
+        </message>
+        <message>
+            <source>Select style.json</source>
+            <translation>选择 style.json</translation>
+        </message>
+        <message>
+            <source>JSON Files (*.json)</source>
+            <translation>JSON 文件 (*.json)</translation>
+        </message>
+        <message>
+            <source>Error</source>
+            <translation>错误</translation>
+        </message>
+        <message>
+            <source>Unable to load the style file:
+{error}</source>
+            <translation>无法加载样式文件：
+{error}</translation>
+        </message>
+        <message>
+            <source>Unable to initialize tiles:
+{error}</source>
+            <translation>无法初始化瓦片：
+{error}</translation>
+        </message>
+        <message>
+            <source>Select map source</source>
+            <translation>选择地图源</translation>
+        </message>
+        <message>
+            <source>OBF Files (*.obf);;All Files (*)</source>
+            <translation>OBF 文件 (*.obf);;所有文件 (*)</translation>
+        </message>
+        <message>
+            <source>Unable to open the OBF source:
+{error}</source>
+            <translation>无法打开 OBF 源：
+{error}</translation>
+        </message>
+        <message>
+            <source>Select tile directory</source>
+            <translation>选择瓦片目录</translation>
+        </message>
+        <message>
+            <source>Unable to open the tile directory:
+{error}</source>
+            <translation>无法打开瓦片目录：
+{error}</translation>
+        </message>
+        <message>
+            <source>Map Preview - {backend} - Zoom {zoom}</source>
+            <translation>地图预览 - {backend} - 缩放 {zoom}</translation>
+        </message>
+        <message>
+            <source>OsmAnd native/helper backend is unavailable, so the preview is using the legacy vector fallback.</source>
+            <translation>OsmAnd 原生/helper 后端不可用，因此预览正在使用旧版矢量回退。</translation>
+        </message>
+        <message>
+            <source>Failed to initialize map:
+{error}</source>
+            <translation>地图初始化失败：
+{error}</translation>
+        </message>
+    </context>
+    <context>
+        <name>MapsPreviewCLI</name>
+        <message>
+            <source>Preview OsmAnd or legacy map backends</source>
+            <translation>预览 OsmAnd 或旧版地图后端</translation>
+        </message>
+        <message>
+            <source>Select the startup renderer explicitly instead of auto-detecting it.</source>
+            <translation>显式选择启动渲染器，而不是自动检测。</translation>
+        </message>
+        <message>
+            <source>Center the initial view on the provided longitude/latitude pair.</source>
+            <translation>将初始视图居中到提供的经纬度坐标。</translation>
+        </message>
+        <message>
+            <source>Set the initial zoom level after the window has been created.</source>
+            <translation>窗口创建后设置初始缩放级别。</translation>
+        </message>
+        <message>
+            <source>Save a screenshot after startup and exit once the image is written.</source>
+            <translation>启动后保存截图，并在图像写入后退出。</translation>
+        </message>
+        <message>
+            <source>How long to wait before taking --screenshot (default: 1500).</source>
+            <translation>执行 --screenshot 前等待的时间（默认：1500）。</translation>
+        </message>
+    </context>
 </TS>

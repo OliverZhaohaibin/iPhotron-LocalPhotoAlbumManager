@@ -302,6 +302,7 @@ nuitka_args=(
   "--include-package=reverse_geocoder"
   "--include-package=insightface"
   "--include-package=onnxruntime"
+  "--include-data-dir=$ROOT_DIR/src/iPhoto/resources/i18n=iPhoto/resources/i18n"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/schemas=iPhoto/schemas"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/icon=iPhoto/gui/ui/icon"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/qml=iPhoto/gui/ui/qml"

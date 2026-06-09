@@ -120,6 +120,7 @@ $arguments = @(
     '--include-package=onnxruntime',
     "--output-dir=$OutputDir",
     "--include-data-dir=$faceModelDir=extension/models",
+    "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\resources\i18n')=iPhoto/resources/i18n",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\schemas')=iPhoto/schemas",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\icon')=iPhoto/gui/ui/icon",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\qml')=iPhoto/gui/ui/qml",

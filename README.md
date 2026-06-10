@@ -20,10 +20,10 @@
 
 ## 📥 Download & Install
 
-[![Download for Windows](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.5.0/v6.50-x86-setup.exe)
-[![Download for Linux (.deb)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.5.0/iphotron_6.5.0_amd64.deb)
-[![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.5.0/iPhotron-6.5.0-x86_64.AppImage)
-[![Download for Linux (.flatpak)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.flatpak)-purple?style=for-the-badge&logo=flatpak&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.5.0/com.github.OliverZhaohaibin.iPhotron-6.5.0-x86_64.flatpak)
+[![Download for Windows](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.6/v6.66-x86-setup.exe)
+[![Download for Linux (.deb)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.6/iphotron_6.6.6_amd64.deb)
+[![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.6/iPhotron-6.6.6-x86_64.AppImage)
+[![Download for Linux (.flatpak)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.flatpak)-purple?style=for-the-badge&logo=flatpak&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.6/com.github.OliverZhaohaibin.iPhotron-6.6.6-x86_64.flatpak)
 
 **💡 Quick Install:** Click the buttons above to download the latest installer directly.
 
@@ -31,20 +31,20 @@
 - **Linux (.deb):** Install with the following command:
 
 ```bash
-sudo apt install ./iphotron_6.5.0_amd64.deb
+sudo apt install ./iphotron_6.6.6_amd64.deb
 ```
 
 - **Linux (.AppImage):** Make the file executable and run it:
 
 ```bash
-chmod +x iPhotron-6.5.0-x86_64.AppImage
-./iPhotron-6.5.0-x86_64.AppImage
+chmod +x iPhotron-6.6.6-x86_64.AppImage
+./iPhotron-6.6.6-x86_64.AppImage
 ```
 
 - **Linux (.flatpak):** Install the bundle with Flatpak:
 
 ```bash
-flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.5.0-x86_64.flatpak
+flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.6.6-x86_64.flatpak
 ```
 
 **For developers** — install from source:

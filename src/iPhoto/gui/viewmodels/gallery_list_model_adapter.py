@@ -49,6 +49,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_window_identity_signature: tuple[str, ...] | None = None
         self._duration_cache: dict[Path, float] = {}
         self._pending_prioritize_range: tuple[int, int] | None = None
+        self._pending_thumbnail_range: tuple[int, int] | None = None
         self._pending_scan_batch_count = 0
         self._backfill_completion_source: Any | None = None
         self._prioritize_timer = QTimer(self)
@@ -115,19 +116,12 @@ class GalleryListModelAdapter(QAbstractListModel):
 
         asset: Optional[AssetDTO] = self._store.asset_at(row)
         if asset is None:
-            self._store.ensure_row_loaded(row, emit_signals=False)
-            asset = self._store.asset_at(row)
-        if not asset:
-            return None
+            return self._placeholder_for_role(role_int)
 
         if role_int == Qt.ItemDataRole.DisplayRole:
             return asset.rel_path.name
         if role_int == Qt.DecorationRole:
-            return self._thumbnails.get_thumbnail(
-                asset.abs_path,
-                self._thumb_size,
-                priority="visible",
-            )
+            return self._thumbnails.peek(asset.abs_path, self._thumb_size)
         if role_int == Qt.ItemDataRole.ToolTipRole:
             return str(asset.abs_path)
 
@@ -184,6 +178,27 @@ class GalleryListModelAdapter(QAbstractListModel):
             return asset.is_pano
         return None
 
+    @staticmethod
+    def _placeholder_for_role(role: int) -> Any:
+        if role == Qt.ItemDataRole.DisplayRole:
+            return ""
+        if role in {
+            Roles.IS_IMAGE,
+            Roles.IS_VIDEO,
+            Roles.IS_LIVE,
+            Roles.FEATURED,
+            Roles.IS_PANO,
+        }:
+            return False
+        if role == Roles.SIZE:
+            return {
+                "duration": 0.0,
+                "width": 0,
+                "height": 0,
+                "bytes": 0,
+            }
+        return None
+
     def info_for_row(self, row: int) -> Optional[dict[str, Any]]:
         asset = self._store.asset_at(row)
         if asset is None:
@@ -217,6 +232,7 @@ class GalleryListModelAdapter(QAbstractListModel):
     def prioritize_rows(self, first: int, last: int) -> None:
         first = max(0, int(first))
         last = max(first, int(last))
+        self._pending_thumbnail_range = (first, last)
         if self._pending_prioritize_range is None:
             self._pending_prioritize_range = (first, last)
         else:
@@ -232,9 +248,23 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _flush_pending_prioritize_rows(self) -> None:
         pending = self._pending_prioritize_range
         self._pending_prioritize_range = None
+        thumbnail_range = self._pending_thumbnail_range
+        self._pending_thumbnail_range = None
         if pending is None:
             return
         self._store.prioritize_rows(*pending)
+        if thumbnail_range is not None:
+            self._request_full_thumbnails(*thumbnail_range)
+
+    def _request_full_thumbnails(self, first: int, last: int) -> None:
+        paths: list[Path] = []
+        for row in range(first, last + 1):
+            asset = self._store.asset_at(row)
+            path = getattr(asset, "abs_path", None)
+            if isinstance(path, Path):
+                paths.append(path)
+        if paths:
+            self._thumbnails.request_many(paths, self._thumb_size, priority="visible")
 
     @Slot(object)
     def handle_scan_batch(self, batch: object) -> None:

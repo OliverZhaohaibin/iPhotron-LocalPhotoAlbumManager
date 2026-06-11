@@ -1,6 +1,7 @@
 import shutil
 import time
 from collections import deque
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Deque, Dict, Optional, Set
 
@@ -149,6 +150,37 @@ class ThumbnailCacheService(QObject):
         # Return placeholder or None while loading
         return None
 
+    def peek(self, path: Path, size: QSize) -> Optional[QPixmap]:
+        """Return an in-memory thumbnail without I/O or background scheduling."""
+
+        if self._is_shutting_down:
+            return None
+        return self._memory_cache.get(self._cache_key(path, size))
+
+    def request_many(
+        self,
+        paths: Iterable[Path],
+        size: QSize,
+        *,
+        priority: str = "normal",
+    ) -> int:
+        """Queue memory misses for asynchronous L2 loading or generation."""
+
+        if self._is_shutting_down:
+            return 0
+
+        queued = 0
+        now = time.monotonic()
+        for path in dict.fromkeys(Path(path) for path in paths):
+            key = self._cache_key(path, size)
+            if key in self._memory_cache or key in self._pending_tasks:
+                continue
+            if self._failure_until.get(key, 0.0) > now:
+                continue
+            self._queue_generation(path, size, priority=priority)
+            queued += 1
+        return queued
+
     def cancel_pending_except(self, paths: Set[Path], size: QSize) -> None:
         """Cancel queued thumbnail work except for *paths* at *size*."""
 
@@ -216,7 +248,7 @@ class ThumbnailCacheService(QObject):
             height=size.height(),
             pending=len(self._pending_tasks),
         )
-        worker = ThumbnailGenerationTask(self._render_thumbnail, path, size, worker_signals)
+        worker = ThumbnailGenerationTask(self._load_or_render_thumbnail, path, size, worker_signals)
         self._thread_pool.start(worker)
 
     def _handle_generation_result(self, path: Path, size: QSize, image: QImage):
@@ -224,10 +256,6 @@ class ThumbnailCacheService(QObject):
         if not image.isNull():
             key = self._cache_key(path, size)
             pixmap = QPixmap.fromImage(image)
-
-            # Save to disk
-            disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
-            pixmap.save(str(disk_file), "JPEG")
 
             self._add_to_memory(key, pixmap)
             self._pending_tasks.discard(key)
@@ -318,6 +346,26 @@ class ThumbnailCacheService(QObject):
             # Simple eviction: remove random item (first)
             self._memory_cache.pop(next(iter(self._memory_cache)))
         self._memory_cache[key] = pixmap
+
+    def _load_or_render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
+        """Load L2 or render and persist a thumbnail inside a worker thread."""
+
+        key = self._cache_key(path, size)
+        disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
+        if disk_file.exists():
+            image = QImage(str(disk_file))
+            if not image.isNull():
+                emit_perf_event("thumbnail_cache_hit", tier="L2-worker", key=key)
+                return image
+
+        image = self._render_thumbnail(path, size)
+        if image is None or image.isNull():
+            return None
+        try:
+            image.save(str(disk_file), "JPEG")
+        except OSError:
+            pass
+        return image
 
     def _render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
         started = monotonic_ms()

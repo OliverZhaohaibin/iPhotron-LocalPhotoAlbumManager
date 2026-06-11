@@ -45,6 +45,10 @@ class AssetGrid(QListView):
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(100)
         self._update_timer.timeout.connect(self._emit_visible_rows)
+        self._viewport_update_timer = QTimer(self)
+        self._viewport_update_timer.setSingleShot(True)
+        self._viewport_update_timer.setInterval(0)
+        self._viewport_update_timer.timeout.connect(self._flush_viewport_update)
         self._visible_range: Optional[tuple[int, int]] = None
         self._model = None
         self._external_drop_enabled = False
@@ -157,43 +161,15 @@ class AssetGrid(QListView):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         if _IS_LINUX:
-            # On Linux with WA_TranslucentBackground, enlarging the window
-            # exposes new viewport area that Qt has not yet painted.  The
-            # compositor may present the frame before the deferred
-            # ``update()`` arrives, producing visible tearing in the
-            # newly exposed region.  A synchronous repaint ensures the
-            # full viewport is composited from Qt's back buffer before
-            # the frame is shown — the same double-buffering strategy
-            # used in ``scrollContentsBy()``.
-            self.viewport().repaint()
+            self._schedule_viewport_update()
         self._schedule_visible_rows_update()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
         if _IS_LINUX:
-            # Double-buffering strategy for Linux with WA_TranslucentBackground:
-            #
-            # The default ``super().scrollContentsBy()`` calls the C++
-            # ``viewport()->scroll(dx, dy)`` which triggers a pixel-shift
-            # blit.  Under ARGB visuals (both X11 and Wayland) this blit
-            # races with the compositor and produces visible tearing or
-            # checkerboard artefacts.
-            #
-            # We skip the super call entirely so the blit never happens.
-            # The scrollbar position has *already* been updated by the time
-            # this method is called (by ``QAbstractScrollArea``), so the
-            # next ``paintEvent`` will render all items at their correct
-            # offsets.
-            #
-            # Skipping super() also skips the ``doDelayedItemsLayout()``
-            # call that ``QListView::scrollContentsBy()`` normally performs.
-            # After a resize, subclasses like ``GalleryGridView`` update
-            # icon/grid sizes which schedules a delayed items layout.  If
-            # the user scrolls before that layout fires, the viewport would
-            # be repainted with stale item positions, producing checkerboard
-            # artefacts.  Flushing the pending layout first ensures item
-            # geometry is up-to-date before the synchronous repaint.
-            self.executeDelayedItemsLayout()
-            self.viewport().repaint()
+            # Avoid the synchronous layout/repaint path used by the old Linux
+            # tearing workaround. The scrollbar value is already current, so
+            # one deferred update can paint the latest position after bursts.
+            self._schedule_viewport_update()
         else:
             super().scrollContentsBy(dx, dy)
         self._schedule_visible_rows_update()
@@ -246,7 +222,7 @@ class AssetGrid(QListView):
         self.modelAboutToChange.emit(previous_model)
         if self._model is not None:
             try:
-                self._model.modelReset.disconnect(self._schedule_visible_rows_update)
+                self._model.modelReset.disconnect(self._reset_visible_rows_update)
             except (RuntimeError, TypeError):
                 pass
             try:
@@ -260,7 +236,7 @@ class AssetGrid(QListView):
         super().setModel(model)
         self._model = model
         if model is not None:
-            model.modelReset.connect(self._schedule_visible_rows_update)
+            model.modelReset.connect(self._reset_visible_rows_update)
             model.rowsInserted.connect(self._schedule_visible_rows_update)
             model.rowsRemoved.connect(self._schedule_visible_rows_update)
         self._schedule_visible_rows_update()
@@ -296,6 +272,17 @@ class AssetGrid(QListView):
 
     def _schedule_visible_rows_update(self) -> None:
         self._update_timer.start()
+
+    def _reset_visible_rows_update(self) -> None:
+        self._visible_range = None
+        self._schedule_visible_rows_update()
+
+    def _schedule_viewport_update(self) -> None:
+        if not self._viewport_update_timer.isActive():
+            self._viewport_update_timer.start()
+
+    def _flush_viewport_update(self) -> None:
+        self.viewport().update()
 
     def _viewport_pos(self, event: QMouseEvent) -> QPoint:
         """Return the event position mapped into viewport coordinates."""

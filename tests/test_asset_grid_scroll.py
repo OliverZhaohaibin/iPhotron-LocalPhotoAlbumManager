@@ -1,4 +1,4 @@
-"""Regression tests for AssetGrid.scrollContentsBy double-buffering."""
+"""Regression tests for AssetGrid scroll update coalescing."""
 
 import pytest
 
@@ -37,44 +37,37 @@ def _make_grid(qapp: QApplication) -> AssetGrid:
     return grid
 
 
-def test_scroll_linux_skips_super_and_repaints(qapp: QApplication) -> None:
-    """On Linux, scrollContentsBy must skip the blit and repaint synchronously."""
+def test_scroll_linux_avoids_synchronous_layout_and_repaint(qapp: QApplication) -> None:
     grid = _make_grid(qapp)
+    grid._viewport_update_timer.stop()
 
     with (
-        patch.object(type(grid).scrollContentsBy, "__wrapped__", create=True),
         patch("iPhoto.gui.ui.widgets.asset_grid._IS_LINUX", True),
+        patch.object(grid, "executeDelayedItemsLayout") as mock_layout,
         patch.object(grid.viewport(), "repaint") as mock_repaint,
+        patch.object(grid.viewport(), "update") as mock_update,
     ):
-        # Call through the real method with the flag patched to True
         AssetGrid.scrollContentsBy(grid, 0, -20)
-        mock_repaint.assert_called_once()
+        mock_layout.assert_not_called()
+        mock_repaint.assert_not_called()
+        mock_update.assert_not_called()
 
 
-def test_scroll_linux_flushes_pending_layout(qapp: QApplication) -> None:
-    """On Linux, scrollContentsBy must flush pending layout before repaint."""
+def test_scroll_linux_coalesces_viewport_updates(qapp: QApplication) -> None:
     grid = _make_grid(qapp)
-
-    call_order: list[str] = []
+    grid._viewport_update_timer.stop()
 
     with (
         patch("iPhoto.gui.ui.widgets.asset_grid._IS_LINUX", True),
-        patch.object(
-            grid,
-            "executeDelayedItemsLayout",
-            side_effect=lambda: call_order.append("layout"),
-        ) as mock_layout,
-        patch.object(
-            grid.viewport(),
-            "repaint",
-            side_effect=lambda: call_order.append("repaint"),
-        ) as mock_repaint,
+        patch.object(grid.viewport(), "update") as mock_update,
     ):
         AssetGrid.scrollContentsBy(grid, 0, -20)
-        mock_layout.assert_called_once()
-        mock_repaint.assert_called_once()
-        # Layout flush must happen BEFORE the repaint
-        assert call_order == ["layout", "repaint"]
+        AssetGrid.scrollContentsBy(grid, 0, -20)
+        AssetGrid.scrollContentsBy(grid, 0, -20)
+
+        mock_update.assert_not_called()
+        qapp.processEvents()
+        mock_update.assert_called_once()
 
 
 def test_scroll_non_linux_calls_super(qapp: QApplication) -> None:
@@ -88,17 +81,21 @@ def test_scroll_non_linux_calls_super(qapp: QApplication) -> None:
         # (the base class handles updating internally)
 
 
-def test_resize_linux_forces_repaint(qapp: QApplication) -> None:
-    """On Linux, resizeEvent must force a synchronous viewport repaint."""
+def test_resize_linux_schedules_deferred_update(qapp: QApplication) -> None:
     grid = _make_grid(qapp)
+    grid._viewport_update_timer.stop()
 
     with (
         patch("iPhoto.gui.ui.widgets.asset_grid._IS_LINUX", True),
         patch.object(grid.viewport(), "repaint") as mock_repaint,
+        patch.object(grid.viewport(), "update") as mock_update,
     ):
         event = QResizeEvent(QSize(800, 600), QSize(400, 300))
         AssetGrid.resizeEvent(grid, event)
-        mock_repaint.assert_called_once()
+        mock_repaint.assert_not_called()
+        mock_update.assert_not_called()
+        qapp.processEvents()
+        mock_update.assert_called_once()
 
 
 def test_resize_non_linux_no_forced_repaint(qapp: QApplication) -> None:

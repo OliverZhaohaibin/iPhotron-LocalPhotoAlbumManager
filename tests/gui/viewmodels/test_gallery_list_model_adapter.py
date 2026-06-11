@@ -126,13 +126,44 @@ def test_prioritize_rows_delegates_to_store(adapter, mock_store):
     mock_store.prioritize_rows.assert_called_once_with(10, 25)
 
 
-def test_prioritize_rows_coalesces_fast_scroll_requests(adapter, mock_store):
+def test_prioritize_rows_requests_loaded_full_thumbnails(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    first = _make_dto(abs_path=Path("/library/first.jpg"))
+    second = _make_dto(abs_path=Path("/library/second.jpg"))
+    mock_store.asset_at.side_effect = lambda row: {10: first, 11: second}.get(row)
+
+    adapter.prioritize_rows(10, 12)
+    adapter._flush_pending_prioritize_rows()
+
+    mock_thumb_service.request_many.assert_called_once_with(
+        [Path("/library/first.jpg"), Path("/library/second.jpg")],
+        adapter._thumb_size,
+        priority="visible",
+    )
+
+
+def test_prioritize_rows_coalesces_window_but_requests_latest_thumbnails(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    latest = _make_dto(abs_path=Path("/library/latest.jpg"))
+    mock_store.asset_at.side_effect = lambda row: latest if row == 5 else None
+
     adapter.prioritize_rows(10, 25)
     adapter.prioritize_rows(20, 60)
     adapter.prioritize_rows(5, 15)
     adapter._flush_pending_prioritize_rows()
 
     mock_store.prioritize_rows.assert_called_once_with(5, 60)
+    mock_thumb_service.request_many.assert_called_once_with(
+        [Path("/library/latest.jpg")],
+        adapter._thumb_size,
+        priority="visible",
+    )
 
 
 def test_scan_batches_are_coalesced_before_store_flush(adapter, mock_store):
@@ -215,16 +246,16 @@ def test_decoration_role_uses_full_size_thumbnail_even_with_micro_fallback(
     full_size = object()
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = _make_dto(micro_thumbnail=micro)
-    mock_thumb_service.get_thumbnail.return_value = full_size
+    mock_thumb_service.peek.return_value = full_size
 
     result = adapter.data(adapter.index(0, 0), Qt.DecorationRole)
 
     assert result is full_size
-    mock_thumb_service.get_thumbnail.assert_called_once_with(
+    mock_thumb_service.peek.assert_called_once_with(
         Path("photo.jpg"),
         adapter._thumb_size,
-        priority="visible",
     )
+    mock_thumb_service.get_thumbnail.assert_not_called()
 
 
 def test_decoration_role_miss_leaves_micro_thumbnail_for_delegate_fallback(
@@ -235,16 +266,17 @@ def test_decoration_role_miss_leaves_micro_thumbnail_for_delegate_fallback(
     micro = QImage(2, 2, QImage.Format.Format_RGB32)
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = _make_dto(micro_thumbnail=micro)
-    mock_thumb_service.get_thumbnail.return_value = None
+    mock_thumb_service.peek.return_value = None
 
     index = adapter.index(0, 0)
 
     assert adapter.data(index, Qt.DecorationRole) is None
     assert adapter.data(index, Roles.MICRO_THUMBNAIL) is micro
-    mock_thumb_service.get_thumbnail.assert_called_once()
+    mock_thumb_service.peek.assert_called_once()
+    mock_thumb_service.get_thumbnail.assert_not_called()
 
 
-def test_decoration_role_schedules_full_size_even_when_micro_thumbnail_is_not_drawable(
+def test_decoration_role_uses_memory_thumbnail_when_micro_thumbnail_is_not_drawable(
     adapter,
     mock_store,
     mock_thumb_service,
@@ -252,12 +284,37 @@ def test_decoration_role_schedules_full_size_even_when_micro_thumbnail_is_not_dr
     fallback = object()
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = _make_dto(micro_thumbnail=b"jpeg-bytes")
-    mock_thumb_service.get_thumbnail.return_value = fallback
+    mock_thumb_service.peek.return_value = fallback
 
     result = adapter.data(adapter.index(0, 0), Qt.DecorationRole)
 
     assert result is fallback
-    mock_thumb_service.get_thumbnail.assert_called_once()
+    mock_thumb_service.peek.assert_called_once()
+    mock_thumb_service.get_thumbnail.assert_not_called()
+
+
+def test_data_miss_returns_stable_placeholder_without_loading(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = None
+    index = adapter.index(0, 0)
+
+    assert adapter.data(index, Qt.DisplayRole) == ""
+    assert adapter.data(index, Qt.DecorationRole) is None
+    assert adapter.data(index, Roles.IS_VIDEO) is False
+    assert adapter.data(index, Roles.SIZE) == {
+        "duration": 0.0,
+        "width": 0,
+        "height": 0,
+        "bytes": 0,
+    }
+
+    mock_store.ensure_row_loaded.assert_not_called()
+    mock_thumb_service.peek.assert_not_called()
+    mock_thumb_service.get_thumbnail.assert_not_called()
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

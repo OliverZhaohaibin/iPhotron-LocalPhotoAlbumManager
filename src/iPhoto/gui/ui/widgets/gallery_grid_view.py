@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent, QPalette, QColor, QGuiApplication
-from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel, QStyleOptionViewItem
+from PySide6.QtGui import QGuiApplication, QMouseEvent, QPalette
+from PySide6.QtWidgets import QAbstractItemView, QLabel, QListView
 
 from iPhoto.gui.i18n import tr
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
-from ..models.roles import Roles
 
 
 class GalleryGridView(AssetGrid):
@@ -64,98 +63,6 @@ class GalleryGridView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
         self._update_empty_state()
-
-    # ------------------------------------------------------------------
-    # Painting
-    # ------------------------------------------------------------------
-    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
-        """Paint visible items and one extra row above/below the viewport.
-
-        By pre-rendering items just outside the visible area we prevent the
-        blank-flash that occurs when Qt recycles off-screen item widgets and
-        the user scrolls them back into view.  The extra row is painted into
-        the viewport surface but lies outside the visible region, so it is
-        invisible to the user yet ready for immediate display on scroll.
-        """
-        # Let the base class handle the standard visible items first.
-        super().paintEvent(event)
-
-        cell_h = self.gridSize().height()
-        cell_w = self.gridSize().width()
-        if cell_h <= 0 or cell_w <= 0:
-            return
-
-        model = self.model()
-        if model is None:
-            return
-        row_count = model.rowCount()
-        if row_count == 0:
-            return
-
-        delegate = self.itemDelegate()
-        if delegate is None:
-            return
-
-        vp = self.viewport()
-        vp_rect = vp.rect()
-
-        # Probe *inside* the viewport to find boundary items, then compute
-        # adjacent rows via the column count.  Probing outside the viewport
-        # (e.g. ``top()-1``) returns invalid indices in QAbstractItemView,
-        # so we determine the row above/below arithmetically instead.
-        cols = max(1, vp_rect.width() // cell_w)
-
-        first_visible = self.indexAt(QPoint(vp_rect.left(), vp_rect.top()))
-        bottom_visible = self.indexAt(QPoint(vp_rect.left(), vp_rect.bottom()))
-        if not bottom_visible.isValid():
-            # Last row may be partial; try the right edge.
-            bottom_visible = self.indexAt(QPoint(vp_rect.right(), vp_rect.bottom()))
-
-        # Determine the range of model rows for each extra band.
-        extra_indices = []
-
-        # --- Extra row ABOVE the viewport ---
-        if first_visible.isValid():
-            vis_row = first_visible.row() // cols
-            if vis_row > 0:
-                above_start = (vis_row - 1) * cols
-                first_above = model.index(above_start, 0)
-                above_rect = self.visualRect(first_above)
-                if above_rect.isValid():
-                    target_y = above_rect.top()
-                    for r in range(above_start, min(above_start + cols, row_count)):
-                        idx = model.index(r, 0)
-                        r_rect = self.visualRect(idx)
-                        if r_rect.isValid() and r_rect.top() == target_y:
-                            extra_indices.append((idx, r_rect))
-
-        # --- Extra row BELOW the viewport ---
-        if bottom_visible.isValid():
-            vis_row = bottom_visible.row() // cols
-            below_start = (vis_row + 1) * cols
-            if below_start < row_count:
-                first_below = model.index(below_start, 0)
-                below_rect = self.visualRect(first_below)
-                if below_rect.isValid():
-                    target_y = below_rect.top()
-                    for r in range(below_start, min(below_start + cols, row_count)):
-                        idx = model.index(r, 0)
-                        r_rect = self.visualRect(idx)
-                        if r_rect.isValid() and r_rect.top() == target_y:
-                            extra_indices.append((idx, r_rect))
-
-        if not extra_indices:
-            return
-
-        painter = QPainter(vp)
-        try:
-            for idx, item_rect in extra_indices:
-                opt = QStyleOptionViewItem()
-                self.initViewItemOption(opt)
-                opt.rect = item_rect
-                delegate.paint(painter, opt, idx)
-        finally:
-            painter.end()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

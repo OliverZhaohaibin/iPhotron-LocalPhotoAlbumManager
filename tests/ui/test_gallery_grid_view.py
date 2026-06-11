@@ -181,6 +181,10 @@ def test_delegate_assigned_after_show_uses_responsive_tile_size(qapp_instance, m
     assert first_rect.width() == view.iconSize().width()
 
 
+def test_gallery_uses_base_view_paint_path_only():
+    assert GalleryGridView.paintEvent is AssetGrid.paintEvent
+
+
 def test_favorite_badge_click_uses_viewport_coordinates(qapp_instance, monkeypatch):
     patch_delegate_icons(monkeypatch)
 

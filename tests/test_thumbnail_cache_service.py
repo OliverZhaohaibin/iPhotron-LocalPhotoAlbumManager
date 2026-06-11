@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -7,7 +8,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
 from PIL import Image
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QPixmap
 
 from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
@@ -85,6 +86,107 @@ def test_l1_l2_hit_does_not_enqueue_generation(tmp_path: Path) -> None:
         assert service.get_thumbnail(path, size) is image
 
     queue_generation.assert_not_called()
+
+
+def test_peek_is_memory_only_and_does_not_schedule_work(tmp_path: Path, qapp) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(64, 64)
+    key = service._cache_key(path, size)
+    pixmap = QPixmap(8, 8)
+    service._memory_cache[key] = pixmap
+
+    with (
+        patch(
+            "iPhoto.infrastructure.services.thumbnail_cache_service.thumbnail_cache_file_for_key"
+        ) as disk_lookup,
+        patch.object(service, "_queue_generation") as queue_generation,
+        patch(
+            "iPhoto.infrastructure.services.thumbnail_cache_service.emit_perf_event"
+        ) as emit_perf_event,
+    ):
+        assert service.peek(path, size) is pixmap
+        assert service.peek(tmp_path / "missing.jpg", size) is None
+
+    disk_lookup.assert_not_called()
+    queue_generation.assert_not_called()
+    emit_perf_event.assert_not_called()
+
+
+def test_request_many_queues_misses_without_caller_disk_access(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.jpg"
+    size = QSize(64, 64)
+    service._memory_cache[service._cache_key(first, size)] = QImage(8, 8, QImage.Format_RGB32)
+
+    with (
+        patch(
+            "iPhoto.infrastructure.services.thumbnail_cache_service.thumbnail_cache_file_for_key"
+        ) as disk_lookup,
+        patch.object(service, "_queue_generation") as queue_generation,
+    ):
+        queued = service.request_many([first, first, second], size, priority="visible")
+
+    assert queued == 1
+    queue_generation.assert_called_once_with(second, size, priority="visible")
+    disk_lookup.assert_not_called()
+
+
+def test_worker_loader_prefers_l2_without_rendering_source(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(64, 64)
+    disk_file = thumbnail_cache_file(tmp_path / "thumbs", path, (64, 64))
+    disk_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), "red").save(disk_file, format="JPEG")
+
+    with patch.object(service, "_render_thumbnail") as render_thumbnail:
+        image = service._load_or_render_thumbnail(path, size)
+
+    assert image is not None
+    assert not image.isNull()
+    render_thumbnail.assert_not_called()
+
+
+def test_generation_result_publishes_without_gui_disk_write(tmp_path: Path, qapp) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(64, 64)
+    image = QImage(64, 64, QImage.Format_RGB32)
+    key = service._cache_key(path, size)
+    service._pending_tasks.add(key)
+    service._active_tasks = 1
+
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.thumbnail_cache_file_for_key"
+    ) as disk_lookup:
+        service._handle_generation_result(path, size, image)
+
+    disk_lookup.assert_not_called()
+    assert service.peek(path, size) is not None
+
+
+def test_request_many_eventually_publishes_full_thumbnail(tmp_path: Path, qapp) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    Image.new("RGB", (256, 128), "blue").save(path, format="JPEG")
+    size = QSize(64, 64)
+    ready: list[Path] = []
+    service.thumbnailReady.connect(ready.append)
+
+    assert service.request_many([path], size, priority="visible") == 1
+
+    deadline = time.monotonic() + 3.0
+    while not ready and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert ready == [path]
+    pixmap = service.peek(path, size)
+    assert pixmap is not None
+    assert not pixmap.isNull()
+    assert thumbnail_cache_file(tmp_path / "thumbs", path, (64, 64)).exists()
 
 
 def test_l2_hit_for_scan_written_512_thumbnail_does_not_enqueue_generation(

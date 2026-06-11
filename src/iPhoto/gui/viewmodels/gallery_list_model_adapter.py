@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     Signal as QtSignal,
     Slot,
 )
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.dtos import GalleryAssetDTO
 from iPhoto.application.ports import EditServicePort
 from iPhoto.gui.ui.models.roles import Roles, role_names
 from iPhoto.infrastructure.services.performance_events import emit_perf_event
@@ -129,7 +129,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         if role_int == Roles.IS_SPACER:
             return False
 
-        asset: Optional[AssetDTO] = self._store.asset_at(row)
+        asset: Optional[GalleryAssetDTO] = self._store.asset_at(row)
         if asset is None:
             return self._placeholder_for_role(role_int)
 
@@ -153,7 +153,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         if role_int == Roles.IS_LIVE:
             return asset.is_live
         if role_int == Roles.LIVE_GROUP_ID:
-            metadata = asset.metadata or {}
+            metadata = self._metadata_for_asset(asset)
             return metadata.get("live_photo_group_id")
         if role_int in (Roles.LIVE_MOTION_REL, Roles.LIVE_MOTION_ABS):
             motion_rel, motion_abs = self._resolve_live_motion(asset)
@@ -172,7 +172,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         if role_int == Roles.FEATURED:
             return asset.is_favorite
         if role_int == Roles.LOCATION:
-            metadata = asset.metadata or {}
+            metadata = self._metadata_for_asset(asset)
             location = metadata.get("location") or metadata.get("place")
             if isinstance(location, str) and location.strip():
                 return location
@@ -218,7 +218,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         asset = self._store.asset_at(row)
         if asset is None:
             return None
-        info = asset.metadata.copy() if asset.metadata else {}
+        info = self._metadata_for_asset(asset)
         info.update(
             {
                 "rel": str(asset.rel_path),
@@ -233,7 +233,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         )
         return info
 
-    def asset_dto(self, row: int) -> Optional[AssetDTO]:
+    def asset_dto(self, row: int) -> Optional[GalleryAssetDTO]:
         return self._store.asset_at(row)
 
     @Slot(int, result="QVariant")
@@ -432,7 +432,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         dto = self._store.find_dto_by_path(path)
         if not dto:
             return None
-        meta = dto.metadata.copy() if dto.metadata else {}
+        meta = self._metadata_for_asset(dto)
         meta.update(
             {
                 "is_live": dto.is_live,
@@ -448,8 +448,17 @@ class GalleryListModelAdapter(QAbstractListModel):
                 meta["live_motion_rel"] = str(motion_rel)
         return meta
 
-    def _resolve_live_motion(self, asset: AssetDTO) -> tuple[Optional[Path], Optional[Path]]:
-        metadata = asset.metadata or {}
+    def _metadata_for_asset(self, asset: GalleryAssetDTO) -> Dict[str, Any]:
+        metadata_for_asset = getattr(self._store, "metadata_for_asset", None)
+        if callable(metadata_for_asset):
+            metadata = metadata_for_asset(asset)
+            if isinstance(metadata, dict):
+                return dict(metadata)
+        raw = getattr(asset, "metadata", None)
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _resolve_live_motion(self, asset: GalleryAssetDTO) -> tuple[Optional[Path], Optional[Path]]:
+        metadata = self._metadata_for_asset(asset)
         live_partner_rel = metadata.get("live_partner_rel")
         live_role = metadata.get("live_role")
         if isinstance(live_partner_rel, str) and live_partner_rel and live_role != 1:
@@ -665,7 +674,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         abs_path = getattr(asset, "abs_path", None) or getattr(asset, "path", None)
         return b"" if abs_path is None else str(abs_path).encode("utf-8")
 
-    def _effective_video_duration(self, asset: AssetDTO) -> float:
+    def _effective_video_duration(self, asset: GalleryAssetDTO) -> float:
         if not asset.is_video:
             return asset.duration
         if asset.abs_path in self._duration_cache:

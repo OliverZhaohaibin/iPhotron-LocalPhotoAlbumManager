@@ -11,7 +11,7 @@ from iPhoto.application.ports import (
     EditRenderingState,
     EditServicePort,
 )
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.dtos import GalleryAssetDTO
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.utils.geocoding import resolve_location_name
 
@@ -246,8 +246,8 @@ class DetailViewModel(BaseViewModel):
             return
         self.restore_after_adjustment(path, reason)
 
-    def _build_presentation(self, row: int, dto: AssetDTO) -> DetailPresentation:
-        info = dto.metadata.copy() if dto.metadata else {}
+    def _build_presentation(self, row: int, dto: GalleryAssetDTO) -> DetailPresentation:
+        info = self._metadata_for_asset(dto)
         info.update(
             {
                 "rel": str(dto.rel_path),
@@ -323,7 +323,7 @@ class DetailViewModel(BaseViewModel):
 
     def _resolve_video_duration(
         self,
-        dto: AssetDTO,
+        dto: GalleryAssetDTO,
         restore_request: MediaRestoreRequest | None,
     ) -> float | None:
         duration_hint = restore_request.duration_sec if restore_request is not None else None
@@ -359,8 +359,17 @@ class DetailViewModel(BaseViewModel):
             duration_hint=duration_hint,
         )
 
-    def _resolve_location(self, dto: AssetDTO) -> Optional[str]:
-        metadata = dto.metadata or {}
+    def _metadata_for_asset(self, dto: GalleryAssetDTO) -> dict[str, Any]:
+        metadata_for_asset = getattr(self._store, "metadata_for_asset", None)
+        if callable(metadata_for_asset):
+            metadata = metadata_for_asset(dto)
+            if isinstance(metadata, dict):
+                return dict(metadata)
+        raw = getattr(dto, "metadata", None)
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _resolve_location(self, dto: GalleryAssetDTO) -> Optional[str]:
+        metadata = self._metadata_for_asset(dto)
         location = metadata.get("location") or metadata.get("place")
         if isinstance(location, str) and location.strip():
             return location.strip()
@@ -374,8 +383,8 @@ class DetailViewModel(BaseViewModel):
         normalized = [str(item).strip() for item in components if item]
         return ", ".join(normalized) if normalized else None
 
-    def _resolve_live_motion(self, dto: AssetDTO) -> tuple[Optional[Path], Optional[Path]]:
-        metadata = dto.metadata or {}
+    def _resolve_live_motion(self, dto: GalleryAssetDTO) -> tuple[Optional[Path], Optional[Path]]:
+        metadata = self._metadata_for_asset(dto)
         live_partner_rel = metadata.get("live_partner_rel")
         live_role = metadata.get("live_role")
         if isinstance(live_partner_rel, str) and live_partner_rel and live_role != 1:
@@ -394,7 +403,7 @@ class DetailViewModel(BaseViewModel):
             candidate = self._store.asset_at(candidate_row)
             if candidate is None or not candidate.is_video:
                 continue
-            candidate_group = (candidate.metadata or {}).get("live_photo_group_id")
+            candidate_group = self._metadata_for_asset(candidate).get("live_photo_group_id")
             if candidate_group == group_id:
                 return candidate.rel_path, candidate.abs_path
         return None, None

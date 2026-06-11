@@ -57,7 +57,6 @@ _OMIT_METADATA_VALUE = object()
 GALLERY_WINDOW_COLUMNS = (
     "id",
     "rel",
-    "parent_album_path",
     "dt",
     "bytes",
     "mime",
@@ -72,9 +71,6 @@ GALLERY_WINDOW_COLUMNS = (
     "frame_rate",
     "codec",
     "still_image_time",
-    "original_rel_path",
-    "original_album_id",
-    "original_album_subpath",
     "aspect_ratio",
     "location",
     "gps",

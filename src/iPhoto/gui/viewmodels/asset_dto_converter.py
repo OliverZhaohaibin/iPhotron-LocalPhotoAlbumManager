@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.dtos import AssetDTO, GalleryTileDTO
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.domain.models import Asset
 from iPhoto.domain.models.core import MediaType
@@ -356,6 +356,75 @@ def scan_row_to_dto(
         is_live=is_live,
         is_pano=is_pano,
         micro_thumbnail=micro_thumbnail,
+    )
+
+
+def gallery_row_to_tile(
+    view_root: Path,
+    view_rel: str,
+    row: dict,
+) -> GalleryTileDTO:
+    """Map a projected Gallery row without retaining its source dictionary."""
+
+    abs_path = view_root / view_rel
+    rel_path = Path(view_rel)
+    media_type_value = row.get("media_type")
+    is_video = (
+        str(media_type_value).lower() in {"1", "video"}
+        if isinstance(media_type_value, (str, int))
+        else bool(row.get("is_video"))
+    )
+    live_partner_rel = row.get("live_partner_rel")
+    is_live = bool(row.get("is_live") or live_partner_rel) and not is_video
+    media_type = MediaType.VIDEO.value if is_video else MediaType.IMAGE.value
+    if is_live:
+        media_type = MediaType.LIVE_PHOTO.value
+
+    created_at = None
+    dt_raw = row.get("dt")
+    if isinstance(dt_raw, str):
+        try:
+            created_at = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+        except ValueError:
+            created_at = None
+
+    width = int(row.get("w") or row.get("width") or 0)
+    height = int(row.get("h") or row.get("height") or 0)
+    aspect_ratio = _coerce_positive_number(row.get("aspect_ratio"))
+    if aspect_ratio is None and width > 0 and height > 0:
+        aspect_ratio = width / height
+    size_bytes = int(row.get("bytes") or 0)
+    gps = row.get("gps")
+
+    return GalleryTileDTO(
+        id=str(row.get("id") or abs_path),
+        abs_path=abs_path,
+        rel_path=rel_path,
+        media_type=media_type,
+        created_at=created_at,
+        width=width,
+        height=height,
+        duration=float(row.get("dur") or row.get("duration") or 0.0),
+        size_bytes=size_bytes,
+        is_favorite=bool(
+            row.get("featured") or row.get("favorite") or row.get("is_favorite")
+        ),
+        mime=row.get("mime"),
+        face_status=row.get("face_status"),
+        is_live=is_live,
+        is_pano=bool(row.get("is_pano")),
+        micro_thumbnail=_decode_micro_thumbnail(row.get("micro_thumbnail")),
+        live_role=int(row.get("live_role") or 0),
+        live_partner_rel=live_partner_rel if isinstance(live_partner_rel, str) else None,
+        content_id=row.get("content_id"),
+        frame_rate=_coerce_positive_number(row.get("frame_rate")),
+        codec=row.get("codec"),
+        still_image_time=_coerce_positive_number(row.get("still_image_time")),
+        aspect_ratio=aspect_ratio,
+        location=row.get("location"),
+        gps=dict(gps) if isinstance(gps, dict) else None,
+        thumbnail_state=row.get("thumbnail_state"),
+        thumb_cache_key=row.get("thumb_cache_key"),
     )
 
 

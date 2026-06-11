@@ -41,6 +41,50 @@ class AssetDTO:
     def is_image(self) -> bool:
         return self.media_type == "photo" or self.media_type == "image"
 
+
+@dataclass(slots=True)
+class GalleryTileDTO:
+    """Lightweight in-memory projection used by Gallery query windows."""
+
+    id: str
+    abs_path: Path
+    rel_path: Path
+    media_type: str
+    created_at: Optional[datetime]
+    width: int
+    height: int
+    duration: float
+    size_bytes: int
+    is_favorite: bool
+    mime: Optional[str] = None
+    face_status: Optional[str] = None
+    is_live: bool = False
+    is_pano: bool = False
+    micro_thumbnail: Optional[Any] = None
+    live_role: int = 0
+    live_partner_rel: Optional[str] = None
+    content_id: Optional[str] = None
+    frame_rate: Optional[float] = None
+    codec: Optional[str] = None
+    still_image_time: Optional[float] = None
+    aspect_ratio: Optional[float] = None
+    location: Optional[str] = None
+    gps: Optional[Dict[str, Any]] = None
+    thumbnail_state: Optional[str] = None
+    thumb_cache_key: Optional[str] = None
+
+    @property
+    def is_video(self) -> bool:
+        return self.media_type == "video"
+
+    @property
+    def is_image(self) -> bool:
+        return self.media_type == "photo" or self.media_type == "image"
+
+
+GalleryAssetDTO = AssetDTO | GalleryTileDTO
+
+
 @dataclass
 class OpenAlbumRequest:
     path: Path

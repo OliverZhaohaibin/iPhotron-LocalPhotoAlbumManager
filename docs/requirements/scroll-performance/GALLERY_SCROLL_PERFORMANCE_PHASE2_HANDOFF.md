@@ -3,6 +3,7 @@
 > 状态：开发完成，待 Windows/Linux 实机视觉与性能验收  
 > 日期：2026-06-11  
 > 上游交接：`GALLERY_SCROLL_PERFORMANCE_PHASE1_HANDOFF.md`
+> 下游交接：`GALLERY_SCROLL_PERFORMANCE_PHASE2_LIGHTWEIGHT_TILE_HANDOFF.md`
 
 ## 1. 本阶段结论
 
@@ -153,8 +154,8 @@ PytestConfigWarning: Unknown config option: env
 
 ### 后续 Phase 2/3 开发
 
-1. 将当前 Gallery 投影后的 `AssetDTO` 收敛为轻量 `GalleryTileDTO`，减少 metadata
-   materialization 和 worker 到 GUI 的对象体积。
+1. 已将当前 Gallery 投影后的 `AssetDTO` 收敛为轻量 `GalleryTileDTO`；实现与验证
+   记录见下游交接文档。
 2. 将 visible/warm window-ready 更新按帧合并，并只刷新准确 row 与 role。
 3. 为完整缩略图请求增加 viewport generation、visible/hot/warm 优先级和 stale result
    丢弃；当前 generation 只覆盖 window 请求。

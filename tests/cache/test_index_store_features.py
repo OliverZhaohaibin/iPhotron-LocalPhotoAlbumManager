@@ -199,7 +199,14 @@ def test_gallery_collection_window_uses_micro_first_explicit_projection(
 
     assert set(rows[0]) == set(GALLERY_WINDOW_COLUMNS)
     assert rows[0]["micro_thumbnail"] == b"micro"
-    assert "make" not in rows[0]
+    assert {
+        "make",
+        "metadata",
+        "parent_album_path",
+        "original_rel_path",
+        "original_album_id",
+        "original_album_subpath",
+    }.isdisjoint(rows[0])
 
 
 def test_update_asset_geodata_updates_map_collection_membership(store: IndexStore) -> None:

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import copy
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Protocol
 
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.dtos import AssetDTO, GalleryAssetDTO, GalleryTileDTO
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.domain.models.query import WindowResult
 from iPhoto.infrastructure.services.performance_events import emit_perf_event, monotonic_ms
+from iPhoto.gui.viewmodels.asset_dto_converter import (
+    gallery_row_to_tile as _gallery_row_to_tile_fn,
+)
 from iPhoto.gui.viewmodels.asset_dto_converter import (
     geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
 )
@@ -106,6 +110,7 @@ class GalleryCollectionStore:
     LOOKBEHIND_SCREENS = 1
     LOOKAHEAD_SCREENS = 2
     HYSTERESIS_RATIO = 0.25
+    MAX_ASYNC_VISIBLE_RETRIES = 1
 
     def __init__(
         self,
@@ -126,7 +131,8 @@ class GalleryCollectionStore:
         self._selection_direct_assets: Optional[list] = None
         self._selection_library_root: Optional[Path] = library_root
         self._total_count = 0
-        self._row_cache: Dict[int, AssetDTO] = {}
+        self._row_cache: Dict[int, GalleryAssetDTO] = {}
+        self._metadata_overlays: Dict[str, Dict[str, object]] = {}
         self._window_range: Optional[tuple[int, int]] = None
         self._visible_range: Optional[tuple[int, int]] = None
         self._active_root: Optional[Path] = None
@@ -276,7 +282,7 @@ class GalleryCollectionStore:
         if self._window_range is not None:
             self.window_changed.emit(*self._window_range)
 
-    def asset_at(self, index: int) -> Optional[AssetDTO]:
+    def asset_at(self, index: int) -> Optional[GalleryAssetDTO]:
         dto = self._row_cache.get(index)
         if dto is not None or self._direct_mode:
             return dto
@@ -324,7 +330,7 @@ class GalleryCollectionStore:
             return None
         return self._scan_row_to_dto(active_root, rel, row)
 
-    def find_dto_by_path(self, path: Path) -> Optional[AssetDTO]:
+    def find_dto_by_path(self, path: Path) -> Optional[GalleryAssetDTO]:
         target = self._normalize_abs_key(path)
         for dto in self._row_cache.values():
             if self._normalize_abs_key(dto.abs_path) == target:
@@ -382,6 +388,31 @@ class GalleryCollectionStore:
     def count(self) -> int:
         return self._total_count
 
+    def metadata_for_asset(self, dto: GalleryAssetDTO) -> Dict[str, object]:
+        """Build a compatibility metadata view without widening every tile."""
+
+        if isinstance(dto, AssetDTO):
+            metadata: Dict[str, object] = dict(dto.metadata or {})
+        else:
+            metadata = {
+                "mime": dto.mime,
+                "live_role": dto.live_role,
+                "live_partner_rel": dto.live_partner_rel,
+                "content_id": dto.content_id,
+                "frame_rate": dto.frame_rate,
+                "codec": dto.codec,
+                "still_image_time": dto.still_image_time,
+                "aspect_ratio": dto.aspect_ratio,
+                "location": dto.location,
+                "gps": dict(dto.gps) if dto.gps is not None else None,
+                "face_status": dto.face_status,
+                "thumbnail_state": dto.thumbnail_state,
+                "thumb_cache_key": dto.thumb_cache_key,
+            }
+            metadata = {key: value for key, value in metadata.items() if value is not None}
+        metadata.update(self._metadata_overlays.get(self._normalize_abs_key(dto.abs_path), {}))
+        return metadata
+
     def update_favorite_status(self, row: int, is_favorite: bool) -> None:
         dto = self._row_cache.get(row)
         if dto is None and row >= 0:
@@ -397,7 +428,36 @@ class GalleryCollectionStore:
             dto = self.asset_at(row)
         if dto is None:
             return
-        dto.metadata = dict(metadata)
+        if isinstance(dto, AssetDTO):
+            dto.metadata = dict(metadata)
+        else:
+            self._metadata_overlays[self._normalize_abs_key(dto.abs_path)] = dict(metadata)
+            dto.live_role = int(metadata.get("live_role") or dto.live_role)
+            live_partner_rel = metadata.get("live_partner_rel")
+            if isinstance(live_partner_rel, str):
+                dto.live_partner_rel = live_partner_rel
+                dto.is_live = not dto.is_video
+            location = metadata.get("location") or metadata.get("place")
+            if isinstance(location, str):
+                dto.location = location
+            gps = metadata.get("gps")
+            if isinstance(gps, dict):
+                dto.gps = dict(gps)
+            for attr in (
+                "mime",
+                "content_id",
+                "codec",
+                "thumbnail_state",
+                "thumb_cache_key",
+                "face_status",
+            ):
+                value = metadata.get(attr)
+                if value is not None:
+                    setattr(dto, attr, value)
+            for attr in ("frame_rate", "still_image_time", "aspect_ratio"):
+                value = metadata.get(attr)
+                if isinstance(value, (int, float)):
+                    setattr(dto, attr, float(value))
         width = metadata.get("w")
         height = metadata.get("h")
         duration = metadata.get("dur")
@@ -421,7 +481,7 @@ class GalleryCollectionStore:
 
         old_total = self._total_count
         removed_set = set(removed)
-        new_cache: Dict[int, AssetDTO] = {}
+        new_cache: Dict[int, GalleryAssetDTO] = {}
         removed_before = 0
         removed_index = 0
         removed_count = len(removed)
@@ -489,7 +549,7 @@ class GalleryCollectionStore:
                 height=dto.height,
                 duration=dto.duration,
                 size_bytes=dto.size_bytes,
-                metadata=dto.metadata,
+                metadata=self.metadata_for_asset(dto),
                 is_favorite=dto.is_favorite,
                 is_live=dto.is_live,
                 is_pano=dto.is_pano,
@@ -769,6 +829,7 @@ class GalleryCollectionStore:
             request.last,
             window_first=request.window_first,
             window_limit=request.window_limit,
+            raise_errors=True,
         )
         total_count, window_first, window_last, rows, collection_revision = fetch_result
         return GalleryWindowResult(
@@ -784,11 +845,11 @@ class GalleryCollectionStore:
         """Publish a worker result if it still belongs to the latest viewport."""
 
         request = result.request
-        if (
-            result.error is not None
-            or request.generation != self._request_generation
-            or request.collection_revision != self._collection_revision
-        ):
+        request_is_current = (
+            request.generation == self._request_generation
+            and request.collection_revision == self._collection_revision
+        )
+        if result.error is not None or not request_is_current:
             emit_perf_event(
                 "gallery_window_stale_discarded",
                 generation=request.generation,
@@ -798,6 +859,27 @@ class GalleryCollectionStore:
                 current_collection_revision=self._collection_revision,
                 error=result.error,
             )
+            if (
+                result.error is not None
+                and request_is_current
+                and request.tier == "visible"
+                and self._visible_range == (request.first, request.last)
+                and request.retry_count < self.MAX_ASYNC_VISIBLE_RETRIES
+            ):
+                retry = replace(
+                    request,
+                    requested_at_ms=monotonic_ms(),
+                    retry_count=request.retry_count + 1,
+                )
+                emit_perf_event(
+                    "gallery_window_retry_requested",
+                    generation=retry.generation,
+                    first=retry.first,
+                    last=retry.last,
+                    retry_count=retry.retry_count,
+                    error=result.error,
+                )
+                self._window_loader.submit(retry)
             return False
         self._apply_window_fetch_result(
             (
@@ -826,7 +908,7 @@ class GalleryCollectionStore:
 
     def _apply_window_fetch_result(
         self,
-        fetch_result: tuple[int, int, int, Dict[int, AssetDTO], int],
+        fetch_result: tuple[int, int, int, Dict[int, GalleryAssetDTO], int],
         first: int,
         last: int,
         *,
@@ -929,7 +1011,8 @@ class GalleryCollectionStore:
         *,
         window_first: int | None = None,
         window_limit: int | None = None,
-    ) -> tuple[int, int, int, Dict[int, AssetDTO], int]:
+        raise_errors: bool = False,
+    ) -> tuple[int, int, int, Dict[int, GalleryAssetDTO], int]:
         if self._current_query is None:
             return 0, 0, -1, {}, self._collection_revision
 
@@ -961,6 +1044,8 @@ class GalleryCollectionStore:
                     last=window_first + max(0, window_limit) - 1,
                     error=type(exc).__name__,
                 )
+                if raise_errors:
+                    raise
                 return self._total_count, window_first, window_first + max(0, window_limit) - 1, {}, self._collection_revision
             pending_source_count = self._pending_source_count_for_query(
                 self._current_query
@@ -1012,7 +1097,7 @@ class GalleryCollectionStore:
             new_total,
             window_first,
             window_last,
-            self._fetch_rows(window_first, window_last),
+            self._fetch_rows(window_first, window_last, raise_errors=raise_errors),
             self._collection_revision + 1,
         )
 
@@ -1083,7 +1168,13 @@ class GalleryCollectionStore:
                 return True
         return False
 
-    def _fetch_rows(self, first: int, last: int) -> Dict[int, AssetDTO]:
+    def _fetch_rows(
+        self,
+        first: int,
+        last: int,
+        *,
+        raise_errors: bool = False,
+    ) -> Dict[int, GalleryAssetDTO]:
         if self._current_query is None or last < first:
             return {}
 
@@ -1098,7 +1189,7 @@ class GalleryCollectionStore:
             last - first + 1 + pending_source_count,
         )
         validate_paths = self._should_validate_paths(self._current_query)
-        rows: Dict[int, AssetDTO] = {}
+        rows: Dict[int, GalleryAssetDTO] = {}
         active_root = self._active_root or self._library_root
         if active_root is None or self._asset_query_service is None:
             return {}
@@ -1116,6 +1207,8 @@ class GalleryCollectionStore:
                 last=last,
                 error=type(exc).__name__,
             )
+            if raise_errors:
+                raise
             return {}
         return rows
 
@@ -1126,8 +1219,8 @@ class GalleryCollectionStore:
         *,
         active_root: Path | None = None,
         validate_paths: bool | None = None,
-    ) -> Dict[int, AssetDTO]:
-        rows: Dict[int, AssetDTO] = {}
+    ) -> Dict[int, GalleryAssetDTO]:
+        rows: Dict[int, GalleryAssetDTO] = {}
         root = active_root or self._active_root or self._library_root
         if root is None:
             return rows
@@ -1142,7 +1235,7 @@ class GalleryCollectionStore:
                 continue
             if self._scan_row_is_thumbnail(view_rel, row):
                 continue
-            dto = self._scan_row_to_dto(root, view_rel, row)
+            dto = self._gallery_row_to_tile(root, view_rel, row)
             if dto is None:
                 continue
             if validate_paths and not self._path_exists_cached(dto.abs_path):
@@ -1153,7 +1246,7 @@ class GalleryCollectionStore:
             rows[row_index] = dto
         return rows
 
-    def _fetch_single_row(self, row: int) -> Optional[AssetDTO]:
+    def _fetch_single_row(self, row: int) -> Optional[GalleryAssetDTO]:
         if self._current_query is None or row < 0:
             return None
         fetched = self._fetch_rows(row, row)
@@ -1276,7 +1369,7 @@ class GalleryCollectionStore:
             return None
         return top_key, bottom_key
 
-    def _sort_key_from_dto(self, dto: AssetDTO) -> Optional[tuple[str, str]]:
+    def _sort_key_from_dto(self, dto: GalleryAssetDTO) -> Optional[tuple[str, str]]:
         if dto.created_at is None:
             return None
         return dto.created_at.isoformat(), str(dto.id or "")
@@ -1350,6 +1443,14 @@ class GalleryCollectionStore:
         row: dict,
     ) -> Optional[AssetDTO]:
         return _scan_row_to_dto_fn(view_root, view_rel, row)
+
+    def _gallery_row_to_tile(
+        self,
+        view_root: Path,
+        view_rel: str,
+        row: dict,
+    ) -> GalleryTileDTO:
+        return _gallery_row_to_tile_fn(view_root, view_rel, row)
 
     def _normalize_abs_key(self, path: Path) -> str:
         try:
@@ -1436,7 +1537,7 @@ class GalleryCollectionStore:
         self,
         raw_total_count: int,
         query: AssetQuery,
-        existing_rows: Iterable[AssetDTO],
+        existing_rows: Iterable[GalleryAssetDTO],
     ) -> int:
         pending_sources = self._pending_source_count_for_query(query)
         pending_insertions = len(
@@ -1447,7 +1548,7 @@ class GalleryCollectionStore:
     def _pending_insertions_for_query(
         self,
         query: AssetQuery,
-        existing_rows: Iterable[AssetDTO],
+        existing_rows: Iterable[GalleryAssetDTO],
     ) -> list[AssetDTO]:
         if not self._pending_moves:
             return []
@@ -1466,7 +1567,7 @@ class GalleryCollectionStore:
             existing_keys.update(pending_keys)
         return inserted
 
-    def _dto_matches_pending_source(self, dto: AssetDTO) -> bool:
+    def _dto_matches_pending_source(self, dto: GalleryAssetDTO) -> bool:
         if not self._pending_paths:
             return False
         dto_abs_key = self._normalize_abs_key(dto.abs_path)
@@ -1492,7 +1593,7 @@ class GalleryCollectionStore:
 
     def _dto_matches_pending_destination(
         self,
-        dto: AssetDTO,
+        dto: GalleryAssetDTO,
         pending: _PendingMove,
     ) -> bool:
         return bool(
@@ -1503,7 +1604,7 @@ class GalleryCollectionStore:
 
     def _dto_destination_keys(
         self,
-        dto: AssetDTO,
+        dto: GalleryAssetDTO,
         *,
         include_id: bool = False,
     ) -> set[str]:
@@ -1575,11 +1676,12 @@ class GalleryCollectionStore:
     def _clone_query(query: AssetQuery) -> AssetQuery:
         return copy.deepcopy(query)
 
-    def _iter_cached_rows(self) -> List[tuple[int, AssetDTO]]:
+    def _iter_cached_rows(self) -> List[tuple[int, GalleryAssetDTO]]:
         return sorted(self._row_cache.items(), key=lambda item: item[0])
 
     def _reset_window_state(self, *, clear_pending: bool = False) -> None:
         self._row_cache.clear()
+        self._metadata_overlays.clear()
         self._total_count = 0
         self._window_range = None
         self._visible_range = None

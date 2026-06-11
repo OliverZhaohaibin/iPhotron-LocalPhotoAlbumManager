@@ -1,6 +1,6 @@
 # Gallery 滚动性能验收进度跟踪
 
-> 当前版本：Phase 2  
+> 当前版本：Phase 2 Lightweight Tile
 > 最后更新：2026-06-11  
 > 维护者：CI/CD 自动化体系
 
@@ -26,6 +26,19 @@
 - `GALLERY_SCROLL_PERFORMANCE_WINDOWS_VALIDATION.md`
 - `PERFORMANCE_TEST_QUICK_REFERENCE.md`
 
+#### Phase 2 - Linux Offscreen/XCB (2026-06-11)
+- [x] Linux offscreen 基准测试
+- [x] Linux XCB backend 基准测试
+- [x] Micro 100% 覆盖与 Placeholder 0%
+- [x] 零保护路径违反
+
+#### Phase 2 - Lightweight Tile (2026-06-11)
+- [x] 查询窗口改用 `GalleryTileDTO`
+- [x] Gallery 专用 typed row mapper
+- [x] 精简显式 SQL 投影
+- [x] 稀疏 metadata compatibility overlay
+- [x] 保持 micro-first 与零 placeholder
+
 ### ⏳ 进行中
 
 #### GPU 加速平台验收
@@ -47,7 +60,7 @@
 ### 📋 计划中
 
 #### Phase 2/3 微优化
-- [ ] `AssetDTO` → `GalleryTileDTO` 轻量化
+- [x] `AssetDTO` → `GalleryTileDTO` 轻量化
 - [ ] Window-ready 更新按帧合并
 - [ ] 完整缩略图的 tier 优先级实现
 - [ ] 逐 tile 更新 → 帧局部更新
@@ -63,7 +76,7 @@
 |:---|:---|:---:|:---:|:---:|:---|
 | **macOS** | Cocoa | ✅ 2026-06-11 | ⏳ | ⏳ | 2026-Q3 |
 | **Windows** | DirectX | ✅ 2026-06-11 | ⏳ | ⏳ | 2026-Q3 |
-| **Linux** | XCB | ⏳ | ⏳ | ⏳ | 2026-Q4 |
+| **Linux** | XCB | ✅ 2026-06-11 | ⏳ | ⏳ | 2026-Q4 |
 | **Linux** | Wayland | ⏳ | ⏳ | ⏳ | 2026-Q4 |
 
 ### 图例
@@ -258,6 +271,9 @@ docs/requirements/scroll-performance/
 ### 2026-06-11
 
 **新增内容**
+- [x] Gallery 查询窗口轻量 `GalleryTileDTO` 开发完成
+- [x] 新增 `GALLERY_SCROLL_PERFORMANCE_PHASE2_LIGHTWEIGHT_TILE_HANDOFF.md`
+- [x] 下一开发项切换为 window-ready/thumbnail-ready 按帧准确合并
 - [x] Windows offscreen 基准测试完成 (3 passed, 7.70s)
 - [x] 验收报告 `GALLERY_SCROLL_PERFORMANCE_WINDOWS_VALIDATION.md`
 - [x] 快速参考指南 `PERFORMANCE_TEST_QUICK_REFERENCE.md`
@@ -280,5 +296,3 @@ docs/requirements/scroll-performance/
 - 🔧 [测试源码](../../tests/performance/test_gallery_scroll_qt_benchmark.py)
 - 📊 [报告数据](../../../../tmp/iphoto-gallery-scroll-performance/)
 - 🎯 [功能需求文档](../README.md)
-
-

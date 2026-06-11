@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtGui import QImage
 
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.dtos import AssetDTO, GalleryTileDTO
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
@@ -81,6 +81,23 @@ def _make_dto(**overrides) -> AssetDTO:
     return AssetDTO(**defaults)
 
 
+def _make_tile(**overrides) -> GalleryTileDTO:
+    defaults = dict(
+        id="1",
+        abs_path=Path("photo.jpg"),
+        rel_path=Path("photo.jpg"),
+        media_type="image",
+        created_at=None,
+        width=100,
+        height=100,
+        duration=0.0,
+        size_bytes=100,
+        is_favorite=False,
+    )
+    defaults.update(overrides)
+    return GalleryTileDTO(**defaults)
+
+
 def test_adapter_init(adapter):
     assert adapter.rowCount() == 0
 
@@ -102,6 +119,24 @@ def test_info_role_contains_required_keys(adapter, mock_store):
 
     for key in ("rel", "abs", "name", "is_video", "w", "h", "dur", "bytes"):
         assert key in info
+
+
+def test_lightweight_tile_roles_use_store_metadata_view(adapter, mock_store):
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_tile(
+        live_partner_rel="motion.mov",
+        location="Berlin",
+    )
+    mock_store.metadata_for_asset.return_value = {
+        "live_partner_rel": "motion.mov",
+        "location": "Berlin",
+    }
+
+    index = adapter.index(0, 0)
+
+    assert adapter.data(index, Roles.LOCATION) == "Berlin"
+    assert adapter.data(index, Roles.INFO)["location"] == "Berlin"
+    assert adapter.data(index, Roles.LIVE_MOTION_REL) == "motion.mov"
 
 
 def test_data_display_role(adapter, mock_store):

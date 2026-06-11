@@ -12,7 +12,8 @@ from PIL import Image
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery, WindowResult
-from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
+from iPhoto.application.dtos import GalleryTileDTO
+from iPhoto.gui.viewmodels.asset_dto_converter import gallery_row_to_tile, scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.library.runtime_controller import GeotaggedAsset
 
@@ -203,6 +204,33 @@ def test_scan_row_to_dto_ignores_invalid_micro_thumbnail_bytes() -> None:
     assert dto.micro_thumbnail is None
 
 
+def test_gallery_row_to_tile_does_not_retain_wide_metadata_dict() -> None:
+    row = {
+        "id": "asset",
+        "rel": "photo.jpg",
+        "media_type": 0,
+        "w": 4000,
+        "h": 2000,
+        "bytes": 2_000_000,
+        "mime": "image/jpeg",
+        "location": "Berlin",
+        "gps": {"latitude": 52.52, "longitude": 13.405},
+        "codec": "jpeg",
+        "micro_thumbnail": _jpeg_bytes(),
+        "unused": "must-not-be-retained",
+    }
+
+    tile = gallery_row_to_tile(Path("/library"), "photo.jpg", row)
+
+    assert isinstance(tile, GalleryTileDTO)
+    assert not hasattr(tile, "metadata")
+    assert tile.location == "Berlin"
+    assert tile.mime == "image/jpeg"
+    assert tile.gps == {"latitude": 52.52, "longitude": 13.405}
+    assert tile.codec == "jpeg"
+    assert isinstance(tile.micro_thumbnail, QImage)
+
+
 def test_async_window_decodes_micro_off_caller_thread_and_publishes_on_demand() -> None:
     caller_thread = threading.get_ident()
     service = _FakeQueryService(
@@ -239,8 +267,97 @@ def test_async_window_decodes_micro_off_caller_thread_and_publishes_on_demand() 
     assert ready.wait(2.0)
     assert worker_threads and worker_threads[0] != caller_thread
     assert store.apply_window_result(results[-1]) is True
-    assert isinstance(store.asset_at(0).micro_thumbnail, QImage)
+    tile = store.asset_at(0)
+    assert isinstance(tile, GalleryTileDTO)
+    assert not hasattr(tile, "metadata")
+    assert isinstance(tile.micro_thumbnail, QImage)
     store.shutdown()
+
+
+def test_async_visible_window_retries_transient_fetch_failure() -> None:
+    service = _FakeQueryService(
+        [
+            Asset(
+                id="asset",
+                album_id="a",
+                path=Path("photo.jpg"),
+                media_type=MediaType.IMAGE,
+                size_bytes=1,
+            )
+        ]
+    )
+    attempts: list[tuple[int, int]] = []
+    original_read = service.read_query_asset_window
+
+    def read_window(root, query, first, limit):
+        attempts.append((first, limit))
+        if len(attempts) == 1:
+            raise RuntimeError("transient initial window failure")
+        return original_read(root, query, first, limit)
+
+    service.read_query_asset_window = read_window  # type: ignore[method-assign]
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    published: list[bool] = []
+    ready = threading.Event()
+
+    def apply_result(result) -> None:
+        published.append(store.apply_window_result(result))
+        if published[-1]:
+            ready.set()
+
+    store.window_result_ready.connect(apply_result)
+
+    store.load_selection(Path("."), query=AssetQuery())
+
+    assert ready.wait(2.0)
+    assert published == [False, True]
+    assert attempts == [
+        (0, store.INITIAL_VISIBLE_ROWS),
+        (0, store.INITIAL_VISIBLE_ROWS),
+    ]
+    assert store.count() == 1
+    assert store.asset_at(0) is not None
+    store.shutdown()
+
+
+def test_query_tile_metadata_updates_use_sparse_compatibility_overlay() -> None:
+    service = _FakeQueryService(
+        [
+            Asset(
+                id="asset",
+                album_id="a",
+                path=Path("photo.jpg"),
+                media_type=MediaType.IMAGE,
+                size_bytes=1,
+            )
+        ]
+    )
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.load_selection(Path("."), query=AssetQuery())
+
+    tile = store.asset_at(0)
+    assert isinstance(tile, GalleryTileDTO)
+    store.update_asset_metadata(
+        0,
+        {
+            "location": "Berlin",
+            "gps": {"latitude": 52.52, "longitude": 13.405},
+            "codec": "jpeg",
+            "custom": "overlay-only",
+            "w": 800,
+            "h": 600,
+        },
+    )
+
+    assert tile.location == "Berlin"
+    assert tile.gps == {"latitude": 52.52, "longitude": 13.405}
+    assert tile.codec == "jpeg"
+    assert tile.width == 800
+    assert tile.height == 600
+    assert store.metadata_for_asset(tile)["custom"] == "overlay-only"
 
 
 def test_async_window_discards_stale_generation_after_large_scroll_jump() -> None:

@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.dtos import GalleryAssetDTO
 
 GalleryWindowTier = Literal["visible", "warm"]
 
@@ -22,6 +22,7 @@ class GalleryWindowRequest:
     window_limit: int
     tier: GalleryWindowTier
     requested_at_ms: float
+    retry_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +31,7 @@ class GalleryWindowResult:
     total_count: int
     window_first: int
     window_last: int
-    rows: tuple[tuple[int, AssetDTO], ...]
+    rows: tuple[tuple[int, GalleryAssetDTO], ...]
     collection_revision: int
     error: str | None = None
 

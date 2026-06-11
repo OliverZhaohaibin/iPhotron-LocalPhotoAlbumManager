@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from iPhoto.application.ports import EditRenderingState
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.application.dtos import AssetDTO, GalleryTileDTO
 from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
@@ -63,6 +63,31 @@ def test_show_row_builds_presentation_and_requests_detail_route():
     assert received[0].asset_id == dto.id
     assert received[0].path == dto.abs_path
     assert received[0].is_favorite is True
+
+
+def test_show_row_builds_lightweight_tile_presentation_from_metadata_view():
+    vm, store, session, _ = _make_vm()
+    tile = GalleryTileDTO(
+        id="tile",
+        abs_path=Path("/tmp/photo.jpg"),
+        rel_path=Path("photo.jpg"),
+        media_type="image",
+        created_at=None,
+        width=100,
+        height=100,
+        duration=0.0,
+        size_bytes=100,
+        is_favorite=False,
+        location="Berlin",
+    )
+    store.asset_at.return_value = tile
+    store.metadata_for_asset.return_value = {"location": "Berlin", "codec": "jpeg"}
+    session.set_current_row.return_value = tile.abs_path
+
+    vm.show_row(0)
+
+    assert vm.presentation.value.location == "Berlin"
+    assert vm.presentation.value.info["codec"] == "jpeg"
 
 
 def test_next_and_previous_delegate_to_session():

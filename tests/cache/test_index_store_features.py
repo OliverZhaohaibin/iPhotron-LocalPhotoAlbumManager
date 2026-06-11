@@ -7,6 +7,7 @@ import pytest
 
 from iPhoto.cache.index_store import IndexStore
 from iPhoto.cache.index_store.queries import QueryBuilder
+from iPhoto.cache.index_store.repository import GALLERY_WINDOW_COLUMNS
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.query import (
     CollectionQuery,
@@ -176,6 +177,29 @@ def test_collection_query_sql_pushdown_filters_visible_media_rows(store: IndexSt
         "asset-1",
         "asset-0",
     ]
+
+
+def test_gallery_collection_window_uses_micro_first_explicit_projection(
+    store: IndexStore,
+) -> None:
+    store.write_rows(
+        [
+            {
+                "rel": "photo.jpg",
+                "id": "asset",
+                "thumbnail_state": "ready",
+                "thumb_cache_key": "thumb",
+                "micro_thumbnail": b"micro",
+                "make": "excluded-camera",
+            }
+        ]
+    )
+
+    rows = store.read_gallery_collection_window(CollectionQuery(), 0, 10).rows
+
+    assert set(rows[0]) == set(GALLERY_WINDOW_COLUMNS)
+    assert rows[0]["micro_thumbnail"] == b"micro"
+    assert "make" not in rows[0]
 
 
 def test_update_asset_geodata_updates_map_collection_membership(store: IndexStore) -> None:

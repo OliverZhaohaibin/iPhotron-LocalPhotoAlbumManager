@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 
 from PySide6.QtGui import QImage
 from PIL import Image
@@ -200,6 +201,80 @@ def test_scan_row_to_dto_ignores_invalid_micro_thumbnail_bytes() -> None:
 
     assert dto is not None
     assert dto.micro_thumbnail is None
+
+
+def test_async_window_decodes_micro_off_caller_thread_and_publishes_on_demand() -> None:
+    caller_thread = threading.get_ident()
+    service = _FakeQueryService(
+        [
+            Asset(
+                id="asset",
+                album_id="a",
+                path=Path("photo.jpg"),
+                media_type=MediaType.IMAGE,
+                size_bytes=1,
+            )
+        ]
+    )
+    worker_threads: list[int] = []
+    original_read = service.read_query_asset_window
+
+    def read_window(root, query, first, limit):
+        worker_threads.append(threading.get_ident())
+        result = original_read(root, query, first, limit)
+        result.rows[0]["micro_thumbnail"] = _jpeg_bytes()
+        return result
+
+    service.read_query_asset_window = read_window  # type: ignore[method-assign]
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    ready = threading.Event()
+    results = []
+    store.window_result_ready.connect(lambda result: (results.append(result), ready.set()))
+
+    store.load_selection(Path("."), query=AssetQuery())
+
+    assert store.count() == 0
+    assert ready.wait(2.0)
+    assert worker_threads and worker_threads[0] != caller_thread
+    assert store.apply_window_result(results[-1]) is True
+    assert isinstance(store.asset_at(0).micro_thumbnail, QImage)
+    store.shutdown()
+
+
+def test_async_window_discards_stale_generation_after_large_scroll_jump() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(10_000)
+    ]
+    service = _FakeQueryService(assets)
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    ready = threading.Event()
+    results = []
+
+    def collect(result):
+        results.append(result)
+        if len(results) >= 2:
+            ready.set()
+
+    store.window_result_ready.connect(collect)
+    store.load_selection(Path("."), query=AssetQuery())
+    store.prioritize_rows(7_000, 7_060)
+
+    assert ready.wait(2.0)
+    assert store.apply_window_result(results[0]) is False
+    assert store.apply_window_result(results[-1]) is True
+    assert store.asset_at(7_000) is not None
+    store.shutdown()
 
 
 def test_load_initial_window_uses_sparse_cache() -> None:

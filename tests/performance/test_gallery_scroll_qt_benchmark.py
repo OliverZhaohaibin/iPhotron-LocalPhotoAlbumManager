@@ -23,7 +23,7 @@ if os.environ.get("IPHOTO_RUN_GALLERY_SCROLL_BENCHMARK") != "1":
 pytest.importorskip("PySide6", reason="PySide6 is required for Qt scroll benchmarks")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QGuiApplication, QWheelEvent
+from PySide6.QtGui import QGuiApplication, QImage, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.application.dtos import AssetDTO
@@ -49,6 +49,8 @@ class _SyntheticStore:
         self._row_count = row_count
         self._violations = violations
         self._cache: dict[int, AssetDTO] = {}
+        self._micro = QImage(16, 16, QImage.Format.Format_RGB32)
+        self._micro.fill(Qt.GlobalColor.darkGray)
         self.prioritize_calls = 0
 
     def count(self) -> int:
@@ -72,6 +74,7 @@ class _SyntheticStore:
                 size_bytes=1024,
                 metadata={},
                 is_favorite=False,
+                micro_thumbnail=self._micro,
             )
             self._cache[row] = dto
         return dto
@@ -194,6 +197,8 @@ def _write_report(report: dict[str, Any], row_count: int) -> tuple[Path, Path]:
                 "paint_p95_ms",
                 "frame_interval_p95_ms",
                 "input_catchup_ms",
+                "micro_or_full_ratio",
+                "placeholder_ratio",
                 "final_scrollbar_value",
                 "ensure_row_loaded_violations",
                 "get_thumbnail_violations",
@@ -290,6 +295,23 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         qapp.processEvents()
         time.sleep(0.005)
 
+    visual_rows = []
+    if view._visible_range is not None:
+        visual_first, visual_last = view._visible_range
+        visual_rows = [
+            store.asset_at(row)
+            for row in range(visual_first, visual_last + 1)
+        ]
+    visual_count = len(visual_rows)
+    micro_count = sum(
+        1
+        for asset in visual_rows
+        if asset is not None
+        and isinstance(asset.micro_thumbnail, QImage)
+        and not asset.micro_thumbnail.isNull()
+    )
+    placeholder_count = visual_count - micro_count
+
     paint_starts = metrics["paint_started_at"]
     frame_intervals = [
         (current - previous) * 1000.0
@@ -321,6 +343,15 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
             * 1000.0,
             3,
         ),
+        "visual_coverage": {
+            "visible_rows": visual_count,
+            "micro_or_full_ratio": round(micro_count / visual_count, 4)
+            if visual_count
+            else 1.0,
+            "placeholder_ratio": round(placeholder_count / visual_count, 4)
+            if visual_count
+            else 0.0,
+        },
         "total_elapsed_ms": round((finished - started) * 1000.0, 3),
         "final_scrollbar_value": scrollbar.value(),
         "scrollbar_change_count": len(metrics["scrollbar_changes"]),
@@ -336,6 +367,8 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         "paint_p95_ms": report["paint"]["p95_ms"],
         "frame_interval_p95_ms": report["frame_interval"]["p95_ms"],
         "input_catchup_ms": report["input_catchup_ms"],
+        "micro_or_full_ratio": report["visual_coverage"]["micro_or_full_ratio"],
+        "placeholder_ratio": report["visual_coverage"]["placeholder_ratio"],
         "final_scrollbar_value": report["final_scrollbar_value"],
         "ensure_row_loaded_violations": violations["ensure_row_loaded"],
         "get_thumbnail_violations": violations["get_thumbnail"],
@@ -349,6 +382,8 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
     assert metrics["scroll_ms"]
     assert metrics["paint_ms"]
     assert thumbnails.requested_paths > 0
+    assert report["visual_coverage"]["micro_or_full_ratio"] == 1.0
+    assert report["visual_coverage"]["placeholder_ratio"] == 0.0
     assert not any(violations.values()), f"Protected-path violations: {violations}"
     assert json_path.exists()
     assert csv_path.exists()

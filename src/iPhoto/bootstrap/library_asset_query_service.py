@@ -283,6 +283,39 @@ class LibraryAssetQueryService:
             collection_revision=0,
         )
 
+    def read_query_gallery_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a Gallery-specific micro-first projected window."""
+
+        read_query = copy.deepcopy(query)
+        read_query.offset = max(0, int(first))
+        read_query.limit = max(0, int(limit))
+        album_path = self.album_path_for(root)
+        if self._can_use_collection_api(read_query):
+            read_gallery_window = getattr(
+                self._repository(),
+                "read_gallery_collection_window",
+                None,
+            )
+            if callable(read_gallery_window):
+                window = read_gallery_window(
+                    self._collection_query_for_asset_query(read_query),
+                    read_query.offset,
+                    read_query.limit or 0,
+                )
+                return WindowResult(
+                    first=window.first,
+                    rows=list(self._scoped_rows(window.rows, album_path)),
+                    total_count=window.total_count,
+                    collection_revision=window.collection_revision,
+                )
+        return self.read_query_asset_window(root, read_query, first, limit)
+
     def count_collection(self, query: CollectionQuery) -> int:
         """Return the number of assets matching a SQL-first collection query."""
 

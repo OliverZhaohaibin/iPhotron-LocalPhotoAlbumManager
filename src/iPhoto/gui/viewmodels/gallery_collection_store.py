@@ -40,6 +40,11 @@ from iPhoto.gui.viewmodels.pending_move_buffer import (
     should_include_pending as _should_include_pending_fn,
 )
 from iPhoto.gui.viewmodels.signal import Signal
+from iPhoto.gui.viewmodels.gallery_window_loader import (
+    GalleryWindowLoader,
+    GalleryWindowRequest,
+    GalleryWindowResult,
+)
 
 
 class GalleryAssetQuerySurface(Protocol):
@@ -65,6 +70,15 @@ class GalleryAssetQuerySurface(Protocol):
         limit: int,
     ) -> WindowResult:
         """Return a bounded scoped window for *query*."""
+
+    def read_query_gallery_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a projected Gallery window containing micro thumbnails."""
 
     def find_row_by_path(self, query: AssetQuery, path: Path) -> Optional[int]:
         """Return a row index for *path* inside *query*."""
@@ -102,6 +116,7 @@ class GalleryCollectionStore:
         self.count_changed = Signal()
         self.row_changed = Signal()
         self.thumbnail_backfill_scheduled = Signal()
+        self.window_result_ready = Signal()
 
         self._asset_query_service = asset_query_service
         self._library_root = library_root or getattr(asset_query_service, "library_root", None)
@@ -126,6 +141,19 @@ class GalleryCollectionStore:
         self._direct_mode = False
         self._collection_revision = 0
         self._request_generation = 0
+        self._async_windows_enabled = False
+        self._window_loader = GalleryWindowLoader(
+            self._fetch_async_window,
+            self.window_result_ready.emit,
+        )
+
+    def enable_async_windows(self) -> None:
+        """Move subsequent query-window reads and micro decode off the caller thread."""
+
+        self._async_windows_enabled = True
+
+    def shutdown(self) -> None:
+        self._window_loader.shutdown()
 
     def set_library_root(self, root: Optional[Path]) -> None:
         if self._library_root == root:
@@ -524,7 +552,7 @@ class GalleryCollectionStore:
             return
         if self._total_count == 0 and self._window_range is None:
             self._load_initial_window()
-            if self._total_count == 0:
+            if self._total_count == 0 and not self._async_windows_enabled:
                 return
 
         first = max(0, first)
@@ -657,8 +685,100 @@ class GalleryCollectionStore:
             return
         request_generation = self._request_generation + 1
         self._request_generation = request_generation
+        if self._async_windows_enabled:
+            window_first, window_limit = self._compute_target_window_unbounded(first, last)
+            request = GalleryWindowRequest(
+                generation=request_generation,
+                collection_revision=self._collection_revision,
+                first=first,
+                last=last,
+                window_first=window_first,
+                window_limit=window_limit,
+            )
+            emit_perf_event(
+                "gallery_window_requested",
+                generation=request_generation,
+                first=first,
+                last=last,
+                window_first=window_first,
+                window_limit=window_limit,
+            )
+            self._window_loader.submit(request)
+            return
 
         fetch_result = self._fetch_window_for_visible_range(first, last)
+        self._apply_window_fetch_result(
+            fetch_result,
+            first,
+            last,
+            request_generation=request_generation,
+            emit_signals=emit_signals,
+            emit_source_changed=emit_source_changed,
+        )
+
+    def _fetch_async_window(self, request: GalleryWindowRequest) -> GalleryWindowResult:
+        fetch_result = self._fetch_window_for_visible_range(request.first, request.last)
+        total_count, window_first, window_last, rows, collection_revision = fetch_result
+        return GalleryWindowResult(
+            request=request,
+            total_count=total_count,
+            window_first=window_first,
+            window_last=window_last,
+            rows=tuple(rows.items()),
+            collection_revision=collection_revision,
+        )
+
+    def apply_window_result(self, result: GalleryWindowResult) -> bool:
+        """Publish a worker result if it still belongs to the latest viewport."""
+
+        request = result.request
+        if (
+            result.error is not None
+            or request.generation != self._request_generation
+            or request.collection_revision != self._collection_revision
+        ):
+            emit_perf_event(
+                "gallery_window_stale_discarded",
+                generation=request.generation,
+                current_generation=self._request_generation,
+                collection_revision=request.collection_revision,
+                current_collection_revision=self._collection_revision,
+                error=result.error,
+            )
+            return False
+        self._apply_window_fetch_result(
+            (
+                result.total_count,
+                result.window_first,
+                result.window_last,
+                dict(result.rows),
+                result.collection_revision,
+            ),
+            request.first,
+            request.last,
+            request_generation=request.generation,
+            emit_signals=True,
+            emit_source_changed=False,
+        )
+        emit_perf_event(
+            "gallery_window_published",
+            generation=request.generation,
+            first=result.window_first,
+            last=result.window_last,
+            rows=len(result.rows),
+        )
+        return True
+
+    def _apply_window_fetch_result(
+        self,
+        fetch_result: tuple[int, int, int, Dict[int, AssetDTO], int],
+        first: int,
+        last: int,
+        *,
+        request_generation: int,
+        emit_signals: bool,
+        emit_source_changed: bool,
+    ) -> None:
         new_total = fetch_result[0]
         if new_total <= 0:
             queued_backfill = self._request_visible_thumbnail_backfill(first, last)
@@ -699,7 +819,7 @@ class GalleryCollectionStore:
         pinned_row = self._pinned_row
         if pinned_row is not None and pinned_row not in new_cache and 0 <= pinned_row < new_total:
             pinned_dto = previous_cache.get(pinned_row)
-            if pinned_dto is None:
+            if pinned_dto is None and not self._async_windows_enabled:
                 pinned_dto = self._fetch_single_row(pinned_row)
             if pinned_dto is not None:
                 new_cache[pinned_row] = pinned_dto
@@ -759,7 +879,9 @@ class GalleryCollectionStore:
         if active_root is None or self._asset_query_service is None:
             return 0, 0, -1, {}, self._collection_revision
 
-        read_window = getattr(self._asset_query_service, "read_query_asset_window", None)
+        read_window = getattr(self._asset_query_service, "read_query_gallery_window", None)
+        if not callable(read_window):
+            read_window = getattr(self._asset_query_service, "read_query_asset_window", None)
         if callable(read_window):
             window_first, window_limit = self._compute_target_window_unbounded(first, last)
             raw_window_first = self._pending_adjusted_raw_offset_for_view_offset(

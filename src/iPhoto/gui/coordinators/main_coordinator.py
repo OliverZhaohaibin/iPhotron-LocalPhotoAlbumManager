@@ -397,6 +397,8 @@ class MainCoordinator(QObject):
 
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
+        if self._gallery_store:
+            self._gallery_store.shutdown()
         # 1. Cancel any active background scans/imports via Facade
         if self._facade:
             self._facade.cancel_active_scans()

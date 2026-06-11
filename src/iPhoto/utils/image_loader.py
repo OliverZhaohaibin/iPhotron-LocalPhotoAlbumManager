@@ -118,6 +118,9 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
             return QImage(qt_image)
         except Exception:
             _LOGGER.debug("Pillow failed to decode image bytes in qimage_from_bytes")
+            # Pillow already established that this payload is malformed. Passing
+            # it through Qt's native image plugins can crash some runtimes.
+            return None
 
     image = QImage()
     if image.loadFromData(data):

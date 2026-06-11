@@ -54,6 +54,36 @@ _DEEP_OFFSET_LIMIT = 5_000
 _DEEP_SEEK_CHUNK_SIZE = 1_024
 _MAX_COLLECTION_ANCHORS_PER_QUERY = 64
 _OMIT_METADATA_VALUE = object()
+GALLERY_WINDOW_COLUMNS = (
+    "id",
+    "rel",
+    "parent_album_path",
+    "dt",
+    "bytes",
+    "mime",
+    "w",
+    "h",
+    "dur",
+    "media_type",
+    "is_favorite",
+    "live_role",
+    "live_partner_rel",
+    "content_id",
+    "frame_rate",
+    "codec",
+    "still_image_time",
+    "original_rel_path",
+    "original_album_id",
+    "original_album_subpath",
+    "aspect_ratio",
+    "location",
+    "gps",
+    "face_status",
+    "thumbnail_state",
+    "thumb_cache_key",
+    "micro_thumbnail",
+)
+GALLERY_WINDOW_SELECT = f"SELECT {', '.join(GALLERY_WINDOW_COLUMNS)}"
 
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
@@ -994,21 +1024,76 @@ class AssetRepository:
             if should_close:
                 conn.close()
 
+    def read_gallery_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a bounded Gallery window using the micro-first tile projection."""
+
+        first = max(0, int(first))
+        limit = max(0, int(limit))
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            if first > _DEEP_OFFSET_LIMIT:
+                sql, params = self._build_deep_collection_window_query(
+                    conn,
+                    query,
+                    first,
+                    limit,
+                    select_clause=GALLERY_WINDOW_SELECT,
+                )
+                rows = [] if sql is None else [
+                    self._db_row_to_dict(row) for row in conn.execute(sql, params)
+                ]
+            else:
+                sql, params = QueryBuilder.build_collection_query(
+                    query,
+                    select_clause=GALLERY_WINDOW_SELECT,
+                    limit=limit,
+                    offset=first,
+                )
+                rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+            total_count, collection_revision = self._collection_count_and_revision(conn, query)
+            return WindowResult(
+                first=first,
+                rows=rows,
+                total_count=total_count,
+                collection_revision=collection_revision,
+            )
+        finally:
+            if should_close:
+                conn.close()
+
     def _build_deep_collection_window_query(
         self,
         conn: sqlite3.Connection,
         query: CollectionQuery,
         first: int,
         limit: int,
+        *,
+        select_clause: str = "SELECT *",
     ) -> tuple[str | None, list[Any]]:
         if first <= 0:
-            return QueryBuilder.build_collection_query(query, limit=limit)
+            return QueryBuilder.build_collection_query(
+                query,
+                select_clause=select_clause,
+                limit=limit,
+            )
 
         cursor = self._cursor_for_collection_offset(conn, query, first)
         if cursor is None and first > 0:
             return None, []
 
-        return QueryBuilder.build_collection_query(query, cursor=cursor, limit=limit)
+        return QueryBuilder.build_collection_query(
+            query,
+            select_clause=select_clause,
+            cursor=cursor,
+            limit=limit,
+        )
 
     def read_thumbnail_backfill_candidates(
         self,

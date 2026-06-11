@@ -29,6 +29,7 @@ class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
 
     _scan_batch_received = QtSignal(object)
+    _window_result_received = QtSignal(object)
     thumbnailBackfillProgress = QtSignal(Path, int, int)
 
     def __init__(
@@ -56,6 +57,10 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._prioritize_timer.setSingleShot(True)
         self._prioritize_timer.setInterval(16)
         self._prioritize_timer.timeout.connect(self._flush_pending_prioritize_rows)
+        self._thumbnail_timer = QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.setInterval(100)
+        self._thumbnail_timer.timeout.connect(self._flush_pending_thumbnail_rows)
         self._scan_batch_timer = QTimer(self)
         self._scan_batch_timer.setSingleShot(True)
         self._scan_batch_timer.setInterval(150)
@@ -64,10 +69,20 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._enqueue_scan_batch_on_ui_thread,
             Qt.ConnectionType.QueuedConnection,
         )
+        self._window_result_received.connect(
+            self._apply_window_result_on_ui_thread,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._store.window_changed.connect(self._on_window_changed)
         self._store.data_changed.connect(self._on_source_changed)
         self._store.row_changed.connect(self._on_row_changed)
+        window_result_ready = getattr(self._store, "window_result_ready", None)
+        if window_result_ready is not None:
+            window_result_ready.connect(self._queue_window_result)
+        enable_async_windows = getattr(self._store, "enable_async_windows", None)
+        if callable(enable_async_windows):
+            enable_async_windows()
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
         self._bind_backfill_completion_signal(self._current_asset_query_service())
 
@@ -243,16 +258,20 @@ class GalleryListModelAdapter(QAbstractListModel):
             )
         if not self._prioritize_timer.isActive():
             self._prioritize_timer.start()
+        self._thumbnail_timer.start()
 
     @Slot()
     def _flush_pending_prioritize_rows(self) -> None:
         pending = self._pending_prioritize_range
         self._pending_prioritize_range = None
-        thumbnail_range = self._pending_thumbnail_range
-        self._pending_thumbnail_range = None
         if pending is None:
             return
         self._store.prioritize_rows(*pending)
+
+    @Slot()
+    def _flush_pending_thumbnail_rows(self) -> None:
+        thumbnail_range = self._pending_thumbnail_range
+        self._pending_thumbnail_range = None
         if thumbnail_range is not None:
             self._request_full_thumbnails(*thumbnail_range)
 
@@ -264,7 +283,24 @@ class GalleryListModelAdapter(QAbstractListModel):
             if isinstance(path, Path):
                 paths.append(path)
         if paths:
+            cancel_pending = getattr(self._thumbnails, "cancel_pending_except", None)
+            if callable(cancel_pending):
+                cancel_pending(set(paths), self._thumb_size)
             self._thumbnails.request_many(paths, self._thumb_size, priority="visible")
+
+    def _queue_window_result(self, result: object) -> None:
+        self._window_result_received.emit(result)
+
+    @Slot(object)
+    def _apply_window_result_on_ui_thread(self, result: object) -> None:
+        if not self._store.apply_window_result(result):
+            return
+        request = getattr(result, "request", None)
+        first = getattr(request, "first", None)
+        last = getattr(request, "last", None)
+        if isinstance(first, int) and isinstance(last, int):
+            self._pending_thumbnail_range = (first, last)
+            self._thumbnail_timer.start()
 
     @Slot(object)
     def handle_scan_batch(self, batch: object) -> None:

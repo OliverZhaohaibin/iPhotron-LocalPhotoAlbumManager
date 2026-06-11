@@ -96,6 +96,14 @@ class AssetRepositoryPort(Protocol):
     ) -> WindowResult:
         """Return a bounded collection window."""
 
+    def read_gallery_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a Gallery-projected collection window with micro thumbnails."""
+
     def read_thumbnail_backfill_candidates(
         self,
         query: CollectionQuery,

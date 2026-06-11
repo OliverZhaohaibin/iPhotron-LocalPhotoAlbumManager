@@ -138,6 +138,13 @@ def test_prioritize_rows_requests_loaded_full_thumbnails(
     adapter.prioritize_rows(10, 12)
     adapter._flush_pending_prioritize_rows()
 
+    mock_thumb_service.request_many.assert_not_called()
+    adapter._flush_pending_thumbnail_rows()
+
+    mock_thumb_service.cancel_pending_except.assert_called_once_with(
+        {Path("/library/first.jpg"), Path("/library/second.jpg")},
+        adapter._thumb_size,
+    )
     mock_thumb_service.request_many.assert_called_once_with(
         [Path("/library/first.jpg"), Path("/library/second.jpg")],
         adapter._thumb_size,
@@ -159,6 +166,13 @@ def test_prioritize_rows_coalesces_window_but_requests_latest_thumbnails(
     adapter._flush_pending_prioritize_rows()
 
     mock_store.prioritize_rows.assert_called_once_with(5, 60)
+    mock_thumb_service.request_many.assert_not_called()
+    adapter._flush_pending_thumbnail_rows()
+
+    mock_thumb_service.cancel_pending_except.assert_called_once_with(
+        {Path("/library/latest.jpg")},
+        adapter._thumb_size,
+    )
     mock_thumb_service.request_many.assert_called_once_with(
         [Path("/library/latest.jpg")],
         adapter._thumb_size,

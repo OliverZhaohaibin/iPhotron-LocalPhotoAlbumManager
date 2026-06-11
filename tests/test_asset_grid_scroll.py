@@ -5,7 +5,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QModelIndex, QSize
 from PySide6.QtGui import QResizeEvent, QStandardItem, QStandardItemModel
@@ -87,14 +87,17 @@ def test_resize_linux_schedules_deferred_update(qapp: QApplication) -> None:
 
     with (
         patch("iPhoto.gui.ui.widgets.asset_grid._IS_LINUX", True),
+        patch.object(grid, "doItemsLayout") as mock_layout,
         patch.object(grid.viewport(), "repaint") as mock_repaint,
         patch.object(grid.viewport(), "update") as mock_update,
     ):
         event = QResizeEvent(QSize(800, 600), QSize(400, 300))
         AssetGrid.resizeEvent(grid, event)
         mock_repaint.assert_not_called()
+        mock_layout.assert_not_called()
         mock_update.assert_not_called()
         qapp.processEvents()
+        mock_layout.assert_called_once_with()
         mock_update.assert_called_once()
 
 
@@ -109,6 +112,22 @@ def test_resize_non_linux_no_forced_repaint(qapp: QApplication) -> None:
         event = QResizeEvent(QSize(800, 600), QSize(400, 300))
         AssetGrid.resizeEvent(grid, event)
         mock_repaint.assert_not_called()
+
+
+def test_visible_rows_update_timer_is_frame_coalesced_without_restart(
+    qapp: QApplication,
+) -> None:
+    grid = _make_grid(qapp)
+    grid._update_timer.stop()
+    grid._update_timer.start = MagicMock()
+    grid._update_timer.isActive = MagicMock(side_effect=[False, True, True])
+
+    grid._schedule_visible_rows_update()
+    grid._schedule_visible_rows_update()
+    grid._schedule_visible_rows_update()
+
+    grid._update_timer.start.assert_called_once_with()
+    assert grid._update_timer.interval() == 16
 
 
 def test_visible_rows_ignores_empty_bottom_right_cell(qapp: QApplication) -> None:

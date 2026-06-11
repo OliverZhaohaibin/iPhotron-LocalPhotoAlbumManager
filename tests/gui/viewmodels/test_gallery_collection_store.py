@@ -277,6 +277,144 @@ def test_async_window_discards_stale_generation_after_large_scroll_jump() -> Non
     store.shutdown()
 
 
+def test_async_visible_window_uses_exact_range_before_warm_prefetch() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(10_000)
+    ]
+    service = _FakeQueryService(assets)
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    results = []
+    ready = threading.Event()
+    store.window_result_ready.connect(lambda result: (results.append(result), ready.set()))
+
+    store.load_selection(Path("."), query=AssetQuery())
+    assert ready.wait(2.0)
+    initial = results.pop()
+    assert initial.request.tier == "visible"
+    assert initial.request.window_first == 0
+    assert initial.request.window_limit == store.INITIAL_VISIBLE_ROWS
+    assert store.apply_window_result(initial) is True
+
+    ready.clear()
+    store.prioritize_rows(7_000, 7_060)
+    assert ready.wait(2.0)
+    visible = results.pop()
+    assert visible.request.tier == "visible"
+    assert visible.request.window_first == 7_000
+    assert visible.request.window_limit == 61
+    assert store.apply_window_result(visible) is True
+
+    ready.clear()
+    store.prefetch_rows(7_000, 7_060)
+    assert ready.wait(2.0)
+    warm = results.pop()
+    assert warm.request.tier == "warm"
+    assert warm.request.window_limit == store.MIN_WINDOW_SIZE
+    assert warm.request.window_first < visible.request.window_first
+    assert store.apply_window_result(warm) is True
+    store.shutdown()
+
+
+def test_async_warm_prefetch_waits_for_visible_rows_to_publish() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(1_000)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    submitted = []
+    store._window_loader.submit = submitted.append  # type: ignore[method-assign]
+    store._total_count = len(assets)
+    store._visible_range = (600, 660)
+
+    store.prefetch_rows(600, 660)
+
+    assert submitted == []
+    store.shutdown()
+
+
+def test_async_cached_viewport_change_invalidates_active_window_generation() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(1_000)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    store._current_query = AssetQuery()
+    store._total_count = len(assets)
+    store._visible_range = (100, 120)
+    store._window_range = (0, 299)
+    store._row_cache = {
+        row: store._scan_row_to_dto(
+            Path("."),
+            f"asset_{row}.jpg",
+            {
+                "id": str(row),
+                "rel": f"asset_{row}.jpg",
+                "media_type": 0,
+                "bytes": 1,
+            },
+        )
+        for row in range(300)
+    }
+    starting_generation = store._request_generation
+    submitted = []
+    store._window_loader.submit = submitted.append  # type: ignore[method-assign]
+
+    store.prioritize_rows(140, 160)
+
+    assert store._request_generation == starting_generation + 1
+    assert submitted == []
+    store.shutdown()
+
+
+def test_async_ensure_row_loaded_preserves_interactive_sync_contract() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(500)
+    ]
+    service = _FakeQueryService(assets)
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    store._current_query = AssetQuery()
+    store._total_count = len(assets)
+
+    assert store.ensure_row_loaded(350) is True
+    assert store.asset_at(350).rel_path == Path("asset_350.jpg")
+    assert service.read_calls[-1] == (350, 1)
+    store.shutdown()
+
+
 def test_load_initial_window_uses_sparse_cache() -> None:
     assets = [
         Asset(

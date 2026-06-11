@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Optional, Protocol
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.domain.models.query import WindowResult
-from iPhoto.infrastructure.services.performance_events import emit_perf_event
+from iPhoto.infrastructure.services.performance_events import emit_perf_event, monotonic_ms
 from iPhoto.gui.viewmodels.asset_dto_converter import (
     geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
 )
@@ -44,6 +44,7 @@ from iPhoto.gui.viewmodels.gallery_window_loader import (
     GalleryWindowLoader,
     GalleryWindowRequest,
     GalleryWindowResult,
+    GalleryWindowTier,
 )
 
 
@@ -299,7 +300,10 @@ class GalleryCollectionStore:
         if row >= self._total_count:
             return False
 
-        self._reload_window_for_visible_range(row, row, emit_signals=emit_signals)
+        if self._async_windows_enabled:
+            self._ensure_row_loaded(row, emit_signals=emit_signals)
+        else:
+            self._reload_window_for_visible_range(row, row, emit_signals=emit_signals)
         return row in self._row_cache
 
     def snapshot_signature(self) -> tuple[int, Optional[tuple[int, int]], int]:
@@ -559,7 +563,10 @@ class GalleryCollectionStore:
         last = max(first, last)
         if self._total_count > 0:
             last = min(last, self._total_count - 1)
+        previous_visible_range = self._visible_range
         self._visible_range = (first, last)
+        if self._async_windows_enabled and previous_visible_range != self._visible_range:
+            self._request_generation += 1
 
         should_refresh = self._pending_scan_refresh and (
             first == 0 or self._window_rel_intersects_pending_scan(first, last)
@@ -570,7 +577,37 @@ class GalleryCollectionStore:
                 last,
                 emit_signals=True,
                 emit_source_changed=should_refresh,
+                tier="visible",
+                increment_generation=not self._async_windows_enabled,
             )
+
+    def prefetch_rows(self, first: int, last: int) -> None:
+        """Load a wider warm window after the latest visible range stabilizes."""
+
+        if (
+            not self._async_windows_enabled
+            or self._direct_mode
+            or self._current_query is None
+            or self._visible_range != (first, last)
+        ):
+            return
+        if any(row not in self._row_cache for row in range(first, last + 1)):
+            return
+        warm_first, warm_limit = self._compute_target_window_unbounded(first, last)
+        warm_last = min(self._total_count - 1, warm_first + warm_limit - 1)
+        if (
+            self._window_range is not None
+            and self._window_range[0] <= warm_first
+            and self._window_range[1] >= warm_last
+        ):
+            return
+        self._reload_window_for_visible_range(
+            first,
+            last,
+            emit_signals=True,
+            tier="warm",
+            increment_generation=False,
+        )
 
     def pin_row(self, row: int) -> None:
         if row < 0 or row >= self._total_count:
@@ -680,13 +717,20 @@ class GalleryCollectionStore:
         *,
         emit_signals: bool,
         emit_source_changed: bool = False,
+        tier: GalleryWindowTier = "visible",
+        increment_generation: bool = True,
     ) -> None:
         if self._current_query is None:
             return
-        request_generation = self._request_generation + 1
-        self._request_generation = request_generation
+        if increment_generation:
+            self._request_generation += 1
+        request_generation = self._request_generation
         if self._async_windows_enabled:
-            window_first, window_limit = self._compute_target_window_unbounded(first, last)
+            if tier == "visible":
+                window_first = max(0, first)
+                window_limit = max(1, last - first + 1)
+            else:
+                window_first, window_limit = self._compute_target_window_unbounded(first, last)
             request = GalleryWindowRequest(
                 generation=request_generation,
                 collection_revision=self._collection_revision,
@@ -694,10 +738,13 @@ class GalleryCollectionStore:
                 last=last,
                 window_first=window_first,
                 window_limit=window_limit,
+                tier=tier,
+                requested_at_ms=monotonic_ms(),
             )
             emit_perf_event(
                 "gallery_window_requested",
                 generation=request_generation,
+                tier=tier,
                 first=first,
                 last=last,
                 window_first=window_first,
@@ -717,7 +764,12 @@ class GalleryCollectionStore:
         )
 
     def _fetch_async_window(self, request: GalleryWindowRequest) -> GalleryWindowResult:
-        fetch_result = self._fetch_window_for_visible_range(request.first, request.last)
+        fetch_result = self._fetch_window_for_visible_range(
+            request.first,
+            request.last,
+            window_first=request.window_first,
+            window_limit=request.window_limit,
+        )
         total_count, window_first, window_last, rows, collection_revision = fetch_result
         return GalleryWindowResult(
             request=request,
@@ -740,6 +792,7 @@ class GalleryCollectionStore:
             emit_perf_event(
                 "gallery_window_stale_discarded",
                 generation=request.generation,
+                tier=request.tier,
                 current_generation=self._request_generation,
                 collection_revision=request.collection_revision,
                 current_collection_revision=self._collection_revision,
@@ -763,9 +816,11 @@ class GalleryCollectionStore:
         emit_perf_event(
             "gallery_window_published",
             generation=request.generation,
+            tier=request.tier,
             first=result.window_first,
             last=result.window_last,
             rows=len(result.rows),
+            request_to_publish_ms=round(monotonic_ms() - request.requested_at_ms, 3),
         )
         return True
 
@@ -871,6 +926,9 @@ class GalleryCollectionStore:
         self,
         first: int,
         last: int,
+        *,
+        window_first: int | None = None,
+        window_limit: int | None = None,
     ) -> tuple[int, int, int, Dict[int, AssetDTO], int]:
         if self._current_query is None:
             return 0, 0, -1, {}, self._collection_revision
@@ -883,7 +941,8 @@ class GalleryCollectionStore:
         if not callable(read_window):
             read_window = getattr(self._asset_query_service, "read_query_asset_window", None)
         if callable(read_window):
-            window_first, window_limit = self._compute_target_window_unbounded(first, last)
+            if window_first is None or window_limit is None:
+                window_first, window_limit = self._compute_target_window_unbounded(first, last)
             raw_window_first = self._pending_adjusted_raw_offset_for_view_offset(
                 self._current_query,
                 window_first,

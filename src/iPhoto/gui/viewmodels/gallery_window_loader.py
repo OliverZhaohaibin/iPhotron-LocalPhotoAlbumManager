@@ -5,9 +5,11 @@ from __future__ import annotations
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 from iPhoto.application.dtos import AssetDTO
+
+GalleryWindowTier = Literal["visible", "warm"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +20,8 @@ class GalleryWindowRequest:
     last: int
     window_first: int
     window_limit: int
+    tier: GalleryWindowTier
+    requested_at_ms: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +49,10 @@ class GalleryWindowLoader:
             max_workers=1,
             thread_name_prefix="iPhotoGalleryWindow",
         )
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._active = False
-        self._pending: GalleryWindowRequest | None = None
+        self._pending_visible: GalleryWindowRequest | None = None
+        self._pending_warm: GalleryWindowRequest | None = None
         self._shutdown = False
 
     def submit(self, request: GalleryWindowRequest) -> None:
@@ -55,7 +60,11 @@ class GalleryWindowLoader:
             if self._shutdown:
                 return
             if self._active:
-                self._pending = request
+                if request.tier == "visible":
+                    self._pending_visible = request
+                    self._pending_warm = None
+                else:
+                    self._pending_warm = request
                 return
             self._active = True
         self._start(request)
@@ -63,7 +72,8 @@ class GalleryWindowLoader:
     def shutdown(self) -> None:
         with self._lock:
             self._shutdown = True
-            self._pending = None
+            self._pending_visible = None
+            self._pending_warm = None
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _start(self, request: GalleryWindowRequest) -> None:
@@ -87,14 +97,16 @@ class GalleryWindowLoader:
                 collection_revision=0,
                 error=type(exc).__name__,
             )
-        self._publish(result)
-
         with self._lock:
             if self._shutdown:
                 self._active = False
                 return
-            pending = self._pending
-            self._pending = None
+            self._publish(result)
+            pending = self._pending_visible or self._pending_warm
+            if self._pending_visible is not None:
+                self._pending_visible = None
+            else:
+                self._pending_warm = None
             if pending is None:
                 self._active = False
                 return

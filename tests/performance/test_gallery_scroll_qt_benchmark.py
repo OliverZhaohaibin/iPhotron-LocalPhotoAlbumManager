@@ -39,6 +39,10 @@ class _Signal:
     def connect(self, handler) -> None:
         self._handlers.append(handler)
 
+    def emit(self, *args) -> None:
+        for handler in list(self._handlers):
+            handler(*args)
+
 
 class _SyntheticStore:
     def __init__(self, row_count: int, violations: dict[str, int]) -> None:
@@ -52,6 +56,8 @@ class _SyntheticStore:
         self._micro = QImage(16, 16, QImage.Format.Format_RGB32)
         self._micro.fill(Qt.GlobalColor.darkGray)
         self.prioritize_calls = 0
+        self.visible_publishes: list[tuple[float, int, int]] = []
+        self.warm_requests: list[tuple[float, int, int]] = []
 
     def count(self) -> int:
         return self._row_count
@@ -59,10 +65,12 @@ class _SyntheticStore:
     def asset_at(self, row: int) -> AssetDTO | None:
         if row < 0 or row >= self._row_count:
             return None
-        dto = self._cache.get(row)
-        if dto is None:
+        return self._cache.get(row)
+
+    def _publish_micro(self, first: int, last: int) -> None:
+        for row in range(first, last + 1):
             path = Path(f"/synthetic/photo-{row:07d}.jpg")
-            dto = AssetDTO(
+            self._cache[row] = AssetDTO(
                 id=f"asset-{row:07d}",
                 abs_path=path,
                 rel_path=Path(path.name),
@@ -76,8 +84,6 @@ class _SyntheticStore:
                 is_favorite=False,
                 micro_thumbnail=self._micro,
             )
-            self._cache[row] = dto
-        return dto
 
     def ensure_row_loaded(self, row: int, *, emit_signals: bool = True) -> bool:
         del row, emit_signals
@@ -85,8 +91,13 @@ class _SyntheticStore:
         return False
 
     def prioritize_rows(self, first: int, last: int) -> None:
-        del first, last
         self.prioritize_calls += 1
+        self._publish_micro(first, last)
+        self.visible_publishes.append((time.perf_counter(), first, last))
+        self.window_changed.emit(first, last)
+
+    def prefetch_rows(self, first: int, last: int) -> None:
+        self.warm_requests.append((time.perf_counter(), first, last))
 
 
 class _MemoryOnlyThumbnails:
@@ -197,8 +208,10 @@ def _write_report(report: dict[str, Any], row_count: int) -> tuple[Path, Path]:
                 "paint_p95_ms",
                 "frame_interval_p95_ms",
                 "input_catchup_ms",
+                "final_micro_publish_ms",
                 "micro_or_full_ratio",
                 "placeholder_ratio",
+                "visible_before_warm",
                 "final_scrollbar_value",
                 "ensure_row_loaded_violations",
                 "get_thumbnail_violations",
@@ -311,6 +324,26 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         and not asset.micro_thumbnail.isNull()
     )
     placeholder_count = visual_count - micro_count
+    final_micro_publish_ms = next(
+        (
+            max(0.0, (published_at - queued_at) * 1000.0)
+            for published_at, first, last in store.visible_publishes
+            if published_at >= queued_at
+            and view._visible_range is not None
+            and first <= view._visible_range[0]
+            and last >= view._visible_range[1]
+        ),
+        -1.0,
+    )
+    visible_before_warm = bool(store.warm_requests) and all(
+        any(
+            published_at <= warm_at
+            and published_first <= warm_first
+            and published_last >= warm_last
+            for published_at, published_first, published_last in store.visible_publishes
+        )
+        for warm_at, warm_first, warm_last in store.warm_requests
+    )
 
     paint_starts = metrics["paint_started_at"]
     frame_intervals = [
@@ -343,6 +376,8 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
             * 1000.0,
             3,
         ),
+        "final_micro_publish_ms": round(final_micro_publish_ms, 3),
+        "visible_before_warm": visible_before_warm,
         "visual_coverage": {
             "visible_rows": visual_count,
             "micro_or_full_ratio": round(micro_count / visual_count, 4)
@@ -367,8 +402,10 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         "paint_p95_ms": report["paint"]["p95_ms"],
         "frame_interval_p95_ms": report["frame_interval"]["p95_ms"],
         "input_catchup_ms": report["input_catchup_ms"],
+        "final_micro_publish_ms": report["final_micro_publish_ms"],
         "micro_or_full_ratio": report["visual_coverage"]["micro_or_full_ratio"],
         "placeholder_ratio": report["visual_coverage"]["placeholder_ratio"],
+        "visible_before_warm": report["visible_before_warm"],
         "final_scrollbar_value": report["final_scrollbar_value"],
         "ensure_row_loaded_violations": violations["ensure_row_loaded"],
         "get_thumbnail_violations": violations["get_thumbnail"],
@@ -384,6 +421,8 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
     assert thumbnails.requested_paths > 0
     assert report["visual_coverage"]["micro_or_full_ratio"] == 1.0
     assert report["visual_coverage"]["placeholder_ratio"] == 0.0
+    assert 0.0 <= report["final_micro_publish_ms"] <= 100.0
+    assert report["visible_before_warm"] is True
     assert not any(violations.values()), f"Protected-path violations: {violations}"
     assert json_path.exists()
     assert csv_path.exists()

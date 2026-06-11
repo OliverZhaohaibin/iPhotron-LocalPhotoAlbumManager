@@ -152,7 +152,7 @@ def test_prioritize_rows_requests_loaded_full_thumbnails(
     )
 
 
-def test_prioritize_rows_coalesces_window_but_requests_latest_thumbnails(
+def test_prioritize_rows_keeps_latest_window_and_requests_latest_thumbnails(
     adapter,
     mock_store,
     mock_thumb_service,
@@ -165,7 +165,7 @@ def test_prioritize_rows_coalesces_window_but_requests_latest_thumbnails(
     adapter.prioritize_rows(5, 15)
     adapter._flush_pending_prioritize_rows()
 
-    mock_store.prioritize_rows.assert_called_once_with(5, 60)
+    mock_store.prioritize_rows.assert_called_once_with(5, 15)
     mock_thumb_service.request_many.assert_not_called()
     adapter._flush_pending_thumbnail_rows()
 
@@ -178,6 +178,36 @@ def test_prioritize_rows_coalesces_window_but_requests_latest_thumbnails(
         adapter._thumb_size,
         priority="visible",
     )
+    mock_store.prefetch_rows.assert_called_once_with(5, 15)
+
+
+def test_visible_window_result_restarts_stable_warm_timer(
+    adapter,
+    mock_store,
+):
+    request = SimpleNamespace(first=10, last=20, tier="visible")
+    result = SimpleNamespace(request=request)
+    mock_store.apply_window_result.return_value = True
+
+    adapter._apply_window_result_on_ui_thread(result)
+
+    assert adapter._pending_thumbnail_range == (10, 20)
+    assert adapter._thumbnail_timer.isActive()
+
+
+def test_warm_window_result_does_not_restart_stable_timer(
+    adapter,
+    mock_store,
+):
+    request = SimpleNamespace(first=10, last=20, tier="warm")
+    result = SimpleNamespace(request=request)
+    mock_store.apply_window_result.return_value = True
+    adapter._thumbnail_timer.stop()
+
+    adapter._apply_window_result_on_ui_thread(result)
+
+    assert adapter._pending_thumbnail_range is None
+    assert not adapter._thumbnail_timer.isActive()
 
 
 def test_scan_batches_are_coalesced_before_store_flush(adapter, mock_store):

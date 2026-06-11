@@ -43,12 +43,13 @@ class AssetGrid(QListView):
         self._suppress_next_preview_leave = False
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
-        self._update_timer.setInterval(100)
+        self._update_timer.setInterval(16)
         self._update_timer.timeout.connect(self._emit_visible_rows)
         self._viewport_update_timer = QTimer(self)
         self._viewport_update_timer.setSingleShot(True)
         self._viewport_update_timer.setInterval(0)
         self._viewport_update_timer.timeout.connect(self._flush_viewport_update)
+        self._viewport_layout_pending = False
         self._visible_range: Optional[tuple[int, int]] = None
         self._model = None
         self._external_drop_enabled = False
@@ -161,6 +162,7 @@ class AssetGrid(QListView):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         if _IS_LINUX:
+            self._viewport_layout_pending = True
             self._schedule_viewport_update()
         self._schedule_visible_rows_update()
 
@@ -271,7 +273,8 @@ class AssetGrid(QListView):
         return bool(buttons & Qt.MouseButton.LeftButton)
 
     def _schedule_visible_rows_update(self) -> None:
-        self._update_timer.start()
+        if not self._update_timer.isActive():
+            self._update_timer.start()
 
     def _reset_visible_rows_update(self) -> None:
         self._visible_range = None
@@ -282,6 +285,9 @@ class AssetGrid(QListView):
             self._viewport_update_timer.start()
 
     def _flush_viewport_update(self) -> None:
+        if self._viewport_layout_pending:
+            self._viewport_layout_pending = False
+            self.doItemsLayout()
         self.viewport().update()
 
     def _viewport_pos(self, event: QMouseEvent) -> QPoint:

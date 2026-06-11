@@ -248,14 +248,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         first = max(0, int(first))
         last = max(first, int(last))
         self._pending_thumbnail_range = (first, last)
-        if self._pending_prioritize_range is None:
-            self._pending_prioritize_range = (first, last)
-        else:
-            pending_first, pending_last = self._pending_prioritize_range
-            self._pending_prioritize_range = (
-                min(pending_first, first),
-                max(pending_last, last),
-            )
+        self._pending_prioritize_range = (first, last)
         if not self._prioritize_timer.isActive():
             self._prioritize_timer.start()
         self._thumbnail_timer.start()
@@ -273,6 +266,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         thumbnail_range = self._pending_thumbnail_range
         self._pending_thumbnail_range = None
         if thumbnail_range is not None:
+            prefetch_rows = getattr(self._store, "prefetch_rows", None)
+            if callable(prefetch_rows):
+                prefetch_rows(*thumbnail_range)
             self._request_full_thumbnails(*thumbnail_range)
 
     def _request_full_thumbnails(self, first: int, last: int) -> None:
@@ -298,7 +294,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         request = getattr(result, "request", None)
         first = getattr(request, "first", None)
         last = getattr(request, "last", None)
-        if isinstance(first, int) and isinstance(last, int):
+        tier = getattr(request, "tier", None)
+        if tier == "visible" and isinstance(first, int) and isinstance(last, int):
             self._pending_thumbnail_range = (first, last)
             self._thumbnail_timer.start()
 

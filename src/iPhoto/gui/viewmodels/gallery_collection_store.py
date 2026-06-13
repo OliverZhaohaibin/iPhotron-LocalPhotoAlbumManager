@@ -107,6 +107,11 @@ class GalleryCollectionStore:
     MIN_WINDOW_SIZE = 300
     MAX_WINDOW_SIZE = 2000
     WINDOW_MULTIPLIER = 4
+    MICRO_WARM_MIN_ROWS = 160
+    MICRO_WARM_MAX_ROWS = 400
+    MICRO_WARM_MULTIPLIER = 4
+    MICRO_WARM_FORWARD_RATIO = 0.75
+    MAX_MICRO_CACHE_ROWS = 2000
     LOOKBEHIND_SCREENS = 1
     LOOKAHEAD_SCREENS = 2
     HYSTERESIS_RATIO = 0.25
@@ -146,8 +151,11 @@ class GalleryCollectionStore:
         self._thumbnail_backfill_windows: set[tuple[int, int]] = set()
         self._thumbnail_backfill_pending = False
         self._direct_mode = False
-        self._collection_revision = 0
+        self._source_revision = 0
+        self._model_revision = 0
+        self._selection_generation = 0
         self._request_generation = 0
+        self._scroll_direction = 0
         self._async_windows_enabled = False
         self._window_loader = GalleryWindowLoader(
             self._fetch_async_window,
@@ -313,7 +321,10 @@ class GalleryCollectionStore:
         return row in self._row_cache
 
     def snapshot_signature(self) -> tuple[int, Optional[tuple[int, int]], int]:
-        return (self._total_count, self._window_range, self._collection_revision)
+        return (self._total_count, self._window_range, self._model_revision)
+
+    def visible_range(self) -> Optional[tuple[int, int]]:
+        return self._visible_range
 
     def live_partner_for(self, asset_id: str, root: Optional[Path] = None) -> Optional[AssetDTO]:
         find_live_partner = getattr(self._asset_query_service, "find_live_partner", None)
@@ -625,20 +636,41 @@ class GalleryCollectionStore:
             last = min(last, self._total_count - 1)
         previous_visible_range = self._visible_range
         self._visible_range = (first, last)
-        if self._async_windows_enabled and previous_visible_range != self._visible_range:
-            self._request_generation += 1
+        if previous_visible_range is not None:
+            previous_center = (previous_visible_range[0] + previous_visible_range[1]) / 2
+            current_center = (first + last) / 2
+            self._scroll_direction = (current_center > previous_center) - (
+                current_center < previous_center
+            )
 
         should_refresh = self._pending_scan_refresh and (
             first == 0 or self._window_rel_intersects_pending_scan(first, last)
         )
-        if should_refresh or self._window_needs_reload(first, last):
+        needs_reload = self._window_needs_reload(first, last)
+        visible_rows_cached = all(
+            row == self._pinned_row or row in self._row_cache
+            for row in range(first, last + 1)
+        )
+        if (
+            needs_reload
+            and not should_refresh
+            and self._async_windows_enabled
+            and visible_rows_cached
+        ):
+            self._reload_window_for_visible_range(
+                first,
+                last,
+                emit_signals=True,
+                tier="warm",
+                increment_generation=False,
+            )
+        elif should_refresh or needs_reload:
             self._reload_window_for_visible_range(
                 first,
                 last,
                 emit_signals=True,
                 emit_source_changed=should_refresh,
                 tier="visible",
-                increment_generation=not self._async_windows_enabled,
             )
 
     def prefetch_rows(self, first: int, last: int) -> None:
@@ -653,7 +685,7 @@ class GalleryCollectionStore:
             return
         if any(row not in self._row_cache for row in range(first, last + 1)):
             return
-        warm_first, warm_limit = self._compute_target_window_unbounded(first, last)
+        warm_first, warm_limit = self._compute_micro_warm_window(first, last)
         warm_last = min(self._total_count - 1, warm_first + warm_limit - 1)
         if (
             self._window_range is not None
@@ -710,7 +742,8 @@ class GalleryCollectionStore:
         is_thumbnail_backfill = job_id.startswith("thumbnail-backfill:")
         revision = getattr(batch, "collection_revision", None)
         if isinstance(revision, int):
-            self._collection_revision = max(self._collection_revision, revision)
+            self._source_revision = max(self._source_revision, revision)
+            self._model_revision = max(self._model_revision + 1, self._source_revision)
         if is_thumbnail_backfill:
             self._thumbnail_backfill_windows.clear()
             self._thumbnail_backfill_pending = False
@@ -790,16 +823,17 @@ class GalleryCollectionStore:
                 window_first = max(0, first)
                 window_limit = max(1, last - first + 1)
             else:
-                window_first, window_limit = self._compute_target_window_unbounded(first, last)
+                window_first, window_limit = self._compute_micro_warm_window(first, last)
             request = GalleryWindowRequest(
                 generation=request_generation,
-                collection_revision=self._collection_revision,
+                collection_revision=self._source_revision,
                 first=first,
                 last=last,
                 window_first=window_first,
                 window_limit=window_limit,
                 tier=tier,
                 requested_at_ms=monotonic_ms(),
+                selection_generation=self._selection_generation,
             )
             emit_perf_event(
                 "gallery_window_requested",
@@ -845,9 +879,26 @@ class GalleryCollectionStore:
         """Publish a worker result if it still belongs to the latest viewport."""
 
         request = result.request
+        current_visible = self._visible_range
+        warm_is_relevant = (
+            request.tier == "warm"
+            and current_visible is not None
+            and result.window_first <= current_visible[1] + 1
+            and result.window_last >= current_visible[0] - 1
+        )
+        visible_matches_current = (
+            request.tier != "visible"
+            or current_visible == (request.first, request.last)
+        )
         request_is_current = (
-            request.generation == self._request_generation
-            and request.collection_revision == self._collection_revision
+            request.selection_generation == self._selection_generation
+            and request.collection_revision == self._source_revision
+            and visible_matches_current
+            and (request.tier != "warm" or warm_is_relevant)
+            and (
+                request.generation == self._request_generation
+                or warm_is_relevant
+            )
         )
         if result.error is not None or not request_is_current:
             emit_perf_event(
@@ -856,7 +907,7 @@ class GalleryCollectionStore:
                 tier=request.tier,
                 current_generation=self._request_generation,
                 collection_revision=request.collection_revision,
-                current_collection_revision=self._collection_revision,
+                current_collection_revision=self._source_revision,
                 error=result.error,
             )
             if (
@@ -881,6 +932,9 @@ class GalleryCollectionStore:
                 )
                 self._window_loader.submit(retry)
             return False
+        apply_first, apply_last = request.first, request.last
+        if request.tier == "warm" and current_visible is not None:
+            apply_first, apply_last = current_visible
         self._apply_window_fetch_result(
             (
                 result.total_count,
@@ -889,11 +943,14 @@ class GalleryCollectionStore:
                 dict(result.rows),
                 result.collection_revision,
             ),
-            request.first,
-            request.last,
-            request_generation=request.generation,
+            apply_first,
+            apply_last,
+            request_generation=(
+                self._request_generation if warm_is_relevant else request.generation
+            ),
             emit_signals=True,
             emit_source_changed=False,
+            tier=request.tier,
         )
         emit_perf_event(
             "gallery_window_published",
@@ -915,6 +972,7 @@ class GalleryCollectionStore:
         request_generation: int,
         emit_signals: bool,
         emit_source_changed: bool,
+        tier: GalleryWindowTier = "visible",
     ) -> None:
         new_total = fetch_result[0]
         if new_total <= 0:
@@ -944,7 +1002,21 @@ class GalleryCollectionStore:
 
         old_total = self._total_count
         previous_cache = self._row_cache
-        new_cache = dict(fetched_rows)
+        previous_window = self._window_range
+        incoming_first = window_first
+        incoming_last = window_last
+        windows_touch = (
+            previous_window is not None
+            and incoming_first <= previous_window[1] + 1
+            and incoming_last >= previous_window[0] - 1
+        )
+        if windows_touch and not emit_source_changed and old_total == new_total:
+            new_cache = dict(previous_cache)
+            new_cache.update(fetched_rows)
+            window_first = min(previous_window[0], incoming_first)
+            window_last = max(previous_window[1], incoming_last)
+        else:
+            new_cache = dict(fetched_rows)
         pending_insertions = (
             self._pending_insertions_for_query(self._current_query, new_cache.values())
             if self._current_query is not None
@@ -961,6 +1033,13 @@ class GalleryCollectionStore:
             if pinned_dto is not None:
                 new_cache[pinned_row] = pinned_dto
 
+        new_cache = self._trim_micro_cache(new_cache, first, last)
+        cached_rows = [row for row in new_cache if row != pinned_row]
+        if cached_rows:
+            window_first = min(cached_rows)
+            window_last = max(cached_rows)
+        else:
+            window_first, window_last = incoming_first, incoming_last
         self._row_cache = new_cache
         self._total_count = new_total
         self._window_range = (window_first, window_last)
@@ -968,7 +1047,8 @@ class GalleryCollectionStore:
         self._pending_scan_refresh = False
         self._pending_scan_rels.clear()
         self._pending_scan_sort_keys.clear()
-        self._collection_revision = max(self._collection_revision + 1, collection_revision)
+        self._source_revision = max(self._source_revision, collection_revision)
+        self._model_revision = max(self._model_revision + 1, self._source_revision)
 
         if emit_signals:
             if old_total != new_total:
@@ -976,7 +1056,12 @@ class GalleryCollectionStore:
                 emit_source_changed = True
             if emit_source_changed:
                 self.data_changed.emit()
-            self.window_changed.emit(window_first, window_last)
+            changed_first, changed_last = window_first, window_last
+            if tier == "warm":
+                changed_first = max(first, incoming_first)
+                changed_last = min(last, incoming_last)
+            if changed_first <= changed_last:
+                self.window_changed.emit(changed_first, changed_last)
             if pinned_row is not None and pinned_row not in fetched_rows and pinned_row in self._row_cache:
                 self.window_changed.emit(pinned_row, pinned_row)
 
@@ -1014,11 +1099,11 @@ class GalleryCollectionStore:
         raise_errors: bool = False,
     ) -> tuple[int, int, int, Dict[int, GalleryAssetDTO], int]:
         if self._current_query is None:
-            return 0, 0, -1, {}, self._collection_revision
+            return 0, 0, -1, {}, self._source_revision
 
         active_root = self._active_root or self._library_root
         if active_root is None or self._asset_query_service is None:
-            return 0, 0, -1, {}, self._collection_revision
+            return 0, 0, -1, {}, self._source_revision
 
         read_window = getattr(self._asset_query_service, "read_query_gallery_window", None)
         if not callable(read_window):
@@ -1046,7 +1131,7 @@ class GalleryCollectionStore:
                 )
                 if raise_errors:
                     raise
-                return self._total_count, window_first, window_first + max(0, window_limit) - 1, {}, self._collection_revision
+                return self._total_count, window_first, window_first + max(0, window_limit) - 1, {}, self._source_revision
             pending_source_count = self._pending_source_count_for_query(
                 self._current_query
             )
@@ -1085,7 +1170,7 @@ class GalleryCollectionStore:
             (),
         )
         if new_total <= 0:
-            return 0, 0, -1, {}, self._collection_revision
+            return 0, 0, -1, {}, self._source_revision
         bounded_first = max(0, min(first, new_total - 1))
         bounded_last = max(bounded_first, min(last, new_total - 1))
         window_first, window_last = self._compute_target_window(
@@ -1098,8 +1183,58 @@ class GalleryCollectionStore:
             window_first,
             window_last,
             self._fetch_rows(window_first, window_last, raise_errors=raise_errors),
-            self._collection_revision + 1,
+            self._source_revision,
         )
+
+    def _compute_micro_warm_window(self, first: int, last: int) -> tuple[int, int]:
+        first = max(0, first)
+        last = max(first, last)
+        visible_count = max(1, last - first + 1)
+        target_size = min(
+            self.MICRO_WARM_MAX_ROWS,
+            max(self.MICRO_WARM_MIN_ROWS, visible_count * self.MICRO_WARM_MULTIPLIER),
+        )
+        surrounding = max(0, target_size - visible_count)
+        forward = int(surrounding * self.MICRO_WARM_FORWARD_RATIO)
+        backward = surrounding - forward
+        if self._scroll_direction < 0:
+            lookbehind = forward
+        elif self._scroll_direction > 0:
+            lookbehind = backward
+        else:
+            lookbehind = surrounding // 2
+        window_first = max(0, first - lookbehind)
+        if self._total_count > 0 and window_first + target_size > self._total_count:
+            window_first = max(0, self._total_count - target_size)
+        return window_first, target_size
+
+    def _trim_micro_cache(
+        self,
+        cache: Dict[int, GalleryAssetDTO],
+        first: int,
+        last: int,
+    ) -> Dict[int, GalleryAssetDTO]:
+        pinned_row = self._pinned_row if self._pinned_row in cache else None
+        cache_budget = self.MAX_MICRO_CACHE_ROWS - (1 if pinned_row is not None else 0)
+        cache_without_pinned = {
+            row: dto for row, dto in cache.items() if row != pinned_row
+        }
+        if len(cache_without_pinned) <= cache_budget:
+            return cache
+        center = (first + last) / 2
+        keep_rows = {
+            row
+            for row in sorted(
+                cache_without_pinned,
+                key=lambda row: (
+                    0 if first <= row <= last else 1,
+                    abs(row - center),
+                ),
+            )[:cache_budget]
+        }
+        if pinned_row is not None:
+            keep_rows.add(pinned_row)
+        return {row: dto for row, dto in cache.items() if row in keep_rows}
 
     def _compute_target_window_unbounded(self, first: int, last: int) -> tuple[int, int]:
         first = max(0, first)
@@ -1156,8 +1291,12 @@ class GalleryCollectionStore:
 
         window_size = max(1, window_last - window_first + 1)
         margin = max(1, int(window_size * self.HYSTERESIS_RATIO))
-        safe_first = window_first + margin
-        safe_last = window_last - margin
+        safe_first = window_first if window_first == 0 else window_first + margin
+        safe_last = (
+            window_last
+            if window_last >= self._total_count - 1
+            else window_last - margin
+        )
         if first < safe_first or last > safe_last:
             return True
 
@@ -1695,5 +1834,8 @@ class GalleryCollectionStore:
         self._pending_scan_sort_keys.clear()
         self._thumbnail_backfill_windows.clear()
         self._thumbnail_backfill_pending = False
-        self._collection_revision += 1
+        self._source_revision = 0
+        self._model_revision += 1
+        self._selection_generation += 1
         self._request_generation += 1
+        self._scroll_direction = 0

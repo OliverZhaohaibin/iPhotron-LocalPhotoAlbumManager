@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 import threading
+import time
 
 from PySide6.QtGui import QImage
 from PIL import Image
@@ -15,6 +16,10 @@ from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.application.dtos import GalleryTileDTO
 from iPhoto.gui.viewmodels.asset_dto_converter import gallery_row_to_tile, scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
+from iPhoto.gui.viewmodels.gallery_window_loader import (
+    GalleryWindowRequest,
+    GalleryWindowResult,
+)
 from iPhoto.library.runtime_controller import GeotaggedAsset
 
 
@@ -163,6 +168,26 @@ class _FailingOnceQueryService(_FakeQueryService):
             self.failed = True
             raise RuntimeError("transient deep window failure")
         return super().read_query_asset_window(root, query, first, limit)
+
+
+class _DelayedQueryService(_FakeQueryService):
+    def __init__(self, assets, *, delay_seconds: float):
+        super().__init__(assets)
+        self.delay_seconds = delay_seconds
+
+    def read_query_asset_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ):
+        time.sleep(self.delay_seconds)
+        window = super().read_query_asset_window(root, query, first, limit)
+        micro = _jpeg_bytes()
+        for row in window.rows:
+            row["micro_thumbnail"] = micro
+        return window
 
 
 def _jpeg_bytes() -> bytes:
@@ -435,7 +460,7 @@ def test_async_visible_window_uses_exact_range_before_warm_prefetch() -> None:
     assert ready.wait(2.0)
     warm = results.pop()
     assert warm.request.tier == "warm"
-    assert warm.request.window_limit == store.MIN_WINDOW_SIZE
+    assert store.MICRO_WARM_MIN_ROWS <= warm.request.window_limit <= store.MICRO_WARM_MAX_ROWS
     assert warm.request.window_first < visible.request.window_first
     assert store.apply_window_result(warm) is True
     store.shutdown()
@@ -466,7 +491,7 @@ def test_async_warm_prefetch_waits_for_visible_rows_to_publish() -> None:
     store.shutdown()
 
 
-def test_async_cached_viewport_change_invalidates_active_window_generation() -> None:
+def test_async_cached_viewport_change_keeps_active_window_generation() -> None:
     assets = [
         Asset(
             id=str(index),
@@ -503,9 +528,216 @@ def test_async_cached_viewport_change_invalidates_active_window_generation() -> 
 
     store.prioritize_rows(140, 160)
 
-    assert store._request_generation == starting_generation + 1
+    assert store._request_generation == starting_generation
     assert submitted == []
     store.shutdown()
+
+
+def test_micro_warm_window_is_small_and_directional() -> None:
+    store = GalleryCollectionStore(None, library_root=Path("."))
+    store._total_count = 10_000
+    store._scroll_direction = 1
+
+    window_first, window_limit = store._compute_micro_warm_window(5_000, 5_060)
+
+    assert store.MICRO_WARM_MIN_ROWS <= window_limit <= store.MICRO_WARM_MAX_ROWS
+    lookbehind = 5_000 - window_first
+    lookahead = window_limit - 61 - lookbehind
+    assert lookahead > lookbehind
+
+    store._scroll_direction = -1
+    upward_first, upward_limit = store._compute_micro_warm_window(5_000, 5_060)
+
+    assert upward_limit == window_limit
+    assert 5_000 - upward_first > lookbehind
+
+
+def test_warm_micro_cache_is_available_during_continuous_scroll() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(10_000)
+    ]
+    service = _FakeQueryService(assets)
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    results = []
+    ready = threading.Event()
+    store.window_result_ready.connect(lambda result: (results.append(result), ready.set()))
+
+    store.load_selection(Path("."), query=AssetQuery())
+    assert ready.wait(2.0)
+    assert store.apply_window_result(results.pop()) is True
+
+    ready.clear()
+    store.prioritize_rows(5_000, 5_060)
+    assert ready.wait(2.0)
+    assert store.apply_window_result(results.pop()) is True
+
+    ready.clear()
+    store.prefetch_rows(5_000, 5_060)
+    assert ready.wait(2.0)
+    assert store.apply_window_result(results.pop()) is True
+
+    store.prioritize_rows(5_100, 5_160)
+
+    assert all(store.asset_at(row) is not None for row in range(5_100, 5_161))
+    store.shutdown()
+
+
+def test_delayed_async_warm_window_prevents_placeholder_on_continuous_scroll() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(10_000)
+    ]
+    service = _DelayedQueryService(assets, delay_seconds=0.01)
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.enable_async_windows()
+    results = []
+    ready = threading.Event()
+    store.window_result_ready.connect(lambda result: (results.append(result), ready.set()))
+
+    store.load_selection(Path("."), query=AssetQuery())
+    assert ready.wait(2.0)
+    assert store.apply_window_result(results.pop()) is True
+
+    ready.clear()
+    store.prioritize_rows(5_000, 5_060)
+    assert ready.wait(2.0)
+    assert store.apply_window_result(results.pop()) is True
+
+    ready.clear()
+    store.prefetch_rows(5_000, 5_060)
+    assert ready.wait(2.0)
+    assert store.apply_window_result(results.pop()) is True
+
+    store.prioritize_rows(5_100, 5_160)
+
+    visible_assets = [store.asset_at(row) for row in range(5_100, 5_161)]
+    assert all(asset is not None for asset in visible_assets)
+    assert all(
+        isinstance(asset.micro_thumbnail, QImage) and not asset.micro_thumbnail.isNull()
+        for asset in visible_assets
+        if asset is not None
+    )
+    store.shutdown()
+
+
+def test_large_visible_jump_replaces_disjoint_micro_cache() -> None:
+    store = GalleryCollectionStore(None, library_root=Path("."))
+    store._total_count = 10_000
+    store._current_query = AssetQuery()
+    store._window_range = (0, 299)
+    store._row_cache = {
+        row: gallery_row_to_tile(
+            Path("."),
+            f"asset_{row}.jpg",
+            {"id": str(row), "rel": f"asset_{row}.jpg", "media_type": 0},
+        )
+        for row in range(300)
+    }
+    fetched = {
+        row: gallery_row_to_tile(
+            Path("."),
+            f"asset_{row}.jpg",
+            {"id": str(row), "rel": f"asset_{row}.jpg", "media_type": 0},
+        )
+        for row in range(7_000, 7_061)
+    }
+
+    store._apply_window_fetch_result(
+        (10_000, 7_000, 7_060, fetched, 0),
+        7_000,
+        7_060,
+        request_generation=store._request_generation,
+        emit_signals=False,
+        emit_source_changed=False,
+    )
+
+    assert store.asset_at(0) is None
+    assert store.asset_at(7_000) is not None
+
+
+def test_micro_cache_never_exceeds_budget() -> None:
+    store = GalleryCollectionStore(None, library_root=Path("."))
+    cache = {
+        row: gallery_row_to_tile(
+            Path("."),
+            f"asset_{row}.jpg",
+            {"id": str(row), "rel": f"asset_{row}.jpg", "media_type": 0},
+        )
+        for row in range(store.MAX_MICRO_CACHE_ROWS + 500)
+    }
+
+    trimmed = store._trim_micro_cache(cache, 1_000, 1_060)
+
+    assert len(trimmed) == store.MAX_MICRO_CACHE_ROWS
+    assert all(row in trimmed for row in range(1_000, 1_061))
+
+
+def test_source_revision_stays_stable_while_model_revision_advances() -> None:
+    assets = [
+        Asset(
+            id=str(index),
+            album_id="a",
+            path=Path(f"asset_{index}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for index in range(600)
+    ]
+    store = GalleryCollectionStore(_FakeQueryService(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(Path("."), query=AssetQuery())
+    source_revision = store._source_revision
+    model_revision = store.snapshot_signature()[2]
+
+    store.prioritize_rows(400, 420)
+
+    assert source_revision == 42
+    assert store._source_revision == source_revision
+    assert store.snapshot_signature()[2] > model_revision
+
+
+def test_warm_result_must_remain_adjacent_to_current_viewport() -> None:
+    store = GalleryCollectionStore(None, library_root=Path("."))
+    store._total_count = 10_000
+    store._visible_range = (5_000, 5_060)
+    request = GalleryWindowRequest(
+        generation=store._request_generation,
+        collection_revision=store._source_revision,
+        first=100,
+        last=160,
+        window_first=50,
+        window_limit=200,
+        tier="warm",
+        requested_at_ms=0.0,
+        selection_generation=store._selection_generation,
+    )
+    result = GalleryWindowResult(
+        request=request,
+        total_count=10_000,
+        window_first=50,
+        window_last=249,
+        rows=(),
+        collection_revision=store._source_revision,
+    )
+
+    assert store.apply_window_result(result) is False
 
 
 def test_async_ensure_row_loaded_preserves_interactive_sync_contract() -> None:

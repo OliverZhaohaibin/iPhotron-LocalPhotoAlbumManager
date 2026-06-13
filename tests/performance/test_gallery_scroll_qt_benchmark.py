@@ -9,6 +9,7 @@ import platform
 import statistics
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -49,6 +50,7 @@ class _SyntheticStore:
         self.data_changed = _Signal()
         self.window_changed = _Signal()
         self.row_changed = _Signal()
+        self.window_result_ready = _Signal()
         self.thumbnail_backfill_scheduled = _Signal()
         self._row_count = row_count
         self._violations = violations
@@ -95,6 +97,12 @@ class _SyntheticStore:
         self._publish_micro(first, last)
         self.visible_publishes.append((time.perf_counter(), first, last))
         self.window_changed.emit(first, last)
+        self.window_result_ready.emit(
+            SimpleNamespace(request=SimpleNamespace(first=first, last=last, tier="visible"))
+        )
+
+    def apply_window_result(self, _result) -> bool:
+        return True
 
     def prefetch_rows(self, first: int, last: int) -> None:
         self.warm_requests.append((time.perf_counter(), first, last))
@@ -106,6 +114,7 @@ class _MemoryOnlyThumbnails:
         self._violations = violations
         self.peek_calls = 0
         self.requested_paths = 0
+        self.request_batches: list[tuple[float, str, bool, tuple[Path, ...]]] = []
 
     def peek(self, path: Path, size) -> None:
         del path, size
@@ -117,10 +126,20 @@ class _MemoryOnlyThumbnails:
         self._violations["get_thumbnail"] += 1
         return None
 
-    def request_many(self, paths, size, *, priority: str = "normal") -> int:
-        del size, priority
-        requested = len(list(paths))
+    def request_many(
+        self,
+        paths,
+        size,
+        *,
+        priority: str = "normal",
+        allow_generate: bool = True,
+        speculative: bool = False,
+    ) -> int:
+        del size, speculative
+        batch = tuple(paths)
+        requested = len(batch)
         self.requested_paths += requested
+        self.request_batches.append((time.perf_counter(), priority, allow_generate, batch))
         return requested
 
 
@@ -209,6 +228,7 @@ def _write_report(report: dict[str, Any], row_count: int) -> tuple[Path, Path]:
                 "frame_interval_p95_ms",
                 "input_catchup_ms",
                 "final_micro_publish_ms",
+                "final_full_request_ms",
                 "micro_or_full_ratio",
                 "placeholder_ratio",
                 "visible_before_warm",
@@ -238,6 +258,7 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         "paint_ms": [],
         "paint_started_at": [],
         "scrollbar_changes": [],
+        "viewport_changes": [],
     }
     store = _SyntheticStore(row_count, violations)
     thumbnails = _MemoryOnlyThumbnails(violations)
@@ -247,6 +268,12 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
     view.setModel(model)
     view.setItemDelegate(AssetGridDelegate(view))
     view.visibleRowsChanged.connect(model.prioritize_rows)
+    view.viewportRowsChanged.connect(
+        lambda first, last: metrics["viewport_changes"].append(
+            (time.perf_counter(), first, last)
+        )
+    )
+    view.viewportRowsChanged.connect(model.prioritize_full_rows)
     view.show()
     qapp.processEvents()
     view.doItemsLayout()
@@ -344,6 +371,17 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         )
         for warm_at, warm_first, warm_last in store.warm_requests
     )
+    final_viewport_changed_at = (
+        metrics["viewport_changes"][-1][0] if metrics["viewport_changes"] else queued_at
+    )
+    final_full_request_ms = next(
+        (
+            max(0.0, (requested_at - final_viewport_changed_at) * 1000.0)
+            for requested_at, priority, _allow_generate, _paths in thumbnails.request_batches
+            if requested_at >= final_viewport_changed_at and priority == "visible"
+        ),
+        -1.0,
+    )
 
     paint_starts = metrics["paint_started_at"]
     frame_intervals = [
@@ -377,6 +415,7 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
             3,
         ),
         "final_micro_publish_ms": round(final_micro_publish_ms, 3),
+        "final_full_request_ms": round(final_full_request_ms, 3),
         "visible_before_warm": visible_before_warm,
         "visual_coverage": {
             "visible_rows": visual_count,
@@ -392,6 +431,11 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         "scrollbar_change_count": len(metrics["scrollbar_changes"]),
         "memory_thumbnail_peek_calls": thumbnails.peek_calls,
         "async_thumbnail_request_count": thumbnails.requested_paths,
+        "visible_thumbnail_batch_sizes": [
+            len(paths)
+            for _at, priority, _allow_generate, paths in thumbnails.request_batches
+            if priority == "visible"
+        ],
         "visible_range_request_count": store.prioritize_calls,
         "violations": violations,
     }
@@ -403,6 +447,7 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         "frame_interval_p95_ms": report["frame_interval"]["p95_ms"],
         "input_catchup_ms": report["input_catchup_ms"],
         "final_micro_publish_ms": report["final_micro_publish_ms"],
+        "final_full_request_ms": report["final_full_request_ms"],
         "micro_or_full_ratio": report["visual_coverage"]["micro_or_full_ratio"],
         "placeholder_ratio": report["visual_coverage"]["placeholder_ratio"],
         "visible_before_warm": report["visible_before_warm"],
@@ -422,6 +467,15 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
     assert report["visual_coverage"]["micro_or_full_ratio"] == 1.0
     assert report["visual_coverage"]["placeholder_ratio"] == 0.0
     assert 0.0 <= report["final_micro_publish_ms"] <= 100.0
+    # Materialized viewport rows schedule synchronously. This synthetic store
+    # deliberately withholds rows until the 16 ms visible-window flush, so one
+    # event-loop frame plus scheduling overhead is the expected upper bound.
+    assert 0.0 <= report["final_full_request_ms"] <= 32.0
+    assert report["visible_thumbnail_batch_sizes"]
+    assert view._viewport_range is not None
+    assert max(report["visible_thumbnail_batch_sizes"]) <= (
+        view._viewport_range[1] - view._viewport_range[0] + 1
+    )
     assert report["visible_before_warm"] is True
     assert not any(violations.values()), f"Protected-path violations: {violations}"
     assert json_path.exists()

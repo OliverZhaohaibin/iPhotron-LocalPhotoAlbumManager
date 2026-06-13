@@ -23,6 +23,7 @@ class GalleryWindowRequest:
     tier: GalleryWindowTier
     requested_at_ms: float
     retry_count: int = 0
+    selection_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -55,7 +55,9 @@ def mock_store():
 
 @pytest.fixture
 def mock_thumb_service():
-    return MagicMock(spec=ThumbnailCacheService)
+    service = MagicMock(spec=ThumbnailCacheService)
+    service.peek.return_value = None
+    return service
 
 
 @pytest.fixture
@@ -155,39 +157,52 @@ def test_row_for_path_delegates_to_store(adapter, mock_store):
     mock_store.row_for_path.assert_called_once_with(path)
 
 
-def test_prioritize_rows_delegates_to_store(adapter, mock_store):
+def test_prioritize_rows_delegates_to_store_after_frame_coalescing(adapter, mock_store):
     adapter.prioritize_rows(10, 25)
     adapter._flush_pending_prioritize_rows()
+
     mock_store.prioritize_rows.assert_called_once_with(10, 25)
+    assert adapter._pending_micro_prefetch_range == (10, 25)
 
 
-def test_prioritize_rows_requests_loaded_full_thumbnails(
+def test_buffered_prioritize_rows_does_not_request_full_thumbnails(
     adapter,
     mock_store,
     mock_thumb_service,
 ):
-    first = _make_dto(abs_path=Path("/library/first.jpg"))
-    second = _make_dto(abs_path=Path("/library/second.jpg"))
-    mock_store.asset_at.side_effect = lambda row: {10: first, 11: second}.get(row)
-
     adapter.prioritize_rows(10, 12)
     adapter._flush_pending_prioritize_rows()
 
+    mock_thumb_service.cancel_pending_except.assert_not_called()
     mock_thumb_service.request_many.assert_not_called()
-    adapter._flush_pending_thumbnail_rows()
+
+
+def test_full_viewport_rows_request_only_loaded_full_thumbnails_center_out(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    assets = {
+        row: _make_dto(abs_path=Path(f"/library/{row}.jpg"))
+        for row in range(10, 13)
+    }
+    mock_store.asset_at.side_effect = assets.get
+
+    adapter.prioritize_full_rows(10, 12)
 
     mock_thumb_service.cancel_pending_except.assert_called_once_with(
-        {Path("/library/first.jpg"), Path("/library/second.jpg")},
+        {Path("/library/10.jpg"), Path("/library/11.jpg"), Path("/library/12.jpg")},
         adapter._thumb_size,
     )
     mock_thumb_service.request_many.assert_called_once_with(
-        [Path("/library/first.jpg"), Path("/library/second.jpg")],
+        [Path("/library/11.jpg"), Path("/library/10.jpg"), Path("/library/12.jpg")],
         adapter._thumb_size,
         priority="visible",
+        allow_generate=True,
     )
 
 
-def test_prioritize_rows_keeps_latest_window_and_requests_latest_thumbnails(
+def test_full_viewport_rows_keep_latest_range_and_cancel_old_work(
     adapter,
     mock_store,
     mock_thumb_service,
@@ -195,39 +210,67 @@ def test_prioritize_rows_keeps_latest_window_and_requests_latest_thumbnails(
     latest = _make_dto(abs_path=Path("/library/latest.jpg"))
     mock_store.asset_at.side_effect = lambda row: latest if row == 5 else None
 
-    adapter.prioritize_rows(10, 25)
-    adapter.prioritize_rows(20, 60)
-    adapter.prioritize_rows(5, 15)
-    adapter._flush_pending_prioritize_rows()
+    adapter.prioritize_full_rows(10, 25)
+    adapter.prioritize_full_rows(20, 60)
+    adapter.prioritize_full_rows(5, 15)
 
-    mock_store.prioritize_rows.assert_called_once_with(5, 15)
-    mock_thumb_service.request_many.assert_not_called()
-    adapter._flush_pending_thumbnail_rows()
-
-    mock_thumb_service.cancel_pending_except.assert_called_once_with(
+    assert adapter._full_visible_range == (5, 15)
+    mock_thumb_service.cancel_pending_except.assert_called_with(
         {Path("/library/latest.jpg")},
         adapter._thumb_size,
     )
-    mock_thumb_service.request_many.assert_called_once_with(
+    mock_thumb_service.request_many.assert_called_with(
         [Path("/library/latest.jpg")],
         adapter._thumb_size,
         priority="visible",
+        allow_generate=True,
     )
-    mock_store.prefetch_rows.assert_called_once_with(5, 15)
 
 
 def test_visible_window_result_restarts_stable_warm_timer(
     adapter,
     mock_store,
+    mock_thumb_service,
 ):
     request = SimpleNamespace(first=10, last=20, tier="visible")
     result = SimpleNamespace(request=request)
     mock_store.apply_window_result.return_value = True
+    visible = _make_dto(abs_path=Path("/library/visible.jpg"))
+    mock_store.asset_at.side_effect = lambda row: visible if row == 10 else None
+    adapter._full_visible_range = (10, 20)
 
     adapter._apply_window_result_on_ui_thread(result)
 
     assert adapter._pending_thumbnail_range == (10, 20)
     assert adapter._thumbnail_timer.isActive()
+    assert adapter._pending_micro_prefetch_range == (10, 20)
+    assert adapter._micro_prefetch_timer.isActive()
+    mock_thumb_service.request_many.assert_called_once_with(
+        [Path("/library/visible.jpg")],
+        adapter._thumb_size,
+        priority="visible",
+        allow_generate=True,
+    )
+
+
+def test_visible_window_result_without_viewport_does_not_request_buffered_full_rows(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    request = SimpleNamespace(first=10, last=60, tier="visible")
+    result = SimpleNamespace(request=request)
+    mock_store.apply_window_result.return_value = True
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
+
+    adapter._apply_window_result_on_ui_thread(result)
+
+    mock_thumb_service.cancel_pending_except.assert_not_called()
+    mock_thumb_service.request_many.assert_not_called()
+    assert adapter._pending_thumbnail_range is None
+    assert adapter._pending_micro_prefetch_range == (10, 60)
 
 
 def test_warm_window_result_does_not_restart_stable_timer(
@@ -243,6 +286,190 @@ def test_warm_window_result_does_not_restart_stable_timer(
 
     assert adapter._pending_thumbnail_range is None
     assert not adapter._thumbnail_timer.isActive()
+
+
+def test_micro_prefetch_timer_keeps_latest_range_without_restart(adapter, mock_store):
+    adapter._micro_prefetch_timer.stop()
+    adapter._micro_prefetch_timer.start = MagicMock()
+    adapter._micro_prefetch_timer.isActive = MagicMock(side_effect=[False, True, True])
+
+    adapter.prioritize_rows(10, 20)
+    adapter.prioritize_rows(20, 30)
+    adapter.prioritize_rows(30, 40)
+
+    adapter._micro_prefetch_timer.start.assert_called_once_with()
+    assert adapter._pending_micro_prefetch_range == (30, 40)
+
+    adapter._flush_pending_micro_prefetch()
+
+    mock_store.prefetch_rows.assert_called_once_with(30, 40)
+
+
+def test_stable_timer_only_prefetches_neighbor_full_thumbnails(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    mock_store.count.return_value = 100
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
+    mock_thumb_service.peek.return_value = object()
+    adapter._full_visible_range = (40, 50)
+    adapter._pending_thumbnail_range = (40, 50)
+
+    adapter._flush_pending_thumbnail_rows()
+
+    mock_store.prefetch_rows.assert_not_called()
+    call = mock_thumb_service.request_many.call_args
+    assert call.kwargs["priority"] == "low"
+    assert call.kwargs["allow_generate"] is False
+    assert call.kwargs["speculative"] is True
+    assert call.args[0] == [
+        *(Path(f"/library/{row}.jpg") for row in range(62, 71)),
+        *(Path(f"/library/{row}.jpg") for row in range(20, 29)),
+    ]
+
+
+def test_completed_viewport_immediately_warms_nearest_full_rows(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    mock_store.count.return_value = 100
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
+    mock_thumb_service.peek.return_value = object()
+    adapter._full_visible_range = (40, 50)
+
+    adapter._record_full_viewport_completion_if_ready()
+
+    mock_thumb_service.request_many.assert_called_once_with(
+        [
+            Path("/library/51.jpg"),
+            Path("/library/39.jpg"),
+            Path("/library/52.jpg"),
+            Path("/library/38.jpg"),
+            Path("/library/53.jpg"),
+            Path("/library/37.jpg"),
+            Path("/library/54.jpg"),
+            Path("/library/36.jpg"),
+            Path("/library/55.jpg"),
+            Path("/library/35.jpg"),
+            Path("/library/56.jpg"),
+            Path("/library/34.jpg"),
+            Path("/library/57.jpg"),
+            Path("/library/33.jpg"),
+            Path("/library/58.jpg"),
+            Path("/library/32.jpg"),
+            Path("/library/59.jpg"),
+            Path("/library/31.jpg"),
+            Path("/library/60.jpg"),
+            Path("/library/30.jpg"),
+            Path("/library/61.jpg"),
+            Path("/library/29.jpg"),
+        ],
+        adapter._thumb_size,
+        priority="normal",
+        allow_generate=True,
+        speculative=True,
+    )
+    assert adapter._full_warmup_range == (40, 50)
+
+
+def test_full_warmup_is_not_requeued_for_same_viewport(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    mock_store.count.return_value = 100
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
+    mock_thumb_service.peek.return_value = object()
+    adapter._full_visible_range = (40, 50)
+
+    adapter._record_full_viewport_completion_if_ready()
+    adapter._record_full_viewport_completion_if_ready()
+
+    mock_thumb_service.request_many.assert_called_once()
+
+
+def test_warm_result_retries_neighbors_for_stable_viewport(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    request = SimpleNamespace(first=40, last=50, tier="warm")
+    result = SimpleNamespace(request=request)
+    mock_store.apply_window_result.return_value = True
+    mock_store.visible_range.return_value = (40, 50)
+    mock_store.count.return_value = 100
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
+    mock_thumb_service.peek.return_value = object()
+    adapter._full_visible_range = (40, 50)
+    adapter._stable_thumbnail_range = (40, 50)
+
+    adapter._apply_window_result_on_ui_thread(result)
+
+    assert mock_thumb_service.request_many.call_count == 3
+    assert mock_thumb_service.request_many.call_args_list[0].kwargs["priority"] == "visible"
+    assert mock_thumb_service.request_many.call_args_list[0].kwargs["allow_generate"] is True
+    assert mock_thumb_service.request_many.call_args_list[1].kwargs == {
+        "priority": "normal",
+        "allow_generate": True,
+        "speculative": True,
+    }
+    assert mock_thumb_service.request_many.call_args_list[2].kwargs["priority"] == "low"
+    assert mock_thumb_service.request_many.call_args_list[2].kwargs["allow_generate"] is False
+    assert mock_thumb_service.request_many.call_args_list[2].kwargs["speculative"] is True
+
+
+def test_stable_viewport_waits_for_all_full_thumbnails_before_neighbor_prefetch(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    mock_store.count.return_value = 100
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
+    mock_thumb_service.peek.return_value = None
+    adapter._full_visible_range = (40, 50)
+    adapter._pending_thumbnail_range = (40, 50)
+
+    adapter._flush_pending_thumbnail_rows()
+
+    mock_thumb_service.request_many.assert_not_called()
+
+
+def test_thumbnail_ready_starts_neighbors_after_stable_viewport_completes(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    mock_store.count.return_value = 100
+    mock_store.row_for_path.return_value = 40
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
+    mock_thumb_service.peek.return_value = object()
+    adapter._full_visible_range = (40, 50)
+    adapter._stable_thumbnail_range = (40, 50)
+    adapter._full_visible_pending_paths = {Path("/library/40.jpg")}
+
+    adapter._on_thumbnail_ready(Path("/library/40.jpg"))
+
+    call = mock_thumb_service.request_many.call_args
+    assert call.kwargs == {
+        "priority": "low",
+        "allow_generate": False,
+        "speculative": True,
+    }
+    assert adapter._neighbor_prefetched_range == (40, 50)
 
 
 def test_scan_batches_are_coalesced_before_store_flush(adapter, mock_store):

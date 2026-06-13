@@ -27,6 +27,7 @@ class AssetGrid(QListView):
     previewReleased = Signal()
     previewCancelled = Signal()
     visibleRowsChanged = Signal(int, int)
+    viewportRowsChanged = Signal(int, int)
     modelAboutToChange = Signal(object)
     modelChanged = Signal(object)
 
@@ -51,6 +52,7 @@ class AssetGrid(QListView):
         self._viewport_update_timer.timeout.connect(self._flush_viewport_update)
         self._viewport_layout_pending = False
         self._visible_range: Optional[tuple[int, int]] = None
+        self._viewport_range: Optional[tuple[int, int]] = None
         self._model = None
         self._external_drop_enabled = False
         self._drop_handler: Optional[Callable[[List[Path]], None]] = None
@@ -278,6 +280,7 @@ class AssetGrid(QListView):
 
     def _reset_visible_rows_update(self) -> None:
         self._visible_range = None
+        self._viewport_range = None
         self._schedule_visible_rows_update()
 
     def _schedule_viewport_update(self) -> None:
@@ -342,6 +345,8 @@ class AssetGrid(QListView):
         if row_count == 0:
             if self._visible_range is not None:
                 self._visible_range = None
+            if self._viewport_range is not None:
+                self._viewport_range = None
             return
         viewport_rect = self.viewport().rect()
         if viewport_rect.isEmpty():
@@ -351,6 +356,10 @@ class AssetGrid(QListView):
         if visible_bounds is None:
             return
         first, last = visible_bounds
+        viewport_range = (first, last)
+        if self._viewport_range != viewport_range:
+            self._viewport_range = viewport_range
+            self.viewportRowsChanged.emit(first, last)
 
         buffer = 20
         first = max(0, first - buffer)

@@ -2,6 +2,7 @@ import shutil
 import time
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque, Dict, Optional, Set
 
@@ -26,8 +27,34 @@ from iPhoto.utils import image_loader
 class ThumbnailWorkerSignals(QObject):
     """Signals emitted by thumbnail generation workers."""
 
-    result = Signal(Path, QSize, QImage)
-    failed = Signal(Path, QSize, str)
+    result = Signal(object, Path, QSize, QImage)
+    failed = Signal(object, Path, QSize, str)
+    cancelled = Signal(object, Path, QSize, str)
+
+
+@dataclass(slots=True)
+class _QueuedThumbnailTask:
+    path: Path
+    size: QSize
+    priority: str
+    allow_generate: bool
+    speculative: bool
+    requested_at_ms: float
+
+
+@dataclass(slots=True)
+class _ActiveThumbnailTask:
+    task_id: int
+    key: str
+    path: Path
+    size: QSize
+    priority: str
+    allow_generate: bool
+    speculative: bool
+    requested_at_ms: float
+    stale: bool = False
+    cancel_reason: str | None = None
+    retry_after_cancel: bool = False
 
 
 class ThumbnailGenerationTask(QRunnable):
@@ -36,27 +63,39 @@ class ThumbnailGenerationTask(QRunnable):
     def __init__(
         self,
         renderer,
-        path: Path,
-        size: QSize,
+        task: _ActiveThumbnailTask,
         signals: ThumbnailWorkerSignals,
     ):
         super().__init__()
         self._renderer = renderer
-        self._path = path
-        self._size = size
+        self._task = task
         self._signals = signals
 
     def run(self):
+        task = self._task
         try:
-            # Generate logic (CPU intensive)
-            qimg = self._renderer(self._path, self._size)
-            if qimg is not None and not qimg.isNull():
+            if task.stale:
+                self._signals.cancelled.emit(
+                    task, task.path, task.size, task.cancel_reason or "stale_before_start"
+                )
+                return
+            qimg = self._renderer(task.path, task.size, task)
+            if task.stale or task.cancel_reason is not None:
+                self._signals.cancelled.emit(
+                    task, task.path, task.size, task.cancel_reason or "stale_after_work"
+                )
+            elif qimg is not None and not qimg.isNull():
                 # Emit result back to main thread
-                self._signals.result.emit(self._path, self._size, qimg)
+                self._signals.result.emit(task, task.path, task.size, qimg)
             else:
-                self._signals.failed.emit(self._path, self._size, "empty_render")
+                self._signals.failed.emit(task, task.path, task.size, "empty_render")
         except Exception:
-            self._signals.failed.emit(self._path, self._size, "exception")
+            if task.stale or task.cancel_reason is not None:
+                self._signals.cancelled.emit(
+                    task, task.path, task.size, task.cancel_reason or "stale_exception"
+                )
+            else:
+                self._signals.failed.emit(task, task.path, task.size, "exception")
 
 class ThumbnailCacheService(QObject):
     """
@@ -64,6 +103,7 @@ class ThumbnailCacheService(QObject):
     """
 
     thumbnailReady = Signal(Path)
+    _PRIORITY_ORDER = ("visible", "normal", "low")
 
     def __init__(self, disk_cache_path: Path, memory_limit_mb: int = 500):
         super().__init__()
@@ -78,13 +118,15 @@ class ThumbnailCacheService(QObject):
         self._max_memory_items = 1000  # Rough approximation
 
         self._pending_tasks: Set[str] = set()
-        self._queued_tasks: Dict[str, tuple[Path, QSize, str]] = {}
+        self._queued_tasks: Dict[str, _QueuedThumbnailTask] = {}
         self._priority_queues: dict[str, Deque[str]] = {
             "visible": deque(),
             "normal": deque(),
             "low": deque(),
         }
         self._active_tasks = 0
+        self._active_jobs: Dict[int, _ActiveThumbnailTask] = {}
+        self._next_task_id = 1
         self._max_active_jobs = 2
         self._failure_cooldown_seconds = 60.0
         self._failure_until: Dict[str, float] = {}
@@ -94,11 +136,13 @@ class ThumbnailCacheService(QObject):
     def shutdown(self):
         """Prevents new tasks from being submitted and clears pending logic."""
         self._is_shutting_down = True
+        for task in self._active_jobs.values():
+            task.stale = True
+            task.cancel_reason = "shutdown"
         self._pending_tasks.clear()
         self._queued_tasks.clear()
         for queue in self._priority_queues.values():
             queue.clear()
-        self._active_tasks = 0
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
         self._is_shutting_down = False
@@ -107,6 +151,9 @@ class ThumbnailCacheService(QObject):
         self._disk_cache_path = disk_cache_path
         self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._memory_cache.clear()
+        for task in self._active_jobs.values():
+            task.stale = True
+            task.cancel_reason = "cache_path_changed"
         self._pending_tasks.clear()
         self._queued_tasks.clear()
         for queue in self._priority_queues.values():
@@ -145,7 +192,7 @@ class ThumbnailCacheService(QObject):
         # 3. Trigger Async Generation if not pending
         emit_perf_event("thumbnail_cache_miss", key=key, pending=len(self._pending_tasks))
         if key not in self._pending_tasks:
-            self._queue_generation(path, size, priority=priority)
+            self._queue_generation(path, size, priority=priority, allow_generate=True)
 
         # Return placeholder or None while loading
         return None
@@ -163,29 +210,111 @@ class ThumbnailCacheService(QObject):
         size: QSize,
         *,
         priority: str = "normal",
+        allow_generate: bool = True,
+        speculative: bool = False,
     ) -> int:
-        """Queue memory misses for asynchronous L2 loading or generation."""
+        """Queue memory misses, optionally limiting work to existing L2 entries."""
 
         if self._is_shutting_down:
             return 0
 
+        priority = priority if priority in self._priority_queues else "normal"
         queued = 0
+        promoted = 0
         now = time.monotonic()
-        for path in dict.fromkeys(Path(path) for path in paths):
+        requested_at_ms = monotonic_ms()
+        unique_paths = list(dict.fromkeys(Path(path) for path in paths))
+        for path in unique_paths:
             key = self._cache_key(path, size)
-            if key in self._memory_cache or key in self._pending_tasks:
+            if key in self._memory_cache:
+                continue
+            queued_spec = self._queued_tasks.get(key)
+            if queued_spec is not None:
+                queued_priority = queued_spec.priority
+                priority_promoted = self._PRIORITY_ORDER.index(
+                    priority
+                ) < self._PRIORITY_ORDER.index(queued_priority)
+                generate_promoted = allow_generate and not queued_spec.allow_generate
+                if priority_promoted or generate_promoted:
+                    effective_priority = priority if priority_promoted else queued_priority
+                    self._queued_tasks[key] = _QueuedThumbnailTask(
+                        path=path,
+                        size=size,
+                        priority=effective_priority,
+                        allow_generate=allow_generate or queued_spec.allow_generate,
+                        speculative=speculative and queued_spec.speculative,
+                        requested_at_ms=requested_at_ms,
+                    )
+                    self._priority_queues[effective_priority].append(key)
+                    promoted += 1
+                continue
+            if key in self._pending_tasks:
+                active_tasks = [
+                    task for task in self._active_jobs.values() if task.key == key
+                ]
+                active_promoted = False
+                for task in active_tasks:
+                    priority_promoted = self._PRIORITY_ORDER.index(
+                        priority
+                    ) < self._PRIORITY_ORDER.index(task.priority)
+                    generate_promoted = allow_generate and not task.allow_generate
+                    retry_visible_after_cancel = (
+                        priority == "visible"
+                        and allow_generate
+                        and (task.stale or task.cancel_reason is not None)
+                    )
+                    should_promote = (
+                        priority_promoted
+                        or generate_promoted
+                        or retry_visible_after_cancel
+                    )
+                    if should_promote:
+                        if priority_promoted:
+                            task.priority = priority
+                        task.allow_generate = allow_generate or task.allow_generate
+                        task.speculative = speculative and task.speculative
+                        if retry_visible_after_cancel:
+                            task.retry_after_cancel = True
+                        active_promoted = True
+                if active_promoted:
+                    promoted += 1
                 continue
             if self._failure_until.get(key, 0.0) > now:
                 continue
-            self._queue_generation(path, size, priority=priority)
+            self._queue_generation(
+                path,
+                size,
+                priority=priority,
+                allow_generate=allow_generate,
+                speculative=speculative,
+                drain=False,
+                requested_at_ms=requested_at_ms,
+            )
             queued += 1
-        return queued
+        self._drain_generation_queue()
+        emit_perf_event(
+            "thumbnail_batch_scheduled",
+            priority=priority,
+            allow_generate=allow_generate,
+            speculative=speculative,
+            requested=len(unique_paths),
+            queued=queued,
+            promoted=promoted,
+            pending=len(self._pending_tasks),
+            queued_pending=len(self._queued_tasks),
+            active=self._active_tasks,
+        )
+        return queued + promoted
 
     def cancel_pending_except(self, paths: Set[Path], size: QSize) -> None:
         """Cancel queued thumbnail work except for *paths* at *size*."""
 
         keep_keys = {self._cache_key(path, size) for path in paths}
-        drop_keys = set(self._queued_tasks) - keep_keys
+        drop_keys = {
+            key
+            for key, task in self._queued_tasks.items()
+            if task.size == size and key not in keep_keys
+        }
         for key in drop_keys:
             self._queued_tasks.pop(key, None)
             self._pending_tasks.discard(key)
@@ -194,37 +323,70 @@ class ThumbnailCacheService(QObject):
                 self._priority_queues[priority] = deque(
                     key for key in queue if key not in drop_keys
                 )
+        for task in self._active_jobs.values():
+            if task.size == size and task.key not in keep_keys and not task.stale:
+                task.stale = True
+                task.cancel_reason = "stale_active"
+                emit_perf_event(
+                    "thumbnail_active_marked_stale",
+                    path=task.path,
+                    width=size.width(),
+                    height=size.height(),
+                    priority=task.priority,
+                )
 
-    def _queue_generation(self, path: Path, size: QSize, *, priority: str) -> None:
+    def _queue_generation(
+        self,
+        path: Path,
+        size: QSize,
+        *,
+        priority: str,
+        allow_generate: bool = True,
+        speculative: bool = False,
+        drain: bool = True,
+        requested_at_ms: float | None = None,
+    ) -> None:
         priority = priority if priority in self._priority_queues else "normal"
         key = self._cache_key(path, size)
         self._pending_tasks.add(key)
-        self._queued_tasks[key] = (path, size, priority)
+        self._queued_tasks[key] = _QueuedThumbnailTask(
+            path=path,
+            size=size,
+            priority=priority,
+            allow_generate=allow_generate,
+            speculative=speculative,
+            requested_at_ms=requested_at_ms or monotonic_ms(),
+        )
         self._priority_queues[priority].append(key)
-        self._drain_generation_queue()
+        if drain:
+            self._drain_generation_queue()
 
     def _drain_generation_queue(self) -> None:
         while not self._is_shutting_down and self._active_tasks < self._max_active_jobs:
             next_item = self._pop_next_generation()
             if next_item is None:
                 return
-            key, path, size = next_item
+            key, task = next_item
             self._active_tasks += 1
-            self._start_generation(key, path, size)
+            self._start_generation(key, task)
 
-    def _pop_next_generation(self) -> tuple[str, Path, QSize] | None:
+    def _pop_next_generation(self) -> tuple[str, _QueuedThumbnailTask] | None:
+        speculative_active = any(task.speculative for task in self._active_jobs.values())
         for priority in ("visible", "normal", "low"):
             queue = self._priority_queues[priority]
-            while queue:
+            for _ in range(len(queue)):
                 key = queue.popleft()
-                spec = self._queued_tasks.pop(key, None)
+                spec = self._queued_tasks.get(key)
                 if spec is None:
                     continue
-                path, size, _priority = spec
-                return key, path, size
+                if spec.speculative and speculative_active:
+                    queue.append(key)
+                    continue
+                self._queued_tasks.pop(key, None)
+                return key, spec
         return None
 
-    def _start_generation(self, key: str, path: Path, size: QSize):
+    def _start_generation(self, key: str, queued: _QueuedThumbnailTask):
         # Create signals object (must be created on heap/managed by QObject tree or kept alive)
         # Since QRunnable isn't a QObject parent, we need to ensure signals exist during run.
         # However, typically we pass a new QObject.
@@ -236,31 +398,70 @@ class ThumbnailCacheService(QObject):
         worker_signals = ThumbnailWorkerSignals()
         worker_signals.result.connect(self._handle_generation_result)
         worker_signals.failed.connect(self._handle_generation_failure)
+        worker_signals.cancelled.connect(self._handle_generation_cancelled)
 
         # We need to ensure worker_signals isn't garbage collected before run() finishes?
         # QThreadPool takes ownership of QRunnable. The QRunnable holds 'signals'.
         # Python ref counting should keep 'signals' alive as long as 'worker' is alive.
 
+        task = _ActiveThumbnailTask(
+            task_id=self._next_task_id,
+            key=key,
+            path=queued.path,
+            size=queued.size,
+            priority=queued.priority,
+            allow_generate=queued.allow_generate,
+            speculative=queued.speculative,
+            requested_at_ms=queued.requested_at_ms,
+        )
+        self._next_task_id += 1
+        self._active_jobs[task.task_id] = task
+
         emit_perf_event(
             "thumbnail_generate_started",
-            path=path,
-            width=size.width(),
-            height=size.height(),
+            path=task.path,
+            width=task.size.width(),
+            height=task.size.height(),
+            priority=task.priority,
+            allow_generate=task.allow_generate,
+            speculative=task.speculative,
+            queue_wait_ms=round(monotonic_ms() - task.requested_at_ms, 3),
             pending=len(self._pending_tasks),
         )
-        worker = ThumbnailGenerationTask(self._load_or_render_thumbnail, path, size, worker_signals)
+        worker = ThumbnailGenerationTask(self._load_or_render_thumbnail, task, worker_signals)
         self._thread_pool.start(worker)
 
-    def _handle_generation_result(self, path: Path, size: QSize, image: QImage):
+    def _finish_active_task(self, task: _ActiveThumbnailTask) -> None:
+        self._active_jobs.pop(task.task_id, None)
+        self._active_tasks = max(0, self._active_tasks - 1)
+        if task.key not in self._queued_tasks and not any(
+            active.key == task.key for active in self._active_jobs.values()
+        ):
+            self._pending_tasks.discard(task.key)
+
+    def _handle_generation_result(
+        self,
+        task: _ActiveThumbnailTask,
+        path: Path,
+        size: QSize,
+        image: QImage,
+    ):
         # Back on main thread
+        if task.stale or task.cancel_reason is not None:
+            self._handle_generation_cancelled(
+                task,
+                path,
+                size,
+                task.cancel_reason or "stale_result",
+            )
+            return
         if not image.isNull():
             key = self._cache_key(path, size)
             pixmap = QPixmap.fromImage(image)
 
             self._add_to_memory(key, pixmap)
-            self._pending_tasks.discard(key)
             self._failure_until.pop(key, None)
-            self._active_tasks = max(0, self._active_tasks - 1)
+            self._finish_active_task(task)
 
             emit_perf_event(
                 "thumbnail_generate_finished",
@@ -272,12 +473,24 @@ class ThumbnailCacheService(QObject):
             self.thumbnailReady.emit(path)
             self._drain_generation_queue()
 
-    def _handle_generation_failure(self, path: Path, size: QSize, reason: str) -> None:
+    def _handle_generation_failure(
+        self,
+        task: _ActiveThumbnailTask,
+        path: Path,
+        size: QSize,
+        reason: str,
+    ) -> None:
+        if task.stale or task.cancel_reason is not None:
+            self._handle_generation_cancelled(
+                task,
+                path,
+                size,
+                task.cancel_reason or "stale_failure",
+            )
+            return
         key = self._cache_key(path, size)
-        self._pending_tasks.discard(key)
-        self._queued_tasks.pop(key, None)
         self._failure_until[key] = time.monotonic() + self._failure_cooldown_seconds
-        self._active_tasks = max(0, self._active_tasks - 1)
+        self._finish_active_task(task)
         emit_perf_event(
             "thumbnail_generate_failed",
             path=path,
@@ -286,6 +499,27 @@ class ThumbnailCacheService(QObject):
             reason=reason,
             pending=len(self._pending_tasks),
         )
+        self._drain_generation_queue()
+
+    def _handle_generation_cancelled(
+        self,
+        task: _ActiveThumbnailTask,
+        path: Path,
+        size: QSize,
+        reason: str,
+    ) -> None:
+        retry_after_cancel = task.retry_after_cancel
+        self._finish_active_task(task)
+        emit_perf_event(
+            "thumbnail_generate_cancelled",
+            path=path,
+            width=size.width(),
+            height=size.height(),
+            reason=reason,
+            pending=len(self._pending_tasks),
+        )
+        if retry_after_cancel and not self._is_shutting_down:
+            self.request_many([path], size, priority="visible", allow_generate=True)
         self._drain_generation_queue()
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
@@ -347,9 +581,29 @@ class ThumbnailCacheService(QObject):
             self._memory_cache.pop(next(iter(self._memory_cache)))
         self._memory_cache[key] = pixmap
 
-    def _load_or_render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
+    @staticmethod
+    def _cancel_at_stage(task: _ActiveThumbnailTask | None, stage: str) -> bool:
+        if task is None or not task.stale:
+            return False
+        task.cancel_reason = task.cancel_reason or f"stale_before_{stage}"
+        emit_perf_event(
+            "thumbnail_stale_task_stopped",
+            path=task.path,
+            stage=stage,
+            priority=task.priority,
+        )
+        return True
+
+    def _load_or_render_thumbnail(
+        self,
+        path: Path,
+        size: QSize,
+        task: _ActiveThumbnailTask | None = None,
+    ) -> Optional[QImage]:
         """Load L2 or render and persist a thumbnail inside a worker thread."""
 
+        if self._cancel_at_stage(task, "l2_read"):
+            return None
         key = self._cache_key(path, size)
         disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         if disk_file.exists():
@@ -358,8 +612,17 @@ class ThumbnailCacheService(QObject):
                 emit_perf_event("thumbnail_cache_hit", tier="L2-worker", key=key)
                 return image
 
+        if task is not None and not task.allow_generate:
+            task.cancel_reason = "l2_only_miss"
+            emit_perf_event("thumbnail_l2_only_miss", key=key, path=path)
+            return None
+        if self._cancel_at_stage(task, "source_decode"):
+            return None
+        emit_perf_event("thumbnail_source_generation_started", path=path)
         image = self._render_thumbnail(path, size)
         if image is None or image.isNull():
+            return None
+        if self._cancel_at_stage(task, "disk_write"):
             return None
         try:
             image.save(str(disk_file), "JPEG")

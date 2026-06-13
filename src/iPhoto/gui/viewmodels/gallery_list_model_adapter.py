@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -18,7 +19,7 @@ from PySide6.QtCore import (
 from iPhoto.application.dtos import GalleryAssetDTO
 from iPhoto.application.ports import EditServicePort
 from iPhoto.gui.ui.models.roles import Roles, role_names
-from iPhoto.infrastructure.services.performance_events import emit_perf_event
+from iPhoto.infrastructure.services.performance_events import emit_perf_event, monotonic_ms
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 from iPhoto.utils.geocoding import resolve_location_name
 
@@ -27,6 +28,8 @@ from .gallery_collection_store import GalleryCollectionStore
 
 class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
+
+    FULL_THUMBNAIL_PREFETCH_ROWS = 20
 
     _scan_batch_received = QtSignal(object)
     _window_result_received = QtSignal(object)
@@ -50,13 +53,26 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_window_identity_signature: tuple[str, ...] | None = None
         self._duration_cache: dict[Path, float] = {}
         self._pending_prioritize_range: tuple[int, int] | None = None
+        self._pending_micro_prefetch_range: tuple[int, int] | None = None
         self._pending_thumbnail_range: tuple[int, int] | None = None
+        self._stable_thumbnail_range: tuple[int, int] | None = None
+        self._full_visible_range: tuple[int, int] | None = None
+        self._full_warmup_range: tuple[int, int] | None = None
+        self._neighbor_prefetched_range: tuple[int, int] | None = None
+        self._full_visible_requested_at_ms: float | None = None
+        self._full_visible_pending_paths: set[Path] = set()
+        self._full_visible_first_published = False
+        self._full_visible_complete_reported = False
         self._pending_scan_batch_count = 0
         self._backfill_completion_source: Any | None = None
         self._prioritize_timer = QTimer(self)
         self._prioritize_timer.setSingleShot(True)
         self._prioritize_timer.setInterval(16)
         self._prioritize_timer.timeout.connect(self._flush_pending_prioritize_rows)
+        self._micro_prefetch_timer = QTimer(self)
+        self._micro_prefetch_timer.setSingleShot(True)
+        self._micro_prefetch_timer.setInterval(50)
+        self._micro_prefetch_timer.timeout.connect(self._flush_pending_micro_prefetch)
         self._thumbnail_timer = QTimer(self)
         self._thumbnail_timer.setSingleShot(True)
         self._thumbnail_timer.setInterval(100)
@@ -247,11 +263,37 @@ class GalleryListModelAdapter(QAbstractListModel):
     def prioritize_rows(self, first: int, last: int) -> None:
         first = max(0, int(first))
         last = max(first, int(last))
-        self._pending_thumbnail_range = (first, last)
+        self._pending_micro_prefetch_range = (first, last)
         self._pending_prioritize_range = (first, last)
         if not self._prioritize_timer.isActive():
             self._prioritize_timer.start()
+        if not self._micro_prefetch_timer.isActive():
+            self._micro_prefetch_timer.start()
+
+    def prioritize_full_rows(self, first: int, last: int) -> None:
+        """Immediately prioritize only rows physically inside the viewport."""
+
+        first = max(0, int(first))
+        last = max(first, int(last))
+        visible_range = (first, last)
+        if self._full_visible_range != visible_range:
+            self._full_visible_range = visible_range
+            self._stable_thumbnail_range = None
+            self._full_warmup_range = None
+            self._neighbor_prefetched_range = None
+            self._full_visible_requested_at_ms = monotonic_ms()
+            self._full_visible_pending_paths.clear()
+            self._full_visible_first_published = False
+            self._full_visible_complete_reported = False
+            emit_perf_event(
+                "gallery_viewport_thumbnail_range_changed",
+                first=first,
+                last=last,
+                rows=last - first + 1,
+            )
+        self._pending_thumbnail_range = visible_range
         self._thumbnail_timer.start()
+        self._request_visible_full_thumbnails(first, last)
 
     @Slot()
     def _flush_pending_prioritize_rows(self) -> None:
@@ -262,27 +304,166 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._store.prioritize_rows(*pending)
 
     @Slot()
+    def _flush_pending_micro_prefetch(self) -> None:
+        pending = self._pending_micro_prefetch_range
+        self._pending_micro_prefetch_range = None
+        if pending is None:
+            return
+        prefetch_rows = getattr(self._store, "prefetch_rows", None)
+        if callable(prefetch_rows):
+            prefetch_rows(*pending)
+
+    @Slot()
     def _flush_pending_thumbnail_rows(self) -> None:
         thumbnail_range = self._pending_thumbnail_range
         self._pending_thumbnail_range = None
         if thumbnail_range is not None:
-            prefetch_rows = getattr(self._store, "prefetch_rows", None)
-            if callable(prefetch_rows):
-                prefetch_rows(*thumbnail_range)
-            self._request_full_thumbnails(*thumbnail_range)
+            self._stable_thumbnail_range = thumbnail_range
+            self._maybe_request_neighbor_full_thumbnails()
 
-    def _request_full_thumbnails(self, first: int, last: int) -> None:
+    @staticmethod
+    def _center_out_rows(first: int, last: int) -> list[int]:
+        center = (first + last) / 2
+        return sorted(range(first, last + 1), key=lambda row: (abs(row - center), row))
+
+    def _thumbnail_paths_for_rows(self, rows: Iterable[int]) -> list[Path]:
         paths: list[Path] = []
-        for row in range(first, last + 1):
+        for row in rows:
             asset = self._store.asset_at(row)
             path = getattr(asset, "abs_path", None)
             if isinstance(path, Path):
                 paths.append(path)
+        return paths
+
+    def _request_visible_full_thumbnails(
+        self,
+        first: int,
+        last: int,
+        *,
+        cancel_stale: bool = True,
+    ) -> None:
+        rows = self._center_out_rows(first, last)
+        paths = self._thumbnail_paths_for_rows(rows)
+        cancel_pending = getattr(self._thumbnails, "cancel_pending_except", None)
+        if cancel_stale and callable(cancel_pending):
+            cancel_pending(set(paths), self._thumb_size)
         if paths:
-            cancel_pending = getattr(self._thumbnails, "cancel_pending_except", None)
-            if callable(cancel_pending):
-                cancel_pending(set(paths), self._thumb_size)
-            self._thumbnails.request_many(paths, self._thumb_size, priority="visible")
+            missing_paths = {
+                path for path in paths if self._thumbnails.peek(path, self._thumb_size) is None
+            }
+            self._full_visible_pending_paths.update(missing_paths)
+            queued = self._thumbnails.request_many(
+                paths,
+                self._thumb_size,
+                priority="visible",
+                allow_generate=True,
+            )
+            emit_perf_event(
+                "gallery_viewport_thumbnail_batch_scheduled",
+                first=first,
+                last=last,
+                requested=len(paths),
+                queued=queued,
+                center_order=rows,
+            )
+        self._record_full_viewport_completion_if_ready()
+
+    def _request_neighbor_full_thumbnails(self, first: int, last: int) -> None:
+        total_count = self._store.count()
+        if total_count <= 0:
+            return
+        before_first = max(0, first - self.FULL_THUMBNAIL_PREFETCH_ROWS)
+        after_last = min(total_count - 1, last + self.FULL_THUMBNAIL_PREFETCH_ROWS)
+        page_rows = last - first + 1
+        warmup_first = max(0, first - page_rows)
+        warmup_last = min(total_count - 1, last + page_rows)
+        paths = self._thumbnail_paths_for_rows(range(warmup_last + 1, after_last + 1))
+        paths.extend(self._thumbnail_paths_for_rows(range(before_first, warmup_first)))
+        if paths:
+            self._thumbnails.request_many(
+                paths,
+                self._thumb_size,
+                priority="low",
+                allow_generate=False,
+                speculative=True,
+            )
+            self._neighbor_prefetched_range = (first, last)
+
+    def _request_full_warmup(self, first: int, last: int) -> None:
+        total_count = self._store.count()
+        if total_count <= 0:
+            return
+        page_rows = last - first + 1
+        paths: list[Path] = []
+        for distance in range(1, page_rows + 1):
+            after = last + distance
+            before = first - distance
+            if after < total_count:
+                paths.extend(self._thumbnail_paths_for_rows((after,)))
+            if before >= 0:
+                paths.extend(self._thumbnail_paths_for_rows((before,)))
+        if paths:
+            self._thumbnails.request_many(
+                paths,
+                self._thumb_size,
+                priority="normal",
+                allow_generate=True,
+                speculative=True,
+            )
+        self._full_warmup_range = (first, last)
+
+    def _maybe_request_full_warmup(self) -> None:
+        visible_range = self._full_visible_range
+        if (
+            visible_range is None
+            or self._full_warmup_range == visible_range
+            or not self._full_viewport_is_ready(visible_range)
+        ):
+            return
+        self._request_full_warmup(*visible_range)
+
+    def _full_viewport_is_ready(self, visible_range: tuple[int, int]) -> bool:
+        first, last = visible_range
+        paths = self._thumbnail_paths_for_rows(range(first, last + 1))
+        if len(paths) != last - first + 1:
+            return False
+        return all(self._thumbnails.peek(path, self._thumb_size) is not None for path in paths)
+
+    def _maybe_request_neighbor_full_thumbnails(self) -> None:
+        visible_range = self._full_visible_range
+        if (
+            visible_range is None
+            or self._stable_thumbnail_range != visible_range
+            or self._neighbor_prefetched_range == visible_range
+            or not self._full_viewport_is_ready(visible_range)
+        ):
+            return
+        self._request_neighbor_full_thumbnails(*visible_range)
+
+    def _record_full_viewport_completion_if_ready(self) -> None:
+        visible_range = self._full_visible_range
+        requested_at = self._full_visible_requested_at_ms
+        if visible_range is None or not self._full_viewport_is_ready(visible_range):
+            return
+        self._full_visible_pending_paths.clear()
+        if not self._full_visible_first_published and requested_at is not None:
+            self._full_visible_first_published = True
+            emit_perf_event(
+                "gallery_viewport_thumbnail_first_published",
+                path=None,
+                source="memory",
+                elapsed_ms=round(monotonic_ms() - requested_at, 3),
+            )
+        if not self._full_visible_complete_reported and requested_at is not None:
+            self._full_visible_complete_reported = True
+            emit_perf_event(
+                "gallery_viewport_thumbnail_all_published",
+                first=visible_range[0],
+                last=visible_range[1],
+                elapsed_ms=round(monotonic_ms() - requested_at, 3),
+            )
+        self._maybe_request_full_warmup()
+        self._maybe_request_neighbor_full_thumbnails()
 
     def _queue_window_result(self, result: object) -> None:
         self._window_result_received.emit(result)
@@ -296,8 +477,23 @@ class GalleryListModelAdapter(QAbstractListModel):
         last = getattr(request, "last", None)
         tier = getattr(request, "tier", None)
         if tier == "visible" and isinstance(first, int) and isinstance(last, int):
-            self._pending_thumbnail_range = (first, last)
-            self._thumbnail_timer.start()
+            self._pending_micro_prefetch_range = (first, last)
+            if not self._micro_prefetch_timer.isActive():
+                self._micro_prefetch_timer.start()
+            visible_range = self._full_visible_range
+            if visible_range is not None:
+                self._request_visible_full_thumbnails(*visible_range)
+                self._pending_thumbnail_range = visible_range
+                self._thumbnail_timer.start()
+        elif tier == "warm":
+            visible_range = self._full_visible_range
+            if isinstance(visible_range, tuple) and len(visible_range) == 2:
+                self._request_visible_full_thumbnails(
+                    int(visible_range[0]),
+                    int(visible_range[1]),
+                    cancel_stale=False,
+                )
+                self._maybe_request_neighbor_full_thumbnails()
 
     @Slot(object)
     def handle_scan_batch(self, batch: object) -> None:
@@ -347,6 +543,23 @@ class GalleryListModelAdapter(QAbstractListModel):
         asset_query_service,
         library_root: Optional[Path],
     ) -> None:
+        self._prioritize_timer.stop()
+        self._micro_prefetch_timer.stop()
+        self._thumbnail_timer.stop()
+        self._pending_prioritize_range = None
+        self._pending_micro_prefetch_range = None
+        self._pending_thumbnail_range = None
+        self._stable_thumbnail_range = None
+        self._full_visible_range = None
+        self._full_warmup_range = None
+        self._neighbor_prefetched_range = None
+        self._full_visible_requested_at_ms = None
+        self._full_visible_pending_paths.clear()
+        self._full_visible_first_published = False
+        self._full_visible_complete_reported = False
+        cancel_pending = getattr(self._thumbnails, "cancel_pending_except", None)
+        if callable(cancel_pending):
+            cancel_pending(set(), self._thumb_size)
         self._last_snapshot = None
         self._last_selection_signature = None
         self._last_window_identity_signature = None
@@ -607,6 +820,17 @@ class GalleryListModelAdapter(QAbstractListModel):
         idx = self.index(row, 0)
         if idx.isValid():
             self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+        if path in self._full_visible_pending_paths:
+            self._full_visible_pending_paths.discard(path)
+            requested_at = self._full_visible_requested_at_ms
+            if not self._full_visible_first_published and requested_at is not None:
+                self._full_visible_first_published = True
+                emit_perf_event(
+                    "gallery_viewport_thumbnail_first_published",
+                    path=path,
+                    elapsed_ms=round(monotonic_ms() - requested_at, 3),
+                )
+        self._record_full_viewport_completion_if_ready()
 
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)

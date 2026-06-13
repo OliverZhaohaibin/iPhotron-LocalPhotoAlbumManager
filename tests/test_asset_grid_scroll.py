@@ -155,3 +155,31 @@ def test_visible_rows_ignores_empty_bottom_right_cell(qapp: QApplication) -> Non
 
     assert emitted
     assert emitted[-1][1] < 9_999
+
+
+def test_viewport_rows_exclude_micro_buffer(qapp: QApplication) -> None:
+    grid = AssetGrid()
+    model = QStandardItemModel()
+    for i in range(10_000):
+        model.appendRow(QStandardItem(f"item-{i}"))
+    grid.setModel(model)
+    grid.resize(500, 300)
+    grid.show()
+    qapp.processEvents()
+
+    viewport_emitted: list[tuple[int, int]] = []
+    buffered_emitted: list[tuple[int, int]] = []
+    grid.viewportRowsChanged.connect(
+        lambda first, last: viewport_emitted.append((first, last))
+    )
+    grid.visibleRowsChanged.connect(
+        lambda first, last: buffered_emitted.append((first, last))
+    )
+
+    with patch.object(grid, "_visible_row_bounds", return_value=(100, 120)):
+        grid._viewport_range = None
+        grid._visible_range = None
+        grid._emit_visible_rows()
+
+    assert viewport_emitted == [(100, 120)]
+    assert buffered_emitted == [(80, 140)]

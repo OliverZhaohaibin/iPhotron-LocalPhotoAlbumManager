@@ -177,7 +177,7 @@ def test_buffered_prioritize_rows_does_not_request_full_thumbnails(
     mock_thumb_service.request_many.assert_not_called()
 
 
-def test_full_viewport_rows_request_only_loaded_full_thumbnails_center_out(
+def test_scrolling_viewport_only_probes_center_l2_without_cancelling(
     adapter,
     mock_store,
     mock_thumb_service,
@@ -190,40 +190,39 @@ def test_full_viewport_rows_request_only_loaded_full_thumbnails_center_out(
 
     adapter.prioritize_full_rows(10, 12)
 
-    mock_thumb_service.cancel_pending_except.assert_called_once_with(
-        {Path("/library/10.jpg"), Path("/library/11.jpg"), Path("/library/12.jpg")},
-        adapter._thumb_size,
-    )
+    mock_thumb_service.cancel_pending_except.assert_not_called()
     mock_thumb_service.request_many.assert_called_once_with(
         [Path("/library/11.jpg"), Path("/library/10.jpg"), Path("/library/12.jpg")],
         adapter._thumb_size,
         priority="visible",
-        allow_generate=True,
+        allow_generate=False,
     )
 
 
-def test_full_viewport_rows_keep_latest_range_and_cancel_old_work(
+def test_scrolling_viewport_keeps_latest_range_without_cancelling_active_work(
     adapter,
     mock_store,
     mock_thumb_service,
 ):
-    latest = _make_dto(abs_path=Path("/library/latest.jpg"))
-    mock_store.asset_at.side_effect = lambda row: latest if row == 5 else None
+    mock_store.asset_at.side_effect = lambda row: _make_dto(
+        abs_path=Path(f"/library/{row}.jpg")
+    )
 
     adapter.prioritize_full_rows(10, 25)
     adapter.prioritize_full_rows(20, 60)
     adapter.prioritize_full_rows(5, 15)
 
     assert adapter._full_visible_range == (5, 15)
-    mock_thumb_service.cancel_pending_except.assert_called_with(
-        {Path("/library/latest.jpg")},
-        adapter._thumb_size,
-    )
+    mock_thumb_service.cancel_pending_except.assert_not_called()
     mock_thumb_service.request_many.assert_called_with(
-        [Path("/library/latest.jpg")],
+        [
+            Path("/library/10.jpg"),
+            Path("/library/9.jpg"),
+            Path("/library/11.jpg"),
+        ],
         adapter._thumb_size,
         priority="visible",
-        allow_generate=True,
+        allow_generate=False,
     )
 
 
@@ -245,12 +244,7 @@ def test_visible_window_result_restarts_stable_warm_timer(
     assert adapter._thumbnail_timer.isActive()
     assert adapter._pending_micro_prefetch_range == (10, 20)
     assert adapter._micro_prefetch_timer.isActive()
-    mock_thumb_service.request_many.assert_called_once_with(
-        [Path("/library/visible.jpg")],
-        adapter._thumb_size,
-        priority="visible",
-        allow_generate=True,
-    )
+    mock_thumb_service.request_many.assert_not_called()
 
 
 def test_visible_window_result_without_viewport_does_not_request_buffered_full_rows(
@@ -415,17 +409,10 @@ def test_warm_result_retries_neighbors_for_stable_viewport(
 
     adapter._apply_window_result_on_ui_thread(result)
 
-    assert mock_thumb_service.request_many.call_count == 3
-    assert mock_thumb_service.request_many.call_args_list[0].kwargs["priority"] == "visible"
-    assert mock_thumb_service.request_many.call_args_list[0].kwargs["allow_generate"] is True
-    assert mock_thumb_service.request_many.call_args_list[1].kwargs == {
-        "priority": "normal",
-        "allow_generate": True,
-        "speculative": True,
-    }
-    assert mock_thumb_service.request_many.call_args_list[2].kwargs["priority"] == "low"
-    assert mock_thumb_service.request_many.call_args_list[2].kwargs["allow_generate"] is False
-    assert mock_thumb_service.request_many.call_args_list[2].kwargs["speculative"] is True
+    assert mock_thumb_service.request_many.call_count == 1
+    assert mock_thumb_service.request_many.call_args.kwargs["priority"] == "low"
+    assert mock_thumb_service.request_many.call_args.kwargs["allow_generate"] is False
+    assert mock_thumb_service.request_many.call_args.kwargs["speculative"] is True
 
 
 def test_stable_viewport_waits_for_all_full_thumbnails_before_neighbor_prefetch(
@@ -443,7 +430,42 @@ def test_stable_viewport_waits_for_all_full_thumbnails_before_neighbor_prefetch(
 
     adapter._flush_pending_thumbnail_rows()
 
-    mock_thumb_service.request_many.assert_not_called()
+    call = mock_thumb_service.request_many.call_args
+    assert call.kwargs == {"priority": "visible", "allow_generate": True}
+    assert set(call.args[0]) == {
+        Path(f"/library/{row}.jpg") for row in range(39, 52)
+    }
+    assert mock_thumb_service.cancel_pending_except.call_args.kwargs == {
+        "cancel_active": False
+    }
+
+
+def test_thumbnail_ready_updates_are_frame_coalesced_and_viewport_scoped(
+    adapter,
+    mock_store,
+):
+    mock_store.count.return_value = 100
+    rows = {
+        Path("/library/40.jpg"): 40,
+        Path("/library/41.jpg"): 41,
+        Path("/library/70.jpg"): 70,
+    }
+    mock_store.row_for_path.side_effect = rows.get
+    adapter._full_visible_range = (40, 50)
+    emissions: list[tuple[int, int, list[int]]] = []
+    adapter.dataChanged.connect(
+        lambda top, bottom, roles: emissions.append(
+            (top.row(), bottom.row(), list(roles))
+        )
+    )
+
+    for path in rows:
+        adapter._on_thumbnail_ready(path)
+
+    assert emissions == []
+    adapter._flush_pending_thumbnail_ready()
+
+    assert emissions == [(40, 41, [int(Qt.DecorationRole)])]
 
 
 def test_thumbnail_ready_starts_neighbors_after_stable_viewport_completes(

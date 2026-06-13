@@ -23,7 +23,7 @@ if os.environ.get("IPHOTO_RUN_GALLERY_SCROLL_BENCHMARK") != "1":
 
 pytest.importorskip("PySide6", reason="PySide6 is required for Qt scroll benchmarks")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QSize, Qt
 from PySide6.QtGui import QGuiApplication, QImage, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
@@ -31,6 +31,8 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
+from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file
+from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 
 class _Signal:
@@ -141,6 +143,40 @@ class _MemoryOnlyThumbnails:
         self.requested_paths += requested
         self.request_batches.append((time.perf_counter(), priority, allow_generate, batch))
         return requested
+
+
+def test_real_l2_thumbnail_batch_with_slow_decode_does_not_block_caller(
+    qapp,
+    tmp_path: Path,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(512, 512)
+    paths = [tmp_path / f"photo-{index}.jpg" for index in range(20)]
+    image = QImage(512, 512, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.darkGray)
+    for path in paths:
+        assert image.save(str(thumbnail_cache_file(tmp_path / "thumbs", path)), "JPEG")
+
+    published: list[Path] = []
+    service.thumbnailReady.connect(published.append)
+    original_load = service._load_or_render_thumbnail
+
+    def slow_load(path, requested_size, task=None):
+        time.sleep(0.02)
+        return original_load(path, requested_size, task)
+
+    started = time.perf_counter()
+    with patch.object(service, "_load_or_render_thumbnail", side_effect=slow_load):
+        service.request_many(paths, size, priority="visible", allow_generate=True)
+        caller_elapsed_ms = (time.perf_counter() - started) * 1000.0
+        deadline = time.perf_counter() + 3.0
+        while len(published) < len(paths) and time.perf_counter() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+
+    service.shutdown()
+    assert caller_elapsed_ms < 20.0
+    assert set(published) == set(paths)
 
 
 class _InstrumentedGalleryGridView(GalleryGridView):
@@ -325,13 +361,19 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
                 stable_since = None
             elif stable_since is None:
                 stable_since = now
-            elif now - stable_since >= 0.05:
+            elif now - stable_since >= 0.12:
                 break
             time.sleep(0.001)
     finished = time.perf_counter()
     view._benchmark_active = False
     request_deadline = time.perf_counter() + 0.3
-    while thumbnails.requested_paths == 0 and time.perf_counter() < request_deadline:
+    while (
+        not any(
+            priority == "visible" and allow_generate
+            for _at, priority, allow_generate, _paths in thumbnails.request_batches
+        )
+        and time.perf_counter() < request_deadline
+    ):
         qapp.processEvents()
         time.sleep(0.005)
 
@@ -371,17 +413,26 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
         )
         for warm_at, warm_first, warm_last in store.warm_requests
     )
-    final_viewport_changed_at = (
-        metrics["viewport_changes"][-1][0] if metrics["viewport_changes"] else queued_at
-    )
-    final_full_request_ms = next(
-        (
-            max(0.0, (requested_at - final_viewport_changed_at) * 1000.0)
-            for requested_at, priority, _allow_generate, _paths in thumbnails.request_batches
-            if requested_at >= final_viewport_changed_at and priority == "visible"
-        ),
-        -1.0,
-    )
+    full_requests = [
+        request
+        for request in thumbnails.request_batches
+        if request[0] >= queued_at and request[1] == "visible" and request[2]
+    ]
+    final_full_request_ms = -1.0
+    if full_requests:
+        full_requested_at = full_requests[-1][0]
+        relevant_viewport_at = max(
+            (
+                changed_at
+                for changed_at, _first, _last in metrics["viewport_changes"]
+                if changed_at <= full_requested_at
+            ),
+            default=queued_at,
+        )
+        final_full_request_ms = max(
+            0.0,
+            (full_requested_at - relevant_viewport_at) * 1000.0,
+        )
 
     paint_starts = metrics["paint_started_at"]
     frame_intervals = [
@@ -467,14 +518,13 @@ def test_real_qt_gallery_scroll_benchmark(qapp, row_count: int) -> None:
     assert report["visual_coverage"]["micro_or_full_ratio"] == 1.0
     assert report["visual_coverage"]["placeholder_ratio"] == 0.0
     assert 0.0 <= report["final_micro_publish_ms"] <= 100.0
-    # Materialized viewport rows schedule synchronously. This synthetic store
-    # deliberately withholds rows until the 16 ms visible-window flush, so one
-    # event-loop frame plus scheduling overhead is the expected upper bound.
-    assert 0.0 <= report["final_full_request_ms"] <= 32.0
+    # Full generation is deliberately deferred until the viewport is stable so
+    # rapid Windows wheel/scrollbar input does not rebuild generation queues.
+    assert 60.0 <= report["final_full_request_ms"] <= 140.0
     assert report["visible_thumbnail_batch_sizes"]
     assert view._viewport_range is not None
     assert max(report["visible_thumbnail_batch_sizes"]) <= (
-        view._viewport_range[1] - view._viewport_range[0] + 1
+        view._viewport_range[1] - view._viewport_range[0] + 3
     )
     assert report["visible_before_warm"] is True
     assert not any(violations.values()), f"Protected-path violations: {violations}"

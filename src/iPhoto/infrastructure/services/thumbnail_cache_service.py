@@ -1,4 +1,5 @@
 import shutil
+import sys
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Deque, Dict, Optional, Set
 
 import numpy as np
+from PIL import Image
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
 
@@ -127,38 +129,40 @@ class ThumbnailCacheService(QObject):
         self._active_tasks = 0
         self._active_jobs: Dict[int, _ActiveThumbnailTask] = {}
         self._next_task_id = 1
-        self._max_active_jobs = 2
+        self._max_active_jobs = 4 if sys.platform == "win32" else 2
         self._failure_cooldown_seconds = 60.0
         self._failure_until: Dict[str, float] = {}
-        self._thread_pool = QThreadPool.globalInstance()
+        self._thread_pool = QThreadPool(self)
+        self._thread_pool.setMaxThreadCount(self._max_active_jobs)
         self._is_shutting_down = False
 
     def shutdown(self):
         """Prevents new tasks from being submitted and clears pending logic."""
         self._is_shutting_down = True
-        for task in self._active_jobs.values():
-            task.stale = True
-            task.cancel_reason = "shutdown"
-        self._pending_tasks.clear()
-        self._queued_tasks.clear()
-        for queue in self._priority_queues.values():
-            queue.clear()
+        self._stop_all_tasks("shutdown")
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
         self._is_shutting_down = False
         if self._disk_cache_path == disk_cache_path:
             return
+        self._stop_all_tasks("cache_path_changed")
         self._disk_cache_path = disk_cache_path
         self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._memory_cache.clear()
+        self._failure_until.clear()
+
+    def _stop_all_tasks(self, reason: str) -> None:
         for task in self._active_jobs.values():
             task.stale = True
-            task.cancel_reason = "cache_path_changed"
-        self._pending_tasks.clear()
+            task.cancel_reason = reason
         self._queued_tasks.clear()
         for queue in self._priority_queues.values():
             queue.clear()
-        self._failure_until.clear()
+        self._thread_pool.clear()
+        self._thread_pool.waitForDone(2000)
+        self._active_jobs.clear()
+        self._active_tasks = 0
+        self._pending_tasks.clear()
 
     def set_edit_service(self, edit_service: EditServicePort | None) -> None:
         """Bind the current edit surface used for thumbnail rendering."""
@@ -306,7 +310,13 @@ class ThumbnailCacheService(QObject):
         )
         return queued + promoted
 
-    def cancel_pending_except(self, paths: Set[Path], size: QSize) -> None:
+    def cancel_pending_except(
+        self,
+        paths: Set[Path],
+        size: QSize,
+        *,
+        cancel_active: bool = True,
+    ) -> None:
         """Cancel queued thumbnail work except for *paths* at *size*."""
 
         keep_keys = {self._cache_key(path, size) for path in paths}
@@ -323,17 +333,18 @@ class ThumbnailCacheService(QObject):
                 self._priority_queues[priority] = deque(
                     key for key in queue if key not in drop_keys
                 )
-        for task in self._active_jobs.values():
-            if task.size == size and task.key not in keep_keys and not task.stale:
-                task.stale = True
-                task.cancel_reason = "stale_active"
-                emit_perf_event(
-                    "thumbnail_active_marked_stale",
-                    path=task.path,
-                    width=size.width(),
-                    height=size.height(),
-                    priority=task.priority,
-                )
+        if cancel_active:
+            for task in self._active_jobs.values():
+                if task.size == size and task.key not in keep_keys and not task.stale:
+                    task.stale = True
+                    task.cancel_reason = "stale_active"
+                    emit_perf_event(
+                        "thumbnail_active_marked_stale",
+                        path=task.path,
+                        width=size.width(),
+                        height=size.height(),
+                        priority=task.priority,
+                    )
 
     def _queue_generation(
         self,
@@ -607,7 +618,7 @@ class ThumbnailCacheService(QObject):
         key = self._cache_key(path, size)
         disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         if disk_file.exists():
-            image = QImage(str(disk_file))
+            image = self._load_l2_thumbnail(disk_file)
             if not image.isNull():
                 emit_perf_event("thumbnail_cache_hit", tier="L2-worker", key=key)
                 return image
@@ -630,22 +641,27 @@ class ThumbnailCacheService(QObject):
             pass
         return image
 
+    @staticmethod
+    def _load_l2_thumbnail(disk_file: Path) -> QImage:
+        """Decode cached JPEGs without invoking Qt's threaded file decoder."""
+
+        try:
+            with Image.open(disk_file) as pil_image:
+                pil_image.load()
+                image = image_loader.qimage_from_pil(pil_image.convert("RGB"))
+        except (OSError, ValueError):
+            return QImage()
+        return image if image is not None else QImage()
+
     def _render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
         started = monotonic_ms()
         if size.isEmpty() or not size.isValid():
             return None
 
-        video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
-        is_video = path.suffix.lower() in video_exts
-        qimage: Optional[QImage] = None
-        if not is_video:
-            qimage = image_loader.load_qimage(path, size)
-
-        if qimage is None or qimage.isNull():
-            pil_image = self._generator.generate(path, (size.width(), size.height()))
-            if pil_image is None:
-                return None
-            qimage = image_loader.qimage_from_pil(pil_image)
+        pil_image = self._generator.generate(path, (size.width(), size.height()))
+        if pil_image is None:
+            return None
+        qimage = image_loader.qimage_from_pil(pil_image)
 
         if qimage is None or qimage.isNull():
             emit_perf_event(

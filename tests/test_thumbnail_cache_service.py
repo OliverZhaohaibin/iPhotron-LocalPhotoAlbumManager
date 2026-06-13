@@ -69,14 +69,14 @@ def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> N
     edit_service = Mock()
     edit_service.sidecar_exists.return_value = False
     service.set_edit_service(edit_service)
-    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
     path = tmp_path / "photo.jpg"
     path.write_bytes(b"image")
     size = QSize(64, 64)
 
-    with patch(
-        "iPhoto.infrastructure.services.thumbnail_cache_service.image_loader.load_qimage",
-        return_value=image,
+    with patch.object(
+        service._generator,
+        "generate",
+        return_value=Image.new("RGB", (8, 8), "red"),
     ), patch(
         "iPhoto.infrastructure.services.thumbnail_cache_service.compute_color_statistics",
     ) as compute_stats:
@@ -230,6 +230,51 @@ def test_cancel_pending_except_marks_matching_active_task_stale(tmp_path: Path) 
 
     assert stale_task.stale is True
     assert stale_task.cancel_reason == "stale_active"
+
+
+def test_cancel_pending_except_can_preserve_active_scroll_work(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    stale = tmp_path / "stale.jpg"
+    keep = tmp_path / "keep.jpg"
+    size = QSize(512, 512)
+    stale_task = _active_task(service, stale, size, priority="visible")
+
+    service.cancel_pending_except({keep}, size, cancel_active=False)
+
+    assert stale_task.stale is False
+    assert stale_task.cancel_reason is None
+
+
+def test_windows_visible_request_can_start_while_slow_old_tasks_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.sys.platform",
+        "win32",
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(512, 512)
+    service._active_jobs.clear()
+    for index in range(2):
+        task = _active_task(
+            service,
+            tmp_path / f"old-{index}.jpg",
+            size,
+            priority="visible",
+        )
+        service._active_jobs.pop(task.task_id)
+        task.task_id = index + 1
+        service._active_jobs[task.task_id] = task
+    service._active_tasks = 2
+    visible = tmp_path / "visible.jpg"
+
+    with patch.object(service._thread_pool, "start") as start:
+        service.request_many([visible], size, priority="visible", allow_generate=True)
+
+    assert service._max_active_jobs == 4
+    start.assert_called_once()
+    assert any(task.path == visible for task in service._active_jobs.values())
 
 
 def test_active_l2_only_task_promoted_after_miss_retries_as_visible(

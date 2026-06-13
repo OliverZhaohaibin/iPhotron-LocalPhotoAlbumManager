@@ -445,6 +445,10 @@ def test_async_visible_window_uses_exact_range_before_warm_prefetch() -> None:
     assert initial.request.window_first == 0
     assert initial.request.window_limit == store.INITIAL_VISIBLE_ROWS
     assert store.apply_window_result(initial) is True
+    window_events: list[tuple[int, int]] = []
+    store.window_changed.connect(
+        lambda first, last: window_events.append((first, last))
+    )
 
     ready.clear()
     store.prioritize_rows(7_000, 7_060)
@@ -454,6 +458,7 @@ def test_async_visible_window_uses_exact_range_before_warm_prefetch() -> None:
     assert visible.request.window_first == 7_000
     assert visible.request.window_limit == 61
     assert store.apply_window_result(visible) is True
+    assert window_events[-1] == (7_000, 7_060)
 
     ready.clear()
     store.prefetch_rows(7_000, 7_060)
@@ -463,6 +468,7 @@ def test_async_visible_window_uses_exact_range_before_warm_prefetch() -> None:
     assert store.MICRO_WARM_MIN_ROWS <= warm.request.window_limit <= store.MICRO_WARM_MAX_ROWS
     assert warm.request.window_first < visible.request.window_first
     assert store.apply_window_result(warm) is True
+    assert window_events[-1] == (7_000, 7_060)
     store.shutdown()
 
 

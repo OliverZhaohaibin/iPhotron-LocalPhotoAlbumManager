@@ -1005,6 +1005,9 @@ class GalleryCollectionStore:
         previous_window = self._window_range
         incoming_first = window_first
         incoming_last = window_last
+        published_rows = [
+            row for row in fetched_rows if first <= row <= last
+        ]
         windows_touch = (
             previous_window is not None
             and incoming_first <= previous_window[1] + 1
@@ -1056,11 +1059,14 @@ class GalleryCollectionStore:
                 emit_source_changed = True
             if emit_source_changed:
                 self.data_changed.emit()
-            changed_first, changed_last = window_first, window_last
-            if tier == "warm":
-                changed_first = max(first, incoming_first)
-                changed_last = min(last, incoming_last)
-            if changed_first <= changed_last:
+            if published_rows:
+                changed_first = changed_last = min(published_rows)
+                for row in sorted(set(published_rows))[1:]:
+                    if row <= changed_last + 1:
+                        changed_last = row
+                        continue
+                    self.window_changed.emit(changed_first, changed_last)
+                    changed_first = changed_last = row
                 self.window_changed.emit(changed_first, changed_last)
             if pinned_row is not None and pinned_row not in fetched_rows and pinned_row in self._row_cache:
                 self.window_changed.emit(pinned_row, pinned_row)

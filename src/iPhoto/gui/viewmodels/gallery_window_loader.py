@@ -28,6 +28,9 @@ class GalleryWindowRequest:
     pending_insertions: tuple[AssetDTO, ...] = ()
     request_backfill: bool = True
     collection_revision: int = 0
+    demand_generation: int = 0
+    priority: int = 1
+    retain_when_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,8 @@ class GalleryWindowResult:
     backfill_queued: int = 0
     error: str | None = None
     requested_revision: int = 0
+    demand_generation: int = 0
+    priority: int = 1
 
 
 class _GalleryWindowSignals(QObject):
@@ -119,6 +124,8 @@ class _GalleryWindowWorker(QRunnable):
                     total_count=total_count,
                     collection_revision=int(window.collection_revision),
                     requested_revision=request.collection_revision,
+                    demand_generation=request.demand_generation,
+                    priority=request.priority,
                 )
             )
             request_backfill = getattr(request.query_service, "request_thumbnail_backfill", None)
@@ -140,38 +147,83 @@ class _GalleryWindowWorker(QRunnable):
                     collection_revision=0,
                     error=f"{type(exc).__name__}: {exc}",
                     requested_revision=request.collection_revision,
+                    demand_generation=request.demand_generation,
+                    priority=request.priority,
                 )
             )
 
 
 class GalleryWindowLoader(QObject):
-    """Run at most one query and retain only the newest queued viewport request."""
+    """Run one query at a time and prioritize the newest viewport's chunks."""
 
     resultReady = Signal(object)  # noqa: N815 - Qt signal naming convention
+    requestsDropped = Signal(object)  # noqa: N815 - Qt signal naming convention
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
         self._active_generation: int | None = None
-        self._latest_request: GalleryWindowRequest | None = None
-        self._latest_generation = 0
+        self._active_request: GalleryWindowRequest | None = None
+        self._queued_requests: list[GalleryWindowRequest] = []
+        self._latest_demand_generation = 0
         self._signals: dict[int, _GalleryWindowSignals] = {}
 
     def request(self, request: GalleryWindowRequest) -> None:
-        self._latest_generation = max(self._latest_generation, request.generation)
+        demand_generation = int(request.demand_generation)
+        if demand_generation > self._latest_demand_generation:
+            self._latest_demand_generation = demand_generation
+            dropped = [
+                queued.generation
+                for queued in self._queued_requests
+                if (
+                    int(queued.demand_generation) < demand_generation
+                    and not queued.retain_when_stale
+                )
+            ]
+            self._queued_requests = [
+                queued
+                for queued in self._queued_requests
+                if (
+                    int(queued.demand_generation) >= demand_generation
+                    or queued.retain_when_stale
+                )
+            ]
+            if dropped:
+                self.requestsDropped.emit(tuple(dropped))
+        elif demand_generation > 0 and demand_generation < self._latest_demand_generation:
+            self.requestsDropped.emit((request.generation,))
+            return
+
+        signature = self._request_signature(request)
+        if (
+            self._active_request is not None
+            and self._request_signature(self._active_request) == signature
+        ):
+            self.requestsDropped.emit((request.generation,))
+            return
+        for index, queued in enumerate(self._queued_requests):
+            if self._request_signature(queued) != signature:
+                continue
+            self._queued_requests[index] = request
+            self.requestsDropped.emit((queued.generation,))
+            return
         if self._active_generation is not None:
-            self._latest_request = request
+            self._queued_requests.append(request)
             return
         self._start(request)
 
     def shutdown(self) -> None:
-        self._latest_request = None
-        self._latest_generation += 1
+        dropped = tuple(request.generation for request in self._queued_requests)
+        self._queued_requests.clear()
+        self._latest_demand_generation += 1
         self._pool.clear()
+        if dropped:
+            self.requestsDropped.emit(dropped)
 
     def _start(self, request: GalleryWindowRequest) -> None:
         self._active_generation = request.generation
+        self._active_request = request
         signals = _GalleryWindowSignals()
         signals.completed.connect(self._handle_completed)
         self._signals[request.generation] = signals
@@ -182,12 +234,34 @@ class GalleryWindowLoader(QObject):
         if signals is not None:
             signals.deleteLater()
         self._active_generation = None
-        if result.generation == self._latest_generation:
-            self.resultReady.emit(result)
-        next_request = self._latest_request
-        self._latest_request = None
-        if next_request is not None:
-            self._start(next_request)
+        self._active_request = None
+        self.resultReady.emit(result)
+        self._start_next()
+
+    def _start_next(self) -> None:
+        if not self._queued_requests:
+            return
+        best_index = min(
+            range(len(self._queued_requests)),
+            key=lambda index: self._queued_requests[index].priority,
+        )
+        self._start(self._queued_requests.pop(best_index))
+
+    @staticmethod
+    def _request_signature(request: GalleryWindowRequest) -> tuple[object, ...]:
+        return (
+            request.root,
+            id(request.query_service),
+            request.query,
+            request.view_first,
+            request.raw_first,
+            request.limit,
+            request.pending_source_ids,
+            request.pending_source_count,
+            request.pending_insertions,
+            request.request_backfill,
+            request.collection_revision,
+        )
 
 
 __all__ = [

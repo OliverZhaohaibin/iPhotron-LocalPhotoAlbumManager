@@ -1,7 +1,7 @@
 # Windows/Linux 大型图库 Gallery 滚动性能重构
 
 > 状态：实施中
-> 文档版本：1.1
+> 文档版本：1.2
 > 创建日期：2026-06-11
 > 适用架构：vNext / Qt Widgets Gallery
 > 主要验收平台：Windows、Linux
@@ -423,9 +423,10 @@ thumbnail_cache.request_many(requests, generation)
 - 保证不触发文件系统访问、解码或 worker 等待；
 - miss 时立即返回 `None`。
 
-`request_many()`：
+`request_many()` / `reconcile_demand()`：
 
 - 接收去重后的批量请求；
+- 每个 viewport generation 使用 `reconcile_demand()` 原子替换 visible/hot 排队需求；
 - 在 worker 中执行 L2 文件检查、读取和解码；
 - worker 返回 `QImage`，不在 worker 创建 `QPixmap`；
 - GUI 线程只对仍相关的结果执行 `QImage -> QPixmap`；
@@ -442,7 +443,25 @@ thumbnail_cache.request_many(requests, generation)
 | warm | 更远但可能即将进入 viewport 的 tile | 低优先级，仅在 worker 空闲时执行 |
 | stale | 已离开相关 generation 的 tile | 取消或丢弃 |
 
-快速滚动时暂停旧范围 full 请求，并扩大滚动方向上的 micro 预取，优先保证 scrollbar 与 micro 绘制流畅。停止或减速后立即请求 visible 和邻近一个 viewport 的 full。
+调度使用 `GalleryViewportDemand` 描述 generation、visible、hot、warm、方向、
+EWMA `screens_per_second` 与 `settled / slow / medium / fast` 阶段。速度只影响资源
+范围，不得改变滚轮输入距离。
+
+- 传统鼠标滚轮每个 notch 使用恒定增益并遵循系统 `wheelScrollLines()`；禁止连续
+  notch 自适应加速。触控板 `pixelDelta` 保持 1:1。
+- 滚动速度使用约 `120ms` EWMA；低于 `2` 屏/秒为 slow，`2–8` 屏/秒为
+  medium，高于 `8` 屏/秒为 fast；约 `120ms` 无输入后标记 settled。
+- 所有阶段持续请求 visible full；slow/settled 扩展至前方两屏和后方一屏，
+  medium 只扩展前方一屏，fast 仅请求 visible。
+- micro warm-up 使用 `256` 张分块，visible -> hot -> warm 顺序提交。
+- slow/settled warm 至少 `300` 张或 `6` 屏，medium 至少 `300` 张或 `24` 屏，
+  fast 扩展至最多 `2000` 张。
+- 有方向时约 `75%` warm 容量分配在前方，settled 时居中分配。
+- micro 稀疏 LRU 每个活动 Gallery 最多保留 `2000` 张，显式交互 pin 行可单独保留。
+
+旧 generation 的未开始请求会取消；已经完成的 micro window 若仍落在当前 warm
+范围且 collection revision 一致，可以合并复用。full 结果若不再属于当前
+visible/hot demand，则在 `QImage -> QPixmap` 前丢弃。
 
 ### 8.9 generation 与取消
 

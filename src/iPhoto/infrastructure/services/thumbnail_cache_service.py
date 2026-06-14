@@ -13,7 +13,11 @@ from iPhoto.application.ports import EditServicePort
 from iPhoto.core import geo_utils
 from iPhoto.core.color_resolver import compute_color_statistics
 from iPhoto.core.image_filters import apply_adjustments
-from iPhoto.infrastructure.services.performance_events import emit_perf_event, monotonic_ms
+from iPhoto.infrastructure.services.performance_events import (
+    emit_perf_event,
+    monotonic_ms,
+    perf_logging_enabled,
+)
 from iPhoto.infrastructure.services.thumbnail_cache_keys import (
     thumbnail_cache_file_for_key,
     thumbnail_cache_key,
@@ -148,6 +152,13 @@ class ThumbnailCacheService(QObject):
             return self._memory_cache[key]
         return None
 
+    def has_full_thumbnail(self, path: Path, size: QSize) -> bool:
+        """Return whether the full thumbnail is resident without touching its LRU state."""
+
+        if self._is_shutting_down:
+            return False
+        return self._cache_key(path, size) in self._memory_cache
+
     def get_thumbnail(
         self,
         path: Path,
@@ -208,6 +219,68 @@ class ThumbnailCacheService(QObject):
                 priority=priority,
                 generation=int(generation),
             )
+
+    def reconcile_demand(
+        self,
+        *,
+        visible_paths: Iterable[Path],
+        hot_paths: Iterable[Path],
+        size: QSize,
+        generation: int,
+    ) -> None:
+        """Replace queued work with the latest visible/hot thumbnail demand."""
+
+        visible = list(dict.fromkeys(Path(path) for path in visible_paths))
+        visible_set = set(visible)
+        hot = [
+            Path(path)
+            for path in dict.fromkeys(Path(path) for path in hot_paths)
+            if Path(path) not in visible_set
+        ]
+        desired_keys = {
+            self._cache_key(path, size)
+            for path in [*visible, *hot]
+        }
+        record_perf = perf_logging_enabled()
+        pending_before = set(self._pending_tasks) if record_perf else set()
+        resident = len(desired_keys.intersection(self._memory_cache)) if record_perf else 0
+        self._current_generation = max(self._current_generation, int(generation))
+        self.pin_visible(visible, size)
+
+        drop_keys = set(self._queued_tasks) - desired_keys
+        for key in drop_keys:
+            self._queued_tasks.pop(key, None)
+            self._pending_tasks.discard(key)
+            self._pending_generations.pop(key, None)
+        if drop_keys:
+            for priority, queue in self._priority_queues.items():
+                self._priority_queues[priority] = deque(
+                    key for key in queue if key not in drop_keys
+                )
+
+        self.request_many(
+            ((path, size, "visible") for path in visible),
+            generation=generation,
+        )
+        self.request_many(
+            ((path, size, "normal") for path in hot),
+            generation=generation,
+        )
+        if record_perf:
+            emit_perf_event(
+                "thumbnail_demand_reconciled",
+                generation=generation,
+                visible=len(visible),
+                hot=len(hot),
+                requested=len(
+                    (set(self._pending_tasks) - pending_before).intersection(desired_keys)
+                ),
+                resident=resident,
+                canceled=len(drop_keys),
+                queued=len(self._queued_tasks),
+                active=self._active_tasks,
+            )
+        self._drain_generation_queue()
 
     def pin_visible(self, paths: Iterable[Path], size: QSize) -> None:
         """Keep current visible full thumbnails resident until the next viewport."""

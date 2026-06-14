@@ -9,11 +9,11 @@ from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtGui import QImage
 
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.gui.gallery_demand import build_viewport_demand
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_tile import GalleryTileSnapshot
-from iPhoto.gui.ui.widgets.gallery_scroll_controller import GalleryViewportState
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 
@@ -291,22 +291,67 @@ def test_tile_snapshot_miss_does_not_synchronously_load(adapter, mock_store):
     mock_store.ensure_row_loaded.assert_not_called()
 
 
-def test_active_viewport_prioritizes_micro_and_cancels_stale_full(
+def test_fast_viewport_warms_micro_and_still_requests_visible_full(
     adapter,
     mock_store,
     mock_thumb_service,
 ):
-    state = GalleryViewportState(7, 100, 119, 1, 5000.0, True)
+    dto = _make_dto(abs_path=Path("/library/photo.jpg"))
+    mock_store.cached_rows.side_effect = [[(100, dto)], [(100, dto)]]
+    demand = build_viewport_demand(
+        generation=7,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=9.0,
+        actively_scrolling=True,
+    )
 
-    adapter.update_viewport(state)
-    adapter._flush_pending_prioritize_rows()
+    adapter.update_viewport(demand)
 
-    mock_store.prioritize_rows.assert_called_once_with(60, 359)
-    mock_thumb_service.cancel_stale.assert_called_once_with(7)
-    mock_thumb_service.request_many.assert_not_called()
+    mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
+    mock_thumb_service.reconcile_demand.assert_called_once_with(
+        visible_paths=[Path("/library/photo.jpg")],
+        hot_paths=[Path("/library/photo.jpg")],
+        size=adapter._thumb_size,
+        generation=7,
+    )
+    assert demand.phase == "fast"
+    assert demand.hot_range == demand.visible_range
+    assert demand.warm_last - demand.warm_first + 1 == 2000
 
 
-def test_idle_viewport_requests_visible_and_adjacent_full(
+@pytest.mark.parametrize(("speed", "phase"), [(1.0, "slow"), (4.0, "medium")])
+def test_scrolling_phase_immediately_requests_visible_full(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+    speed,
+    phase,
+):
+    dto = _make_dto(abs_path=Path("/library/photo.jpg"))
+    mock_store.cached_rows.side_effect = [[(100, dto)], [(100, dto)]]
+    demand = build_viewport_demand(
+        generation=7,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=speed,
+        actively_scrolling=True,
+    )
+
+    adapter.update_viewport(demand)
+
+    assert demand.phase == phase
+    mock_thumb_service.reconcile_demand.assert_called_once()
+    assert mock_thumb_service.reconcile_demand.call_args.kwargs["visible_paths"] == [
+        Path("/library/photo.jpg")
+    ]
+
+
+def test_settled_viewport_requests_visible_and_hot_full(
     adapter,
     mock_store,
     mock_thumb_service,
@@ -316,15 +361,28 @@ def test_idle_viewport_requests_visible_and_adjacent_full(
         [(100, dto)],
         [(100, dto)],
     ]
-    state = GalleryViewportState(8, 100, 119, 1, 0.0, False)
-
-    adapter.update_viewport(state)
-
-    mock_thumb_service.pin_visible.assert_called_once_with(
-        [Path("/library/photo.jpg")],
-        adapter._thumb_size,
+    demand = build_viewport_demand(
+        generation=8,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
     )
-    mock_thumb_service.request_many.assert_called_once()
+
+    adapter.update_viewport(demand)
+
+    mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
+    mock_thumb_service.reconcile_demand.assert_called_once_with(
+        visible_paths=[Path("/library/photo.jpg")],
+        hot_paths=[Path("/library/photo.jpg")],
+        size=adapter._thumb_size,
+        generation=8,
+    )
+    assert demand.phase == "settled"
+    assert demand.hot_first < demand.visible_first
+    assert demand.hot_last > demand.visible_last
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

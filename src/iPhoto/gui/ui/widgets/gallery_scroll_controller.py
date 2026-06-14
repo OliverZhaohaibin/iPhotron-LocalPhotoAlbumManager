@@ -5,30 +5,20 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication
 
-
-@dataclass(frozen=True, slots=True)
-class GalleryViewportState:
-    """One immutable description of the Gallery viewport."""
-
-    generation: int
-    visible_first: int
-    visible_last: int
-    direction: int
-    velocity: float
-    actively_scrolling: bool
+from iPhoto.gui.gallery_demand import (
+    SCROLL_SETTLED_TIMEOUT_MS,
+    SCROLL_VELOCITY_EWMA_SECONDS,
+    GalleryViewportDemand,
+    build_viewport_demand,
+)
 
 
 class GalleryScrollController(QObject):
     """Keep wheel input responsive and publish at most one viewport state per event-loop turn."""
-
-    _IDLE_TIMEOUT_MS = 90
-    _FAST_WHEEL_INTERVAL_SEC = 0.085
-    _MAX_ACCELERATION = 4
 
     def __init__(self, view, publish: Callable[[], None]) -> None:
         super().__init__(view)
@@ -39,9 +29,7 @@ class GalleryScrollController(QObject):
         self._last_value = int(self._view.verticalScrollBar().value())
         self._last_value_at = time.monotonic()
         self._direction = 0
-        self._velocity = 0.0
-        self._last_wheel_at = 0.0
-        self._wheel_streak = 0
+        self._screens_per_second = 0.0
 
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
@@ -50,7 +38,7 @@ class GalleryScrollController(QObject):
 
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
-        self._idle_timer.setInterval(self._IDLE_TIMEOUT_MS)
+        self._idle_timer.setInterval(SCROLL_SETTLED_TIMEOUT_MS)
         self._idle_timer.timeout.connect(self._publish_idle_state)
 
         self._view.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
@@ -63,24 +51,16 @@ class GalleryScrollController(QObject):
         if pixel_y:
             # Trackpads already provide a precise physical-pixel stream.
             delta = -float(pixel_y)
-            self._wheel_streak = 0
         else:
             angle_delta = event.angleDelta()
             angle = angle_delta.y() or angle_delta.x()
             if not angle:
                 return False
-            now = time.monotonic()
-            if now - self._last_wheel_at <= self._FAST_WHEEL_INTERVAL_SEC:
-                self._wheel_streak = min(self._MAX_ACCELERATION - 1, self._wheel_streak + 1)
-            else:
-                self._wheel_streak = 0
-            self._last_wheel_at = now
 
             steps = float(angle) / 120.0
-            wheel_lines = max(1, QApplication.wheelScrollLines())
+            wheel_lines = max(0, QApplication.wheelScrollLines())
             row_height = max(1, self._view.gridSize().height() or self._view.iconSize().height())
-            acceleration = 1 + self._wheel_streak
-            delta = -steps * row_height * wheel_lines * acceleration
+            delta = -steps * row_height * wheel_lines
 
         self._pending_pixel_delta += delta
         if not self._apply_timer.isActive():
@@ -91,7 +71,7 @@ class GalleryScrollController(QObject):
     def schedule_publish(self) -> None:
         self._publish()
 
-    def viewport_state(self, row_count: int) -> GalleryViewportState | None:
+    def viewport_state(self, row_count: int) -> GalleryViewportDemand | None:
         if row_count <= 0:
             return None
         cell_height = max(1, self._view.gridSize().height() or self._view.iconSize().height())
@@ -104,12 +84,13 @@ class GalleryScrollController(QObject):
         first = min(row_count - 1, first_grid_row * columns)
         last = min(row_count - 1, (first_grid_row + visible_grid_rows) * columns - 1)
         self._generation += 1
-        return GalleryViewportState(
+        return build_viewport_demand(
             generation=self._generation,
+            row_count=row_count,
             visible_first=first,
             visible_last=max(first, last),
             direction=self._direction,
-            velocity=self._velocity,
+            screens_per_second=self._screens_per_second,
             actively_scrolling=self._idle_timer.isActive(),
         )
 
@@ -132,15 +113,18 @@ class GalleryScrollController(QObject):
         elapsed = max(1e-6, now - self._last_value_at)
         distance = int(value) - self._last_value
         self._direction = 1 if distance > 0 else (-1 if distance < 0 else self._direction)
-        self._velocity = abs(float(distance)) / elapsed
+        viewport_height = max(1, self._view.viewport().height())
+        instantaneous = abs(float(distance)) / elapsed / viewport_height
+        alpha = 1.0 - math.exp(-elapsed / SCROLL_VELOCITY_EWMA_SECONDS)
+        self._screens_per_second += alpha * (instantaneous - self._screens_per_second)
         self._last_value = int(value)
         self._last_value_at = now
         self._idle_timer.start()
         self.schedule_publish()
 
     def _publish_idle_state(self) -> None:
-        self._velocity = 0.0
+        self._screens_per_second = 0.0
         self.schedule_publish()
 
 
-__all__ = ["GalleryScrollController", "GalleryViewportState"]
+__all__ = ["GalleryScrollController", "GalleryViewportDemand"]

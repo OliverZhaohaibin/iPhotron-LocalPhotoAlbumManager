@@ -115,7 +115,7 @@ def test_trackpad_pixel_delta_is_accumulated_one_to_one(qapp: QApplication) -> N
     assert bar.value() == 24
 
 
-def test_discrete_wheel_accelerates_only_consecutive_notches(qapp: QApplication) -> None:
+def test_discrete_wheel_uses_constant_system_configured_step(qapp: QApplication) -> None:
     grid = _make_grid(qapp)
     bar = grid.verticalScrollBar()
     bar.setRange(0, 10_000)
@@ -129,4 +129,35 @@ def test_discrete_wheel_accelerates_only_consecutive_notches(qapp: QApplication)
         qapp.processEvents()
 
     assert first_value == 300
-    assert bar.value() == 900
+    assert bar.value() == 600
+
+
+def test_discrete_wheel_respects_zero_system_scroll_lines(qapp: QApplication) -> None:
+    grid = _make_grid(qapp)
+    bar = grid.verticalScrollBar()
+    bar.setRange(0, 10_000)
+    bar.setValue(500)
+
+    with patch.object(QApplication, "wheelScrollLines", return_value=0):
+        assert grid._scroll_controller.handle_wheel(_WheelEvent(angle_y=-120))
+        qapp.processEvents()
+
+    assert bar.value() == 500
+
+
+def test_rapid_back_and_forth_notches_keep_constant_distance(qapp: QApplication) -> None:
+    grid = _make_grid(qapp)
+    bar = grid.verticalScrollBar()
+    bar.setRange(0, 100_000)
+    bar.setValue(50_000)
+    values = [bar.value()]
+
+    with patch.object(QApplication, "wheelScrollLines", return_value=3):
+        for index in range(100):
+            angle = -120 if index % 2 == 0 else 120
+            assert grid._scroll_controller.handle_wheel(_WheelEvent(angle_y=angle))
+            qapp.processEvents()
+            values.append(bar.value())
+
+    assert {abs(current - previous) for previous, current in zip(values, values[1:])} == {300}
+    assert bar.value() == 50_000

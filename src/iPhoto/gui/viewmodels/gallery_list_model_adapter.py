@@ -21,8 +21,12 @@ from PySide6.QtGui import QImage, QPixmap
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.ports import EditServicePort
+from iPhoto.gui.gallery_demand import GalleryViewportDemand
 from iPhoto.gui.ui.models.roles import Roles, role_names
-from iPhoto.infrastructure.services.performance_events import emit_perf_event
+from iPhoto.infrastructure.services.performance_events import (
+    emit_perf_event,
+    perf_logging_enabled,
+)
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 from iPhoto.utils.geocoding import resolve_location_name
 
@@ -56,11 +60,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._duration_cache: dict[Path, float] = {}
         self._pending_prioritize_range: tuple[int, int] | None = None
         self._viewport_generation = 0
-        self._visible_range: tuple[int, int] | None = None
-        self._actively_scrolling = False
+        self._viewport_demand: GalleryViewportDemand | None = None
         self._pending_thumbnail_rows: set[int] = set()
         self._window_loader = GalleryWindowLoader(self)
         self._window_loader.resultReady.connect(self._on_window_result)
+        self._window_loader.requestsDropped.connect(self._store.discard_window_requests)
         self._pending_scan_batch_count = 0
         self._backfill_completion_source: Any | None = None
         self._prioritize_timer = QTimer(self)
@@ -267,34 +271,14 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     @Slot(object)
     def update_viewport(self, state: object) -> None:
-        """Prioritize micro windows while scrolling and full thumbnails when settled."""
+        """Continuously reconcile micro warm-up and full-thumbnail demand."""
 
-        first = max(0, int(getattr(state, "visible_first", 0)))
-        last = max(first, int(getattr(state, "visible_last", first)))
-        generation = int(getattr(state, "generation", self._viewport_generation + 1))
-        direction = int(getattr(state, "direction", 0))
-        active = bool(getattr(state, "actively_scrolling", False))
-        self._viewport_generation = generation
-        self._visible_range = (first, last)
-        self._actively_scrolling = active
-
-        visible_count = max(1, last - first + 1)
-        behind_screens = 2
-        ahead_screens = 12 if active else 3
-        if direction < 0:
-            request_first = max(0, first - visible_count * ahead_screens)
-            request_last = last + visible_count * behind_screens
-        else:
-            request_first = max(0, first - visible_count * behind_screens)
-            request_last = last + visible_count * ahead_screens
-        self.prioritize_rows(request_first, request_last)
-
-        if active:
-            self._thumbnails.pin_visible([], self._thumb_size)
-            self._thumbnails.cancel_stale(generation)
+        if not isinstance(state, GalleryViewportDemand):
             return
-
-        self._request_full_for_viewport()
+        self._viewport_generation = state.generation
+        self._viewport_demand = state
+        self._store.reconcile_viewport_demand(state)
+        self._reconcile_full_thumbnail_demand()
 
     @Slot()
     def _flush_pending_prioritize_rows(self) -> None:
@@ -306,8 +290,8 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     @Slot(object)
     def _on_window_result(self, result: GalleryWindowResult) -> None:
-        if self._store.apply_window_result(result) and not self._actively_scrolling:
-            self._request_full_for_viewport()
+        if self._store.apply_window_result(result):
+            self._reconcile_full_thumbnail_demand()
 
     @Slot(object)
     def handle_scan_batch(self, batch: object) -> None:
@@ -649,23 +633,36 @@ class GalleryListModelAdapter(QAbstractListModel):
                 [Qt.DecorationRole, Roles.TILE_SNAPSHOT],
             )
 
-    def _request_full_for_viewport(self) -> None:
-        if self._visible_range is None:
+    def _reconcile_full_thumbnail_demand(self) -> None:
+        demand = self._viewport_demand
+        if demand is None:
             return
-        first, last = self._visible_range
-        visible_count = max(1, last - first + 1)
-        visible_rows = self._store.cached_rows(first, last)
-        self._thumbnails.pin_visible(
-            [dto.abs_path for _row, dto in visible_rows],
-            self._thumb_size,
+        visible_rows = self._store.cached_rows(*demand.visible_range)
+        hot_rows = self._store.cached_rows(*demand.hot_range)
+        if perf_logging_enabled():
+            full_count = 0
+            micro_count = 0
+            for _row, dto in visible_rows:
+                if self._thumbnails.has_full_thumbnail(dto.abs_path, self._thumb_size) is True:
+                    full_count += 1
+                elif isinstance(dto.micro_thumbnail, QImage) and not dto.micro_thumbnail.isNull():
+                    micro_count += 1
+            visible_count = demand.visible_last - demand.visible_first + 1
+            emit_perf_event(
+                "gallery_visible_layers",
+                generation=demand.generation,
+                phase=demand.phase,
+                visible=visible_count,
+                full=full_count,
+                micro=micro_count,
+                placeholder=max(0, visible_count - full_count - micro_count),
+            )
+        self._thumbnails.reconcile_demand(
+            visible_paths=[dto.abs_path for _row, dto in visible_rows],
+            hot_paths=[dto.abs_path for _row, dto in hot_rows],
+            size=self._thumb_size,
+            generation=demand.generation,
         )
-        full_first = max(0, first - visible_count)
-        full_last = last + visible_count
-        requests = [
-            (dto.abs_path, self._thumb_size, "visible")
-            for _row, dto in self._store.cached_rows(full_first, full_last)
-        ]
-        self._thumbnails.request_many(requests, generation=self._viewport_generation)
 
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)

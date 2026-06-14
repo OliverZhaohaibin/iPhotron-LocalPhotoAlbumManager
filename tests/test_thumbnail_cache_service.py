@@ -143,6 +143,37 @@ def test_reentered_pending_thumbnail_promotes_generation(tmp_path: Path) -> None
     assert service._queued_tasks[key][2:] == ("visible", 9)
 
 
+def test_reconcile_demand_keeps_only_latest_visible_and_hot_queue(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    size = QSize(512, 512)
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.jpg"
+    third = tmp_path / "third.jpg"
+
+    service.reconcile_demand(
+        visible_paths=[first],
+        hot_paths=[second, third],
+        size=size,
+        generation=1,
+    )
+    service.reconcile_demand(
+        visible_paths=[second],
+        hot_paths=[],
+        size=size,
+        generation=2,
+    )
+
+    first_key = service._cache_key(first, size)
+    second_key = service._cache_key(second, size)
+    third_key = service._cache_key(third, size)
+    assert set(service._queued_tasks) == {second_key}
+    assert first_key not in service._pending_tasks
+    assert third_key not in service._pending_tasks
+    assert service._queued_tasks[second_key][2:] == ("visible", 2)
+    assert service._pinned_keys == {second_key}
+
+
 def test_stale_worker_result_is_discarded_before_pixmap_conversion(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     path = tmp_path / "photo.jpg"

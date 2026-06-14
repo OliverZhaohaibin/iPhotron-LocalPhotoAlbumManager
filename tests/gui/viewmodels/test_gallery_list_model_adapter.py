@@ -313,12 +313,12 @@ def test_fast_viewport_warms_micro_and_still_requests_visible_full(
     mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
     mock_thumb_service.reconcile_demand.assert_called_once_with(
         visible_paths=[Path("/library/photo.jpg")],
-        hot_paths=[Path("/library/photo.jpg")],
+        prefetch_paths=[],
         size=adapter._thumb_size,
         generation=7,
     )
     assert demand.phase == "fast"
-    assert demand.hot_range == demand.visible_range
+    assert demand.full_prefetch_range == demand.visible_range
     assert demand.warm_last - demand.warm_first + 1 == 2000
 
 
@@ -351,15 +351,17 @@ def test_scrolling_phase_immediately_requests_visible_full(
     ]
 
 
-def test_settled_viewport_requests_visible_and_hot_full(
+def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
     adapter,
     mock_store,
     mock_thumb_service,
 ):
-    dto = _make_dto(abs_path=Path("/library/photo.jpg"))
+    visible = _make_dto(abs_path=Path("/library/visible.jpg"))
+    before = _make_dto(abs_path=Path("/library/before.jpg"))
+    after = _make_dto(abs_path=Path("/library/after.jpg"))
     mock_store.cached_rows.side_effect = [
-        [(100, dto)],
-        [(100, dto)],
+        [(100, visible)],
+        [(99, before), (100, visible), (120, after)],
     ]
     demand = build_viewport_demand(
         generation=8,
@@ -375,14 +377,17 @@ def test_settled_viewport_requests_visible_and_hot_full(
 
     mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
     mock_thumb_service.reconcile_demand.assert_called_once_with(
-        visible_paths=[Path("/library/photo.jpg")],
-        hot_paths=[Path("/library/photo.jpg")],
+        visible_paths=[Path("/library/visible.jpg")],
+        prefetch_paths=[
+            Path("/library/before.jpg"),
+            Path("/library/after.jpg"),
+        ],
         size=adapter._thumb_size,
         generation=8,
     )
     assert demand.phase == "settled"
-    assert demand.hot_first < demand.visible_first
-    assert demand.hot_last > demand.visible_last
+    assert demand.full_prefetch_first < demand.visible_first
+    assert demand.full_prefetch_last > demand.visible_last
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

@@ -638,7 +638,12 @@ class GalleryListModelAdapter(QAbstractListModel):
         if demand is None:
             return
         visible_rows = self._store.cached_rows(*demand.visible_range)
-        hot_rows = self._store.cached_rows(*demand.hot_range)
+        prefetched_rows = dict(self._store.cached_rows(*demand.full_prefetch_range))
+        prefetch_paths = [
+            prefetched_rows[row].abs_path
+            for row in demand.iter_full_prefetch_rows()
+            if row in prefetched_rows
+        ]
         if perf_logging_enabled():
             full_count = 0
             micro_count = 0
@@ -659,7 +664,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             )
         self._thumbnails.reconcile_demand(
             visible_paths=[dto.abs_path for _row, dto in visible_rows],
-            hot_paths=[dto.abs_path for _row, dto in hot_rows],
+            prefetch_paths=prefetch_paths,
             size=self._thumb_size,
             generation=demand.generation,
         )

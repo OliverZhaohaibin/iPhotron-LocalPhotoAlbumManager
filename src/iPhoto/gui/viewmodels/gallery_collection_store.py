@@ -613,7 +613,12 @@ class GalleryCollectionStore:
                 demand.visible_last,
             ):
                 priority = 0
-            elif _ranges_intersect(chunk_first, chunk_last, demand.hot_first, demand.hot_last):
+            elif _ranges_intersect(
+                chunk_first,
+                chunk_last,
+                demand.full_prefetch_first,
+                demand.full_prefetch_last,
+            ):
                 priority = 1
             else:
                 priority = 2
@@ -634,7 +639,9 @@ class GalleryCollectionStore:
             phase=demand.phase,
             screens_per_second=round(demand.screens_per_second, 3),
             visible_count=demand.visible_last - demand.visible_first + 1,
-            hot_count=demand.hot_last - demand.hot_first + 1,
+            full_prefetch_count=(
+                demand.full_prefetch_last - demand.full_prefetch_first + 1
+            ),
             warm_count=demand.warm_last - demand.warm_first + 1,
             cached_count=len(self._row_cache),
             queued_chunks=len(chunks),

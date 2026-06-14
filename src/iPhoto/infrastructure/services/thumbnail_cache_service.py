@@ -1,7 +1,10 @@
 import os
 import shutil
+import threading
 import time
 from collections import OrderedDict, deque
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Deque, Dict, Iterable, Optional, Set
 
@@ -30,8 +33,34 @@ from iPhoto.utils import image_loader
 class ThumbnailWorkerSignals(QObject):
     """Signals emitted by thumbnail generation workers."""
 
-    result = Signal(Path, QSize, QImage, int)
-    failed = Signal(Path, QSize, str, int)
+    result = Signal(Path, QSize, QImage, int, object)
+    failed = Signal(Path, QSize, str, int, object)
+
+
+class ThumbnailRequestKind(str, Enum):
+    """Resource-isolated classes of Gallery thumbnail work."""
+
+    VISIBLE = "visible"
+    PREFETCH = "prefetch"
+
+
+@dataclass(frozen=True, slots=True)
+class ThumbnailRequest:
+    path: Path
+    size: QSize
+    kind: ThumbnailRequestKind
+    generation: int
+
+
+class _CancellationToken:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def cancelled(self) -> bool:
+        return self._event.is_set()
 
 
 class ThumbnailGenerationTask(QRunnable):
@@ -44,6 +73,8 @@ class ThumbnailGenerationTask(QRunnable):
         size: QSize,
         signals: ThumbnailWorkerSignals,
         generation: int,
+        kind: ThumbnailRequestKind,
+        cancellation: _CancellationToken | None = None,
     ):
         super().__init__()
         self._renderer = renderer
@@ -51,23 +82,56 @@ class ThumbnailGenerationTask(QRunnable):
         self._size = size
         self._signals = signals
         self._generation = int(generation)
+        self._kind = kind
+        self._cancellation = cancellation
 
     def run(self):
         try:
+            if self._cancellation is not None and self._cancellation.cancelled():
+                self._signals.failed.emit(
+                    self._path,
+                    self._size,
+                    "cancelled",
+                    self._generation,
+                    self._kind,
+                )
+                return
             # Generate logic (CPU intensive)
-            qimg = self._renderer(self._path, self._size)
+            qimg = self._renderer(self._path, self._size, self._cancellation)
+            if self._cancellation is not None and self._cancellation.cancelled():
+                self._signals.failed.emit(
+                    self._path,
+                    self._size,
+                    "cancelled",
+                    self._generation,
+                    self._kind,
+                )
+                return
             if qimg is not None and not qimg.isNull():
                 # Emit result back to main thread
-                self._signals.result.emit(self._path, self._size, qimg, self._generation)
+                self._signals.result.emit(
+                    self._path,
+                    self._size,
+                    qimg,
+                    self._generation,
+                    self._kind,
+                )
             else:
                 self._signals.failed.emit(
                     self._path,
                     self._size,
                     "empty_render",
                     self._generation,
+                    self._kind,
                 )
         except Exception:
-            self._signals.failed.emit(self._path, self._size, "exception", self._generation)
+            self._signals.failed.emit(
+                self._path,
+                self._size,
+                "exception",
+                self._generation,
+                self._kind,
+            )
 
 class ThumbnailCacheService(QObject):
     """
@@ -91,20 +155,27 @@ class ThumbnailCacheService(QObject):
 
         self._pending_tasks: Set[str] = set()
         self._pending_generations: Dict[str, int] = {}
-        self._queued_tasks: Dict[str, tuple[Path, QSize, str, int]] = {}
-        self._priority_queues: dict[str, Deque[str]] = {
-            "visible": deque(),
-            "normal": deque(),
-            "low": deque(),
-        }
+        self._queued_tasks: Dict[str, ThumbnailRequest] = {}
+        self._visible_queue: Deque[str] = deque()
+        self._visible_queued_at: Dict[str, float] = {}
         self._active_tasks = 0
         self._max_active_jobs = 2
+        self._prefetch_pending: Set[str] = set()
+        self._prefetch_generations: Dict[str, int] = {}
+        self._prefetch_queued: Dict[str, ThumbnailRequest] = {}
+        self._prefetch_queue: Deque[str] = deque()
+        self._prefetch_active_tokens: Dict[str, _CancellationToken] = {}
+        self._prefetch_active_tasks = 0
+        self._prefetch_key_order: list[str] = []
+        self._prefetch_l2_misses: Set[str] = set()
         self._failure_cooldown_seconds = 60.0
         self._failure_until: Dict[str, float] = {}
         self._is_shutting_down = False
         self._current_generation = 0
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(self._max_active_jobs)
+        self._prefetch_thread_pool = QThreadPool(self)
+        self._prefetch_thread_pool.setMaxThreadCount(1)
 
     def shutdown(self):
         """Prevents new tasks from being submitted and clears pending logic."""
@@ -112,10 +183,14 @@ class ThumbnailCacheService(QObject):
         self._pending_tasks.clear()
         self._pending_generations.clear()
         self._queued_tasks.clear()
-        for queue in self._priority_queues.values():
-            queue.clear()
+        self._visible_queue.clear()
+        self._visible_queued_at.clear()
+        self._cancel_all_prefetch()
+        self._prefetch_l2_misses.clear()
         self._thread_pool.clear()
+        self._prefetch_thread_pool.clear()
         self._active_tasks = 0
+        self._prefetch_active_tasks = 0
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
         self._is_shutting_down = False
@@ -130,8 +205,10 @@ class ThumbnailCacheService(QObject):
         self._pending_tasks.clear()
         self._pending_generations.clear()
         self._queued_tasks.clear()
-        for queue in self._priority_queues.values():
-            queue.clear()
+        self._visible_queue.clear()
+        self._visible_queued_at.clear()
+        self._cancel_all_prefetch()
+        self._prefetch_l2_misses.clear()
         self._failure_until.clear()
 
     def set_edit_service(self, edit_service: EditServicePort | None) -> None:
@@ -168,117 +245,125 @@ class ThumbnailCacheService(QObject):
     ) -> Optional[QPixmap]:
         """Compatibility API: memory-only lookup followed by asynchronous request."""
 
+        del priority
         pixmap = self.peek_full_thumbnail(path, size)
         if pixmap is not None:
             return pixmap
-        self.request_many([(path, size, priority)], generation=self._current_generation)
+        self.request_many(
+            [
+                ThumbnailRequest(
+                    path=path,
+                    size=size,
+                    kind=ThumbnailRequestKind.VISIBLE,
+                    generation=self._current_generation,
+                )
+            ],
+            generation=self._current_generation,
+        )
         return None
 
     def request_many(
         self,
-        requests: Iterable[tuple[Path, QSize, str]],
+        requests: Iterable[ThumbnailRequest],
         *,
         generation: int,
     ) -> None:
-        """Queue deduplicated L2/decode requests for one viewport generation."""
+        """Queue deduplicated foreground requests for one viewport generation."""
 
         if self._is_shutting_down:
             return
         self._current_generation = max(self._current_generation, int(generation))
-        for path, size, priority in requests:
+        for request in requests:
+            path = Path(request.path)
+            size = request.size
+            if request.kind is ThumbnailRequestKind.PREFETCH:
+                self._queue_prefetch(request)
+                continue
             key = self._cache_key(path, size)
             if key in self._memory_cache:
                 continue
+            self._cancel_prefetch_key(key)
             if key in self._pending_tasks:
                 self._pending_generations[key] = max(
                     self._pending_generations.get(key, 0),
-                    int(generation),
+                    int(request.generation),
                 )
                 queued = self._queued_tasks.get(key)
                 if queued is not None:
-                    queued_path, queued_size, queued_priority, queued_generation = queued
-                    next_priority = (
-                        priority
-                        if self._priority_rank(priority) < self._priority_rank(queued_priority)
-                        else queued_priority
+                    self._queued_tasks[key] = ThumbnailRequest(
+                        path=queued.path,
+                        size=queued.size,
+                        kind=ThumbnailRequestKind.VISIBLE,
+                        generation=max(queued.generation, int(request.generation)),
                     )
-                    self._queued_tasks[key] = (
-                        queued_path,
-                        queued_size,
-                        next_priority,
-                        max(queued_generation, int(generation)),
-                    )
-                    if next_priority != queued_priority:
-                        self._priority_queues[next_priority].appendleft(key)
                 continue
             if self._failure_until.get(key, 0.0) > time.monotonic():
                 continue
-            self._queue_generation(
-                path,
-                size,
-                priority=priority,
-                generation=int(generation),
-            )
+            self._queue_visible(request)
 
     def reconcile_demand(
         self,
         *,
         visible_paths: Iterable[Path],
-        hot_paths: Iterable[Path],
+        prefetch_paths: Iterable[Path],
         size: QSize,
         generation: int,
     ) -> None:
-        """Replace queued work with the latest visible/hot thumbnail demand."""
+        """Atomically replace foreground and best-effort thumbnail demand."""
 
         visible = list(dict.fromkeys(Path(path) for path in visible_paths))
         visible_set = set(visible)
-        hot = [
+        prefetch = [
             Path(path)
-            for path in dict.fromkeys(Path(path) for path in hot_paths)
+            for path in dict.fromkeys(Path(path) for path in prefetch_paths)
             if Path(path) not in visible_set
         ]
-        desired_keys = {
-            self._cache_key(path, size)
-            for path in [*visible, *hot]
-        }
+        desired_visible_keys = {self._cache_key(path, size) for path in visible}
+        desired_prefetch_keys = {self._cache_key(path, size) for path in prefetch}
         record_perf = perf_logging_enabled()
         pending_before = set(self._pending_tasks) if record_perf else set()
-        resident = len(desired_keys.intersection(self._memory_cache)) if record_perf else 0
+        resident = len(desired_visible_keys.intersection(self._memory_cache)) if record_perf else 0
         self._current_generation = max(self._current_generation, int(generation))
         self.pin_visible(visible, size)
+        self._prefetch_key_order = [self._cache_key(path, size) for path in prefetch]
 
-        drop_keys = set(self._queued_tasks) - desired_keys
+        drop_keys = set(self._queued_tasks) - desired_visible_keys
         for key in drop_keys:
             self._queued_tasks.pop(key, None)
             self._pending_tasks.discard(key)
             self._pending_generations.pop(key, None)
+            self._visible_queued_at.pop(key, None)
         if drop_keys:
-            for priority, queue in self._priority_queues.items():
-                self._priority_queues[priority] = deque(
-                    key for key in queue if key not in drop_keys
-                )
+            self._visible_queue = deque(key for key in self._visible_queue if key not in drop_keys)
+
+        self._replace_prefetch_demand(desired_prefetch_keys, generation)
 
         self.request_many(
-            ((path, size, "visible") for path in visible),
+            (
+                ThumbnailRequest(path, size, ThumbnailRequestKind.VISIBLE, generation)
+                for path in visible
+            ),
             generation=generation,
         )
-        self.request_many(
-            ((path, size, "normal") for path in hot),
-            generation=generation,
-        )
+        for path in prefetch:
+            self._queue_prefetch(
+                ThumbnailRequest(path, size, ThumbnailRequestKind.PREFETCH, generation)
+            )
         if record_perf:
             emit_perf_event(
                 "thumbnail_demand_reconciled",
                 generation=generation,
                 visible=len(visible),
-                hot=len(hot),
+                prefetch=len(prefetch),
                 requested=len(
-                    (set(self._pending_tasks) - pending_before).intersection(desired_keys)
+                    (set(self._pending_tasks) - pending_before).intersection(desired_visible_keys)
                 ),
                 resident=resident,
                 canceled=len(drop_keys),
                 queued=len(self._queued_tasks),
                 active=self._active_tasks,
+                prefetch_queued=len(self._prefetch_queued),
+                prefetch_active=self._prefetch_active_tasks,
             )
         self._drain_generation_queue()
 
@@ -293,18 +378,17 @@ class ThumbnailCacheService(QObject):
         self._current_generation = max(self._current_generation, int(generation))
         drop_keys = {
             key
-            for key, (_path, _size, _priority, queued_generation) in self._queued_tasks.items()
-            if queued_generation < self._current_generation
+            for key, request in self._queued_tasks.items()
+            if request.generation < self._current_generation
         }
         for key in drop_keys:
             self._queued_tasks.pop(key, None)
             self._pending_tasks.discard(key)
             self._pending_generations.pop(key, None)
+            self._visible_queued_at.pop(key, None)
         if drop_keys:
-            for priority, queue in self._priority_queues.items():
-                self._priority_queues[priority] = deque(
-                    key for key in queue if key not in drop_keys
-                )
+            self._visible_queue = deque(key for key in self._visible_queue if key not in drop_keys)
+        self._cancel_all_prefetch()
 
     def cancel_pending_except(self, paths: Set[Path], size: QSize) -> None:
         """Cancel queued thumbnail work except for *paths* at *size*."""
@@ -315,53 +399,167 @@ class ThumbnailCacheService(QObject):
             self._queued_tasks.pop(key, None)
             self._pending_tasks.discard(key)
             self._pending_generations.pop(key, None)
+            self._visible_queued_at.pop(key, None)
         if drop_keys:
-            for priority, queue in self._priority_queues.items():
-                self._priority_queues[priority] = deque(
-                    key for key in queue if key not in drop_keys
-                )
+            self._visible_queue = deque(key for key in self._visible_queue if key not in drop_keys)
+        self._replace_prefetch_demand(
+            {self._cache_key(path, size) for path in paths},
+            self._current_generation,
+        )
 
-    def _queue_generation(
-        self,
-        path: Path,
-        size: QSize,
-        *,
-        priority: str,
-        generation: int = 0,
-    ) -> None:
-        priority = priority if priority in self._priority_queues else "normal"
-        key = self._cache_key(path, size)
+    def _queue_visible(self, request: ThumbnailRequest) -> None:
+        key = self._cache_key(request.path, request.size)
+        self._pause_active_prefetch()
         self._pending_tasks.add(key)
         self._pending_generations[key] = max(
             self._pending_generations.get(key, 0),
-            int(generation),
+            int(request.generation),
         )
-        self._queued_tasks[key] = (path, size, priority, int(generation))
-        self._priority_queues[priority].append(key)
+        self._queued_tasks[key] = request
+        self._visible_queued_at.setdefault(key, monotonic_ms())
+        self._visible_queue.append(key)
         self._drain_generation_queue()
 
     def _drain_generation_queue(self) -> None:
         while not self._is_shutting_down and self._active_tasks < self._max_active_jobs:
             next_item = self._pop_next_generation()
             if next_item is None:
-                return
+                break
             key, path, size, generation = next_item
             self._active_tasks += 1
-            self._start_generation(key, path, size, generation)
+            self._start_generation(
+                key,
+                path,
+                size,
+                generation,
+                kind=ThumbnailRequestKind.VISIBLE,
+            )
+        self._drain_prefetch_queue()
 
     def _pop_next_generation(self) -> tuple[str, Path, QSize, int] | None:
-        for priority in ("visible", "normal", "low"):
-            queue = self._priority_queues[priority]
-            while queue:
-                key = queue.popleft()
-                spec = self._queued_tasks.pop(key, None)
-                if spec is None:
-                    continue
-                path, size, _priority, generation = spec
-                return key, path, size, generation
+        while self._visible_queue:
+            key = self._visible_queue.popleft()
+            spec = self._queued_tasks.pop(key, None)
+            if spec is None:
+                continue
+            queued_at = self._visible_queued_at.pop(key, monotonic_ms())
+            emit_perf_event(
+                "thumbnail_visible_dequeued",
+                path=spec.path,
+                generation=spec.generation,
+                queue_wait_ms=round(max(0.0, monotonic_ms() - queued_at), 3),
+                visible_queued=len(self._queued_tasks),
+                visible_active=self._active_tasks,
+            )
+            return key, spec.path, spec.size, spec.generation
         return None
 
-    def _start_generation(self, key: str, path: Path, size: QSize, generation: int):
+    def _queue_prefetch(self, request: ThumbnailRequest) -> None:
+        key = self._cache_key(request.path, request.size)
+        if (
+            key in self._memory_cache
+            or key in self._pending_tasks
+            or key in self._prefetch_l2_misses
+            or request.generation < self._current_generation
+        ):
+            return
+        if key in self._prefetch_pending:
+            self._prefetch_generations[key] = max(
+                self._prefetch_generations.get(key, 0),
+                request.generation,
+            )
+            queued = self._prefetch_queued.get(key)
+            if queued is not None:
+                self._prefetch_queued[key] = request
+            return
+        self._prefetch_pending.add(key)
+        self._prefetch_generations[key] = request.generation
+        self._prefetch_queued[key] = request
+        self._prefetch_queue.append(key)
+        self._drain_prefetch_queue()
+
+    def _drain_prefetch_queue(self) -> None:
+        if (
+            self._is_shutting_down
+            or self._pending_tasks
+            or self._prefetch_active_tasks > 0
+        ):
+            return
+        while self._prefetch_queue:
+            key = self._prefetch_queue.popleft()
+            request = self._prefetch_queued.pop(key, None)
+            if request is None or request.generation < self._current_generation:
+                self._prefetch_pending.discard(key)
+                self._prefetch_generations.pop(key, None)
+                continue
+            token = _CancellationToken()
+            self._prefetch_active_tokens[key] = token
+            self._prefetch_active_tasks += 1
+            self._start_generation(
+                key,
+                request.path,
+                request.size,
+                request.generation,
+                kind=ThumbnailRequestKind.PREFETCH,
+                cancellation=token,
+            )
+            return
+
+    def _replace_prefetch_demand(self, desired_keys: Set[str], generation: int) -> None:
+        canceled = 0
+        for key in set(self._prefetch_queued) - desired_keys:
+            self._prefetch_queued.pop(key, None)
+            self._prefetch_pending.discard(key)
+            self._prefetch_generations.pop(key, None)
+            canceled += 1
+        self._prefetch_queue = deque(
+            key for key in self._prefetch_queue if key in self._prefetch_queued
+        )
+        for key, token in list(self._prefetch_active_tokens.items()):
+            if key not in desired_keys:
+                token.cancel()
+                canceled += 1
+        if canceled:
+            emit_perf_event(
+                "thumbnail_prefetch_canceled",
+                generation=generation,
+                canceled=canceled,
+            )
+
+    def _cancel_prefetch_key(self, key: str) -> None:
+        self._prefetch_queued.pop(key, None)
+        self._prefetch_pending.discard(key)
+        self._prefetch_generations.pop(key, None)
+        self._prefetch_key_order = [
+            candidate for candidate in self._prefetch_key_order if candidate != key
+        ]
+        token = self._prefetch_active_tokens.get(key)
+        if token is not None:
+            token.cancel()
+
+    def _pause_active_prefetch(self) -> None:
+        for token in self._prefetch_active_tokens.values():
+            token.cancel()
+
+    def _cancel_all_prefetch(self) -> None:
+        self._prefetch_pending.clear()
+        self._prefetch_generations.clear()
+        self._prefetch_queued.clear()
+        self._prefetch_queue.clear()
+        self._prefetch_key_order.clear()
+        for token in self._prefetch_active_tokens.values():
+            token.cancel()
+
+    def _start_generation(
+        self,
+        key: str,
+        path: Path,
+        size: QSize,
+        generation: int,
+        *,
+        kind: ThumbnailRequestKind,
+        cancellation: _CancellationToken | None = None,
+    ):
         # Create signals object (must be created on heap/managed by QObject tree or kept alive)
         # Since QRunnable isn't a QObject parent, we need to ensure signals exist during run.
         # However, typically we pass a new QObject.
@@ -386,13 +584,22 @@ class ThumbnailCacheService(QObject):
             pending=len(self._pending_tasks),
         )
         worker = ThumbnailGenerationTask(
-            self._load_or_render_thumbnail,
+            (
+                self._load_cached_thumbnail_only
+                if kind is ThumbnailRequestKind.PREFETCH
+                else self._load_or_render_thumbnail
+            ),
             path,
             size,
             worker_signals,
             generation,
+            kind,
+            cancellation,
         )
-        self._thread_pool.start(worker)
+        if kind is ThumbnailRequestKind.PREFETCH:
+            self._prefetch_thread_pool.start(worker)
+        else:
+            self._thread_pool.start(worker)
 
     def _handle_generation_result(
         self,
@@ -400,13 +607,18 @@ class ThumbnailCacheService(QObject):
         size: QSize,
         image: QImage,
         generation: int = 0,
+        kind: ThumbnailRequestKind = ThumbnailRequestKind.VISIBLE,
     ):
         # Back on main thread
+        if kind is ThumbnailRequestKind.PREFETCH:
+            self._handle_prefetch_result(path, size, image, generation)
+            return
         if not image.isNull():
             key = self._cache_key(path, size)
             self._pending_tasks.discard(key)
             desired_generation = self._pending_generations.pop(key, generation)
             self._failure_until.pop(key, None)
+            self._prefetch_l2_misses.discard(key)
             self._active_tasks = max(0, self._active_tasks - 1)
 
             if self._is_shutting_down or desired_generation < self._current_generation:
@@ -437,7 +649,11 @@ class ThumbnailCacheService(QObject):
         size: QSize,
         reason: str,
         generation: int = 0,
+        kind: ThumbnailRequestKind = ThumbnailRequestKind.VISIBLE,
     ) -> None:
+        if kind is ThumbnailRequestKind.PREFETCH:
+            self._handle_prefetch_failure(path, size, reason, generation)
+            return
         key = self._cache_key(path, size)
         self._pending_tasks.discard(key)
         desired_generation = self._pending_generations.pop(key, generation)
@@ -448,11 +664,13 @@ class ThumbnailCacheService(QObject):
             and desired_generation > generation
             and desired_generation >= self._current_generation
         ):
-            self._queue_generation(
-                path,
-                size,
-                priority="visible",
-                generation=desired_generation,
+            self._queue_visible(
+                ThumbnailRequest(
+                    path,
+                    size,
+                    ThumbnailRequestKind.VISIBLE,
+                    desired_generation,
+                )
             )
             return
         self._failure_until[key] = time.monotonic() + self._failure_cooldown_seconds
@@ -464,6 +682,82 @@ class ThumbnailCacheService(QObject):
             reason=reason,
             pending=len(self._pending_tasks),
         )
+        self._drain_generation_queue()
+
+    def _handle_prefetch_result(
+        self,
+        path: Path,
+        size: QSize,
+        image: QImage,
+        generation: int,
+    ) -> None:
+        key = self._cache_key(path, size)
+        token = self._prefetch_active_tokens.pop(key, None)
+        self._prefetch_pending.discard(key)
+        desired_generation = self._prefetch_generations.pop(key, generation)
+        self._prefetch_active_tasks = max(0, self._prefetch_active_tasks - 1)
+        stale = (
+            self._is_shutting_down
+            or desired_generation < self._current_generation
+            or token is None
+            or token.cancelled()
+            or key not in self._prefetch_key_order
+            or bool(self._pending_tasks)
+        )
+        if stale:
+            emit_perf_event(
+                "thumbnail_prefetch_result_discarded",
+                path=path,
+                generation=generation,
+                current_generation=self._current_generation,
+            )
+        elif not image.isNull():
+            self._add_to_memory(key, QPixmap.fromImage(image))
+            emit_perf_event("thumbnail_prefetch_finished", path=path, generation=generation)
+        if key in self._prefetch_key_order and key not in self._pending_tasks:
+            self._queue_prefetch(
+                ThumbnailRequest(
+                    path,
+                    size,
+                    ThumbnailRequestKind.PREFETCH,
+                    self._current_generation,
+                )
+            )
+        self._drain_generation_queue()
+
+    def _handle_prefetch_failure(
+        self,
+        path: Path,
+        size: QSize,
+        reason: str,
+        generation: int,
+    ) -> None:
+        key = self._cache_key(path, size)
+        self._prefetch_active_tokens.pop(key, None)
+        self._prefetch_pending.discard(key)
+        self._prefetch_generations.pop(key, None)
+        self._prefetch_active_tasks = max(0, self._prefetch_active_tasks - 1)
+        if reason == "empty_render":
+            self._prefetch_l2_misses.add(key)
+        emit_perf_event(
+            "thumbnail_prefetch_skipped",
+            path=path,
+            reason=reason,
+            generation=generation,
+        )
+        if (
+            reason == "cancelled"
+            and key in self._prefetch_key_order
+            and key not in self._pending_tasks
+        ):
+            self._queue_prefetch(
+                ThumbnailRequest(
+                    path,
+                    size,
+                    ThumbnailRequestKind.PREFETCH,
+                    self._current_generation,
+                )
+            )
         self._drain_generation_queue()
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
@@ -479,10 +773,13 @@ class ThumbnailCacheService(QObject):
                 self._memory_used_bytes - self._memory_bytes.pop(key, 0),
             )
         self._failure_until.pop(key, None)
+        self._prefetch_l2_misses.discard(key)
         self._pending_tasks.discard(key)
         self._pending_generations.pop(key, None)
         self._queued_tasks.pop(key, None)
+        self._visible_queued_at.pop(key, None)
         self._pinned_keys.discard(key)
+        self._cancel_prefetch_key(key)
 
         disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         if disk_file.exists():
@@ -547,19 +844,64 @@ class ThumbnailCacheService(QObject):
             evicted_key = next(
                 (
                     candidate
-                    for candidate in self._memory_cache
-                    if candidate not in self._pinned_keys and candidate != key
+                    for candidate in reversed(self._prefetch_key_order)
+                    if candidate in self._memory_cache
+                    and candidate not in self._pinned_keys
+                    and candidate != key
                 ),
                 None,
             )
+            if evicted_key is None:
+                evicted_key = next(
+                    (
+                        candidate
+                        for candidate in self._memory_cache
+                        if candidate not in self._pinned_keys and candidate != key
+                    ),
+                    None,
+                )
             if evicted_key is None:
                 break
             self._memory_cache.pop(evicted_key, None)
             self._memory_used_bytes -= self._memory_bytes.pop(evicted_key, 0)
 
-    def _load_or_render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
+    def _load_cached_thumbnail_only(
+        self,
+        path: Path,
+        size: QSize,
+        cancellation: _CancellationToken | None = None,
+    ) -> Optional[QImage]:
+        """Read and decode an existing L2 thumbnail without rendering source media."""
+
+        if cancellation is not None and cancellation.cancelled():
+            return None
+        key = self._cache_key(path, size)
+        disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
+        try:
+            if not disk_file.exists():
+                return None
+            payload = disk_file.read_bytes()
+        except OSError:
+            return None
+        if cancellation is not None and cancellation.cancelled():
+            return None
+        image = image_loader.qimage_from_bytes(payload)
+        if cancellation is not None and cancellation.cancelled():
+            return None
+        if image is None or image.isNull():
+            return None
+        emit_perf_event("thumbnail_cache_hit", tier="L2_prefetch", key=key)
+        return image
+
+    def _load_or_render_thumbnail(
+        self,
+        path: Path,
+        size: QSize,
+        cancellation: _CancellationToken | None = None,
+    ) -> Optional[QImage]:
         """Load L2 or render/write a replacement entirely on a worker thread."""
 
+        del cancellation
         key = self._cache_key(path, size)
         disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         try:
@@ -592,10 +934,6 @@ class ThumbnailCacheService(QObject):
             pass
         total_budget = max(64 * 1024 * 1024, min(512 * 1024 * 1024, physical // 10))
         return total_budget * 3 // 4
-
-    @staticmethod
-    def _priority_rank(priority: str) -> int:
-        return {"visible": 0, "normal": 1, "low": 2}.get(priority, 1)
 
     def _render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
         started = monotonic_ms()

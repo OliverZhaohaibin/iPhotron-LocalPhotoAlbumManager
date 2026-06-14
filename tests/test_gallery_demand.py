@@ -3,7 +3,7 @@ from __future__ import annotations
 from iPhoto.gui.gallery_demand import MICRO_WARM_LIMIT, build_viewport_demand
 
 
-def test_fast_demand_limits_full_hot_range_and_warms_2000_micro_items() -> None:
+def test_fast_demand_disables_full_prefetch_and_warms_2000_micro_items() -> None:
     demand = build_viewport_demand(
         generation=4,
         row_count=100_000,
@@ -15,12 +15,13 @@ def test_fast_demand_limits_full_hot_range_and_warms_2000_micro_items() -> None:
     )
 
     assert demand.phase == "fast"
-    assert demand.hot_range == demand.visible_range
+    assert demand.full_prefetch_range == demand.visible_range
+    assert list(demand.iter_full_prefetch_rows()) == []
     assert demand.warm_last - demand.warm_first + 1 == MICRO_WARM_LIMIT
     assert demand.warm_last - demand.visible_last > demand.visible_first - demand.warm_first
 
 
-def test_medium_and_slow_demand_progressively_expand_full_hot_range() -> None:
+def test_slow_demand_prefetches_two_viewports_on_both_sides() -> None:
     medium = build_viewport_demand(
         generation=1,
         row_count=10_000,
@@ -42,10 +43,50 @@ def test_medium_and_slow_demand_progressively_expand_full_hot_range() -> None:
 
     assert medium.phase == "medium"
     assert slow.phase == "slow"
-    assert medium.hot_first == medium.visible_first
-    assert medium.hot_last > medium.visible_last
-    assert slow.hot_first < slow.visible_first
-    assert slow.hot_last > medium.hot_last
+    assert medium.full_prefetch_range == medium.visible_range
+    assert slow.full_prefetch_range == (960, 1059)
+
+
+def test_full_prefetch_rows_alternate_nearest_before_and_after() -> None:
+    demand = build_viewport_demand(
+        generation=3,
+        row_count=1_000,
+        visible_first=100,
+        visible_last=102,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+
+    assert list(demand.iter_full_prefetch_rows()) == [
+        99,
+        103,
+        98,
+        104,
+        97,
+        105,
+        96,
+        106,
+        95,
+        107,
+        94,
+        108,
+    ]
+
+
+def test_full_prefetch_rows_are_bounded_at_collection_edges() -> None:
+    demand = build_viewport_demand(
+        generation=3,
+        row_count=8,
+        visible_first=0,
+        visible_last=1,
+        direction=-1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+
+    assert demand.full_prefetch_range == (0, 5)
+    assert list(demand.iter_full_prefetch_rows()) == [2, 3, 4, 5]
 
 
 def test_settled_warm_range_is_centered_and_bounded() -> None:

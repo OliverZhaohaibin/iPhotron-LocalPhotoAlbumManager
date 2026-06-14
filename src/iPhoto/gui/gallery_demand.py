@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -21,7 +22,7 @@ SCROLL_VELOCITY_EWMA_SECONDS = 0.12
 
 @dataclass(frozen=True, slots=True)
 class GalleryViewportDemand:
-    """One immutable description of visible, hot, and warm Gallery demand."""
+    """One immutable description of visible, full-prefetch, and micro-warm demand."""
 
     generation: int
     visible_first: int
@@ -29,8 +30,8 @@ class GalleryViewportDemand:
     direction: int
     screens_per_second: float
     phase: GalleryScrollPhase
-    hot_first: int
-    hot_last: int
+    full_prefetch_first: int
+    full_prefetch_last: int
     warm_first: int
     warm_last: int
 
@@ -45,12 +46,34 @@ class GalleryViewportDemand:
         return self.visible_first, self.visible_last
 
     @property
-    def hot_range(self) -> tuple[int, int]:
-        return self.hot_first, self.hot_last
+    def full_prefetch_range(self) -> tuple[int, int]:
+        return self.full_prefetch_first, self.full_prefetch_last
 
     @property
     def warm_range(self) -> tuple[int, int]:
         return self.warm_first, self.warm_last
+
+    def iter_full_prefetch_rows(self) -> Iterator[int]:
+        """Yield viewport-external full-thumbnail rows nearest-first, alternating sides."""
+
+        before = range(self.visible_first - 1, self.full_prefetch_first - 1, -1)
+        after = range(self.visible_last + 1, self.full_prefetch_last + 1)
+        before_iter = iter(before)
+        after_iter = iter(after)
+        while True:
+            emitted = False
+            try:
+                yield next(before_iter)
+                emitted = True
+            except StopIteration:
+                pass
+            try:
+                yield next(after_iter)
+                emitted = True
+            except StopIteration:
+                pass
+            if not emitted:
+                return
 
 
 def classify_scroll_phase(
@@ -78,7 +101,7 @@ def build_viewport_demand(
     screens_per_second: float,
     actively_scrolling: bool,
 ) -> GalleryViewportDemand:
-    """Build bounded visible/hot/warm ranges from current scroll behavior."""
+    """Build bounded visible, full-prefetch, and micro-warm ranges."""
 
     row_count = max(1, int(row_count))
     first = max(0, min(int(visible_first), row_count - 1))
@@ -90,16 +113,11 @@ def build_viewport_demand(
     )
     visible_count = max(1, last - first + 1)
 
-    if phase in {"settled", "slow"}:
-        hot_before, hot_after = _directional_screens(direction, behind=1, ahead=2)
-    elif phase == "medium":
-        hot_before, hot_after = _directional_screens(direction, behind=0, ahead=1)
-    else:
-        hot_before = hot_after = 0
-    hot_first, hot_last = _bounded_range(
+    full_prefetch_screens = 2 if phase in {"settled", "slow"} else 0
+    full_prefetch_first, full_prefetch_last = _bounded_range(
         row_count,
-        first - visible_count * hot_before,
-        last + visible_count * hot_after,
+        first - visible_count * full_prefetch_screens,
+        last + visible_count * full_prefetch_screens,
     )
 
     if phase == "fast":
@@ -124,20 +142,11 @@ def build_viewport_demand(
         direction=direction,
         screens_per_second=max(0.0, float(screens_per_second)),
         phase=phase,
-        hot_first=hot_first,
-        hot_last=hot_last,
+        full_prefetch_first=full_prefetch_first,
+        full_prefetch_last=full_prefetch_last,
         warm_first=warm_first,
         warm_last=warm_last,
     )
-
-
-def _directional_screens(direction: int, *, behind: int, ahead: int) -> tuple[int, int]:
-    if direction > 0:
-        return behind, ahead
-    if direction < 0:
-        return ahead, behind
-    symmetric = max(behind, 1)
-    return symmetric, symmetric
 
 
 def _bounded_range(row_count: int, first: int, last: int) -> tuple[int, int]:

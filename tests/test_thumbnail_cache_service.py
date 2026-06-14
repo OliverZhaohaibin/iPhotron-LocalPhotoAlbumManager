@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -180,11 +181,12 @@ def test_reconcile_demand_keeps_only_latest_visible_and_prefetch_queue(tmp_path:
     first_key = service._cache_key(first, size)
     second_key = service._cache_key(second, size)
     third_key = service._cache_key(third, size)
-    assert set(service._queued_tasks) == {second_key}
+    assert set(service._queued_tasks) == set()
     assert first_key not in service._pending_tasks
     assert third_key not in service._prefetch_pending
-    assert service._queued_tasks[second_key].kind is ThumbnailRequestKind.VISIBLE
-    assert service._queued_tasks[second_key].generation == 2
+    assert second_key in service._prefetch_promoted_visible
+    assert second_key in service._pending_tasks
+    assert service._pending_generations[second_key] == 2
     assert service._pinned_keys == {second_key}
 
 
@@ -245,7 +247,7 @@ def test_prefetch_uses_separate_pool_and_never_enters_foreground_queue(tmp_path:
     assert start_generation.call_args.kwargs["kind"] is ThumbnailRequestKind.PREFETCH
 
 
-def test_visible_request_cancels_active_prefetch_for_same_key(tmp_path: Path) -> None:
+def test_visible_request_promotes_active_prefetch_without_canceling_it(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     service._max_active_jobs = 0
     path = tmp_path / "photo.jpg"
@@ -260,12 +262,33 @@ def test_visible_request_cancels_active_prefetch_for_same_key(tmp_path: Path) ->
         generation=2,
     )
 
-    assert token.cancelled()
+    assert not token.cancelled()
+    assert key in service._prefetch_promoted_visible
     assert key in service._pending_tasks
+    assert key not in service._queued_tasks
+
+
+def test_visible_request_does_not_promote_already_canceled_prefetch(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    token = service._prefetch_active_tokens[key] = _CancellationToken()
+    token.cancel()
+    service._prefetch_pending.add(key)
+    service._prefetch_active_tasks = 1
+
+    service.request_many(
+        [ThumbnailRequest(path, size, ThumbnailRequestKind.VISIBLE, 2)],
+        generation=2,
+    )
+
+    assert key not in service._prefetch_promoted_visible
     assert service._queued_tasks[key].kind is ThumbnailRequestKind.VISIBLE
 
 
-def test_visible_miss_pauses_unrelated_active_prefetch(tmp_path: Path) -> None:
+def test_visible_miss_does_not_pause_unrelated_active_prefetch(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     service._max_active_jobs = 0
     prefetch_path = tmp_path / "prefetch.jpg"
@@ -278,6 +301,125 @@ def test_visible_miss_pauses_unrelated_active_prefetch(tmp_path: Path) -> None:
 
     service.request_many(
         [ThumbnailRequest(visible_path, size, ThumbnailRequestKind.VISIBLE, 2)],
+        generation=2,
+    )
+
+    assert not token.cancelled()
+
+
+def test_prefetch_starts_while_visible_work_is_pending(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    visible_path = tmp_path / "visible.jpg"
+    prefetch_path = tmp_path / "prefetch.jpg"
+    size = QSize(512, 512)
+
+    with patch.object(service, "_start_generation") as start_generation:
+        service.reconcile_demand(
+            visible_paths=[visible_path],
+            prefetch_paths=[prefetch_path],
+            size=size,
+            generation=1,
+        )
+
+    assert service._pending_tasks
+    assert service._prefetch_active_tasks == 1
+    assert start_generation.call_args.kwargs["kind"] is ThumbnailRequestKind.PREFETCH
+
+
+def test_promoted_prefetch_hit_updates_visible_tile_without_duplicate_worker(
+    tmp_path: Path,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    token = service._prefetch_active_tokens[key] = _CancellationToken()
+    service._prefetch_pending.add(key)
+    service._prefetch_generations[key] = 1
+    service._prefetch_active_tasks = 1
+    emitted = []
+    service.thumbnailReady.connect(emitted.append)
+
+    with patch.object(service, "_start_generation") as start_generation:
+        service.request_many(
+            [ThumbnailRequest(path, size, ThumbnailRequestKind.VISIBLE, 2)],
+            generation=2,
+        )
+        service._handle_prefetch_result(
+            path,
+            size,
+            QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied),
+            generation=1,
+        )
+
+    assert not token.cancelled()
+    start_generation.assert_not_called()
+    assert key in service._memory_cache
+    assert key not in service._pending_tasks
+    assert emitted == [path]
+
+
+def test_promoted_prefetch_miss_falls_back_to_foreground_generation(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    service._prefetch_active_tokens[key] = _CancellationToken()
+    service._prefetch_pending.add(key)
+    service._prefetch_generations[key] = 1
+    service._prefetch_active_tasks = 1
+
+    service.request_many(
+        [ThumbnailRequest(path, size, ThumbnailRequestKind.VISIBLE, 2)],
+        generation=2,
+    )
+    service._handle_prefetch_failure(path, size, "empty_render", generation=1)
+
+    assert key not in service._prefetch_promoted_visible
+    assert key in service._pending_tasks
+    assert service._queued_tasks[key].kind is ThumbnailRequestKind.VISIBLE
+    assert service._queued_tasks[key].generation == 2
+
+
+def test_overlapping_active_prefetch_survives_new_generation(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "prefetch.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    token = service._prefetch_active_tokens[key] = _CancellationToken()
+    service._prefetch_pending.add(key)
+    service._prefetch_generations[key] = 1
+    service._prefetch_active_tasks = 1
+
+    service.reconcile_demand(
+        visible_paths=[],
+        prefetch_paths=[path],
+        size=size,
+        generation=2,
+    )
+
+    assert not token.cancelled()
+    assert service._prefetch_generations[key] == 2
+
+
+def test_active_prefetch_is_canceled_after_leaving_latest_demand(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "prefetch.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    token = service._prefetch_active_tokens[key] = _CancellationToken()
+    service._prefetch_pending.add(key)
+    service._prefetch_generations[key] = 1
+    service._prefetch_active_tasks = 1
+
+    service.reconcile_demand(
+        visible_paths=[],
+        prefetch_paths=[],
+        size=size,
         generation=2,
     )
 
@@ -358,6 +500,51 @@ def test_existing_l2_prefetch_streams_into_memory_without_ui_update(
 
     assert service.has_full_thumbnail(path, size)
     assert emitted == []
+
+
+def test_slow_l2_prefetch_survives_visible_work_and_new_generation(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    prefetch_path = tmp_path / "prefetch.jpg"
+    visible_path = tmp_path / "visible.jpg"
+    size = QSize(512, 512)
+    started = threading.Event()
+    release = threading.Event()
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+
+    def _slow_l2_load(_path, _size, cancellation):
+        started.set()
+        release.wait(timeout=2.0)
+        assert not cancellation.cancelled()
+        return image
+
+    with patch.object(service, "_load_cached_thumbnail_only", side_effect=_slow_l2_load):
+        service.reconcile_demand(
+            visible_paths=[],
+            prefetch_paths=[prefetch_path],
+            size=size,
+            generation=1,
+        )
+        assert started.wait(timeout=1.0)
+        token = service._prefetch_active_tokens[service._cache_key(prefetch_path, size)]
+
+        service.reconcile_demand(
+            visible_paths=[visible_path],
+            prefetch_paths=[prefetch_path],
+            size=size,
+            generation=2,
+        )
+        assert not token.cancelled()
+        release.set()
+
+        deadline = time.monotonic() + 2.0
+        while not service.has_full_thumbnail(prefetch_path, size) and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+    assert service.has_full_thumbnail(prefetch_path, size)
 
 
 def test_memory_pressure_evicts_farthest_prefetch_before_visible(

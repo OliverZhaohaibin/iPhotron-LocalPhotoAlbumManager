@@ -47,7 +47,7 @@ def test_slow_demand_prefetches_two_viewports_on_both_sides() -> None:
     assert slow.full_prefetch_range == (960, 1059)
 
 
-def test_full_prefetch_rows_alternate_nearest_before_and_after() -> None:
+def test_scrolling_full_prefetch_rows_favor_the_forward_direction_three_to_one() -> None:
     demand = build_viewport_demand(
         generation=3,
         row_count=1_000,
@@ -56,6 +56,60 @@ def test_full_prefetch_rows_alternate_nearest_before_and_after() -> None:
         direction=1,
         screens_per_second=1.0,
         actively_scrolling=True,
+    )
+
+    assert list(demand.iter_full_prefetch_rows()) == [
+        103,
+        104,
+        105,
+        99,
+        106,
+        107,
+        108,
+        98,
+        97,
+        96,
+        95,
+        94,
+    ]
+
+
+def test_upward_full_prefetch_rows_favor_rows_before_the_viewport() -> None:
+    demand = build_viewport_demand(
+        generation=3,
+        row_count=1_000,
+        visible_first=100,
+        visible_last=102,
+        direction=-1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+
+    assert list(demand.iter_full_prefetch_rows()) == [
+        99,
+        98,
+        97,
+        103,
+        96,
+        95,
+        94,
+        104,
+        105,
+        106,
+        107,
+        108,
+    ]
+
+
+def test_settled_full_prefetch_rows_alternate_nearest_before_and_after() -> None:
+    demand = build_viewport_demand(
+        generation=3,
+        row_count=1_000,
+        visible_first=100,
+        visible_last=102,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
     )
 
     assert list(demand.iter_full_prefetch_rows()) == [

@@ -54,26 +54,41 @@ class GalleryViewportDemand:
         return self.warm_first, self.warm_last
 
     def iter_full_prefetch_rows(self) -> Iterator[int]:
-        """Yield viewport-external full-thumbnail rows nearest-first, alternating sides."""
+        """Yield nearby full-thumbnail rows, favoring the active scroll direction."""
 
         before = range(self.visible_first - 1, self.full_prefetch_first - 1, -1)
         after = range(self.visible_last + 1, self.full_prefetch_last + 1)
-        before_iter = iter(before)
-        after_iter = iter(after)
-        while True:
-            emitted = False
+        if self.phase != "settled" and self.direction:
+            ahead = after if self.direction > 0 else before
+            behind = before if self.direction > 0 else after
+            yield from _interleave_ranges(ahead, behind, primary_count=3)
+            return
+        yield from _interleave_ranges(before, after, primary_count=1)
+
+
+def _interleave_ranges(
+    primary: range,
+    secondary: range,
+    *,
+    primary_count: int,
+) -> Iterator[int]:
+    primary_iter = iter(primary)
+    secondary_iter = iter(secondary)
+    while True:
+        emitted = False
+        for _ in range(max(1, primary_count)):
             try:
-                yield next(before_iter)
+                yield next(primary_iter)
                 emitted = True
             except StopIteration:
-                pass
-            try:
-                yield next(after_iter)
-                emitted = True
-            except StopIteration:
-                pass
-            if not emitted:
-                return
+                break
+        try:
+            yield next(secondary_iter)
+            emitted = True
+        except StopIteration:
+            pass
+        if not emitted:
+            return
 
 
 def classify_scroll_phase(

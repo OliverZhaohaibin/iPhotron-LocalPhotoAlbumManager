@@ -135,7 +135,7 @@ def test_reentered_pending_thumbnail_promotes_generation(tmp_path: Path) -> None
     path = tmp_path / "photo.jpg"
     size = QSize(512, 512)
 
-    service.request_many([(path, size, "low")], generation=1)
+    service.request_many([(path, size, "behind")], generation=1)
     service.request_many([(path, size, "visible")], generation=9)
 
     key = service._cache_key(path, size)
@@ -153,13 +153,15 @@ def test_reconcile_demand_keeps_only_latest_visible_and_hot_queue(tmp_path: Path
 
     service.reconcile_demand(
         visible_paths=[first],
-        hot_paths=[second, third],
+        ahead_paths=[second],
+        behind_paths=[third],
         size=size,
         generation=1,
     )
     service.reconcile_demand(
         visible_paths=[second],
-        hot_paths=[],
+        ahead_paths=[],
+        behind_paths=[],
         size=size,
         generation=2,
     )
@@ -172,6 +174,89 @@ def test_reconcile_demand_keeps_only_latest_visible_and_hot_queue(tmp_path: Path
     assert third_key not in service._pending_tasks
     assert service._queued_tasks[second_key][2:] == ("visible", 2)
     assert service._pinned_keys == {second_key}
+
+
+def test_directional_hydration_queue_prefers_visible_then_ahead_then_behind(
+    tmp_path: Path,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    size = QSize(512, 512)
+    visible = tmp_path / "visible.jpg"
+    ahead = tmp_path / "ahead.jpg"
+    behind = tmp_path / "behind.jpg"
+
+    service.reconcile_demand(
+        visible_paths=[visible],
+        ahead_paths=[ahead],
+        behind_paths=[behind],
+        size=size,
+        generation=1,
+    )
+
+    service._max_active_jobs = 1
+    assert service._pop_next_generation()[1] == visible
+    assert service._pop_next_generation()[1] == ahead
+    assert service._pop_next_generation()[1] == behind
+
+
+def test_l2_miss_moves_to_render_queue_without_failure_cooldown(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    service._max_active_render_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    service.request_many([(path, size, "visible")], generation=3)
+    key = service._cache_key(path, size)
+    service._active_hydration_keys.add(key)
+    service._active_tasks = 1
+
+    service._handle_hydration_failure(path, size, "empty_render", generation=3)
+
+    assert key in service._render_queued_keys
+    assert key not in service._failure_until
+
+
+def test_canceled_l2_miss_can_be_requested_again(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    service._max_active_render_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    service.request_many([(path, size, "visible")], generation=1)
+    key, _path, _size, generation = service._pop_next_generation()
+    service._active_hydration_keys.add(key)
+    service._active_tasks = 1
+
+    service.reconcile_demand(visible_paths=[], size=size, generation=2)
+    service._handle_hydration_failure(path, size, "empty_render", generation=generation)
+
+    assert key not in service._pending_tasks
+    assert key not in service._pending_generations
+    assert key not in service._pending_priorities
+
+    service.reconcile_demand(visible_paths=[path], size=size, generation=3)
+
+    assert key in service._pending_tasks
+    assert key in service._queued_tasks
+
+
+def test_reentered_render_request_promotes_behind_to_visible(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    service._max_active_render_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    service.request_many([(path, size, "behind")], generation=1)
+    key = service._cache_key(path, size)
+    service._active_hydration_keys.add(key)
+    service._active_tasks = 1
+    service._handle_hydration_failure(path, size, "empty_render", generation=1)
+
+    service.request_many([(path, size, "visible")], generation=2)
+
+    assert not service._render_queues["behind"]
+    assert service._render_queues["visible"][0][0] == key
 
 
 def test_stale_worker_result_is_discarded_before_pixmap_conversion(tmp_path: Path) -> None:

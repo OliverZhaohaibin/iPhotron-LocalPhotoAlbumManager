@@ -83,6 +83,21 @@ def test_visible_rows_use_geometry_without_index_at_probes(qapp: QApplication) -
     assert first <= last < 9_999
 
 
+def test_same_grid_row_reuses_viewport_generation(qapp: QApplication) -> None:
+    grid = _make_grid(qapp, rows=10_000)
+    controller = grid._scroll_controller
+    controller._idle_timer.start()
+    grid.verticalScrollBar().setValue(1)
+    first = controller.viewport_state(10_000)
+    grid.verticalScrollBar().setValue(2)
+    second = controller.viewport_state(10_000)
+
+    assert first is not None and second is not None
+    assert first.visible_range == second.visible_range
+    assert first.phase == second.phase
+    assert first.generation == second.generation
+
+
 class _WheelEvent:
     def __init__(self, *, pixel_y: int = 0, angle_y: int = 0) -> None:
         self._pixel = QPoint(0, pixel_y)

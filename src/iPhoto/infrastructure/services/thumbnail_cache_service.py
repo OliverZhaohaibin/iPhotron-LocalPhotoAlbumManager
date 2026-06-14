@@ -91,31 +91,54 @@ class ThumbnailCacheService(QObject):
 
         self._pending_tasks: Set[str] = set()
         self._pending_generations: Dict[str, int] = {}
+        self._pending_priorities: Dict[str, str] = {}
+        self._desired_keys: Set[str] = set()
         self._queued_tasks: Dict[str, tuple[Path, QSize, str, int]] = {}
         self._priority_queues: dict[str, Deque[str]] = {
             "visible": deque(),
-            "normal": deque(),
-            "low": deque(),
+            "ahead": deque(),
+            "behind": deque(),
         }
+        self._render_queues: dict[str, Deque[tuple[str, Path, QSize, int]]] = {
+            "visible": deque(),
+            "ahead": deque(),
+            "behind": deque(),
+        }
+        self._render_queued_keys: Set[str] = set()
+        self._active_hydration_keys: Set[str] = set()
+        self._active_render_keys: Set[str] = set()
         self._active_tasks = 0
-        self._max_active_jobs = 2
+        self._max_active_jobs = 4
+        self._active_render_tasks = 0
+        self._max_active_render_jobs = 2
         self._failure_cooldown_seconds = 60.0
         self._failure_until: Dict[str, float] = {}
         self._is_shutting_down = False
         self._current_generation = 0
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(self._max_active_jobs)
+        self._render_thread_pool = QThreadPool(self)
+        self._render_thread_pool.setMaxThreadCount(self._max_active_render_jobs)
 
     def shutdown(self):
         """Prevents new tasks from being submitted and clears pending logic."""
         self._is_shutting_down = True
         self._pending_tasks.clear()
         self._pending_generations.clear()
+        self._pending_priorities.clear()
+        self._desired_keys.clear()
         self._queued_tasks.clear()
+        for queue in self._render_queues.values():
+            queue.clear()
+        self._render_queued_keys.clear()
+        self._active_hydration_keys.clear()
+        self._active_render_keys.clear()
         for queue in self._priority_queues.values():
             queue.clear()
         self._thread_pool.clear()
+        self._render_thread_pool.clear()
         self._active_tasks = 0
+        self._active_render_tasks = 0
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
         self._is_shutting_down = False
@@ -129,7 +152,14 @@ class ThumbnailCacheService(QObject):
         self._pinned_keys.clear()
         self._pending_tasks.clear()
         self._pending_generations.clear()
+        self._pending_priorities.clear()
+        self._desired_keys.clear()
         self._queued_tasks.clear()
+        for queue in self._render_queues.values():
+            queue.clear()
+        self._render_queued_keys.clear()
+        self._active_hydration_keys.clear()
+        self._active_render_keys.clear()
         for queue in self._priority_queues.values():
             queue.clear()
         self._failure_until.clear()
@@ -186,7 +216,9 @@ class ThumbnailCacheService(QObject):
             return
         self._current_generation = max(self._current_generation, int(generation))
         for path, size, priority in requests:
+            priority = priority if priority in self._priority_queues else "ahead"
             key = self._cache_key(path, size)
+            self._desired_keys.add(key)
             if key in self._memory_cache:
                 continue
             if key in self._pending_tasks:
@@ -195,6 +227,18 @@ class ThumbnailCacheService(QObject):
                     int(generation),
                 )
                 queued = self._queued_tasks.get(key)
+                current_priority = self._pending_priorities.get(key, priority)
+                next_pending_priority = (
+                    priority
+                    if self._priority_rank(priority) < self._priority_rank(current_priority)
+                    else current_priority
+                )
+                self._pending_priorities[key] = next_pending_priority
+                if (
+                    key in self._render_queued_keys
+                    and next_pending_priority != current_priority
+                ):
+                    self._promote_render_key(key, next_pending_priority)
                 if queued is not None:
                     queued_path, queued_size, queued_priority, queued_generation = queued
                     next_priority = (
@@ -224,46 +268,79 @@ class ThumbnailCacheService(QObject):
         self,
         *,
         visible_paths: Iterable[Path],
-        hot_paths: Iterable[Path],
+        ahead_paths: Iterable[Path] = (),
+        behind_paths: Iterable[Path] = (),
+        hot_paths: Iterable[Path] | None = None,
         size: QSize,
         generation: int,
     ) -> None:
-        """Replace queued work with the latest visible/hot thumbnail demand."""
+        """Replace queued work with latest direction-aware thumbnail demand."""
 
         visible = list(dict.fromkeys(Path(path) for path in visible_paths))
+        ahead_source = list(ahead_paths)
+        behind_source = list(behind_paths)
         visible_set = set(visible)
-        hot = [
+        if hot_paths is not None and not ahead_source and not behind_source:
+            ahead_source = list(hot_paths)
+        ahead = [
             Path(path)
-            for path in dict.fromkeys(Path(path) for path in hot_paths)
+            for path in dict.fromkeys(Path(path) for path in ahead_source)
             if Path(path) not in visible_set
+        ]
+        ahead_set = set(ahead)
+        behind = [
+            Path(path)
+            for path in dict.fromkeys(Path(path) for path in behind_source)
+            if Path(path) not in visible_set and Path(path) not in ahead_set
         ]
         desired_keys = {
             self._cache_key(path, size)
-            for path in [*visible, *hot]
+            for path in [*visible, *ahead, *behind]
         }
         record_perf = perf_logging_enabled()
         pending_before = set(self._pending_tasks) if record_perf else set()
         resident = len(desired_keys.intersection(self._memory_cache)) if record_perf else 0
         self._current_generation = max(self._current_generation, int(generation))
         self.pin_visible(visible, size)
+        self._desired_keys = set(desired_keys)
 
         drop_keys = set(self._queued_tasks) - desired_keys
         for key in drop_keys:
             self._queued_tasks.pop(key, None)
             self._pending_tasks.discard(key)
             self._pending_generations.pop(key, None)
+            self._pending_priorities.pop(key, None)
         if drop_keys:
             for priority, queue in self._priority_queues.items():
                 self._priority_queues[priority] = deque(
                     key for key in queue if key not in drop_keys
                 )
+        for priority, queue in self._render_queues.items():
+            self._render_queues[priority] = deque(
+                item for item in queue if item[0] in desired_keys
+            )
+        self._render_queued_keys.intersection_update(desired_keys)
+        cancelable_pending = (
+            set(self._pending_tasks)
+            - desired_keys
+            - self._active_hydration_keys
+            - self._active_render_keys
+        )
+        for key in cancelable_pending:
+            self._pending_tasks.discard(key)
+            self._pending_generations.pop(key, None)
+            self._pending_priorities.pop(key, None)
 
         self.request_many(
             ((path, size, "visible") for path in visible),
             generation=generation,
         )
         self.request_many(
-            ((path, size, "normal") for path in hot),
+            ((path, size, "ahead") for path in ahead),
+            generation=generation,
+        )
+        self.request_many(
+            ((path, size, "behind") for path in behind),
             generation=generation,
         )
         if record_perf:
@@ -271,7 +348,8 @@ class ThumbnailCacheService(QObject):
                 "thumbnail_demand_reconciled",
                 generation=generation,
                 visible=len(visible),
-                hot=len(hot),
+                ahead=len(ahead),
+                behind=len(behind),
                 requested=len(
                     (set(self._pending_tasks) - pending_before).intersection(desired_keys)
                 ),
@@ -281,6 +359,7 @@ class ThumbnailCacheService(QObject):
                 active=self._active_tasks,
             )
         self._drain_generation_queue()
+        self._drain_render_queue()
 
     def pin_visible(self, paths: Iterable[Path], size: QSize) -> None:
         """Keep current visible full thumbnails resident until the next viewport."""
@@ -300,26 +379,41 @@ class ThumbnailCacheService(QObject):
             self._queued_tasks.pop(key, None)
             self._pending_tasks.discard(key)
             self._pending_generations.pop(key, None)
+            self._pending_priorities.pop(key, None)
+            self._desired_keys.discard(key)
         if drop_keys:
             for priority, queue in self._priority_queues.items():
                 self._priority_queues[priority] = deque(
                     key for key in queue if key not in drop_keys
                 )
+            for priority, queue in self._render_queues.items():
+                self._render_queues[priority] = deque(
+                    item for item in queue if item[0] not in drop_keys
+                )
+            self._render_queued_keys.difference_update(drop_keys)
 
     def cancel_pending_except(self, paths: Set[Path], size: QSize) -> None:
         """Cancel queued thumbnail work except for *paths* at *size*."""
 
         keep_keys = {self._cache_key(path, size) for path in paths}
-        drop_keys = set(self._queued_tasks) - keep_keys
+        drop_keys = self._desired_keys - keep_keys
+        self._desired_keys = set(keep_keys)
         for key in drop_keys:
             self._queued_tasks.pop(key, None)
-            self._pending_tasks.discard(key)
-            self._pending_generations.pop(key, None)
+            if key not in self._active_hydration_keys and key not in self._active_render_keys:
+                self._pending_tasks.discard(key)
+                self._pending_generations.pop(key, None)
+                self._pending_priorities.pop(key, None)
         if drop_keys:
             for priority, queue in self._priority_queues.items():
                 self._priority_queues[priority] = deque(
                     key for key in queue if key not in drop_keys
                 )
+            for priority, queue in self._render_queues.items():
+                self._render_queues[priority] = deque(
+                    item for item in queue if item[0] not in drop_keys
+                )
+            self._render_queued_keys.difference_update(drop_keys)
 
     def _queue_generation(
         self,
@@ -329,13 +423,15 @@ class ThumbnailCacheService(QObject):
         priority: str,
         generation: int = 0,
     ) -> None:
-        priority = priority if priority in self._priority_queues else "normal"
+        priority = priority if priority in self._priority_queues else "ahead"
         key = self._cache_key(path, size)
+        self._desired_keys.add(key)
         self._pending_tasks.add(key)
         self._pending_generations[key] = max(
             self._pending_generations.get(key, 0),
             int(generation),
         )
+        self._pending_priorities[key] = priority
         self._queued_tasks[key] = (path, size, priority, int(generation))
         self._priority_queues[priority].append(key)
         self._drain_generation_queue()
@@ -347,10 +443,11 @@ class ThumbnailCacheService(QObject):
                 return
             key, path, size, generation = next_item
             self._active_tasks += 1
+            self._active_hydration_keys.add(key)
             self._start_generation(key, path, size, generation)
 
     def _pop_next_generation(self) -> tuple[str, Path, QSize, int] | None:
-        for priority in ("visible", "normal", "low"):
+        for priority in ("visible", "ahead", "behind"):
             queue = self._priority_queues[priority]
             while queue:
                 key = queue.popleft()
@@ -371,8 +468,8 @@ class ThumbnailCacheService(QObject):
 
         # We instantiate signals here. The worker holds a reference to it.
         worker_signals = ThumbnailWorkerSignals()
-        worker_signals.result.connect(self._handle_generation_result)
-        worker_signals.failed.connect(self._handle_generation_failure)
+        worker_signals.result.connect(self._handle_hydration_result)
+        worker_signals.failed.connect(self._handle_hydration_failure)
 
         # We need to ensure worker_signals isn't garbage collected before run() finishes?
         # QThreadPool takes ownership of QRunnable. The QRunnable holds 'signals'.
@@ -386,13 +483,104 @@ class ThumbnailCacheService(QObject):
             pending=len(self._pending_tasks),
         )
         worker = ThumbnailGenerationTask(
-            self._load_or_render_thumbnail,
+            self._load_l2_thumbnail,
             path,
             size,
             worker_signals,
             generation,
         )
         self._thread_pool.start(worker)
+
+    def _handle_hydration_result(
+        self,
+        path: Path,
+        size: QSize,
+        image: QImage,
+        generation: int = 0,
+    ) -> None:
+        self._active_hydration_keys.discard(self._cache_key(path, size))
+        self._active_tasks = max(0, self._active_tasks - 1)
+        self._publish_thumbnail_result(path, size, image, generation)
+        self._drain_generation_queue()
+
+    def _handle_hydration_failure(
+        self,
+        path: Path,
+        size: QSize,
+        reason: str,
+        generation: int = 0,
+    ) -> None:
+        del reason
+        self._active_hydration_keys.discard(self._cache_key(path, size))
+        self._active_tasks = max(0, self._active_tasks - 1)
+        key = self._cache_key(path, size)
+        desired_generation = self._pending_generations.get(key, generation)
+        if (
+            not self._is_shutting_down
+            and key in self._pending_tasks
+            and key in self._desired_keys
+            and key not in self._render_queued_keys
+        ):
+            priority = self._pending_priorities.get(key, "ahead")
+            self._render_queues[priority].append((key, path, size, desired_generation))
+            self._render_queued_keys.add(key)
+        elif key not in self._desired_keys:
+            self._pending_tasks.discard(key)
+            self._pending_generations.pop(key, None)
+            self._pending_priorities.pop(key, None)
+        self._drain_generation_queue()
+        self._drain_render_queue()
+
+    def _drain_render_queue(self) -> None:
+        while (
+            not self._is_shutting_down
+            and self._active_render_tasks < self._max_active_render_jobs
+            and any(self._render_queues.values())
+        ):
+            next_item = self._pop_next_render()
+            if next_item is None:
+                return
+            key, path, size, generation = next_item
+            self._render_queued_keys.discard(key)
+            if key not in self._pending_tasks:
+                continue
+            signals = ThumbnailWorkerSignals()
+            signals.result.connect(self._handle_generation_result)
+            signals.failed.connect(self._handle_generation_failure)
+            self._active_render_tasks += 1
+            self._active_render_keys.add(key)
+            self._render_thread_pool.start(
+                ThumbnailGenerationTask(
+                    self._render_and_cache_thumbnail,
+                    path,
+                    size,
+                    signals,
+                    generation,
+                )
+            )
+
+    def _pop_next_render(self) -> tuple[str, Path, QSize, int] | None:
+        for priority in ("visible", "ahead", "behind"):
+            queue = self._render_queues[priority]
+            while queue:
+                item = queue.popleft()
+                if item[0] in self._desired_keys:
+                    return item
+        return None
+
+    def _promote_render_key(self, key: str, priority: str) -> None:
+        promoted: tuple[str, Path, QSize, int] | None = None
+        for queue_priority, queue in self._render_queues.items():
+            retained: Deque[tuple[str, Path, QSize, int]] = deque()
+            while queue:
+                item = queue.popleft()
+                if item[0] == key and promoted is None:
+                    promoted = item
+                else:
+                    retained.append(item)
+            self._render_queues[queue_priority] = retained
+        if promoted is not None:
+            self._render_queues[priority].appendleft(promoted)
 
     def _handle_generation_result(
         self,
@@ -403,33 +591,10 @@ class ThumbnailCacheService(QObject):
     ):
         # Back on main thread
         if not image.isNull():
-            key = self._cache_key(path, size)
-            self._pending_tasks.discard(key)
-            desired_generation = self._pending_generations.pop(key, generation)
-            self._failure_until.pop(key, None)
-            self._active_tasks = max(0, self._active_tasks - 1)
-
-            if self._is_shutting_down or desired_generation < self._current_generation:
-                emit_perf_event(
-                    "thumbnail_result_discarded",
-                    path=path,
-                    generation=desired_generation,
-                    current_generation=self._current_generation,
-                )
-                self._drain_generation_queue()
-                return
-
-            pixmap = QPixmap.fromImage(image)
-            self._add_to_memory(key, pixmap)
-            emit_perf_event(
-                "thumbnail_generate_finished",
-                path=path,
-                width=size.width(),
-                height=size.height(),
-                pending=len(self._pending_tasks),
-            )
-            self.thumbnailReady.emit(path)
-            self._drain_generation_queue()
+            self._active_render_keys.discard(self._cache_key(path, size))
+            self._active_render_tasks = max(0, self._active_render_tasks - 1)
+            self._publish_thumbnail_result(path, size, image, generation)
+            self._drain_render_queue()
 
     def _handle_generation_failure(
         self,
@@ -439,10 +604,17 @@ class ThumbnailCacheService(QObject):
         generation: int = 0,
     ) -> None:
         key = self._cache_key(path, size)
+        self._active_render_keys.discard(key)
         self._pending_tasks.discard(key)
         desired_generation = self._pending_generations.pop(key, generation)
+        self._pending_priorities.pop(key, None)
         self._queued_tasks.pop(key, None)
-        self._active_tasks = max(0, self._active_tasks - 1)
+        self._active_render_tasks = max(0, self._active_render_tasks - 1)
+        # Direct/internal callers predating viewport demand tracking may invoke
+        # this handler without registering a desired set.
+        if self._desired_keys and key not in self._desired_keys:
+            self._drain_render_queue()
+            return
         if (
             not self._is_shutting_down
             and desired_generation > generation
@@ -464,7 +636,38 @@ class ThumbnailCacheService(QObject):
             reason=reason,
             pending=len(self._pending_tasks),
         )
-        self._drain_generation_queue()
+        self._drain_render_queue()
+
+    def _publish_thumbnail_result(
+        self,
+        path: Path,
+        size: QSize,
+        image: QImage,
+        generation: int,
+    ) -> None:
+        key = self._cache_key(path, size)
+        desired_generation = self._pending_generations.pop(key, generation)
+        self._pending_tasks.discard(key)
+        self._pending_priorities.pop(key, None)
+        self._failure_until.pop(key, None)
+        if self._is_shutting_down or key not in self._desired_keys:
+            emit_perf_event(
+                "thumbnail_result_discarded",
+                path=path,
+                generation=desired_generation,
+                current_generation=self._current_generation,
+            )
+            return
+        pixmap = QPixmap.fromImage(image)
+        self._add_to_memory(key, pixmap)
+        emit_perf_event(
+            "thumbnail_generate_finished",
+            path=path,
+            width=size.width(),
+            height=size.height(),
+            pending=len(self._pending_tasks),
+        )
+        self.thumbnailReady.emit(path)
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
         """Removes the thumbnail from cache to force regeneration."""
@@ -481,8 +684,15 @@ class ThumbnailCacheService(QObject):
         self._failure_until.pop(key, None)
         self._pending_tasks.discard(key)
         self._pending_generations.pop(key, None)
+        self._pending_priorities.pop(key, None)
+        self._desired_keys.discard(key)
         self._queued_tasks.pop(key, None)
         self._pinned_keys.discard(key)
+        self._render_queued_keys.discard(key)
+        for priority, queue in self._render_queues.items():
+            self._render_queues[priority] = deque(
+                item for item in queue if item[0] != key
+            )
 
         disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         if disk_file.exists():
@@ -557,8 +767,8 @@ class ThumbnailCacheService(QObject):
             self._memory_cache.pop(evicted_key, None)
             self._memory_used_bytes -= self._memory_bytes.pop(evicted_key, 0)
 
-    def _load_or_render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
-        """Load L2 or render/write a replacement entirely on a worker thread."""
+    def _load_l2_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
+        """Hydrate one thumbnail from L2 without rendering source media."""
 
         key = self._cache_key(path, size)
         disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
@@ -570,16 +780,35 @@ class ThumbnailCacheService(QObject):
                     return image
         except OSError:
             pass
+        return None
 
+    def _load_or_render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
+        """Compatibility helper used by focused tests and non-scheduled callers."""
+
+        image = self._load_l2_thumbnail(path, size)
+        if image is not None and not image.isNull():
+            return image
         image = self._render_thumbnail(path, size)
         if image is None or image.isNull():
             return None
+        self._write_l2_thumbnail(path, size, image)
+        return image
+
+    def _render_and_cache_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
+        image = self._render_thumbnail(path, size)
+        if image is None or image.isNull():
+            return None
+        self._write_l2_thumbnail(path, size, image)
+        return image
+
+    def _write_l2_thumbnail(self, path: Path, size: QSize, image: QImage) -> None:
+        key = self._cache_key(path, size)
+        disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, key)
         try:
             disk_file.parent.mkdir(parents=True, exist_ok=True)
             image.save(str(disk_file), "JPEG")
         except OSError:
             pass
-        return image
 
     @staticmethod
     def _resolve_memory_limit(memory_limit_mb: int | None) -> int:
@@ -595,7 +824,7 @@ class ThumbnailCacheService(QObject):
 
     @staticmethod
     def _priority_rank(priority: str) -> int:
-        return {"visible": 0, "normal": 1, "low": 2}.get(priority, 1)
+        return {"visible": 0, "ahead": 1, "behind": 2}.get(priority, 1)
 
     def _render_thumbnail(self, path: Path, size: QSize) -> Optional[QImage]:
         started = monotonic_ms()

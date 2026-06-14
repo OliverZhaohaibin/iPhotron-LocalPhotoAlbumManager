@@ -42,10 +42,10 @@ def test_medium_and_slow_demand_progressively_expand_full_hot_range() -> None:
 
     assert medium.phase == "medium"
     assert slow.phase == "slow"
-    assert medium.hot_first == medium.visible_first
-    assert medium.hot_last > medium.visible_last
-    assert slow.hot_first < slow.visible_first
-    assert slow.hot_last > medium.hot_last
+    assert medium.behind_full_range is None
+    assert medium.ahead_full_range == (1_020, 1_059)
+    assert slow.behind_full_range == (980, 999)
+    assert slow.ahead_full_range == (1_020, 1_139)
 
 
 def test_settled_warm_range_is_centered_and_bounded() -> None:

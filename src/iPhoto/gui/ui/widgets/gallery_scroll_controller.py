@@ -14,6 +14,7 @@ from iPhoto.gui.gallery_demand import (
     SCROLL_VELOCITY_EWMA_SECONDS,
     GalleryViewportDemand,
     build_viewport_demand,
+    classify_scroll_phase,
 )
 
 
@@ -30,6 +31,7 @@ class GalleryScrollController(QObject):
         self._last_value_at = time.monotonic()
         self._direction = 0
         self._screens_per_second = 0.0
+        self._last_demand_signature: tuple[object, ...] | None = None
 
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
@@ -83,7 +85,23 @@ class GalleryScrollController(QObject):
         visible_grid_rows = max(1, math.ceil(viewport.height() / cell_height) + 1)
         first = min(row_count - 1, first_grid_row * columns)
         last = min(row_count - 1, (first_grid_row + visible_grid_rows) * columns - 1)
-        self._generation += 1
+        actively_scrolling = self._idle_timer.isActive()
+        phase = classify_scroll_phase(
+            self._screens_per_second,
+            actively_scrolling=actively_scrolling,
+        )
+        signature = (
+            first,
+            max(first, last),
+            self._direction,
+            phase,
+            columns,
+            cell_width,
+            cell_height,
+        )
+        if signature != self._last_demand_signature:
+            self._generation += 1
+            self._last_demand_signature = signature
         return build_viewport_demand(
             generation=self._generation,
             row_count=row_count,
@@ -91,7 +109,7 @@ class GalleryScrollController(QObject):
             visible_last=max(first, last),
             direction=self._direction,
             screens_per_second=self._screens_per_second,
-            actively_scrolling=self._idle_timer.isActive(),
+            actively_scrolling=actively_scrolling,
         )
 
     def _apply_pending_scroll(self) -> None:

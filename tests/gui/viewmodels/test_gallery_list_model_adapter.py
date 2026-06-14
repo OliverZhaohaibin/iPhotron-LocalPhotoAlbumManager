@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import QModelIndex, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QPixmap
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.gallery_demand import build_viewport_demand
@@ -59,6 +59,7 @@ def mock_store():
 def mock_thumb_service():
     service = MagicMock(spec=ThumbnailCacheService)
     service.peek_full_thumbnail.return_value = None
+    service.has_full_thumbnail.return_value = False
     return service
 
 
@@ -313,13 +314,37 @@ def test_fast_viewport_warms_micro_and_still_requests_visible_full(
     mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
     mock_thumb_service.reconcile_demand.assert_called_once_with(
         visible_paths=[Path("/library/photo.jpg")],
-        hot_paths=[Path("/library/photo.jpg")],
+        ahead_paths=[],
+        behind_paths=[],
         size=adapter._thumb_size,
         generation=7,
     )
     assert demand.phase == "fast"
     assert demand.hot_range == demand.visible_range
     assert demand.warm_last - demand.warm_first + 1 == 2000
+
+
+def test_same_viewport_generation_does_not_reconcile_twice(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    demand = build_viewport_demand(
+        generation=7,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+    mock_store.cached_rows.return_value = []
+
+    adapter.update_viewport(demand)
+    adapter.update_viewport(demand)
+
+    mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
+    mock_thumb_service.reconcile_demand.assert_called_once()
 
 
 @pytest.mark.parametrize(("speed", "phase"), [(1.0, "slow"), (4.0, "medium")])
@@ -331,7 +356,7 @@ def test_scrolling_phase_immediately_requests_visible_full(
     phase,
 ):
     dto = _make_dto(abs_path=Path("/library/photo.jpg"))
-    mock_store.cached_rows.side_effect = [[(100, dto)], [(100, dto)]]
+    mock_store.cached_rows.return_value = [(100, dto)]
     demand = build_viewport_demand(
         generation=7,
         row_count=10_000,
@@ -357,10 +382,7 @@ def test_settled_viewport_requests_visible_and_hot_full(
     mock_thumb_service,
 ):
     dto = _make_dto(abs_path=Path("/library/photo.jpg"))
-    mock_store.cached_rows.side_effect = [
-        [(100, dto)],
-        [(100, dto)],
-    ]
+    mock_store.cached_rows.return_value = [(100, dto)]
     demand = build_viewport_demand(
         generation=8,
         row_count=10_000,
@@ -376,13 +398,105 @@ def test_settled_viewport_requests_visible_and_hot_full(
     mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
     mock_thumb_service.reconcile_demand.assert_called_once_with(
         visible_paths=[Path("/library/photo.jpg")],
-        hot_paths=[Path("/library/photo.jpg")],
+        ahead_paths=[Path("/library/photo.jpg")],
+        behind_paths=[Path("/library/photo.jpg")],
         size=adapter._thumb_size,
         generation=8,
     )
     assert demand.phase == "settled"
     assert demand.hot_first < demand.visible_first
     assert demand.hot_last > demand.visible_last
+
+
+def test_slow_scroll_holds_micro_until_settled(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    micro = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    full = QPixmap(8, 8)
+    path = Path("/library/photo.jpg")
+    dto = _make_dto(abs_path=path, micro_thumbnail=micro)
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = dto
+    mock_store.cached_rows.return_value = [(0, dto)]
+    mock_store.cached_row_for_path.return_value = 0
+    mock_thumb_service.peek_full_thumbnail.return_value = full
+    slow = build_viewport_demand(
+        generation=1,
+        row_count=1,
+        visible_first=0,
+        visible_last=0,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+
+    adapter.update_viewport(slow)
+    adapter._on_thumbnail_ready(path)
+    slow_snapshot = adapter.data(adapter.index(0, 0), Roles.TILE_SNAPSHOT)
+
+    assert path in adapter._slow_scroll_held_paths
+    assert slow_snapshot.loading_state == "micro"
+    assert adapter._pending_thumbnail_rows == set()
+
+    settled = build_viewport_demand(
+        generation=2,
+        row_count=1,
+        visible_first=0,
+        visible_last=0,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter.update_viewport(settled)
+    settled_snapshot = adapter.data(adapter.index(0, 0), Roles.TILE_SNAPSHOT)
+
+    assert path not in adapter._slow_scroll_held_paths
+    assert settled_snapshot.loading_state == "full"
+
+
+def test_medium_scroll_releases_slow_scroll_hold_immediately(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    micro = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    full = QPixmap(8, 8)
+    path = Path("/library/photo.jpg")
+    dto = _make_dto(abs_path=path, micro_thumbnail=micro)
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = dto
+    mock_store.cached_rows.return_value = [(0, dto)]
+    mock_store.cached_row_for_path.return_value = 0
+    mock_thumb_service.peek_full_thumbnail.return_value = full
+
+    adapter.update_viewport(
+        build_viewport_demand(
+            generation=1,
+            row_count=1,
+            visible_first=0,
+            visible_last=0,
+            direction=1,
+            screens_per_second=1.0,
+            actively_scrolling=True,
+        )
+    )
+    adapter.update_viewport(
+        build_viewport_demand(
+            generation=2,
+            row_count=1,
+            visible_first=0,
+            visible_last=0,
+            direction=1,
+            screens_per_second=4.0,
+            actively_scrolling=True,
+        )
+    )
+
+    snapshot = adapter.data(adapter.index(0, 0), Roles.TILE_SNAPSHOT)
+    assert path not in adapter._slow_scroll_held_paths
+    assert snapshot.loading_state == "full"
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

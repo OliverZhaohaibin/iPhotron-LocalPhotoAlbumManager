@@ -61,6 +61,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._pending_prioritize_range: tuple[int, int] | None = None
         self._viewport_generation = 0
         self._viewport_demand: GalleryViewportDemand | None = None
+        self._slow_scroll_held_paths: set[Path] = set()
+        self._visible_thumbnail_paths: set[Path] = set()
+        self._last_viewport_phase: str | None = None
         self._pending_thumbnail_rows: set[int] = set()
         self._window_loader = GalleryWindowLoader(self)
         self._window_loader.resultReady.connect(self._on_window_result)
@@ -149,7 +152,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         if role_int == Qt.ItemDataRole.DisplayRole:
             return asset.rel_path.name
         if role_int == Roles.TILE_SNAPSHOT:
-            full = self._thumbnails.peek_full_thumbnail(asset.abs_path, self._thumb_size)
+            full = (
+                None
+                if asset.abs_path in self._slow_scroll_held_paths
+                else self._thumbnails.peek_full_thumbnail(asset.abs_path, self._thumb_size)
+            )
             micro = asset.micro_thumbnail if isinstance(asset.micro_thumbnail, QImage) else None
             loading_state = (
                 "full"
@@ -275,6 +282,11 @@ class GalleryListModelAdapter(QAbstractListModel):
 
         if not isinstance(state, GalleryViewportDemand):
             return
+        if (
+            self._viewport_demand is not None
+            and self._viewport_demand.generation == state.generation
+        ):
+            return
         self._viewport_generation = state.generation
         self._viewport_demand = state
         self._store.reconcile_viewport_demand(state)
@@ -345,6 +357,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_selection_signature = None
         self._last_window_identity_signature = None
         self._duration_cache.clear()
+        self._slow_scroll_held_paths.clear()
+        self._visible_thumbnail_paths.clear()
+        self._last_viewport_phase = None
         self._store.rebind_asset_query_service(asset_query_service, library_root)
         self._bind_backfill_completion_signal(asset_query_service)
 
@@ -600,6 +615,8 @@ class GalleryListModelAdapter(QAbstractListModel):
             self.dataChanged.emit(top, bottom, [])
 
     def _on_thumbnail_ready(self, path: Path) -> None:
+        if path in self._slow_scroll_held_paths:
+            return
         row = self._store.cached_row_for_path(path)
         if row is None:
             return
@@ -638,7 +655,22 @@ class GalleryListModelAdapter(QAbstractListModel):
         if demand is None:
             return
         visible_rows = self._store.cached_rows(*demand.visible_range)
-        hot_rows = self._store.cached_rows(*demand.hot_range)
+        ahead_rows = self._cached_rows_for_optional_range(demand.ahead_full_range)
+        behind_rows = self._cached_rows_for_optional_range(demand.behind_full_range)
+        if demand.direction < 0:
+            visible_rows.reverse()
+        previous_visible_paths = set(self._visible_thumbnail_paths)
+        self._reconcile_slow_scroll_holds(demand, visible_rows)
+        entering_paths = [
+            dto.abs_path
+            for _row, dto in visible_rows
+            if dto.abs_path not in previous_visible_paths
+        ]
+        visible_paths = entering_paths + [
+            dto.abs_path
+            for _row, dto in visible_rows
+            if dto.abs_path in previous_visible_paths
+        ]
         if perf_logging_enabled():
             full_count = 0
             micro_count = 0
@@ -658,11 +690,59 @@ class GalleryListModelAdapter(QAbstractListModel):
                 placeholder=max(0, visible_count - full_count - micro_count),
             )
         self._thumbnails.reconcile_demand(
-            visible_paths=[dto.abs_path for _row, dto in visible_rows],
-            hot_paths=[dto.abs_path for _row, dto in hot_rows],
+            visible_paths=visible_paths,
+            ahead_paths=[dto.abs_path for _row, dto in ahead_rows],
+            behind_paths=[dto.abs_path for _row, dto in behind_rows],
             size=self._thumb_size,
             generation=demand.generation,
         )
+
+    def _cached_rows_for_optional_range(
+        self,
+        row_range: tuple[int, int] | None,
+    ) -> list[tuple[int, AssetDTO]]:
+        if row_range is None:
+            return []
+        rows = self._store.cached_rows(*row_range)
+        demand = self._viewport_demand
+        if demand is not None and demand.direction < 0:
+            rows.reverse()
+        return rows
+
+    def _reconcile_slow_scroll_holds(
+        self,
+        demand: GalleryViewportDemand,
+        visible_rows: list[tuple[int, AssetDTO]],
+    ) -> None:
+        visible_paths = {dto.abs_path for _row, dto in visible_rows}
+        previous_holds = set(self._slow_scroll_held_paths)
+        self._slow_scroll_held_paths.intersection_update(visible_paths)
+
+        if demand.phase == "slow":
+            entering_paths = (
+                visible_paths
+                if self._last_viewport_phase != "slow"
+                else visible_paths - self._visible_thumbnail_paths
+            )
+            for _row, dto in visible_rows:
+                if dto.abs_path not in entering_paths:
+                    continue
+                if self._thumbnails.has_full_thumbnail(dto.abs_path, self._thumb_size):
+                    continue
+                if isinstance(dto.micro_thumbnail, QImage) and not dto.micro_thumbnail.isNull():
+                    self._slow_scroll_held_paths.add(dto.abs_path)
+        else:
+            self._slow_scroll_held_paths.clear()
+
+        self._visible_thumbnail_paths = visible_paths
+        self._last_viewport_phase = demand.phase
+        released = previous_holds - self._slow_scroll_held_paths
+        for path in released:
+            row = self._store.cached_row_for_path(path)
+            if row is not None:
+                self._pending_thumbnail_rows.add(row)
+        if released and not self._thumbnail_update_timer.isActive():
+            self._thumbnail_update_timer.start()
 
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)

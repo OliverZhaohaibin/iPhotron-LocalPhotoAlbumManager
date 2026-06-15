@@ -362,6 +362,33 @@ def test_query_asset_window_hides_non_ready_thumbnail_rows(tmp_path: Path) -> No
     assert [row["id"] for row in window.rows] == ["ready"]
 
 
+def test_thumbnail_hint_window_returns_only_existing_l2_identity(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    repo = IndexStore(library_root)
+    repo.write_rows(
+        [
+            {
+                "rel": "ready.jpg",
+                "id": "ready",
+                "media_type": 0,
+                "thumbnail_state": "ready",
+                "micro_thumbnail": b"micro",
+                "thumb_cache_key": "thumb-ready",
+            }
+        ]
+    )
+    service = LibraryAssetQueryService(
+        library_root,
+        repository_factory=lambda _root: repo,
+    )
+
+    window = service.read_thumbnail_hint_window(library_root, AssetQuery(), 0, 10)
+
+    assert window.total_count == -1
+    assert window.rows == [{"rel": "ready.jpg", "thumb_cache_key": "thumb-ready"}]
+
+
 def test_recently_deleted_query_includes_non_ready_thumbnail_rows(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()

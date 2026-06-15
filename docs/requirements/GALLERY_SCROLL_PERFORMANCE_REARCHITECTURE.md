@@ -300,13 +300,39 @@ Gallery Window Loader (single worker)
   -> return WindowResult(generation, range, tiles)
   -> GUI applies only current/relevant results
 
+Thumbnail Hint Loader (single worker)
+  -> for slow/directional dwell only, query rel + thumb_cache_key without count or micro BLOB
+  -> publish nearest-screen predictive candidates before Gallery DTO windows finish
+  -> discard stale generation/query/direction results
+
 Thumbnail Workers
-  -> batch memory-miss requests
-  -> L2 file check/read/decode
-  -> return QImage results
-  -> GUI converts current visible/hot images to QPixmap
-  -> coalesce local dataChanged/update once per frame
+  -> visible foreground uses an isolated two-worker pool
+  -> predictive next-screen reads use normal Windows I/O priority and platform concurrency
+  -> far speculative reads use one low/background-priority lane
+  -> continuous burst / medium / fast immediately stop all non-visible work
+  -> open the existing 512px L2 once with QFile and decoder-scale via QImageReader
+  -> return 256/384/512 display-bucket QImage results without writing extra L2 files
+  -> GUI publishes visible, predictive, then far results under a strict time budget
 ```
+
+### 8.3 Windows/Linux predictive full-thumbnail pipeline
+
+- `GalleryScrollPhase` remains the velocity observation; `GalleryScrollIntent` controls
+  speculative eligibility. Traditional Windows wheel input uses cadence, so an isolated
+  notch is not treated as fast merely because it moves close to one viewport.
+- `directional_dwell` begins after 75ms without another discrete notch, preserves recent
+  direction for 600ms, and completes the next screen before spending work behind the
+  viewport. A burst at 75ms cadence or faster, trackpad fast input, and scrollbar fast
+  movement prohibit predictive reads and speculative QPixmap conversion.
+- Disk L2 remains one flat 512px JPEG per ready asset. L1 keys combine that stable L2
+  identity with a display bucket selected from 256/384/512 physical pixels using the
+  current tile size and DPR. No rescan or multi-size disk migration is required.
+- Predictive concurrency is deadline/backpressure driven: Windows starts at two lanes and
+  may use three; Linux uses at most two; macOS remains one. Visible queue wait above 12ms,
+  publisher pressure, or cancellation pressure pauses non-visible work.
+- A packed or sharded L2 layout is explicitly deferred. It is reconsidered only when a
+  Windows packaged profile still fails acceptance and file-open latency contributes more
+  than half of time-to-full P95 or open P95 exceeds 40ms.
 
 ### 8.2 轻量 `GalleryTileDTO`
 
@@ -796,7 +822,9 @@ full-thumbnail 调度的可选真实 Qt benchmark 位于
 Linux 慢盘、medium/fast 快速往返取消和高 DPI 分批发布，并验证：
 
 - slow 滚动预热后下一 viewport 至少 `99%` 已为 full；
+- Windows 离散滚轮 `150/200/250ms` cadence 进入 directional dwell，并在进入可见区前完成下一 viewport；
 - medium/fast 不启动 speculative 读取；
+- continuous burst 不启动 hint 查询、predictive/speculative 读取或 speculative QPixmap 转换；
 - 快速往返调度 P95 `≤2ms`，单次输入追平 `≤100ms`；
 - 高 DPI Qt event-loop tick P95 `≤24ms`。
 

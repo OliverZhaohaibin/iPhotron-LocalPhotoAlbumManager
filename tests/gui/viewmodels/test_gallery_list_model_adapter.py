@@ -13,6 +13,10 @@ from iPhoto.gui.gallery_demand import build_viewport_demand
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
+from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
+    GalleryThumbnailCandidate,
+    GalleryThumbnailHintResult,
+)
 from iPhoto.gui.viewmodels.gallery_tile import GalleryTileSnapshot
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
@@ -317,6 +321,8 @@ def test_fast_viewport_warms_micro_and_still_requests_visible_full(
         size=adapter._thumb_size,
         generation=7,
         phase="fast",
+        intent="continuous_burst",
+        prefetch_candidates=(),
     )
     assert demand.phase == "fast"
     assert demand.full_prefetch_range == demand.visible_range
@@ -386,6 +392,8 @@ def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
         size=adapter._thumb_size,
         generation=8,
         phase="settled",
+        intent="idle",
+        prefetch_candidates=(),
     )
     assert demand.phase == "settled"
     assert demand.full_prefetch_first < demand.visible_first
@@ -399,6 +407,71 @@ def test_rebind_asset_query_service_updates_store(adapter, mock_store):
     adapter.rebind_asset_query_service(query_service, root)
 
     mock_store.rebind_asset_query_service.assert_called_once_with(query_service, root)
+
+
+def test_stale_thumbnail_hint_result_is_discarded(adapter, mock_thumb_service):
+    adapter._viewport_demand = build_viewport_demand(
+        generation=9,
+        row_count=100,
+        visible_first=10,
+        visible_last=19,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+        intent="directional_dwell",
+        prefetch_direction=1,
+    )
+
+    adapter._on_thumbnail_hint_result(
+        GalleryThumbnailHintResult(
+            request_id=adapter._thumbnail_hint_request_id,
+            generation=8,
+            candidates=(
+                GalleryThumbnailCandidate(
+                    Path("/library/stale.jpg"),
+                    "stale-key",
+                    0,
+                    "predictive",
+                ),
+            ),
+            elapsed_ms=1.0,
+        )
+    )
+
+    mock_thumb_service.reconcile_demand.assert_not_called()
+
+
+def test_old_thumbnail_hint_request_id_is_discarded(adapter, mock_thumb_service):
+    adapter._viewport_demand = build_viewport_demand(
+        generation=9,
+        row_count=100,
+        visible_first=10,
+        visible_last=19,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+        intent="directional_dwell",
+        prefetch_direction=1,
+    )
+    adapter._thumbnail_hint_request_id = 2
+
+    adapter._on_thumbnail_hint_result(
+        GalleryThumbnailHintResult(
+            request_id=1,
+            generation=9,
+            candidates=(
+                GalleryThumbnailCandidate(
+                    Path("/old-library/stale.jpg"),
+                    "stale-key",
+                    0,
+                    "predictive",
+                ),
+            ),
+            elapsed_ms=1.0,
+        )
+    )
+
+    mock_thumb_service.reconcile_demand.assert_not_called()
 
 
 def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter, mock_store):

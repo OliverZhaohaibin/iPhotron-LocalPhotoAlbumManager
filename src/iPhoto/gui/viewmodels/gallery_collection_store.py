@@ -9,14 +9,12 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Protocol
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.domain.models.query import AssetQuery
-from iPhoto.domain.models.query import WindowResult
+from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.gallery_demand import (
     MICRO_QUERY_CHUNK,
     MICRO_WARM_LIMIT,
     GalleryViewportDemand,
 )
-from iPhoto.infrastructure.services.performance_events import emit_perf_event
 from iPhoto.gui.viewmodels.asset_dto_converter import (
     geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
 )
@@ -35,6 +33,7 @@ from iPhoto.gui.viewmodels.asset_dto_converter import (
 from iPhoto.gui.viewmodels.asset_paging import (
     should_validate_paths as _should_validate_paths_fn,
 )
+from iPhoto.gui.viewmodels.gallery_window_loader import GalleryWindowRequest, GalleryWindowResult
 from iPhoto.gui.viewmodels.path_cache import PathExistsCache
 from iPhoto.gui.viewmodels.pending_move_buffer import (
     _PendingMove,
@@ -46,7 +45,7 @@ from iPhoto.gui.viewmodels.pending_move_buffer import (
     should_include_pending as _should_include_pending_fn,
 )
 from iPhoto.gui.viewmodels.signal import Signal
-from iPhoto.gui.viewmodels.gallery_window_loader import GalleryWindowRequest, GalleryWindowResult
+from iPhoto.infrastructure.services.performance_events import emit_perf_event
 
 
 class GalleryAssetQuerySurface(Protocol):
@@ -72,6 +71,15 @@ class GalleryAssetQuerySurface(Protocol):
         limit: int,
     ) -> WindowResult:
         """Return a bounded scoped window for *query*."""
+
+    def read_thumbnail_hint_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return paths and existing full-thumbnail cache keys."""
 
     def find_row_by_path(self, query: AssetQuery, path: Path) -> Optional[int]:
         """Return a row index for *path* inside *query*."""

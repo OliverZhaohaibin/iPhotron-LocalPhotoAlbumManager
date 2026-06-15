@@ -104,6 +104,14 @@ class AssetRepositoryPort(Protocol):
     ) -> WindowResult:
         """Return a lightweight collection window for Gallery rendering."""
 
+    def read_thumbnail_hint_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return only paths and existing full-thumbnail cache keys."""
+
     def read_thumbnail_backfill_candidates(
         self,
         query: CollectionQuery,

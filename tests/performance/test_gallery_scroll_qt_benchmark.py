@@ -107,9 +107,10 @@ def _build_gallery_view(qapp, paths: list[Path], service: ThumbnailCacheService,
         service.reconcile_demand(
             visible_paths=visible,
             prefetch_paths=prefetch,
-            size=size,
+            size=QSize(state.display_bucket, state.display_bucket),
             generation=state.generation,
             phase=state.phase,
+            intent=state.intent,
         )
 
     view.viewportStateChanged.connect(reconcile)
@@ -197,6 +198,48 @@ def test_slow_scroll_preheats_full_before_visibility(
     assert statistics.fmean(ready_before_visible) >= 0.99
 
 
+def test_windows_discrete_wheel_directional_dwell_preheats_next_viewport(
+    qapp,
+    tmp_path: Path,
+) -> None:
+    policy = ThumbnailRuntimePolicy.detect(
+        platform="win32",
+        windows_probe=lambda: 16 * 1024**3,
+    )
+    cache_dir = tmp_path / "thumbs"
+    service = ThumbnailCacheService(cache_dir, runtime_policy=policy)
+    paths = [tmp_path / f"photo-{index:04d}.jpg" for index in range(240)]
+    _write_l2(cache_dir, paths, QSize(512, 512))
+    view, _model, _delegate = _build_gallery_view(
+        qapp,
+        paths,
+        service,
+        QSize(512, 512),
+    )
+    readiness: list[bool] = []
+
+    for _index in range(6):
+        view._scroll_controller._last_input_at = time.monotonic() - 0.2
+        _send_wheel(view, -120)
+        _process_for(qapp, 0.3)
+        state = view._scroll_controller.viewport_state(len(paths))
+        assert state is not None
+        display_size = QSize(state.display_bucket, state.display_bucket)
+        visible_count = state.visible_last - state.visible_first + 1
+        next_paths = paths[
+            state.visible_last + 1 : state.visible_last + 1 + visible_count
+        ]
+        if _index > 0:
+            readiness.extend(
+                service.has_full_thumbnail(path, display_size) for path in next_paths
+            )
+
+    view.close()
+    service.shutdown()
+    assert readiness
+    assert statistics.fmean(readiness) >= 0.99
+
+
 def test_fast_round_trip_does_not_start_speculative_or_block_event_loop(
     qapp,
     tmp_path: Path,
@@ -253,7 +296,7 @@ def test_high_dpi_publish_batches_stay_bounded(qapp, tmp_path: Path) -> None:
         publish_budget_ms=3.0,
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    size = QSize(1024, 1024)
+    size = QSize(512, 512)
     paths = [tmp_path / f"photo-{index:04d}.jpg" for index in range(20)]
     _write_l2(tmp_path / "thumbs", paths, size)
     service.reconcile_demand(

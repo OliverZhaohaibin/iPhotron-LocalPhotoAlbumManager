@@ -161,3 +161,41 @@ def test_rapid_back_and_forth_notches_keep_constant_distance(qapp: QApplication)
 
     assert {abs(current - previous) for previous, current in zip(values, values[1:])} == {300}
     assert bar.value() == 50_000
+
+
+def test_discrete_wheel_uses_cadence_instead_of_single_notch_distance(
+    qapp: QApplication,
+) -> None:
+    grid = _make_grid(qapp)
+    controller = grid._scroll_controller
+    controller._last_input_at = 1.0
+
+    with (
+        patch.object(QApplication, "wheelScrollLines", return_value=3),
+        patch(
+            "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+            return_value=1.2,
+        ),
+    ):
+        assert controller.handle_wheel(_WheelEvent(angle_y=-120))
+
+    assert controller._intent == "slow_continuous"
+    controller._publish_directional_dwell()
+    assert controller.viewport_state(500).intent == "directional_dwell"
+
+
+def test_rapid_discrete_wheel_enters_continuous_burst(qapp: QApplication) -> None:
+    grid = _make_grid(qapp)
+    controller = grid._scroll_controller
+    controller._last_input_at = 1.0
+
+    with (
+        patch.object(QApplication, "wheelScrollLines", return_value=3),
+        patch(
+            "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+            return_value=1.05,
+        ),
+    ):
+        assert controller.handle_wheel(_WheelEvent(angle_y=-120))
+
+    assert controller._intent == "continuous_burst"

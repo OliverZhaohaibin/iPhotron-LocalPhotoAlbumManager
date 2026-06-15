@@ -1046,6 +1046,50 @@ class AssetRepository:
             if should_close:
                 conn.close()
 
+    def read_thumbnail_hint_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a count-free projection used by predictive thumbnail reads."""
+
+        first = max(0, int(first))
+        limit = max(0, int(limit))
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            conn.row_factory = sqlite3.Row
+            select_clause = "SELECT rel, thumb_cache_key"
+            if first > _DEEP_OFFSET_LIMIT:
+                sql, params = self._build_deep_collection_window_query(
+                    conn,
+                    query,
+                    first,
+                    limit,
+                    select_clause=select_clause,
+                )
+                rows = [] if sql is None else [
+                    self._db_row_to_dict(row) for row in conn.execute(sql, params)
+                ]
+            else:
+                sql, params = QueryBuilder.build_collection_query(
+                    query,
+                    select_clause=select_clause,
+                    limit=limit,
+                    offset=first,
+                )
+                rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+            return WindowResult(
+                first=first,
+                rows=rows,
+                total_count=-1,
+                collection_revision=0,
+            )
+        finally:
+            if should_close:
+                conn.close()
+
     def _build_deep_collection_window_query(
         self,
         conn: sqlite3.Connection,

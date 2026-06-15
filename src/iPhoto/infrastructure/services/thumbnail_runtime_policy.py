@@ -85,6 +85,8 @@ class ThumbnailRuntimePolicy:
     prefetch_cancel_rate: float = 0.25
     prefetch_backoff_seconds: float = 2.0
     prefetch_miss_ttl_seconds: float = 2.0
+    visible_queue_wait_p95_ms: float = 12.0
+    far_speculative_workers: int = 1
 
     @classmethod
     def detect(

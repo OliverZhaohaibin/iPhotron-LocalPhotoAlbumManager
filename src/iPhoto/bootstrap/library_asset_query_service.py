@@ -316,6 +316,29 @@ class LibraryAssetQueryService:
                 )
         return self.read_query_asset_window(root, read_query, first, limit)
 
+    def read_thumbnail_hint_window(
+        self,
+        root: Path,
+        query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a count-free path/cache-key projection for Gallery prediction."""
+
+        if not self._can_use_collection_api(query):
+            return WindowResult(first=first, rows=[], total_count=-1, collection_revision=0)
+        reader = getattr(self._repository(), "read_thumbnail_hint_window", None)
+        if not callable(reader):
+            return WindowResult(first=first, rows=[], total_count=-1, collection_revision=0)
+        album_path = self.album_path_for(root)
+        window = reader(self._collection_query_for_asset_query(query), first, limit)
+        return WindowResult(
+            first=window.first,
+            rows=list(self._scoped_rows(window.rows, album_path)),
+            total_count=-1,
+            collection_revision=window.collection_revision,
+        )
+
     def count_collection(self, query: CollectionQuery) -> int:
         """Return the number of assets matching a SQL-first collection query."""
 

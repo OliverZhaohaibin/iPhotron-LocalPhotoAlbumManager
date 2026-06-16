@@ -25,7 +25,7 @@ def test_fast_demand_disables_full_prefetch_and_warms_2000_micro_items() -> None
     assert demand.warm_last - demand.visible_last > demand.visible_first - demand.warm_first
 
 
-def test_slow_demand_prefetches_two_viewports_on_both_sides() -> None:
+def test_slow_demand_prefetches_eight_screens_ahead_and_three_behind() -> None:
     medium = build_viewport_demand(
         generation=1,
         row_count=10_000,
@@ -48,7 +48,7 @@ def test_slow_demand_prefetches_two_viewports_on_both_sides() -> None:
     assert medium.phase == "medium"
     assert slow.phase == "slow"
     assert medium.full_prefetch_range == medium.visible_range
-    assert slow.full_prefetch_range == (960, 1059)
+    assert slow.full_prefetch_range == (940, 1179)
 
 
 def test_scrolling_full_prefetch_rows_favor_the_forward_direction_three_to_one() -> None:
@@ -62,7 +62,7 @@ def test_scrolling_full_prefetch_rows_favor_the_forward_direction_three_to_one()
         actively_scrolling=True,
     )
 
-    assert list(demand.iter_full_prefetch_rows()) == [
+    assert list(demand.iter_full_prefetch_rows())[:12] == [
         103,
         104,
         105,
@@ -71,10 +71,10 @@ def test_scrolling_full_prefetch_rows_favor_the_forward_direction_three_to_one()
         107,
         108,
         98,
+        109,
+        110,
+        111,
         97,
-        96,
-        95,
-        94,
     ]
 
 
@@ -89,7 +89,7 @@ def test_upward_full_prefetch_rows_favor_rows_before_the_viewport() -> None:
         actively_scrolling=True,
     )
 
-    assert list(demand.iter_full_prefetch_rows()) == [
+    assert list(demand.iter_full_prefetch_rows())[:12] == [
         99,
         98,
         97,
@@ -98,14 +98,14 @@ def test_upward_full_prefetch_rows_favor_rows_before_the_viewport() -> None:
         95,
         94,
         104,
+        93,
+        92,
+        91,
         105,
-        106,
-        107,
-        108,
     ]
 
 
-def test_settled_full_prefetch_rows_alternate_nearest_before_and_after() -> None:
+def test_idle_full_prefetch_rows_alternate_six_screens_before_and_after() -> None:
     demand = build_viewport_demand(
         generation=3,
         row_count=1_000,
@@ -116,7 +116,8 @@ def test_settled_full_prefetch_rows_alternate_nearest_before_and_after() -> None
         actively_scrolling=False,
     )
 
-    assert list(demand.iter_full_prefetch_rows()) == [
+    assert demand.full_prefetch_range == (82, 120)
+    assert list(demand.iter_full_prefetch_rows())[:12] == [
         99,
         103,
         98,
@@ -143,8 +144,8 @@ def test_full_prefetch_rows_are_bounded_at_collection_edges() -> None:
         actively_scrolling=False,
     )
 
-    assert demand.full_prefetch_range == (0, 5)
-    assert list(demand.iter_full_prefetch_rows()) == [2, 3, 4, 5]
+    assert demand.full_prefetch_range == (0, 7)
+    assert list(demand.iter_full_prefetch_rows()) == [2, 3, 4, 5, 6, 7]
 
 
 def test_settled_warm_range_is_centered_and_bounded() -> None:
@@ -177,7 +178,25 @@ def test_directional_dwell_finishes_next_screen_before_far_prefetch() -> None:
     )
 
     assert demand.phase == "settled"
+    assert demand.full_prefetch_range == (88, 132)
     assert list(demand.iter_full_prefetch_rows())[:3] == [103, 104, 105]
+
+
+def test_medium_slow_input_prefetches_one_forward_screen() -> None:
+    demand = build_viewport_demand(
+        generation=5,
+        row_count=1_000,
+        visible_first=100,
+        visible_last=102,
+        direction=1,
+        screens_per_second=4.0,
+        actively_scrolling=True,
+        predicted_input_interval_ms=100.0,
+    )
+
+    assert demand.phase == "medium"
+    assert demand.full_prefetch_range == (100, 105)
+    assert list(demand.iter_full_prefetch_rows()) == [103, 104, 105]
 
 
 def test_display_thumbnail_bucket_never_requires_new_disk_sizes() -> None:

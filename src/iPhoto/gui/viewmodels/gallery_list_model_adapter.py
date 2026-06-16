@@ -87,7 +87,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._prioritize_timer.timeout.connect(self._flush_pending_prioritize_rows)
         self._thumbnail_update_timer = QTimer(self)
         self._thumbnail_update_timer.setSingleShot(True)
-        self._thumbnail_update_timer.setInterval(0)
+        self._thumbnail_update_timer.setInterval(16)
         self._thumbnail_update_timer.timeout.connect(self._flush_thumbnail_updates)
         self._scan_batch_timer = QTimer(self)
         self._scan_batch_timer.setSingleShot(True)
@@ -659,13 +659,37 @@ class GalleryListModelAdapter(QAbstractListModel):
             return
         visible_rows = self._store.cached_rows(*demand.visible_range)
         prefetched_rows = dict(self._store.cached_rows(*demand.full_prefetch_range))
+        visible_count = demand.visible_last - demand.visible_first + 1
+        ordered_prefetch_rows = tuple(demand.iter_full_prefetch_rows())
+        predictive_rows = (
+            frozenset(ordered_prefetch_rows[:visible_count])
+            if demand.prefetch_direction
+            else frozenset()
+        )
+        cached_candidates = self._cached_thumbnail_candidates(
+            ordered_prefetch_rows,
+            prefetched_rows,
+            predictive_rows,
+        )
         cached_prefetch_paths = [
             prefetched_rows[row].abs_path
-            for row in demand.iter_full_prefetch_rows()
+            for row in ordered_prefetch_rows
             if row in prefetched_rows
         ]
-        hinted_paths = [candidate.path for candidate in self._thumbnail_hint_candidates]
-        prefetch_paths = list(dict.fromkeys((*hinted_paths, *cached_prefetch_paths)))
+        candidate_by_path = {
+            candidate.path: candidate
+            for candidate in (*cached_candidates, *self._thumbnail_hint_candidates)
+        }
+        ordered_candidate_paths = [
+            candidate.path
+            for candidate in sorted(
+                candidate_by_path.values(),
+                key=lambda candidate: candidate.rank,
+            )
+        ]
+        prefetch_paths = list(
+            dict.fromkeys((*ordered_candidate_paths, *cached_prefetch_paths))
+        )
         if perf_logging_enabled():
             full_count = 0
             micro_count = 0
@@ -674,7 +698,16 @@ class GalleryListModelAdapter(QAbstractListModel):
                     full_count += 1
                 elif isinstance(dto.micro_thumbnail, QImage) and not dto.micro_thumbnail.isNull():
                     micro_count += 1
-            visible_count = demand.visible_last - demand.visible_first + 1
+            next_screen_rows = ordered_prefetch_rows[:visible_count]
+            next_screen_resident = sum(
+                1
+                for row in next_screen_rows
+                if row in prefetched_rows
+                and self._thumbnails.has_full_thumbnail(
+                    prefetched_rows[row].abs_path,
+                    self._thumb_size,
+                )
+            )
             emit_perf_event(
                 "gallery_visible_layers",
                 generation=demand.generation,
@@ -684,6 +717,15 @@ class GalleryListModelAdapter(QAbstractListModel):
                 micro=micro_count,
                 placeholder=max(0, visible_count - full_count - micro_count),
             )
+            emit_perf_event(
+                "gallery_full_resident_before_visible",
+                generation=demand.generation,
+                next_screen_rows=len(next_screen_rows),
+                predictive_deadline_rows=len(next_screen_rows),
+                resident=next_screen_resident,
+                l2_key_source_cached=len(cached_candidates),
+                l2_key_source_hint=len(self._thumbnail_hint_candidates),
+            )
         self._thumbnails.reconcile_demand(
             visible_paths=[dto.abs_path for _row, dto in visible_rows],
             prefetch_paths=prefetch_paths,
@@ -691,15 +733,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             generation=demand.generation,
             phase=demand.phase,
             intent=demand.intent,
-            prefetch_candidates=tuple(
-                ThumbnailPrefetchCandidate(
-                    path=candidate.path,
-                    l2_cache_key=candidate.l2_cache_key,
-                    kind=candidate.kind,
-                    rank=candidate.rank,
-                )
-                for candidate in self._thumbnail_hint_candidates
-            ),
+            prefetch_candidates=tuple(candidate_by_path.values()),
         )
 
     def _request_thumbnail_hints(self, demand: GalleryViewportDemand) -> None:
@@ -748,6 +782,33 @@ class GalleryListModelAdapter(QAbstractListModel):
                 predictive_rows=predictive_rows,
             )
         )
+
+    def _cached_thumbnail_candidates(
+        self,
+        ordered_rows: tuple[int, ...],
+        prefetched_rows: dict[int, AssetDTO],
+        predictive_rows: frozenset[int],
+    ) -> tuple[ThumbnailPrefetchCandidate, ...]:
+        candidates: list[ThumbnailPrefetchCandidate] = []
+        for rank, row in enumerate(ordered_rows):
+            dto = prefetched_rows.get(row)
+            if dto is None:
+                continue
+            l2_key = dto.thumb_cache_key
+            if not isinstance(l2_key, str) or not l2_key.strip():
+                metadata_key = dto.metadata.get("thumb_cache_key") if dto.metadata else None
+                l2_key = metadata_key if isinstance(metadata_key, str) else None
+            if not isinstance(l2_key, str) or not l2_key.strip():
+                continue
+            candidates.append(
+                ThumbnailPrefetchCandidate(
+                    path=dto.abs_path,
+                    l2_cache_key=l2_key,
+                    kind="predictive" if row in predictive_rows else "far_speculative",
+                    rank=rank,
+                )
+            )
+        return tuple(candidates)
 
     @Slot(object)
     def _on_thumbnail_hint_result(self, result: GalleryThumbnailHintResult) -> None:

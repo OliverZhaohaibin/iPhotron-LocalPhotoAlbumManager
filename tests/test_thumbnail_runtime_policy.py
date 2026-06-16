@@ -6,18 +6,20 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
 )
 
 
-def test_windows_uses_global_memory_probe_and_three_prefetch_workers() -> None:
+def test_windows_uses_global_memory_probe_and_four_predictive_workers() -> None:
     policy = ThumbnailRuntimePolicy.detect(
         platform="win32",
         windows_probe=lambda: 16 * 1024**3,
     )
 
     assert policy.physical_memory_bytes == 16 * 1024**3
-    assert policy.memory_limit_bytes == 384 * 1024**2
-    assert policy.prefetch_max_workers == 3
+    assert policy.memory_limit_bytes == 1536 * 1024**2
+    assert policy.prefetch_max_workers == 4
+    assert policy.publish_max_items == 4
+    assert policy.publish_budget_ms == 5.0
 
 
-def test_linux_uses_sysconf_and_two_prefetch_workers() -> None:
+def test_linux_uses_sysconf_and_three_predictive_workers() -> None:
     values = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 262_144}
     policy = ThumbnailRuntimePolicy.detect(
         platform="linux",
@@ -25,8 +27,10 @@ def test_linux_uses_sysconf_and_two_prefetch_workers() -> None:
     )
 
     assert policy.physical_memory_bytes == 1024**3
-    assert policy.memory_limit_bytes == 128 * 1024**2
-    assert policy.prefetch_max_workers == 2
+    assert policy.memory_limit_bytes == 512 * 1024**2
+    assert policy.prefetch_max_workers == 3
+    assert policy.publish_max_items == 4
+    assert policy.publish_budget_ms == 5.0
 
 
 def test_macos_keeps_single_speculative_worker() -> None:

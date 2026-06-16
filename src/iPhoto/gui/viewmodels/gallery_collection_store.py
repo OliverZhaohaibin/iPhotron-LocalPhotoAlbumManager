@@ -505,6 +505,7 @@ class GalleryCollectionStore:
                 is_live=dto.is_live,
                 is_pano=dto.is_pano,
                 micro_thumbnail=dto.micro_thumbnail,
+                thumb_cache_key=dto.thumb_cache_key,
             )
             pending = _PendingMove(
                 dto=moved_dto,

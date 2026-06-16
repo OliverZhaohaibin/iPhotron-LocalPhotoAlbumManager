@@ -143,8 +143,8 @@ def _send_wheel(view: GalleryGridView, angle_y: int) -> None:
 @pytest.mark.parametrize(
     ("profile", "platform", "read_delay"),
     [
-        ("delayed-ntfs", "win32", 0.012),
-        ("linux-slow-disk", "linux", 0.020),
+        ("delayed-ntfs", "win32", 0.025),
+        ("linux-slow-disk", "linux", 0.035),
     ],
 )
 def test_slow_scroll_preheats_full_before_visibility(

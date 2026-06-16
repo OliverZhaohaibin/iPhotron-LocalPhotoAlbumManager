@@ -9,10 +9,12 @@ from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtGui import QImage
 
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.gallery_demand import build_viewport_demand
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
+from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
     GalleryThumbnailCandidate,
     GalleryThumbnailHintResult,
@@ -295,6 +297,22 @@ def test_tile_snapshot_miss_does_not_synchronously_load(adapter, mock_store):
     mock_store.ensure_row_loaded.assert_not_called()
 
 
+def test_scan_row_to_dto_preserves_thumb_cache_key() -> None:
+    dto = scan_row_to_dto(
+        Path("/library"),
+        "ready.jpg",
+        {
+            "id": "ready",
+            "rel": "ready.jpg",
+            "thumbnail_state": "ready",
+            "thumb_cache_key": "l2-ready",
+        },
+    )
+
+    assert dto is not None
+    assert dto.thumb_cache_key == "l2-ready"
+
+
 def test_fast_viewport_warms_micro_and_still_requests_visible_full(
     adapter,
     mock_store,
@@ -398,6 +416,107 @@ def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
     assert demand.phase == "settled"
     assert demand.full_prefetch_first < demand.visible_first
     assert demand.full_prefetch_last > demand.visible_last
+
+
+def test_cached_thumb_cache_key_becomes_prefetch_candidate(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    visible = _make_dto(abs_path=Path("/library/visible.jpg"))
+    prefetch = _make_dto(
+        abs_path=Path("/library/prefetch.jpg"),
+        thumb_cache_key="l2-prefetch",
+    )
+    mock_store.cached_rows.side_effect = [
+        [(100, visible)],
+        [(120, prefetch)],
+    ]
+    demand = build_viewport_demand(
+        generation=9,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+    adapter._viewport_demand = demand
+
+    adapter._reconcile_full_thumbnail_demand()
+
+    candidates = mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_candidates"]
+    assert len(candidates) == 1
+    assert candidates[0].path == Path("/library/prefetch.jpg")
+    assert candidates[0].l2_cache_key == "l2-prefetch"
+    assert candidates[0].kind == "predictive"
+
+
+def test_cached_and_hint_prefetch_paths_keep_viewport_order(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    visible = _make_dto(abs_path=Path("/library/visible.jpg"))
+    next_screen = _make_dto(
+        abs_path=Path("/library/next.jpg"),
+        thumb_cache_key="l2-next",
+    )
+    far_hint = GalleryThumbnailCandidate(
+        Path("/library/far.jpg"),
+        "l2-far",
+        5,
+        "far_speculative",
+    )
+    mock_store.cached_rows.side_effect = [
+        [(100, visible)],
+        [(120, next_screen)],
+    ]
+    demand = build_viewport_demand(
+        generation=10,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+    adapter._viewport_demand = demand
+    adapter._thumbnail_hint_candidates = (far_hint,)
+
+    adapter._reconcile_full_thumbnail_demand()
+
+    assert mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_paths"][:2] == [
+        Path("/library/next.jpg"),
+        Path("/library/far.jpg"),
+    ]
+
+
+def test_thumbnail_hint_request_uses_full_ordered_rows(adapter, mock_store):
+    query_service = MagicMock()
+    query_service.read_thumbnail_hint_window = MagicMock()
+    mock_store.current_query.return_value = AssetQuery()
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.library_root.return_value = Path("/library")
+    mock_store.asset_query_service = query_service
+    demand = build_viewport_demand(
+        generation=11,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+
+    with patch.object(adapter._thumbnail_hint_loader, "request") as request_hint:
+        adapter._request_thumbnail_hints(demand)
+
+    request = request_hint.call_args.args[0]
+    assert request.ordered_rows == tuple(demand.iter_full_prefetch_rows())
+    assert request.predictive_rows == frozenset(
+        tuple(demand.iter_full_prefetch_rows())[:20]
+    )
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

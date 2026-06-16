@@ -747,6 +747,29 @@ def test_visible_queue_wait_immediately_pauses_predictive_work(tmp_path: Path) -
     assert service._prefetch_backoff_until > time.monotonic()
 
 
+def test_light_visible_queue_keeps_one_predictive_lane(tmp_path: Path) -> None:
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
+        visible_queue_wait_p95_ms=12.0,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    service._visible_queue_wait_ms.extend([2.0, 4.0])
+    service._queued_tasks["visible"] = ThumbnailRequest(
+        tmp_path / "visible.jpg",
+        QSize(512, 512),
+        ThumbnailRequestKind.VISIBLE,
+        generation=1,
+    )
+    service._prefetch_queued["predictive"] = ThumbnailRequest(
+        tmp_path / "predictive.jpg",
+        QSize(512, 512),
+        ThumbnailRequestKind.PREDICTIVE,
+        generation=1,
+    )
+
+    assert service._prefetch_concurrency_target() == 1
+
+
 def test_direction_reversal_cancels_old_predictive_even_when_range_overlaps(
     tmp_path: Path,
 ) -> None:
@@ -964,6 +987,30 @@ def test_staging_publisher_honors_time_budget(tmp_path: Path, qapp) -> None:
 
     assert len(service._memory_cache) == 1
     assert len(service._publish_prefetch) == 2
+
+
+def test_slow_publisher_uses_four_item_batch_budget(tmp_path: Path, qapp) -> None:
+    policy = ThumbnailRuntimePolicy.detect(
+        platform="linux",
+        sysconf=lambda _name: 4096 * 2_097_152,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    service._current_generation = 1
+    service._current_phase = "slow"
+    service._current_intent = "slow_continuous"
+    size = QSize(8, 8)
+    paths = [tmp_path / f"{index}.jpg" for index in range(5)]
+    service._prefetch_key_order = [service._cache_key(path, size) for path in paths]
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    for path in paths:
+        service._stage_result(
+            ThumbnailLoadResult(path, size, image, 1, ThumbnailRequestKind.PREFETCH)
+        )
+
+    service._drain_publish_queue()
+
+    assert len(service._memory_cache) == 4
+    assert len(service._publish_prefetch) == 1
 
 
 def test_l2_reader_distinguishes_miss_read_and_decode_errors(tmp_path: Path) -> None:

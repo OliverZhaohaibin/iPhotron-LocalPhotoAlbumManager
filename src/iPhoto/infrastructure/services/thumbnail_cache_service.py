@@ -749,7 +749,6 @@ class ThumbnailCacheService(QObject):
             self._is_shutting_down
             or self._current_phase in ("medium", "fast")
             or self._current_intent == "continuous_burst"
-            or self._queued_tasks
             or (
                 len(self._publish_predictive) + len(self._publish_prefetch)
                 >= self._runtime_policy.staging_limit
@@ -793,6 +792,19 @@ class ThumbnailCacheService(QObject):
             request.kind is ThumbnailRequestKind.PREDICTIVE
             for request in self._prefetch_queued.values()
         )
+        if self._queued_tasks:
+            if predictive_queued or self._predictive_active_tasks:
+                publish_backlog = (
+                    len(self._publish_visible)
+                    + len(self._publish_predictive)
+                    + len(self._publish_prefetch)
+                )
+                if (
+                    queue_wait_p95 <= self._runtime_policy.visible_queue_wait_p95_ms
+                    and publish_backlog < self._effective_publish_max_items() * 2
+                ):
+                    return min(1, self._runtime_policy.prefetch_max_workers)
+            return 0
         if predictive_queued or self._predictive_active_tasks:
             initial = min(2, self._runtime_policy.prefetch_max_workers)
             return (
@@ -1058,9 +1070,11 @@ class ThumbnailCacheService(QObject):
         started = monotonic_ms()
         processed = 0
         converted = 0
+        publish_max_items = self._effective_publish_max_items()
+        publish_budget_ms = self._effective_publish_budget_ms()
         while self._publish_visible or self._publish_predictive or self._publish_prefetch:
             if (
-                processed >= self._runtime_policy.publish_max_items
+                processed >= publish_max_items
                 and not self._publish_visible
             ):
                 break
@@ -1102,6 +1116,12 @@ class ThumbnailCacheService(QObject):
                     display_bucket=result.size.width(),
                     elapsed_ms=round(convert_ms, 3),
                 )
+                emit_perf_event(
+                    "thumbnail_qimage_to_qpixmap",
+                    path=result.path,
+                    kind=result.kind.value,
+                    elapsed_ms=round(convert_ms, 3),
+                )
                 converted += 1
                 if visible:
                     emit_perf_event(
@@ -1129,7 +1149,7 @@ class ThumbnailCacheService(QObject):
                     phase=self._current_phase,
                 )
             processed += 1
-            if monotonic_ms() - started >= self._runtime_policy.publish_budget_ms:
+            if monotonic_ms() - started >= publish_budget_ms:
                 break
         emit_perf_event(
             "thumbnail_publish_batch",
@@ -1139,6 +1159,13 @@ class ThumbnailCacheService(QObject):
             visible_depth=len(self._publish_visible),
             predictive_depth=len(self._publish_predictive),
             prefetch_depth=len(self._publish_prefetch),
+            publish_backlog=(
+                len(self._publish_visible)
+                + len(self._publish_predictive)
+                + len(self._publish_prefetch)
+            ),
+            publish_budget_ms=publish_budget_ms,
+            publish_max_items=publish_max_items,
         )
         if self._publish_visible or self._publish_predictive or self._publish_prefetch:
             self._ensure_publish_timer()
@@ -1179,6 +1206,16 @@ class ThumbnailCacheService(QObject):
         self._publish_predictive.clear()
         self._publish_prefetch.clear()
         self._publish_keys.clear()
+
+    def _effective_publish_max_items(self) -> int:
+        if self._current_phase in ("settled", "slow") and self._current_intent != "continuous_burst":
+            return max(1, self._runtime_policy.publish_max_items)
+        return max(1, min(2, self._runtime_policy.publish_max_items))
+
+    def _effective_publish_budget_ms(self) -> float:
+        if self._current_phase in ("settled", "slow") and self._current_intent != "continuous_burst":
+            return max(0.0, float(self._runtime_policy.publish_budget_ms))
+        return max(0.0, min(3.0, float(self._runtime_policy.publish_budget_ms)))
 
     def _start_generation(
         self,
@@ -1534,6 +1571,14 @@ class ThumbnailCacheService(QObject):
         self._memory_cache.move_to_end(key)
         self._memory_bytes[key] = estimated_bytes
         self._memory_used_bytes += estimated_bytes
+        emit_perf_event(
+            "thumbnail_l1_capacity",
+            key=key,
+            estimated_pixmap_bytes=estimated_bytes,
+            memory_used_bytes=self._memory_used_bytes,
+            memory_limit_bytes=self._memory_limit_bytes,
+            capacity_tiles=max(1, self._memory_limit_bytes // max(1, estimated_bytes)),
+        )
         while self._memory_used_bytes > self._memory_limit_bytes and len(self._memory_cache) > 1:
             eviction_reason = "old_demand"
             evicted_key = next(

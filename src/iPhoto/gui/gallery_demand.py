@@ -19,6 +19,12 @@ MICRO_QUERY_CHUNK = 256
 MICRO_MIN_WARM_ITEMS = 300
 MICRO_SLOW_SCREENS = 6
 MICRO_MEDIUM_SCREENS = 24
+FULL_PREFETCH_SLOW_AHEAD_SCREENS = 8
+FULL_PREFETCH_SLOW_BEHIND_SCREENS = 3
+FULL_PREFETCH_DWELL_AHEAD_SCREENS = 10
+FULL_PREFETCH_DWELL_BEHIND_SCREENS = 4
+FULL_PREFETCH_IDLE_SCREENS = 6
+FULL_PREFETCH_MEDIUM_AHEAD_SCREENS = 1
 
 SLOW_SCROLL_SCREENS_PER_SECOND = 2.0
 FAST_SCROLL_SCREENS_PER_SECOND = 8.0
@@ -171,11 +177,16 @@ def build_viewport_demand(
         phase = "settled"
     visible_count = max(1, last - first + 1)
 
-    full_prefetch_screens = 2 if intent != "continuous_burst" and phase in {"settled", "slow"} else 0
+    before_screens, after_screens = _full_prefetch_screens(
+        phase=phase,
+        intent=intent,
+        direction=direction,
+        predicted_input_interval_ms=predicted_input_interval_ms,
+    )
     full_prefetch_first, full_prefetch_last = _bounded_range(
         row_count,
-        first - visible_count * full_prefetch_screens,
-        last + visible_count * full_prefetch_screens,
+        first - visible_count * before_screens,
+        last + visible_count * after_screens,
     )
 
     if phase == "fast":
@@ -230,6 +241,45 @@ def _bounded_range(row_count: int, first: int, last: int) -> tuple[int, int]:
     return bounded_first, bounded_last
 
 
+def _full_prefetch_screens(
+    *,
+    phase: GalleryScrollPhase,
+    intent: GalleryScrollIntent,
+    direction: int,
+    predicted_input_interval_ms: float | None,
+) -> tuple[int, int]:
+    """Return lookbehind/lookahead full-thumbnail screens for the current intent."""
+
+    medium_slow_input = (
+        phase == "medium"
+        and predicted_input_interval_ms is not None
+        and predicted_input_interval_ms > SCROLL_BURST_INTERVAL_MS
+    )
+    if phase == "fast" or (intent == "continuous_burst" and not medium_slow_input):
+        return 0, 0
+
+    if intent == "idle":
+        return FULL_PREFETCH_IDLE_SCREENS, FULL_PREFETCH_IDLE_SCREENS
+
+    if intent == "directional_dwell":
+        ahead = FULL_PREFETCH_DWELL_AHEAD_SCREENS
+        behind = FULL_PREFETCH_DWELL_BEHIND_SCREENS
+    elif phase == "slow":
+        ahead = FULL_PREFETCH_SLOW_AHEAD_SCREENS
+        behind = FULL_PREFETCH_SLOW_BEHIND_SCREENS
+    elif medium_slow_input:
+        ahead = FULL_PREFETCH_MEDIUM_AHEAD_SCREENS
+        behind = 0
+    else:
+        return 0, 0
+
+    if direction < 0:
+        return ahead, behind
+    if direction > 0:
+        return behind, ahead
+    return behind, ahead
+
+
 def _warm_window(
     *,
     row_count: int,
@@ -258,6 +308,12 @@ __all__ = [
     "DISPLAY_THUMBNAIL_BUCKETS",
     "MICRO_QUERY_CHUNK",
     "MICRO_WARM_LIMIT",
+    "FULL_PREFETCH_SLOW_AHEAD_SCREENS",
+    "FULL_PREFETCH_SLOW_BEHIND_SCREENS",
+    "FULL_PREFETCH_DWELL_AHEAD_SCREENS",
+    "FULL_PREFETCH_DWELL_BEHIND_SCREENS",
+    "FULL_PREFETCH_IDLE_SCREENS",
+    "FULL_PREFETCH_MEDIUM_AHEAD_SCREENS",
     "SCROLL_SETTLED_TIMEOUT_MS",
     "SCROLL_DIRECTIONAL_DWELL_MS",
     "SCROLL_DIRECTION_RETENTION_MS",

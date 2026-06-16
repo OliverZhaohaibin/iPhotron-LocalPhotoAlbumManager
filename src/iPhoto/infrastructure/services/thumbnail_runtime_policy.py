@@ -63,9 +63,15 @@ def resolve_physical_memory_bytes(
 def resolve_l1_memory_limit_bytes(
     physical_memory_bytes: int,
     memory_limit_mb: int | None = None,
+    *,
+    platform: str | None = None,
 ) -> int:
     if memory_limit_mb is not None:
         return max(16, int(memory_limit_mb)) * _MIB
+    platform_name = (platform or sys.platform).lower()
+    if platform_name.startswith(("win", "linux")):
+        proposed = int(max(0, physical_memory_bytes) * 0.125)
+        return max(512 * _MIB, min(1536 * _MIB, proposed))
     proposed = int(max(0, physical_memory_bytes) * 0.075)
     return max(128 * _MIB, min(384 * _MIB, proposed))
 
@@ -103,17 +109,29 @@ class ThumbnailRuntimePolicy:
             sysconf=sysconf,
             windows_probe=windows_probe,
         )
+        publish_max_items = 2
+        publish_budget_ms = 3.0
         if platform_name.startswith("win"):
-            prefetch_workers = 3
+            prefetch_workers = 4
+            publish_max_items = 4
+            publish_budget_ms = 5.0
         elif platform_name.startswith("linux"):
-            prefetch_workers = 2
+            prefetch_workers = 3
+            publish_max_items = 4
+            publish_budget_ms = 5.0
         else:
             prefetch_workers = 1
         return cls(
             platform=platform_name,
             physical_memory_bytes=physical,
-            memory_limit_bytes=resolve_l1_memory_limit_bytes(physical, memory_limit_mb),
+            memory_limit_bytes=resolve_l1_memory_limit_bytes(
+                physical,
+                memory_limit_mb,
+                platform=platform_name,
+            ),
             prefetch_max_workers=prefetch_workers,
+            publish_max_items=publish_max_items,
+            publish_budget_ms=publish_budget_ms,
             staging_limit=max(8, prefetch_workers * 4),
         )
 

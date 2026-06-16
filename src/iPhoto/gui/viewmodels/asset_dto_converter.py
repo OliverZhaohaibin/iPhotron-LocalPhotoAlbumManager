@@ -219,6 +219,11 @@ def to_dto(asset: Asset, library_root: Optional[Path]) -> AssetDTO:
         is_live=is_live,
         is_pano=is_pano,
         micro_thumbnail=micro_thumbnail_image,
+        thumb_cache_key=(
+            metadata.get("thumb_cache_key")
+            if isinstance(metadata.get("thumb_cache_key"), str)
+            else None
+        ),
     )
 
 
@@ -284,6 +289,7 @@ def geotagged_asset_to_dto(asset: object, library_root: Path) -> Optional[AssetD
         is_live=is_live,
         is_pano=False,
         micro_thumbnail=None,
+        thumb_cache_key=None,
     )
 
 
@@ -334,6 +340,7 @@ def scan_row_to_dto(
     is_favorite = bool(row.get("featured") or row.get("favorite") or row.get("is_favorite"))
     is_pano = bool(row.get("is_pano"))
     micro_thumbnail = _decode_micro_thumbnail(row.get("micro_thumbnail"))
+    thumb_cache_key = row.get("thumb_cache_key")
 
     return AssetDTO(
         id=str(row.get("id") or abs_path),
@@ -351,6 +358,7 @@ def scan_row_to_dto(
         is_live=is_live,
         is_pano=is_pano,
         micro_thumbnail=micro_thumbnail,
+        thumb_cache_key=thumb_cache_key if isinstance(thumb_cache_key, str) else None,
     )
 
 

@@ -226,6 +226,7 @@ class ThumbnailCacheService(QObject):
         )
         self._pinned_keys: Set[str] = set()
         self._current_l1_demand_keys: Set[str] | None = None
+        self._partial_l1_demand_keys: Set[str] | None = None
 
         self._pending_tasks: Set[str] = set()
         self._pending_generations: Dict[str, int] = {}
@@ -319,6 +320,7 @@ class ThumbnailCacheService(QObject):
         self._memory_used_bytes = 0
         self._pinned_keys.clear()
         self._current_l1_demand_keys = None
+        self._partial_l1_demand_keys = None
         self._pending_tasks.clear()
         self._pending_generations.clear()
         self._queued_tasks.clear()
@@ -435,6 +437,7 @@ class ThumbnailCacheService(QObject):
         phase: ThumbnailScrollPhase = "settled",
         intent: ThumbnailScrollIntent | None = None,
         prefetch_candidates: Iterable[ThumbnailPrefetchCandidate] = (),
+        l1_demand_complete: bool = True,
     ) -> None:
         """Atomically replace foreground and best-effort thumbnail demand."""
 
@@ -488,7 +491,11 @@ class ThumbnailCacheService(QObject):
         self._current_generation = max(self._current_generation, int(generation))
         self.pin_visible(visible, size)
         self._prefetch_key_order = [self._cache_key(path, size) for path in prefetch]
-        self._refresh_l1_for_demand(desired_visible_keys, desired_prefetch_keys)
+        self._refresh_l1_for_demand(
+            desired_visible_keys,
+            desired_prefetch_keys,
+            complete=l1_demand_complete,
+        )
         self._demote_stale_promotions(desired_visible_keys)
 
         drop_keys = set(self._queued_tasks) - desired_visible_keys
@@ -552,6 +559,7 @@ class ThumbnailCacheService(QObject):
                 prefetch_active=self._prefetch_active_tasks,
                 phase=phase,
                 intent=self._current_intent,
+                l1_demand_complete=l1_demand_complete,
             )
         self._drain_generation_queue()
 
@@ -1567,9 +1575,7 @@ class ThumbnailCacheService(QObject):
         return known_key or thumbnail_cache_key(path, (512, 512))
 
     def _add_to_memory(self, key: str, pixmap: QPixmap):
-        if self._current_l1_demand_keys is not None and key not in (
-            self._current_l1_demand_keys | self._pinned_keys
-        ):
+        if self._current_l1_demand_keys is not None and key not in self._l1_protected_keys(set()):
             self._memory_used_bytes = max(
                 0,
                 self._memory_used_bytes - self._memory_bytes.pop(key, 0),
@@ -1613,15 +1619,22 @@ class ThumbnailCacheService(QObject):
         self,
         desired_visible_keys: Set[str],
         desired_prefetch_keys: Set[str],
+        *,
+        complete: bool = True,
     ) -> None:
         desired_keys = desired_visible_keys | desired_prefetch_keys
-        self._current_l1_demand_keys = set(desired_keys) if desired_keys else None
+        if complete:
+            self._current_l1_demand_keys = set(desired_keys) if desired_keys else None
+            self._partial_l1_demand_keys = None
+        else:
+            self._partial_l1_demand_keys = set(desired_keys) if desired_keys else None
         if not desired_keys or self._memory_limit_bytes <= 0:
             return
         for key in (*desired_visible_keys, *self._prefetch_key_order):
             if key in self._memory_cache:
                 self._memory_cache.move_to_end(key)
-        self._evict_l1_keys_outside_demand(desired_keys)
+        if complete:
+            self._evict_l1_keys_outside_demand(desired_keys)
         threshold = max(
             1,
             int(
@@ -1640,7 +1653,7 @@ class ThumbnailCacheService(QObject):
         )
         self._evict_l1_until(
             min(threshold, target),
-            protected_keys=desired_keys,
+            protected_keys=self._l1_protected_keys(desired_keys),
             reason_prefix="demand_refresh",
         )
 
@@ -1692,6 +1705,8 @@ class ThumbnailCacheService(QObject):
         protected = set(keys) | self._pinned_keys
         if self._current_l1_demand_keys is not None:
             protected |= self._current_l1_demand_keys
+        if self._partial_l1_demand_keys is not None:
+            protected |= self._partial_l1_demand_keys
         return protected
 
     def _select_l1_eviction_candidate(

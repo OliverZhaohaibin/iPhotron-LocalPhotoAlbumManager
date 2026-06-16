@@ -347,6 +347,7 @@ def test_fast_viewport_warms_micro_and_still_requests_visible_full(
         phase="fast",
         intent="continuous_burst",
         prefetch_candidates=(),
+        l1_demand_complete=False,
     )
     assert demand.phase == "fast"
     assert demand.full_prefetch_range == demand.visible_range
@@ -418,6 +419,7 @@ def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
         phase="settled",
         intent="idle",
         prefetch_candidates=(),
+        l1_demand_complete=False,
     )
     assert demand.phase == "settled"
     assert demand.full_prefetch_first < demand.visible_first
@@ -456,6 +458,7 @@ def test_cached_thumb_cache_key_becomes_prefetch_candidate(
     assert candidates[0].path == Path("/library/prefetch.jpg")
     assert candidates[0].l2_cache_key == "l2-prefetch"
     assert candidates[0].kind == "predictive"
+    assert mock_thumb_service.reconcile_demand.call_args.kwargs["l1_demand_complete"] is False
 
 
 def test_cached_and_hint_prefetch_paths_keep_viewport_order(
@@ -497,6 +500,39 @@ def test_cached_and_hint_prefetch_paths_keep_viewport_order(
         Path("/library/next.jpg"),
         Path("/library/far.jpg"),
     ]
+
+
+def test_full_thumbnail_demand_is_complete_after_next_screen_coverage(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    visible_rows = [
+        (row, _make_dto(abs_path=Path(f"/library/visible-{row}.jpg")))
+        for row in range(100, 103)
+    ]
+    prefetch_rows = [
+        (row, _make_dto(abs_path=Path(f"/library/prefetch-{row}.jpg")))
+        for row in range(103, 106)
+    ]
+    mock_store.cached_rows.side_effect = [
+        visible_rows,
+        [*visible_rows, *prefetch_rows],
+    ]
+    demand = build_viewport_demand(
+        generation=11,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=102,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+    adapter._viewport_demand = demand
+
+    adapter._reconcile_full_thumbnail_demand()
+
+    assert mock_thumb_service.reconcile_demand.call_args.kwargs["l1_demand_complete"] is True
 
 
 def test_viewport_update_prunes_only_irrelevant_thumbnail_hints(

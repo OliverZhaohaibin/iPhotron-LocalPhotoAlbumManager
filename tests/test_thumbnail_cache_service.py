@@ -631,6 +631,7 @@ def test_windows_l1_refresh_replaces_old_pages_when_saturated(
             generation=1,
             phase="slow",
             intent="slow_continuous",
+            l1_demand_complete=True,
         )
 
     assert visible_key in service._memory_cache
@@ -679,7 +680,72 @@ def test_windows_l1_refresh_replaces_old_pages_before_saturation(
             generation=1,
             phase="slow",
             intent="slow_continuous",
+            l1_demand_complete=True,
         )
+
+    assert visible_key in service._memory_cache
+    assert near_key in service._memory_cache
+    assert all(key not in service._memory_cache for key in old_keys)
+
+
+def test_partial_l1_demand_preserves_preheated_next_page(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(8, 8)
+    visible = tmp_path / "visible.jpg"
+    next_paths = [tmp_path / f"next-{index}.jpg" for index in range(6)]
+    next_keys = [service._cache_key(path, size) for path in next_paths]
+    pixmap = QPixmap(8, 8)
+
+    for key in next_keys:
+        service._add_to_memory(key, pixmap)
+
+    with patch.object(service, "_start_generation"):
+        service.reconcile_demand(
+            visible_paths=[visible],
+            prefetch_paths=[],
+            size=size,
+            generation=1,
+            phase="slow",
+            intent="slow_continuous",
+            l1_demand_complete=False,
+        )
+
+    assert all(key in service._memory_cache for key in next_keys)
+
+
+def test_complete_l1_demand_prunes_preheated_old_viewpoint(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(8, 8)
+    visible = tmp_path / "visible.jpg"
+    near = tmp_path / "near.jpg"
+    old_paths = [tmp_path / f"old-{index}.jpg" for index in range(6)]
+    visible_key = service._cache_key(visible, size)
+    near_key = service._cache_key(near, size)
+    old_keys = [service._cache_key(path, size) for path in old_paths]
+    pixmap = QPixmap(8, 8)
+
+    for key in old_keys:
+        service._add_to_memory(key, pixmap)
+
+    with patch.object(service, "_start_generation"):
+        service.reconcile_demand(
+            visible_paths=[visible],
+            prefetch_paths=[near],
+            size=size,
+            generation=1,
+            phase="slow",
+            intent="slow_continuous",
+            l1_demand_complete=True,
+        )
+
+    service._add_to_memory(visible_key, pixmap)
+    service._add_to_memory(near_key, pixmap)
 
     assert visible_key in service._memory_cache
     assert near_key in service._memory_cache
@@ -705,6 +771,7 @@ def test_l1_rejects_stale_thumbnail_writes_outside_current_demand(
             generation=1,
             phase="slow",
             intent="slow_continuous",
+            l1_demand_complete=True,
         )
 
     service._add_to_memory(stale_key, QPixmap(8, 8))

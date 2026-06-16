@@ -696,6 +696,14 @@ class GalleryListModelAdapter(QAbstractListModel):
         prefetch_paths = list(
             dict.fromkeys((*ordered_candidate_paths, *cached_prefetch_paths))
         )
+        next_screen_target = min(visible_count, len(ordered_prefetch_rows))
+        l1_demand_complete = (
+            demand.intent != "continuous_burst"
+            and (
+                next_screen_target == 0
+                or len(prefetch_paths) >= next_screen_target
+            )
+        )
         if perf_logging_enabled():
             full_count = 0
             micro_count = 0
@@ -731,6 +739,7 @@ class GalleryListModelAdapter(QAbstractListModel):
                 resident=next_screen_resident,
                 l2_key_source_cached=len(cached_candidates),
                 l2_key_source_hint=len(hint_candidates),
+                l1_demand_complete=l1_demand_complete,
             )
         self._thumbnails.reconcile_demand(
             visible_paths=[dto.abs_path for _row, dto in visible_rows],
@@ -740,6 +749,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             phase=demand.phase,
             intent=demand.intent,
             prefetch_candidates=tuple(candidate_by_path.values()),
+            l1_demand_complete=l1_demand_complete,
         )
 
     def _request_thumbnail_hints(self, demand: GalleryViewportDemand) -> None:

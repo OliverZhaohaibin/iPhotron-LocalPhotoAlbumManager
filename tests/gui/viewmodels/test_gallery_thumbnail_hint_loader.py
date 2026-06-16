@@ -31,6 +31,7 @@ def test_hint_worker_returns_ordered_cache_candidates_without_dto_decode() -> No
     request = GalleryThumbnailHintRequest(
         request_id=3,
         generation=7,
+        collection_revision=11,
         root=Path("/library"),
         query=AssetQuery(),
         query_service=_QueryService(),
@@ -47,6 +48,7 @@ def test_hint_worker_returns_ordered_cache_candidates_without_dto_decode() -> No
 
     assert calls == [(Path("/library"), request.query, 99, 3)]
     assert results[0].request_id == 3
+    assert results[0].collection_revision == 11
     assert [candidate.path for candidate in results[0].candidates] == [
         Path("/library/after.jpg"),
         Path("/library/before.jpg"),

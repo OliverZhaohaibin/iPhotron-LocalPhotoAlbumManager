@@ -17,6 +17,7 @@ ThumbnailCandidateKind = Literal["predictive", "far_speculative"]
 
 @dataclass(frozen=True, slots=True)
 class GalleryThumbnailCandidate:
+    row: int
     path: Path
     l2_cache_key: str
     rank: int
@@ -27,6 +28,7 @@ class GalleryThumbnailCandidate:
 class GalleryThumbnailHintRequest:
     request_id: int
     generation: int
+    collection_revision: int
     root: Path
     query: AssetQuery
     query_service: Any
@@ -40,6 +42,11 @@ class GalleryThumbnailHintRequest:
 class GalleryThumbnailHintResult:
     request_id: int
     generation: int
+    collection_revision: int
+    root: Path
+    query: AssetQuery
+    first: int
+    limit: int
     candidates: tuple[GalleryThumbnailCandidate, ...]
     elapsed_ms: float
     error: str | None = None
@@ -79,6 +86,7 @@ class _HintWorker(QRunnable):
                     continue
                 absolute_row = request.first + offset
                 by_row[absolute_row] = GalleryThumbnailCandidate(
+                    row=absolute_row,
                     path=request.root / Path(rel),
                     l2_cache_key=cache_key,
                     rank=0,
@@ -90,6 +98,7 @@ class _HintWorker(QRunnable):
                 )
             candidates = tuple(
                 GalleryThumbnailCandidate(
+                    row=row,
                     path=by_row[row].path,
                     l2_cache_key=by_row[row].l2_cache_key,
                     rank=rank,
@@ -101,6 +110,11 @@ class _HintWorker(QRunnable):
             result = GalleryThumbnailHintResult(
                 request_id=request.request_id,
                 generation=request.generation,
+                collection_revision=request.collection_revision,
+                root=request.root,
+                query=request.query,
+                first=request.first,
+                limit=request.limit,
                 candidates=candidates,
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
             )
@@ -108,6 +122,11 @@ class _HintWorker(QRunnable):
             result = GalleryThumbnailHintResult(
                 request_id=request.request_id,
                 generation=request.generation,
+                collection_revision=request.collection_revision,
+                root=request.root,
+                query=request.query,
+                first=request.first,
+                limit=request.limit,
                 candidates=(),
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 error=f"{type(exc).__name__}: {exc}",

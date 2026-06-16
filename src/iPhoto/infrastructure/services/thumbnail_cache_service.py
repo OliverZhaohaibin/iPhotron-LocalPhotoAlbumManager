@@ -84,6 +84,7 @@ class ThumbnailPrefetchCandidate:
     l2_cache_key: str
     kind: Literal["predictive", "far_speculative"]
     rank: int = 0
+    row: int = -1
 
 
 @dataclass(frozen=True, slots=True)

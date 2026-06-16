@@ -77,7 +77,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._window_loader.requestsDropped.connect(self._store.discard_window_requests)
         self._thumbnail_hint_loader = GalleryThumbnailHintLoader(self)
         self._thumbnail_hint_loader.resultReady.connect(self._on_thumbnail_hint_result)
-        self._thumbnail_hint_candidates: tuple[GalleryThumbnailCandidate, ...] = ()
+        self._thumbnail_hint_candidates_by_row: dict[int, GalleryThumbnailCandidate] = {}
         self._thumbnail_hint_request_id = 0
         self._pending_scan_batch_count = 0
         self._backfill_completion_source: Any | None = None
@@ -292,7 +292,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._thumb_size = QSize(state.display_bucket, state.display_bucket)
         self._viewport_generation = state.generation
         self._viewport_demand = state
-        self._thumbnail_hint_candidates = ()
+        self._prune_thumbnail_hint_candidates(state)
         self._store.reconcile_viewport_demand(state)
         self._request_thumbnail_hints(state)
         self._reconcile_full_thumbnail_demand()
@@ -362,7 +362,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_selection_signature = None
         self._last_window_identity_signature = None
         self._duration_cache.clear()
-        self._thumbnail_hint_candidates = ()
+        self._thumbnail_hint_candidates_by_row.clear()
         self._thumbnail_hint_request_id += 1
         self._thumbnail_hint_loader.cancel_pending()
         self._store.rebind_asset_query_service(asset_query_service, library_root)
@@ -515,6 +515,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_snapshot = current_snapshot
         self._last_selection_signature = current_selection_signature
         self._last_window_identity_signature = current_window_identity
+        if old_snapshot is not None and old_snapshot[2] != current_snapshot[2]:
+            self._thumbnail_hint_candidates_by_row.clear()
         if (
             old_snapshot is not None
             and old_selection_signature == current_selection_signature
@@ -671,6 +673,10 @@ class GalleryListModelAdapter(QAbstractListModel):
             prefetched_rows,
             predictive_rows,
         )
+        hint_candidates = self._current_hint_candidates(
+            ordered_prefetch_rows,
+            predictive_rows,
+        )
         cached_prefetch_paths = [
             prefetched_rows[row].abs_path
             for row in ordered_prefetch_rows
@@ -678,7 +684,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         ]
         candidate_by_path = {
             candidate.path: candidate
-            for candidate in (*cached_candidates, *self._thumbnail_hint_candidates)
+            for candidate in (*cached_candidates, *hint_candidates)
         }
         ordered_candidate_paths = [
             candidate.path
@@ -724,7 +730,7 @@ class GalleryListModelAdapter(QAbstractListModel):
                 predictive_deadline_rows=len(next_screen_rows),
                 resident=next_screen_resident,
                 l2_key_source_cached=len(cached_candidates),
-                l2_key_source_hint=len(self._thumbnail_hint_candidates),
+                l2_key_source_hint=len(hint_candidates),
             )
         self._thumbnails.reconcile_demand(
             visible_paths=[dto.abs_path for _row, dto in visible_rows],
@@ -773,6 +779,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             GalleryThumbnailHintRequest(
                 request_id=request_id,
                 generation=demand.generation,
+                collection_revision=self._current_collection_revision(),
                 root=Path(root),
                 query=query,
                 query_service=query_service,
@@ -802,6 +809,7 @@ class GalleryListModelAdapter(QAbstractListModel):
                 continue
             candidates.append(
                 ThumbnailPrefetchCandidate(
+                    row=row,
                     path=dto.abs_path,
                     l2_cache_key=l2_key,
                     kind="predictive" if row in predictive_rows else "far_speculative",
@@ -810,27 +818,98 @@ class GalleryListModelAdapter(QAbstractListModel):
             )
         return tuple(candidates)
 
+    def _current_hint_candidates(
+        self,
+        ordered_rows: tuple[int, ...],
+        predictive_rows: frozenset[int],
+    ) -> tuple[GalleryThumbnailCandidate, ...]:
+        candidates: list[GalleryThumbnailCandidate] = []
+        for rank, row in enumerate(ordered_rows):
+            candidate = self._thumbnail_hint_candidates_by_row.get(row)
+            if candidate is None:
+                continue
+            candidates.append(
+                GalleryThumbnailCandidate(
+                    row=row,
+                    path=candidate.path,
+                    l2_cache_key=candidate.l2_cache_key,
+                    rank=rank,
+                    kind="predictive" if row in predictive_rows else "far_speculative",
+                )
+            )
+        return tuple(candidates)
+
+    def _prune_thumbnail_hint_candidates(self, demand: GalleryViewportDemand) -> None:
+        if not self._thumbnail_hint_candidates_by_row:
+            return
+        first, last = demand.full_prefetch_range
+        self._thumbnail_hint_candidates_by_row = {
+            row: candidate
+            for row, candidate in self._thumbnail_hint_candidates_by_row.items()
+            if first <= row <= last
+        }
+
     @Slot(object)
     def _on_thumbnail_hint_result(self, result: GalleryThumbnailHintResult) -> None:
         demand = self._viewport_demand
         if (
             demand is None
             or result.error is not None
-            or result.request_id != self._thumbnail_hint_request_id
-            or result.generation != demand.generation
             or demand.intent == "continuous_burst"
+            or not self._thumbnail_hint_result_matches_current_selection(result)
+            or not self._thumbnail_hint_result_matches_current_revision(result)
         ):
             return
-        self._thumbnail_hint_candidates = result.candidates
+        first, last = demand.full_prefetch_range
+        relevant = {
+            candidate.row: candidate
+            for candidate in result.candidates
+            if first <= candidate.row <= last
+        }
+        if not relevant:
+            return
+        self._thumbnail_hint_candidates_by_row.update(relevant)
         emit_perf_event(
             "gallery_next_screen_hint_coverage",
             generation=result.generation,
+            current_generation=demand.generation,
+            request_id=result.request_id,
+            current_request_id=self._thumbnail_hint_request_id,
             predictive=sum(
-                candidate.kind == "predictive" for candidate in result.candidates
+                candidate.kind == "predictive" for candidate in relevant.values()
             ),
-            total=len(result.candidates),
+            total=len(relevant),
         )
         self._reconcile_full_thumbnail_demand()
+
+    def _thumbnail_hint_result_matches_current_selection(
+        self,
+        result: GalleryThumbnailHintResult,
+    ) -> bool:
+        root = self._store.active_root() or self._store.library_root()
+        query = self._store.current_query()
+        if root is None:
+            return False
+        return Path(result.root) == Path(root) and result.query == query
+
+    def _thumbnail_hint_result_matches_current_revision(
+        self,
+        result: GalleryThumbnailHintResult,
+    ) -> bool:
+        current_revision = self._current_collection_revision()
+        result_revision = int(result.collection_revision)
+        return (
+            result_revision <= 0
+            or current_revision <= 0
+            or result_revision == current_revision
+        )
+
+    def _current_collection_revision(self) -> int:
+        try:
+            revision = self._store.snapshot_signature()[2]
+        except (IndexError, TypeError, AttributeError):
+            return 0
+        return revision if isinstance(revision, int) else 0
 
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)

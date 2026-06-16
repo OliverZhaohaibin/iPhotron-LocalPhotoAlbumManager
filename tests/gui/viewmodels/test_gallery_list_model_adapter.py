@@ -189,8 +189,14 @@ def test_rebind_asset_query_service_moves_backfill_completion_signal(
 
     assert adapter.handle_scan_batch not in old_service.thumbnail_backfill_completed.handlers
     assert adapter.handle_scan_batch in new_service.thumbnail_backfill_completed.handlers
-    assert adapter._handle_thumbnail_backfill_progress not in old_service.thumbnail_backfill_progress.handlers
-    assert adapter._handle_thumbnail_backfill_progress in new_service.thumbnail_backfill_progress.handlers
+    assert (
+        adapter._handle_thumbnail_backfill_progress
+        not in old_service.thumbnail_backfill_progress.handlers
+    )
+    assert (
+        adapter._handle_thumbnail_backfill_progress
+        in new_service.thumbnail_backfill_progress.handlers
+    )
     mock_store.rebind_asset_query_service.assert_called_once_with(
         new_service,
         Path("/library"),
@@ -463,6 +469,7 @@ def test_cached_and_hint_prefetch_paths_keep_viewport_order(
         thumb_cache_key="l2-next",
     )
     far_hint = GalleryThumbnailCandidate(
+        121,
         Path("/library/far.jpg"),
         "l2-far",
         5,
@@ -482,7 +489,7 @@ def test_cached_and_hint_prefetch_paths_keep_viewport_order(
         actively_scrolling=True,
     )
     adapter._viewport_demand = demand
-    adapter._thumbnail_hint_candidates = (far_hint,)
+    adapter._thumbnail_hint_candidates_by_row = {121: far_hint}
 
     adapter._reconcile_full_thumbnail_demand()
 
@@ -492,12 +499,93 @@ def test_cached_and_hint_prefetch_paths_keep_viewport_order(
     ]
 
 
+def test_viewport_update_prunes_only_irrelevant_thumbnail_hints(
+    adapter,
+    mock_store,
+):
+    mock_store.cached_rows.return_value = []
+    demand = build_viewport_demand(
+        generation=10,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+    ordered_rows = tuple(demand.iter_full_prefetch_rows())
+    retained_row = ordered_rows[0]
+    stale_row = max(ordered_rows) + 100
+    adapter._thumbnail_hint_candidates_by_row = {
+        retained_row: GalleryThumbnailCandidate(
+            retained_row,
+            Path("/library/retained.jpg"),
+            "retained-key",
+            99,
+            "far_speculative",
+        ),
+        stale_row: GalleryThumbnailCandidate(
+            stale_row,
+            Path("/library/stale.jpg"),
+            "stale-key",
+            0,
+            "predictive",
+        ),
+    }
+
+    adapter.update_viewport(demand)
+
+    assert set(adapter._thumbnail_hint_candidates_by_row) == {retained_row}
+
+
+def test_retained_thumbnail_hints_are_reranked_for_current_demand(adapter):
+    demand = build_viewport_demand(
+        generation=10,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=1.0,
+        actively_scrolling=True,
+    )
+    ordered_rows = tuple(demand.iter_full_prefetch_rows())
+    visible_count = demand.visible_last - demand.visible_first + 1
+    predictive_rows = frozenset(ordered_rows[:visible_count])
+    first_row = ordered_rows[0]
+    later_row = ordered_rows[-1]
+    adapter._thumbnail_hint_candidates_by_row = {
+        first_row: GalleryThumbnailCandidate(
+            first_row,
+            Path("/library/first.jpg"),
+            "first-key",
+            99,
+            "far_speculative",
+        ),
+        later_row: GalleryThumbnailCandidate(
+            later_row,
+            Path("/library/later.jpg"),
+            "later-key",
+            0,
+            "predictive",
+        ),
+    }
+
+    candidates = adapter._current_hint_candidates(ordered_rows, predictive_rows)
+
+    by_row = {candidate.row: candidate for candidate in candidates}
+    assert by_row[first_row].rank == 0
+    assert by_row[first_row].kind == "predictive"
+    assert by_row[later_row].rank == len(ordered_rows) - 1
+    assert by_row[later_row].kind == "far_speculative"
+
+
 def test_thumbnail_hint_request_uses_full_ordered_rows(adapter, mock_store):
     query_service = MagicMock()
     query_service.read_thumbnail_hint_window = MagicMock()
     mock_store.current_query.return_value = AssetQuery()
     mock_store.active_root.return_value = Path("/library")
     mock_store.library_root.return_value = Path("/library")
+    mock_store.snapshot_signature.return_value = (10_000, (0, 100), 5)
     mock_store.asset_query_service = query_service
     demand = build_viewport_demand(
         generation=11,
@@ -513,6 +601,7 @@ def test_thumbnail_hint_request_uses_full_ordered_rows(adapter, mock_store):
         adapter._request_thumbnail_hints(demand)
 
     request = request_hint.call_args.args[0]
+    assert request.collection_revision == 5
     assert request.ordered_rows == tuple(demand.iter_full_prefetch_rows())
     assert request.predictive_rows == frozenset(
         tuple(demand.iter_full_prefetch_rows())[:20]
@@ -528,7 +617,16 @@ def test_rebind_asset_query_service_updates_store(adapter, mock_store):
     mock_store.rebind_asset_query_service.assert_called_once_with(query_service, root)
 
 
-def test_stale_thumbnail_hint_result_is_discarded(adapter, mock_thumb_service):
+def test_old_generation_matching_thumbnail_hint_result_is_merged(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    query = AssetQuery()
+    mock_store.current_query.return_value = query
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.library_root.return_value = Path("/library")
+    mock_store.snapshot_signature.return_value = (100, (0, 99), 3)
     adapter._viewport_demand = build_viewport_demand(
         generation=9,
         row_count=100,
@@ -545,10 +643,64 @@ def test_stale_thumbnail_hint_result_is_discarded(adapter, mock_thumb_service):
         GalleryThumbnailHintResult(
             request_id=adapter._thumbnail_hint_request_id,
             generation=8,
+            collection_revision=3,
+            root=Path("/library"),
+            query=query,
+            first=0,
+            limit=100,
             candidates=(
                 GalleryThumbnailCandidate(
-                    Path("/library/stale.jpg"),
-                    "stale-key",
+                    20,
+                    Path("/library/ahead.jpg"),
+                    "ahead-key",
+                    0,
+                    "predictive",
+                ),
+            ),
+            elapsed_ms=1.0,
+        )
+    )
+
+    candidates = mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_candidates"]
+    assert any(candidate.path == Path("/library/ahead.jpg") for candidate in candidates)
+
+
+def test_thumbnail_hint_result_for_old_collection_revision_is_discarded(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    query = AssetQuery()
+    mock_store.current_query.return_value = query
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.library_root.return_value = Path("/library")
+    mock_store.snapshot_signature.return_value = (100, (0, 99), 4)
+    adapter._viewport_demand = build_viewport_demand(
+        generation=9,
+        row_count=100,
+        visible_first=10,
+        visible_last=19,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+        intent="directional_dwell",
+        prefetch_direction=1,
+    )
+
+    adapter._on_thumbnail_hint_result(
+        GalleryThumbnailHintResult(
+            request_id=adapter._thumbnail_hint_request_id,
+            generation=8,
+            collection_revision=3,
+            root=Path("/library"),
+            query=query,
+            first=0,
+            limit=100,
+            candidates=(
+                GalleryThumbnailCandidate(
+                    20,
+                    Path("/library/stale-row.jpg"),
+                    "stale-row-key",
                     0,
                     "predictive",
                 ),
@@ -560,7 +712,63 @@ def test_stale_thumbnail_hint_result_is_discarded(adapter, mock_thumb_service):
     mock_thumb_service.reconcile_demand.assert_not_called()
 
 
-def test_old_thumbnail_hint_request_id_is_discarded(adapter, mock_thumb_service):
+def test_thumbnail_hint_result_for_other_root_is_discarded(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    query = AssetQuery()
+    mock_store.current_query.return_value = query
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.library_root.return_value = Path("/library")
+    mock_store.snapshot_signature.return_value = (100, (0, 99), 3)
+    adapter._viewport_demand = build_viewport_demand(
+        generation=9,
+        row_count=100,
+        visible_first=10,
+        visible_last=19,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+        intent="directional_dwell",
+        prefetch_direction=1,
+    )
+
+    adapter._on_thumbnail_hint_result(
+        GalleryThumbnailHintResult(
+            request_id=adapter._thumbnail_hint_request_id,
+            generation=9,
+            collection_revision=3,
+            root=Path("/other-library"),
+            query=query,
+            first=0,
+            limit=100,
+            candidates=(
+                GalleryThumbnailCandidate(
+                    20,
+                    Path("/other-library/ahead.jpg"),
+                    "ahead-key",
+                    0,
+                    "predictive",
+                ),
+            ),
+            elapsed_ms=1.0,
+        )
+    )
+
+    mock_thumb_service.reconcile_demand.assert_not_called()
+
+
+def test_old_thumbnail_hint_request_id_with_matching_selection_is_merged(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    query = AssetQuery()
+    mock_store.current_query.return_value = query
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.library_root.return_value = Path("/library")
+    mock_store.snapshot_signature.return_value = (100, (0, 99), 3)
     adapter._viewport_demand = build_viewport_demand(
         generation=9,
         row_count=100,
@@ -578,10 +786,16 @@ def test_old_thumbnail_hint_request_id_is_discarded(adapter, mock_thumb_service)
         GalleryThumbnailHintResult(
             request_id=1,
             generation=9,
+            collection_revision=3,
+            root=Path("/library"),
+            query=query,
+            first=0,
+            limit=100,
             candidates=(
                 GalleryThumbnailCandidate(
-                    Path("/old-library/stale.jpg"),
-                    "stale-key",
+                    20,
+                    Path("/library/late.jpg"),
+                    "late-key",
                     0,
                     "predictive",
                 ),
@@ -590,7 +804,8 @@ def test_old_thumbnail_hint_request_id_is_discarded(adapter, mock_thumb_service)
         )
     )
 
-    mock_thumb_service.reconcile_demand.assert_not_called()
+    candidates = mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_candidates"]
+    assert any(candidate.path == Path("/library/late.jpg") for candidate in candidates)
 
 
 def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter, mock_store):
@@ -681,6 +896,34 @@ def test_source_change_same_selection_and_count_emits_data_changed_not_model_res
 
     assert reset_count == 1
     assert changed_ranges == [(0, 1)]
+
+
+def test_source_change_with_new_revision_clears_thumbnail_hints(adapter, mock_store):
+    assets = [
+        _make_dto(id="a", abs_path=Path("/library/a.jpg")),
+        _make_dto(id="b", abs_path=Path("/library/b.jpg")),
+    ]
+    mock_store.count.return_value = 2
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.current_query.return_value = "all"
+    mock_store.current_direct_assets.return_value = None
+    mock_store.asset_at.side_effect = lambda row: assets[row]
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 1)
+    adapter._thumbnail_hint_candidates_by_row = {
+        1: GalleryThumbnailCandidate(
+            1,
+            Path("/library/b.jpg"),
+            "b-key",
+            0,
+            "predictive",
+        )
+    }
+
+    adapter._on_source_changed()
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 2)
+    adapter._on_source_changed()
+
+    assert adapter._thumbnail_hint_candidates_by_row == {}
 
 
 def test_source_change_same_count_with_reordered_rows_resets_model(

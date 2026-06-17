@@ -42,6 +42,40 @@ def _windows_physical_memory_bytes() -> int:
     return int(status.ullTotalPhys)
 
 
+_LOW_MEMORY_RESOURCE_NOTIFICATION = 0
+_low_memory_notification_handle: int | None = None
+
+
+def windows_low_memory_resource_active() -> bool:
+    """Best-effort non-blocking Windows low-memory resource check."""
+
+    global _low_memory_notification_handle
+    if not sys.platform.lower().startswith("win"):
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        if _low_memory_notification_handle is None:
+            create_notification = kernel32.CreateMemoryResourceNotification
+            create_notification.argtypes = [ctypes.c_int]
+            create_notification.restype = ctypes.c_void_p
+            handle = create_notification(_LOW_MEMORY_RESOURCE_NOTIFICATION)
+            _low_memory_notification_handle = int(handle or 0)
+        if not _low_memory_notification_handle:
+            return False
+        query_notification = kernel32.QueryMemoryResourceNotification
+        query_notification.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+        query_notification.restype = ctypes.c_int
+        state = ctypes.c_int(0)
+        if not query_notification(
+            ctypes.c_void_p(_low_memory_notification_handle),
+            ctypes.byref(state),
+        ):
+            return False
+        return bool(state.value)
+    except (AttributeError, OSError, ctypes.ArgumentError, ValueError):
+        return False
+
+
 def resolve_physical_memory_bytes(
     *,
     platform: str | None = None,
@@ -101,6 +135,13 @@ class ThumbnailRuntimePolicy:
     recovery_predictive_workers: int = 2
     recovery_publish_max_items: int = 4
     recovery_publish_budget_ms: float = 5.0
+    recovery_seconds: float = 1.2
+    recovery_predictive_screens: int = 2
+    slow_predictive_screens: int = 2
+    predictive_staging_limit: int = 12
+    far_staging_limit: int = 8
+    windows_low_memory_target_ratio: float = 0.65
+    windows_low_memory_probe_interval_ms: int = 250
     l1_replacement_threshold_ratio: float = 0.95
     l1_replacement_target_ratio: float = 0.88
 
@@ -124,6 +165,9 @@ class ThumbnailRuntimePolicy:
         recovery_predictive_workers = 2
         recovery_publish_max_items = 4
         recovery_publish_budget_ms = 5.0
+        predictive_staging_limit = 12
+        far_staging_limit = 8
+        windows_low_memory_target_ratio = 0.65
         far_speculative_workers = 1
         l1_replacement_threshold_ratio = 0.95
         l1_replacement_target_ratio = 0.88
@@ -135,6 +179,9 @@ class ThumbnailRuntimePolicy:
             recovery_predictive_workers = 4
             recovery_publish_max_items = 8
             recovery_publish_budget_ms = 8.0
+            predictive_staging_limit = 32
+            far_staging_limit = 8
+            windows_low_memory_target_ratio = 0.60
             l1_replacement_threshold_ratio = 0.90
             l1_replacement_target_ratio = 0.72
         elif platform_name.startswith("linux"):
@@ -144,6 +191,8 @@ class ThumbnailRuntimePolicy:
             recovery_predictive_workers = 3
             recovery_publish_max_items = 6
             recovery_publish_budget_ms = 6.0
+            predictive_staging_limit = 18
+            far_staging_limit = 8
         else:
             prefetch_workers = 1
         return cls(
@@ -165,6 +214,9 @@ class ThumbnailRuntimePolicy:
             recovery_predictive_workers=recovery_predictive_workers,
             recovery_publish_max_items=recovery_publish_max_items,
             recovery_publish_budget_ms=recovery_publish_budget_ms,
+            predictive_staging_limit=predictive_staging_limit,
+            far_staging_limit=far_staging_limit,
+            windows_low_memory_target_ratio=windows_low_memory_target_ratio,
             l1_replacement_threshold_ratio=l1_replacement_threshold_ratio,
             l1_replacement_target_ratio=l1_replacement_target_ratio,
         )
@@ -241,4 +293,5 @@ __all__ = [
     "resolve_l1_memory_limit_bytes",
     "resolve_physical_memory_bytes",
     "speculative_thread_background_mode",
+    "windows_low_memory_resource_active",
 ]

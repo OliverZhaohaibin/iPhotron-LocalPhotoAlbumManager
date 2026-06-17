@@ -349,6 +349,7 @@ def test_fast_viewport_warms_micro_and_still_requests_visible_full(
         prefetch_candidates=(),
         l1_demand_complete=False,
         recovery=False,
+        predictive_deadline_count=20,
     )
     assert demand.phase == "fast"
     assert demand.full_prefetch_range == demand.visible_range
@@ -422,6 +423,7 @@ def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
         prefetch_candidates=(),
         l1_demand_complete=False,
         recovery=False,
+        predictive_deadline_count=20,
     )
     assert demand.phase == "settled"
     assert demand.full_prefetch_first < demand.visible_first
@@ -513,14 +515,6 @@ def test_full_thumbnail_demand_is_complete_after_next_screen_coverage(
         (row, _make_dto(abs_path=Path(f"/library/visible-{row}.jpg")))
         for row in range(100, 103)
     ]
-    prefetch_rows = [
-        (row, _make_dto(abs_path=Path(f"/library/prefetch-{row}.jpg")))
-        for row in range(103, 106)
-    ]
-    mock_store.cached_rows.side_effect = [
-        visible_rows,
-        [*visible_rows, *prefetch_rows],
-    ]
     demand = build_viewport_demand(
         generation=11,
         row_count=10_000,
@@ -530,6 +524,14 @@ def test_full_thumbnail_demand_is_complete_after_next_screen_coverage(
         screens_per_second=1.0,
         actively_scrolling=True,
     )
+    prefetch_rows = [
+        (row, _make_dto(abs_path=Path(f"/library/prefetch-{row}.jpg")))
+        for row in tuple(demand.iter_full_prefetch_rows())[:6]
+    ]
+    mock_store.cached_rows.side_effect = [
+        visible_rows,
+        [*visible_rows, *prefetch_rows],
+    ]
     adapter._viewport_demand = demand
 
     adapter._reconcile_full_thumbnail_demand()
@@ -642,8 +644,43 @@ def test_thumbnail_hint_request_uses_full_ordered_rows(adapter, mock_store):
     assert request.collection_revision == 5
     assert request.ordered_rows == tuple(demand.iter_full_prefetch_rows())
     assert request.predictive_rows == frozenset(
-        tuple(demand.iter_full_prefetch_rows())[:20]
+        tuple(demand.iter_full_prefetch_rows())[:40]
     )
+
+
+def test_recovery_thumbnail_hint_request_adds_urgent_near_window(adapter, mock_store):
+    query_service = MagicMock()
+    query_service.read_thumbnail_hint_window = MagicMock()
+    mock_store.current_query.return_value = AssetQuery()
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.library_root.return_value = Path("/library")
+    mock_store.snapshot_signature.return_value = (10_000, (0, 100), 5)
+    mock_store.asset_query_service = query_service
+    demand = build_viewport_demand(
+        generation=12,
+        row_count=10_000,
+        visible_first=100,
+        visible_last=119,
+        direction=1,
+        screens_per_second=9.0,
+        actively_scrolling=True,
+        intent="slow_continuous",
+        recovery=True,
+    )
+    ordered_rows = tuple(demand.iter_full_prefetch_rows())
+    urgent_rows = ordered_rows[:40]
+
+    with patch.object(adapter._thumbnail_hint_loader, "request") as request_hint:
+        adapter._request_thumbnail_hints(demand)
+
+    urgent_request = request_hint.call_args_list[0].args[0]
+    normal_request = request_hint.call_args_list[1].args[0]
+    assert urgent_request.urgent is True
+    assert urgent_request.ordered_rows == urgent_rows
+    assert urgent_request.first == min(urgent_rows)
+    assert urgent_request.limit == max(urgent_rows) - min(urgent_rows) + 1
+    assert normal_request.urgent is False
+    assert normal_request.ordered_rows == ordered_rows
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

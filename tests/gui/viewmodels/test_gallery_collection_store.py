@@ -538,6 +538,36 @@ def test_async_viewport_demand_schedules_visible_chunk_before_2000_item_warm_ran
     assert {request.priority for request in requests} >= {0, 2}
 
 
+def test_recovery_viewport_marks_visible_and_near_chunks_urgent() -> None:
+    service = _FakeQueryService([])
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store.set_window_request_handler(requests.append)
+    store.load_selection(Path("."), query=AssetQuery())
+    store._total_count = 10_000
+    requests.clear()
+    demand = build_viewport_demand(
+        generation=6,
+        row_count=10_000,
+        visible_first=5_000,
+        visible_last=5_039,
+        direction=1,
+        screens_per_second=9.0,
+        actively_scrolling=True,
+        intent="slow_continuous",
+        recovery=True,
+    )
+
+    store.reconcile_viewport_demand(demand)
+
+    assert requests
+    assert requests[0].urgent is True
+    assert requests[0].priority == 0
+    assert requests[0].view_first <= demand.visible_first <= requests[0].view_first + requests[0].limit
+    assert any(request.urgent and request.priority <= 1 for request in requests)
+    assert any(not request.urgent and request.priority == 2 for request in requests)
+
+
 def test_async_window_results_merge_into_sparse_cache() -> None:
     service = _FakeQueryService([])
     requests: list[GalleryWindowRequest] = []

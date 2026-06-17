@@ -612,6 +612,7 @@ class GalleryCollectionStore:
 
         chunks = []
         view_center = (demand.visible_first + demand.visible_last) / 2.0
+        visible_count = max(1, demand.visible_last - demand.visible_first + 1)
         for chunk_first in range(demand.warm_first, demand.warm_last + 1, MICRO_QUERY_CHUNK):
             chunk_last = min(demand.warm_last, chunk_first + MICRO_QUERY_CHUNK - 1)
             if all(row in self._row_cache for row in range(chunk_first, chunk_last + 1)):
@@ -640,14 +641,20 @@ class GalleryCollectionStore:
                 direction_tie = 0 if chunk_center <= view_center else 1
             else:
                 direction_tie = 0
-            chunks.append((priority, center_distance, direction_tie, chunk_first, chunk_last))
+            urgent = (
+                demand.recovery
+                and priority <= 1
+                and center_distance <= visible_count * 2
+            )
+            chunks.append((0 if urgent else 1, priority, center_distance, direction_tie, chunk_first, chunk_last, urgent))
 
-        for priority, _distance, _direction_tie, chunk_first, chunk_last in sorted(chunks):
+        for _urgent_rank, priority, _distance, _direction_tie, chunk_first, chunk_last, urgent in sorted(chunks):
             self._request_async_chunk(
                 chunk_first,
                 chunk_last,
                 demand_generation=demand.generation,
                 priority=priority,
+                urgent=urgent,
             )
         self._trim_row_cache()
         emit_perf_event(
@@ -783,6 +790,7 @@ class GalleryCollectionStore:
         demand_generation: int,
         priority: int,
         retain_when_stale: bool = False,
+        urgent: bool = False,
     ) -> None:
         if (
             self._window_request_handler is None
@@ -833,6 +841,7 @@ class GalleryCollectionStore:
                 demand_generation=int(demand_generation),
                 priority=int(priority),
                 retain_when_stale=retain_when_stale,
+                urgent=bool(urgent),
             )
         )
 

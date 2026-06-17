@@ -1533,6 +1533,101 @@ def test_prefetch_admission_respects_observed_pixmap_budget(
     assert admitted == prefetch[:1]
 
 
+def test_prefetch_admission_always_keeps_predictive_deadline(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(8, 8)
+    visible = [tmp_path / "visible.jpg"]
+    prefetch = [tmp_path / f"{index}.jpg" for index in range(4)]
+    service._memory_limit_bytes = 2 * 8 * 8 * 4
+    service._add_to_memory(service._cache_key(visible[0], size), QPixmap(8, 8))
+
+    admitted = service._admit_prefetch_paths(
+        visible,
+        prefetch,
+        size,
+        predictive_limit=3,
+    )
+
+    assert admitted == prefetch[:3]
+
+
+def test_far_staging_does_not_block_predictive_staging(tmp_path: Path) -> None:
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
+        predictive_staging_limit=2,
+        far_staging_limit=1,
+        staging_limit=2,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    far = tmp_path / "far.jpg"
+    predictive = tmp_path / "predictive.jpg"
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    service._stage_result(
+        ThumbnailLoadResult(far, size, image, 1, ThumbnailRequestKind.PREFETCH)
+    )
+
+    service._stage_result(
+        ThumbnailLoadResult(predictive, size, image, 1, ThumbnailRequestKind.PREDICTIVE)
+    )
+
+    assert len(service._publish_predictive) == 1
+    assert service._publish_predictive[0].path == predictive
+
+
+def test_windows_low_memory_pressure_clears_far_queue_and_staging(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    tile_bytes = 8 * 8 * 4
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
+        memory_limit_bytes=4 * tile_bytes,
+        l1_replacement_threshold_ratio=0.90,
+        windows_low_memory_target_ratio=0.60,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    far = tmp_path / "far.jpg"
+    predictive = tmp_path / "predictive.jpg"
+    far_key = service._cache_key(far, size)
+    predictive_key = service._cache_key(predictive, size)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    pixmap = QPixmap(8, 8)
+    for index in range(4):
+        service._add_to_memory(service._cache_key(tmp_path / f"old-{index}.jpg", size), pixmap)
+    service._prefetch_queued[far_key] = ThumbnailRequest(
+        far,
+        size,
+        ThumbnailRequestKind.PREFETCH,
+        generation=1,
+    )
+    service._prefetch_queued[predictive_key] = ThumbnailRequest(
+        predictive,
+        size,
+        ThumbnailRequestKind.PREDICTIVE,
+        generation=1,
+    )
+    service._prefetch_kinds[far_key] = ThumbnailRequestKind.PREFETCH
+    service._prefetch_kinds[predictive_key] = ThumbnailRequestKind.PREDICTIVE
+    service._prefetch_pending.update({far_key, predictive_key})
+    service._prefetch_queue.extend([far_key, predictive_key])
+    service._stage_result(ThumbnailLoadResult(far, size, image, 1, ThumbnailRequestKind.PREFETCH))
+
+    service._apply_low_memory_pressure_if_needed()
+
+    assert service._low_memory_pressure is True
+    assert far_key not in service._prefetch_queued
+    assert predictive_key in service._prefetch_queued
+    assert len(service._publish_prefetch) == 0
+    assert service._memory_used_bytes <= int(
+        policy.memory_limit_bytes * policy.windows_low_memory_target_ratio
+    )
+
+
 def test_visible_staging_backpressure_pauses_new_foreground_workers(tmp_path: Path) -> None:
     policy = replace(
         ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 4096),

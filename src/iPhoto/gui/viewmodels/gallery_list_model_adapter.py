@@ -663,7 +663,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         prefetched_rows = dict(self._store.cached_rows(*demand.full_prefetch_range))
         visible_count = demand.visible_last - demand.visible_first + 1
         ordered_prefetch_rows = tuple(demand.iter_full_prefetch_rows())
-        predictive_rows = frozenset(ordered_prefetch_rows[:visible_count])
+        predictive_deadline_count = self._predictive_deadline_count(demand)
+        predictive_rows = frozenset(ordered_prefetch_rows[:predictive_deadline_count])
         cached_candidates = self._cached_thumbnail_candidates(
             ordered_prefetch_rows,
             prefetched_rows,
@@ -692,7 +693,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         prefetch_paths = list(
             dict.fromkeys((*ordered_candidate_paths, *cached_prefetch_paths))
         )
-        next_screen_target = min(visible_count, len(ordered_prefetch_rows))
+        next_screen_target = min(predictive_deadline_count, len(ordered_prefetch_rows))
         l1_demand_complete = (
             demand.intent != "continuous_burst"
             and (
@@ -708,10 +709,10 @@ class GalleryListModelAdapter(QAbstractListModel):
                     full_count += 1
                 elif isinstance(dto.micro_thumbnail, QImage) and not dto.micro_thumbnail.isNull():
                     micro_count += 1
-            next_screen_rows = ordered_prefetch_rows[:visible_count]
+            predictive_deadline_rows = ordered_prefetch_rows[:predictive_deadline_count]
             next_screen_resident = sum(
                 1
-                for row in next_screen_rows
+                for row in predictive_deadline_rows
                 if row in prefetched_rows
                 and self._thumbnails.has_full_thumbnail(
                     prefetched_rows[row].abs_path,
@@ -730,8 +731,8 @@ class GalleryListModelAdapter(QAbstractListModel):
             emit_perf_event(
                 "gallery_full_resident_before_visible",
                 generation=demand.generation,
-                next_screen_rows=len(next_screen_rows),
-                predictive_deadline_rows=len(next_screen_rows),
+                next_screen_rows=min(visible_count, len(ordered_prefetch_rows)),
+                predictive_deadline_rows=len(predictive_deadline_rows),
                 resident=next_screen_resident,
                 l2_key_source_cached=len(cached_candidates),
                 l2_key_source_hint=len(hint_candidates),
@@ -747,6 +748,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             prefetch_candidates=tuple(candidate_by_path.values()),
             l1_demand_complete=l1_demand_complete,
             recovery=demand.recovery,
+            predictive_deadline_count=predictive_deadline_count,
         )
 
     def _request_thumbnail_hints(self, demand: GalleryViewportDemand) -> None:
@@ -765,8 +767,8 @@ class GalleryListModelAdapter(QAbstractListModel):
             or not ordered_rows
         ):
             return
-        visible_count = demand.visible_last - demand.visible_first + 1
-        predictive_rows = frozenset(ordered_rows[:visible_count])
+        predictive_deadline_count = self._predictive_deadline_count(demand)
+        predictive_rows = frozenset(ordered_rows[:predictive_deadline_count])
         emit_perf_event(
             "gallery_thumbnail_hint_requested",
             generation=demand.generation,
@@ -777,6 +779,27 @@ class GalleryListModelAdapter(QAbstractListModel):
         )
         self._thumbnail_hint_request_id += 1
         request_id = self._thumbnail_hint_request_id
+        urgent_rows = ordered_rows[:predictive_deadline_count]
+        if demand.recovery and urgent_rows:
+            urgent_first = min(urgent_rows)
+            urgent_last = max(urgent_rows)
+            self._thumbnail_hint_loader.request(
+                GalleryThumbnailHintRequest(
+                    request_id=request_id,
+                    generation=demand.generation,
+                    collection_revision=self._current_collection_revision(),
+                    root=Path(root),
+                    query=query,
+                    query_service=query_service,
+                    first=urgent_first,
+                    limit=urgent_last - urgent_first + 1,
+                    ordered_rows=urgent_rows,
+                    predictive_rows=predictive_rows,
+                    urgent=True,
+                )
+            )
+            self._thumbnail_hint_request_id += 1
+            request_id = self._thumbnail_hint_request_id
         self._thumbnail_hint_loader.request(
             GalleryThumbnailHintRequest(
                 request_id=request_id,
@@ -791,6 +814,14 @@ class GalleryListModelAdapter(QAbstractListModel):
                 predictive_rows=predictive_rows,
             )
         )
+
+    @staticmethod
+    def _predictive_deadline_count(demand: GalleryViewportDemand) -> int:
+        visible_count = demand.visible_last - demand.visible_first + 1
+        screens = 1
+        if demand.recovery or demand.phase == "slow" or demand.intent == "directional_dwell":
+            screens = 2
+        return max(0, visible_count * screens)
 
     def _cached_thumbnail_candidates(
         self,

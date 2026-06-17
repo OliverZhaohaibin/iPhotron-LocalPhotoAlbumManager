@@ -26,6 +26,12 @@ def test_windows_uses_global_memory_probe_and_aggressive_recovery_workers() -> N
     assert policy.recovery_predictive_workers == 4
     assert policy.recovery_publish_max_items == 8
     assert policy.recovery_publish_budget_ms == 8.0
+    assert policy.recovery_seconds == 1.2
+    assert policy.recovery_predictive_screens == 2
+    assert policy.slow_predictive_screens == 2
+    assert policy.predictive_staging_limit == 32
+    assert policy.far_staging_limit == 8
+    assert policy.windows_low_memory_target_ratio == 0.60
     assert policy.predictive_miss_ttl_seconds == 0.5
     assert policy.l1_replacement_threshold_ratio == 0.90
     assert policy.l1_replacement_target_ratio == 0.72

@@ -40,6 +40,7 @@ from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGe
 from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
     ThumbnailRuntimePolicy,
     speculative_thread_background_mode,
+    windows_low_memory_resource_active,
 )
 from iPhoto.io import sidecar
 from iPhoto.utils import image_loader
@@ -235,6 +236,7 @@ class ThumbnailCacheService(QObject):
         self._pinned_keys: Set[str] = set()
         self._current_l1_demand_keys: Set[str] | None = None
         self._partial_l1_demand_keys: Set[str] | None = None
+        self._current_predictive_keys: Set[str] = set()
 
         self._pending_tasks: Set[str] = set()
         self._pending_generations: Dict[str, int] = {}
@@ -263,9 +265,12 @@ class ThumbnailCacheService(QObject):
         )
         self._prefetch_metrics_lock = threading.Lock()
         self._prefetch_backoff_until = 0.0
+        self._far_prefetch_backoff_until = 0.0
         self._current_phase: ThumbnailScrollPhase = "settled"
         self._current_intent: ThumbnailScrollIntent = "idle"
         self._current_recovery = False
+        self._low_memory_pressure = False
+        self._last_low_memory_probe_ms = 0.0
         self._visible_queue_wait_ms: Deque[tuple[float, float]] = deque(maxlen=16)
         self._publish_visible: Deque[ThumbnailLoadResult] = deque()
         self._publish_predictive: Deque[ThumbnailLoadResult] = deque()
@@ -296,6 +301,11 @@ class ThumbnailCacheService(QObject):
             recovery_predictive_workers=self._runtime_policy.recovery_predictive_workers,
             recovery_publish_max_items=self._runtime_policy.recovery_publish_max_items,
             recovery_publish_budget_ms=self._runtime_policy.recovery_publish_budget_ms,
+            predictive_staging_limit=self._runtime_policy.predictive_staging_limit,
+            far_staging_limit=self._runtime_policy.far_staging_limit,
+            windows_low_memory_target_ratio=(
+                self._runtime_policy.windows_low_memory_target_ratio
+            ),
             l1_replacement_threshold_ratio=(
                 self._runtime_policy.l1_replacement_threshold_ratio
             ),
@@ -333,6 +343,7 @@ class ThumbnailCacheService(QObject):
         self._pinned_keys.clear()
         self._current_l1_demand_keys = None
         self._partial_l1_demand_keys = None
+        self._current_predictive_keys.clear()
         self._pending_tasks.clear()
         self._pending_generations.clear()
         self._queued_tasks.clear()
@@ -343,6 +354,8 @@ class ThumbnailCacheService(QObject):
         self._clear_publish_queue()
         self._failure_until.clear()
         self._current_recovery = False
+        self._low_memory_pressure = False
+        self._last_low_memory_probe_ms = 0.0
 
     def set_edit_service(self, edit_service: EditServicePort | None) -> None:
         """Bind the current edit surface used for thumbnail rendering."""
@@ -452,6 +465,7 @@ class ThumbnailCacheService(QObject):
         prefetch_candidates: Iterable[ThumbnailPrefetchCandidate] = (),
         l1_demand_complete: bool = True,
         recovery: bool = False,
+        predictive_deadline_count: int | None = None,
     ) -> None:
         """Atomically replace foreground and best-effort thumbnail demand."""
 
@@ -469,6 +483,8 @@ class ThumbnailCacheService(QObject):
             else "idle"
         )
         self._current_recovery = bool(recovery)
+        if self._current_recovery:
+            self._drop_far_staged_results("recovery")
         if previous_prefetch_blocked and not self._motion_blocks_prefetch(
             self._current_phase,
             self._current_intent,
@@ -491,10 +507,20 @@ class ThumbnailCacheService(QObject):
             self._current_recovery,
         ):
             prefetch = []
-        prefetch = self._admit_prefetch_paths(visible, prefetch, size)
+        predictive_limit = max(
+            len(visible),
+            int(predictive_deadline_count)
+            if predictive_deadline_count is not None
+            else len(visible),
+        )
+        prefetch = self._admit_prefetch_paths(
+            visible,
+            prefetch,
+            size,
+            predictive_limit=predictive_limit,
+        )
         desired_visible_keys = {self._cache_key(path, size) for path in visible}
         desired_prefetch_keys = {self._cache_key(path, size) for path in prefetch}
-        predictive_limit = len(visible)
         desired_predictive_keys = {
             self._cache_key(path, size)
             for rank, path in enumerate(prefetch)
@@ -504,6 +530,7 @@ class ThumbnailCacheService(QObject):
             )
             or (candidate_by_path.get(path) is None and rank < predictive_limit)
         }
+        self._current_predictive_keys = set(desired_predictive_keys)
         record_perf = perf_logging_enabled()
         pending_before = set(self._pending_tasks) if record_perf else set()
         resident = len(desired_visible_keys.intersection(self._memory_cache)) if record_perf else 0
@@ -521,9 +548,11 @@ class ThumbnailCacheService(QObject):
         self._current_generation = max(self._current_generation, int(generation))
         self.pin_visible(visible, size)
         self._prefetch_key_order = [self._cache_key(path, size) for path in prefetch]
+        self._apply_low_memory_pressure_if_needed()
         self._refresh_l1_for_demand(
             desired_visible_keys,
             desired_prefetch_keys,
+            desired_predictive_keys=desired_predictive_keys,
             complete=l1_demand_complete,
         )
         self._demote_stale_promotions(desired_visible_keys)
@@ -561,6 +590,11 @@ class ThumbnailCacheService(QObject):
                 or (candidate is None and rank < predictive_limit)
                 else ThumbnailRequestKind.PREFETCH
             )
+            if (
+                kind is ThumbnailRequestKind.PREFETCH
+                and (self._current_recovery or self._low_memory_pressure)
+            ):
+                continue
             self._queue_prefetch(
                 ThumbnailRequest(
                     path,
@@ -591,6 +625,7 @@ class ThumbnailCacheService(QObject):
                 intent=self._current_intent,
                 l1_demand_complete=l1_demand_complete,
                 recovery=self._current_recovery,
+                predictive_deadline_count=predictive_limit,
             )
         self._drain_generation_queue()
 
@@ -795,6 +830,14 @@ class ThumbnailCacheService(QObject):
             )
 
     def _prefetch_concurrency_target(self) -> int:
+        predictive_queued = sum(
+            request.kind is ThumbnailRequestKind.PREDICTIVE
+            for request in self._prefetch_queued.values()
+        )
+        far_queued = sum(
+            request.kind is ThumbnailRequestKind.PREFETCH
+            for request in self._prefetch_queued.values()
+        )
         if (
             self._is_shutting_down
             or self._motion_blocks_prefetch(
@@ -802,23 +845,32 @@ class ThumbnailCacheService(QObject):
                 self._current_intent,
                 self._current_recovery,
             )
-            or (
-                len(self._publish_predictive) + len(self._publish_prefetch)
-                >= self._runtime_policy.staging_limit
-            )
         ):
             return 0
-        if len(self._publish_predictive) + len(self._publish_prefetch) >= max(
-            self._runtime_policy.prefetch_max_workers * 2,
-            self._runtime_policy.publish_max_items * 3,
+        if (
+            predictive_queued
+            and len(self._publish_predictive) >= self._effective_predictive_staging_limit()
         ):
             self._prefetch_backoff_until = max(
                 self._prefetch_backoff_until,
                 time.monotonic() + self._runtime_policy.prefetch_backoff_seconds,
             )
             return 0
+        if (
+            far_queued
+            and not predictive_queued
+            and len(self._publish_prefetch) >= self._effective_far_staging_limit()
+        ):
+            self._far_prefetch_backoff_until = max(
+                self._far_prefetch_backoff_until,
+                time.monotonic() + self._runtime_policy.prefetch_backoff_seconds,
+            )
+            return 0
         queue_wait_p95 = self._p95(self._recent_visible_queue_wait_ms())
-        if queue_wait_p95 > self._runtime_policy.visible_queue_wait_p95_ms:
+        visible_wait_limit = self._runtime_policy.visible_queue_wait_p95_ms
+        if self._current_recovery:
+            visible_wait_limit *= 2.0
+        if queue_wait_p95 > visible_wait_limit:
             self._prefetch_backoff_until = max(
                 self._prefetch_backoff_until,
                 time.monotonic() + self._runtime_policy.prefetch_backoff_seconds,
@@ -841,19 +893,14 @@ class ThumbnailCacheService(QObject):
                 seconds=self._runtime_policy.prefetch_backoff_seconds,
             )
             return 1
-        predictive_queued = sum(
-            request.kind is ThumbnailRequestKind.PREDICTIVE
-            for request in self._prefetch_queued.values()
-        )
         if self._queued_tasks:
             if predictive_queued or self._predictive_active_tasks:
                 publish_backlog = (
                     len(self._publish_visible)
                     + len(self._publish_predictive)
-                    + len(self._publish_prefetch)
                 )
                 if (
-                    queue_wait_p95 <= self._runtime_policy.visible_queue_wait_p95_ms
+                    queue_wait_p95 <= visible_wait_limit
                     and publish_backlog < self._effective_publish_max_items() * 2
                 ):
                     if self._current_recovery:
@@ -885,6 +932,10 @@ class ThumbnailCacheService(QObject):
                 )
                 else initial
             )
+        if self._current_recovery or self._low_memory_pressure:
+            return 0
+        if time.monotonic() < self._far_prefetch_backoff_until:
+            return 0
         return self._runtime_policy.far_speculative_workers
 
     @staticmethod
@@ -900,13 +951,15 @@ class ThumbnailCacheService(QObject):
         intent: ThumbnailScrollIntent,
         recovery: bool = False,
     ) -> bool:
-        if recovery and intent != "continuous_burst":
+        if recovery:
             return False
         return phase in ("medium", "fast") or intent == "continuous_burst"
 
     def _recover_prefetch_after_motion_burst(self) -> None:
         self._prefetch_backoff_until = 0.0
+        self._far_prefetch_backoff_until = 0.0
         self._visible_queue_wait_ms.clear()
+        self._drop_far_staged_results("recovery")
 
     def _record_visible_queue_wait(self, queue_wait_ms: float) -> None:
         self._visible_queue_wait_ms.append(
@@ -1039,16 +1092,38 @@ class ThumbnailCacheService(QObject):
         visible: list[Path],
         prefetch: list[Path],
         size: QSize,
+        *,
+        predictive_limit: int | None = None,
     ) -> list[Path]:
         if not prefetch:
             return []
+        predictive_floor = max(0, int(predictive_limit or 0))
         observed_bytes = (
             sum(self._memory_bytes.values()) // len(self._memory_bytes)
             if self._memory_bytes
             else max(1, size.width() * size.height() * 4)
         )
         capacity = max(1, self._memory_limit_bytes // max(1, observed_bytes))
-        admitted = prefetch[: max(0, capacity - len(visible))]
+        admitted_count = max(predictive_floor, max(0, capacity - len(visible)))
+        if self._memory_used_bytes >= int(
+            self._memory_limit_bytes * self._runtime_policy.l1_replacement_threshold_ratio
+        ):
+            self._evict_l1_until(
+                int(
+                    self._memory_limit_bytes
+                    * self._runtime_policy.l1_replacement_target_ratio
+                ),
+                protected_keys=self._l1_strong_protected_keys(set()),
+                reason_prefix="admission",
+            )
+            observed_bytes = (
+                sum(self._memory_bytes.values()) // len(self._memory_bytes)
+                if self._memory_bytes
+                else observed_bytes
+            )
+            capacity = max(1, self._memory_limit_bytes // max(1, observed_bytes))
+            admitted_count = max(predictive_floor, max(0, capacity - len(visible)))
+        admitted = prefetch[: min(len(prefetch), admitted_count)]
         if len(admitted) != len(prefetch):
             emit_perf_event(
                 "thumbnail_prefetch_admission_limited",
@@ -1056,6 +1131,7 @@ class ThumbnailCacheService(QObject):
                 admitted=len(admitted),
                 estimated_pixmap_bytes=observed_bytes,
                 l1_memory_limit_bytes=self._memory_limit_bytes,
+                predictive_floor=predictive_floor,
             )
         return admitted
 
@@ -1128,6 +1204,38 @@ class ThumbnailCacheService(QObject):
                     )
                 )
             return
+        if result.kind is ThumbnailRequestKind.PREDICTIVE:
+            predictive_limit = self._effective_predictive_staging_limit()
+            if len(self._publish_predictive) >= predictive_limit:
+                if self._publish_prefetch:
+                    dropped = self._publish_prefetch.pop()
+                    self._publish_keys.discard(self._cache_key(dropped.path, dropped.size))
+                if len(self._publish_predictive) >= predictive_limit:
+                    emit_perf_event(
+                        "thumbnail_staging_dropped",
+                        path=result.path,
+                        reason="predictive_queue_full",
+                        depth=len(self._publish_predictive),
+                    )
+                    return
+        elif result.kind is ThumbnailRequestKind.PREFETCH:
+            far_limit = self._effective_far_staging_limit()
+            if self._current_recovery or self._low_memory_pressure:
+                emit_perf_event(
+                    "thumbnail_staging_dropped",
+                    path=result.path,
+                    reason="far_disabled_for_recovery",
+                    depth=len(self._publish_prefetch),
+                )
+                return
+            if len(self._publish_prefetch) >= far_limit:
+                emit_perf_event(
+                    "thumbnail_staging_dropped",
+                    path=result.path,
+                    reason="far_queue_full",
+                    depth=len(self._publish_prefetch),
+                )
+                return
         nonvisible_depth = len(self._publish_predictive) + len(self._publish_prefetch)
         if result.kind is not ThumbnailRequestKind.VISIBLE and (
             nonvisible_depth >= self._runtime_policy.staging_limit
@@ -1282,6 +1390,8 @@ class ThumbnailCacheService(QObject):
             for result in self._publish_prefetch
             if self._cache_key(result.path, result.size) in desired_prefetch_keys
             and self._prefetch_results_allowed()
+            and not self._current_recovery
+            and not self._low_memory_pressure
         )
         self._publish_predictive = deque(
             result
@@ -1294,12 +1404,81 @@ class ThumbnailCacheService(QObject):
             for result in (*self._publish_visible, *self._publish_predictive, *self._publish_prefetch)
         }
 
+    def _drop_far_staged_results(self, reason: str) -> None:
+        if not self._publish_prefetch:
+            return
+        dropped = len(self._publish_prefetch)
+        for result in self._publish_prefetch:
+            self._publish_keys.discard(self._cache_key(result.path, result.size))
+        self._publish_prefetch.clear()
+        emit_perf_event("thumbnail_far_staging_dropped", reason=reason, dropped=dropped)
+
+    def _apply_low_memory_pressure_if_needed(self) -> None:
+        low_memory = self._low_memory_pressure_active()
+        self._low_memory_pressure = low_memory
+        if not low_memory:
+            return
+        self._drop_far_staged_results("low_memory")
+        for key, request in list(self._prefetch_queued.items()):
+            if request.kind is not ThumbnailRequestKind.PREFETCH:
+                continue
+            self._prefetch_queued.pop(key, None)
+            self._prefetch_pending.discard(key)
+            self._prefetch_generations.pop(key, None)
+            self._prefetch_kinds.pop(key, None)
+        self._prefetch_queue = deque(
+            key
+            for key in self._prefetch_queue
+            if self._prefetch_kinds.get(key) is not ThumbnailRequestKind.PREFETCH
+        )
+        for key, token in list(self._prefetch_active_tokens.items()):
+            if self._prefetch_kinds.get(key) is ThumbnailRequestKind.PREFETCH:
+                token.cancel("low_memory")
+        self._evict_l1_until(
+            int(
+                self._memory_limit_bytes
+                * self._runtime_policy.windows_low_memory_target_ratio
+            ),
+            protected_keys=self._l1_strong_protected_keys(set()),
+            reason_prefix="low_memory",
+        )
+
+    def _low_memory_pressure_active(self) -> bool:
+        if self._memory_limit_bytes <= 0:
+            return False
+        threshold = int(
+            self._memory_limit_bytes * self._runtime_policy.l1_replacement_threshold_ratio
+        )
+        if self._runtime_policy.platform.lower().startswith("win"):
+            if self._memory_used_bytes >= threshold:
+                return True
+            now_ms = monotonic_ms()
+            if (
+                now_ms - self._last_low_memory_probe_ms
+                >= self._runtime_policy.windows_low_memory_probe_interval_ms
+            ):
+                self._last_low_memory_probe_ms = now_ms
+                if windows_low_memory_resource_active():
+                    return True
+        return False
+
     def _clear_publish_queue(self) -> None:
         self._publish_timer.stop()
         self._publish_visible.clear()
         self._publish_predictive.clear()
         self._publish_prefetch.clear()
         self._publish_keys.clear()
+
+    def _effective_predictive_staging_limit(self) -> int:
+        limit = max(1, int(self._runtime_policy.predictive_staging_limit))
+        if self._current_recovery:
+            return max(limit, 32)
+        return limit
+
+    def _effective_far_staging_limit(self) -> int:
+        if self._low_memory_pressure or self._current_recovery:
+            return 0
+        return max(0, int(self._runtime_policy.far_staging_limit))
 
     def _effective_publish_max_items(self) -> int:
         if self._current_recovery:
@@ -1670,7 +1849,7 @@ class ThumbnailCacheService(QObject):
         return known_key or thumbnail_cache_key(path, (512, 512))
 
     def _add_to_memory(self, key: str, pixmap: QPixmap):
-        if self._current_l1_demand_keys is not None and key not in self._l1_protected_keys(set()):
+        if self._current_l1_demand_keys is not None and key not in self._l1_write_allowed_keys():
             self._memory_used_bytes = max(
                 0,
                 self._memory_used_bytes - self._memory_bytes.pop(key, 0),
@@ -1706,7 +1885,7 @@ class ThumbnailCacheService(QObject):
         )
         self._evict_l1_until(
             self._memory_limit_bytes,
-            protected_keys=self._l1_protected_keys({key}),
+            protected_keys=self._l1_strong_protected_keys({key}),
             reason_prefix="memory_pressure",
         )
 
@@ -1715,14 +1894,17 @@ class ThumbnailCacheService(QObject):
         desired_visible_keys: Set[str],
         desired_prefetch_keys: Set[str],
         *,
+        desired_predictive_keys: Set[str] | None = None,
         complete: bool = True,
     ) -> None:
         desired_keys = desired_visible_keys | desired_prefetch_keys
+        predictive_keys = set(desired_predictive_keys or set())
         if complete:
             self._current_l1_demand_keys = set(desired_keys) if desired_keys else None
             self._partial_l1_demand_keys = None
         else:
-            self._partial_l1_demand_keys = set(desired_keys) if desired_keys else None
+            near_keys = desired_visible_keys | predictive_keys
+            self._partial_l1_demand_keys = set(near_keys) if near_keys else None
         if not desired_keys or self._memory_limit_bytes <= 0:
             return
         for key in (*desired_visible_keys, *self._prefetch_key_order):
@@ -1748,7 +1930,9 @@ class ThumbnailCacheService(QObject):
         )
         self._evict_l1_until(
             min(threshold, target),
-            protected_keys=self._l1_protected_keys(desired_keys),
+            protected_keys=self._l1_strong_protected_keys(
+                desired_visible_keys | predictive_keys
+            ),
             reason_prefix="demand_refresh",
         )
 
@@ -1780,7 +1964,7 @@ class ThumbnailCacheService(QObject):
             )
 
     def _evict_l1_keys_outside_demand(self, desired_keys: Set[str]) -> None:
-        protected = self._l1_protected_keys(desired_keys)
+        protected = desired_keys | self._pinned_keys
         stale_keys = [key for key in self._memory_cache if key not in protected]
         for key in stale_keys:
             self._memory_cache.pop(key, None)
@@ -1796,13 +1980,16 @@ class ThumbnailCacheService(QObject):
                 memory_limit_bytes=self._memory_limit_bytes,
             )
 
-    def _l1_protected_keys(self, keys: Set[str]) -> Set[str]:
-        protected = set(keys) | self._pinned_keys
+    def _l1_strong_protected_keys(self, keys: Set[str]) -> Set[str]:
+        return set(keys) | self._pinned_keys | self._current_predictive_keys
+
+    def _l1_write_allowed_keys(self) -> Set[str]:
+        allowed = set(self._pinned_keys) | set(self._current_predictive_keys)
         if self._current_l1_demand_keys is not None:
-            protected |= self._current_l1_demand_keys
+            allowed |= self._current_l1_demand_keys
         if self._partial_l1_demand_keys is not None:
-            protected |= self._partial_l1_demand_keys
-        return protected
+            allowed |= self._partial_l1_demand_keys
+        return allowed
 
     def _select_l1_eviction_candidate(
         self,

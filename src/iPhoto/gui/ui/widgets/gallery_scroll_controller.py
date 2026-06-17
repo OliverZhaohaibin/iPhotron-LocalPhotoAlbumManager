@@ -23,7 +23,8 @@ from iPhoto.gui.gallery_demand import (
 )
 from iPhoto.infrastructure.services.performance_events import emit_perf_event
 
-BURST_RECOVERY_SECONDS = 0.9
+BURST_RECOVERY_SECONDS = 1.2
+LANDING_RECOVERY_SCREENS = 2.0
 
 
 class GalleryScrollController(QObject):
@@ -204,14 +205,16 @@ class GalleryScrollController(QObject):
         alpha = 1.0 - math.exp(-elapsed / SCROLL_VELOCITY_EWMA_SECONDS)
         self._screens_per_second += alpha * (instantaneous - self._screens_per_second)
         recent_wheel_input = now - self._last_input_at <= 0.05
+        if abs(float(distance)) >= viewport_height * LANDING_RECOVERY_SCREENS:
+            self._mark_recovery(now)
         if self._input_kind == "pixel" and instantaneous >= 2.0:
             self._set_intent("continuous_burst", now=now)
         elif not recent_wheel_input:
             self._input_kind = "scrollbar"
-            self._set_intent(
-                "continuous_burst" if instantaneous >= 2.0 else "slow_continuous",
-                now=now,
-            )
+            next_intent = "continuous_burst" if instantaneous >= 2.0 else "slow_continuous"
+            self._set_intent(next_intent, now=now)
+            if next_intent == "slow_continuous":
+                self._mark_recovery(now)
             self._last_input_at = now
             self._dwell_timer.start(SCROLL_SETTLED_TIMEOUT_MS)
             self._direction_expiry_timer.start()
@@ -244,17 +247,21 @@ class GalleryScrollController(QObject):
         previous = self._intent
         self._intent = intent
         if previous == "continuous_burst" and intent != "continuous_burst":
-            self._burst_recovery_until = max(
-                self._burst_recovery_until,
-                now + BURST_RECOVERY_SECONDS,
-            )
+            self._mark_recovery(now)
+        elif intent == "slow_continuous" and self._burst_recovery_until > now:
+            self._mark_recovery(now)
         elif intent == "continuous_burst":
-            self._burst_recovery_until = 0.0
+            pass
+
+    def _mark_recovery(self, now: float) -> None:
+        self._burst_recovery_until = max(
+            self._burst_recovery_until,
+            now + BURST_RECOVERY_SECONDS,
+        )
 
     def _is_in_burst_recovery(self, now: float) -> bool:
         return (
-            self._intent != "continuous_burst"
-            and self._burst_recovery_until > 0.0
+            self._burst_recovery_until > 0.0
             and now <= self._burst_recovery_until
         )
 

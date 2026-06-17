@@ -283,3 +283,28 @@ def test_slow_discrete_wheel_immediately_after_burst_enters_recovery(
     assert demand.recovery is True
     assert demand.full_prefetch_last > demand.visible_last
     assert list(demand.iter_full_prefetch_rows())
+
+
+def test_large_programmatic_scroll_marks_landing_recovery(qapp: QApplication) -> None:
+    grid = _make_grid(qapp, rows=10_000)
+    controller = grid._scroll_controller
+    controller._last_value = 0
+    controller._last_value_at = 1.0
+    target = grid.viewport().height() * 3
+
+    with patch(
+        "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+        return_value=1.01,
+    ):
+        grid.verticalScrollBar().setValue(target)
+
+    with patch(
+        "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+        return_value=1.02,
+    ):
+        demand = controller.viewport_state(10_000)
+
+    assert demand is not None
+    assert demand.recovery is True
+    assert demand.full_prefetch_first < demand.visible_first
+    assert demand.full_prefetch_last > demand.visible_last

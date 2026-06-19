@@ -106,10 +106,6 @@ def resolve_l1_memory_limit_bytes(
 ) -> int:
     if memory_limit_mb is not None:
         return max(16, int(memory_limit_mb)) * _MIB
-    platform_name = (platform or sys.platform).lower()
-    if platform_name.startswith(("win", "linux")):
-        proposed = int(max(0, physical_memory_bytes) * 0.125)
-        return max(512 * _MIB, min(1536 * _MIB, proposed))
     proposed = int(max(0, physical_memory_bytes) * 0.075)
     return max(128 * _MIB, min(384 * _MIB, proposed))
 
@@ -124,21 +120,12 @@ class ThumbnailRuntimePolicy:
     publish_max_items: int = 2
     publish_budget_ms: float = 3.0
     staging_limit: int = 12
-    prefetch_sample_size: int = 16
-    prefetch_slow_p95_ms: float = 40.0
-    prefetch_cancel_rate: float = 0.25
-    prefetch_backoff_seconds: float = 2.0
     prefetch_miss_ttl_seconds: float = 2.0
-    predictive_miss_ttl_seconds: float = 0.5
-    visible_queue_wait_p95_ms: float = 12.0
+    guard_miss_ttl_seconds: float = 0.5
     far_speculative_workers: int = 1
-    recovery_predictive_workers: int = 2
-    recovery_publish_max_items: int = 4
-    recovery_publish_budget_ms: float = 5.0
-    recovery_seconds: float = 1.2
-    recovery_predictive_screens: int = 2
-    slow_predictive_screens: int = 2
-    predictive_staging_limit: int = 12
+    guard_initial_workers: int = 1
+    guard_max_workers: int = 1
+    guard_staging_limit: int = 12
     far_staging_limit: int = 8
     windows_low_memory_target_ratio: float = 0.65
     windows_low_memory_probe_interval_ms: int = 250
@@ -162,36 +149,32 @@ class ThumbnailRuntimePolicy:
         )
         publish_max_items = 2
         publish_budget_ms = 3.0
-        recovery_predictive_workers = 2
-        recovery_publish_max_items = 4
-        recovery_publish_budget_ms = 5.0
-        predictive_staging_limit = 12
+        guard_initial_workers = 1
+        guard_max_workers = 1
+        guard_staging_limit = 12
         far_staging_limit = 8
         windows_low_memory_target_ratio = 0.65
         far_speculative_workers = 1
         l1_replacement_threshold_ratio = 0.95
         l1_replacement_target_ratio = 0.88
         if platform_name.startswith("win"):
-            prefetch_workers = 6
-            far_speculative_workers = 2
+            prefetch_workers = 4
             publish_max_items = 4
-            publish_budget_ms = 5.0
-            recovery_predictive_workers = 4
-            recovery_publish_max_items = 8
-            recovery_publish_budget_ms = 8.0
-            predictive_staging_limit = 32
+            publish_budget_ms = 4.0
+            guard_initial_workers = 2
+            guard_max_workers = 4
+            guard_staging_limit = 32
             far_staging_limit = 8
             windows_low_memory_target_ratio = 0.60
             l1_replacement_threshold_ratio = 0.90
             l1_replacement_target_ratio = 0.72
         elif platform_name.startswith("linux"):
-            prefetch_workers = 3
+            prefetch_workers = 2
             publish_max_items = 4
-            publish_budget_ms = 5.0
-            recovery_predictive_workers = 3
-            recovery_publish_max_items = 6
-            recovery_publish_budget_ms = 6.0
-            predictive_staging_limit = 18
+            publish_budget_ms = 4.0
+            guard_initial_workers = 1
+            guard_max_workers = 2
+            guard_staging_limit = 18
             far_staging_limit = 8
         else:
             prefetch_workers = 1
@@ -211,10 +194,9 @@ class ThumbnailRuntimePolicy:
                 prefetch_workers * 4,
             ),
             far_speculative_workers=far_speculative_workers,
-            recovery_predictive_workers=recovery_predictive_workers,
-            recovery_publish_max_items=recovery_publish_max_items,
-            recovery_publish_budget_ms=recovery_publish_budget_ms,
-            predictive_staging_limit=predictive_staging_limit,
+            guard_initial_workers=guard_initial_workers,
+            guard_max_workers=guard_max_workers,
+            guard_staging_limit=guard_staging_limit,
             far_staging_limit=far_staging_limit,
             windows_low_memory_target_ratio=windows_low_memory_target_ratio,
             l1_replacement_threshold_ratio=l1_replacement_threshold_ratio,

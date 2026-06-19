@@ -30,8 +30,6 @@ class GalleryWindowRequest:
     collection_revision: int = 0
     demand_generation: int = 0
     priority: int = 1
-    retain_when_stale: bool = False
-    urgent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +45,6 @@ class GalleryWindowResult:
     requested_revision: int = 0
     demand_generation: int = 0
     priority: int = 1
-    urgent: bool = False
 
 
 class _GalleryWindowSignals(QObject):
@@ -128,7 +125,6 @@ class _GalleryWindowWorker(QRunnable):
                     requested_revision=request.collection_revision,
                     demand_generation=request.demand_generation,
                     priority=request.priority,
-                    urgent=request.urgent,
                 )
             )
             request_backfill = getattr(request.query_service, "request_thumbnail_backfill", None)
@@ -152,7 +148,6 @@ class _GalleryWindowWorker(QRunnable):
                     requested_revision=request.collection_revision,
                     demand_generation=request.demand_generation,
                     priority=request.priority,
-                    urgent=request.urgent,
                 )
             )
 
@@ -166,11 +161,9 @@ class GalleryWindowLoader(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._pool = QThreadPool(self)
-        self._pool.setMaxThreadCount(2)
+        self._pool.setMaxThreadCount(1)
         self._active_generation: int | None = None
         self._active_request: GalleryWindowRequest | None = None
-        self._active_urgent_generation: int | None = None
-        self._active_urgent_request: GalleryWindowRequest | None = None
         self._queued_requests: list[GalleryWindowRequest] = []
         self._latest_demand_generation = 0
         self._signals: dict[int, _GalleryWindowSignals] = {}
@@ -184,7 +177,7 @@ class GalleryWindowLoader(QObject):
                 for queued in self._queued_requests
                 if (
                     int(queued.demand_generation) < demand_generation
-                    and not queued.retain_when_stale
+                    and int(queued.demand_generation) > 0
                 )
             ]
             self._queued_requests = [
@@ -192,7 +185,7 @@ class GalleryWindowLoader(QObject):
                 for queued in self._queued_requests
                 if (
                     int(queued.demand_generation) >= demand_generation
-                    or queued.retain_when_stale
+                    or int(queued.demand_generation) == 0
                 )
             ]
             if dropped:
@@ -205,9 +198,6 @@ class GalleryWindowLoader(QObject):
         if (
             self._active_request is not None
             and self._request_signature(self._active_request) == signature
-        ) or (
-            self._active_urgent_request is not None
-            and self._request_signature(self._active_urgent_request) == signature
         ):
             self.requestsDropped.emit((request.generation,))
             return
@@ -216,9 +206,6 @@ class GalleryWindowLoader(QObject):
                 continue
             self._queued_requests[index] = request
             self.requestsDropped.emit((queued.generation,))
-            return
-        if request.urgent and self._active_urgent_generation is None:
-            self._start(request)
             return
         if self._active_generation is not None:
             self._queued_requests.append(request)
@@ -234,12 +221,8 @@ class GalleryWindowLoader(QObject):
             self.requestsDropped.emit(dropped)
 
     def _start(self, request: GalleryWindowRequest) -> None:
-        if request.urgent:
-            self._active_urgent_generation = request.generation
-            self._active_urgent_request = request
-        else:
-            self._active_generation = request.generation
-            self._active_request = request
+        self._active_generation = request.generation
+        self._active_request = request
         signals = _GalleryWindowSignals()
         signals.completed.connect(self._handle_completed)
         self._signals[request.generation] = signals
@@ -249,31 +232,14 @@ class GalleryWindowLoader(QObject):
         signals = self._signals.pop(result.generation, None)
         if signals is not None:
             signals.deleteLater()
-        if result.urgent:
-            self._active_urgent_generation = None
-            self._active_urgent_request = None
-        else:
-            self._active_generation = None
-            self._active_request = None
+        self._active_generation = None
+        self._active_request = None
         self.resultReady.emit(result)
         self._start_next()
 
     def _start_next(self) -> None:
         if not self._queued_requests:
             return
-        if self._active_urgent_generation is None:
-            urgent_indexes = [
-                index
-                for index, request in enumerate(self._queued_requests)
-                if request.urgent
-            ]
-            if urgent_indexes:
-                best_index = min(
-                    urgent_indexes,
-                    key=lambda index: self._queued_requests[index].priority,
-                )
-                self._start(self._queued_requests.pop(best_index))
-                return
         if self._active_generation is not None:
             return
         best_index = min(

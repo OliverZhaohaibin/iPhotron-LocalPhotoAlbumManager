@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.infrastructure.services.performance_events import emit_perf_event
 
-ThumbnailCandidateKind = Literal["predictive", "far_speculative"]
+ThumbnailCandidateKind = Literal["guard", "far_speculative"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,8 +35,7 @@ class GalleryThumbnailHintRequest:
     first: int
     limit: int
     ordered_rows: tuple[int, ...]
-    predictive_rows: frozenset[int]
-    urgent: bool = False
+    guard_rows: frozenset[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +50,6 @@ class GalleryThumbnailHintResult:
     candidates: tuple[GalleryThumbnailCandidate, ...]
     elapsed_ms: float
     error: str | None = None
-    urgent: bool = False
 
 
 class _HintSignals(QObject):
@@ -93,8 +91,8 @@ class _HintWorker(QRunnable):
                     l2_cache_key=cache_key,
                     rank=0,
                     kind=(
-                        "predictive"
-                        if absolute_row in request.predictive_rows
+                        "guard"
+                        if absolute_row in request.guard_rows
                         else "far_speculative"
                     ),
                 )
@@ -119,7 +117,6 @@ class _HintWorker(QRunnable):
                 limit=request.limit,
                 candidates=candidates,
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
-                urgent=request.urgent,
             )
         except Exception as exc:  # noqa: BLE001 - worker boundary
             result = GalleryThumbnailHintResult(
@@ -133,92 +130,57 @@ class _HintWorker(QRunnable):
                 candidates=(),
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 error=f"{type(exc).__name__}: {exc}",
-                urgent=request.urgent,
             )
         self._signals.completed.emit(result)
 
 
 class GalleryThumbnailHintLoader(QObject):
-    """Run the newest lightweight hint request, with one urgent lane for recovery."""
+    """Run one lightweight hint read and coalesce pending demand to the newest request."""
 
     resultReady = Signal(object)  # noqa: N815 - Qt signal naming
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._normal_pool = QThreadPool(self)
-        self._normal_pool.setMaxThreadCount(1)
-        self._urgent_pool = QThreadPool(self)
-        self._urgent_pool.setMaxThreadCount(1)
-        self._active_normal = False
-        self._active_urgent = False
-        self._queued_normal: GalleryThumbnailHintRequest | None = None
-        self._queued_urgent: GalleryThumbnailHintRequest | None = None
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(1)
+        self._active = False
+        self._queued: GalleryThumbnailHintRequest | None = None
+        self._signals: _HintSignals | None = None
         self._latest_request_id = 0
-        self._latest_generation = 0
-        self._valid_request_ids: set[int] = set()
-        self._signals: dict[int, _HintSignals] = {}
+        self._minimum_valid_request_id = 0
 
     def request(self, request: GalleryThumbnailHintRequest) -> None:
-        request_id = int(request.request_id)
-        generation = int(request.generation)
-        self._latest_request_id = max(self._latest_request_id, request_id)
-        if generation > self._latest_generation:
-            self._latest_generation = generation
-            self._valid_request_ids.clear()
-        self._valid_request_ids.add(request_id)
-        if request.urgent:
-            if self._active_urgent:
-                self._queued_urgent = request
-                return
-            self._start(request)
-            return
-        if self._active_normal:
-            self._queued_normal = request
+        self._latest_request_id = max(self._latest_request_id, int(request.request_id))
+        if self._active:
+            self._queued = request
             return
         self._start(request)
 
     def cancel_pending(self) -> None:
-        self._queued_normal = None
-        self._queued_urgent = None
-        self._latest_request_id += 1
-        self._valid_request_ids.clear()
-        self._normal_pool.clear()
-        self._urgent_pool.clear()
+        self._queued = None
+        self._minimum_valid_request_id = self._latest_request_id + 1
+        self._pool.clear()
 
     def shutdown(self) -> None:
         self.cancel_pending()
 
     def _start(self, request: GalleryThumbnailHintRequest) -> None:
-        if request.urgent:
-            self._active_urgent = True
-        else:
-            self._active_normal = True
+        self._active = True
         signals = _HintSignals()
         signals.completed.connect(self._handle_completed)
-        self._signals[request.request_id] = signals
-        pool = self._urgent_pool if request.urgent else self._normal_pool
-        pool.start(_HintWorker(request, signals))
+        self._signals = signals
+        self._pool.start(_HintWorker(request, signals))
 
     def _handle_completed(self, result: GalleryThumbnailHintResult) -> None:
-        signals = self._signals.pop(result.request_id, None)
-        if signals is not None:
-            signals.deleteLater()
-        if result.urgent:
-            self._active_urgent = False
-        else:
-            self._active_normal = False
-        if (
-            result.generation < self._latest_generation
-            or result.request_id not in self._valid_request_ids
-        ):
-            emit_perf_event(
-                "gallery_thumbnail_hint_finished",
-                generation=result.generation,
-                candidates=len(result.candidates),
-                elapsed_ms=round(result.elapsed_ms, 3),
-                error="stale_request",
-            )
-            self._start_next()
+        if self._signals is not None:
+            self._signals.deleteLater()
+        self._signals = None
+        self._active = False
+        if result.request_id < self._minimum_valid_request_id:
+            queued = self._queued
+            self._queued = None
+            if queued is not None:
+                self._start(queued)
             return
         emit_perf_event(
             "gallery_thumbnail_hint_finished",
@@ -228,17 +190,10 @@ class GalleryThumbnailHintLoader(QObject):
             error=result.error,
         )
         self.resultReady.emit(result)
-        self._start_next()
-
-    def _start_next(self) -> None:
-        queued_urgent = self._queued_urgent
-        if queued_urgent is not None and not self._active_urgent:
-            self._queued_urgent = None
-            self._start(queued_urgent)
-        queued_normal = self._queued_normal
-        if queued_normal is not None and not self._active_normal:
-            self._queued_normal = None
-            self._start(queued_normal)
+        queued = self._queued
+        self._queued = None
+        if queued is not None:
+            self._start(queued)
 
 
 __all__ = [

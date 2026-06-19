@@ -25,7 +25,7 @@ def test_fast_demand_disables_full_prefetch_and_warms_2000_micro_items() -> None
     assert demand.warm_last - demand.visible_last > demand.visible_first - demand.warm_first
 
 
-def test_slow_demand_prefetches_symmetric_viewpoint_window() -> None:
+def test_slow_demand_builds_one_screen_guard_and_directional_speculation() -> None:
     medium = build_viewport_demand(
         generation=1,
         row_count=10_000,
@@ -48,7 +48,8 @@ def test_slow_demand_prefetches_symmetric_viewpoint_window() -> None:
     assert medium.phase == "medium"
     assert slow.phase == "slow"
     assert medium.full_prefetch_range == medium.visible_range
-    assert slow.full_prefetch_range == (880, 1139)
+    assert slow.full_guard_range == (980, 1039)
+    assert slow.full_prefetch_range == (960, 1079)
 
 
 def test_scrolling_full_prefetch_rows_alternate_from_viewpoint_with_direction_tie() -> None:
@@ -70,11 +71,11 @@ def test_scrolling_full_prefetch_rows_alternate_from_viewpoint_with_direction_ti
         105,
         97,
         106,
-        96,
         107,
-        95,
         108,
-        94,
+        96,
+        109,
+        110,
     ]
 
 
@@ -97,15 +98,15 @@ def test_upward_full_prefetch_rows_favor_rows_before_the_viewport() -> None:
         97,
         105,
         96,
-        106,
         95,
-        107,
         94,
-        108,
+        106,
+        93,
+        92,
     ]
 
 
-def test_idle_full_prefetch_rows_alternate_six_screens_before_and_after() -> None:
+def test_idle_full_prefetch_rows_cover_guard_then_two_speculative_screens() -> None:
     demand = build_viewport_demand(
         generation=3,
         row_count=1_000,
@@ -116,7 +117,8 @@ def test_idle_full_prefetch_rows_alternate_six_screens_before_and_after() -> Non
         actively_scrolling=False,
     )
 
-    assert demand.full_prefetch_range == (82, 120)
+    assert demand.full_guard_range == (97, 105)
+    assert demand.full_prefetch_range == (91, 111)
     assert list(demand.iter_full_prefetch_rows())[:12] == [
         99,
         103,
@@ -178,11 +180,12 @@ def test_directional_dwell_finishes_next_screen_before_far_prefetch() -> None:
     )
 
     assert demand.phase == "settled"
-    assert demand.full_prefetch_range == (76, 126)
+    assert demand.full_guard_range == (97, 105)
+    assert demand.full_prefetch_range == (94, 111)
     assert list(demand.iter_full_prefetch_rows())[:4] == [103, 99, 104, 98]
 
 
-def test_medium_slow_input_prefetches_one_forward_screen() -> None:
+def test_medium_scroll_keeps_full_work_visible_only() -> None:
     demand = build_viewport_demand(
         generation=5,
         row_count=1_000,
@@ -195,24 +198,11 @@ def test_medium_slow_input_prefetches_one_forward_screen() -> None:
     )
 
     assert demand.phase == "medium"
-    assert demand.full_prefetch_range == (94, 108)
-    assert list(demand.iter_full_prefetch_rows()) == [
-        103,
-        99,
-        104,
-        98,
-        105,
-        97,
-        106,
-        96,
-        107,
-        95,
-        108,
-        94,
-    ]
+    assert demand.full_prefetch_range == demand.visible_range
+    assert list(demand.iter_full_prefetch_rows()) == []
 
 
-def test_burst_recovery_opens_symmetric_full_prefetch_window() -> None:
+def test_slow_demand_after_burst_needs_no_recovery_state() -> None:
     demand = build_viewport_demand(
         generation=6,
         row_count=1_000,
@@ -222,12 +212,11 @@ def test_burst_recovery_opens_symmetric_full_prefetch_window() -> None:
         screens_per_second=9.0,
         actively_scrolling=True,
         intent="slow_continuous",
-        recovery=True,
     )
 
-    assert demand.recovery is True
     assert demand.phase == "slow"
-    assert demand.full_prefetch_range == (91, 111)
+    assert demand.full_guard_range == (97, 105)
+    assert demand.full_prefetch_range == (94, 111)
     assert list(demand.iter_full_prefetch_rows())[:6] == [103, 99, 104, 98, 105, 97]
 
 

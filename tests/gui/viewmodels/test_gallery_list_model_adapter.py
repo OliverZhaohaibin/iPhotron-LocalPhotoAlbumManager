@@ -339,18 +339,11 @@ def test_fast_viewport_warms_micro_and_still_requests_visible_full(
     adapter.update_viewport(demand)
 
     mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
-    mock_thumb_service.reconcile_demand.assert_called_once_with(
-        visible_paths=[Path("/library/photo.jpg")],
-        prefetch_paths=[],
-        size=adapter._thumb_size,
-        generation=7,
-        phase="fast",
-        intent="continuous_burst",
-        prefetch_candidates=(),
-        l1_demand_complete=False,
-        recovery=False,
-        predictive_deadline_count=20,
-    )
+    snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
+    assert snapshot.visible_paths == (Path("/library/photo.jpg"),)
+    assert snapshot.guard_paths == ()
+    assert snapshot.speculative_paths == ()
+    assert snapshot.revision == 7
     assert demand.phase == "fast"
     assert demand.full_prefetch_range == demand.visible_range
     assert demand.warm_last - demand.warm_first + 1 == 2000
@@ -380,9 +373,9 @@ def test_scrolling_phase_immediately_requests_visible_full(
 
     assert demand.phase == phase
     mock_thumb_service.reconcile_demand.assert_called_once()
-    assert mock_thumb_service.reconcile_demand.call_args.kwargs["visible_paths"] == [
-        Path("/library/photo.jpg")
-    ]
+    assert mock_thumb_service.reconcile_demand.call_args.args[0].visible_paths == (
+        Path("/library/photo.jpg"),
+    )
 
 
 def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
@@ -410,20 +403,11 @@ def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
     adapter.update_viewport(demand)
 
     mock_store.reconcile_viewport_demand.assert_called_once_with(demand)
-    mock_thumb_service.reconcile_demand.assert_called_once_with(
-        visible_paths=[Path("/library/visible.jpg")],
-        prefetch_paths=[
-            Path("/library/before.jpg"),
-            Path("/library/after.jpg"),
-        ],
-        size=adapter._thumb_size,
-        generation=8,
-        phase="settled",
-        intent="idle",
-        prefetch_candidates=(),
-        l1_demand_complete=False,
-        recovery=False,
-        predictive_deadline_count=20,
+    snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
+    assert snapshot.visible_paths == (Path("/library/visible.jpg"),)
+    assert snapshot.guard_paths == (
+        Path("/library/before.jpg"),
+        Path("/library/after.jpg"),
     )
     assert demand.phase == "settled"
     assert demand.full_prefetch_first < demand.visible_first
@@ -457,12 +441,12 @@ def test_cached_thumb_cache_key_becomes_prefetch_candidate(
 
     adapter._reconcile_full_thumbnail_demand()
 
-    candidates = mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_candidates"]
+    snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
+    candidates = snapshot.candidates
     assert len(candidates) == 1
     assert candidates[0].path == Path("/library/prefetch.jpg")
     assert candidates[0].l2_cache_key == "l2-prefetch"
-    assert candidates[0].kind == "predictive"
-    assert mock_thumb_service.reconcile_demand.call_args.kwargs["l1_demand_complete"] is False
+    assert candidates[0].kind == "guard"
 
 
 def test_cached_and_hint_prefetch_paths_keep_viewport_order(
@@ -500,13 +484,14 @@ def test_cached_and_hint_prefetch_paths_keep_viewport_order(
 
     adapter._reconcile_full_thumbnail_demand()
 
-    assert mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_paths"][:2] == [
+    snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
+    assert snapshot.guard_paths[:2] == (
         Path("/library/next.jpg"),
         Path("/library/far.jpg"),
-    ]
+    )
 
 
-def test_full_thumbnail_demand_is_complete_after_next_screen_coverage(
+def test_full_thumbnail_snapshot_separates_guard_from_speculation(
     adapter,
     mock_store,
     mock_thumb_service,
@@ -536,7 +521,9 @@ def test_full_thumbnail_demand_is_complete_after_next_screen_coverage(
 
     adapter._reconcile_full_thumbnail_demand()
 
-    assert mock_thumb_service.reconcile_demand.call_args.kwargs["l1_demand_complete"] is True
+    snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
+    assert len(snapshot.guard_paths) == len(tuple(demand.iter_full_guard_rows()))
+    assert set(snapshot.guard_paths).isdisjoint(snapshot.speculative_paths)
 
 
 def test_viewport_update_prunes_only_irrelevant_thumbnail_hints(
@@ -569,7 +556,7 @@ def test_viewport_update_prunes_only_irrelevant_thumbnail_hints(
             Path("/library/stale.jpg"),
             "stale-key",
             0,
-            "predictive",
+            "guard",
         ),
     }
 
@@ -590,7 +577,7 @@ def test_retained_thumbnail_hints_are_reranked_for_current_demand(adapter):
     )
     ordered_rows = tuple(demand.iter_full_prefetch_rows())
     visible_count = demand.visible_last - demand.visible_first + 1
-    predictive_rows = frozenset(ordered_rows[:visible_count])
+    guard_rows = frozenset(ordered_rows[:visible_count])
     first_row = ordered_rows[0]
     later_row = ordered_rows[-1]
     adapter._thumbnail_hint_candidates_by_row = {
@@ -606,15 +593,15 @@ def test_retained_thumbnail_hints_are_reranked_for_current_demand(adapter):
             Path("/library/later.jpg"),
             "later-key",
             0,
-            "predictive",
+            "guard",
         ),
     }
 
-    candidates = adapter._current_hint_candidates(ordered_rows, predictive_rows)
+    candidates = adapter._current_hint_candidates(ordered_rows, guard_rows)
 
     by_row = {candidate.row: candidate for candidate in candidates}
     assert by_row[first_row].rank == 0
-    assert by_row[first_row].kind == "predictive"
+    assert by_row[first_row].kind == "guard"
     assert by_row[later_row].rank == len(ordered_rows) - 1
     assert by_row[later_row].kind == "far_speculative"
 
@@ -643,12 +630,10 @@ def test_thumbnail_hint_request_uses_full_ordered_rows(adapter, mock_store):
     request = request_hint.call_args.args[0]
     assert request.collection_revision == 5
     assert request.ordered_rows == tuple(demand.iter_full_prefetch_rows())
-    assert request.predictive_rows == frozenset(
-        tuple(demand.iter_full_prefetch_rows())[:40]
-    )
+    assert request.guard_rows == frozenset(demand.iter_full_guard_rows())
 
 
-def test_recovery_thumbnail_hint_request_adds_urgent_near_window(adapter, mock_store):
+def test_slow_thumbnail_hint_request_uses_single_guard_first_query(adapter, mock_store):
     query_service = MagicMock()
     query_service.read_thumbnail_hint_window = MagicMock()
     mock_store.current_query.return_value = AssetQuery()
@@ -665,22 +650,16 @@ def test_recovery_thumbnail_hint_request_adds_urgent_near_window(adapter, mock_s
         screens_per_second=9.0,
         actively_scrolling=True,
         intent="slow_continuous",
-        recovery=True,
     )
     ordered_rows = tuple(demand.iter_full_prefetch_rows())
-    urgent_rows = ordered_rows[:40]
 
     with patch.object(adapter._thumbnail_hint_loader, "request") as request_hint:
         adapter._request_thumbnail_hints(demand)
 
-    urgent_request = request_hint.call_args_list[0].args[0]
-    normal_request = request_hint.call_args_list[1].args[0]
-    assert urgent_request.urgent is True
-    assert urgent_request.ordered_rows == urgent_rows
-    assert urgent_request.first == min(urgent_rows)
-    assert urgent_request.limit == max(urgent_rows) - min(urgent_rows) + 1
-    assert normal_request.urgent is False
-    assert normal_request.ordered_rows == ordered_rows
+    assert request_hint.call_count == 1
+    request = request_hint.call_args.args[0]
+    assert request.ordered_rows == ordered_rows
+    assert request.guard_rows == frozenset(demand.iter_full_guard_rows())
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):
@@ -729,14 +708,14 @@ def test_old_generation_matching_thumbnail_hint_result_is_merged(
                     Path("/library/ahead.jpg"),
                     "ahead-key",
                     0,
-                    "predictive",
+                    "guard",
                 ),
             ),
             elapsed_ms=1.0,
         )
     )
 
-    candidates = mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_candidates"]
+    candidates = mock_thumb_service.reconcile_demand.call_args.args[0].candidates
     assert any(candidate.path == Path("/library/ahead.jpg") for candidate in candidates)
 
 
@@ -777,7 +756,7 @@ def test_thumbnail_hint_result_for_old_collection_revision_is_discarded(
                     Path("/library/stale-row.jpg"),
                     "stale-row-key",
                     0,
-                    "predictive",
+                    "guard",
                 ),
             ),
             elapsed_ms=1.0,
@@ -824,7 +803,7 @@ def test_thumbnail_hint_result_for_other_root_is_discarded(
                     Path("/other-library/ahead.jpg"),
                     "ahead-key",
                     0,
-                    "predictive",
+                    "guard",
                 ),
             ),
             elapsed_ms=1.0,
@@ -872,14 +851,14 @@ def test_old_thumbnail_hint_request_id_with_matching_selection_is_merged(
                     Path("/library/late.jpg"),
                     "late-key",
                     0,
-                    "predictive",
+                    "guard",
                 ),
             ),
             elapsed_ms=1.0,
         )
     )
 
-    candidates = mock_thumb_service.reconcile_demand.call_args.kwargs["prefetch_candidates"]
+    candidates = mock_thumb_service.reconcile_demand.call_args.args[0].candidates
     assert any(candidate.path == Path("/library/late.jpg") for candidate in candidates)
 
 
@@ -990,7 +969,7 @@ def test_source_change_with_new_revision_clears_thumbnail_hints(adapter, mock_st
             Path("/library/b.jpg"),
             "b-key",
             0,
-            "predictive",
+            "guard",
         )
     }
 
@@ -999,6 +978,47 @@ def test_source_change_with_new_revision_clears_thumbnail_hints(adapter, mock_st
     adapter._on_source_changed()
 
     assert adapter._thumbnail_hint_candidates_by_row == {}
+
+
+def test_source_revision_change_republishes_static_viewport_demand(
+    adapter,
+    mock_store,
+):
+    assets = [
+        _make_dto(id="a", abs_path=Path("/library/a.jpg")),
+        _make_dto(id="b", abs_path=Path("/library/b.jpg")),
+    ]
+    query = AssetQuery()
+    mock_store.count.return_value = 2
+    mock_store.active_root.return_value = Path("/library")
+    mock_store.current_query.return_value = query
+    mock_store.current_direct_assets.return_value = None
+    mock_store.asset_at.side_effect = lambda row: assets[row]
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 1)
+    adapter._on_source_changed()
+    demand = build_viewport_demand(
+        generation=1,
+        row_count=2,
+        visible_first=0,
+        visible_last=0,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter._ensure_coordinator_viewport(demand)
+    previous_generation = adapter._viewport_demand.generation
+
+    mock_store.snapshot_signature.return_value = (2, (0, 1), 2)
+    with (
+        patch.object(adapter, "_request_thumbnail_hints") as request_hints,
+        patch.object(adapter, "_reconcile_full_thumbnail_demand") as reconcile_full,
+    ):
+        adapter._on_source_changed()
+
+    assert adapter._demand_coordinator.collection_revision == 2
+    assert adapter._viewport_demand.generation > previous_generation
+    request_hints.assert_called_once_with(adapter._viewport_demand)
+    reconcile_full.assert_called_once_with()
 
 
 def test_source_change_same_count_with_reordered_rows_resets_model(

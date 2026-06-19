@@ -16,6 +16,7 @@ from PySide6.QtGui import QImage, QPixmap
 from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file
 from iPhoto.infrastructure.services.thumbnail_cache_service import (
     ThumbnailCacheService,
+    ThumbnailDemandSnapshot,
     ThumbnailGenerationTask,
     ThumbnailLoadResult,
     ThumbnailPrefetchCandidate,
@@ -25,6 +26,44 @@ from iPhoto.infrastructure.services.thumbnail_cache_service import (
     _CancellationToken,
 )
 from iPhoto.infrastructure.services.thumbnail_runtime_policy import ThumbnailRuntimePolicy
+
+
+def _reconcile(
+    service: ThumbnailCacheService,
+    demand: ThumbnailDemandSnapshot | None = None,
+    **legacy,
+) -> None:
+    """Keep test setup terse while exercising the snapshot-only public API."""
+
+    if demand is None:
+        visible = tuple(legacy.pop("visible_paths", ()))
+        prefetch = tuple(legacy.pop("prefetch_paths", ()))
+        candidates = tuple(legacy.pop("prefetch_candidates", ()))
+        guard_set = {
+            candidate.path for candidate in candidates if candidate.kind == "guard"
+        }
+        guard = tuple(path for path in prefetch if path in guard_set)
+        speculative = tuple(path for path in prefetch if path not in guard_set)
+        phase = legacy.pop("phase", "settled")
+        demand = ThumbnailDemandSnapshot(
+            revision=legacy.pop("generation", 0),
+            size=legacy.pop("size"),
+            visible_paths=visible,
+            guard_paths=guard,
+            speculative_paths=speculative,
+            candidates=candidates,
+            phase=phase,
+            intent=legacy.pop(
+                "intent",
+                "continuous_burst"
+                if phase in ("medium", "fast")
+                else "slow_continuous"
+                if phase == "slow"
+                else "idle",
+            ),
+        )
+        assert not legacy
+    service.reconcile_demand(demand)
 
 
 def test_thumbnail_cache_service_remaps_album_disk_cache(tmp_path: Path) -> None:
@@ -173,13 +212,13 @@ def test_reconcile_demand_keeps_only_latest_visible_and_prefetch_queue(tmp_path:
     third = tmp_path / "third.jpg"
 
     with patch.object(service, "_start_generation"):
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[],
             prefetch_paths=[second, third],
             size=size,
             generation=1,
         )
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[second],
             prefetch_paths=[],
             size=size,
@@ -241,7 +280,7 @@ def test_prefetch_uses_separate_pool_and_never_enters_foreground_queue(tmp_path:
     size = QSize(512, 512)
 
     with patch.object(service, "_start_generation") as start_generation:
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[],
             prefetch_paths=[path],
             size=size,
@@ -315,7 +354,7 @@ def test_visible_miss_does_not_pause_unrelated_active_prefetch(tmp_path: Path) -
     assert not token.cancelled()
 
 
-def test_prefetch_waits_while_visible_work_is_queued(tmp_path: Path) -> None:
+def test_far_speculation_uses_its_isolated_lane_while_visible_is_queued(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     service._max_active_jobs = 0
     visible_path = tmp_path / "visible.jpg"
@@ -323,7 +362,7 @@ def test_prefetch_waits_while_visible_work_is_queued(tmp_path: Path) -> None:
     size = QSize(512, 512)
 
     with patch.object(service, "_start_generation") as start_generation:
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[visible_path],
             prefetch_paths=[prefetch_path],
             prefetch_candidates=[
@@ -334,8 +373,8 @@ def test_prefetch_waits_while_visible_work_is_queued(tmp_path: Path) -> None:
         )
 
     assert service._pending_tasks
-    assert service._prefetch_active_tasks == 0
-    start_generation.assert_not_called()
+    assert service._prefetch_active_tasks == 1
+    assert start_generation.call_args.kwargs["kind"] is ThumbnailRequestKind.PREFETCH
 
 
 def test_promoted_prefetch_hit_updates_visible_tile_without_duplicate_worker(
@@ -407,7 +446,7 @@ def test_overlapping_active_prefetch_survives_new_generation(tmp_path: Path) -> 
     service._prefetch_generations[key] = 1
     service._prefetch_active_tasks = 1
 
-    service.reconcile_demand(
+    _reconcile(service,
         visible_paths=[],
         prefetch_paths=[path],
         size=size,
@@ -429,7 +468,7 @@ def test_active_prefetch_is_canceled_after_leaving_latest_demand(tmp_path: Path)
     service._prefetch_generations[key] = 1
     service._prefetch_active_tasks = 1
 
-    service.reconcile_demand(
+    _reconcile(service,
         visible_paths=[],
         prefetch_paths=[],
         size=size,
@@ -477,14 +516,14 @@ def test_prefetch_l2_miss_uses_short_retry_ttl(tmp_path: Path) -> None:
     assert key in service._prefetch_pending
 
 
-def test_predictive_l2_miss_uses_shorter_retry_ttl(tmp_path: Path) -> None:
+def test_guard_l2_miss_uses_shorter_retry_ttl(tmp_path: Path) -> None:
     policy = replace(
         ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
-        predictive_miss_ttl_seconds=0.5,
+        guard_miss_ttl_seconds=0.5,
         prefetch_miss_ttl_seconds=2.0,
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    path = tmp_path / "missing-predictive.jpg"
+    path = tmp_path / "missing-guard.jpg"
     size = QSize(512, 512)
     key = service._cache_key(path, size)
 
@@ -492,14 +531,14 @@ def test_predictive_l2_miss_uses_shorter_retry_ttl(tmp_path: Path) -> None:
     token.l2_outcome = "miss"
     service._prefetch_pending.add(key)
     service._prefetch_active_tasks = 1
-    service._predictive_active_tasks = 1
+    service._guard_active_tasks = 1
 
     service._handle_prefetch_failure(
         path,
         size,
         "empty_render",
         generation=1,
-        kind=ThumbnailRequestKind.PREDICTIVE,
+        kind=ThumbnailRequestKind.GUARD,
     )
 
     ttl = service._prefetch_l2_miss_until[key] - time.monotonic()
@@ -540,7 +579,7 @@ def test_existing_l2_prefetch_streams_into_memory_without_ui_update(
     emitted = []
     service.thumbnailReady.connect(emitted.append)
 
-    service.reconcile_demand(
+    _reconcile(service,
         visible_paths=[],
         prefetch_paths=[path],
         size=size,
@@ -574,7 +613,7 @@ def test_slow_l2_prefetch_survives_visible_work_and_new_generation(
         return image
 
     with patch.object(service, "_load_cached_thumbnail_only", side_effect=_slow_l2_load):
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[],
             prefetch_paths=[prefetch_path],
             size=size,
@@ -583,7 +622,7 @@ def test_slow_l2_prefetch_survives_visible_work_and_new_generation(
         assert started.wait(timeout=1.0)
         token = service._prefetch_active_tokens[service._cache_key(prefetch_path, size)]
 
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[visible_path],
             prefetch_paths=[prefetch_path],
             size=size,
@@ -657,14 +696,15 @@ def test_windows_l1_refresh_replaces_old_pages_when_saturated(
     assert service._memory_used_bytes == policy.memory_limit_bytes
 
     with patch.object(service, "_start_generation"):
-        service.reconcile_demand(
-            visible_paths=[visible],
-            prefetch_paths=[near, future],
-            size=size,
-            generation=1,
-            phase="slow",
-            intent="slow_continuous",
-            l1_demand_complete=True,
+        _reconcile(service,
+            ThumbnailDemandSnapshot(
+                revision=1,
+                size=size,
+                visible_paths=(visible,),
+                guard_paths=(near, future),
+                phase="slow",
+                intent="slow_continuous",
+            )
         )
 
     assert visible_key in service._memory_cache
@@ -706,22 +746,26 @@ def test_windows_l1_refresh_replaces_old_pages_before_saturation(
     )
 
     with patch.object(service, "_start_generation"):
-        service.reconcile_demand(
-            visible_paths=[visible],
-            prefetch_paths=[near, future],
-            size=size,
-            generation=1,
-            phase="slow",
-            intent="slow_continuous",
-            l1_demand_complete=True,
+        _reconcile(service,
+            ThumbnailDemandSnapshot(
+                revision=1,
+                size=size,
+                visible_paths=(visible,),
+                guard_paths=(near, future),
+                phase="slow",
+                intent="slow_continuous",
+            )
         )
+
+    while service._has_stale_l1_entries():
+        service._drain_l1_evictions()
 
     assert visible_key in service._memory_cache
     assert near_key in service._memory_cache
     assert all(key not in service._memory_cache for key in old_keys)
 
 
-def test_partial_l1_demand_preserves_preheated_next_page(
+def test_new_demand_evicts_preheated_old_viewpoint_in_bounded_batches(
     tmp_path: Path,
     qapp,
 ) -> None:
@@ -736,17 +780,16 @@ def test_partial_l1_demand_preserves_preheated_next_page(
         service._add_to_memory(key, pixmap)
 
     with patch.object(service, "_start_generation"):
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[visible],
             prefetch_paths=[],
             size=size,
             generation=1,
             phase="slow",
             intent="slow_continuous",
-            l1_demand_complete=False,
         )
 
-    assert all(key in service._memory_cache for key in next_keys)
+    assert all(key not in service._memory_cache for key in next_keys)
 
 
 def test_complete_l1_demand_prunes_preheated_old_viewpoint(
@@ -767,14 +810,13 @@ def test_complete_l1_demand_prunes_preheated_old_viewpoint(
         service._add_to_memory(key, pixmap)
 
     with patch.object(service, "_start_generation"):
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[visible],
             prefetch_paths=[near],
             size=size,
             generation=1,
             phase="slow",
             intent="slow_continuous",
-            l1_demand_complete=True,
         )
 
     service._add_to_memory(visible_key, pixmap)
@@ -797,14 +839,13 @@ def test_l1_rejects_stale_thumbnail_writes_outside_current_demand(
     stale_key = service._cache_key(stale, size)
 
     with patch.object(service, "_start_generation"):
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[visible],
             prefetch_paths=[],
             size=size,
             generation=1,
             phase="slow",
             intent="slow_continuous",
-            l1_demand_complete=True,
         )
 
     service._add_to_memory(stale_key, QPixmap(8, 8))
@@ -851,25 +892,27 @@ def test_l2_512_file_decodes_directly_to_display_bucket_without_new_disk_file(
     assert not thumbnail_cache_file(tmp_path / "thumbs", path, (256, 256)).exists()
 
 
-def test_known_l2_cache_key_drives_predictive_request(tmp_path: Path) -> None:
+def test_known_l2_cache_key_drives_guard_request(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     path = tmp_path / "photo.jpg"
     size = QSize(256, 256)
 
     with patch.object(service, "_start_generation") as start_generation:
-        service.reconcile_demand(
-            visible_paths=[],
-            prefetch_paths=[path],
-            prefetch_candidates=[
-                ThumbnailPrefetchCandidate(path, "known-l2-key", "predictive")
-            ],
-            size=size,
-            generation=1,
-            phase="settled",
-            intent="directional_dwell",
+        _reconcile(service,
+            ThumbnailDemandSnapshot(
+                revision=1,
+                size=size,
+                visible_paths=(),
+                guard_paths=(path,),
+                candidates=(
+                    ThumbnailPrefetchCandidate(path, "known-l2-key", "guard"),
+                ),
+                phase="settled",
+                intent="directional_dwell",
+            )
         )
 
-    assert start_generation.call_args.kwargs["kind"] is ThumbnailRequestKind.PREDICTIVE
+    assert start_generation.call_args.kwargs["kind"] is ThumbnailRequestKind.GUARD
     assert start_generation.call_args.kwargs["l2_cache_key"] == "known-l2-key"
 
 
@@ -890,11 +933,11 @@ def test_only_far_speculative_enters_windows_background_mode(tmp_path: Path) -> 
     ):
         ThumbnailGenerationTask(
             lambda _path, _size, _token: image,
-            Path("predictive.jpg"),
+            Path("guard.jpg"),
             QSize(256, 256),
             signals,
             1,
-            ThumbnailRequestKind.PREDICTIVE,
+            ThumbnailRequestKind.GUARD,
             "win32",
             _CancellationToken(),
         ).run()
@@ -912,10 +955,9 @@ def test_only_far_speculative_enters_windows_background_mode(tmp_path: Path) -> 
     assert entered == ["", "win32"]
 
 
-def test_predictive_prefetch_starts_two_lanes_without_sample_warmup(tmp_path: Path) -> None:
+def test_guard_prefetch_starts_two_lanes_without_sample_warmup(tmp_path: Path) -> None:
     policy = replace(
         ThumbnailRuntimePolicy.detect(platform="linux", sysconf=lambda _name: 4096),
-        prefetch_sample_size=2,
         prefetch_max_workers=2,
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
@@ -925,129 +967,120 @@ def test_predictive_prefetch_starts_two_lanes_without_sample_warmup(tmp_path: Pa
     with patch.object(service, "_start_generation") as start_generation:
         for path in paths:
             service._queue_prefetch(
-                ThumbnailRequest(path, size, ThumbnailRequestKind.PREDICTIVE, generation=0)
+                ThumbnailRequest(path, size, ThumbnailRequestKind.GUARD, generation=0)
             )
 
     assert service._prefetch_active_tasks == 2
     assert start_generation.call_count == 2
 
 
-def test_slow_l2_samples_do_not_throttle_predictive_deadline_coverage(tmp_path: Path) -> None:
-    policy = replace(
-        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
-        prefetch_sample_size=2,
+def test_guard_coverage_starts_at_fixed_initial_concurrency(tmp_path: Path) -> None:
+    policy = ThumbnailRuntimePolicy.detect(
+        platform="win32", windows_probe=lambda: 8 * 1024**3
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    service._prefetch_l2_elapsed_ms.extend([50.0, 60.0])
-    service._prefetch_l2_cancelled.extend([False, False])
 
-    service._prefetch_queued["predictive"] = ThumbnailRequest(
-        tmp_path / "predictive.jpg",
+    service._prefetch_queued["guard"] = ThumbnailRequest(
+        tmp_path / "guard.jpg",
         QSize(512, 512),
-        ThumbnailRequestKind.PREDICTIVE,
+        ThumbnailRequestKind.GUARD,
         generation=0,
     )
 
     assert service._prefetch_concurrency_target() == 2
-    assert service._prefetch_backoff_until == 0.0
 
 
-def test_visible_queue_wait_immediately_pauses_predictive_work(tmp_path: Path) -> None:
-    policy = replace(
-        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
-        visible_queue_wait_p95_ms=12.0,
+def test_guard_scheduler_has_no_queue_wait_backoff_state(tmp_path: Path) -> None:
+    policy = ThumbnailRuntimePolicy.detect(
+        platform="win32", windows_probe=lambda: 8 * 1024**3
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    service._record_visible_queue_wait(14.0)
-    service._record_visible_queue_wait(18.0)
 
-    assert service._prefetch_concurrency_target() == 0
-    assert service._prefetch_backoff_until > time.monotonic()
+    service._prefetch_queued["guard"] = ThumbnailRequest(
+        tmp_path / "guard.jpg",
+        QSize(512, 512),
+        ThumbnailRequestKind.GUARD,
+        generation=1,
+    )
+    assert service._prefetch_concurrency_target() == 2
+    assert not hasattr(service, "_prefetch_backoff_until")
 
 
-def test_light_visible_queue_keeps_one_predictive_lane(tmp_path: Path) -> None:
-    policy = replace(
-        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
-        visible_queue_wait_p95_ms=12.0,
+def test_visible_queue_starts_two_guard_lanes_on_windows(tmp_path: Path) -> None:
+    policy = ThumbnailRuntimePolicy.detect(
+        platform="win32", windows_probe=lambda: 8 * 1024**3
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    service._record_visible_queue_wait(2.0)
-    service._record_visible_queue_wait(4.0)
     service._queued_tasks["visible"] = ThumbnailRequest(
         tmp_path / "visible.jpg",
         QSize(512, 512),
         ThumbnailRequestKind.VISIBLE,
         generation=1,
     )
-    service._prefetch_queued["predictive"] = ThumbnailRequest(
-        tmp_path / "predictive.jpg",
+    service._prefetch_queued["guard"] = ThumbnailRequest(
+        tmp_path / "guard.jpg",
         QSize(512, 512),
-        ThumbnailRequestKind.PREDICTIVE,
+        ThumbnailRequestKind.GUARD,
         generation=1,
     )
 
-    assert service._prefetch_concurrency_target() == 1
+    assert service._prefetch_concurrency_target() == 2
 
 
-def test_windows_recovery_visible_queue_keeps_two_predictive_lanes(tmp_path: Path) -> None:
+def test_windows_guard_pool_starts_two_lanes_without_recovery_state(tmp_path: Path) -> None:
     policy = replace(
         ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
         prefetch_max_workers=4,
-        recovery_predictive_workers=4,
-        visible_queue_wait_p95_ms=12.0,
+        guard_initial_workers=2,
+        guard_max_workers=4,
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    service._current_recovery = True
-    service._record_visible_queue_wait(2.0)
     service._queued_tasks["visible"] = ThumbnailRequest(
         tmp_path / "visible.jpg",
         QSize(512, 512),
         ThumbnailRequestKind.VISIBLE,
         generation=1,
     )
-    service._prefetch_queued["predictive-a"] = ThumbnailRequest(
-        tmp_path / "predictive-a.jpg",
+    service._prefetch_queued["guard-a"] = ThumbnailRequest(
+        tmp_path / "guard-a.jpg",
         QSize(512, 512),
-        ThumbnailRequestKind.PREDICTIVE,
+        ThumbnailRequestKind.GUARD,
         generation=1,
     )
-    service._prefetch_queued["predictive-b"] = ThumbnailRequest(
-        tmp_path / "predictive-b.jpg",
+    service._prefetch_queued["guard-b"] = ThumbnailRequest(
+        tmp_path / "guard-b.jpg",
         QSize(512, 512),
-        ThumbnailRequestKind.PREDICTIVE,
+        ThumbnailRequestKind.GUARD,
         generation=1,
     )
 
     assert service._prefetch_concurrency_target() == 2
 
 
-def test_stale_visible_queue_wait_does_not_permanently_pause_predictive_work(
+def test_guard_pool_can_expand_after_initial_workers_are_active(
     tmp_path: Path,
 ) -> None:
-    policy = replace(
-        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
-        visible_queue_wait_p95_ms=12.0,
+    policy = ThumbnailRuntimePolicy.detect(
+        platform="win32", windows_probe=lambda: 8 * 1024**3
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    service._visible_queue_wait_ms.append((time.monotonic() - 60.0, 48.0))
-    service._prefetch_queued["predictive"] = ThumbnailRequest(
-        tmp_path / "predictive.jpg",
+    service._prefetch_queued["guard"] = ThumbnailRequest(
+        tmp_path / "guard.jpg",
         QSize(512, 512),
-        ThumbnailRequestKind.PREDICTIVE,
+        ThumbnailRequestKind.GUARD,
         generation=1,
     )
 
-    assert service._prefetch_concurrency_target() == 2
-    assert list(service._visible_queue_wait_ms) == []
+    service._guard_active_tasks = 2
+    assert service._prefetch_concurrency_target() == 4
 
 
-def test_slow_demand_after_burst_clears_backoff_and_drains_predictive_prefetch(
+def test_slow_demand_after_burst_immediately_queues_guard(
     tmp_path: Path,
 ) -> None:
     policy = replace(
         ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
         prefetch_max_workers=2,
-        visible_queue_wait_p95_ms=12.0,
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
     size = QSize(512, 512)
@@ -1055,63 +1088,29 @@ def test_slow_demand_after_burst_clears_backoff_and_drains_predictive_prefetch(
     ahead = tmp_path / "ahead.jpg"
     service._current_phase = "fast"
     service._current_intent = "continuous_burst"
-    service._prefetch_backoff_until = time.monotonic() + 60.0
-    service._record_visible_queue_wait(48.0)
-
     with patch.object(service, "_start_generation") as start_generation:
-        service.reconcile_demand(
-            visible_paths=[visible],
-            prefetch_paths=[ahead],
-            prefetch_candidates=[
-                ThumbnailPrefetchCandidate(ahead, "ahead-l2-key", "predictive")
-            ],
-            size=size,
-            generation=2,
-            phase="slow",
-            intent="slow_continuous",
+        _reconcile(service,
+            ThumbnailDemandSnapshot(
+                revision=2,
+                size=size,
+                visible_paths=(visible,),
+                guard_paths=(ahead,),
+                candidates=(
+                    ThumbnailPrefetchCandidate(ahead, "ahead-l2-key", "guard"),
+                ),
+                phase="slow",
+                intent="slow_continuous",
+            )
         )
 
-    assert service._prefetch_backoff_until == 0.0
-    assert list(service._visible_queue_wait_ms) == []
+    assert not hasattr(service, "_prefetch_backoff_until")
     assert any(
-        call.kwargs.get("kind") is ThumbnailRequestKind.PREDICTIVE
+        call.kwargs.get("kind") is ThumbnailRequestKind.GUARD
         for call in start_generation.call_args_list
     )
 
 
-def test_strategic_prefetch_cancellation_does_not_poison_cancel_rate(
-    tmp_path: Path,
-) -> None:
-    policy = replace(
-        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
-        prefetch_sample_size=2,
-        prefetch_max_workers=2,
-    )
-    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
-    size = QSize(512, 512)
-    path = tmp_path / "predictive.jpg"
-    token = _CancellationToken()
-    token.cancel("demand_replaced")
-
-    with patch.object(
-        service,
-        "_read_cached_thumbnail",
-        return_value=(None, "cancelled", 1.0),
-    ):
-        assert service._load_cached_thumbnail_only(path, size, token) is None
-
-    service._prefetch_queued["predictive"] = ThumbnailRequest(
-        path,
-        size,
-        ThumbnailRequestKind.PREDICTIVE,
-        generation=1,
-    )
-
-    assert list(service._prefetch_l2_cancelled) == []
-    assert service._prefetch_concurrency_target() == 2
-
-
-def test_direction_reversal_cancels_old_predictive_even_when_range_overlaps(
+def test_direction_reversal_keeps_active_work_when_range_still_overlaps(
     tmp_path: Path,
 ) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
@@ -1123,16 +1122,16 @@ def test_direction_reversal_cancels_old_predictive_even_when_range_overlaps(
     token = service._prefetch_active_tokens[old_key] = _CancellationToken()
     service._prefetch_pending.add(old_key)
     service._prefetch_generations[old_key] = 1
-    service._prefetch_kinds[old_key] = ThumbnailRequestKind.PREDICTIVE
+    service._prefetch_kinds[old_key] = ThumbnailRequestKind.GUARD
     service._prefetch_active_tasks = 1
-    service._predictive_active_tasks = 1
+    service._guard_active_tasks = 1
 
     with patch.object(service, "_start_generation"):
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[visible],
             prefetch_paths=[new_ahead, old_ahead],
             prefetch_candidates=[
-                ThumbnailPrefetchCandidate(new_ahead, "new", "predictive"),
+                ThumbnailPrefetchCandidate(new_ahead, "new", "guard"),
                 ThumbnailPrefetchCandidate(old_ahead, "old", "far_speculative", rank=1),
             ],
             size=size,
@@ -1141,19 +1140,8 @@ def test_direction_reversal_cancels_old_predictive_even_when_range_overlaps(
             intent="directional_dwell",
         )
 
-    assert token.cancelled()
-    assert token.cancel_reason == "demand_replaced"
-    with patch.object(service, "_start_generation") as start_generation:
-        service._handle_prefetch_failure(
-            old_ahead,
-            size,
-            "cancelled",
-            generation=1,
-            kind=ThumbnailRequestKind.PREDICTIVE,
-        )
-
-    assert old_key not in service._prefetch_pending
-    assert all(call.args[1] != old_ahead for call in start_generation.call_args_list)
+    assert not token.cancelled()
+    assert service._prefetch_generations[old_key] == 2
 
 
 def test_fast_phase_cancels_and_discards_speculative_before_pixmap(
@@ -1174,11 +1162,11 @@ def test_fast_phase_cancels_and_discards_speculative_before_pixmap(
             size,
             QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied),
             1,
-            ThumbnailRequestKind.PREDICTIVE,
+            ThumbnailRequestKind.GUARD,
         )
     )
 
-    service.reconcile_demand(
+    _reconcile(service,
         visible_paths=[],
         prefetch_paths=[path],
         size=size,
@@ -1399,7 +1387,7 @@ def test_staged_prefetch_entering_visible_is_promoted_without_duplicate_read(
     )
 
     with patch.object(service, "_start_generation") as start_generation:
-        service.reconcile_demand(
+        _reconcile(service,
             visible_paths=[path],
             prefetch_paths=[],
             size=size,
@@ -1528,12 +1516,13 @@ def test_prefetch_admission_respects_observed_pixmap_budget(
     service._memory_limit_bytes = 2 * 8 * 8 * 4
     service._add_to_memory(service._cache_key(visible[0], size), QPixmap(8, 8))
 
-    admitted = service._admit_prefetch_paths(visible, prefetch, size)
+    guard, speculative = service._admit_prefetch_paths(visible, [], prefetch, size)
 
-    assert admitted == prefetch[:1]
+    assert guard == []
+    assert speculative == prefetch[:1]
 
 
-def test_prefetch_admission_always_keeps_predictive_deadline(
+def test_prefetch_admission_keeps_nearest_guard_within_hard_budget(
     tmp_path: Path,
     qapp,
 ) -> None:
@@ -1544,38 +1533,75 @@ def test_prefetch_admission_always_keeps_predictive_deadline(
     service._memory_limit_bytes = 2 * 8 * 8 * 4
     service._add_to_memory(service._cache_key(visible[0], size), QPixmap(8, 8))
 
-    admitted = service._admit_prefetch_paths(
+    guard, speculative = service._admit_prefetch_paths(
         visible,
         prefetch,
+        [],
         size,
-        predictive_limit=3,
     )
 
-    assert admitted == prefetch[:3]
+    assert guard == prefetch[:1]
+    assert speculative == []
 
 
-def test_far_staging_does_not_block_predictive_staging(tmp_path: Path) -> None:
+def test_far_staging_does_not_block_guard_staging(tmp_path: Path) -> None:
     policy = replace(
         ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
-        predictive_staging_limit=2,
+        guard_staging_limit=2,
         far_staging_limit=1,
         staging_limit=2,
     )
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
     size = QSize(8, 8)
     far = tmp_path / "far.jpg"
-    predictive = tmp_path / "predictive.jpg"
+    guard = tmp_path / "guard.jpg"
     image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
     service._stage_result(
         ThumbnailLoadResult(far, size, image, 1, ThumbnailRequestKind.PREFETCH)
     )
 
     service._stage_result(
-        ThumbnailLoadResult(predictive, size, image, 1, ThumbnailRequestKind.PREDICTIVE)
+        ThumbnailLoadResult(guard, size, image, 1, ThumbnailRequestKind.GUARD)
     )
 
-    assert len(service._publish_predictive) == 1
-    assert service._publish_predictive[0].path == predictive
+    assert len(service._publish_guard) == 1
+    assert service._publish_guard[0].path == guard
+
+
+def test_staging_bytes_never_exceed_ten_percent_of_total_budget(
+    tmp_path: Path,
+) -> None:
+    tile_bytes = 8 * 8 * 4
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),
+        memory_limit_bytes=10 * tile_bytes,
+        guard_staging_limit=8,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+
+    service._stage_result(
+        ThumbnailLoadResult(
+            tmp_path / "first.jpg",
+            size,
+            image,
+            1,
+            ThumbnailRequestKind.GUARD,
+        )
+    )
+    service._stage_result(
+        ThumbnailLoadResult(
+            tmp_path / "second.jpg",
+            size,
+            image,
+            1,
+            ThumbnailRequestKind.GUARD,
+        )
+    )
+
+    assert service.memory_snapshot().staging_bytes <= policy.memory_limit_bytes // 10
+    assert service.memory_snapshot().live_bytes <= policy.memory_limit_bytes
 
 
 def test_windows_low_memory_pressure_clears_far_queue_and_staging(
@@ -1592,9 +1618,9 @@ def test_windows_low_memory_pressure_clears_far_queue_and_staging(
     service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
     size = QSize(8, 8)
     far = tmp_path / "far.jpg"
-    predictive = tmp_path / "predictive.jpg"
+    guard = tmp_path / "guard.jpg"
     far_key = service._cache_key(far, size)
-    predictive_key = service._cache_key(predictive, size)
+    guard_key = service._cache_key(guard, size)
     image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
     pixmap = QPixmap(8, 8)
     for index in range(4):
@@ -1605,23 +1631,23 @@ def test_windows_low_memory_pressure_clears_far_queue_and_staging(
         ThumbnailRequestKind.PREFETCH,
         generation=1,
     )
-    service._prefetch_queued[predictive_key] = ThumbnailRequest(
-        predictive,
+    service._prefetch_queued[guard_key] = ThumbnailRequest(
+        guard,
         size,
-        ThumbnailRequestKind.PREDICTIVE,
+        ThumbnailRequestKind.GUARD,
         generation=1,
     )
     service._prefetch_kinds[far_key] = ThumbnailRequestKind.PREFETCH
-    service._prefetch_kinds[predictive_key] = ThumbnailRequestKind.PREDICTIVE
-    service._prefetch_pending.update({far_key, predictive_key})
-    service._prefetch_queue.extend([far_key, predictive_key])
+    service._prefetch_kinds[guard_key] = ThumbnailRequestKind.GUARD
+    service._prefetch_pending.update({far_key, guard_key})
+    service._prefetch_queue.extend([far_key, guard_key])
     service._stage_result(ThumbnailLoadResult(far, size, image, 1, ThumbnailRequestKind.PREFETCH))
 
     service._apply_low_memory_pressure_if_needed()
 
     assert service._low_memory_pressure is True
     assert far_key not in service._prefetch_queued
-    assert predictive_key in service._prefetch_queued
+    assert guard_key in service._prefetch_queued
     assert len(service._publish_prefetch) == 0
     assert service._memory_used_bytes <= int(
         policy.memory_limit_bytes * policy.windows_low_memory_target_ratio

@@ -10,34 +10,30 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
 )
 
 
-def test_windows_uses_global_memory_probe_and_aggressive_recovery_workers() -> None:
+def test_windows_uses_bounded_budget_and_dedicated_guard_workers() -> None:
     policy = ThumbnailRuntimePolicy.detect(
         platform="win32",
         windows_probe=lambda: 16 * 1024**3,
     )
 
     assert policy.physical_memory_bytes == 16 * 1024**3
-    assert policy.memory_limit_bytes == 1536 * 1024**2
-    assert policy.prefetch_max_workers == 6
-    assert policy.far_speculative_workers == 2
+    assert policy.memory_limit_bytes == 384 * 1024**2
+    assert policy.prefetch_max_workers == 4
+    assert policy.guard_initial_workers == 2
+    assert policy.guard_max_workers == 4
+    assert policy.far_speculative_workers == 1
     assert policy.publish_max_items == 4
-    assert policy.publish_budget_ms == 5.0
+    assert policy.publish_budget_ms == 4.0
     assert policy.staging_limit == 24
-    assert policy.recovery_predictive_workers == 4
-    assert policy.recovery_publish_max_items == 8
-    assert policy.recovery_publish_budget_ms == 8.0
-    assert policy.recovery_seconds == 1.2
-    assert policy.recovery_predictive_screens == 2
-    assert policy.slow_predictive_screens == 2
-    assert policy.predictive_staging_limit == 32
+    assert policy.guard_staging_limit == 32
     assert policy.far_staging_limit == 8
     assert policy.windows_low_memory_target_ratio == 0.60
-    assert policy.predictive_miss_ttl_seconds == 0.5
+    assert policy.guard_miss_ttl_seconds == 0.5
     assert policy.l1_replacement_threshold_ratio == 0.90
     assert policy.l1_replacement_target_ratio == 0.72
 
 
-def test_linux_uses_sysconf_and_three_predictive_workers() -> None:
+def test_linux_uses_sysconf_and_two_guard_workers() -> None:
     values = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 262_144}
     policy = ThumbnailRuntimePolicy.detect(
         platform="linux",
@@ -45,10 +41,10 @@ def test_linux_uses_sysconf_and_three_predictive_workers() -> None:
     )
 
     assert policy.physical_memory_bytes == 1024**3
-    assert policy.memory_limit_bytes == 512 * 1024**2
-    assert policy.prefetch_max_workers == 3
+    assert policy.memory_limit_bytes == 128 * 1024**2
+    assert policy.prefetch_max_workers == 2
     assert policy.publish_max_items == 4
-    assert policy.publish_budget_ms == 5.0
+    assert policy.publish_budget_ms == 4.0
 
 
 def test_macos_keeps_single_speculative_worker() -> None:

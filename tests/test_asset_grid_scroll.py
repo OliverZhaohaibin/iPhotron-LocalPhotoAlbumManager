@@ -241,11 +241,12 @@ def test_slow_discrete_wheel_after_burst_settle_restores_full_prefetch(
         demand = controller.viewport_state(500)
     assert demand is not None
     assert demand.intent == "slow_continuous"
-    assert demand.recovery is True
+    assert demand.full_guard_range != demand.visible_range
+    assert demand.full_guard_last > demand.visible_last
     assert list(demand.iter_full_prefetch_rows())
 
 
-def test_slow_discrete_wheel_immediately_after_burst_enters_recovery(
+def test_slow_discrete_wheel_immediately_after_burst_rebuilds_guard(
     qapp: QApplication,
 ) -> None:
     grid = _make_grid(qapp)
@@ -280,12 +281,13 @@ def test_slow_discrete_wheel_immediately_after_burst_enters_recovery(
 
     assert demand is not None
     assert demand.intent == "slow_continuous"
-    assert demand.recovery is True
+    assert demand.full_guard_range != demand.visible_range
+    assert demand.full_guard_last > demand.visible_last
     assert demand.full_prefetch_last > demand.visible_last
     assert list(demand.iter_full_prefetch_rows())
 
 
-def test_large_programmatic_scroll_marks_landing_recovery(qapp: QApplication) -> None:
+def test_large_programmatic_scroll_keeps_full_work_visible_until_settled(qapp: QApplication) -> None:
     grid = _make_grid(qapp, rows=10_000)
     controller = grid._scroll_controller
     controller._last_value = 0
@@ -305,6 +307,10 @@ def test_large_programmatic_scroll_marks_landing_recovery(qapp: QApplication) ->
         demand = controller.viewport_state(10_000)
 
     assert demand is not None
-    assert demand.recovery is True
-    assert demand.full_prefetch_first < demand.visible_first
-    assert demand.full_prefetch_last > demand.visible_last
+    assert demand.full_prefetch_range == demand.visible_range
+
+    controller._publish_idle_state()
+    settled = controller.viewport_state(10_000)
+    assert settled is not None
+    assert settled.full_guard_first < settled.visible_first
+    assert settled.full_guard_last > settled.visible_last

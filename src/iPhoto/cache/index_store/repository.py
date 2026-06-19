@@ -1052,7 +1052,7 @@ class AssetRepository:
         first: int,
         limit: int,
     ) -> WindowResult:
-        """Return a count-free projection used by predictive thumbnail reads."""
+        """Return a count-free projection used by guard thumbnail reads."""
 
         first = max(0, int(first))
         limit = max(0, int(limit))

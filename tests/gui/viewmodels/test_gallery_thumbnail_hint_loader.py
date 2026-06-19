@@ -38,7 +38,7 @@ def test_hint_worker_returns_ordered_cache_candidates_without_dto_decode() -> No
         first=99,
         limit=3,
         ordered_rows=(101, 99),
-        predictive_rows=frozenset({101}),
+        guard_rows=frozenset({101}),
     )
 
     _HintWorker(
@@ -54,6 +54,6 @@ def test_hint_worker_returns_ordered_cache_candidates_without_dto_decode() -> No
         Path("/library/before.jpg"),
     ]
     assert [candidate.kind for candidate in results[0].candidates] == [
-        "predictive",
+        "guard",
         "far_speculative",
     ]

@@ -249,7 +249,11 @@ class GalleryCollectionStore:
             self._load_initial_window()
         else:
             self._visible_range = (0, max(0, self.INITIAL_VISIBLE_ROWS - 1))
-            self._request_async_window(*self._visible_range)
+            self._request_async_chunk(
+                *self._visible_range,
+                demand_generation=0,
+                priority=0,
+            )
         self._emit_refresh(old_total)
 
     def _load_direct_assets(self, assets: list, library_root: Path) -> None:
@@ -307,7 +311,7 @@ class GalleryCollectionStore:
             return False
         if self._window_request_handler is not None:
             self._pending_row_loads.add(row)
-            self._request_async_window(row, row, retain_when_stale=True)
+            self._request_async_window(row, row)
             return False
         if self._total_count == 0 and self._window_range is None:
             self._load_initial_window()
@@ -610,30 +614,31 @@ class GalleryCollectionStore:
             self.prioritize_rows(*demand.warm_range)
             return
 
-        chunks = []
+        chunks: list[tuple[int, float, int, int, int]] = []
         view_center = (demand.visible_first + demand.visible_last) / 2.0
-        visible_count = max(1, demand.visible_last - demand.visible_first + 1)
-        for chunk_first in range(demand.warm_first, demand.warm_last + 1, MICRO_QUERY_CHUNK):
-            chunk_last = min(demand.warm_last, chunk_first + MICRO_QUERY_CHUNK - 1)
-            if all(row in self._row_cache for row in range(chunk_first, chunk_last + 1)):
+        critical_first, critical_last = demand.full_guard_range
+        if not all(row in self._row_cache for row in range(critical_first, critical_last + 1)):
+            chunks.append((0, 0.0, 0, critical_first, critical_last))
+
+        warm_chunks: list[tuple[int, float, int, int, int]] = []
+        aligned_first = (demand.warm_first // MICRO_QUERY_CHUNK) * MICRO_QUERY_CHUNK
+        for block_first in range(aligned_first, demand.warm_last + 1, MICRO_QUERY_CHUNK):
+            block_last = min(self._total_count - 1, block_first + MICRO_QUERY_CHUNK - 1)
+            if block_last < block_first:
                 continue
-            if _ranges_intersect(
-                chunk_first,
-                chunk_last,
-                demand.visible_first,
-                demand.visible_last,
-            ):
-                priority = 0
-            elif _ranges_intersect(
-                chunk_first,
-                chunk_last,
-                demand.full_prefetch_first,
-                demand.full_prefetch_last,
-            ):
-                priority = 1
-            else:
-                priority = 2
-            chunk_center = (chunk_first + chunk_last) / 2.0
+            if all(row in self._row_cache for row in range(block_first, block_last + 1)):
+                continue
+            priority = (
+                1
+                if _ranges_intersect(
+                    block_first,
+                    block_last,
+                    demand.full_prefetch_first,
+                    demand.full_prefetch_last,
+                )
+                else 2
+            )
+            chunk_center = (block_first + block_last) / 2.0
             center_distance = abs(chunk_center - view_center)
             if demand.direction > 0:
                 direction_tie = 0 if chunk_center >= view_center else 1
@@ -641,20 +646,25 @@ class GalleryCollectionStore:
                 direction_tie = 0 if chunk_center <= view_center else 1
             else:
                 direction_tie = 0
-            urgent = (
-                demand.recovery
-                and priority <= 1
-                and center_distance <= visible_count * 2
+            warm_chunks.append(
+                (priority, center_distance, direction_tie, block_first, block_last)
             )
-            chunks.append((0 if urgent else 1, priority, center_distance, direction_tie, chunk_first, chunk_last, urgent))
 
-        for _urgent_rank, priority, _distance, _direction_tie, chunk_first, chunk_last, urgent in sorted(chunks):
+        warm_count = demand.warm_last - demand.warm_first + 1
+        block_budget = min(
+            MICRO_WARM_LIMIT // MICRO_QUERY_CHUNK,
+            max(1, (warm_count + MICRO_QUERY_CHUNK - 1) // MICRO_QUERY_CHUNK),
+        )
+        chunks.extend(sorted(warm_chunks)[:block_budget])
+
+        for priority, _distance, _direction_tie, chunk_first, chunk_last in sorted(chunks):
+            if all(row in self._row_cache for row in range(chunk_first, chunk_last + 1)):
+                continue
             self._request_async_chunk(
                 chunk_first,
                 chunk_last,
                 demand_generation=demand.generation,
                 priority=priority,
-                urgent=urgent,
             )
         self._trim_row_cache()
         emit_perf_event(
@@ -761,8 +771,6 @@ class GalleryCollectionStore:
         self,
         first: int,
         last: int,
-        *,
-        retain_when_stale: bool = False,
     ) -> None:
         if (
             self._window_request_handler is None
@@ -779,7 +787,6 @@ class GalleryCollectionStore:
             view_first + limit - 1,
             demand_generation=0,
             priority=0,
-            retain_when_stale=retain_when_stale,
         )
 
     def _request_async_chunk(
@@ -789,8 +796,6 @@ class GalleryCollectionStore:
         *,
         demand_generation: int,
         priority: int,
-        retain_when_stale: bool = False,
-        urgent: bool = False,
     ) -> None:
         if (
             self._window_request_handler is None
@@ -840,8 +845,6 @@ class GalleryCollectionStore:
                 collection_revision=self._collection_revision,
                 demand_generation=int(demand_generation),
                 priority=int(priority),
-                retain_when_stale=retain_when_stale,
-                urgent=bool(urgent),
             )
         )
 

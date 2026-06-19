@@ -19,13 +19,10 @@ MICRO_QUERY_CHUNK = 256
 MICRO_MIN_WARM_ITEMS = 300
 MICRO_SLOW_SCREENS = 6
 MICRO_MEDIUM_SCREENS = 24
-FULL_PREFETCH_RECOVERY_SCREENS = 3
-FULL_PREFETCH_SLOW_AHEAD_SCREENS = 6
-FULL_PREFETCH_SLOW_BEHIND_SCREENS = 6
-FULL_PREFETCH_DWELL_AHEAD_SCREENS = 8
-FULL_PREFETCH_DWELL_BEHIND_SCREENS = 8
-FULL_PREFETCH_IDLE_SCREENS = 6
-FULL_PREFETCH_MEDIUM_AHEAD_SCREENS = 2
+FULL_GUARD_SCREENS = 1
+FULL_SPECULATIVE_SLOW_AHEAD_SCREENS = 2
+FULL_SPECULATIVE_SLOW_BEHIND_SCREENS = 1
+FULL_SPECULATIVE_IDLE_SCREENS = 2
 
 SLOW_SCROLL_SCREENS_PER_SECOND = 2.0
 FAST_SCROLL_SCREENS_PER_SECOND = 8.0
@@ -51,7 +48,8 @@ class GalleryViewportDemand:
     prefetch_direction: int
     predicted_input_interval_ms: float | None
     display_bucket: int
-    recovery: bool
+    full_guard_first: int
+    full_guard_last: int
     full_prefetch_first: int
     full_prefetch_last: int
     warm_first: int
@@ -72,25 +70,57 @@ class GalleryViewportDemand:
         return self.full_prefetch_first, self.full_prefetch_last
 
     @property
+    def full_guard_range(self) -> tuple[int, int]:
+        return self.full_guard_first, self.full_guard_last
+
+    @property
     def warm_range(self) -> tuple[int, int]:
         return self.warm_first, self.warm_last
 
-    def iter_full_prefetch_rows(self) -> Iterator[int]:
-        """Yield full-thumbnail rows from the viewpoint outward.
+    def iter_full_guard_rows(self) -> Iterator[int]:
+        """Yield the hard one-screen guard symmetrically around the viewport."""
 
-        The demand window is symmetric around the visible viewpoint. Direction only
-        breaks ties between equally-near rows; it does not allow one side to run
-        far ahead of the other.
-        """
-
-        before = range(self.visible_first - 1, self.full_prefetch_first - 1, -1)
-        after = range(self.visible_last + 1, self.full_prefetch_last + 1)
+        before = range(self.visible_first - 1, self.full_guard_first - 1, -1)
+        after = range(self.visible_last + 1, self.full_guard_last + 1)
         if self.prefetch_direction:
             ahead = after if self.prefetch_direction > 0 else before
             behind = before if self.prefetch_direction > 0 else after
             yield from _interleave_ranges(ahead, behind, primary_count=1)
             return
         yield from _interleave_ranges(before, after, primary_count=1)
+
+    def iter_full_speculative_rows(self) -> Iterator[int]:
+        """Yield rows beyond the guard, favoring the retained scroll direction."""
+
+        before = range(self.full_guard_first - 1, self.full_prefetch_first - 1, -1)
+        after = range(self.full_guard_last + 1, self.full_prefetch_last + 1)
+        if self.prefetch_direction:
+            ahead = after if self.prefetch_direction > 0 else before
+            behind = before if self.prefetch_direction > 0 else after
+            yield from _interleave_ranges(ahead, behind, primary_count=3)
+            return
+        yield from _interleave_ranges(before, after, primary_count=1)
+
+    def iter_full_prefetch_rows(self) -> Iterator[int]:
+        """Yield the complete L2-only demand: guard first, then speculation."""
+
+        yield from self.iter_full_guard_rows()
+        yield from self.iter_full_speculative_rows()
+
+    @property
+    def scheduling_identity(self) -> tuple[object, ...]:
+        """Fields whose change requires a new resource-demand revision."""
+
+        return (
+            self.visible_range,
+            self.phase,
+            self.intent,
+            self.prefetch_direction,
+            self.display_bucket,
+            self.full_guard_range,
+            self.full_prefetch_range,
+            self.warm_range,
+        )
 
 
 def _interleave_ranges(
@@ -153,7 +183,6 @@ def build_viewport_demand(
     prefetch_direction: int | None = None,
     predicted_input_interval_ms: float | None = None,
     display_bucket: int = 512,
-    recovery: bool = False,
 ) -> GalleryViewportDemand:
     """Build bounded visible, full-prefetch, and micro-warm ranges."""
 
@@ -176,12 +205,21 @@ def build_viewport_demand(
         phase = "settled"
     visible_count = max(1, last - first + 1)
 
+    guard_before, guard_after = _full_guard_screens(
+        phase=phase,
+        intent=intent,
+        predicted_input_interval_ms=predicted_input_interval_ms,
+    )
+    full_guard_first, full_guard_last = _bounded_range(
+        row_count,
+        first - visible_count * guard_before,
+        last + visible_count * guard_after,
+    )
     before_screens, after_screens = _full_prefetch_screens(
         phase=phase,
         intent=intent,
         direction=direction,
         predicted_input_interval_ms=predicted_input_interval_ms,
-        recovery=bool(recovery),
     )
     full_prefetch_first, full_prefetch_last = _bounded_range(
         row_count,
@@ -223,7 +261,8 @@ def build_viewport_demand(
             else max(0.0, float(predicted_input_interval_ms))
         ),
         display_bucket=resolve_display_thumbnail_bucket(display_bucket),
-        recovery=bool(recovery),
+        full_guard_first=full_guard_first,
+        full_guard_last=full_guard_last,
         full_prefetch_first=full_prefetch_first,
         full_prefetch_last=full_prefetch_last,
         warm_first=warm_first,
@@ -242,45 +281,48 @@ def _bounded_range(row_count: int, first: int, last: int) -> tuple[int, int]:
     return bounded_first, bounded_last
 
 
+def _full_guard_screens(
+    *,
+    phase: GalleryScrollPhase,
+    intent: GalleryScrollIntent,
+    predicted_input_interval_ms: float | None,
+) -> tuple[int, int]:
+    """Return the hard full-thumbnail deadline around a stable viewpoint."""
+
+    del predicted_input_interval_ms
+    if phase in {"medium", "fast"} or intent == "continuous_burst":
+        return 0, 0
+    return FULL_GUARD_SCREENS, FULL_GUARD_SCREENS
+
+
 def _full_prefetch_screens(
     *,
     phase: GalleryScrollPhase,
     intent: GalleryScrollIntent,
     direction: int,
     predicted_input_interval_ms: float | None,
-    recovery: bool,
 ) -> tuple[int, int]:
-    """Return symmetric full-thumbnail screens for the current viewpoint."""
+    """Return guard plus best-effort speculative screens."""
 
-    medium_slow_input = (
-        phase == "medium"
-        and predicted_input_interval_ms is not None
-        and predicted_input_interval_ms > SCROLL_BURST_INTERVAL_MS
+    guard_before, guard_after = _full_guard_screens(
+        phase=phase,
+        intent=intent,
+        predicted_input_interval_ms=predicted_input_interval_ms,
     )
-    if recovery:
-        return FULL_PREFETCH_RECOVERY_SCREENS, FULL_PREFETCH_RECOVERY_SCREENS
-    if phase == "fast" or (intent == "continuous_burst" and not medium_slow_input):
+    if not guard_before and not guard_after:
         return 0, 0
 
     if intent == "idle":
-        return FULL_PREFETCH_IDLE_SCREENS, FULL_PREFETCH_IDLE_SCREENS
+        screens = FULL_GUARD_SCREENS + FULL_SPECULATIVE_IDLE_SCREENS
+        return screens, screens
 
-    if intent == "directional_dwell":
-        screens = max(
-            FULL_PREFETCH_DWELL_AHEAD_SCREENS,
-            FULL_PREFETCH_DWELL_BEHIND_SCREENS,
-        )
-    elif phase == "slow":
-        screens = max(
-            FULL_PREFETCH_SLOW_AHEAD_SCREENS,
-            FULL_PREFETCH_SLOW_BEHIND_SCREENS,
-        )
-    elif medium_slow_input:
-        screens = FULL_PREFETCH_MEDIUM_AHEAD_SCREENS
-    else:
-        return 0, 0
-
-    return screens, screens
+    ahead = FULL_GUARD_SCREENS + FULL_SPECULATIVE_SLOW_AHEAD_SCREENS
+    behind = FULL_GUARD_SCREENS + FULL_SPECULATIVE_SLOW_BEHIND_SCREENS
+    if direction < 0:
+        return ahead, behind
+    if direction > 0:
+        return behind, ahead
+    return behind, ahead
 
 
 def _warm_window(
@@ -311,13 +353,10 @@ __all__ = [
     "DISPLAY_THUMBNAIL_BUCKETS",
     "MICRO_QUERY_CHUNK",
     "MICRO_WARM_LIMIT",
-    "FULL_PREFETCH_RECOVERY_SCREENS",
-    "FULL_PREFETCH_SLOW_AHEAD_SCREENS",
-    "FULL_PREFETCH_SLOW_BEHIND_SCREENS",
-    "FULL_PREFETCH_DWELL_AHEAD_SCREENS",
-    "FULL_PREFETCH_DWELL_BEHIND_SCREENS",
-    "FULL_PREFETCH_IDLE_SCREENS",
-    "FULL_PREFETCH_MEDIUM_AHEAD_SCREENS",
+    "FULL_GUARD_SCREENS",
+    "FULL_SPECULATIVE_SLOW_AHEAD_SCREENS",
+    "FULL_SPECULATIVE_SLOW_BEHIND_SCREENS",
+    "FULL_SPECULATIVE_IDLE_SCREENS",
     "SCROLL_SETTLED_TIMEOUT_MS",
     "SCROLL_DIRECTIONAL_DWELL_MS",
     "SCROLL_DIRECTION_RETENTION_MS",

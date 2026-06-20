@@ -831,7 +831,7 @@ class ThumbnailCacheService(QObject):
         )
         while (
             not self._is_shutting_down
-            and self._prefetch_active_tasks < target
+            and target > 0
             and self._prefetch_queue
         ):
             key = self._prefetch_queue.popleft()
@@ -841,6 +841,13 @@ class ThumbnailCacheService(QObject):
                 self._prefetch_generations.pop(key, None)
                 self._prefetch_kinds.pop(key, None)
                 continue
+            if (
+                request.kind is ThumbnailRequestKind.GUARD
+                and self._guard_active_tasks >= target
+            ):
+                self._prefetch_queued[key] = request
+                self._prefetch_queue.appendleft(key)
+                break
             if (
                 request.kind is ThumbnailRequestKind.PREFETCH
                 and (

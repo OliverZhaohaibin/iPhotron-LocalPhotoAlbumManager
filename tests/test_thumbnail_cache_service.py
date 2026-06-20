@@ -1054,6 +1054,40 @@ def test_windows_guard_pool_starts_two_lanes_without_recovery_state(tmp_path: Pa
     assert service._prefetch_concurrency_target() == 2
 
 
+def test_active_far_prefetch_does_not_consume_guard_worker_capacity(
+    tmp_path: Path,
+) -> None:
+    policy = ThumbnailRuntimePolicy.detect(
+        platform="win32", windows_probe=lambda: 8 * 1024**3
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(512, 512)
+    service._prefetch_active_tasks = 1
+    service._far_active_tasks = 1
+    guard_keys = []
+    for name in ("guard-a", "guard-b"):
+        path = tmp_path / f"{name}.jpg"
+        key = service._cache_key(path, size)
+        guard_keys.append(key)
+        service._prefetch_pending.add(key)
+        service._prefetch_generations[key] = 1
+        service._prefetch_kinds[key] = ThumbnailRequestKind.GUARD
+        service._prefetch_queued[key] = ThumbnailRequest(
+            path,
+            size,
+            ThumbnailRequestKind.GUARD,
+            generation=1,
+        )
+        service._prefetch_queue.append(key)
+
+    with patch.object(service, "_start_generation", return_value=True) as start_generation:
+        service._drain_prefetch_queue()
+
+    assert start_generation.call_count == policy.guard_initial_workers
+    assert service._guard_active_tasks == policy.guard_initial_workers
+    assert service._far_active_tasks == 1
+
+
 def test_guard_pool_can_expand_after_initial_workers_are_active(
     tmp_path: Path,
 ) -> None:

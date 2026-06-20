@@ -199,3 +199,118 @@ def test_rapid_discrete_wheel_enters_continuous_burst(qapp: QApplication) -> Non
         assert controller.handle_wheel(_WheelEvent(angle_y=-120))
 
     assert controller._intent == "continuous_burst"
+
+
+def test_slow_discrete_wheel_after_burst_settle_restores_full_prefetch(
+    qapp: QApplication,
+) -> None:
+    grid = _make_grid(qapp)
+    controller = grid._scroll_controller
+    controller._last_input_at = 1.0
+
+    with (
+        patch.object(QApplication, "wheelScrollLines", return_value=3),
+        patch(
+            "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+            return_value=1.05,
+        ),
+    ):
+        assert controller.handle_wheel(_WheelEvent(angle_y=-120))
+
+    assert controller._intent == "continuous_burst"
+    with patch(
+        "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+        return_value=1.20,
+    ):
+        controller._publish_idle_state()
+    assert list(controller._angle_intervals_ms) == []
+
+    with (
+        patch.object(QApplication, "wheelScrollLines", return_value=3),
+        patch(
+            "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+            return_value=1.30,
+        ),
+    ):
+        assert controller.handle_wheel(_WheelEvent(angle_y=-120))
+
+    with patch(
+        "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+        return_value=1.31,
+    ):
+        demand = controller.viewport_state(500)
+    assert demand is not None
+    assert demand.intent == "slow_continuous"
+    assert demand.full_guard_range != demand.visible_range
+    assert demand.full_guard_last > demand.visible_last
+    assert list(demand.iter_full_prefetch_rows())
+
+
+def test_slow_discrete_wheel_immediately_after_burst_rebuilds_guard(
+    qapp: QApplication,
+) -> None:
+    grid = _make_grid(qapp)
+    controller = grid._scroll_controller
+    controller._last_input_at = 1.0
+
+    with (
+        patch.object(QApplication, "wheelScrollLines", return_value=3),
+        patch(
+            "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+            return_value=1.05,
+        ),
+    ):
+        assert controller.handle_wheel(_WheelEvent(angle_y=-120))
+
+    assert controller._intent == "continuous_burst"
+
+    with (
+        patch.object(QApplication, "wheelScrollLines", return_value=3),
+        patch(
+            "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+            return_value=1.30,
+        ),
+    ):
+        assert controller.handle_wheel(_WheelEvent(angle_y=-120))
+
+    with patch(
+        "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+        return_value=1.31,
+    ):
+        demand = controller.viewport_state(500)
+
+    assert demand is not None
+    assert demand.intent == "slow_continuous"
+    assert demand.full_guard_range != demand.visible_range
+    assert demand.full_guard_last > demand.visible_last
+    assert demand.full_prefetch_last > demand.visible_last
+    assert list(demand.iter_full_prefetch_rows())
+
+
+def test_large_programmatic_scroll_keeps_full_work_visible_until_settled(qapp: QApplication) -> None:
+    grid = _make_grid(qapp, rows=10_000)
+    controller = grid._scroll_controller
+    controller._last_value = 0
+    controller._last_value_at = 1.0
+    target = grid.viewport().height() * 3
+
+    with patch(
+        "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+        return_value=1.01,
+    ):
+        grid.verticalScrollBar().setValue(target)
+
+    with patch(
+        "iPhoto.gui.ui.widgets.gallery_scroll_controller.time.monotonic",
+        return_value=1.02,
+    ):
+        demand = controller.viewport_state(10_000)
+
+    assert demand is not None
+    assert demand.full_prefetch_range == demand.visible_range
+
+    controller._publish_idle_state()
+    settled = controller.viewport_state(10_000)
+    assert settled is not None
+    assert settled.full_guard_first < settled.visible_first
+    assert settled.full_guard_last > settled.visible_last

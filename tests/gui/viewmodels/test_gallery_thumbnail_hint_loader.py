@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
+    GalleryThumbnailHintLoader,
     GalleryThumbnailHintRequest,
     _HintWorker,
 )
@@ -31,13 +32,14 @@ def test_hint_worker_returns_ordered_cache_candidates_without_dto_decode() -> No
     request = GalleryThumbnailHintRequest(
         request_id=3,
         generation=7,
+        collection_revision=11,
         root=Path("/library"),
         query=AssetQuery(),
         query_service=_QueryService(),
         first=99,
         limit=3,
         ordered_rows=(101, 99),
-        predictive_rows=frozenset({101}),
+        guard_rows=frozenset({101}),
     )
 
     _HintWorker(
@@ -47,11 +49,27 @@ def test_hint_worker_returns_ordered_cache_candidates_without_dto_decode() -> No
 
     assert calls == [(Path("/library"), request.query, 99, 3)]
     assert results[0].request_id == 3
+    assert results[0].collection_revision == 11
     assert [candidate.path for candidate in results[0].candidates] == [
         Path("/library/after.jpg"),
         Path("/library/before.jpg"),
     ]
     assert [candidate.kind for candidate in results[0].candidates] == [
-        "predictive",
+        "guard",
         "far_speculative",
     ]
+
+
+def test_discard_queued_preserves_active_hint_request() -> None:
+    loader = GalleryThumbnailHintLoader()
+    active = object()
+    queued = object()
+    loader._active = True
+    loader._signals = active
+    loader._queued = queued
+
+    loader.discard_queued()
+
+    assert loader._active is True
+    assert loader._signals is active
+    assert loader._queued is None

@@ -35,6 +35,7 @@ from iPhoto.infrastructure.services.thumbnail_cache_service import (
 from iPhoto.utils.geocoding import resolve_location_name
 
 from .gallery_collection_store import GalleryCollectionStore
+from .gallery_demand_coordinator import GalleryDemandCoordinator
 from .gallery_thumbnail_hint_loader import (
     GalleryThumbnailCandidate,
     GalleryThumbnailHintLoader,
@@ -71,13 +72,13 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._pending_prioritize_range: tuple[int, int] | None = None
         self._viewport_generation = 0
         self._viewport_demand: GalleryViewportDemand | None = None
+        self._demand_coordinator = GalleryDemandCoordinator()
         self._pending_thumbnail_rows: set[int] = set()
         self._window_loader = GalleryWindowLoader(self)
         self._window_loader.resultReady.connect(self._on_window_result)
         self._window_loader.requestsDropped.connect(self._store.discard_window_requests)
         self._thumbnail_hint_loader = GalleryThumbnailHintLoader(self)
         self._thumbnail_hint_loader.resultReady.connect(self._on_thumbnail_hint_result)
-        self._thumbnail_hint_candidates: tuple[GalleryThumbnailCandidate, ...] = ()
         self._thumbnail_hint_request_id = 0
         self._pending_scan_batch_count = 0
         self._backfill_completion_source: Any | None = None
@@ -87,8 +88,12 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._prioritize_timer.timeout.connect(self._flush_pending_prioritize_rows)
         self._thumbnail_update_timer = QTimer(self)
         self._thumbnail_update_timer.setSingleShot(True)
-        self._thumbnail_update_timer.setInterval(0)
+        self._thumbnail_update_timer.setInterval(16)
         self._thumbnail_update_timer.timeout.connect(self._flush_thumbnail_updates)
+        self._micro_trim_timer = QTimer(self)
+        self._micro_trim_timer.setSingleShot(True)
+        self._micro_trim_timer.setInterval(0)
+        self._micro_trim_timer.timeout.connect(self._trim_micro_cache_step)
         self._scan_batch_timer = QTimer(self)
         self._scan_batch_timer.setSingleShot(True)
         self._scan_batch_timer.setInterval(150)
@@ -126,6 +131,19 @@ class GalleryListModelAdapter(QAbstractListModel):
     @property
     def store(self) -> GalleryCollectionStore:
         return self._store
+
+    @property
+    def _thumbnail_hint_candidates_by_row(self) -> dict[int, GalleryThumbnailCandidate]:
+        """Compatibility view; ownership lives in GalleryDemandCoordinator."""
+
+        return self._demand_coordinator.hint_candidates_by_row
+
+    @_thumbnail_hint_candidates_by_row.setter
+    def _thumbnail_hint_candidates_by_row(
+        self,
+        value: dict[int, GalleryThumbnailCandidate],
+    ) -> None:
+        self._demand_coordinator.hint_candidates_by_row = value
 
     def roleNames(self) -> Dict[int, bytes]:  # type: ignore[override]
         return role_names(super().roleNames())
@@ -289,12 +307,18 @@ class GalleryListModelAdapter(QAbstractListModel):
 
         if not isinstance(state, GalleryViewportDemand):
             return
-        self._thumb_size = QSize(state.display_bucket, state.display_bucket)
-        self._viewport_generation = state.generation
-        self._viewport_demand = state
-        self._thumbnail_hint_candidates = ()
-        self._store.reconcile_viewport_demand(state)
-        self._request_thumbnail_hints(state)
+        self._demand_coordinator.update_viewport(
+            state,
+            root=self._store.active_root() or self._store.library_root(),
+            query=self._store.current_query(),
+            collection_revision=self._current_collection_revision(),
+        )
+        effective = self._demand_coordinator.viewport or state
+        self._thumb_size = QSize(effective.display_bucket, effective.display_bucket)
+        self._viewport_generation = effective.generation
+        self._viewport_demand = effective
+        self._store.reconcile_viewport_demand(effective)
+        self._request_thumbnail_hints(effective)
         self._reconcile_full_thumbnail_demand()
 
     @Slot()
@@ -308,7 +332,14 @@ class GalleryListModelAdapter(QAbstractListModel):
     @Slot(object)
     def _on_window_result(self, result: GalleryWindowResult) -> None:
         if self._store.apply_window_result(result):
+            if self._store.row_cache_needs_trim() and not self._micro_trim_timer.isActive():
+                self._micro_trim_timer.start()
             self._reconcile_full_thumbnail_demand()
+
+    @Slot()
+    def _trim_micro_cache_step(self) -> None:
+        if self._store.trim_row_cache_step() and not self._micro_trim_timer.isActive():
+            self._micro_trim_timer.start()
 
     @Slot(object)
     def handle_scan_batch(self, batch: object) -> None:
@@ -362,7 +393,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_selection_signature = None
         self._last_window_identity_signature = None
         self._duration_cache.clear()
-        self._thumbnail_hint_candidates = ()
+        self._demand_coordinator.reset()
         self._thumbnail_hint_request_id += 1
         self._thumbnail_hint_loader.cancel_pending()
         self._store.rebind_asset_query_service(asset_query_service, library_root)
@@ -515,6 +546,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_snapshot = current_snapshot
         self._last_selection_signature = current_selection_signature
         self._last_window_identity_signature = current_window_identity
+        collection_revision_changed = (
+            old_snapshot is not None and old_snapshot[2] != current_snapshot[2]
+        )
+        if collection_revision_changed:
+            self._demand_coordinator.hint_candidates_by_row.clear()
         if (
             old_snapshot is not None
             and old_selection_signature == current_selection_signature
@@ -524,6 +560,8 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._emit_data_refresh(old_snapshot[1], current_snapshot[1])
             if self._current_row >= count:
                 self._current_row = -1
+            if collection_revision_changed:
+                self._republish_thumbnail_demand_for_collection_revision()
             return
         emit_perf_event(
             "gallery_model_reset",
@@ -535,6 +573,20 @@ class GalleryListModelAdapter(QAbstractListModel):
         self.endResetModel()
         if self._current_row >= count:
             self._current_row = -1
+        if collection_revision_changed:
+            self._republish_thumbnail_demand_for_collection_revision()
+
+    def _republish_thumbnail_demand_for_collection_revision(self) -> None:
+        """Rebuild guard demand even when the viewport itself did not move."""
+
+        demand = self._viewport_demand
+        if demand is None:
+            return
+        self._ensure_coordinator_viewport(demand)
+        effective = self._viewport_demand or demand
+        self._viewport_generation = effective.generation
+        self._request_thumbnail_hints(effective)
+        self._reconcile_full_thumbnail_demand()
 
     def _emit_data_refresh(
         self,
@@ -612,6 +664,12 @@ class GalleryListModelAdapter(QAbstractListModel):
         count = self.rowCount()
         if count <= 0:
             return
+        demand = self._viewport_demand
+        if demand is not None:
+            first = max(first, demand.visible_first)
+            last = min(last, demand.visible_last)
+            if last < first:
+                return
         first = max(0, min(first, count - 1))
         last = max(first, min(last, count - 1))
         top = self.index(first, 0)
@@ -657,15 +715,20 @@ class GalleryListModelAdapter(QAbstractListModel):
         demand = self._viewport_demand
         if demand is None:
             return
+        self._ensure_coordinator_viewport(demand)
+        demand = self._viewport_demand or demand
         visible_rows = self._store.cached_rows(*demand.visible_range)
         prefetched_rows = dict(self._store.cached_rows(*demand.full_prefetch_range))
-        cached_prefetch_paths = [
-            prefetched_rows[row].abs_path
-            for row in demand.iter_full_prefetch_rows()
-            if row in prefetched_rows
-        ]
-        hinted_paths = [candidate.path for candidate in self._thumbnail_hint_candidates]
-        prefetch_paths = list(dict.fromkeys((*hinted_paths, *cached_prefetch_paths)))
+        visible_count = demand.visible_last - demand.visible_first + 1
+        guard_rows = tuple(demand.iter_full_guard_rows())
+        speculative_rows = tuple(demand.iter_full_speculative_rows())
+        snapshot = self._demand_coordinator.build_thumbnail_snapshot(
+            visible_rows=visible_rows,
+            prefetched_rows=prefetched_rows,
+            size=self._thumb_size,
+        )
+        if snapshot is None:
+            return
         if perf_logging_enabled():
             full_count = 0
             micro_count = 0
@@ -674,7 +737,15 @@ class GalleryListModelAdapter(QAbstractListModel):
                     full_count += 1
                 elif isinstance(dto.micro_thumbnail, QImage) and not dto.micro_thumbnail.isNull():
                     micro_count += 1
-            visible_count = demand.visible_last - demand.visible_first + 1
+            guard_resident = sum(
+                1
+                for row in guard_rows
+                if row in prefetched_rows
+                and self._thumbnails.has_full_thumbnail(
+                    prefetched_rows[row].abs_path,
+                    self._thumb_size,
+                )
+            )
             emit_perf_event(
                 "gallery_visible_layers",
                 generation=demand.generation,
@@ -684,28 +755,20 @@ class GalleryListModelAdapter(QAbstractListModel):
                 micro=micro_count,
                 placeholder=max(0, visible_count - full_count - micro_count),
             )
-        self._thumbnails.reconcile_demand(
-            visible_paths=[dto.abs_path for _row, dto in visible_rows],
-            prefetch_paths=prefetch_paths,
-            size=self._thumb_size,
-            generation=demand.generation,
-            phase=demand.phase,
-            intent=demand.intent,
-            prefetch_candidates=tuple(
-                ThumbnailPrefetchCandidate(
-                    path=candidate.path,
-                    l2_cache_key=candidate.l2_cache_key,
-                    kind=candidate.kind,
-                    rank=candidate.rank,
-                )
-                for candidate in self._thumbnail_hint_candidates
-            ),
-        )
+            emit_perf_event(
+                "gallery_full_resident_before_visible",
+                generation=demand.generation,
+                guard_rows=len(guard_rows),
+                speculative_rows=len(speculative_rows),
+                resident=guard_resident,
+                guard_coverage=(guard_resident / len(guard_rows) if guard_rows else 1.0),
+            )
+        self._thumbnails.reconcile_demand(snapshot)
 
     def _request_thumbnail_hints(self, demand: GalleryViewportDemand) -> None:
         if demand.intent == "continuous_burst":
             self._thumbnail_hint_request_id += 1
-            self._thumbnail_hint_loader.cancel_pending()
+            self._thumbnail_hint_loader.discard_queued()
             return
         query = self._store.current_query()
         root = self._store.active_root() or self._store.library_root()
@@ -719,19 +782,14 @@ class GalleryListModelAdapter(QAbstractListModel):
             or not ordered_rows
         ):
             return
-        visible_count = demand.visible_last - demand.visible_first + 1
-        predictive_rows = (
-            frozenset(ordered_rows[:visible_count])
-            if demand.prefetch_direction
-            else frozenset()
-        )
+        guard_rows = frozenset(demand.iter_full_guard_rows())
         emit_perf_event(
             "gallery_thumbnail_hint_requested",
             generation=demand.generation,
             intent=demand.intent,
             first=demand.full_prefetch_first,
             limit=demand.full_prefetch_last - demand.full_prefetch_first + 1,
-            predictive_rows=len(predictive_rows),
+            guard_rows=len(guard_rows),
         )
         self._thumbnail_hint_request_id += 1
         request_id = self._thumbnail_hint_request_id
@@ -739,37 +797,118 @@ class GalleryListModelAdapter(QAbstractListModel):
             GalleryThumbnailHintRequest(
                 request_id=request_id,
                 generation=demand.generation,
+                collection_revision=self._current_collection_revision(),
                 root=Path(root),
                 query=query,
                 query_service=query_service,
                 first=demand.full_prefetch_first,
                 limit=demand.full_prefetch_last - demand.full_prefetch_first + 1,
                 ordered_rows=ordered_rows,
-                predictive_rows=predictive_rows,
+                guard_rows=guard_rows,
             )
         )
+
+    def _cached_thumbnail_candidates(
+        self,
+        ordered_rows: tuple[int, ...],
+        prefetched_rows: dict[int, AssetDTO],
+        guard_rows: frozenset[int],
+    ) -> tuple[ThumbnailPrefetchCandidate, ...]:
+        candidates: list[ThumbnailPrefetchCandidate] = []
+        for rank, row in enumerate(ordered_rows):
+            dto = prefetched_rows.get(row)
+            if dto is None:
+                continue
+            l2_key = dto.thumb_cache_key
+            if not isinstance(l2_key, str) or not l2_key.strip():
+                metadata_key = dto.metadata.get("thumb_cache_key") if dto.metadata else None
+                l2_key = metadata_key if isinstance(metadata_key, str) else None
+            if not isinstance(l2_key, str) or not l2_key.strip():
+                continue
+            candidates.append(
+                ThumbnailPrefetchCandidate(
+                    row=row,
+                    path=dto.abs_path,
+                    l2_cache_key=l2_key,
+                    kind="guard" if row in guard_rows else "far_speculative",
+                    rank=rank,
+                )
+            )
+        return tuple(candidates)
+
+    def _current_hint_candidates(
+        self,
+        ordered_rows: tuple[int, ...],
+        guard_rows: frozenset[int],
+    ) -> tuple[GalleryThumbnailCandidate, ...]:
+        return self._demand_coordinator.hint_candidates(ordered_rows, guard_rows)
+
+    def _prune_thumbnail_hint_candidates(self, demand: GalleryViewportDemand) -> None:
+        del demand
+        self._demand_coordinator.prune_hints()
 
     @Slot(object)
     def _on_thumbnail_hint_result(self, result: GalleryThumbnailHintResult) -> None:
         demand = self._viewport_demand
-        if (
-            demand is None
-            or result.error is not None
-            or result.request_id != self._thumbnail_hint_request_id
-            or result.generation != demand.generation
-            or demand.intent == "continuous_burst"
-        ):
+        if demand is None or demand.intent == "continuous_burst":
             return
-        self._thumbnail_hint_candidates = result.candidates
+        self._ensure_coordinator_viewport(demand)
+        demand = self._viewport_demand or demand
+        merged = self._demand_coordinator.merge_hint_result(result)
+        if not merged:
+            return
         emit_perf_event(
             "gallery_next_screen_hint_coverage",
             generation=result.generation,
-            predictive=sum(
-                candidate.kind == "predictive" for candidate in result.candidates
+            current_generation=demand.generation,
+            request_id=result.request_id,
+            current_request_id=self._thumbnail_hint_request_id,
+            guard=sum(
+                candidate.kind == "guard" for candidate in result.candidates
             ),
-            total=len(result.candidates),
+            total=merged,
         )
         self._reconcile_full_thumbnail_demand()
+
+    def _ensure_coordinator_viewport(self, demand: GalleryViewportDemand) -> None:
+        """Keep private/test entry points on the same coordinator-owned state."""
+
+        self._demand_coordinator.update_viewport(
+            demand,
+            root=self._store.active_root() or self._store.library_root(),
+            query=self._store.current_query(),
+            collection_revision=self._current_collection_revision(),
+        )
+        self._viewport_demand = self._demand_coordinator.viewport or demand
+
+    def _thumbnail_hint_result_matches_current_selection(
+        self,
+        result: GalleryThumbnailHintResult,
+    ) -> bool:
+        root = self._store.active_root() or self._store.library_root()
+        query = self._store.current_query()
+        if root is None:
+            return False
+        return Path(result.root) == Path(root) and result.query == query
+
+    def _thumbnail_hint_result_matches_current_revision(
+        self,
+        result: GalleryThumbnailHintResult,
+    ) -> bool:
+        current_revision = self._current_collection_revision()
+        result_revision = int(result.collection_revision)
+        return (
+            result_revision <= 0
+            or current_revision <= 0
+            or result_revision == current_revision
+        )
+
+    def _current_collection_revision(self) -> int:
+        try:
+            revision = self._store.snapshot_signature()[2]
+        except (IndexError, TypeError, AttributeError):
+            return 0
+        return revision if isinstance(revision, int) else 0
 
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)

@@ -534,8 +534,38 @@ def test_async_viewport_demand_schedules_visible_chunk_before_2000_item_warm_ran
     assert requests[0].priority == 0
     assert requests[0].view_first <= demand.visible_first <= requests[0].view_first + requests[0].limit
     assert all(request.limit <= MICRO_QUERY_CHUNK for request in requests)
-    assert sum(request.limit for request in requests) == MICRO_WARM_LIMIT
+    assert sum(request.limit for request in requests) <= MICRO_WARM_LIMIT
+    assert all(request.view_first % MICRO_QUERY_CHUNK == 0 for request in requests[1:])
     assert {request.priority for request in requests} >= {0, 2}
+
+
+def test_slow_viewport_prioritizes_exact_guard_before_aligned_warm_blocks() -> None:
+    service = _FakeQueryService([])
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=Path("."))
+    store.set_window_request_handler(requests.append)
+    store.load_selection(Path("."), query=AssetQuery())
+    store._total_count = 10_000
+    requests.clear()
+    demand = build_viewport_demand(
+        generation=6,
+        row_count=10_000,
+        visible_first=5_000,
+        visible_last=5_039,
+        direction=1,
+        screens_per_second=9.0,
+        actively_scrolling=True,
+        intent="slow_continuous",
+    )
+
+    store.reconcile_viewport_demand(demand)
+
+    assert requests
+    assert requests[0].priority == 0
+    assert requests[0].view_first == demand.full_guard_first
+    assert requests[0].view_first + requests[0].limit - 1 == demand.full_guard_last
+    assert any(request.priority == 1 for request in requests)
+    assert all(request.limit <= MICRO_QUERY_CHUNK for request in requests[1:])
 
 
 def test_async_window_results_merge_into_sparse_cache() -> None:
@@ -598,6 +628,30 @@ def test_async_window_results_merge_into_sparse_cache() -> None:
     assert store.asset_at(visible_request.view_first) is visible_dto
     assert store.asset_at(warm_request.view_first) is warm_dto
     assert len(store._row_cache) <= MICRO_WARM_LIMIT
+
+
+def test_micro_row_cache_trim_is_bounded_and_preserves_warm_rows() -> None:
+    store = GalleryCollectionStore(_FakeQueryService([]), library_root=Path("."))
+    store._total_count = MICRO_WARM_LIMIT + 100
+    store._warm_range = (MICRO_WARM_LIMIT - 100, MICRO_WARM_LIMIT + 99)
+    dto = scan_row_to_dto(
+        Path("."),
+        "asset.jpg",
+        {"id": "asset", "rel": "asset.jpg", "media_type": 0},
+    )
+    assert dto is not None
+    for row in range(MICRO_WARM_LIMIT + 64):
+        store._row_cache[row] = dto
+
+    needs_more = store.trim_row_cache_step(max_items=32, budget_ms=100.0)
+
+    assert needs_more is True
+    assert len(store._row_cache) == MICRO_WARM_LIMIT + 32
+    assert all(row in store._row_cache for row in range(MICRO_WARM_LIMIT, MICRO_WARM_LIMIT + 64))
+
+    while store.trim_row_cache_step(max_items=32, budget_ms=100.0):
+        pass
+    assert len(store._row_cache) == MICRO_WARM_LIMIT
 
 
 def test_async_window_results_from_same_revision_batch_all_merge() -> None:
@@ -765,7 +819,6 @@ def test_window_loader_keeps_explicit_row_request_when_viewport_generation_chang
         generation: int,
         *,
         demand_generation: int,
-        retain_when_stale: bool = False,
     ) -> GalleryWindowRequest:
         return GalleryWindowRequest(
             generation=generation,
@@ -776,11 +829,10 @@ def test_window_loader_keeps_explicit_row_request_when_viewport_generation_chang
             raw_first=generation * 10,
             limit=10,
             demand_generation=demand_generation,
-            retain_when_stale=retain_when_stale,
         )
 
     loader.request(request(1, demand_generation=1))
-    loader.request(request(2, demand_generation=0, retain_when_stale=True))
+    loader.request(request(2, demand_generation=0))
     loader.request(request(3, demand_generation=2))
 
     assert dropped == [1]
@@ -877,7 +929,7 @@ def test_async_ensure_row_loaded_only_schedules_window() -> None:
     assert store.ensure_row_loaded(700) is False
     assert service.read_calls == []
     assert len(requests) == 1
-    assert requests[0].retain_when_stale is True
+    assert requests[0].demand_generation == 0
 
 
 def test_async_ensure_row_loaded_emits_when_requested_row_arrives() -> None:

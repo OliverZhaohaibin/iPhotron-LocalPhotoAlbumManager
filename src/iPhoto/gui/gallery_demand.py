@@ -19,6 +19,12 @@ MICRO_QUERY_CHUNK = 256
 MICRO_MIN_WARM_ITEMS = 300
 MICRO_SLOW_SCREENS = 6
 MICRO_MEDIUM_SCREENS = 24
+FULL_GUARD_SCREENS = 2
+# The full-prefetch envelope is five screens on each side.  The nearest two
+# screens are guard demand, leaving three screens per side as speculation.
+FULL_SPECULATIVE_SLOW_AHEAD_SCREENS = 3
+FULL_SPECULATIVE_SLOW_BEHIND_SCREENS = 3
+FULL_SPECULATIVE_IDLE_SCREENS = 3
 
 SLOW_SCROLL_SCREENS_PER_SECOND = 2.0
 FAST_SCROLL_SCREENS_PER_SECOND = 8.0
@@ -44,6 +50,8 @@ class GalleryViewportDemand:
     prefetch_direction: int
     predicted_input_interval_ms: float | None
     display_bucket: int
+    full_guard_first: int
+    full_guard_last: int
     full_prefetch_first: int
     full_prefetch_last: int
     warm_first: int
@@ -64,29 +72,57 @@ class GalleryViewportDemand:
         return self.full_prefetch_first, self.full_prefetch_last
 
     @property
+    def full_guard_range(self) -> tuple[int, int]:
+        return self.full_guard_first, self.full_guard_last
+
+    @property
     def warm_range(self) -> tuple[int, int]:
         return self.warm_first, self.warm_last
 
-    def iter_full_prefetch_rows(self) -> Iterator[int]:
-        """Yield nearby full-thumbnail rows, favoring the active scroll direction."""
+    def iter_full_guard_rows(self) -> Iterator[int]:
+        """Yield the hard one-screen guard symmetrically around the viewport."""
 
-        before = range(self.visible_first - 1, self.full_prefetch_first - 1, -1)
-        after = range(self.visible_last + 1, self.full_prefetch_last + 1)
+        before = range(self.visible_first - 1, self.full_guard_first - 1, -1)
+        after = range(self.visible_last + 1, self.full_guard_last + 1)
         if self.prefetch_direction:
             ahead = after if self.prefetch_direction > 0 else before
             behind = before if self.prefetch_direction > 0 else after
-            if self.intent == "directional_dwell":
-                ahead_iter = iter(ahead)
-                for _ in range(self.visible_last - self.visible_first + 1):
-                    try:
-                        yield next(ahead_iter)
-                    except StopIteration:
-                        break
-                yield from _interleave_iterators(ahead_iter, iter(behind), primary_count=3)
-                return
+            yield from _interleave_ranges(ahead, behind, primary_count=1)
+            return
+        yield from _interleave_ranges(before, after, primary_count=1)
+
+    def iter_full_speculative_rows(self) -> Iterator[int]:
+        """Yield rows beyond the guard, favoring the retained scroll direction."""
+
+        before = range(self.full_guard_first - 1, self.full_prefetch_first - 1, -1)
+        after = range(self.full_guard_last + 1, self.full_prefetch_last + 1)
+        if self.prefetch_direction:
+            ahead = after if self.prefetch_direction > 0 else before
+            behind = before if self.prefetch_direction > 0 else after
             yield from _interleave_ranges(ahead, behind, primary_count=3)
             return
         yield from _interleave_ranges(before, after, primary_count=1)
+
+    def iter_full_prefetch_rows(self) -> Iterator[int]:
+        """Yield the complete L2-only demand: guard first, then speculation."""
+
+        yield from self.iter_full_guard_rows()
+        yield from self.iter_full_speculative_rows()
+
+    @property
+    def scheduling_identity(self) -> tuple[object, ...]:
+        """Fields whose change requires a new resource-demand revision."""
+
+        return (
+            self.visible_range,
+            self.phase,
+            self.intent,
+            self.prefetch_direction,
+            self.display_bucket,
+            self.full_guard_range,
+            self.full_prefetch_range,
+            self.warm_range,
+        )
 
 
 def _interleave_ranges(
@@ -171,11 +207,26 @@ def build_viewport_demand(
         phase = "settled"
     visible_count = max(1, last - first + 1)
 
-    full_prefetch_screens = 2 if intent != "continuous_burst" and phase in {"settled", "slow"} else 0
+    guard_before, guard_after = _full_guard_screens(
+        phase=phase,
+        intent=intent,
+        predicted_input_interval_ms=predicted_input_interval_ms,
+    )
+    full_guard_first, full_guard_last = _bounded_range(
+        row_count,
+        first - visible_count * guard_before,
+        last + visible_count * guard_after,
+    )
+    before_screens, after_screens = _full_prefetch_screens(
+        phase=phase,
+        intent=intent,
+        direction=direction,
+        predicted_input_interval_ms=predicted_input_interval_ms,
+    )
     full_prefetch_first, full_prefetch_last = _bounded_range(
         row_count,
-        first - visible_count * full_prefetch_screens,
-        last + visible_count * full_prefetch_screens,
+        first - visible_count * before_screens,
+        last + visible_count * after_screens,
     )
 
     if phase == "fast":
@@ -212,6 +263,8 @@ def build_viewport_demand(
             else max(0.0, float(predicted_input_interval_ms))
         ),
         display_bucket=resolve_display_thumbnail_bucket(display_bucket),
+        full_guard_first=full_guard_first,
+        full_guard_last=full_guard_last,
         full_prefetch_first=full_prefetch_first,
         full_prefetch_last=full_prefetch_last,
         warm_first=warm_first,
@@ -228,6 +281,50 @@ def _bounded_range(row_count: int, first: int, last: int) -> tuple[int, int]:
     bounded_first = max(0, min(first, row_count - 1))
     bounded_last = max(bounded_first, min(last, row_count - 1))
     return bounded_first, bounded_last
+
+
+def _full_guard_screens(
+    *,
+    phase: GalleryScrollPhase,
+    intent: GalleryScrollIntent,
+    predicted_input_interval_ms: float | None,
+) -> tuple[int, int]:
+    """Return the hard full-thumbnail deadline around a stable viewpoint."""
+
+    del predicted_input_interval_ms
+    if phase in {"medium", "fast"} or intent == "continuous_burst":
+        return 0, 0
+    return FULL_GUARD_SCREENS, FULL_GUARD_SCREENS
+
+
+def _full_prefetch_screens(
+    *,
+    phase: GalleryScrollPhase,
+    intent: GalleryScrollIntent,
+    direction: int,
+    predicted_input_interval_ms: float | None,
+) -> tuple[int, int]:
+    """Return guard plus best-effort speculative screens."""
+
+    guard_before, guard_after = _full_guard_screens(
+        phase=phase,
+        intent=intent,
+        predicted_input_interval_ms=predicted_input_interval_ms,
+    )
+    if not guard_before and not guard_after:
+        return 0, 0
+
+    if intent == "idle":
+        screens = FULL_GUARD_SCREENS + FULL_SPECULATIVE_IDLE_SCREENS
+        return screens, screens
+
+    ahead = FULL_GUARD_SCREENS + FULL_SPECULATIVE_SLOW_AHEAD_SCREENS
+    behind = FULL_GUARD_SCREENS + FULL_SPECULATIVE_SLOW_BEHIND_SCREENS
+    if direction < 0:
+        return ahead, behind
+    if direction > 0:
+        return behind, ahead
+    return behind, ahead
 
 
 def _warm_window(
@@ -258,6 +355,10 @@ __all__ = [
     "DISPLAY_THUMBNAIL_BUCKETS",
     "MICRO_QUERY_CHUNK",
     "MICRO_WARM_LIMIT",
+    "FULL_GUARD_SCREENS",
+    "FULL_SPECULATIVE_SLOW_AHEAD_SCREENS",
+    "FULL_SPECULATIVE_SLOW_BEHIND_SCREENS",
+    "FULL_SPECULATIVE_IDLE_SCREENS",
     "SCROLL_SETTLED_TIMEOUT_MS",
     "SCROLL_DIRECTIONAL_DWELL_MS",
     "SCROLL_DIRECTION_RETENTION_MS",

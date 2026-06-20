@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Protocol
@@ -249,7 +250,11 @@ class GalleryCollectionStore:
             self._load_initial_window()
         else:
             self._visible_range = (0, max(0, self.INITIAL_VISIBLE_ROWS - 1))
-            self._request_async_window(*self._visible_range)
+            self._request_async_chunk(
+                *self._visible_range,
+                demand_generation=0,
+                priority=0,
+            )
         self._emit_refresh(old_total)
 
     def _load_direct_assets(self, assets: list, library_root: Path) -> None:
@@ -307,7 +312,7 @@ class GalleryCollectionStore:
             return False
         if self._window_request_handler is not None:
             self._pending_row_loads.add(row)
-            self._request_async_window(row, row, retain_when_stale=True)
+            self._request_async_window(row, row)
             return False
         if self._total_count == 0 and self._window_range is None:
             self._load_initial_window()
@@ -505,6 +510,7 @@ class GalleryCollectionStore:
                 is_live=dto.is_live,
                 is_pano=dto.is_pano,
                 micro_thumbnail=dto.micro_thumbnail,
+                thumb_cache_key=dto.thumb_cache_key,
             )
             pending = _PendingMove(
                 dto=moved_dto,
@@ -609,38 +615,59 @@ class GalleryCollectionStore:
             self.prioritize_rows(*demand.warm_range)
             return
 
-        chunks = []
-        for chunk_first in range(demand.warm_first, demand.warm_last + 1, MICRO_QUERY_CHUNK):
-            chunk_last = min(demand.warm_last, chunk_first + MICRO_QUERY_CHUNK - 1)
+        chunks: list[tuple[int, float, int, int, int]] = []
+        view_center = (demand.visible_first + demand.visible_last) / 2.0
+        critical_first, critical_last = demand.full_guard_range
+        if not all(row in self._row_cache for row in range(critical_first, critical_last + 1)):
+            chunks.append((0, 0.0, 0, critical_first, critical_last))
+
+        warm_chunks: list[tuple[int, float, int, int, int]] = []
+        aligned_first = (demand.warm_first // MICRO_QUERY_CHUNK) * MICRO_QUERY_CHUNK
+        for block_first in range(aligned_first, demand.warm_last + 1, MICRO_QUERY_CHUNK):
+            block_last = min(self._total_count - 1, block_first + MICRO_QUERY_CHUNK - 1)
+            if block_last < block_first:
+                continue
+            if all(row in self._row_cache for row in range(block_first, block_last + 1)):
+                continue
+            priority = (
+                1
+                if _ranges_intersect(
+                    block_first,
+                    block_last,
+                    demand.full_prefetch_first,
+                    demand.full_prefetch_last,
+                )
+                else 2
+            )
+            chunk_center = (block_first + block_last) / 2.0
+            center_distance = abs(chunk_center - view_center)
+            if demand.direction > 0:
+                direction_tie = 0 if chunk_center >= view_center else 1
+            elif demand.direction < 0:
+                direction_tie = 0 if chunk_center <= view_center else 1
+            else:
+                direction_tie = 0
+            warm_chunks.append(
+                (priority, center_distance, direction_tie, block_first, block_last)
+            )
+
+        warm_count = demand.warm_last - demand.warm_first + 1
+        block_budget = min(
+            MICRO_WARM_LIMIT // MICRO_QUERY_CHUNK,
+            max(1, (warm_count + MICRO_QUERY_CHUNK - 1) // MICRO_QUERY_CHUNK),
+        )
+        chunks.extend(sorted(warm_chunks)[:block_budget])
+
+        for priority, _distance, _direction_tie, chunk_first, chunk_last in sorted(chunks):
             if all(row in self._row_cache for row in range(chunk_first, chunk_last + 1)):
                 continue
-            if _ranges_intersect(
-                chunk_first,
-                chunk_last,
-                demand.visible_first,
-                demand.visible_last,
-            ):
-                priority = 0
-            elif _ranges_intersect(
-                chunk_first,
-                chunk_last,
-                demand.full_prefetch_first,
-                demand.full_prefetch_last,
-            ):
-                priority = 1
-            else:
-                priority = 2
-            direction_order = chunk_first if demand.direction >= 0 else -chunk_last
-            chunks.append((priority, direction_order, chunk_first, chunk_last))
-
-        for priority, _direction_order, chunk_first, chunk_last in sorted(chunks):
             self._request_async_chunk(
                 chunk_first,
                 chunk_last,
                 demand_generation=demand.generation,
                 priority=priority,
             )
-        self._trim_row_cache()
+        self.trim_row_cache_step()
         emit_perf_event(
             "gallery_viewport_demand",
             generation=demand.generation,
@@ -693,7 +720,7 @@ class GalleryCollectionStore:
             self._row_cache[row] = dto
             self._row_cache.move_to_end(row)
         self._total_count = max(0, int(result.total_count))
-        self._trim_row_cache()
+        self.trim_row_cache_step()
         self._window_range = self._cache_window_range()
         loaded_rows = sorted(self._pending_row_loads.intersection(self._row_cache))
         completed_pending_rows = {
@@ -745,8 +772,6 @@ class GalleryCollectionStore:
         self,
         first: int,
         last: int,
-        *,
-        retain_when_stale: bool = False,
     ) -> None:
         if (
             self._window_request_handler is None
@@ -763,7 +788,6 @@ class GalleryCollectionStore:
             view_first + limit - 1,
             demand_generation=0,
             priority=0,
-            retain_when_stale=retain_when_stale,
         )
 
     def _request_async_chunk(
@@ -773,7 +797,6 @@ class GalleryCollectionStore:
         *,
         demand_generation: int,
         priority: int,
-        retain_when_stale: bool = False,
     ) -> None:
         if (
             self._window_request_handler is None
@@ -823,7 +846,6 @@ class GalleryCollectionStore:
                 collection_revision=self._collection_revision,
                 demand_generation=int(demand_generation),
                 priority=int(priority),
-                retain_when_stale=retain_when_stale,
             )
         )
 
@@ -836,9 +858,23 @@ class GalleryCollectionStore:
             return False
         return self._warm_range[0] <= row <= self._warm_range[1]
 
-    def _trim_row_cache(self) -> None:
+    def row_cache_needs_trim(self) -> bool:
         max_items = MICRO_WARM_LIMIT + (1 if self._pinned_row is not None else 0)
-        while len(self._row_cache) > max_items:
+        return len(self._row_cache) > max_items
+
+    def trim_row_cache_step(
+        self,
+        *,
+        max_items: int = 32,
+        budget_ms: float = 1.0,
+    ) -> bool:
+        """Retire stale micro DTOs in bounded GUI-thread slices."""
+
+        started = time.perf_counter()
+        evicted = 0
+        item_budget = max(1, int(max_items))
+        cache_limit = MICRO_WARM_LIMIT + (1 if self._pinned_row is not None else 0)
+        while len(self._row_cache) > cache_limit:
             evict = next(
                 (
                     row
@@ -855,6 +891,27 @@ class GalleryCollectionStore:
             if evict is None:
                 break
             self._row_cache.pop(evict, None)
+            evicted += 1
+            if evicted >= item_budget:
+                break
+            if (time.perf_counter() - started) * 1000.0 >= max(0.0, budget_ms):
+                break
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if evicted:
+            emit_perf_event(
+                "gallery_micro_trim",
+                evicted=evicted,
+                elapsed_ms=round(elapsed_ms, 3),
+                cached_count=len(self._row_cache),
+                remaining=max(0, len(self._row_cache) - cache_limit),
+            )
+        return len(self._row_cache) > cache_limit
+
+    def _trim_row_cache(self) -> None:
+        """Compatibility helper for callers/tests that require an eager trim."""
+
+        while self.trim_row_cache_step():
+            pass
 
     def _cache_window_range(self) -> tuple[int, int] | None:
         if not self._row_cache or self._total_count <= 0:

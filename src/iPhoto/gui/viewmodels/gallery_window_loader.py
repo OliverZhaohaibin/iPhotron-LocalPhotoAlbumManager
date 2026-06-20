@@ -30,7 +30,6 @@ class GalleryWindowRequest:
     collection_revision: int = 0
     demand_generation: int = 0
     priority: int = 1
-    retain_when_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +177,7 @@ class GalleryWindowLoader(QObject):
                 for queued in self._queued_requests
                 if (
                     int(queued.demand_generation) < demand_generation
-                    and not queued.retain_when_stale
+                    and int(queued.demand_generation) > 0
                 )
             ]
             self._queued_requests = [
@@ -186,7 +185,7 @@ class GalleryWindowLoader(QObject):
                 for queued in self._queued_requests
                 if (
                     int(queued.demand_generation) >= demand_generation
-                    or queued.retain_when_stale
+                    or int(queued.demand_generation) == 0
                 )
             ]
             if dropped:
@@ -240,6 +239,8 @@ class GalleryWindowLoader(QObject):
 
     def _start_next(self) -> None:
         if not self._queued_requests:
+            return
+        if self._active_generation is not None:
             return
         best_index = min(
             range(len(self._queued_requests)),

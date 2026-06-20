@@ -74,14 +74,14 @@ class RuntimeContext:
 
     settings: "SettingsManager" = field(default_factory=_create_settings_manager)
     library: "LibraryRuntimeController" = field(default_factory=_create_library_manager)
-    facade: "AppFacade" = field(default_factory=_create_facade)
     event_bus: EventBus = field(default_factory=_create_event_bus)
-    asset_runtime: "LibraryAssetRuntime" = field(default_factory=_create_asset_runtime)
     recent_albums: list[Path] = field(default_factory=list)
     defer_startup_tasks: bool = False
     translation: "TranslationManager" = field(init=False)
     theme: "ThemeManager" = field(init=False)
     library_session: "LibrarySession | None" = field(init=False, default=None)
+    _facade: "AppFacade | None" = field(init=False, default=None, repr=False)
+    _asset_runtime: "LibraryAssetRuntime | None" = field(init=False, default=None, repr=False)
     _container: "DependencyContainer | None" = field(
         init=False,
         default=None,
@@ -92,7 +92,6 @@ class RuntimeContext:
     def __post_init__(self) -> None:
         self.translation = _create_translation_manager(self.settings)
         self.theme = _create_theme_manager(self.settings)
-        self.facade.bind_library(self.library)
 
         basic_path = self.settings.get("basic_library_path")
         if isinstance(basic_path, str) and basic_path:
@@ -112,10 +111,44 @@ class RuntimeContext:
             self.resume_startup_tasks()
 
     @classmethod
-    def create(cls, *, defer_startup: bool = False) -> "RuntimeContext":
+    def create(
+        cls,
+        *,
+        defer_startup: bool = False,
+        settings: "SettingsManager | None" = None,
+    ) -> "RuntimeContext":
         """Create a runtime context for desktop startup."""
 
-        return cls(defer_startup_tasks=defer_startup)
+        if settings is None:
+            return cls(defer_startup_tasks=defer_startup)
+        return cls(settings=settings, defer_startup_tasks=defer_startup)
+
+    @property
+    def facade(self) -> "AppFacade":
+        """Create the service-heavy GUI facade on first actual use."""
+
+        if self._facade is None:
+            self._facade = _create_facade()
+            self._facade.bind_library(self.library)
+        return self._facade
+
+    @facade.setter
+    def facade(self, value: "AppFacade") -> None:
+        # Setter preserves compatibility with tests and lightweight embedders
+        # that assemble RuntimeContext through ``__new__``.
+        self._facade = value
+
+    @property
+    def asset_runtime(self) -> "LibraryAssetRuntime":
+        """Create repositories and thumbnail services on first actual use."""
+
+        if self._asset_runtime is None:
+            self._asset_runtime = _create_asset_runtime()
+        return self._asset_runtime
+
+    @asset_runtime.setter
+    def asset_runtime(self, value: "LibraryAssetRuntime") -> None:
+        self._asset_runtime = value
 
     @property
     def container(self) -> "DependencyContainer":

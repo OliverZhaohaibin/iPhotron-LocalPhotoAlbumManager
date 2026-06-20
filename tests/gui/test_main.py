@@ -212,7 +212,7 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
     assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
-def test_main_applies_pending_map_extension_before_qt_setup(monkeypatch) -> None:
+def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> None:
     call_order: list[tuple[str, object]] = []
     fake_color_role = type("ColorRole", (), {"Window": object(), "WindowText": object(), "ToolTipBase": object(), "ToolTipText": object()})
 
@@ -260,22 +260,34 @@ def test_main_applies_pending_map_extension_before_qt_setup(monkeypatch) -> None
     )
     monkeypatch.setattr("iPhoto.gui.main._prefer_local_source_tree", lambda: call_order.append(("prefer", None)))
     monkeypatch.setattr("iPhoto.gui.main._prepare_qt_runtime_for_maps", lambda: call_order.append(("prepare_maps", None)))
-    monkeypatch.setattr("iPhoto.gui.main._configure_qt_opengl_defaults", lambda: call_order.append(("configure_gl", None)))
+    monkeypatch.setattr(
+        "iPhoto.gui.main._configure_qt_opengl_defaults",
+        lambda _library_root=None: call_order.append(("configure_gl", None)),
+    )
     monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
     monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
     monkeypatch.setattr("iPhoto.gui.main.QColor", _FakeColor)
     monkeypatch.setattr("iPhoto.gui.main.Qt", type("FakeQt", (), {"GlobalColor": type("GlobalColor", (), {"black": 0})(), "ApplicationAttribute": type("ApplicationAttribute", (), {})()}))
     monkeypatch.setattr("iPhoto.gui.main.QTimer.singleShot", lambda _delay, _callback: None)
+    monkeypatch.setattr(
+        "iPhoto.settings.manager.SettingsManager",
+        lambda: type(
+            "FakeSettings",
+            (),
+            {"load": lambda self: None, "get": lambda self, *_args: None},
+        )(),
+    )
 
     class _FakeRuntimeContext:
         @staticmethod
-        def create(*, defer_startup: bool = False):
+        def create(*, defer_startup: bool = False, settings=None):
             call_order.append(("create_context", defer_startup))
             return type("FakeContext", (), {"resume_startup_tasks": lambda self: None})()
 
     class _FakeWindow:
         def __init__(self, _context):
             self.ui = type("FakeUi", (), {"sidebar": type("FakeSidebar", (), {"select_all_photos": lambda *a, **k: None})()})()
+            self.firstPainted = type("FakeSignal", (), {"connect": lambda *a, **k: None})()
 
         def show(self) -> None:
             call_order.append(("show", None))
@@ -300,5 +312,5 @@ def test_main_applies_pending_map_extension_before_qt_setup(monkeypatch) -> None
     main([])
 
     assert call_order[0][0] == "prefer"
-    assert call_order[1][0] == "apply_pending"
-    assert call_order[2][0] == "prepare_maps"
+    assert not any(name == "apply_pending" for name, _value in call_order)
+    assert call_order[1][0] == "prepare_maps"

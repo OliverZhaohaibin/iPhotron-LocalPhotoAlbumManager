@@ -7,12 +7,17 @@ import os
 import sys
 from pathlib import Path
 
+from iPhoto.bootstrap.startup_profile import mark
+
+mark("module.before_qt_imports")
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
 from iPhoto.gui.render_backend import should_configure_global_desktop_opengl
+
+mark("module.imported")
 
 _logger = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -61,9 +66,12 @@ def _bootstrap_macos_external_tool_path() -> None:
         os.environ["PATH"] = path_separator.join(merged_paths)
 
 
-def _configure_qt_shader_disk_cache() -> None:
+def _configure_qt_shader_disk_cache(library_root: Path | None = None) -> None:
     """Route shader/program caches into a managed ``.iPhoto`` work directory."""
-    configure_shader_cache_environment()
+    if library_root is None:
+        configure_shader_cache_environment()
+    else:
+        configure_shader_cache_environment(library_root=library_root)
 
 
 def _opengl_explicitly_disabled() -> bool:
@@ -155,10 +163,10 @@ def _prepare_qt_runtime_for_maps() -> None:
         os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
 
 
-def _configure_qt_opengl_defaults() -> None:
+def _configure_qt_opengl_defaults(library_root: Path | None = None) -> None:
     """Apply OpenGL context defaults required by the map widgets."""
 
-    _configure_qt_shader_disk_cache()
+    _configure_qt_shader_disk_cache(library_root)
 
     if _opengl_explicitly_disabled():
         return
@@ -185,13 +193,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _prefer_local_source_tree()
     _bootstrap_macos_external_tool_path()
-    maps_package_root = Path(__file__).resolve().parents[2] / "maps"
-    try:
-        from maps.map_sources import apply_pending_osmand_extension_install
-
-        apply_pending_osmand_extension_install(maps_package_root)
-    except Exception:
-        _logger.warning("Failed to apply pending map extension install", exc_info=True)
+    mark("main.entered")
 
     # Ensure the ``iPhoto`` root logger is configured before any component
     # creates a child logger.  ``get_logger()`` lazily attaches a StreamHandler
@@ -201,9 +203,22 @@ def main(argv: list[str] | None = None) -> int:
     _init_logging()
 
     arguments = list(sys.argv if argv is None else argv)
+    from iPhoto.settings.manager import SettingsManager
+
+    startup_settings = SettingsManager()
+    startup_settings.load()
+    mark("settings.loaded")
+    saved_library = startup_settings.get("basic_library_path")
+    saved_library_root = (
+        Path(saved_library).expanduser()
+        if isinstance(saved_library, str) and saved_library
+        else None
+    )
     _prepare_qt_runtime_for_maps()
-    _configure_qt_opengl_defaults()
+    _configure_qt_opengl_defaults(saved_library_root)
+    mark("qapplication.before_create")
     app = QApplication(arguments)
+    mark("qapplication.created")
 
     # ``QToolTip`` instances inherit ``WA_TranslucentBackground`` from the frameless
     # main window, which means they expect the application to provide an opaque fill
@@ -248,22 +263,32 @@ def main(argv: list[str] | None = None) -> int:
     app.setPalette(tooltip_palette, "QToolTip")
 
     from iPhoto.bootstrap.runtime_context import RuntimeContext
-    from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+
+    mark("runtime_context.imported")
     from iPhoto.gui.ui.main_window import MainWindow
 
+    mark("main_window.imported")
+
     # Defer heavy library binding + initial scan until the event loop is running.
-    context = RuntimeContext.create(defer_startup=True)
+    context = RuntimeContext.create(defer_startup=True, settings=startup_settings)
+    mark("runtime_context.created")
     # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)
+    mark("main_window.created")
 
     # Coordinator needs Window, Context, and Container
-    window.show()
-
     def _initialize_after_show() -> None:
+        mark("post_paint.begin")
+        # Importing the coordinator expands the controller/view-model graph;
+        # keep that work behind the OS-confirmed first paint.
+        from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+
+        mark("main_coordinator.imported")
         _logger.info("_initialize_after_show: creating MainCoordinator")
         coordinator = MainCoordinator(window, context)
         window.set_coordinator(coordinator)
         coordinator.start()
+        mark("main_coordinator.started")
         _logger.info("_initialize_after_show: coordinator started, resuming startup tasks")
         context.resume_startup_tasks()
 
@@ -274,7 +299,36 @@ def main(argv: list[str] | None = None) -> int:
         _logger.info("_initialize_after_show: selecting All Photos in sidebar")
         window.ui.sidebar.select_all_photos(emit_signal=True)
 
-    QTimer.singleShot(0, _initialize_after_show)
+    def _initialize_features_after_show() -> None:
+        # QWidget creation must remain on the GUI thread. Splitting hidden
+        # feature construction across event-loop turns keeps the newly painted
+        # window responsive while preserving the current coordinator contract.
+        from iPhoto.gui.ui.ui_main_window import FeatureKind
+
+        pending = iter(
+            (
+                FeatureKind.DETAIL,
+                FeatureKind.PREVIEW,
+                FeatureKind.PEOPLE,
+            )
+        )
+
+        def _create_next() -> None:
+            try:
+                feature = next(pending)
+            except StopIteration:
+                QTimer.singleShot(0, _initialize_after_show)
+                return
+            mark("feature.before_create", feature=feature.value)
+            window.ui.ensure_feature(feature)
+            mark("feature.created", feature=feature.value)
+            QTimer.singleShot(0, _create_next)
+
+        _create_next()
+
+    window.firstPainted.connect(lambda: QTimer.singleShot(0, _initialize_features_after_show))
+    window.show()
+    mark("main_window.show_called")
 
     return app.exec()
 

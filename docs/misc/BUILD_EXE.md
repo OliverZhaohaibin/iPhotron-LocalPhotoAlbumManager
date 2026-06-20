@@ -100,9 +100,9 @@ For the full end-to-end sync workflow, see [docs/development.md](../development.
 ## Face Recognition in Release Builds
 
 The People feature uses InsightFace for face detection and embeddings. Release
-builds must treat this as a small AI runtime rather than as a normal optional
-import, because Nuitka's standalone/no-site output will not read packages from
-the user's Python environment after packaging.
+builds must include its Python runtime even though the model data itself is an
+optional component: Nuitka's standalone/no-site output will not read packages
+from the user's Python environment after packaging.
 
 Required Python packages for the face runtime are:
 
@@ -119,17 +119,18 @@ Install them into the build environment before running Nuitka:
 python -m pip install -e ".[ai-demo]"
 ```
 
-The app may download InsightFace models at runtime when the model cache is
-missing, but release builds should still bundle the checked-in model cache when
-available. The expected source layout is:
+The app downloads InsightFace models when a People scan first needs them. An
+offline build may instead bundle the checked-in model cache. The expected
+source layout is:
 
 | Path | Purpose |
 |---|---|
 | `src/extension/models/buffalo_s/` | InsightFace `buffalo_s` ONNX model files |
 | `src/extension/models/buffalo_s.zip` | Optional upstream model pack archive |
 
-At runtime the default model root is resolved from the installed package as
-`extension/models`. It can be overridden for debugging with:
+On Windows the default writable model root is
+`%LOCALAPPDATA%\iPhoto\extensions\faces\v1\models`; InsightFace downloads into
+that versioned component directory. It can be overridden for debugging with:
 
 ```powershell
 $env:IPHOTO_FACE_MODEL_DIR = "D:\path\to\models"
@@ -138,7 +139,8 @@ $env:IPHOTO_FACE_MODEL_DIR = "D:\path\to\models"
 Important packaging rules:
 
 - Include `insightface` and `onnxruntime` in the Nuitka bundle.
-- Include `src/extension/models` as `extension/models`.
+- Include `src/extension/models` as `extension/models` only for an offline
+  `-IncludeOptionalAssets` build.
 - Do not rely on installing `insightface` or `onnxruntime` next to an already
   built executable; standalone/no-site builds will not load those packages.
 - Exclude `albumentations`, `albucore`, `pydantic`, `pydantic_core`, and
@@ -156,6 +158,7 @@ Nuitka command, include the equivalent flags:
 ```bash
 --include-package=insightface
 --include-package=onnxruntime
+# Optional for a fully offline build:
 --include-data-dir=src/extension/models=extension/models
 --nofollow-import-to=albumentations
 --nofollow-import-to=albucore
@@ -202,8 +205,15 @@ For real Windows release builds, prefer:
 powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -OutputDir build
 ```
 
-That script does three important map-extension-specific jobs before invoking
-Nuitka:
+The default is a fast-starting base package: it omits the map extension's
+roughly 45,000 files and the InsightFace model cache. Those resources are
+resolved from the per-user extension cache when their feature is used. Pass
+`-IncludeOptionalAssets` when a controlled deployment requires a completely
+offline bundle. Every build writes `nuitka-compilation-report.xml` below the
+output directory for import auditing.
+
+With `-IncludeOptionalAssets`, the script performs these map-specific jobs
+before invoking Nuitka:
 
 1. it optionally rebuilds the native runtime with
    `tools\osmand_render_helper_native\build_native_widget_msvc.ps1` when
@@ -234,6 +244,8 @@ Useful flags:
 - `-SkipNativeRuntimeSync`
   Skip the copy into `src/maps/tiles/extension/bin` if you already staged the
   runtime manually.
+- `-IncludeOptionalAssets`
+  Bundle the staged map extension and face models for a fully offline build.
 - `-ConsoleMode disable|attach|force`
   Control the Windows console mode.
 - `-Jobs <n>`

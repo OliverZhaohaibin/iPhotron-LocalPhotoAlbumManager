@@ -12,15 +12,18 @@ from iPhoto.gui.ui.theme_manager import ThemeManager, LIGHT_THEME, DARK_THEME
 from iPhoto.gui.ui.widgets.collapsible_section import CollapsibleSection
 from iPhoto.gui.ui.window_manager import RoundedWindowShell
 
-# Mock load_icon globally to avoid disk/resource access and crashes during tests
-import sys
-sys.modules["iPhoto.gui.ui.icon"] = MagicMock()
-sys.modules["iPhoto.gui.ui.icon"].load_icon = MagicMock()
-sys.modules["iPhoto.gui.ui.icons"] = MagicMock()
-sys.modules["iPhoto.gui.ui.icons"].load_icon = MagicMock()
-# Also mock the relative import inside window_theme_controller
 from iPhoto.gui.ui.controllers import window_theme_controller as wtc_module
-wtc_module.load_icon = MagicMock()
+
+
+@pytest.fixture(autouse=True)
+def mock_load_icon(monkeypatch):
+    """Avoid resource access without leaking a fake icon module to other tests."""
+
+    monkeypatch.setattr(
+        wtc_module,
+        "load_icon",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
 
 
 class StubUi(QObject):

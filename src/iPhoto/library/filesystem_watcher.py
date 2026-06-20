@@ -5,11 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..bootstrap.library_scan_service import LibraryScanService
 from ..config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 
 if TYPE_CHECKING:
-    pass
+    from ..bootstrap.library_scan_service import LibraryScanService
 
 
 class FileSystemWatcherMixin:
@@ -101,6 +100,8 @@ class FileSystemWatcherMixin:
 
         scan_service = getattr(self, "scan_service", None)
         if scan_service is None:
+            from ..bootstrap.library_scan_service import LibraryScanService
+
             scan_service = LibraryScanService(self._root)
 
         while self._watch_scan_queue:

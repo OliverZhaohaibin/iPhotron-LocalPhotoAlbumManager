@@ -27,6 +27,16 @@ def _default_shared_face_model_dir() -> Path:
     if override:
         return Path(override).expanduser()
 
+    if os.name == "nt":
+        base = Path(
+            os.environ.get("LOCALAPPDATA")
+            or Path.home() / "AppData" / "Local"
+        )
+        # InsightFace expects ``root/models/<pack>``. Keeping the cache outside
+        # Program Files makes on-demand model installation work for a standard
+        # non-administrator account and keeps models out of the base bundle.
+        return base / "iPhoto" / "extensions" / "faces" / "v1" / "models"
+
     package_root = Path(__file__).resolve().parents[2]
     return package_root / "extension" / "models"
 

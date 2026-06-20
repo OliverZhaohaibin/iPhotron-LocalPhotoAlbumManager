@@ -409,6 +409,26 @@ def test_default_pending_osmand_extension_root_uses_external_runtime_path_for_ap
     assert default_osmand_extension_root(package_root) == bundled_root.resolve()
 
 
+def test_windows_map_components_use_versioned_local_app_data(monkeypatch, tmp_path) -> None:
+    local_app_data = tmp_path / "LocalAppData"
+    package_root = tmp_path / "package" / "maps"
+    package_root.mkdir(parents=True)
+    monkeypatch.setattr("maps.map_sources.sys.platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    pending_root = default_pending_osmand_extension_root(package_root)
+
+    assert pending_root == (
+        local_app_data
+        / "iPhoto"
+        / "extensions"
+        / "maps"
+        / "v1"
+        / "tiles"
+        / "extension.pending"
+    ).resolve()
+
+
 def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_path) -> None:
     package_root = tmp_path / "maps"
     extension_root = _create_extension_assets(package_root)

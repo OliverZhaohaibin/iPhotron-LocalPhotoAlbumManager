@@ -1,51 +1,49 @@
-"""Reusable Qt widgets for the iPhoto GUI."""
+"""Lazy compatibility exports for reusable GUI widgets.
 
-from .album_sidebar import AlbumSidebar
-from .asset_delegate import AssetGridDelegate
-from .asset_grid import AssetGrid
-from .gallery_grid_view import GalleryGridView
-from .chrome_status_bar import ChromeStatusBar
-from .custom_title_bar import CustomTitleBar
-from .detail_page import DetailPageWidget
-from .filmstrip_view import FilmstripView
-from .image_viewer import ImageViewer
-from .edit_sidebar import EditSidebar
-from .face_name_overlay import FaceNameOverlayWidget
-from .gallery_page import GalleryPageWidget
-from .info_panel import InfoPanel
-from .information_popup import InformationPopup
-from .main_header import MainHeaderWidget
-from .player_bar import PlayerBar
-from .video_area import VideoArea
-from .video_trim_bar import VideoTrimBar
-from .preview_window import PreviewWindow
-from .photo_map_view import PhotoMapView
-from .live_badge import LiveBadge
-from .notification_toast import NotificationToast
-from .people_dashboard import PeopleDashboardWidget
+Importing any concrete widget module necessarily executes this package file.
+Keeping it free of eager imports prevents a basic sidebar import from loading
+map, multimedia, editing, People, and GPU feature trees before first paint.
+"""
 
-__all__ = [
-    "AlbumSidebar",
-    "AssetGridDelegate",
-    "AssetGrid",
-    "ChromeStatusBar",
-    "CustomTitleBar",
-    "GalleryGridView",
-    "GalleryPageWidget",
-    "FilmstripView",
-    "ImageViewer",
-    "EditSidebar",
-    "DetailPageWidget",
-    "FaceNameOverlayWidget",
-    "MainHeaderWidget",
-    "InfoPanel",
-    "InformationPopup",
-    "PlayerBar",
-    "VideoArea",
-    "VideoTrimBar",
-    "PreviewWindow",
-    "LiveBadge",
-    "PhotoMapView",
-    "NotificationToast",
-    "PeopleDashboardWidget",
-]
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+_EXPORTS = {
+    "AlbumSidebar": ("album_sidebar", "AlbumSidebar"),
+    "AssetGridDelegate": ("asset_delegate", "AssetGridDelegate"),
+    "AssetGrid": ("asset_grid", "AssetGrid"),
+    "GalleryGridView": ("gallery_grid_view", "GalleryGridView"),
+    "ChromeStatusBar": ("chrome_status_bar", "ChromeStatusBar"),
+    "CustomTitleBar": ("custom_title_bar", "CustomTitleBar"),
+    "DetailPageWidget": ("detail_page", "DetailPageWidget"),
+    "FilmstripView": ("filmstrip_view", "FilmstripView"),
+    "ImageViewer": ("image_viewer", "ImageViewer"),
+    "EditSidebar": ("edit_sidebar", "EditSidebar"),
+    "FaceNameOverlayWidget": ("face_name_overlay", "FaceNameOverlayWidget"),
+    "GalleryPageWidget": ("gallery_page", "GalleryPageWidget"),
+    "InfoPanel": ("info_panel", "InfoPanel"),
+    "InformationPopup": ("information_popup", "InformationPopup"),
+    "MainHeaderWidget": ("main_header", "MainHeaderWidget"),
+    "PlayerBar": ("player_bar", "PlayerBar"),
+    "VideoArea": ("video_area", "VideoArea"),
+    "VideoTrimBar": ("video_trim_bar", "VideoTrimBar"),
+    "PreviewWindow": ("preview_window", "PreviewWindow"),
+    "PhotoMapView": ("photo_map_view", "PhotoMapView"),
+    "LiveBadge": ("live_badge", "LiveBadge"),
+    "NotificationToast": ("notification_toast", "NotificationToast"),
+    "PeopleDashboardWidget": ("people_dashboard", "PeopleDashboardWidget"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    target = _EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute = target
+    value = getattr(import_module(f"{__name__}.{module_name}"), attribute)
+    globals()[name] = value
+    return value

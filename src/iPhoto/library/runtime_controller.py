@@ -18,8 +18,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThreadPool, QMutex
 
 from ..errors import LibraryUnavailableError
-from ..people.index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
-from ..people.service import PeopleService
 from ..utils.logging import get_logger
 from .tree import AlbumNode
 
@@ -33,13 +31,13 @@ from .filesystem_watcher import FileSystemWatcherMixin
 from .geo_aggregator import GeoAggregatorMixin
 from .trash_manager import TrashManagerMixin
 
-# Workers are still needed for type annotations in __init__
-from .workers.face_scan_worker import FaceScanWorker
-from .workers.scanner_worker import ScannerWorker
-
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
+    from ..people.index_coordinator import PeopleIndexCoordinator
+    from ..people.service import PeopleService
+    from .workers.face_scan_worker import FaceScanWorker
+    from .workers.scanner_worker import ScannerWorker
     from ..application.ports import (
         AssetStateServicePort,
         EditServicePort,
@@ -476,6 +474,8 @@ class LibraryRuntimeController(
         return self._location_service
 
     def _bind_people_index_coordinator(self, root: Path) -> None:
+        from ..people.index_coordinator import get_people_index_coordinator
+
         coordinator = get_people_index_coordinator(root)
         coordinator.resume()
         coordinator.snapshotCommitted.connect(

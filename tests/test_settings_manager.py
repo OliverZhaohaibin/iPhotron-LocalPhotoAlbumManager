@@ -42,6 +42,19 @@ def test_settings_manager_roundtrip(tmp_path: Path, qapp: QApplication) -> None:
     assert stored["basic_library_path"] == str(library_path)
 
 
+def test_unchanged_settings_are_not_rewritten(tmp_path: Path, monkeypatch) -> None:
+    settings_path = tmp_path / "settings.json"
+    SettingsManager(path=settings_path).load()
+    manager = SettingsManager(path=settings_path)
+    monkeypatch.setattr(
+        manager,
+        "_write",
+        lambda: pytest.fail("unchanged settings should not be rewritten"),
+    )
+
+    manager.load()
+
+
 def test_settings_manager_nested_updates_preserve_defaults(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     manager = SettingsManager(path=settings_path)

@@ -5,10 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from iPhoto.people.service import PeopleService
-
 if TYPE_CHECKING:  # pragma: no cover
     from ...library.runtime_controller import LibraryRuntimeController
+    from iPhoto.people.service import PeopleService
 
 
 def resolve_people_service(
@@ -24,8 +23,12 @@ def resolve_people_service(
     if service is not None:
         return service
     if allow_root_fallback and library_root is not None:
+        from iPhoto.people.service import PeopleService
+
         return PeopleService(Path(library_root))
     if default_to_unbound:
+        from iPhoto.people.service import PeopleService
+
         return PeopleService()
     return None
 

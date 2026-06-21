@@ -45,11 +45,12 @@ class SettingsManager(QObject):
     # Persistence
     # ------------------------------------------------------------------
     def load(self) -> None:
-        """Load the settings JSON from disk, creating defaults if missing."""
+        """Load settings, writing only when defaults or migrations changed them."""
 
         path = self._path or default_settings_path()
         self._path = path
-        if path.exists():
+        path_existed = path.exists()
+        if path_existed:
             try:
                 payload = read_json(path)
             except Exception as exc:  # pragma: no cover - defensive guard
@@ -57,10 +58,15 @@ class SettingsManager(QObject):
         else:
             payload = None
         try:
-            self._data = merge_with_defaults(payload)
+            merged = merge_with_defaults(payload)
         except Exception as exc:  # pragma: no cover - defensive guard
             raise SettingsValidationError(str(exc)) from exc
-        self._write()
+        self._data = merged
+        # Avoid an atomic JSON rewrite on every application launch. Besides
+        # being unnecessary I/O, this is particularly expensive when Windows
+        # Defender observes both the temporary file and its replacement.
+        if not path_existed or payload != merged:
+            self._write()
 
     def get(self, key: str, default: Any | None = None) -> Any:
         """Return the value for *key*, supporting dotted access for nested keys."""

@@ -7,13 +7,10 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
-from ..bootstrap.library_scan_service import LibraryScanService
 from ..utils.logging import get_logger
-from .workers.face_scan_worker import FaceScanWorker
-from .workers.scanner_worker import ScannerSignals, ScannerWorker
 
 if TYPE_CHECKING:
-    pass
+    from ..bootstrap.library_scan_service import LibraryScanService
 
 LOGGER = get_logger()
 
@@ -68,6 +65,12 @@ class ScanCoordinatorMixin:
         
         All scanned assets are written to the global database at the library root.
         """
+        # Scanner and face-recognition workers bring Pillow/NumPy and optional
+        # AI runtimes into the process. Import them only when a scan actually
+        # starts, never while constructing the first window frame.
+        from .workers.face_scan_worker import FaceScanWorker
+        from .workers.scanner_worker import ScannerSignals, ScannerWorker
+
         signals = ScannerSignals()
 
         # Check if already scanning the same root (thread-safe)

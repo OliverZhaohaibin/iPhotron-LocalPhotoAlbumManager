@@ -7,7 +7,8 @@ param(
     [ValidateSet("disable", "attach", "force")]
     [string]$ConsoleMode = "disable",
     [switch]$RebuildNativeRuntime,
-    [switch]$SkipNativeRuntimeSync
+    [switch]$SkipNativeRuntimeSync,
+    [switch]$IncludeOptionalAssets
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,7 +58,9 @@ Assert-Exists $repoRoot
 Assert-Exists $srcRoot
 Assert-Exists $mainScript
 Assert-Exists $nativeBuildScript
-Assert-Exists $faceModelDir
+if ($IncludeOptionalAssets) {
+    Assert-Exists $faceModelDir
+}
 
 if (-not $PythonExe) {
     $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
@@ -83,7 +86,7 @@ if ($RebuildNativeRuntime) {
     }
 }
 
-if (-not $SkipNativeRuntimeSync) {
+if ($IncludeOptionalAssets -and -not $SkipNativeRuntimeSync) {
     Assert-Exists $nativeDistDir
     Sync-NativeRuntime -SourceDir $nativeDistDir -DestinationDir $extensionBinDir
     Write-Host "Synced native map runtime into: $extensionBinDir"
@@ -101,6 +104,7 @@ $arguments = @(
     '--include-qt-plugins=qml,multimedia,platforms',
     "--windows-console-mode=$ConsoleMode",
     '--assume-yes-for-downloads',
+    "--report=$(Join-Path $OutputDir 'nuitka-compilation-report.xml')",
     '--nofollow-import-to=numba',
     '--nofollow-import-to=llvmlite',
     '--nofollow-import-to=albumentations',
@@ -110,6 +114,8 @@ $arguments = @(
     '--nofollow-import-to=typing_inspection',
     '--nofollow-import-to=iPhoto.tests',
     '--nofollow-import-to=pytest',
+    # Keep dynamically resolved compatibility exports available. Nuitka does
+    # not infer the module names assembled by package-level __getattr__ hooks.
     '--include-package=iPhoto',
     '--include-package=maps',
     '--include-package=OpenGL',
@@ -119,7 +125,6 @@ $arguments = @(
     '--include-package=insightface',
     '--include-package=onnxruntime',
     "--output-dir=$OutputDir",
-    "--include-data-dir=$faceModelDir=extension/models",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\resources\i18n')=iPhoto/resources/i18n",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\schemas')=iPhoto/schemas",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\icon')=iPhoto/gui/ui/icon",
@@ -138,10 +143,14 @@ $arguments = @(
     "--include-data-file=$(Join-Path $srcRoot 'iPhoto\gui\ui\widgets\video_renderer.frag.qsb')=iPhoto/gui/ui/widgets/video_renderer.frag.qsb",
     "--include-data-file=$(Join-Path $srcRoot 'iPhoto\gui\ui\widgets\video_renderer.vert')=iPhoto/gui/ui/widgets/video_renderer.vert",
     "--include-data-file=$(Join-Path $srcRoot 'iPhoto\gui\ui\widgets\video_renderer.vert.qsb')=iPhoto/gui/ui/widgets/video_renderer.vert.qsb",
-    "--include-data-dir=$(Join-Path $srcRoot 'maps\tiles')=maps/tiles",
     "--include-data-file=$(Join-Path $srcRoot 'maps\style.json')=maps/style.json",
     "--include-data-dir=$(Join-Path $srcRoot 'maps\map_widget\qml')=maps/map_widget/qml"
 )
+
+if ($IncludeOptionalAssets) {
+    $arguments += "--include-data-dir=$faceModelDir=extension/models"
+    $arguments += "--include-data-dir=$(Join-Path $srcRoot 'maps\tiles')=maps/tiles"
+}
 
 if ($IconPath) {
     Assert-Exists $IconPath

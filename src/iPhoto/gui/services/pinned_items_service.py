@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal
 
@@ -11,8 +12,10 @@ from iPhoto.application.services.pinned_state_service import (
     PinnedSidebarItem,
     PinnedSidebarStateService,
 )
-from iPhoto.people.service import PeopleService
 from iPhoto.settings.manager import SettingsManager
+
+if TYPE_CHECKING:  # pragma: no cover
+    from iPhoto.people.service import PeopleService
 
 
 class _SettingsPinnedStateRepository:
@@ -159,6 +162,8 @@ class PinnedItemsService(QObject):
             service = self._people_service_getter(library_root)
             if service is not None:
                 return service
+        from iPhoto.people.service import PeopleService
+
         return PeopleService(Path(library_root))
 
     def _emit_if_changed(self, changed: bool) -> None:

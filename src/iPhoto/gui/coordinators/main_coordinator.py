@@ -355,6 +355,7 @@ class MainCoordinator(QObject):
         self._shortcut_manager.set_edit_coordinator(self._edit)
 
         self._connect_signals()
+        window.ui.featureCreated.connect(self._on_feature_created)
 
     def start(self):
         """Start the coordinator."""
@@ -585,6 +586,26 @@ class MainCoordinator(QObject):
         # Note: keyboard shortcuts are now managed centrally by
         # AppShortcutManager, which is created in __init__ after all
         # coordinators are initialised.  Do not add QShortcut instances here.
+
+    def _on_feature_created(self, feature: str, widget: object) -> None:
+        """Wire optional pages that are constructed on their first visit."""
+
+        ui = self._window.ui
+        if feature == "map":
+            map_view = getattr(ui, "map_view", None)
+            if map_view is None:
+                return
+            map_view.set_map_runtime(self._map_runtime())
+            map_view.set_map_interaction_service(self._map_interaction_service())
+            map_view.assetActivated.connect(self._on_map_asset_activated)
+            map_view.clusterActivated.connect(self._on_cluster_activated)
+            return
+
+        if feature == "albums":
+            dashboard = getattr(ui, "albums_dashboard_page", widget)
+            dashboard.set_pinned_service(self._pinned_items_service)
+            dashboard.albumSelected.connect(self.open_album_from_path)
+            self._facade.albumCoverUpdated.connect(dashboard.update_album_cover)
 
     def _on_library_tree_updated(self) -> None:
         root = self._library_root()

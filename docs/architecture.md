@@ -191,6 +191,24 @@ It reads `ui.language`, installs the active Qt translator, exposes
 language has no bundled resource. The active stored language values are
 `system`, `de`, and `zh-CN`; the language menu presents `system` as `English`.
 
+Desktop construction deliberately has two boundaries. The process first loads
+settings, configures graphics caches, creates `QApplication`, `RuntimeContext`,
+and the lightweight main-window shell, then calls `show()`. Only after the shell
+emits `firstPainted` may startup create hidden feature bundles, import and start
+`MainCoordinator`, resume library startup tasks, or select the initial
+collection. This is an architecture constraint rather than a timer-based
+optimization: optional feature imports must not migrate back above the first
+paint boundary.
+
+`Ui_MainWindow.ensure_feature()` owns the on-demand lifetime of the detail,
+preview, Map, People, and Albums bundles. It caches each bundle and emits
+`featureCreated` so the window manager and coordinator can attach behavior to
+late-created widgets. Navigation may also call `ensure_feature()` if Map or the
+Albums dashboard was not constructed during the post-paint warm-up. On Windows,
+the QRhi-backed detail bundle is constructed before `show()` because inserting
+it into a visible top-level window can recreate the native window; preview and
+People remain post-paint. Other desktop platforms defer all three.
+
 ## Layer Boundaries
 
 ### Domain
@@ -344,18 +362,29 @@ choices.
 
 ```mermaid
 sequenceDiagram
-    participant UI as GUI/CLI
+    participant UI as GUI Shell
+    participant Paint as First Paint
     participant Runtime as RuntimeContext
+    participant Feature as Feature Bundles
+    participant Coordinator as MainCoordinator
     participant Session as LibrarySession
-    participant Surfaces as Session Surfaces
     participant Infra as Infrastructure
 
-    UI->>Runtime: open_library(root)
+    UI->>Runtime: create(defer_startup=True)
+    UI->>UI: show lightweight window shell
+    UI-->>Paint: firstPainted
+    Paint->>Feature: create deferred hidden features over event-loop turns
+    Feature->>Coordinator: import, wire, and start
+    Coordinator->>Runtime: resume_startup_tasks()
+    Runtime->>Runtime: open saved library root
     Runtime->>Session: create library-scoped session
     Session->>Infra: bind SQLite/cache/people/maps/edit adapters
-    Session->>Surfaces: expose commands and queries
-    Runtime-->>UI: session ready
+    Runtime-->>Coordinator: session surfaces ready
 ```
+
+Headless callers do not use the paint boundary; they create the same
+library-scoped session directly. Scan workers, geocoding, People AI, Qt
+Multimedia, and Maps rendering remain demand-loaded by their owning workflow.
 
 ### Open Collection
 

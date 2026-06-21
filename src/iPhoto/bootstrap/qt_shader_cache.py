@@ -33,12 +33,16 @@ def resolve_managed_work_root(
     settings_path: Path | None = None,
     *,
     home_root: Path | None = None,
+    library_root: Path | None = None,
 ) -> Path:
     """Return the managed ``.iPhoto`` directory used for startup caches."""
 
-    library_root = load_saved_basic_library_path(settings_path)
+    if library_root is None:
+        library_root = load_saved_basic_library_path(settings_path)
     if library_root is not None:
-        return ensure_work_dir(library_root)
+        candidate = Path(library_root).expanduser()
+        if candidate.exists():
+            return ensure_work_dir(candidate)
 
     user_home = home_root or Path.home()
     work_root = user_home / WORK_DIR_NAME
@@ -50,10 +54,15 @@ def resolve_shader_cache_root(
     settings_path: Path | None = None,
     *,
     home_root: Path | None = None,
+    library_root: Path | None = None,
 ) -> Path:
     """Return the managed shader cache directory."""
 
-    cache_root = resolve_managed_work_root(settings_path, home_root=home_root) / "cache" / "shaders"
+    cache_root = resolve_managed_work_root(
+        settings_path,
+        home_root=home_root,
+        library_root=library_root,
+    ) / "cache" / "shaders"
     cache_root.mkdir(parents=True, exist_ok=True)
     return cache_root
 
@@ -63,11 +72,16 @@ def configure_shader_cache_environment(
     *,
     home_root: Path | None = None,
     environ: MutableMapping[str, str] | None = None,
+    library_root: Path | None = None,
 ) -> Path:
     """Configure process env vars so shader caches stay under ``.iPhoto``."""
 
     target_env = os.environ if environ is None else environ
-    cache_root = resolve_shader_cache_root(settings_path, home_root=home_root)
+    cache_root = resolve_shader_cache_root(
+        settings_path,
+        home_root=home_root,
+        library_root=library_root,
+    )
     driver_cache_root = cache_root / "driver"
     qt3d_cache_root = cache_root / "qt3d"
     driver_cache_root.mkdir(parents=True, exist_ok=True)

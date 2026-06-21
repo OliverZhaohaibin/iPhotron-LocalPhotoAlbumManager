@@ -12,6 +12,40 @@ memory-aware thumbnail publishing.*
 
 ### Key Updates
 
+#### 🪟 Desktop Startup & On-Demand Features
+- Added a real `MainWindow.firstPainted` boundary. Hidden feature widgets and
+  the main coordinator are now created over later event-loop turns instead of
+  blocking the initial window paint.
+- Split the main UI into on-demand detail, preview, Map, People, and Albums
+  feature bundles, with `featureCreated` wiring for components that appear
+  after the window shell.
+- Kept the GPU-backed detail page in the Windows pre-show phase to avoid native
+  window recreation and a visible false first window; macOS and Linux defer it
+  for the faster first-frame path.
+- Reused the settings object loaded during early startup and avoided rewriting
+  an unchanged settings file on every launch.
+
+#### 🧩 Lazy Imports & Runtime Work
+- Replaced eager package exports and startup imports across GUI services,
+  widgets, models, scan workers, geocoding, People, and library runtime code
+  with compatibility-preserving lazy imports.
+- Deferred pending OsmAnd extension installation until the Map feature is first
+  created, and moved Windows map and face assets to versioned per-user extension
+  roots under `%LOCALAPPDATA%`.
+- Added `IPHOTO_STARTUP_PROFILE` checkpoints written as JSON Lines to the
+  platform log directory; diagnostics are disabled and perform no file I/O by
+  default.
+- Added subprocess import-boundary tests that prevent NumPy, Qt Multimedia,
+  People AI, Maps rendering, and the coordinator graph from returning to the
+  initial GUI import path.
+
+#### 📦 Windows Startup Packaging
+- Changed the Windows Nuitka script to build a smaller base package by default;
+  map data/native binaries and face models are included only with
+  `-IncludeOptionalAssets` for offline deployments.
+- Added a Nuitka compilation report for auditing frozen imports while retaining
+  explicit package inclusion required by lazy package exports.
+
 #### ⚡ Gallery Scroll Pipeline
 - Added `GalleryScrollController` for wheel-aware scroll handling, viewport
   generation tracking, scroll intent classification, and display thumbnail

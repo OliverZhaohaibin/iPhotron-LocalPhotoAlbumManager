@@ -485,10 +485,28 @@ def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
 def _default_external_osmand_extension_root() -> Path:
     data_home = os.environ.get("XDG_DATA_HOME", "").strip()
     if sys.platform == "win32":
-        base = os.environ.get("APPDATA", "").strip()
+        base = os.environ.get("LOCALAPPDATA", "").strip()
         if base:
-            return (Path(base) / "iPhoto" / "maps" / "tiles" / "extension").resolve()
-        return (Path.home() / "AppData" / "Roaming" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+            return (
+                Path(base)
+                / "iPhoto"
+                / "extensions"
+                / "maps"
+                / "v1"
+                / "tiles"
+                / "extension"
+            ).resolve()
+        return (
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "iPhoto"
+            / "extensions"
+            / "maps"
+            / "v1"
+            / "tiles"
+            / "extension"
+        ).resolve()
     if sys.platform == "darwin":
         return (Path.home() / "Library" / "Application Support" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
     if data_home:
@@ -497,6 +515,12 @@ def _default_external_osmand_extension_root() -> Path:
 
 
 def _should_use_external_osmand_extension_root(package_root: Path) -> bool:
+    # Windows downloads always belong to a per-user, versioned component
+    # directory. This avoids writes beside a standalone executable and keeps
+    # tens of thousands of map files out of Program Files/Defender's launch
+    # path. A bundled offline extension remains a read-only fallback.
+    if sys.platform == "win32":
+        return True
     if os.environ.get("APPIMAGE"):
         return True
 

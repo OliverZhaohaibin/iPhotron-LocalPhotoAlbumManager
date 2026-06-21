@@ -100,10 +100,10 @@ class FramelessWindowManager(QObject):
         self._geometry_fix_in_progress = False
         self._tracked_window_handle: QObject | None = None
         self._last_screen_dpr = 1.0
-        self._video_controls_enabled_before = self._ui.video_area.controls_enabled()
+        self._video_controls_enabled_before = False
         self._window_shell_stylesheet = self._ui.window_shell.styleSheet()
-        self._player_container_stylesheet = self._ui.player_container.styleSheet()
-        self._player_stack_stylesheet = self._ui.player_stack.styleSheet()
+        self._player_container_stylesheet = ""
+        self._player_stack_stylesheet = ""
         self._immersive_background_applied = False
         self._immersive_visibility_targets = self._build_immersive_targets()
 
@@ -118,6 +118,22 @@ class FramelessWindowManager(QObject):
         self.position_live_badge()
         self.position_resize_widgets()
         QTimer.singleShot(0, self._init_screen_tracking)
+
+    def bind_detail_feature(self) -> None:
+        """Attach immersive-window behaviour after the detail UI is created."""
+
+        video_area = getattr(self._ui, "video_area", None)
+        if video_area is None:
+            return
+        self._video_controls_enabled_before = video_area.controls_enabled()
+        self._player_container_stylesheet = self._ui.player_container.styleSheet()
+        self._player_stack_stylesheet = self._ui.player_stack.styleSheet()
+        self._ui.image_viewer.fullscreenToggleRequested.connect(self.toggle_fullscreen)
+        self._ui.image_viewer.fullscreenExitRequested.connect(self.exit_fullscreen)
+        video_area.fullscreenExitRequested.connect(self.exit_fullscreen)
+        self._ui.badge_host.installEventFilter(self)
+        self._immersive_visibility_targets = self._build_immersive_targets()
+        self.position_live_badge()
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -185,10 +201,13 @@ class FramelessWindowManager(QObject):
     def position_live_badge(self) -> None:
         """Keep the Live badge pinned to the player corner."""
 
-        if self._ui.badge_host is None:
+        if getattr(self._ui, "badge_host", None) is None:
             return
-        self._ui.live_badge.move(15, 15)
-        self._ui.live_badge.raise_()
+        live_badge = getattr(self._ui, "live_badge", None)
+        if live_badge is None:
+            return
+        live_badge.move(15, 15)
+        live_badge.raise_()
 
     def position_resize_widgets(self) -> None:
         """Pin the resize icon and grip to the shell's lower-right corner."""
@@ -360,7 +379,7 @@ class FramelessWindowManager(QObject):
             if self._handle_title_bar_drag(event):
                 return True
 
-        if watched is self._ui.badge_host and event.type() in {
+        if watched is getattr(self._ui, "badge_host", None) and event.type() in {
             QEvent.Type.Resize,
             QEvent.Type.Move,
             QEvent.Type.Show,
@@ -405,16 +424,15 @@ class FramelessWindowManager(QObject):
         self._ui.minimize_button.clicked.connect(self._window.showMinimized)
         self._ui.close_button.clicked.connect(self._window.close)
         self._ui.fullscreen_button.clicked.connect(self.toggle_fullscreen)
-        self._ui.image_viewer.fullscreenToggleRequested.connect(self.toggle_fullscreen)
-        self._ui.image_viewer.fullscreenExitRequested.connect(self.exit_fullscreen)
-        self._ui.video_area.fullscreenExitRequested.connect(self.exit_fullscreen)
 
     def _configure_drag_sources(self) -> None:
         self._drag_sources = {self._ui.title_bar, self._ui.window_title_label}
         for source in self._drag_sources:
             source.installEventFilter(self)
 
-        self._ui.badge_host.installEventFilter(self)
+        badge_host = getattr(self._ui, "badge_host", None)
+        if badge_host is not None:
+            badge_host.installEventFilter(self)
 
     def _init_screen_tracking(self) -> None:
         handle = self._window.windowHandle()
@@ -713,8 +731,8 @@ class FramelessWindowManager(QObject):
             self._ui.status_bar,
             self._ui.sidebar,
             self._ui.window_chrome,
-            self._ui.detail_chrome_container,
-            self._ui.filmstrip_view,
+            getattr(self._ui, "detail_chrome_container", None),
+            getattr(self._ui, "filmstrip_view", None),
         )
         return tuple(widget for widget in candidates if widget is not None)
 

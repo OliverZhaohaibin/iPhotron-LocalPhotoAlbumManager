@@ -85,6 +85,9 @@ class ViewRouter(QObject):
 
     def show_map(self):
         """Switch to the Map view."""
+        if self._map_idx == -1:
+            map_page = self._ui.ensure_feature("map")
+            self._map_idx = self._stack.indexOf(map_page)
         if self._map_idx != -1 and self._stack.currentIndex() != self._map_idx:
             self._stack.setCurrentIndex(self._map_idx)
             self.mapViewShown.emit()
@@ -121,6 +124,9 @@ class ViewRouter(QObject):
 
     def show_albums_dashboard(self):
         """Switch to the Albums Dashboard."""
+        if self._dashboard_idx == -1:
+            dashboard = self._ui.ensure_feature("albums")
+            self._dashboard_idx = self._stack.indexOf(dashboard)
         if self._dashboard_idx != -1 and self._stack.currentIndex() != self._dashboard_idx:
             self._stack.setCurrentIndex(self._dashboard_idx)
             self.dashboardViewShown.emit()

@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import Qt
 
 from iPhoto.gui.main import (
     _bootstrap_macos_external_tool_path,
     _configure_qt_opengl_defaults,
     _prepare_qt_runtime_for_maps,
+    _startup_feature_plan,
 )
 
 
@@ -212,7 +214,199 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
     assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
-def test_main_applies_pending_map_extension_before_qt_setup(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    (
+        ("win32", (("detail",), ("preview", "people"))),
+        ("darwin", ((), ("detail", "preview", "people"))),
+        ("linux", ((), ("detail", "preview", "people"))),
+    ),
+)
+def test_startup_feature_plan_keeps_windows_rhi_detail_before_show(
+    platform: str,
+    expected: tuple[tuple[str, ...], tuple[str, ...]],
+) -> None:
+    assert _startup_feature_plan(platform) == expected
+
+
+@pytest.mark.parametrize("platform", ("win32", "linux"))
+def test_main_creates_required_features_in_platform_safe_order(
+    monkeypatch,
+    platform: str,
+) -> None:
+    call_order: list[str] = []
+    profile_marks: list[str] = []
+    fake_color_role = type(
+        "ColorRole",
+        (),
+        {
+            "Window": object(),
+            "WindowText": object(),
+            "ToolTipBase": object(),
+            "ToolTipText": object(),
+        },
+    )
+
+    class _FakeColor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def isValid(self) -> bool:
+            return True
+
+        def setAlpha(self, _value: int) -> None:
+            return None
+
+        def lightness(self) -> int:
+            return 255
+
+    class _FakePalette:
+        ColorRole = fake_color_role
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def color(self, _role):
+            return _FakeColor()
+
+        def setColor(self, *_args, **_kwargs) -> None:
+            return None
+
+    class _FakeApp:
+        def __init__(self, _args) -> None:
+            return None
+
+        def palette(self):
+            return _FakePalette()
+
+        def setPalette(self, *_args, **_kwargs) -> None:
+            return None
+
+        def exec(self) -> int:
+            return 0
+
+    class _FakeSignal:
+        def __init__(self) -> None:
+            self._callback = None
+
+        def connect(self, callback) -> None:
+            self._callback = callback
+
+        def emit(self) -> None:
+            assert self._callback is not None
+            self._callback()
+
+    class _FakeUi:
+        sidebar = type(
+            "FakeSidebar",
+            (),
+            {"select_all_photos": lambda *args, **kwargs: call_order.append("select")},
+        )()
+
+        def ensure_feature(self, feature: str) -> None:
+            call_order.append(f"feature:{feature}")
+
+    class _FakeWindow:
+        def __init__(self, _context) -> None:
+            self.ui = _FakeUi()
+            self.firstPainted = _FakeSignal()
+
+        def show(self) -> None:
+            call_order.append("show")
+            self.firstPainted.emit()
+
+        def set_coordinator(self, _coordinator) -> None:
+            call_order.append("set_coordinator")
+
+    class _FakeRuntimeContext:
+        @staticmethod
+        def create(*, defer_startup: bool = False, settings=None):
+            return type(
+                "FakeContext",
+                (),
+                {"resume_startup_tasks": lambda self: call_order.append("resume")},
+            )()
+
+    class _FakeCoordinator:
+        def __init__(self, _window, _context) -> None:
+            call_order.append("coordinator:create")
+
+        def start(self) -> None:
+            call_order.append("coordinator:start")
+
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", platform)
+    monkeypatch.setattr(
+        "iPhoto.gui.main.mark",
+        lambda stage, **_details: profile_marks.append(stage),
+    )
+    monkeypatch.setattr("iPhoto.gui.main._prefer_local_source_tree", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._prepare_qt_runtime_for_maps", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._configure_qt_opengl_defaults", lambda _root=None: None)
+    monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
+    monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
+    monkeypatch.setattr("iPhoto.gui.main.QColor", _FakeColor)
+    monkeypatch.setattr(
+        "iPhoto.gui.main.Qt",
+        type(
+            "FakeQt",
+            (),
+            {
+                "GlobalColor": type("GlobalColor", (), {"black": 0})(),
+                "ApplicationAttribute": type("ApplicationAttribute", (), {})(),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "iPhoto.gui.main.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+    monkeypatch.setattr(
+        "iPhoto.settings.manager.SettingsManager",
+        lambda: type(
+            "FakeSettings",
+            (),
+            {"load": lambda self: None, "get": lambda self, *_args: None},
+        )(),
+    )
+    monkeypatch.setattr("iPhoto.utils.logging.get_logger", lambda: None)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "iPhoto.bootstrap.runtime_context",
+        type("Mod", (), {"RuntimeContext": _FakeRuntimeContext})(),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "iPhoto.gui.coordinators.main_coordinator",
+        type("Mod", (), {"MainCoordinator": _FakeCoordinator})(),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "iPhoto.gui.ui.main_window",
+        type("Mod", (), {"MainWindow": _FakeWindow})(),
+    )
+
+    from iPhoto.gui.main import main
+
+    assert main([]) == 0
+
+    detail_index = call_order.index("feature:detail")
+    show_index = call_order.index("show")
+    preview_index = call_order.index("feature:preview")
+    people_index = call_order.index("feature:people")
+    coordinator_index = call_order.index("coordinator:create")
+
+    if platform == "win32":
+        assert detail_index < show_index
+        assert "windows_detail.before_create" in profile_marks
+        assert "windows_detail.created" in profile_marks
+    else:
+        assert show_index < detail_index
+        assert "windows_detail.before_create" not in profile_marks
+        assert "windows_detail.created" not in profile_marks
+    assert show_index < preview_index < people_index < coordinator_index
+
+
+def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> None:
     call_order: list[tuple[str, object]] = []
     fake_color_role = type("ColorRole", (), {"Window": object(), "WindowText": object(), "ToolTipBase": object(), "ToolTipText": object()})
 
@@ -260,22 +454,34 @@ def test_main_applies_pending_map_extension_before_qt_setup(monkeypatch) -> None
     )
     monkeypatch.setattr("iPhoto.gui.main._prefer_local_source_tree", lambda: call_order.append(("prefer", None)))
     monkeypatch.setattr("iPhoto.gui.main._prepare_qt_runtime_for_maps", lambda: call_order.append(("prepare_maps", None)))
-    monkeypatch.setattr("iPhoto.gui.main._configure_qt_opengl_defaults", lambda: call_order.append(("configure_gl", None)))
+    monkeypatch.setattr(
+        "iPhoto.gui.main._configure_qt_opengl_defaults",
+        lambda _library_root=None: call_order.append(("configure_gl", None)),
+    )
     monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
     monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
     monkeypatch.setattr("iPhoto.gui.main.QColor", _FakeColor)
     monkeypatch.setattr("iPhoto.gui.main.Qt", type("FakeQt", (), {"GlobalColor": type("GlobalColor", (), {"black": 0})(), "ApplicationAttribute": type("ApplicationAttribute", (), {})()}))
     monkeypatch.setattr("iPhoto.gui.main.QTimer.singleShot", lambda _delay, _callback: None)
+    monkeypatch.setattr(
+        "iPhoto.settings.manager.SettingsManager",
+        lambda: type(
+            "FakeSettings",
+            (),
+            {"load": lambda self: None, "get": lambda self, *_args: None},
+        )(),
+    )
 
     class _FakeRuntimeContext:
         @staticmethod
-        def create(*, defer_startup: bool = False):
+        def create(*, defer_startup: bool = False, settings=None):
             call_order.append(("create_context", defer_startup))
             return type("FakeContext", (), {"resume_startup_tasks": lambda self: None})()
 
     class _FakeWindow:
         def __init__(self, _context):
             self.ui = type("FakeUi", (), {"sidebar": type("FakeSidebar", (), {"select_all_photos": lambda *a, **k: None})()})()
+            self.firstPainted = type("FakeSignal", (), {"connect": lambda *a, **k: None})()
 
         def show(self) -> None:
             call_order.append(("show", None))
@@ -300,5 +506,5 @@ def test_main_applies_pending_map_extension_before_qt_setup(monkeypatch) -> None
     main([])
 
     assert call_order[0][0] == "prefer"
-    assert call_order[1][0] == "apply_pending"
-    assert call_order[2][0] == "prepare_maps"
+    assert not any(name == "apply_pending" for name, _value in call_order)
+    assert call_order[1][0] == "prepare_maps"

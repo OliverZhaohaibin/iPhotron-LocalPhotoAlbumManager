@@ -884,6 +884,58 @@ See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and
 
 ---
 
+## Desktop Startup Performance
+
+The GUI startup contract is “paint the window shell, then warm optional
+features.” Do not use a zero-delay timer as a substitute for the boundary:
+startup work must be connected to `MainWindow.firstPainted`. Widget creation
+still belongs on the GUI thread and should be split across event-loop turns.
+
+Keep imports above that boundary narrow. In particular, importing
+`iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the People
+pipeline, map rendering, asset-import services, edit-session models, or
+`MainCoordinator`. Package-level convenience imports in startup-reachable
+packages should use `__getattr__` lazy exports, while imports needed only by a
+scan or optional feature should live at the call site. Preserve public names so
+callers and test patch targets continue to work.
+
+Enable checkpoint logging for a local diagnostic run with:
+
+```bash
+IPHOTO_STARTUP_PROFILE=1 iphoto-gui
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:IPHOTO_STARTUP_PROFILE = "1"
+iphoto-gui
+```
+
+The profiler appends JSON Lines records containing `stage`, `elapsed_ms`,
+`pid`, and wall time. Logs are written to:
+
+- Windows: `%LOCALAPPDATA%\iPhoto\logs\startup.jsonl`
+- macOS: `~/Library/Logs/iPhoto/logs/startup.jsonl`
+- Linux: `${XDG_STATE_HOME:-~/.local/state}/iPhoto/logs/startup.jsonl`
+
+Unset the variable for normal launches; disabled profiling does not create a
+file. Compare at least `main_window.show_called`, `main_window.first_paint`,
+feature creation, and `main_coordinator.started` when investigating a
+regression.
+
+Run the focused startup guardrails with:
+
+```bash
+python -m pytest tests/gui/test_startup_import_boundary.py tests/gui/test_main.py
+```
+
+On Windows, also verify that startup shows one stable top-level window. The
+detail feature intentionally remains pre-show there because adding its QRhi
+widgets after the window is visible can recreate the native window.
+
+---
+
 ## Running Tests
 
 ```bash

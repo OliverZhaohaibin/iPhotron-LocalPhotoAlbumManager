@@ -101,3 +101,42 @@ def test_view_router_no_emit_when_view_unchanged(qtbot):
 
     assert stack.currentIndex() == stack.indexOf(gallery_page)
     assert spy.count() == 0
+
+
+@pytest.mark.parametrize(
+    ("feature", "method_name", "signal_name"),
+    [
+        ("map", "show_map", "mapViewShown"),
+        ("albums", "show_albums_dashboard", "dashboardViewShown"),
+    ],
+)
+def test_view_router_creates_optional_page_on_first_visit(
+    qtbot, feature, method_name, signal_name
+):
+    gallery_page = object()
+    detail_page = object()
+    optional_page = object()
+    stack = FakeStack([gallery_page, detail_page])
+    calls = []
+
+    class LazyUi:
+        def __init__(self):
+            self.view_stack = stack
+            self.gallery_page = gallery_page
+            self.detail_page = detail_page
+
+        def ensure_feature(self, requested):
+            calls.append(requested)
+            if optional_page not in stack._widgets:
+                stack._widgets.append(optional_page)
+            return optional_page
+
+    router = ViewRouter(LazyUi())
+    spy = QSignalSpy(getattr(router, signal_name))
+
+    getattr(router, method_name)()
+    getattr(router, method_name)()
+
+    assert calls == [feature]
+    assert stack.currentWidget() is optional_page
+    assert spy.count() == 1

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
+from enum import StrEnum
+from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QMetaObject, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QMetaObject, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QFrame,
@@ -21,21 +24,22 @@ from PySide6.QtWidgets import (
 )
 
 from .icon import load_icon
-from .widgets import (
-    AlbumSidebar,
-    ChromeStatusBar,
-    CustomTitleBar,
-    DetailPageWidget,
-    GalleryPageWidget,
-    InfoPanel,
-    MainHeaderWidget,
-    NotificationToast,
-    PeopleDashboardWidget,
-    PhotoMapView,
-    PreviewWindow,
-)
-from .widgets.albums_dashboard import AlbumsDashboard
-from .widgets.gl_image_viewer import GLImageViewer
+from .widgets.album_sidebar import AlbumSidebar
+from .widgets.chrome_status_bar import ChromeStatusBar
+from .widgets.custom_title_bar import CustomTitleBar
+from .widgets.gallery_page import GalleryPageWidget
+from .widgets.main_header import MainHeaderWidget
+from .widgets.notification_toast import NotificationToast
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class FeatureKind(StrEnum):
+    DETAIL = "detail"
+    PREVIEW = "preview"
+    MAP = "map"
+    PEOPLE = "people"
+    ALBUMS = "albums"
 
 
 def _configure_opaque_widget_background(widget: QWidget, background: str | None = None) -> None:
@@ -76,11 +80,22 @@ def _configure_main_view_stack(view_stack: QStackedWidget, map_view: object) -> 
         stack_layout.setStackingMode(QStackedLayout.StackAll)
 
 
-class Ui_MainWindow(object):
+class Ui_MainWindow(QObject):
     """Pure UI layer for :class:`~PySide6.QtWidgets.QMainWindow`."""
 
+    featureCreated = Signal(str, object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._features: dict[FeatureKind, object] = {}
+        self._main_window: QMainWindow | None = None
+        self._library = None
+
     def setupUi(self, MainWindow: QMainWindow, library) -> None:  # noqa: N802 - Qt style
-        """Instantiate and lay out every widget composing the main window."""
+        """Instantiate only the widgets needed to paint the initial gallery."""
+
+        self._main_window = MainWindow
+        self._library = library
 
         if not MainWindow.objectName():
             MainWindow.setObjectName("MainWindow")
@@ -175,64 +190,8 @@ class Ui_MainWindow(object):
         self.window_shell_layout.addWidget(self.menu_bar_container)
 
         self.sidebar = AlbumSidebar(library, MainWindow)
-        self.preview_window = PreviewWindow(MainWindow)
-        self.map_view = PhotoMapView(
-            map_runtime=getattr(library, "map_runtime", None),
-            map_interaction_service=getattr(library, "map_interaction_service", None),
-        )
-
         self.gallery_page = GalleryPageWidget()
         self.grid_view = self.gallery_page.grid_view
-        self.people_page = PeopleDashboardWidget()
-
-        shared_image_viewer = GLImageViewer()
-        self.detail_page = DetailPageWidget(MainWindow, image_viewer=shared_image_viewer)
-        self.back_button = self.detail_page.back_button
-        self.info_button = self.detail_page.info_button
-        self.share_button = self.detail_page.share_button
-        self.favorite_button = self.detail_page.favorite_button
-        self.rotate_left_button = self.detail_page.rotate_left_button
-        self.edit_button = self.detail_page.edit_button
-        self.zoom_widget = self.detail_page.zoom_widget
-        self.zoom_slider = self.detail_page.zoom_slider
-        self.zoom_in_button = self.detail_page.zoom_in_button
-        self.zoom_out_button = self.detail_page.zoom_out_button
-        self.location_label = self.detail_page.location_label
-        self.timestamp_label = self.detail_page.timestamp_label
-        self.detail_actions_layout = self.detail_page.detail_actions_layout
-        self.detail_info_button_index = self.detail_page.detail_info_button_index
-        self.detail_favorite_button_index = self.detail_page.detail_favorite_button_index
-        self.detail_header_layout = self.detail_page.detail_header_layout
-        self.detail_zoom_widget_index = self.detail_page.detail_zoom_widget_index
-        self.detail_header = self.detail_page.detail_header
-        self.detail_chrome_container = self.detail_page.detail_chrome_container
-        self.detail_header_separator = self.detail_page.detail_header_separator
-        self.player_stack = self.detail_page.player_stack
-        self.player_placeholder = self.detail_page.player_placeholder
-        self.image_viewer = shared_image_viewer
-        self.video_area = self.detail_page.video_area
-        self.player_bar = self.detail_page.player_bar
-        self.video_trim_bar = self.detail_page.video_trim_bar
-        self.face_name_overlay = self.detail_page.face_name_overlay
-        self.filmstrip_view = self.detail_page.filmstrip_view
-        self.live_badge = self.detail_page.live_badge
-        self.badge_host = self.detail_page.badge_host
-        self.player_container = self.detail_page.player_container
-
-        self.edit_mode_group = self.detail_page.edit_mode_group
-        self.edit_adjust_action = self.detail_page.edit_adjust_action
-        self.edit_crop_action = self.detail_page.edit_crop_action
-        self.edit_compare_button = self.detail_page.edit_compare_button
-        self.edit_reset_button = self.detail_page.edit_reset_button
-        self.edit_done_button = self.detail_page.edit_done_button
-        self.edit_rotate_left_button = self.detail_page.edit_rotate_left_button
-        self.edit_image_viewer = self.image_viewer
-        self.edit_sidebar = self.detail_page.edit_sidebar
-        self.edit_mode_control = self.detail_page.edit_mode_control
-        self.edit_header_container = self.detail_page.edit_header_container
-        self.edit_zoom_host = self.detail_page.edit_zoom_host
-        self.edit_zoom_host_layout = self.detail_page.edit_zoom_host_layout
-        self.edit_right_controls_layout = self.detail_page.edit_right_controls_layout
 
         right_panel = QWidget()
         right_panel.setObjectName("rightPanel")
@@ -243,24 +202,8 @@ class Ui_MainWindow(object):
         self.view_stack = QStackedWidget()
         self.view_stack.setObjectName("mainViewStack")
         _configure_opaque_widget_background(self.view_stack)
-        map_page = QWidget()
-        map_page.setObjectName("locationMapPage")
-        _configure_opaque_widget_background(map_page, "#88a8c2")
-        map_layout = QVBoxLayout(map_page)
-        map_layout.setContentsMargins(0, 0, 0, 0)
-        map_layout.setSpacing(0)
-        map_layout.addWidget(self.map_view)
-        self.map_page = map_page
 
         self.view_stack.addWidget(self.gallery_page)
-        self.view_stack.addWidget(self.people_page)
-        self.view_stack.addWidget(self.map_page)
-        self.view_stack.addWidget(self.detail_page)
-
-        self.albums_dashboard_page = AlbumsDashboard(library, MainWindow)
-        self.view_stack.addWidget(self.albums_dashboard_page)
-        _configure_main_view_stack(self.view_stack, self.map_view)
-
         self.view_stack.setCurrentWidget(self.gallery_page)
         right_layout.addWidget(self.view_stack)
 
@@ -280,15 +223,109 @@ class Ui_MainWindow(object):
 
         MainWindow.setCentralWidget(self.window_shell)
 
-        self.info_panel = InfoPanel(MainWindow)
-        self.info_panel.set_map_runtime(getattr(library, "map_runtime", None))
         self.notification_toast = NotificationToast(MainWindow)
-
-        if self.player_container is not None:
-            self.player_container.installEventFilter(MainWindow)
 
         self.retranslateUi(MainWindow)
         QMetaObject.connectSlotsByName(MainWindow)
+
+    def ensure_feature(self, feature: FeatureKind | str) -> object:
+        """Create and cache one hidden feature bundle on demand."""
+
+        kind = FeatureKind(feature)
+        existing = self._features.get(kind)
+        if existing is not None:
+            return existing
+        factory = {
+            FeatureKind.DETAIL: self._create_detail_feature,
+            FeatureKind.PREVIEW: self._create_preview_feature,
+            FeatureKind.MAP: self._create_map_feature,
+            FeatureKind.PEOPLE: self._create_people_feature,
+            FeatureKind.ALBUMS: self._create_albums_feature,
+        }[kind]
+        created = factory()
+        self._features[kind] = created
+        self.featureCreated.emit(kind.value, created)
+        return created
+
+    def _create_detail_feature(self) -> object:
+        from .widgets.detail_page import DetailPageWidget
+        from .widgets.gl_image_viewer import GLImageViewer
+        from .widgets.info_panel import InfoPanel
+
+        assert self._main_window is not None
+        shared_image_viewer = GLImageViewer()
+        self.detail_page = DetailPageWidget(self._main_window, image_viewer=shared_image_viewer)
+        for name in (
+            "back_button", "info_button", "share_button", "favorite_button",
+            "rotate_left_button", "edit_button", "zoom_widget", "zoom_slider",
+            "zoom_in_button", "zoom_out_button", "location_label", "timestamp_label",
+            "detail_actions_layout", "detail_info_button_index", "detail_favorite_button_index",
+            "detail_header_layout", "detail_zoom_widget_index", "detail_header",
+            "detail_chrome_container", "detail_header_separator", "player_stack",
+            "player_placeholder", "video_area", "player_bar", "video_trim_bar",
+            "face_name_overlay", "filmstrip_view", "live_badge", "badge_host",
+            "player_container", "edit_mode_group", "edit_adjust_action", "edit_crop_action",
+            "edit_compare_button", "edit_reset_button", "edit_done_button",
+            "edit_rotate_left_button", "edit_sidebar", "edit_mode_control",
+            "edit_header_container", "edit_zoom_host", "edit_zoom_host_layout",
+            "edit_right_controls_layout",
+        ):
+            setattr(self, name, getattr(self.detail_page, name))
+        self.image_viewer = shared_image_viewer
+        self.edit_image_viewer = shared_image_viewer
+        self.view_stack.addWidget(self.detail_page)
+        self.info_panel = InfoPanel(self._main_window)
+        self.info_panel.set_map_runtime(getattr(self._library, "map_runtime", None))
+        self.player_container.installEventFilter(self._main_window)
+        self.retranslateUi(self._main_window)
+        return self.detail_page
+
+    def _create_preview_feature(self) -> object:
+        from .widgets.preview_window import PreviewWindow
+
+        assert self._main_window is not None
+        self.preview_window = PreviewWindow(self._main_window)
+        return self.preview_window
+
+    def _create_map_feature(self) -> object:
+        from maps.map_sources import apply_pending_osmand_extension_install
+        from .widgets.photo_map_view import PhotoMapView
+
+        assert self._main_window is not None
+        maps_root = Path(__file__).resolve().parents[3] / "maps"
+        try:
+            apply_pending_osmand_extension_install(maps_root)
+        except Exception:
+            _LOGGER.warning("Failed to apply pending map extension install", exc_info=True)
+        self.map_view = PhotoMapView(
+            map_runtime=getattr(self._library, "map_runtime", None),
+            map_interaction_service=getattr(self._library, "map_interaction_service", None),
+        )
+        self.map_page = QWidget()
+        self.map_page.setObjectName("locationMapPage")
+        _configure_opaque_widget_background(self.map_page, "#88a8c2")
+        layout = QVBoxLayout(self.map_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.map_view)
+        self.view_stack.addWidget(self.map_page)
+        _configure_main_view_stack(self.view_stack, self.map_view)
+        return self.map_page
+
+    def _create_people_feature(self) -> object:
+        from .widgets.people_dashboard import PeopleDashboardWidget
+
+        self.people_page = PeopleDashboardWidget()
+        self.view_stack.addWidget(self.people_page)
+        return self.people_page
+
+    def _create_albums_feature(self) -> object:
+        from .widgets.albums_dashboard import AlbumsDashboard
+
+        assert self._main_window is not None
+        self.albums_dashboard_page = AlbumsDashboard(self._library, self._main_window)
+        self.view_stack.addWidget(self.albums_dashboard_page)
+        return self.albums_dashboard_page
 
     def retranslateUi(self, MainWindow: QMainWindow) -> None:  # noqa: N802 - Qt style
         """Apply translatable strings to the window."""
@@ -309,32 +346,35 @@ class Ui_MainWindow(object):
                 None,
             )
         )
-        self.edit_adjust_action.setText(QCoreApplication.translate("MainWindow", "Adjust", None))
-        self.edit_crop_action.setText(QCoreApplication.translate("MainWindow", "Crop", None))
-        self.edit_mode_control.setItems(
-            (
-                self.edit_adjust_action.text(),
-                self.edit_crop_action.text(),
+        if hasattr(self, "edit_adjust_action"):
+            self.edit_adjust_action.setText(
+                QCoreApplication.translate("MainWindow", "Adjust", None)
             )
-        )
-        self.edit_compare_button.setToolTip(
-            QCoreApplication.translate(
-                "MainWindow",
-                "Press and hold to preview the unedited photo",
-                None,
+            self.edit_crop_action.setText(QCoreApplication.translate("MainWindow", "Crop", None))
+            self.edit_mode_control.setItems(
+                (
+                    self.edit_adjust_action.text(),
+                    self.edit_crop_action.text(),
+                )
             )
-        )
-        self.edit_reset_button.setText(
-            QCoreApplication.translate("MainWindow", "Revert to Original", None)
-        )
-        self.edit_reset_button.setToolTip(
-            QCoreApplication.translate(
-                "MainWindow",
-                "Restore every adjustment to its original value",
-                None,
+            self.edit_compare_button.setToolTip(
+                QCoreApplication.translate(
+                    "MainWindow",
+                    "Press and hold to preview the unedited photo",
+                    None,
+                )
             )
-        )
-        self.edit_done_button.setText(QCoreApplication.translate("MainWindow", "Done", None))
+            self.edit_reset_button.setText(
+                QCoreApplication.translate("MainWindow", "Revert to Original", None)
+            )
+            self.edit_reset_button.setToolTip(
+                QCoreApplication.translate(
+                    "MainWindow",
+                    "Restore every adjustment to its original value",
+                    None,
+                )
+            )
+            self.edit_done_button.setText(QCoreApplication.translate("MainWindow", "Done", None))
         self.open_album_action.setText(
             QCoreApplication.translate("MainWindow", "Open Album Folder…", None)
         )
@@ -366,4 +406,4 @@ class Ui_MainWindow(object):
         self.wheel_action_zoom.setText(QCoreApplication.translate("MainWindow", "Zoom", None))
 
 
-__all__ = ["Ui_MainWindow"]
+__all__ = ["FeatureKind", "Ui_MainWindow"]

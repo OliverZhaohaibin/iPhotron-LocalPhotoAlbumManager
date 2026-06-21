@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QCloseEvent, QResizeEvent
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QPaintEvent, QResizeEvent
 from PySide6.QtWidgets import QMainWindow, QMenuBar, QWidget
 
 from ...application.contracts.runtime_entry_contract import RuntimeEntryContract
 
-from .media import require_multimedia
-from .ui_main_window import ChromeStatusBar, Ui_MainWindow
+from .ui_main_window import ChromeStatusBar, FeatureKind, Ui_MainWindow
 from .window_manager import FramelessWindowManager
 # MainController import removed; logic is now in MainCoordinator via self.coordinator
 
@@ -19,9 +18,11 @@ from .window_manager import FramelessWindowManager
 class MainWindow(QMainWindow):
     """Primary window for the desktop experience."""
 
+    firstPainted = Signal()
+
     def __init__(self, context: RuntimeEntryContract) -> None:
         super().__init__()
-        require_multimedia()
+        self._first_paint_emitted = False
 
         self.ui = Ui_MainWindow()
 
@@ -41,6 +42,7 @@ class MainWindow(QMainWindow):
         # behaviour.  The main window therefore remains a thin container that
         # simply forwards lifecycle events to the helper.
         self.window_manager = FramelessWindowManager(self, self.ui)
+        self.ui.featureCreated.connect(self._on_feature_created)
 
         # The controller (now coordinator) is assigned via setter or set later.
         self.coordinator = None
@@ -49,6 +51,10 @@ class MainWindow(QMainWindow):
         # so global shortcuts continue to function when no child widget is
         # active.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+    def _on_feature_created(self, feature: str, _widget: object) -> None:
+        if feature == FeatureKind.DETAIL.value and self.window_manager is not None:
+            self.window_manager.bind_detail_feature()
 
     def retranslate_ui_tree(self) -> None:
         """Refresh this window and child widgets after translator changes."""
@@ -86,6 +92,18 @@ class MainWindow(QMainWindow):
         if self.coordinator:
             self.coordinator.shutdown()
         super().closeEvent(event)
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
+        """Publish the real first-frame boundary exactly once."""
+
+        super().paintEvent(event)
+        if self._first_paint_emitted or not self.isVisible():
+            return
+        self._first_paint_emitted = True
+        from ...bootstrap.startup_profile import mark
+
+        mark("main_window.first_paint")
+        self.firstPainted.emit()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)

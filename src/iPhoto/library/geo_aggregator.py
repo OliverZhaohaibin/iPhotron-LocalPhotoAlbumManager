@@ -6,9 +6,22 @@ from pathlib import Path
 from typing import List
 
 from ..application.dtos import GeotaggedAsset
-from ..application.services.location_asset_service import geotagged_asset_from_row
-from ..bootstrap.library_location_service import LibraryLocationService
-from ..utils.geocoding import resolve_location_name  # compatibility patch target
+
+
+def geotagged_asset_from_row(*args, **kwargs):
+    """Compatibility wrapper that avoids loading geocoding at startup."""
+
+    from ..application.services.location_asset_service import geotagged_asset_from_row as convert
+
+    return convert(*args, **kwargs)
+
+
+def resolve_location_name(*args, **kwargs):
+    """Compatibility wrapper retained as a test/extension patch target."""
+
+    from ..utils.geocoding import resolve_location_name as resolve
+
+    return resolve(*args, **kwargs)
 
 
 class GeoAggregatorMixin:
@@ -43,6 +56,8 @@ class GeoAggregatorMixin:
         query_service = getattr(self, "asset_query_service", None)
         if query_service is None:
             return []
+        from ..bootstrap.library_location_service import LibraryLocationService
+
         service = LibraryLocationService(root, query_service=query_service)
         assets = service.list_geotagged_assets()
         setattr(self, "_geotagged_assets_cache_root", root)

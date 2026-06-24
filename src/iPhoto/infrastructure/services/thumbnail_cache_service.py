@@ -239,6 +239,7 @@ class ThumbnailCacheService(QObject):
     """
 
     thumbnailReady = Signal(Path)
+    _THREAD_POOL_SHUTDOWN_TIMEOUT_MS = 3000
 
     def __init__(
         self,
@@ -348,6 +349,12 @@ class ThumbnailCacheService(QObject):
             far_pipeline_budget_ratio=self._runtime_policy.far_pipeline_budget_ratio,
         )
 
+    def __del__(self) -> None:
+        try:
+            self.shutdown()
+        except (AttributeError, RuntimeError):
+            pass
+
     def shutdown(self):
         """Prevents new tasks from being submitted and clears pending logic."""
         self._is_shutting_down = True
@@ -359,9 +366,18 @@ class ThumbnailCacheService(QObject):
         self._cancel_all_prefetch("shutdown")
         self._prefetch_l2_miss_until.clear()
         self._clear_publish_queue()
-        self._thread_pool.clear()
-        self._prefetch_thread_pool.clear()
-        self._guard_thread_pool.clear()
+        for pool in (
+            self._thread_pool,
+            self._prefetch_thread_pool,
+            self._guard_thread_pool,
+        ):
+            pool.clear()
+        for pool in (
+            self._thread_pool,
+            self._prefetch_thread_pool,
+            self._guard_thread_pool,
+        ):
+            pool.waitForDone(self._THREAD_POOL_SHUTDOWN_TIMEOUT_MS)
         self._active_tasks = 0
         self._prefetch_active_tasks = 0
         self._guard_active_tasks = 0

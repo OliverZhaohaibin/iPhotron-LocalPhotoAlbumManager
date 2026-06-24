@@ -516,6 +516,22 @@ def test_prefetch_l2_miss_uses_short_retry_ttl(tmp_path: Path) -> None:
     assert key in service._prefetch_pending
 
 
+def test_shutdown_waits_for_private_thread_pools(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    pools = [Mock(), Mock(), Mock()]
+    service._thread_pool = pools[0]
+    service._prefetch_thread_pool = pools[1]
+    service._guard_thread_pool = pools[2]
+
+    service.shutdown()
+
+    for pool in pools:
+        pool.clear.assert_called_once_with()
+        pool.waitForDone.assert_called_once_with(
+            service._THREAD_POOL_SHUTDOWN_TIMEOUT_MS
+        )
+
+
 def test_guard_l2_miss_uses_shorter_retry_ttl(tmp_path: Path) -> None:
     policy = replace(
         ThumbnailRuntimePolicy.detect(platform="win32", windows_probe=lambda: 8 * 1024**3),

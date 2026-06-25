@@ -491,9 +491,7 @@ def test_refresh_location_extension_state_uses_bound_map_runtime_capabilities() 
     assert coordinator._location_search_service is location_search_service
 
 
-def test_refresh_location_extension_state_initializes_search_service_with_runtime_package_root(
-    monkeypatch,
-) -> None:
+def test_refresh_location_extension_state_uses_runtime_package_root() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._map_runtime = SimpleNamespace(
         capabilities=lambda: SimpleNamespace(location_search_available=True),
@@ -503,21 +501,11 @@ def test_refresh_location_extension_state_initializes_search_service_with_runtim
     coordinator._location_search_timer = Mock(stop=Mock())
     coordinator._pending_location_query = ""
     coordinator._location_search_target_path = None
-    coordinator._location_search_service = None
-
-    created_kwargs: dict[str, object] = {}
-
-    class _FakeSearchService:
-        def __init__(self, *args, **kwargs) -> None:
-            del args
-            created_kwargs.update(kwargs)
-
-    monkeypatch.setattr(playback_coordinator_module, "OsmAndSearchService", _FakeSearchService)
 
     enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
 
     assert enabled is True
-    assert created_kwargs["package_root"] == Path("/fake/maps")
+    assert PlaybackCoordinator._map_runtime_package_root(coordinator) == Path("/fake/maps")
 
 
 def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unbound(
@@ -530,7 +518,6 @@ def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unb
     coordinator._location_search_timer = Mock(stop=Mock())
     coordinator._pending_location_query = ""
     coordinator._location_search_target_path = None
-    coordinator._location_search_service = None
 
     fallback_runtime = SimpleNamespace(
         capabilities=lambda: SimpleNamespace(location_search_available=True),
@@ -542,20 +529,11 @@ def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unb
         lambda: fallback_runtime,
     )
 
-    created_kwargs: dict[str, object] = {}
-
-    class _FakeSearchService:
-        def __init__(self, *args, **kwargs) -> None:
-            del args
-            created_kwargs.update(kwargs)
-
-    monkeypatch.setattr(playback_coordinator_module, "OsmAndSearchService", _FakeSearchService)
-
     enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
 
     assert enabled is True
     assert coordinator._map_runtime is fallback_runtime
-    assert created_kwargs["package_root"] == Path("/fallback/maps")
+    assert PlaybackCoordinator._map_runtime_package_root(coordinator) == Path("/fallback/maps")
 
 
 def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
@@ -1028,32 +1006,36 @@ def test_location_assignment_restore_reloads_video_when_same_asset_remains() -> 
 def test_location_confirm_updates_current_header_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     asset_path = Path("/fake/video.mp4")
-    presentation = _make_presentation(path=str(asset_path), is_video=True)
+    presentation = _make_presentation(
+        path=str(asset_path),
+        is_video=True,
+        info_panel_visible=True,
+    )
     presentation.info["rel"] = "video.mp4"
     coordinator._current_presentation = presentation
     coordinator._refresh_location_extension_state = Mock(return_value=True)
     coordinator._location_assign_inflight = False
     coordinator._library_manager = None
+    store = Mock(library_root=Mock(return_value=Path("/fake/library")))
     coordinator._asset_model = Mock(
         metadata_for_path=Mock(return_value={"codec": "hevc"}),
-        store=Mock(library_root=Mock(return_value=Path("/fake/library"))),
+        row_for_path=Mock(return_value=0),
+        store=store,
     )
     coordinator._location_search_timer = Mock(stop=Mock())
     coordinator._pending_location_query = ""
     coordinator._location_search_target_path = None
-    coordinator._location_search_service = Mock(abort=Mock())
+    coordinator._location_search_controller = Mock(reset=Mock())
     coordinator._info_panel = Mock()
     coordinator._update_header = Mock()
     coordinator._refresh_info_panel = Mock()
     coordinator._location_video_write_inflight_paths = set()
+    coordinator._location_write_jobs_by_path = {}
+    coordinator._location_write_queue = Mock(enqueue=Mock())
+    coordinator._event_bus = None
+    coordinator._location_session_invalidator = None
     coordinator._player_view = Mock(
         video_area=Mock(current_source=Mock(return_value=None), stop=Mock())
-    )
-    thread_pool = Mock(start=Mock())
-    monkeypatch.setattr(
-        playback_coordinator_module.QThreadPool,
-        "globalInstance",
-        Mock(return_value=thread_pool),
     )
     suggestion = SearchSuggestion(
         display_name="Munich",
@@ -1062,6 +1044,38 @@ def test_location_confirm_updates_current_header_immediately(monkeypatch: pytest
         latitude=48.137154,
         source_kind="test",
         match_kind="exact",
+    )
+    write_job = SimpleNamespace(job_id="job-1")
+
+    class _FakeLocationAssignmentService:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def assign(self, **kwargs) -> SimpleNamespace:
+            metadata = dict(kwargs["existing_metadata"])
+            metadata.update(
+                {
+                    "gps": {"lat": kwargs["latitude"], "lon": kwargs["longitude"]},
+                    "location": kwargs["display_name"],
+                    "location_name": kwargs["display_name"],
+                }
+            )
+            return SimpleNamespace(
+                asset_path=kwargs["asset_path"],
+                display_name=kwargs["display_name"],
+                metadata=metadata,
+                write_job=write_job,
+            )
+
+    monkeypatch.setattr(
+        playback_coordinator_module,
+        "IndexStoreLocationAssignmentRepository",
+        lambda _root: Mock(),
+    )
+    monkeypatch.setattr(
+        playback_coordinator_module,
+        "LocationAssignmentService",
+        _FakeLocationAssignmentService,
     )
 
     PlaybackCoordinator._handle_location_confirm_requested(
@@ -1075,13 +1089,10 @@ def test_location_confirm_updates_current_header_immediately(monkeypatch: pytest
     assert updated.info["location"] == "Munich"
     assert updated.info["gps"] == {"lat": 48.137154, "lon": 11.576124}
     coordinator._update_header.assert_called_with(updated)
-    coordinator._info_panel.preview_location.assert_called_once_with(
-        "Munich",
-        48.137154,
-        11.576124,
-    )
-    coordinator._refresh_info_panel.assert_not_called()
-    thread_pool.start.assert_called_once()
+    coordinator._refresh_info_panel.assert_called_once_with(updated.info)
+    store.update_asset_metadata.assert_called_once_with(0, updated.info)
+    coordinator._location_write_queue.enqueue.assert_called_once_with(write_job)
+    assert coordinator._location_write_jobs_by_path[asset_path] == "job-1"
 
 
 def test_presentation_changed_keeps_pending_location_preview_in_header() -> None:

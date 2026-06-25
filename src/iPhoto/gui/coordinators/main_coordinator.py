@@ -22,6 +22,7 @@ from PySide6.QtGui import QAction
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.events.asset_events import AssetMetadataUpdated
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
@@ -29,6 +30,7 @@ from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.services.location_trash_navigation_service import (
     LocationTrashNavigationService,
 )
+from iPhoto.gui.services.location_file_write_queue import LocationFileWriteQueue
 from iPhoto.gui.services.people_service_resolver import resolve_people_service
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
@@ -130,6 +132,14 @@ class MainCoordinator(QObject):
             self._facade.set_model_provider(lambda: self._asset_list_vm)
 
         # --- Coordinators Setup ---
+        self._location_write_queue = LocationFileWriteQueue(
+            event_bus=self._event_bus,
+            parent=self,
+        )
+        self._asset_metadata_subscription = self._event_bus.subscribe(
+            AssetMetadataUpdated,
+            self._handle_asset_metadata_updated,
+        )
 
         # 1. View Router
         self._view_router = ViewRouter(window.ui)
@@ -212,6 +222,8 @@ class MainCoordinator(QObject):
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
             map_runtime=self._map_runtime(),
+            event_bus=self._event_bus,
+            location_write_queue=self._location_write_queue,
         )
 
         # Inject optional dependencies into Playback
@@ -227,6 +239,7 @@ class MainCoordinator(QObject):
             window.ui.info_panel.downloadMapExtensionRequested.connect(
                 lambda: self._map_extension_download.start_download(source="info_panel")
             )
+        self._location_write_queue.bind_library_root(lib_root)
         if hasattr(window.ui, "map_view"):
             window.ui.map_view.set_map_runtime(self._map_runtime())
             window.ui.map_view.set_map_interaction_service(self._map_interaction_service())
@@ -396,8 +409,38 @@ class MainCoordinator(QObject):
 
         self._playback.resume_playback_after_transition()
 
+    def _handle_asset_metadata_updated(self, event: AssetMetadataUpdated) -> None:
+        asset_path = event.asset_path
+        if asset_path is None:
+            return
+        metadata = dict(event.metadata_delta or {})
+        if event.gps:
+            metadata["gps"] = dict(event.gps)
+        if event.location:
+            metadata["location"] = event.location
+            metadata.setdefault("location_name", event.location)
+        path = Path(asset_path)
+        existing_metadata = self._asset_list_vm.metadata_for_path(path) or {}
+        merged_metadata = dict(existing_metadata)
+        merged_metadata.update(metadata)
+        row = self._gallery_store.row_for_path(path)
+        if row is not None:
+            self._gallery_store.update_asset_metadata(row, merged_metadata)
+        try:
+            self._context.library.invalidate_geotagged_assets_cache(emit_tree_updated=False)
+        except Exception:  # noqa: BLE001
+            self._logger.warning("Failed to invalidate geotagged assets cache", exc_info=True)
+        try:
+            self._gallery_vm.invalidate_location_session()
+        except Exception:  # noqa: BLE001
+            self._logger.warning("Failed to invalidate location session", exc_info=True)
+
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
+        location_queue = getattr(self, "_location_write_queue", None)
+        if location_queue is not None:
+            location_queue.drain(timeout=None)
+
         # 1. Cancel any active background scans/imports via Facade
         if self._facade:
             self._facade.cancel_active_scans()
@@ -409,6 +452,9 @@ class MainCoordinator(QObject):
         # 2. Stop playback (video/audio)
         if self._playback:
             self._playback.shutdown()
+
+        if location_queue is not None:
+            location_queue.shutdown(wait=True)
 
         # 3. Shutdown other coordinators if they have cleanup logic
         if self._edit:

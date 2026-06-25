@@ -1425,6 +1425,34 @@ def test_info_panel_location_preview_reflow_stabilizes_on_first_event_pass(
     panel.close()
 
 
+def test_info_panel_location_suggestions_use_non_focus_floating_tool(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata({"rel": "map.jpg", "name": "map.jpg"})
+    panel.show()
+    qapp.processEvents()
+    height_before = panel.height()
+
+    panel._location_editor.setFocus(Qt.FocusReason.OtherFocusReason)
+    panel.set_location_suggestions(
+        [
+            SimpleNamespace(display_name="Munich", secondary_text="Germany"),
+            SimpleNamespace(display_name="Munich Airport", secondary_text="Germany"),
+        ]
+    )
+    qapp.processEvents()
+
+    assert not panel._location_results.isHidden()
+    assert panel._location_results.windowType() == Qt.WindowType.Tool
+    assert panel._location_results.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert panel._location_results.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert panel._location_layout.indexOf(panel._location_results) == -1
+    assert panel.height() == height_before
+    panel.close()
+
+
 def test_info_panel_common_location_show_path_queues_one_post_show_reflow(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,

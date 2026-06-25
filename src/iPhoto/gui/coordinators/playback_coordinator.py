@@ -15,13 +15,21 @@ from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.application.ports import EditServicePort, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
-from iPhoto.gui.ui.tasks.assign_location_worker import (
-    AssignLocationRequest,
-    AssignLocationWorker,
+from iPhoto.application.services.location_assignment_service import (
+    LocationAssignment,
+    LocationAssignmentService,
 )
 from iPhoto.infrastructure.services.map_runtime_service import SessionMapRuntimeService
+from iPhoto.infrastructure.repositories.location_assignment_repository import (
+    IndexStoreLocationAssignmentRepository,
+)
 from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.services.location_file_write_queue import (
+    LocationFileWriteQueue,
+    LocationFileWriteResult,
+)
+from iPhoto.gui.services.location_search_controller import LocationSearchController
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.icons import load_icon
@@ -36,7 +44,7 @@ from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailVie
 from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.people.repository import AssetFaceAnnotation
 from iPhoto.people.service import PeopleService
-from maps.osmand_search import OsmAndSearchService, SearchSuggestion
+from maps.osmand_search import SearchSuggestion
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -49,6 +57,7 @@ if TYPE_CHECKING:
     from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
     from iPhoto.gui.ui.widgets.player_bar import PlayerBar
     from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
+    from iPhoto.events.bus import EventBus
 
 LOGGER = logging.getLogger(__name__)
 
@@ -102,6 +111,8 @@ class PlaybackCoordinator(QObject):
         library_manager: LibraryRuntimeController | None = None,
         location_session_invalidator: Callable[[], None] | None = None,
         map_runtime: MapRuntimePort | None = None,
+        event_bus: EventBus | None = None,
+        location_write_queue: LocationFileWriteQueue | None = None,
     ) -> None:
         super().__init__()
         self._player_bar = player_bar
@@ -132,6 +143,8 @@ class PlaybackCoordinator(QObject):
         self._library_manager = library_manager
         self._location_session_invalidator = location_session_invalidator
         self._map_runtime = map_runtime or getattr(library_manager, "map_runtime", None)
+        self._event_bus = event_bus
+        self._location_write_queue = location_write_queue
 
         self._is_playing = False
         self._navigation: NavigationCoordinator | None = None
@@ -151,7 +164,13 @@ class PlaybackCoordinator(QObject):
         self._manual_face_inflight_asset_id: str | None = None
         self._pending_manual_face_annotations: dict[str, list[AssetFaceAnnotation]] = {}
         self._pending_manual_face_sequence = 0
-        self._location_search_service: OsmAndSearchService | None = None
+        self._location_search_controller = LocationSearchController(self)
+        self._location_search_controller.suggestionsReady.connect(
+            self._handle_location_suggestions_ready
+        )
+        self._location_search_controller.searchFailed.connect(
+            self._handle_location_search_failed
+        )
         self._location_search_cache: dict[str, list[SearchSuggestion]] = {}
         self._location_assign_inflight = False
         self._location_assign_path: Path | None = None
@@ -164,6 +183,14 @@ class PlaybackCoordinator(QObject):
         self._location_released_video_was_playing = False
         self._location_released_video_position_ms: int | None = None
         self._location_video_write_inflight_paths: set[Path] = set()
+        self._location_write_jobs_by_path: dict[Path, str] = {}
+        if self._location_write_queue is not None:
+            self._location_write_queue.writeVerified.connect(
+                self._handle_location_file_write_verified
+            )
+            self._location_write_queue.writeFailed.connect(
+                self._handle_location_file_write_failed
+            )
 
         self._pending_play_row: int | None = None
         self._show_face_names = False
@@ -904,10 +931,7 @@ class PlaybackCoordinator(QObject):
             location_timer.stop()
         self._pending_location_query = ""
         self._location_search_target_path = None
-        location_service = getattr(self, "_location_search_service", None)
-        if location_service is not None:
-            location_service.shutdown()
-            self._location_search_service = None
+        self._reset_location_search_service()
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._hide_face_name_overlay(clear_annotations=True)
@@ -926,9 +950,7 @@ class PlaybackCoordinator(QObject):
         self._location_search_timer.stop()
         self._pending_location_query = ""
         self._location_search_target_path = None
-        if self._location_search_service is not None:
-            self._location_search_service.shutdown()
-            self._location_search_service = None
+        self._reset_location_search_service()
         self._player_view.video_area.stop()
         self._hide_face_name_overlay(clear_annotations=True)
         self._is_playing = False
@@ -1059,18 +1081,6 @@ class PlaybackCoordinator(QObject):
         if not enabled:
             self._reset_location_search_service()
             return False
-
-        if getattr(self, "_location_search_service", None) is not None:
-            return True
-
-        try:
-            self._location_search_service = OsmAndSearchService(
-                package_root=self._map_runtime_package_root(),
-            )
-        except Exception:  # noqa: BLE001
-            LOGGER.warning("Failed to initialize offline location search", exc_info=True)
-            self._location_search_service = None
-            return False
         return True
 
     @staticmethod
@@ -1135,10 +1145,9 @@ class PlaybackCoordinator(QObject):
         location_cache = getattr(self, "_location_search_cache", None)
         if location_cache is not None:
             location_cache.clear()
-        location_service = getattr(self, "_location_search_service", None)
-        if location_service is not None:
-            location_service.shutdown()
-            self._location_search_service = None
+        controller = getattr(self, "_location_search_controller", None)
+        if controller is not None:
+            controller.reset()
 
     def _normalize_location_query(self, query: str) -> str:
         return " ".join(query.split()).casefold()
@@ -1196,8 +1205,7 @@ class PlaybackCoordinator(QObject):
         self._location_search_timer.stop()
         self._pending_location_query = ""
         self._location_search_target_path = None
-        if self._location_search_service is not None:
-            self._location_search_service.abort()
+        self._location_search_controller.reset()
 
         if not self._refresh_location_extension_state():
             info_panel.set_location_suggestions([])
@@ -1209,13 +1217,7 @@ class PlaybackCoordinator(QObject):
             info_panel.set_location_suggestions([])
             return
 
-        preview, is_exact = self._preview_cached_location_suggestions(query)
-        if preview is not None:
-            info_panel.set_location_suggestions(preview)
-            if is_exact:
-                return
-        else:
-            info_panel.set_location_suggestions([])
+        info_panel.set_location_suggestions([])
 
         presentation = getattr(self, "_current_presentation", None)
         if presentation is None:
@@ -1243,36 +1245,53 @@ class PlaybackCoordinator(QObject):
         if not self._refresh_location_extension_state():
             info_panel.set_location_suggestions([])
             return
-        service = self._location_search_service
-        if service is None:
-            info_panel.set_location_suggestions([])
-            return
 
         locale = QLocale.system().bcp47Name()
-        try:
-            suggestions = service.search(
-                query,
-                limit=_LOCATION_SEARCH_RESULT_LIMIT,
-                locale=locale,
-            )
-        except Exception:  # noqa: BLE001
-            LOGGER.warning("Offline location search failed for query %r", query, exc_info=True)
-            suggestions = []
+        self._location_search_controller.search(
+            query,
+            target_path=target_path,
+            package_root=self._map_runtime_package_root(),
+            locale=locale,
+        )
 
-        normalized_query = self._normalize_location_query(query)
-        self._location_search_cache[normalized_query] = list(suggestions)
-        if len(self._location_search_cache) > 64:
-            oldest_key = next(iter(self._location_search_cache))
-            self._location_search_cache.pop(oldest_key, None)
-
+    @Slot(int, object, str, object)
+    def _handle_location_suggestions_ready(
+        self,
+        _token: int,
+        target_path: object,
+        _query: str,
+        suggestions_obj: object,
+    ) -> None:
+        info_panel = getattr(self, "_info_panel", None)
         current_presentation = getattr(self, "_current_presentation", None)
         if (
-            current_presentation is None
-            or current_presentation.path != target_path
+            info_panel is None
+            or current_presentation is None
+            or current_presentation.path != Path(target_path)
             or self._location_assign_inflight
         ):
             return
+        suggestions = list(suggestions_obj) if isinstance(suggestions_obj, list) else []
         info_panel.set_location_suggestions(suggestions)
+
+    @Slot(int, object, str, str)
+    def _handle_location_search_failed(
+        self,
+        _token: int,
+        target_path: object,
+        query: str,
+        message: str,
+    ) -> None:
+        info_panel = getattr(self, "_info_panel", None)
+        current_presentation = getattr(self, "_current_presentation", None)
+        if (
+            info_panel is None
+            or current_presentation is None
+            or current_presentation.path != Path(target_path)
+        ):
+            return
+        LOGGER.warning("Offline location search failed for query %r: %s", query, message)
+        info_panel.set_location_suggestions([])
 
     @Slot(str, object)
     def _handle_location_confirm_requested(self, query: str, suggestion_obj: object) -> None:
@@ -1300,45 +1319,28 @@ class PlaybackCoordinator(QObject):
         self._location_search_timer.stop()
         self._pending_location_query = ""
         self._location_search_target_path = None
-        if self._location_search_service is not None:
-            self._location_search_service.abort()
+        self._location_search_controller.reset()
 
         display_name = suggestion_obj.display_name.strip() or query.strip()
+        if not display_name:
+            return
         self._location_assign_inflight = True
         self._location_assign_path = presentation.path
-        self._location_preview_path = presentation.path
-        self._location_preview_metadata = {
-            "location": display_name,
-            "place": display_name,
-            "gps": {
-                "lat": float(suggestion_obj.latitude),
-                "lon": float(suggestion_obj.longitude),
-            },
-        }
         if self._info_panel is not None:
-            self._info_panel.preview_location(
-                display_name,
-                float(suggestion_obj.latitude),
-                float(suggestion_obj.longitude),
-            )
             self._info_panel.set_location_busy(True)
             self._info_panel.set_location_suggestions([])
+        existing_metadata = dict(presentation.info)
+        stored_metadata = self._asset_model.metadata_for_path(presentation.path)
+        if isinstance(stored_metadata, dict):
+            existing_metadata.update(stored_metadata)
 
-        self._apply_location_assignment_to_current_presentation(
-            presentation.path,
-            self._location_preview_metadata,
-            display_name=display_name,
-            refresh_info_panel=False,
-        )
-        if presentation.is_video:
-            self._defer_location_video_loading(presentation.path)
-        self._release_current_video_for_location_write(presentation)
-        existing_metadata = self._asset_model.metadata_for_path(presentation.path) or dict(
-            presentation.info
-        )
-        worker = AssignLocationWorker(
-            AssignLocationRequest(
-                library_root=Path(library_root),
+        assignment: LocationAssignment | None = None
+        try:
+            service = LocationAssignmentService(
+                IndexStoreLocationAssignmentRepository(Path(library_root)),
+                self._event_bus,
+            )
+            assignment = service.assign(
                 asset_path=presentation.path,
                 asset_rel=rel_value,
                 display_name=display_name,
@@ -1347,24 +1349,37 @@ class PlaybackCoordinator(QObject):
                 is_video=bool(presentation.is_video),
                 existing_metadata=existing_metadata,
             )
-        )
-        worker.signals.ready.connect(self._handle_location_assignment_ready)
-        worker.signals.file_write_finished.connect(
-            self._handle_location_assignment_file_write_finished
-        )
-        worker.signals.file_write_error.connect(self._handle_location_assignment_file_write_error)
-        worker.signals.error.connect(self._handle_location_assignment_error)
-        worker.signals.finished.connect(self._handle_location_assignment_finished)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to assign location", exc_info=True)
+            self._handle_location_assignment_error(str(exc))
+            self._location_assign_inflight = False
+            self._location_assign_path = None
+            if self._info_panel is not None:
+                self._info_panel.set_location_busy(False)
+            return
+
+        self._project_location_assignment(assignment)
+        if presentation.is_video:
+            self._defer_location_video_loading(presentation.path)
+            self._release_current_video_for_location_write(presentation)
+        queue = getattr(self, "_location_write_queue", None)
         try:
-            QThreadPool.globalInstance().start(worker, -1)
-        except Exception:  # noqa: BLE001
-            LOGGER.warning("Failed to start location assignment worker", exc_info=True)
-            self._allow_location_video_loading(presentation.path)
-            self._restore_video_released_for_location_write()
-            if self._location_preview_path == presentation.path:
-                self._location_preview_path = None
-                self._location_preview_metadata = None
-                self._detail_vm.refresh_current()
+            if queue is None:
+                raise RuntimeError("write-back queue unavailable")
+            self._location_write_jobs_by_path[presentation.path] = assignment.write_job.job_id
+            queue.enqueue(assignment.write_job)
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            LOGGER.warning(
+                "Location saved locally, but original-file write-back could not be queued: %s",
+                message,
+                exc_info=True,
+            )
+            self._queue_location_file_write_warning(message)
+            if presentation.is_video:
+                self._allow_location_video_loading(presentation.path)
+                self._restore_video_released_for_location_write()
+        finally:
             self._location_assign_inflight = False
             self._location_assign_path = None
             if self._info_panel is not None:
@@ -1415,6 +1430,54 @@ class PlaybackCoordinator(QObject):
             self._player_view.video_area.seek(position_ms)
         if not was_playing:
             self._player_view.video_area.pause()
+
+    def _project_location_assignment(self, assignment: LocationAssignment) -> None:
+        metadata = self._merged_location_assignment_metadata(
+            assignment.asset_path,
+            assignment.metadata,
+        )
+        row = self._asset_model.row_for_path(assignment.asset_path)
+        if row is not None:
+            self._asset_model.store.update_asset_metadata(row, dict(metadata))
+
+        self._apply_location_assignment_to_current_presentation(
+            assignment.asset_path,
+            metadata,
+            display_name=assignment.display_name,
+            refresh_info_panel=True,
+        )
+        self._remember_confirmed_location_metadata(
+            assignment.asset_path,
+            metadata,
+        )
+        library_manager = getattr(self, "_library_manager", None)
+        invalidate = getattr(library_manager, "invalidate_geotagged_assets_cache", None)
+        if callable(invalidate):
+            try:
+                invalidate(emit_tree_updated=False)
+            except Exception:  # noqa: BLE001
+                LOGGER.warning("Failed to refresh geotagged asset caches", exc_info=True)
+        invalidate_location_session = getattr(self, "_location_session_invalidator", None)
+        if callable(invalidate_location_session):
+            try:
+                invalidate_location_session()
+            except Exception:  # noqa: BLE001
+                LOGGER.warning("Failed to invalidate cached location-session data", exc_info=True)
+
+    def _merged_location_assignment_metadata(
+        self,
+        asset_path: Path,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.path == asset_path:
+            merged.update(presentation.info)
+        asset_metadata = self._asset_model.metadata_for_path(asset_path)
+        if isinstance(asset_metadata, dict):
+            merged.update(asset_metadata)
+        merged.update(metadata)
+        return merged
 
     @Slot(object)
     def _handle_location_assignment_ready(self, result: object) -> None:
@@ -1607,6 +1670,30 @@ class PlaybackCoordinator(QObject):
             _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE.format(reason=message.strip()),
             title=_LOCATION_FILE_WRITE_LIMITED_TITLE,
         )
+
+    @Slot(object)
+    def _handle_location_file_write_verified(self, result: object) -> None:
+        if not isinstance(result, LocationFileWriteResult):
+            return
+        self._location_write_jobs_by_path.pop(result.asset_path, None)
+        self._complete_location_video_file_write(result.asset_path)
+
+    @Slot(object)
+    def _handle_location_file_write_failed(self, result: object) -> None:
+        if not isinstance(result, LocationFileWriteResult):
+            return
+        message = result.error or "unknown error"
+        LOGGER.warning(
+            "Location saved in the library, but GPS metadata was not written to %s: %s",
+            result.asset_path,
+            message,
+        )
+        self._location_write_jobs_by_path.pop(result.asset_path, None)
+        if self._is_missing_exiftool_error(message):
+            self._queue_location_exiftool_missing_warning()
+        else:
+            self._queue_location_file_write_warning(message)
+        self._complete_location_video_file_write(result.asset_path)
 
     @Slot(object)
     def _handle_location_assignment_file_write_finished(self, path: object) -> None:

@@ -59,6 +59,19 @@ def test_resolve_exiftool_uses_macos_fallback_with_minimal_path(
     assert exiftool._resolve_exiftool_executable() == str(fallback)
 
 
+def test_resolve_exiftool_uses_bundled_fallback_after_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundled = _make_executable(tmp_path / "exiftool.exe")
+    monkeypatch.delenv("IPHOTO_EXIFTOOL_PATH", raising=False)
+    monkeypatch.setattr(exiftool.sys, "platform", "win32")
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(exiftool, "_bundled_exiftool_candidates", lambda: (bundled,))
+
+    assert exiftool._resolve_exiftool_executable() == str(bundled)
+
+
 def test_resolve_exiftool_error_includes_search_locations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -182,6 +195,36 @@ def test_write_gps_metadata_passes_source_file_via_arg_file(
 
     assert seen_arg_file is not None
     assert not Path(seen_arg_file).exists()
+
+
+def test_write_gps_metadata_writes_explicit_quicktime_tags_for_video(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = tmp_path / "clip.mov"
+    asset.write_bytes(b"video-data")
+    seen_cmd: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        del kwargs
+        seen_cmd.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/usr/bin/exiftool")
+    monkeypatch.setattr(exiftool.subprocess, "run", fake_run)
+
+    write_gps_metadata(
+        asset,
+        latitude=48.137154,
+        longitude=11.576124,
+        is_video=True,
+    )
+
+    assert "-Keys:GPSCoordinates=+48.137154+11.576124/" in seen_cmd
+    assert "-ItemList:GPSCoordinates=+48.137154+11.576124/" in seen_cmd
+    assert "-QuickTime:GPSCoordinates=+48.137154+11.576124/" in seen_cmd
+    assert "-XMP:GPSLatitude=48.13715400" in seen_cmd
+    assert "-XMP:GPSLongitude=11.57612400" in seen_cmd
 
 
 def test_write_gps_metadata_retries_rename_failure_with_in_place_fallback(

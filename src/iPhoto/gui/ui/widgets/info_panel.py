@@ -10,7 +10,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -574,7 +574,15 @@ class InfoPanel(QWidget):
         self._location_editor_layout.addWidget(self._location_confirm_button, 0)
         self._location_layout.addWidget(self._location_editor_row)
 
-        self._location_results = QListWidget(self._location_container)
+        self._location_results = QListWidget(self)
+        self._location_results.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self._location_results.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._location_results.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._location_results.setAlternatingRowColors(True)
         self._location_results.setMaximumHeight(150)
         self._location_results.hide()
@@ -582,7 +590,6 @@ class InfoPanel(QWidget):
         self._location_results.itemClicked.connect(self._handle_location_item_clicked)
         self._location_results.itemActivated.connect(self._handle_location_item_activated)
         self._location_results.currentRowChanged.connect(self._handle_location_row_changed)
-        self._location_layout.addWidget(self._location_results)
 
         self._location_map = InfoLocationMapView(self._location_container)
         self._location_map.hide()
@@ -784,9 +791,10 @@ class InfoPanel(QWidget):
             return
 
         self._location_results.setCurrentRow(0)
+        self._position_location_results_popup()
         self._set_widget_explicitly_visible(self._location_results, True)
+        self._location_results.raise_()
         self._location_confirm_button.setEnabled(True)
-        self._refresh_or_schedule_panel_geometry()
 
     def set_location_busy(self, busy: bool) -> None:
         self._location_busy = bool(busy)
@@ -821,6 +829,7 @@ class InfoPanel(QWidget):
         self._refresh_or_schedule_panel_geometry()
 
     def shutdown(self) -> None:
+        self._clear_location_results()
         self._location_map.shutdown()
 
     # ------------------------------------------------------------------
@@ -1066,6 +1075,21 @@ class InfoPanel(QWidget):
         self._location_results.clear()
         self._set_widget_explicitly_visible(self._location_results, False)
         self._location_confirm_button.setEnabled(False)
+
+    def _position_location_results_popup(self) -> None:
+        row_height = max(28, self._location_results.sizeHintForRow(0))
+        visible_rows = min(max(1, self._location_results.count()), 5)
+        height = min(150, row_height * visible_rows + 8)
+        width = max(self._location_editor.width(), self._location_editor_row.width())
+        global_top_left = self._location_editor.mapToGlobal(
+            QPoint(0, self._location_editor.height() + 4)
+        )
+        self._location_results.setGeometry(
+            global_top_left.x(),
+            global_top_left.y(),
+            max(220, width),
+            max(36, height),
+        )
 
     @staticmethod
     def _set_widget_explicitly_visible(widget: QWidget, visible: bool) -> None:
@@ -1373,6 +1397,20 @@ class InfoPanel(QWidget):
             self._centered = True
         self._refresh_panel_geometry(recenter=first_show)
         self._schedule_post_show_reflow(recenter=first_show)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._set_widget_explicitly_visible(self._location_results, False)
+        super().hideEvent(event)
+
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        super().moveEvent(event)
+        if not self._location_results.isHidden():
+            self._position_location_results_popup()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if not self._location_results.isHidden():
+            self._position_location_results_popup()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Emit a dismissal signal so the detail state stays in sync."""

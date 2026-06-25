@@ -5,9 +5,54 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
+
+
+@dataclass(frozen=True)
+class LocationWriteJobRecord:
+    job_id: str
+    asset_rel: str
+    asset_path: Path
+    gps: dict[str, float]
+    location: str
+    media_kind: str
+    status: str
+    attempts: int = 0
+    last_error: str | None = None
+
+    @property
+    def is_video(self) -> bool:
+        return self.media_kind == "video"
+
+
+class MetadataWriteJobRepositoryPort(Protocol):
+    def create_location_job(
+        self,
+        *,
+        asset_rel: str,
+        asset_path: Path,
+        gps: dict[str, float],
+        location: str,
+        is_video: bool,
+    ) -> LocationWriteJobRecord:
+        """Create a durable original-file metadata write job."""
+
+
+class LocationAssignmentRepositoryPort(Protocol):
+    def assign_location(
+        self,
+        *,
+        asset_rel: str,
+        asset_path: Path,
+        gps: dict[str, float],
+        location: str,
+        is_video: bool,
+        metadata_updates: dict[str, Any],
+    ) -> LocationWriteJobRecord:
+        """Atomically persist local geodata and create a write-back job."""
 
 
 class AssetRepositoryPort(Protocol):

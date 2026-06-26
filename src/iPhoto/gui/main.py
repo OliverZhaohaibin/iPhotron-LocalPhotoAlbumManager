@@ -15,6 +15,7 @@ from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
+from iPhoto.gui.i18n.ui_font import configure_application_font_fallbacks
 from iPhoto.gui.render_backend import should_configure_global_desktop_opengl
 
 mark("module.imported")
@@ -238,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     mark("qapplication.before_create")
     app = QApplication(arguments)
     mark("qapplication.created")
+    configure_application_font_fallbacks()
+    mark("font_fallbacks.configured")
 
     # ``QToolTip`` instances inherit ``WA_TranslucentBackground`` from the frameless
     # main window, which means they expect the application to provide an opaque fill

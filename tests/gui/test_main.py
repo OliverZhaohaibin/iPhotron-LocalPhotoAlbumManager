@@ -274,6 +274,7 @@ def test_main_creates_required_features_in_platform_safe_order(
 
     class _FakeApp:
         def __init__(self, _args) -> None:
+            call_order.append("app:create")
             return None
 
         def palette(self):
@@ -321,6 +322,7 @@ def test_main_creates_required_features_in_platform_safe_order(
     class _FakeRuntimeContext:
         @staticmethod
         def create(*, defer_startup: bool = False, settings=None):
+            call_order.append("context:create")
             return type(
                 "FakeContext",
                 (),
@@ -342,6 +344,10 @@ def test_main_creates_required_features_in_platform_safe_order(
     monkeypatch.setattr("iPhoto.gui.main._prefer_local_source_tree", lambda: None)
     monkeypatch.setattr("iPhoto.gui.main._prepare_qt_runtime_for_maps", lambda: None)
     monkeypatch.setattr("iPhoto.gui.main._configure_qt_opengl_defaults", lambda _root=None: None)
+    monkeypatch.setattr(
+        "iPhoto.gui.main.configure_application_font_fallbacks",
+        lambda: call_order.append("font_fallbacks"),
+    )
     monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
     monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
     monkeypatch.setattr("iPhoto.gui.main.QColor", _FakeColor)
@@ -389,12 +395,16 @@ def test_main_creates_required_features_in_platform_safe_order(
 
     assert main([]) == 0
 
+    app_index = call_order.index("app:create")
+    font_index = call_order.index("font_fallbacks")
+    context_index = call_order.index("context:create")
     detail_index = call_order.index("feature:detail")
     show_index = call_order.index("show")
     preview_index = call_order.index("feature:preview")
     people_index = call_order.index("feature:people")
     coordinator_index = call_order.index("coordinator:create")
 
+    assert app_index < font_index < context_index < show_index
     if platform == "win32":
         assert detail_index < show_index
         assert "windows_detail.before_create" in profile_marks
@@ -437,6 +447,7 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     class _FakeApp:
         def __init__(self, _args) -> None:
+            call_order.append(("app", None))
             return None
 
         def palette(self):
@@ -457,6 +468,10 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
     monkeypatch.setattr(
         "iPhoto.gui.main._configure_qt_opengl_defaults",
         lambda _library_root=None: call_order.append(("configure_gl", None)),
+    )
+    monkeypatch.setattr(
+        "iPhoto.gui.main.configure_application_font_fallbacks",
+        lambda: call_order.append(("font_fallbacks", None)),
     )
     monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
     monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
@@ -508,3 +523,10 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
     assert call_order[0][0] == "prefer"
     assert not any(name == "apply_pending" for name, _value in call_order)
     assert call_order[1][0] == "prepare_maps"
+    assert [name for name, _value in call_order[:5]] == [
+        "prefer",
+        "prepare_maps",
+        "configure_gl",
+        "app",
+        "font_fallbacks",
+    ]

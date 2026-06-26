@@ -44,9 +44,11 @@ def _settings(tmp_path: Path) -> SettingsManager:
 def preserved_app_font(qapp: QApplication):
     original = QFont(qapp.font())
     ui_font._ORIGINAL_APP_FONT = None
+    ui_font._FALLBACKS_CONFIGURED = False
     yield
     qapp.setFont(original)
     ui_font._ORIGINAL_APP_FONT = None
+    ui_font._FALLBACKS_CONFIGURED = False
 
 
 class _RetranslateControl:
@@ -206,40 +208,85 @@ def test_non_windows_chinese_font_does_not_change_app_font(
     assert qapp.font().family() == "Arial"
 
 
-def test_linux_chinese_font_uses_noto_sans_cjk_sc_when_available(
+def test_linux_font_fallback_uses_noto_sans_cjk_sc_when_available(
     monkeypatch,
     qapp: QApplication,
     preserved_app_font,
 ) -> None:
     qapp.setFont(QFont("Arial"))
     monkeypatch.setattr(ui_font.sys, "platform", "linux")
-    monkeypatch.setattr(
-        ui_font.QFontDatabase,
-        "families",
-        staticmethod(lambda: ["Noto Sans", "Noto Sans CJK SC"]),
-    )
 
-    ui_font.apply_language_font("zh-CN")
+    def fake_families(_writing_system=None):
+        return ["Noto Sans", "Noto Sans CJK SC"]
 
-    assert qapp.font().family() == "Noto Sans CJK SC"
+    monkeypatch.setattr(ui_font.QFontDatabase, "families", staticmethod(fake_families))
 
-
-def test_linux_chinese_font_keeps_current_font_when_noto_cjk_is_missing(
-    monkeypatch,
-    qapp: QApplication,
-    preserved_app_font,
-) -> None:
-    qapp.setFont(QFont("Arial"))
-    monkeypatch.setattr(ui_font.sys, "platform", "linux")
-    monkeypatch.setattr(
-        ui_font.QFontDatabase,
-        "families",
-        staticmethod(lambda: ["Noto Sans", "DejaVu Sans"]),
-    )
-
-    ui_font.apply_language_font("zh-CN")
+    ui_font.configure_application_font_fallbacks()
 
     assert qapp.font().family() == "Arial"
+    assert qapp.font().families() == ["Arial", "Noto Sans CJK SC"]
+
+
+def test_linux_font_fallback_keeps_current_font_when_noto_cjk_is_missing(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "linux")
+
+    def fake_families(_writing_system=None):
+        return ["Noto Sans", "DejaVu Sans"]
+
+    monkeypatch.setattr(ui_font.QFontDatabase, "families", staticmethod(fake_families))
+
+    ui_font.configure_application_font_fallbacks()
+
+    assert qapp.font().family() == "Arial"
+    assert qapp.font().families() == ["Arial"]
+
+
+def test_linux_font_fallback_is_idempotent(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "linux")
+
+    def fake_families(_writing_system=None):
+        return ["Noto Sans CJK SC"]
+
+    monkeypatch.setattr(ui_font.QFontDatabase, "families", staticmethod(fake_families))
+
+    ui_font.configure_application_font_fallbacks()
+    ui_font._FALLBACKS_CONFIGURED = False
+    ui_font.configure_application_font_fallbacks()
+
+    assert qapp.font().family() == "Arial"
+    assert qapp.font().families() == ["Arial", "Noto Sans CJK SC"]
+
+
+def test_linux_language_switch_does_not_replace_app_font(
+    monkeypatch,
+    tmp_path: Path,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "linux")
+    monkeypatch.setattr(
+        ui_font.QFontDatabase,
+        "families",
+        staticmethod(lambda: ["Noto Sans CJK SC"]),
+    )
+    translations = TranslationManager(_settings(tmp_path))
+
+    translations.apply_language("zh-CN")
+    qapp.processEvents()
+
+    assert qapp.font().family() == "Arial"
+    assert qapp.font().families() == ["Arial"]
 
 
 def test_windows_chinese_font_restores_original_when_language_changes(

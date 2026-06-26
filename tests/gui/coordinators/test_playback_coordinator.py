@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for playback coordinator tests", exc_type=ImportError)
 
 from iPhoto.application.services.assign_location_service import AssignedLocationResult
+from iPhoto.application.ports import LocationWriteJobRecord
 from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
@@ -999,6 +1000,56 @@ def test_location_assignment_releases_current_video_source_before_write() -> Non
     assert coordinator._location_released_video_path == Path("/fake/video.mp4")
     assert coordinator._location_released_video_was_playing is False
     assert coordinator._location_released_video_position_ms == 1234
+
+
+def test_location_file_write_started_defers_recovered_current_video() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/video.mp4")
+    presentation = _make_presentation(path=str(asset_path), is_video=True)
+    coordinator._current_presentation = presentation
+    coordinator._location_write_jobs_by_path = {}
+    coordinator._location_video_write_inflight_paths = set()
+    coordinator._release_current_video_for_location_write = Mock()
+
+    job = LocationWriteJobRecord(
+        job_id="job-1",
+        asset_rel="video.mp4",
+        asset_path=asset_path,
+        gps={"lat": 48.137154, "lon": 11.576124},
+        location="Munich",
+        media_kind="video",
+        status="writing",
+    )
+
+    PlaybackCoordinator._handle_location_file_write_started(coordinator, job)
+
+    assert coordinator._location_write_jobs_by_path[asset_path] == "job-1"
+    assert asset_path in coordinator._location_video_write_inflight_paths
+    coordinator._release_current_video_for_location_write.assert_called_once_with(presentation)
+
+
+def test_location_file_write_started_does_not_release_already_deferred_video() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/video.mp4")
+    coordinator._current_presentation = _make_presentation(path=str(asset_path), is_video=True)
+    coordinator._location_write_jobs_by_path = {}
+    coordinator._location_video_write_inflight_paths = {asset_path}
+    coordinator._release_current_video_for_location_write = Mock()
+
+    job = LocationWriteJobRecord(
+        job_id="job-1",
+        asset_rel="video.mp4",
+        asset_path=asset_path,
+        gps={"lat": 48.137154, "lon": 11.576124},
+        location="Munich",
+        media_kind="video",
+        status="queued",
+    )
+
+    PlaybackCoordinator._handle_location_file_write_started(coordinator, job)
+
+    assert coordinator._location_write_jobs_by_path[asset_path] == "job-1"
+    coordinator._release_current_video_for_location_write.assert_not_called()
 
 
 def test_location_assignment_restore_reloads_video_when_same_asset_remains() -> None:

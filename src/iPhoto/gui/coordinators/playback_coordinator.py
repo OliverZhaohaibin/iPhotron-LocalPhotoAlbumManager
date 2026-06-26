@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QLocale, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
-from iPhoto.application.ports import EditServicePort, MapRuntimePort
+from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.application.services.location_assignment_service import (
     LocationAssignment,
@@ -75,10 +75,11 @@ _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE = (
     "地点已保存到本机图库数据库。\n\n"
     "GPS 信息未能写入原始照片/视频文件：{reason}"
 )
+_LOCATION_VIDEO_WRITE_PLACEHOLDER = "Writing data, please wait..."
 
 
 def _location_video_write_placeholder() -> str:
-    return tr("PlaybackCoordinator", "Writing data, please wait...")
+    return tr("PlaybackCoordinator", _LOCATION_VIDEO_WRITE_PLACEHOLDER)
 
 
 class PlaybackCoordinator(QObject):
@@ -184,6 +185,9 @@ class PlaybackCoordinator(QObject):
         self._location_video_write_inflight_paths: set[Path] = set()
         self._location_write_jobs_by_path: dict[Path, str] = {}
         if self._location_write_queue is not None:
+            self._location_write_queue.writeStarted.connect(
+                self._handle_location_file_write_started
+            )
             self._location_write_queue.writeVerified.connect(
                 self._handle_location_file_write_verified
             )
@@ -1626,6 +1630,24 @@ class PlaybackCoordinator(QObject):
             _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE.format(reason=message.strip()),
             title=_LOCATION_FILE_WRITE_LIMITED_TITLE,
         )
+
+    @Slot(object)
+    def _handle_location_file_write_started(self, job: object) -> None:
+        if not isinstance(job, LocationWriteJobRecord) or not job.is_video:
+            return
+        path = Path(job.asset_path)
+        self._location_write_jobs_by_path[path] = job.job_id
+        already_inflight = self._is_location_video_write_inflight(path)
+        self._defer_location_video_loading(path)
+        if already_inflight:
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        if (
+            presentation is not None
+            and presentation.path == path
+            and presentation.is_video
+        ):
+            self._release_current_video_for_location_write(presentation)
 
     @Slot(object)
     def _handle_location_file_write_verified(self, result: object) -> None:

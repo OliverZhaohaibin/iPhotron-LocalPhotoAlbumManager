@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -28,6 +29,66 @@ _PRELOADED_QT_LIBRARIES: list[ctypes.CDLL] = []
 _WHITESPACE_RE = re.compile(r"\s+")
 _FTS_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _PREFIX_CACHE_MAX_QUERY_LEN = 4
+_PREFIX_CACHE_FETCH_LIMIT = 20
+_LOGGER = logging.getLogger(__name__)
+_OPTIMIZED_SEARCH_INDEX_COLUMNS = {
+    "norm_name",
+    "name_priority",
+    "population",
+    "geoname_id",
+    "matched_name",
+    "primary_name",
+    "asciiname",
+    "latitude",
+    "longitude",
+    "feature_code",
+    "country_code",
+    "admin1_code",
+    "admin2_code",
+    "admin3_code",
+    "admin4_code",
+}
+_OPTIMIZED_PREFIX_CACHE_COLUMNS = {
+    "prefix",
+    "rank",
+    "name_priority",
+    "population",
+    "geoname_id",
+    "matched_name",
+    "primary_name",
+    "asciiname",
+    "latitude",
+    "longitude",
+    "feature_code",
+    "country_code",
+    "admin1_code",
+    "admin2_code",
+    "admin3_code",
+    "admin4_code",
+}
+_LEGACY_FTS_TABLES = {"alternate_names_fts", "alternate_names", "geonames"}
+_LEGACY_ALTERNATE_NAMES_COLUMNS = {
+    "alt_name_id",
+    "geoname_id",
+    "lang",
+    "name",
+    "norm_name",
+    "is_preferred",
+}
+_LEGACY_GEONAMES_COLUMNS = {
+    "geoname_id",
+    "name",
+    "asciiname",
+    "latitude",
+    "longitude",
+    "feature_code",
+    "country_code",
+    "admin1_code",
+    "admin2_code",
+    "admin3_code",
+    "admin4_code",
+    "population",
+}
 _OPTIMIZED_EXACT_SQL = """
 SELECT
     geoname_id,
@@ -69,7 +130,7 @@ SELECT
 FROM prefix_cache
 WHERE prefix = :query_norm
 ORDER BY rank ASC
-LIMIT :result_limit
+LIMIT :candidate_limit
 """
 _OPTIMIZED_PREFIX_RANGE_SQL = """
 SELECT
@@ -201,6 +262,17 @@ def _build_fts_query(query_norm: str) -> str:
 
 def _next_prefix(value: str) -> str:
     return value + "\U0010FFFF"
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+
+
+def _has_columns(conn: sqlite3.Connection, table_name: str, required_columns: set[str]) -> bool:
+    return required_columns.issubset(_table_columns(conn, table_name))
 
 
 def _secondary_text_from_row(row: sqlite3.Row, display_name: str) -> str:
@@ -435,7 +507,21 @@ class GeoNamesSearchService:
         self._connection.execute("PRAGMA temp_store = MEMORY")
         self._connection.execute("PRAGMA mmap_size = 268435456")
         self._has_prefix_cache = False
-        self._query_mode = self._detect_query_mode()
+        try:
+            self._query_mode = self._detect_query_mode()
+        except Exception:
+            _LOGGER.info(
+                "GeoNames search database %s unavailable",
+                self._database_path,
+                exc_info=True,
+            )
+            self.shutdown()
+            raise
+        _LOGGER.info(
+            "GeoNames search database %s opened in %s mode",
+            self._database_path,
+            self._query_mode,
+        )
 
     def _detect_query_mode(self) -> str:
         table_names = {
@@ -445,10 +531,30 @@ class GeoNamesSearchService:
             ).fetchall()
         }
         if "search_index" in table_names:
+            if not _has_columns(
+                self._connection,
+                "search_index",
+                _OPTIMIZED_SEARCH_INDEX_COLUMNS,
+            ):
+                raise TileLoadingError("GeoNames optimized search_index table has an unexpected schema")
+            if "prefix_cache" in table_names and not _has_columns(
+                self._connection,
+                "prefix_cache",
+                _OPTIMIZED_PREFIX_CACHE_COLUMNS,
+            ):
+                raise TileLoadingError("GeoNames optimized prefix_cache table is missing or invalid")
             self._has_prefix_cache = "prefix_cache" in table_names
             return "optimized"
-        if "alternate_names_fts" in table_names:
-            return "fts"
+        if _LEGACY_FTS_TABLES.issubset(table_names) and _has_columns(
+            self._connection,
+            "alternate_names",
+            _LEGACY_ALTERNATE_NAMES_COLUMNS,
+        ) and _has_columns(
+            self._connection,
+            "geonames",
+            _LEGACY_GEONAMES_COLUMNS,
+        ):
+            return "legacy_fts"
         raise TileLoadingError(
             "GeoNames database is missing both optimized search tables and the legacy FTS index",
         )
@@ -521,7 +627,7 @@ class GeoNamesSearchService:
                 _OPTIMIZED_PREFIX_CACHE_SQL,
                 {
                     "query_norm": query_norm,
-                    "result_limit": result_limit,
+                    "candidate_limit": max(result_limit, _PREFIX_CACHE_FETCH_LIMIT),
                 },
             ).fetchall()
         else:
@@ -656,6 +762,7 @@ class OsmAndSearchService:
         limit: int = 5,
         locale: str = "",
         include_poi_fallback: bool = True,
+        fallback_on_empty: bool = True,
     ) -> list[SearchSuggestion]:
         geonames_error: Exception | None = None
         if self._geonames_service is not None:
@@ -669,7 +776,7 @@ class OsmAndSearchService:
             except Exception as exc:
                 geonames_error = exc
             else:
-                if suggestions:
+                if suggestions or not fallback_on_empty:
                     return suggestions
 
         try:

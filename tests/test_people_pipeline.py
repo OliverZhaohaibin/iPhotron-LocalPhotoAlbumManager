@@ -313,6 +313,34 @@ def test_resolve_canonical_person_id_uses_stable_profiles_for_embedding_matches(
     assert resolved == "person-a"
 
 
+def test_face_pipeline_reports_unreadable_image_without_error_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    library_root = tmp_path / "library"
+    raw_path = library_root / "album" / "photo.NEF"
+    raw_path.parent.mkdir(parents=True)
+    raw_path.write_bytes(b"not a pillow-readable raw file")
+    pipeline = FaceClusterPipeline(model_root=tmp_path / "models")
+    fake_face_app = SimpleNamespace(get=pytest.fail)
+    monkeypatch.setattr(pipeline, "_ensure_face_analysis", lambda: fake_face_app)
+
+    with caplog.at_level("WARNING", logger="iPhoto.people.pipeline"):
+        results = pipeline.detect_faces_for_rows(
+            [{"id": "asset-a", "rel": "album/photo.NEF"}],
+            library_root=library_root,
+            thumbnail_dir=tmp_path / "thumbs",
+        )
+
+    assert len(results) == 1
+    assert results[0].asset_id == "asset-a"
+    assert results[0].faces == []
+    assert results[0].error
+    assert "Skipping face detection for unreadable image" in caplog.text
+    assert "Face detection failed" not in caplog.text
+
+
 def test_build_manual_face_record_saves_requested_box_without_face_detection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

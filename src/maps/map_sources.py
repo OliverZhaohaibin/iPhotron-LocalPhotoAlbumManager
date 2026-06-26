@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import shlex
+import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +96,65 @@ else:
     )
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+_SQLITE_HEADER = b"SQLite format 3\x00"
+_OPTIMIZED_SEARCH_INDEX_COLUMNS = {
+    "norm_name",
+    "name_priority",
+    "population",
+    "geoname_id",
+    "matched_name",
+    "primary_name",
+    "asciiname",
+    "latitude",
+    "longitude",
+    "feature_code",
+    "country_code",
+    "admin1_code",
+    "admin2_code",
+    "admin3_code",
+    "admin4_code",
+}
+_OPTIMIZED_PREFIX_CACHE_COLUMNS = {
+    "prefix",
+    "rank",
+    "name_priority",
+    "population",
+    "geoname_id",
+    "matched_name",
+    "primary_name",
+    "asciiname",
+    "latitude",
+    "longitude",
+    "feature_code",
+    "country_code",
+    "admin1_code",
+    "admin2_code",
+    "admin3_code",
+    "admin4_code",
+}
+_LEGACY_FTS_TABLES = {"alternate_names_fts", "alternate_names", "geonames"}
+_LEGACY_ALTERNATE_NAMES_COLUMNS = {
+    "alt_name_id",
+    "geoname_id",
+    "lang",
+    "name",
+    "norm_name",
+    "is_preferred",
+}
+_LEGACY_GEONAMES_COLUMNS = {
+    "geoname_id",
+    "name",
+    "asciiname",
+    "latitude",
+    "longitude",
+    "feature_code",
+    "country_code",
+    "admin1_code",
+    "admin2_code",
+    "admin3_code",
+    "admin4_code",
+    "population",
+}
 
 
 def prefer_osmand_native_widget() -> bool:
@@ -250,7 +310,9 @@ def has_usable_osmand_search_extension(package_root: Path | None = None) -> bool
     """Return ``True`` when both the map assets and search DB are bundled."""
 
     root = package_root or _package_root()
-    return _has_osmand_data_assets(root) and default_osmand_search_database(root).is_file()
+    return _has_osmand_data_assets(root) and is_valid_osmand_search_database(
+        default_osmand_search_database(root),
+    )
 
 
 def default_pending_osmand_extension_root(package_root: Path | None = None) -> Path:
@@ -313,6 +375,8 @@ def validate_osmand_extension_root(extension_root: Path, *, platform: str | None
         extension_root / "search" / "geonames.sqlite3",
     )
     if not extension_root.is_dir() or not all(candidate.exists() for candidate in required_paths):
+        return False
+    if not is_valid_osmand_search_database(required_paths[2]):
         return False
 
     if resolved_platform == "win32":
@@ -384,6 +448,55 @@ def _has_osmand_data_assets(package_root: Path) -> bool:
         and Path(source.resources_root or "").exists()
         and Path(source.style_path or "").exists()
     )
+
+
+def is_valid_osmand_search_database(path: Path) -> bool:
+    """Return whether *path* is a usable GeoNames SQLite search database."""
+
+    db_path = Path(path)
+    if not db_path.is_file():
+        return False
+    try:
+        with db_path.open("rb") as handle:
+            if handle.read(len(_SQLITE_HEADER)) != _SQLITE_HEADER:
+                return False
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.row_factory = sqlite3.Row
+            table_names = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')",
+                ).fetchall()
+            }
+            if "search_index" in table_names:
+                if not _has_table_columns(conn, "search_index", _OPTIMIZED_SEARCH_INDEX_COLUMNS):
+                    return False
+                return (
+                    "prefix_cache" not in table_names
+                    or _has_table_columns(conn, "prefix_cache", _OPTIMIZED_PREFIX_CACHE_COLUMNS)
+                )
+            return (
+                _LEGACY_FTS_TABLES.issubset(table_names)
+                and _has_table_columns(conn, "alternate_names", _LEGACY_ALTERNATE_NAMES_COLUMNS)
+                and _has_table_columns(conn, "geonames", _LEGACY_GEONAMES_COLUMNS)
+            )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def _has_table_columns(
+    conn: sqlite3.Connection,
+    table_name: str,
+    required_columns: set[str],
+) -> bool:
+    columns = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    return required_columns.issubset(columns)
 
 
 def _resolve_path(value: Path | str, package_root: Path) -> Path:
@@ -616,6 +729,7 @@ __all__ = [
     "has_usable_osmand_default",
     "has_usable_osmand_native_widget",
     "has_usable_osmand_search_extension",
+    "is_valid_osmand_search_database",
     "prefer_osmand_native_widget",
     "resolve_osmand_helper_command",
     "resolve_osmand_native_widget_library",

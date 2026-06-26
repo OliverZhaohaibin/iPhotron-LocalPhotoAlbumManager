@@ -136,6 +136,15 @@ class LocationFileWriteQueue(QObject):
         repository: MetadataWriteJobRepository,
         job: LocationWriteJobRecord,
     ) -> LocationFileWriteResult:
+        is_superseded = getattr(repository, "is_superseded", None)
+        if callable(is_superseded) and is_superseded(job.job_id):
+            return LocationFileWriteResult(
+                job_id=job.job_id,
+                asset_path=job.asset_path,
+                gps=dict(job.gps),
+                location=job.location,
+                error="superseded",
+            )
         if job.status == "writing":
             recovered = self._verify_interrupted_job(repository, job)
             if recovered is not None:

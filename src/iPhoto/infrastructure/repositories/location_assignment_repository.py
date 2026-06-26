@@ -93,6 +93,24 @@ class IndexStoreLocationAssignmentRepository:
             )
             conn.execute(
                 """
+                UPDATE metadata_write_jobs
+                SET status = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE asset_rel = ?
+                  AND status IN (?, ?)
+                """,
+                (
+                    "superseded",
+                    "Superseded by a newer location assignment",
+                    now,
+                    asset_rel,
+                    "queued",
+                    "failed",
+                ),
+            )
+            conn.execute(
+                """
                 INSERT INTO metadata_write_jobs (
                     job_id, asset_rel, asset_path, gps_json, location, media_kind,
                     status, attempts, last_error, created_at, updated_at

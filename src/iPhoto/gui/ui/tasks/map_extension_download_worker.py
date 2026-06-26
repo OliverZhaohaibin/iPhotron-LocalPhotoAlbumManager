@@ -20,6 +20,7 @@ from maps.map_sources import (
     default_osmand_extension_root,
     default_pending_osmand_extension_root,
     default_osmand_tiles_root,
+    is_valid_osmand_search_database,
     supports_map_extension_download,
     verify_osmand_extension_install,
 )
@@ -165,6 +166,11 @@ class MapExtensionDownloadWorker(QRunnable):
                     "Downloaded map extension is incomplete: "
                     f"missing '{candidate.relative_to(extension_root)}'."
                 )
+        if not is_valid_osmand_search_database(required_paths[2]):
+            raise RuntimeError(
+                "Downloaded map extension is incomplete: search/geonames.sqlite3 "
+                "is not a valid GeoNames search database."
+            )
 
         helper_candidates = (
             extension_root / "bin" / "osmand_render_helper.exe",

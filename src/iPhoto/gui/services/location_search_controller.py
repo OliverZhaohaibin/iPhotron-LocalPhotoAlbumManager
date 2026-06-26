@@ -2,66 +2,82 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
 from maps.osmand_search import OsmAndSearchService, SearchSuggestion
 
 _LOCATION_SEARCH_RESULT_LIMIT = 5
+_LOCATION_SEARCH_DEBOUNCE_MS = 50
+_LOCATION_SEARCH_CACHE_LIMIT = 128
 
 
-class _LocationSearchSignals(QObject):
+class _LocationSearchWorker(QObject):
     ready = Signal(int, object, str, object)
     error = Signal(int, object, str, str)
-    finished = Signal(int)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._service: OsmAndSearchService | None = None
+        self._package_root: Path | None = None
 
-class _LocationSearchWorker(QRunnable):
-    def __init__(
+    @Slot(object, str)
+    def warm_up(self, package_root_obj: object, locale: str) -> None:
+        del locale
+        try:
+            self._ensure_service(package_root_obj)
+        except Exception:
+            # Warm-up is opportunistic; the foreground search path reports errors.
+            return
+
+    @Slot(int, object, str, object, str)
+    def search(
         self,
-        *,
         token: int,
-        target_path: Path,
+        target_path: object,
         query: str,
-        package_root: Path | None,
+        package_root_obj: object,
         locale: str,
     ) -> None:
-        super().__init__()
-        self.setAutoDelete(True)
-        self.signals = _LocationSearchSignals()
-        self._token = int(token)
-        self._target_path = Path(target_path)
-        self._query = str(query)
-        self._package_root = Path(package_root) if package_root is not None else None
-        self._locale = str(locale or "")
-
-    def run(self) -> None:  # pragma: no cover - exercised via controller tests
         try:
-            service = OsmAndSearchService(package_root=self._package_root)
-            try:
-                suggestions = service.search(
-                    self._query,
-                    limit=_LOCATION_SEARCH_RESULT_LIMIT,
-                    locale=self._locale,
-                )
-            finally:
-                service.shutdown()
-            self.signals.ready.emit(
-                self._token,
-                self._target_path,
-                self._query,
-                suggestions,
+            service = self._ensure_service(package_root_obj)
+            suggestions = service.search(
+                query,
+                limit=_LOCATION_SEARCH_RESULT_LIMIT,
+                locale=locale,
+                fallback_on_empty=False,
             )
+            self.ready.emit(token, target_path, query, suggestions)
         except Exception as exc:  # noqa: BLE001
-            self.signals.error.emit(
-                self._token,
-                self._target_path,
-                self._query,
-                str(exc),
-            )
-        finally:
-            self.signals.finished.emit(self._token)
+            self.error.emit(token, target_path, query, str(exc))
+
+    @Slot()
+    def shutdown(self) -> None:
+        if self._service is None:
+            return
+        self._service.shutdown()
+        self._service = None
+        self._package_root = None
+
+    def _ensure_service(self, package_root_obj: object) -> OsmAndSearchService:
+        package_root = self._normalize_package_root(package_root_obj)
+        if self._service is not None and package_root == self._package_root:
+            return self._service
+        self.shutdown()
+        self._service = OsmAndSearchService(package_root=package_root)
+        self._package_root = package_root
+        return self._service
+
+    @staticmethod
+    def _normalize_package_root(package_root_obj: object) -> Path | None:
+        if package_root_obj is None:
+            return None
+        try:
+            return Path(package_root_obj).resolve()
+        except TypeError:
+            return None
 
 
 class LocationSearchController(QObject):
@@ -70,24 +86,63 @@ class LocationSearchController(QObject):
     suggestionsReady = Signal(int, object, str, object)
     searchFailed = Signal(int, object, str, str)
 
+    _searchRequested = Signal(int, object, str, object, str)
+    _warmRequested = Signal(object, str)
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._pool = QThreadPool(self)
-        self._pool.setMaxThreadCount(1)
         self._token = 0
-        self._active_tokens: set[int] = set()
-        self._cache: dict[str, list[SearchSuggestion]] = {}
         self._target_path: Path | None = None
+        self._pending_search: tuple[int, Path, str, Path | None, str] | None = None
+        self._cache: OrderedDict[str, list[SearchSuggestion]] = OrderedDict()
+        self._cache_package_root: Path | None = None
+
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(_LOCATION_SEARCH_DEBOUNCE_MS)
+        self._debounce_timer.timeout.connect(self._execute_pending_search)
+
+        self._thread = QThread(self)
+        self._worker = _LocationSearchWorker()
+        self._worker.moveToThread(self._thread)
+        self._searchRequested.connect(self._worker.search)
+        self._warmRequested.connect(self._worker.warm_up)
+        self._worker.ready.connect(self._handle_ready)
+        self._worker.error.connect(self._handle_error)
+        self._thread.start()
+
+    def warm_up(
+        self,
+        *,
+        package_root: Path | None,
+        locale: str,
+    ) -> None:
+        normalized_root = self._normalize_package_root(package_root)
+        self._set_cache_package_root(normalized_root)
+        self._warmRequested.emit(normalized_root, str(locale or ""))
 
     def reset(self) -> None:
         self._token += 1
-        self._active_tokens.clear()
         self._target_path = None
-        self._pool.clear()
+        self._pending_search = None
+        self._debounce_timer.stop()
 
     def shutdown(self) -> None:
         self.reset()
-        self._pool.waitForDone(500)
+        self.clear_cache()
+        if self._thread.isRunning():
+            try:
+                QMetaObject.invokeMethod(
+                    self._worker,
+                    "shutdown",
+                    Qt.ConnectionType.BlockingQueuedConnection,
+                )
+            except RuntimeError:
+                self._worker.shutdown()
+            self._thread.quit()
+            self._thread.wait(1000)
+        else:
+            self._worker.shutdown()
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -103,6 +158,11 @@ class LocationSearchController(QObject):
         self._token += 1
         token = self._token
         self._target_path = Path(target_path)
+        self._pending_search = None
+        self._debounce_timer.stop()
+
+        normalized_root = self._normalize_package_root(package_root)
+        self._set_cache_package_root(normalized_root)
         trimmed = query.strip()
         if not self._should_search(trimmed):
             self.suggestionsReady.emit(token, self._target_path, trimmed, [])
@@ -111,28 +171,39 @@ class LocationSearchController(QObject):
         normalized_query = self._normalize_query(trimmed)
         exact = self._cache.get(normalized_query)
         if exact is not None:
+            self._cache.move_to_end(normalized_query)
             self.suggestionsReady.emit(token, self._target_path, trimmed, list(exact))
             return token
 
         preview = self._preview_cached(trimmed)
-        if preview is not None:
-            self.suggestionsReady.emit(token, self._target_path, trimmed, preview)
-
-        self._pool.clear()
-        self._active_tokens.add(token)
-        worker = _LocationSearchWorker(
-            token=token,
-            target_path=self._target_path,
-            query=trimmed,
-            package_root=package_root,
-            locale=locale,
+        self.suggestionsReady.emit(
+            token,
+            self._target_path,
+            trimmed,
+            preview if preview is not None else [],
         )
-        worker.signals.ready.connect(self._handle_ready)
-        worker.signals.error.connect(self._handle_error)
-        worker.signals.finished.connect(self._handle_finished)
-        self._pool.start(worker)
+        self._pending_search = (
+            token,
+            self._target_path,
+            trimmed,
+            normalized_root,
+            str(locale or ""),
+        )
+        self._debounce_timer.start()
         return token
 
+    @Slot()
+    def _execute_pending_search(self) -> None:
+        pending = self._pending_search
+        self._pending_search = None
+        if pending is None:
+            return
+        token, target_path, query, package_root, locale = pending
+        if token != self._token or target_path != self._target_path:
+            return
+        self._searchRequested.emit(token, target_path, query, package_root, locale)
+
+    @Slot(int, object, str, object)
     def _handle_ready(
         self,
         token: int,
@@ -143,11 +214,14 @@ class LocationSearchController(QObject):
         if token != self._token or Path(target_path) != self._target_path:
             return
         suggestions = list(suggestions_obj) if isinstance(suggestions_obj, list) else []
-        self._cache[self._normalize_query(query)] = suggestions
-        if len(self._cache) > 64:
-            self._cache.pop(next(iter(self._cache)), None)
+        normalized_query = self._normalize_query(query)
+        self._cache[normalized_query] = suggestions
+        self._cache.move_to_end(normalized_query)
+        while len(self._cache) > _LOCATION_SEARCH_CACHE_LIMIT:
+            self._cache.popitem(last=False)
         self.suggestionsReady.emit(token, target_path, query, suggestions)
 
+    @Slot(int, object, str, str)
     def _handle_error(
         self,
         token: int,
@@ -158,9 +232,6 @@ class LocationSearchController(QObject):
         if token != self._token or Path(target_path) != self._target_path:
             return
         self.searchFailed.emit(token, target_path, query, message)
-
-    def _handle_finished(self, token: int) -> None:
-        self._active_tokens.discard(int(token))
 
     def _preview_cached(self, query: str) -> list[SearchSuggestion] | None:
         normalized_query = self._normalize_query(query)
@@ -188,6 +259,18 @@ class LocationSearchController(QObject):
             if filtered:
                 return filtered[:_LOCATION_SEARCH_RESULT_LIMIT]
         return None
+
+    def _set_cache_package_root(self, package_root: Path | None) -> None:
+        if package_root == self._cache_package_root:
+            return
+        self._cache_package_root = package_root
+        self.clear_cache()
+
+    @staticmethod
+    def _normalize_package_root(package_root: Path | None) -> Path | None:
+        if package_root is None:
+            return None
+        return Path(package_root).resolve()
 
     @staticmethod
     def _normalize_query(query: str) -> str:

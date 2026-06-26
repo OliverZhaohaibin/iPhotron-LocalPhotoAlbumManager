@@ -82,3 +82,63 @@ def test_location_assignment_repository_rolls_back_job_when_asset_is_missing(
     with sqlite3.connect(repo.path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM metadata_write_jobs").fetchone()[0]
     assert count == 0
+
+
+def test_location_assignment_repository_supersedes_old_failed_jobs_for_asset(
+    tmp_path: Path,
+) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([{"rel": "clip.mov", "id": "asset-1", "bytes": 10}])
+    now = 1_700_000_000_000
+    with sqlite3.connect(repo.path) as conn:
+        conn.execute(
+            """
+            INSERT INTO metadata_write_jobs (
+                job_id, asset_rel, asset_path, gps_json, location, media_kind,
+                status, attempts, last_error, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "old-job",
+                "clip.mov",
+                str(tmp_path / "clip.mov"),
+                json.dumps({"lat": 1.0, "lon": 2.0}),
+                "Old",
+                "video",
+                "failed",
+                1,
+                "permission denied",
+                now,
+                now,
+            ),
+        )
+    assignment_repo = IndexStoreLocationAssignmentRepository(tmp_path)
+
+    new_job = assignment_repo.assign_location(
+        asset_rel="clip.mov",
+        asset_path=tmp_path / "clip.mov",
+        gps={"lat": 48.137154, "lon": 11.576124},
+        location="Munich",
+        is_video=True,
+        metadata_updates={},
+    )
+
+    with sqlite3.connect(repo.path) as conn:
+        rows = conn.execute(
+            """
+            SELECT job_id, status, last_error
+            FROM metadata_write_jobs
+            WHERE asset_rel = ?
+            ORDER BY created_at ASC
+            """,
+            ("clip.mov",),
+        ).fetchall()
+
+    assert rows[0] == (
+        "old-job",
+        "superseded",
+        "Superseded by a newer location assignment",
+    )
+    assert rows[1][0] == new_job.job_id
+    assert rows[1][1:] == ("queued", None)

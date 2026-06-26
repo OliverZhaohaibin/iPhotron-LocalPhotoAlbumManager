@@ -132,6 +132,18 @@ class MetadataWriteJobRepository:
             last_error=str(error),
         )
 
+    def is_superseded(self, job_id: str) -> bool:
+        repo = get_global_repository(self._library_root)
+        with repo.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM metadata_write_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        status = row["status"] if isinstance(row, dict) else row[0]
+        return str(status) == "superseded"
+
     def _update_status(
         self,
         job_id: str,

@@ -474,21 +474,19 @@ def test_set_people_library_root_prefers_bound_library_manager_service() -> None
 
 def test_refresh_location_extension_state_uses_bound_map_runtime_capabilities() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    location_search_service = object()
     coordinator._map_runtime = SimpleNamespace(
         capabilities=lambda: SimpleNamespace(location_search_available=True),
         package_root=lambda: Path("/fake/maps"),
     )
-    coordinator._location_search_cache = {}
-    coordinator._location_search_timer = Mock(stop=Mock())
-    coordinator._pending_location_query = ""
-    coordinator._location_search_target_path = None
-    coordinator._location_search_service = location_search_service
+    coordinator._location_search_controller = Mock(warm_up=Mock())
 
     enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
 
     assert enabled is True
-    assert coordinator._location_search_service is location_search_service
+    coordinator._location_search_controller.warm_up.assert_called_once()
+    assert coordinator._location_search_controller.warm_up.call_args.kwargs["package_root"] == Path(
+        "/fake/maps"
+    )
 
 
 def test_refresh_location_extension_state_uses_runtime_package_root() -> None:
@@ -497,10 +495,7 @@ def test_refresh_location_extension_state_uses_runtime_package_root() -> None:
         capabilities=lambda: SimpleNamespace(location_search_available=True),
         package_root=lambda: Path("/fake/maps"),
     )
-    coordinator._location_search_cache = {}
-    coordinator._location_search_timer = Mock(stop=Mock())
-    coordinator._pending_location_query = ""
-    coordinator._location_search_target_path = None
+    coordinator._location_search_controller = Mock(warm_up=Mock())
 
     enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
 
@@ -514,10 +509,7 @@ def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unb
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._map_runtime = None
     coordinator._library_manager = SimpleNamespace(map_runtime=None)
-    coordinator._location_search_cache = {}
-    coordinator._location_search_timer = Mock(stop=Mock())
-    coordinator._pending_location_query = ""
-    coordinator._location_search_target_path = None
+    coordinator._location_search_controller = Mock(warm_up=Mock())
 
     fallback_runtime = SimpleNamespace(
         capabilities=lambda: SimpleNamespace(location_search_available=True),
@@ -887,11 +879,38 @@ def test_refresh_info_panel_keeps_download_prompt_when_only_legacy_map_runtime_i
         ),
         package_root=lambda: Path("/fake/maps"),
     )
-    coordinator._location_search_cache = {}
-    coordinator._location_search_timer = Mock(stop=Mock())
-    coordinator._pending_location_query = ""
-    coordinator._location_search_target_path = None
-    coordinator._location_search_service = None
+    coordinator._location_search_controller = Mock(reset=Mock())
+    coordinator._queue_info_panel_metadata_enrichment = Mock()
+
+    PlaybackCoordinator._refresh_info_panel(
+        coordinator,
+        {
+            "abs": "/fake/image.jpg",
+            "rel": "image.jpg",
+            "name": "image.jpg",
+            "is_video": False,
+        },
+    )
+
+    coordinator._info_panel.set_location_capability.assert_called_once_with(
+        enabled=False,
+        preview_enabled=False,
+        fallback_text=playback_coordinator_module._LOCATION_EXTENSION_PROMPT,
+    )
+
+
+def test_refresh_info_panel_shows_download_prompt_when_extension_search_is_unavailable() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock()
+    coordinator._map_runtime = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(
+            display_available=True,
+            location_search_available=False,
+            osmand_extension_available=True,
+        ),
+        package_root=lambda: Path("/fake/maps"),
+    )
+    coordinator._location_search_controller = Mock(reset=Mock())
     coordinator._queue_info_panel_metadata_enrichment = Mock()
 
     PlaybackCoordinator._refresh_info_panel(
@@ -1049,9 +1068,6 @@ def test_location_confirm_passes_library_relative_rel_to_assignment_service(
         metadata_for_path=Mock(return_value={}),
         store=store,
     )
-    coordinator._location_search_timer = Mock(stop=Mock())
-    coordinator._pending_location_query = ""
-    coordinator._location_search_target_path = None
     coordinator._location_search_controller = Mock(reset=Mock())
     coordinator._info_panel = Mock()
     coordinator._location_write_queue = Mock(enqueue=Mock())
@@ -1125,9 +1141,6 @@ def test_location_confirm_updates_current_header_immediately(monkeypatch: pytest
         row_for_path=Mock(return_value=0),
         store=store,
     )
-    coordinator._location_search_timer = Mock(stop=Mock())
-    coordinator._pending_location_query = ""
-    coordinator._location_search_target_path = None
     coordinator._location_search_controller = Mock(reset=Mock())
     coordinator._info_panel = Mock()
     coordinator._update_header = Mock()

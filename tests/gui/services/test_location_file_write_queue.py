@@ -22,6 +22,7 @@ class _FakeRepository:
         self.queued: list[tuple[str, str | None]] = []
         self.failed_jobs: list[LocationWriteJobRecord] = []
         self.recoverable_jobs: list[LocationWriteJobRecord] = []
+        self.superseded_job_ids: set[str] = set()
 
     def mark_writing(self, job_id: str) -> None:
         self.writing.append(job_id)
@@ -42,6 +43,9 @@ class _FakeRepository:
         if asset_rel is None:
             return list(self.failed_jobs)
         return [job for job in self.failed_jobs if job.asset_rel == asset_rel]
+
+    def is_superseded(self, job_id: str) -> bool:
+        return job_id in self.superseded_job_ids
 
 
 class _FakeWriter:
@@ -184,5 +188,28 @@ def test_location_file_write_queue_verifies_recovered_writing_job_without_rewrit
     assert repository.verified == ["job-1"]
     assert writer.write_calls == 0
     assert verified_events and verified_events[0].job_id == "job-1"
+    queue.shutdown(wait=True)
+    event_bus.shutdown()
+
+
+def test_location_file_write_queue_skips_superseded_job_without_writing(
+    qcore_app: QCoreApplication,
+    tmp_path: Path,
+) -> None:
+    del qcore_app
+    event_bus = EventBus()
+    writer = _FakeWriter()
+    queue = LocationFileWriteQueue(event_bus=event_bus, writer=writer)
+    repository = _FakeRepository()
+    repository.superseded_job_ids = {"job-1"}
+    queue._repository = repository
+
+    queue.enqueue(_job(tmp_path))
+
+    assert queue.drain(timeout=5.0) is True
+    assert writer.write_calls == 0
+    assert repository.writing == []
+    assert repository.verified == []
+    assert repository.failed == []
     queue.shutdown(wait=True)
     event_bus.shutdown()

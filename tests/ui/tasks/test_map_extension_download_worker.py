@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import socket
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,52 @@ from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadWorker,
     _DOWNLOAD_TIMEOUT_SECONDS,
 )
+
+
+def _create_search_database(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE search_index (
+                norm_name TEXT NOT NULL,
+                name_priority INTEGER NOT NULL,
+                population INTEGER NOT NULL,
+                geoname_id INTEGER NOT NULL,
+                matched_name TEXT NOT NULL,
+                primary_name TEXT NOT NULL,
+                asciiname TEXT,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                feature_code TEXT,
+                country_code TEXT,
+                admin1_code TEXT,
+                admin2_code TEXT,
+                admin3_code TEXT,
+                admin4_code TEXT,
+                PRIMARY KEY (norm_name, name_priority, population DESC, geoname_id)
+            ) WITHOUT ROWID;
+            CREATE TABLE prefix_cache (
+                prefix TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                name_priority INTEGER NOT NULL,
+                population INTEGER NOT NULL,
+                geoname_id INTEGER NOT NULL,
+                matched_name TEXT NOT NULL,
+                primary_name TEXT NOT NULL,
+                asciiname TEXT,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                feature_code TEXT,
+                country_code TEXT,
+                admin1_code TEXT,
+                admin2_code TEXT,
+                admin3_code TEXT,
+                admin4_code TEXT,
+                PRIMARY KEY (prefix, rank)
+            ) WITHOUT ROWID;
+            """
+        )
 
 
 @pytest.fixture()
@@ -180,7 +227,7 @@ def test_download_and_stage_returns_success_when_verified_cleanup_fails(
             encoding="utf-8",
         )
         (extension_root / "search").mkdir()
-        (extension_root / "search" / "geonames.sqlite3").write_bytes(b"sqlite")
+        _create_search_database(extension_root / "search" / "geonames.sqlite3")
         (extension_root / "bin").mkdir()
         (extension_root / "bin" / "osmand_render_helper").write_bytes(b"helper")
         (extension_root / "World_basemap_2.obf").write_bytes(b"obf")

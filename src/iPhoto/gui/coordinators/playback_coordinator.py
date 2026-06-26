@@ -62,8 +62,6 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 _INFO_PANEL_METADATA_CACHE_MAX = 200
-_LOCATION_SEARCH_RESULT_LIMIT = 5
-_LOCATION_SEARCH_DEBOUNCE_MS = 80
 _LOCATION_EXTENSION_PROMPT = "Install the map extension to use Assign a Location."
 _LOCATION_VIDEO_WRITE_PLACEHOLDER = "Writing data, please wait..."
 _LOCATION_EXIFTOOL_LIMITED_TITLE = "功能受限"
@@ -171,14 +169,11 @@ class PlaybackCoordinator(QObject):
         self._location_search_controller.searchFailed.connect(
             self._handle_location_search_failed
         )
-        self._location_search_cache: dict[str, list[SearchSuggestion]] = {}
         self._location_assign_inflight = False
         self._location_assign_path: Path | None = None
         self._location_preview_path: Path | None = None
         self._location_preview_metadata: dict[str, Any] | None = None
         self._confirmed_location_metadata: dict[Path, dict[str, Any]] = {}
-        self._pending_location_query = ""
-        self._location_search_target_path: Path | None = None
         self._location_released_video_path: Path | None = None
         self._location_released_video_was_playing = False
         self._location_released_video_position_ms: int | None = None
@@ -198,10 +193,6 @@ class PlaybackCoordinator(QObject):
         self._play_debounce.setSingleShot(True)
         self._play_debounce.setInterval(PLAY_ASSET_DEBOUNCE_MS)
         self._play_debounce.timeout.connect(self._execute_pending_play)
-        self._location_search_timer = QTimer(self)
-        self._location_search_timer.setSingleShot(True)
-        self._location_search_timer.setInterval(_LOCATION_SEARCH_DEBOUNCE_MS)
-        self._location_search_timer.timeout.connect(self._perform_location_search)
 
         self._connect_signals()
         self._setup_zoom_handler()
@@ -225,6 +216,12 @@ class PlaybackCoordinator(QObject):
         )
         panel.locationQueryChanged.connect(self._handle_location_query_changed)
         panel.locationConfirmRequested.connect(self._handle_location_confirm_requested)
+        if getattr(self, "_location_search_controller", None) is not None and getattr(
+            self,
+            "_map_runtime",
+            None,
+        ) is not None:
+            self._refresh_location_extension_state()
 
     def set_people_library_root(self, library_root: Path | None) -> None:
         people_service = getattr(self, "_people_service", None)
@@ -251,13 +248,17 @@ class PlaybackCoordinator(QObject):
         previous_package_root = self._map_runtime_package_root()
         self._map_runtime = map_runtime or getattr(self._library_manager, "map_runtime", None)
         if self._map_runtime_package_root() != previous_package_root:
-            self._reset_location_search_service()
+            self._reset_location_search_service(clear_cache=True)
         if self._info_panel is None or self._info_panel.current_rel() is None:
             return
         capabilities = self._map_runtime_capabilities()
+        location_enabled = self._refresh_location_extension_state()
         self._info_panel.set_location_capability(
-            enabled=self._refresh_location_extension_state(),
-            preview_enabled=self._info_panel_preview_enabled(capabilities),
+            enabled=location_enabled,
+            preview_enabled=self._info_panel_preview_enabled(
+                capabilities,
+                location_enabled=location_enabled,
+            ),
             fallback_text=_LOCATION_EXTENSION_PROMPT,
         )
 
@@ -926,12 +927,7 @@ class PlaybackCoordinator(QObject):
 
     def reset_for_gallery(self) -> None:
         self._clear_play_request_state()
-        location_timer = getattr(self, "_location_search_timer", None)
-        if location_timer is not None:
-            location_timer.stop()
-        self._pending_location_query = ""
-        self._location_search_target_path = None
-        self._reset_location_search_service()
+        self._reset_location_search_service(clear_cache=True)
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._hide_face_name_overlay(clear_annotations=True)
@@ -947,10 +943,9 @@ class PlaybackCoordinator(QObject):
 
     def shutdown(self) -> None:
         self._clear_play_request_state()
-        self._location_search_timer.stop()
-        self._pending_location_query = ""
-        self._location_search_target_path = None
-        self._reset_location_search_service()
+        location_search_controller = getattr(self, "_location_search_controller", None)
+        if location_search_controller is not None:
+            location_search_controller.shutdown()
         self._player_view.video_area.stop()
         self._hide_face_name_overlay(clear_annotations=True)
         self._is_playing = False
@@ -1055,7 +1050,10 @@ class PlaybackCoordinator(QObject):
         with self._info_panel_content_update():
             self._info_panel.set_location_capability(
                 enabled=location_enabled,
-                preview_enabled=self._info_panel_preview_enabled(capabilities, location_enabled=location_enabled),
+                preview_enabled=self._info_panel_preview_enabled(
+                    capabilities,
+                    location_enabled=location_enabled,
+                ),
                 fallback_text=_LOCATION_EXTENSION_PROMPT,
             )
             self._info_panel.set_asset_metadata(local_info)
@@ -1081,6 +1079,7 @@ class PlaybackCoordinator(QObject):
         if not enabled:
             self._reset_location_search_service()
             return False
+        self._warm_location_search_controller()
         return True
 
     @staticmethod
@@ -1092,6 +1091,8 @@ class PlaybackCoordinator(QObject):
         if capabilities is None:
             return bool(location_enabled)
         return bool(
+            location_enabled
+            and
             getattr(capabilities, "display_available", False)
             and getattr(capabilities, "osmand_extension_available", False)
         )
@@ -1136,65 +1137,24 @@ class PlaybackCoordinator(QObject):
         self._map_runtime = fallback_runtime
         return fallback_runtime
 
-    def _reset_location_search_service(self) -> None:
-        location_timer = getattr(self, "_location_search_timer", None)
-        if location_timer is not None:
-            location_timer.stop()
-        self._pending_location_query = ""
-        self._location_search_target_path = None
-        location_cache = getattr(self, "_location_search_cache", None)
-        if location_cache is not None:
-            location_cache.clear()
+    def _reset_location_search_service(self, *, clear_cache: bool = False) -> None:
         controller = getattr(self, "_location_search_controller", None)
         if controller is not None:
             controller.reset()
+            if clear_cache:
+                controller.clear_cache()
 
-    def _normalize_location_query(self, query: str) -> str:
-        return " ".join(query.split()).casefold()
-
-    def _should_search_location_query(self, query: str) -> bool:
-        trimmed = " ".join(query.split())
-        if not trimmed:
-            return False
-        if len(trimmed) >= 2:
-            return True
-        return any(ord(character) >= 128 for character in trimmed)
-
-    def _preview_cached_location_suggestions(
-        self,
-        query: str,
-    ) -> tuple[list[SearchSuggestion] | None, bool]:
-        normalized_query = self._normalize_location_query(query)
-        if not normalized_query:
-            return None, False
-        exact = self._location_search_cache.get(normalized_query)
-        if exact is not None:
-            return list(exact), True
-
-        for cached_query, cached_results in sorted(
-            self._location_search_cache.items(),
-            key=lambda item: len(item[0]),
-            reverse=True,
-        ):
-            if not normalized_query.startswith(cached_query):
-                continue
-            filtered = [
-                suggestion
-                for suggestion in cached_results
-                if normalized_query in self._normalize_location_query(
-                    " ".join(
-                        part
-                        for part in (
-                            suggestion.display_name,
-                            suggestion.secondary_text,
-                        )
-                        if part
-                    )
-                )
-            ]
-            if filtered:
-                return filtered[:_LOCATION_SEARCH_RESULT_LIMIT], False
-        return None, False
+    def _warm_location_search_controller(self) -> None:
+        controller = getattr(self, "_location_search_controller", None)
+        if controller is None:
+            return
+        try:
+            controller.warm_up(
+                package_root=self._map_runtime_package_root(),
+                locale=QLocale.system().bcp47Name(),
+            )
+        except Exception:
+            LOGGER.debug("Failed to warm location search controller", exc_info=True)
 
     @Slot(str)
     def _handle_location_query_changed(self, query: str) -> None:
@@ -1202,54 +1162,24 @@ class PlaybackCoordinator(QObject):
         if info_panel is None:
             return
 
-        self._location_search_timer.stop()
-        self._pending_location_query = ""
-        self._location_search_target_path = None
-        self._location_search_controller.reset()
-
         if not self._refresh_location_extension_state():
             info_panel.set_location_suggestions([])
             return
         if self._location_assign_inflight:
+            self._reset_location_search_service()
             info_panel.set_location_suggestions([])
             return
-        if not self._should_search_location_query(query):
-            info_panel.set_location_suggestions([])
-            return
-
-        info_panel.set_location_suggestions([])
 
         presentation = getattr(self, "_current_presentation", None)
         if presentation is None:
-            return
-        self._pending_location_query = query.strip()
-        self._location_search_target_path = presentation.path
-        self._location_search_timer.start()
-
-    @Slot()
-    def _perform_location_search(self) -> None:
-        info_panel = getattr(self, "_info_panel", None)
-        presentation = getattr(self, "_current_presentation", None)
-        query = self._pending_location_query.strip()
-        target_path = self._location_search_target_path
-        self._pending_location_query = ""
-        if (
-            info_panel is None
-            or presentation is None
-            or not query
-            or target_path is None
-            or presentation.path != target_path
-        ):
-            return
-
-        if not self._refresh_location_extension_state():
+            self._reset_location_search_service()
             info_panel.set_location_suggestions([])
             return
 
         locale = QLocale.system().bcp47Name()
         self._location_search_controller.search(
             query,
-            target_path=target_path,
+            target_path=presentation.path,
             package_root=self._map_runtime_package_root(),
             locale=locale,
         )
@@ -1321,9 +1251,6 @@ class PlaybackCoordinator(QObject):
             rel_value,
         )
 
-        self._location_search_timer.stop()
-        self._pending_location_query = ""
-        self._location_search_target_path = None
         self._location_search_controller.reset()
 
         display_name = suggestion_obj.display_name.strip() or query.strip()

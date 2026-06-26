@@ -8,15 +8,31 @@ from iPhoto.infrastructure.services import map_runtime_service as map_runtime_se
 from iPhoto.infrastructure.services.map_runtime_service import SessionMapRuntimeService
 
 
-def test_map_runtime_service_keeps_native_widget_available_when_macos_python_gl_probe_fails(
+def test_map_runtime_service_initializes_capabilities_without_runtime_probes(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(map_runtime_service_module, "_has_qt_application", lambda: True)
-    monkeypatch.setattr(map_runtime_service_module, "check_opengl_support", lambda: False)
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "check_opengl_support",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("OpenGL should not be probed during init")
+        ),
+    )
     monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: True)
-    monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_native_widget", lambda root: root == tmp_path)
-    monkeypatch.setattr(map_runtime_service_module, "probe_native_widget_runtime", lambda root: (root == tmp_path, None))
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "has_usable_osmand_native_widget",
+        lambda root: root == tmp_path,
+    )
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "probe_native_widget_runtime",
+        lambda root: (_ for _ in ()).throw(
+            AssertionError("Native widget should not be probed during init")
+        ),
+    )
     monkeypatch.setattr(
         map_runtime_service_module,
         "choose_default_map_source",
@@ -30,9 +46,62 @@ def test_map_runtime_service_keeps_native_widget_available_when_macos_python_gl_
 
     capabilities = SessionMapRuntimeService(tmp_path).capabilities()
 
-    assert capabilities.python_gl_available is False
+    assert capabilities.python_gl_available is True
     assert capabilities.native_widget_available is True
     assert capabilities.osmand_extension_available is True
+    assert capabilities.preferred_backend == "osmand_native"
+
+
+def test_map_runtime_service_refresh_runs_runtime_probes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+    probe_calls: list[str] = []
+
+    def _check_opengl_support() -> bool:
+        probe_calls.append("opengl")
+        return False
+
+    def _probe_native_widget_runtime(root: Path) -> tuple[bool, str | None]:
+        probe_calls.append(f"native:{root}")
+        return root == tmp_path, None
+
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "check_opengl_support",
+        _check_opengl_support,
+    )
+    monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: True)
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "has_usable_osmand_native_widget",
+        lambda root: root == tmp_path,
+    )
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "probe_native_widget_runtime",
+        _probe_native_widget_runtime,
+    )
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "choose_default_map_source",
+        lambda root, **_kwargs: MapSourceSpec.osmand_default(root),
+    )
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "has_usable_osmand_search_extension",
+        lambda package_root=None: False,
+    )
+
+    service = SessionMapRuntimeService(tmp_path)
+    assert probe_calls == []
+
+    capabilities = service.refresh()
+
+    assert probe_calls == ["opengl", f"native:{tmp_path}"]
+    assert capabilities.python_gl_available is False
+    assert capabilities.native_widget_available is True
     assert capabilities.preferred_backend == "osmand_native"
 
 
@@ -40,10 +109,13 @@ def test_map_runtime_service_falls_back_to_legacy_when_osmand_extension_is_unava
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(map_runtime_service_module, "_has_qt_application", lambda: True)
-    monkeypatch.setattr(map_runtime_service_module, "check_opengl_support", lambda: True)
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
     monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: True)
-    monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_native_widget", lambda root: False)
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "has_usable_osmand_native_widget",
+        lambda root: False,
+    )
     monkeypatch.setattr(
         map_runtime_service_module,
         "choose_default_map_source",
@@ -68,10 +140,13 @@ def test_map_runtime_service_checks_search_extension_against_bound_package_root(
 ) -> None:
     probed_roots: list[Path] = []
 
-    monkeypatch.setattr(map_runtime_service_module, "_has_qt_application", lambda: True)
-    monkeypatch.setattr(map_runtime_service_module, "check_opengl_support", lambda: True)
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
     monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: False)
-    monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_native_widget", lambda root: False)
+    monkeypatch.setattr(
+        map_runtime_service_module,
+        "has_usable_osmand_native_widget",
+        lambda root: False,
+    )
     monkeypatch.setattr(
         map_runtime_service_module,
         "choose_default_map_source",

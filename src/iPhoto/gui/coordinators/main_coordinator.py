@@ -218,7 +218,7 @@ class MainCoordinator(QObject):
             header_controller=self._header_controller,
             face_name_overlay=window.ui.face_name_overlay,
             people_service=self._playback_people_service,
-            people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
+            people_dashboard_refresh_callback=self._schedule_people_dashboard_refresh,
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
             map_runtime=self._map_runtime(),
@@ -322,8 +322,9 @@ class MainCoordinator(QObject):
         window.ui.filmstrip_view.setItemDelegate(self._filmstrip_delegate)
 
         self._preview_controller = PreviewController(
-            window.ui.preview_window,
+            self._ensure_preview_window,
             edit_service_getter=edit_service_getter,
+            parent=self,
         )
         self._preview_controller.bind_view(window.ui.grid_view)
 
@@ -460,6 +461,7 @@ class MainCoordinator(QObject):
         if self._edit:
             self._edit.shutdown()
 
+        self._preview_controller.close_preview(False)
         if hasattr(self._window.ui, "preview_window"):
             try:
                 self._window.ui.preview_window.close_preview(False)
@@ -653,6 +655,20 @@ class MainCoordinator(QObject):
             dashboard.albumSelected.connect(self.open_album_from_path)
             self._facade.albumCoverUpdated.connect(dashboard.update_album_cover)
 
+        if feature == "people":
+            people_page = getattr(ui, "people_page", widget)
+            bound_people_service = self._people_service(library_root=self._library_root())
+            if bound_people_service is not None and hasattr(people_page, "set_people_service"):
+                people_page.set_people_service(bound_people_service)
+            else:
+                people_page.set_library_root(self._library_root())
+            people_page.set_pinned_service(self._pinned_items_service)
+            people_page.set_status_message(self._context.library.face_scan_status_message())
+            people_page.clusterActivated.connect(self._on_people_cluster_activated)
+            people_page.groupActivated.connect(self._on_people_group_activated)
+            self._context.library.peopleIndexUpdated.connect(people_page.schedule_index_refresh)
+            self._context.library.faceScanStatusChanged.connect(people_page.set_status_message)
+
     def _on_library_tree_updated(self) -> None:
         root = self._library_root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
@@ -732,6 +748,22 @@ class MainCoordinator(QObject):
             self._context.library,
             library_root=library_root,
         )
+
+    def _ensure_preview_window(self) -> object | None:
+        ui = self._window.ui
+        preview_window = getattr(ui, "preview_window", None)
+        if preview_window is not None:
+            return preview_window
+        try:
+            return ui.ensure_feature("preview")
+        except Exception:
+            self._logger.warning("Failed to create preview window on demand", exc_info=True)
+            return None
+
+    def _schedule_people_dashboard_refresh(self) -> None:
+        people_page = getattr(self._window.ui, "people_page", None)
+        if people_page is not None:
+            people_page.schedule_index_refresh()
 
     def _map_runtime(self):
         session = self._active_session()

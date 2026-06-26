@@ -205,10 +205,12 @@ optional feature imports must not migrate back above `show()`.
 preview, Map, People, and Albums bundles. It caches each bundle and emits
 `featureCreated` so the window manager and coordinator can attach behavior to
 late-created widgets. Navigation may also call `ensure_feature()` if Map or the
-Albums dashboard was not constructed during the post-paint warm-up. On Windows
-and Linux, the QRhi-backed detail bundle is constructed before `show()` because
-inserting it into a visible top-level window can recreate the native window;
-preview and People remain post-paint. macOS defers all three.
+Albums dashboard was not constructed during the post-paint warm-up. Windows
+keeps the QRhi-backed detail bundle before `show()` because inserting it into a
+visible top-level window can recreate the native window. Linux prioritizes a
+responsive shell: it creates no feature bundles before `show()`, creates only
+the startup-required detail bundle after first paint, and leaves preview and
+People on demand. macOS defers detail, preview, and People post-paint.
 
 ## Layer Boundaries
 

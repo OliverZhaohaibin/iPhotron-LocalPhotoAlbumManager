@@ -297,8 +297,15 @@ class Ui_MainWindow(QObject):
             apply_pending_osmand_extension_install(maps_root)
         except Exception:
             _LOGGER.warning("Failed to apply pending map extension install", exc_info=True)
+        map_runtime = getattr(self._library, "map_runtime", None)
+        refresh_runtime = getattr(map_runtime, "refresh", None)
+        if callable(refresh_runtime):
+            try:
+                refresh_runtime()
+            except Exception:
+                _LOGGER.warning("Failed to refresh map runtime before map view creation", exc_info=True)
         self.map_view = PhotoMapView(
-            map_runtime=getattr(self._library, "map_runtime", None),
+            map_runtime=map_runtime,
             map_interaction_service=getattr(self._library, "map_interaction_service", None),
         )
         self.map_page = QWidget()

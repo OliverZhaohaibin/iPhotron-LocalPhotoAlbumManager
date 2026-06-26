@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThreadPool, QMutex
 
+from ..bootstrap.startup_profile import mark
 from ..errors import LibraryUnavailableError
 from ..utils.logging import get_logger
 from .tree import AlbumNode
@@ -190,7 +191,9 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)
         self._initialize_deleted_dir()
+        mark("library.bind_path.before_tree", root=str(normalized))
         self._refresh_tree()
+        mark("library.bind_path.after_tree", root=str(normalized), albums=len(self._albums))
         # If the album tree was unchanged, ``_refresh_tree()`` may have skipped
         # rebuilding the QFileSystemWatcher paths. Because ``bind_path()`` just
         # cleared all watcher directories, ensure we restore them so filesystem

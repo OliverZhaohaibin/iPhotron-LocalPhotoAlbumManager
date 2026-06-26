@@ -93,6 +93,36 @@ def test_request_preview_falls_back_to_raw_video_without_edit_service() -> None:
     assert kwargs["adjusted_preview"] is False
 
 
+def test_lazy_preview_provider_only_creates_window_for_preview_request() -> None:
+    preview_window = Mock()
+    provider_calls = 0
+
+    def provider() -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        return preview_window
+
+    controller = PreviewController(provider)
+    preview_path = Path("D:/fake/video.mp4")
+    view = _make_view(QRect(0, 0, 80, 60))
+    index = _make_index(
+        {
+            Roles.IS_VIDEO: True,
+            Roles.IS_LIVE: False,
+            Roles.ABS: str(preview_path),
+            Roles.INFO: {"w": 1280, "h": 720},
+        }
+    )
+
+    controller.close_preview(False)
+    assert provider_calls == 0
+
+    controller._handle_request_preview(view, index)
+
+    assert provider_calls == 1
+    preview_window.show_preview.assert_called_once()
+
+
 def test_request_preview_falls_back_to_raw_video_when_edit_lookup_fails() -> None:
     preview_window = Mock()
     edit_service = Mock()

@@ -12,7 +12,6 @@ from PySide6.QtCore import QModelIndex, QObject, QRect
 from ....application.ports import EditServicePort
 from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
-from ..widgets.preview_window import PreviewWindow
 
 
 class PreviewController(QObject):
@@ -20,14 +19,22 @@ class PreviewController(QObject):
 
     def __init__(
         self,
-        preview_window: PreviewWindow,
+        preview_window: object | Callable[[], object | None],
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
-        """Store the shared preview window instance."""
+        """Store or lazily resolve the shared preview window instance."""
 
         super().__init__(parent)
-        self._preview_window = preview_window
+        if self._looks_like_preview_window(preview_window):
+            self._preview_window_provider = lambda: preview_window
+            self._preview_window = preview_window
+        elif callable(preview_window):
+            self._preview_window_provider = preview_window
+            self._preview_window: object | None = None
+        else:
+            self._preview_window_provider = lambda: preview_window
+            self._preview_window = preview_window
         self._edit_service_getter = edit_service_getter
 
     def bind_view(self, view: AssetGrid) -> None:
@@ -40,7 +47,12 @@ class PreviewController(QObject):
     def close_preview(self, delayed: bool = True) -> None:
         """Close the preview window, optionally cancelling the delay timer."""
 
-        self._preview_window.close_preview(delayed)
+        preview_window = self._resolve_preview_window(create=False)
+        if preview_window is None:
+            return
+        close_preview = getattr(preview_window, "close_preview", None)
+        if callable(close_preview):
+            close_preview(delayed)
 
     def close_preview_after_release(self) -> None:
         """Hide the preview window after a successful long press."""
@@ -79,13 +91,33 @@ class PreviewController(QObject):
             adjustment_path,
             info,
         )
-        self._preview_window.show_preview(
+        preview_window = self._resolve_preview_window(create=True)
+        if preview_window is None:
+            return
+        preview_window.show_preview(
             preview_path,
             global_rect,
             aspect_ratio_hint=aspect_hint,
             adjustments=adjustments,
             trim_range_ms=trim_range_ms,
             adjusted_preview=adjusted_preview,
+        )
+
+    def _resolve_preview_window(self, *, create: bool) -> object | None:
+        """Return the preview window without forcing construction for close-only paths."""
+
+        if self._preview_window is not None:
+            return self._preview_window
+        if not create:
+            return None
+        preview_window = self._preview_window_provider()
+        self._preview_window = preview_window
+        return preview_window
+
+    @staticmethod
+    def _looks_like_preview_window(candidate: object) -> bool:
+        return callable(getattr(candidate, "show_preview", None)) or callable(
+            getattr(candidate, "close_preview", None)
         )
 
     def _extract_aspect_hint(self, info: Any) -> float | None:

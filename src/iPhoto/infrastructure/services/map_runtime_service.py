@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtGui import QGuiApplication
+from iPhoto.bootstrap.startup_profile import mark
 from maps.main import check_opengl_support, choose_default_map_source
 from maps.map_sources import (
     has_usable_osmand_native_widget,
@@ -24,10 +24,6 @@ def _opengl_explicitly_disabled() -> bool:
     return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in _TRUE_ENV_VALUES
 
 
-def _has_qt_application() -> bool:
-    return QGuiApplication.instance() is not None
-
-
 class SessionMapRuntimeService(MapRuntimePort):
     """Compute one capability snapshot shared by the active GUI session."""
 
@@ -35,7 +31,7 @@ class SessionMapRuntimeService(MapRuntimePort):
         self._package_root = (
             Path(package_root).resolve() if package_root is not None else _MAPS_PACKAGE_ROOT
         )
-        self._capabilities = self._detect_capabilities()
+        self._capabilities = self._detect_capabilities(probe_runtime=False)
 
     def is_available(self) -> bool:
         return self._capabilities.display_available
@@ -47,27 +43,25 @@ class SessionMapRuntimeService(MapRuntimePort):
         return self._package_root
 
     def refresh(self) -> MapRuntimeCapabilities:
-        self._capabilities = self._detect_capabilities()
+        self._capabilities = self._detect_capabilities(probe_runtime=True)
         return self._capabilities
 
-    def _detect_capabilities(self) -> MapRuntimeCapabilities:
+    def _detect_capabilities(self, *, probe_runtime: bool) -> MapRuntimeCapabilities:
         opengl_disabled = _opengl_explicitly_disabled()
-        has_qt_app = _has_qt_application()
-        python_gl_available = (
-            False
-            if opengl_disabled or not has_qt_app
-            else check_opengl_support()
-        )
+        python_gl_available = False
+        if not opengl_disabled:
+            python_gl_available = check_opengl_support() if probe_runtime else True
 
         native_widget_available = False
         if (
-            has_qt_app
-            and
             not opengl_disabled
             and prefer_osmand_native_widget()
             and has_usable_osmand_native_widget(self._package_root)
         ):
-            native_widget_available, _ = probe_native_widget_runtime(self._package_root)
+            if probe_runtime:
+                native_widget_available, _ = probe_native_widget_runtime(self._package_root)
+            else:
+                native_widget_available = True
 
         default_source = choose_default_map_source(
             self._package_root,
@@ -86,7 +80,7 @@ class SessionMapRuntimeService(MapRuntimePort):
         else:
             preferred_backend = "unavailable"
 
-        return MapRuntimeCapabilities(
+        capabilities = MapRuntimeCapabilities(
             display_available=preferred_backend != "unavailable",
             preferred_backend=preferred_backend,
             python_gl_available=python_gl_available,
@@ -100,6 +94,15 @@ class SessionMapRuntimeService(MapRuntimePort):
                 location_search_available=location_search_available,
             ),
         )
+        mark(
+            "map_runtime.capabilities.initialized",
+            package_root=str(self._package_root),
+            probe_runtime=probe_runtime,
+            preferred_backend=preferred_backend,
+            python_gl_available=python_gl_available,
+            native_widget_available=native_widget_available,
+        )
+        return capabilities
 
     @staticmethod
     def _status_message(

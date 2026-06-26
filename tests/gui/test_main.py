@@ -219,10 +219,10 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
         (
             ("win32", (("detail",), ("preview", "people"))),
             ("darwin", ((), ("detail", "preview", "people"))),
-            ("linux", (("detail",), ("preview", "people"))),
+            ("linux", ((), ("detail",))),
         ),
 )
-def test_startup_feature_plan_keeps_rhi_detail_before_show_where_needed(
+def test_startup_feature_plan_keeps_linux_shell_first(
     platform: str,
     expected: tuple[tuple[str, ...], tuple[str, ...]],
 ) -> None:
@@ -400,15 +400,22 @@ def test_main_creates_required_features_in_platform_safe_order(
     context_index = call_order.index("context:create")
     detail_index = call_order.index("feature:detail")
     show_index = call_order.index("show")
-    preview_index = call_order.index("feature:preview")
-    people_index = call_order.index("feature:people")
     coordinator_index = call_order.index("coordinator:create")
 
     assert app_index < font_index < context_index < show_index
-    assert detail_index < show_index
-    assert "pre_show_detail.before_create" in profile_marks
-    assert "pre_show_detail.created" in profile_marks
-    assert show_index < preview_index < people_index < coordinator_index
+    if platform == "win32":
+        preview_index = call_order.index("feature:preview")
+        people_index = call_order.index("feature:people")
+        assert detail_index < show_index
+        assert "pre_show_detail.before_create" in profile_marks
+        assert "pre_show_detail.created" in profile_marks
+        assert show_index < preview_index < people_index < coordinator_index
+    else:
+        assert show_index < detail_index < coordinator_index
+        assert "feature:preview" not in call_order
+        assert "feature:people" not in call_order
+        assert "pre_show_detail.before_create" not in profile_marks
+        assert "pre_show_detail.created" not in profile_marks
     assert call_order.count("coordinator:create") == 1
 
 

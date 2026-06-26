@@ -818,6 +818,15 @@ class InfoLocationMapView(QWidget):
     def _create_map_widget(self) -> None:
         if self._map_widget is not None:
             return
+        refresh_runtime = getattr(self._map_runtime, "refresh", None)
+        if callable(refresh_runtime):
+            try:
+                self._map_runtime_capabilities = refresh_runtime()
+            except Exception:
+                LOGGER.warning(
+                    "Failed to refresh map runtime before mini-map creation",
+                    exc_info=True,
+                )
         map_source = MapSourceSpec.osmand_default(self._map_package_root).resolved(
             self._map_package_root
         )

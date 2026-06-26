@@ -195,18 +195,42 @@ def _startup_feature_plan(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return features created before and after the main window is shown.
 
-    On Windows and Linux, inserting the detail page's OpenGL-backed
-    ``QRhiWidget`` children into an already visible top-level widget can make
-    Qt recreate the native window.  That appears as a short-lived first window
-    followed by the real one.  Keep the GPU-backed detail page in the pre-show
-    phase there, while retaining the faster first-frame path on macOS.
+    Windows keeps the detail page's OpenGL-backed ``QRhiWidget`` children in
+    the pre-show phase to avoid a native window rebuild.  Linux favours a
+    responsive shell first and creates only the startup-required detail page
+    after the first paint; preview and people are created on demand.
     """
 
     target_platform = sys.platform if platform is None else platform
     deferred = ("detail", "preview", "people")
-    if target_platform == "win32" or target_platform.startswith("linux"):
+    if target_platform == "win32":
         return (("detail",), ("preview", "people"))
+    if target_platform.startswith("linux"):
+        return ((), ("detail",))
     return ((), deferred)
+
+
+def _log_linux_qt_startup_environment() -> None:
+    """Record Linux Qt/GL environment that influences startup hangs."""
+
+    if sys.platform != "linux":
+        return
+    env_keys = (
+        "QT_QPA_PLATFORM",
+        "QT_OPENGL",
+        "QT_XCB_GL_INTEGRATION",
+        "IPHOTO_DISABLE_OPENGL",
+    )
+    values = {key: os.environ.get(key, "") for key in env_keys}
+    _logger.info(
+        "Linux Qt startup environment: QT_QPA_PLATFORM=%r QT_OPENGL=%r "
+        "QT_XCB_GL_INTEGRATION=%r IPHOTO_DISABLE_OPENGL=%r",
+        values["QT_QPA_PLATFORM"],
+        values["QT_OPENGL"],
+        values["QT_XCB_GL_INTEGRATION"],
+        values["IPHOTO_DISABLE_OPENGL"],
+    )
+    mark("linux_qt_environment", **values)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -236,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
     _prepare_qt_runtime_for_maps()
+    _log_linux_qt_startup_environment()
     _configure_qt_opengl_defaults(saved_library_root)
     mark("qapplication.before_create")
     app = QApplication(arguments)

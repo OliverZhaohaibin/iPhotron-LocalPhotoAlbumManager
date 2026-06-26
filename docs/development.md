@@ -616,10 +616,11 @@ When touching Linux map packaging, keep these rules in place:
   `QT_XCB_GL_INTEGRATION=xcb_glx` aligned so the native OsmAnd widget gets the
   GLX-backed desktop OpenGL context expected by GLEW.
 - Do not use the generic OpenGL probe as the only gate for the native widget.
-  Backend selection must still run `probe_native_widget_runtime(...)`; if the
-  native library loads cleanly, prefer it even when the generic Qt OpenGL probe
-  failed, and if the runtime probe fails, log the reason and fall back to the
-  Python OBF path.
+  Explicit map-view creation or runtime refresh must still run
+  `probe_native_widget_runtime(...)`; if the native library loads cleanly,
+  prefer it even when the generic Qt OpenGL probe failed, and if the runtime
+  probe fails, log the reason and fall back to the Python OBF path. Do not move
+  that runtime probe back into `SessionMapRuntimeService()` construction.
 - Keep the Linux/Nuitka packaging inputs explicit. The current fast build
   script needs `--enable-plugin=pyside6`,
   `--include-qt-plugins=qml,multimedia`, `--include-package=OpenGL`, and
@@ -923,7 +924,10 @@ The profiler appends JSON Lines records containing `stage`, `elapsed_ms`,
 Unset the variable for normal launches; disabled profiling does not create a
 file. Compare at least `main_window.show_called`, `main_window.first_paint`,
 `post_show_initialization.scheduled`, feature creation, and
-`main_coordinator.started` when investigating a regression.
+`main_coordinator.started` when investigating a regression. Linux diagnostics
+also include `QT_QPA_PLATFORM`, `QT_OPENGL`, `QT_XCB_GL_INTEGRATION`, and
+`IPHOTO_DISABLE_OPENGL` so X11, Wayland, GLX, and OpenGL-disable cases can be
+distinguished.
 
 Run the focused startup guardrails with:
 
@@ -931,9 +935,11 @@ Run the focused startup guardrails with:
 python -m pytest tests/gui/test_startup_import_boundary.py tests/gui/test_main.py
 ```
 
-On Windows and Linux, also verify that startup shows one stable top-level
-window. The detail feature intentionally remains pre-show there because adding
-its QRhi widgets after the window is visible can recreate the native window.
+On Windows, also verify that startup shows one stable top-level window. The
+detail feature intentionally remains pre-show there because adding its QRhi
+widgets after the window is visible can recreate the native window. On Linux,
+the contract is shell first: no feature bundle is created before `show()`, only
+detail is created after first paint, and preview/People remain on demand.
 
 ---
 

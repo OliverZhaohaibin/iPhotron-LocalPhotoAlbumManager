@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..events.bus import EventBus
+from .startup_profile import mark
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..di.container import DependencyContainer
@@ -219,11 +220,13 @@ class RuntimeContext:
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
 
+        mark("library_session.before_create", root=str(normalized))
         self.library_session = LibrarySession(
             normalized,
             asset_runtime=self.asset_runtime,
             bind_asset_runtime=False,
         )
+        mark("library_session.created", root=str(normalized))
         bind_library_session = getattr(self.library, "bind_library_session", None)
         used_session_binding = callable(bind_library_session)
         if used_session_binding:
@@ -262,10 +265,12 @@ class RuntimeContext:
 
         try:
             bind_path_from_session = getattr(self.library, "bind_path_from_session", None)
+            mark("library.bind_path.before", root=str(normalized))
             if callable(bind_path_from_session):
                 bind_path_from_session(normalized)
             else:
                 self.library.bind_path(normalized)
+            mark("library.bind_path.after", root=str(normalized))
         except Exception:
             self.close_library()
             raise

@@ -192,12 +192,14 @@ language has no bundled resource. The active stored language values are
 
 Desktop construction deliberately has two boundaries. The process first loads
 settings, configures graphics caches, creates `QApplication`, `RuntimeContext`,
-and the lightweight main-window shell, then calls `show()`. Only after the shell
-emits `firstPainted` may startup create hidden feature bundles, import and start
-`MainCoordinator`, resume library startup tasks, or select the initial
-collection. This is an architecture constraint rather than a timer-based
-optimization: optional feature imports must not migrate back above the first
-paint boundary.
+and the lightweight main-window shell, then calls `show()`. After the shell
+emits `firstPainted`, startup may create hidden feature bundles, import and
+start `MainCoordinator`, resume library startup tasks, or select the initial
+collection. A guarded post-show timer fallback may trigger the same one-time
+sequence if platform QRhi composition prevents the main window paint signal from
+arriving.
+This is an architecture constraint rather than a timer-based optimization:
+optional feature imports must not migrate back above `show()`.
 
 `Ui_MainWindow.ensure_feature()` owns the on-demand lifetime of the detail,
 preview, Map, People, and Albums bundles. It caches each bundle and emits

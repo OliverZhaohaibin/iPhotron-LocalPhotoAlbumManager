@@ -886,10 +886,11 @@ See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and
 
 ## Desktop Startup Performance
 
-The GUI startup contract is “paint the window shell, then warm optional
+The GUI startup contract is “show the window shell, then warm optional
 features.” Do not use a zero-delay timer as a substitute for the boundary:
-startup work must be connected to `MainWindow.firstPainted`. Widget creation
-still belongs on the GUI thread and should be split across event-loop turns.
+startup work must be connected to `MainWindow.firstPainted` or the guarded
+post-show fallback in `iPhoto.gui.main`. Widget creation still belongs on the
+GUI thread and should be split across event-loop turns.
 
 Keep imports above that boundary narrow. In particular, importing
 `iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the People
@@ -921,8 +922,8 @@ The profiler appends JSON Lines records containing `stage`, `elapsed_ms`,
 
 Unset the variable for normal launches; disabled profiling does not create a
 file. Compare at least `main_window.show_called`, `main_window.first_paint`,
-feature creation, and `main_coordinator.started` when investigating a
-regression.
+`post_show_initialization.scheduled`, feature creation, and
+`main_coordinator.started` when investigating a regression.
 
 Run the focused startup guardrails with:
 

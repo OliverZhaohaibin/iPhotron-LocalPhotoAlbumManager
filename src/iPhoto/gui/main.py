@@ -22,6 +22,7 @@ mark("module.imported")
 
 _logger = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_POST_SHOW_INITIALIZATION_FALLBACK_MS = 250
 _MACOS_EXTERNAL_TOOL_PATHS = (
     Path("/opt/homebrew/bin"),
     Path("/opt/homebrew/sbin"),
@@ -308,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Coordinator needs Window, Context, and Container
     def _initialize_after_show() -> None:
-        mark("post_paint.begin")
+        mark("post_show.begin")
         # Importing the coordinator expands the controller/view-model graph;
         # keep that work behind the OS-confirmed first paint.
         from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
@@ -348,9 +349,24 @@ def main(argv: list[str] | None = None) -> int:
 
         _create_next()
 
-    window.firstPainted.connect(lambda: QTimer.singleShot(0, _initialize_features_after_show))
+    post_show_initialization_started = False
+
+    def _schedule_post_show_initialization(source: str) -> None:
+        nonlocal post_show_initialization_started
+
+        if post_show_initialization_started:
+            return
+        post_show_initialization_started = True
+        mark("post_show_initialization.scheduled", source=source)
+        QTimer.singleShot(0, _initialize_features_after_show)
+
+    window.firstPainted.connect(lambda: _schedule_post_show_initialization("first_paint"))
     window.show()
     mark("main_window.show_called")
+    QTimer.singleShot(
+        _POST_SHOW_INITIALIZATION_FALLBACK_MS,
+        lambda: _schedule_post_show_initialization("timer_fallback"),
+    )
 
     return app.exec()
 

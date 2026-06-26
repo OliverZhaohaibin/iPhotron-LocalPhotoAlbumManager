@@ -215,14 +215,14 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
 
 
 @pytest.mark.parametrize(
-    ("platform", "expected"),
-    (
-        ("win32", (("detail",), ("preview", "people"))),
-        ("darwin", ((), ("detail", "preview", "people"))),
-        ("linux", ((), ("detail", "preview", "people"))),
-    ),
+        ("platform", "expected"),
+        (
+            ("win32", (("detail",), ("preview", "people"))),
+            ("darwin", ((), ("detail", "preview", "people"))),
+            ("linux", (("detail",), ("preview", "people"))),
+        ),
 )
-def test_startup_feature_plan_keeps_windows_rhi_detail_before_show(
+def test_startup_feature_plan_keeps_rhi_detail_before_show_where_needed(
     platform: str,
     expected: tuple[tuple[str, ...], tuple[str, ...]],
 ) -> None:
@@ -405,14 +405,9 @@ def test_main_creates_required_features_in_platform_safe_order(
     coordinator_index = call_order.index("coordinator:create")
 
     assert app_index < font_index < context_index < show_index
-    if platform == "win32":
-        assert detail_index < show_index
-        assert "windows_detail.before_create" in profile_marks
-        assert "windows_detail.created" in profile_marks
-    else:
-        assert show_index < detail_index
-        assert "windows_detail.before_create" not in profile_marks
-        assert "windows_detail.created" not in profile_marks
+    assert detail_index < show_index
+    assert "pre_show_detail.before_create" in profile_marks
+    assert "pre_show_detail.created" in profile_marks
     assert show_index < preview_index < people_index < coordinator_index
 
 

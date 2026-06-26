@@ -203,10 +203,10 @@ paint boundary.
 preview, Map, People, and Albums bundles. It caches each bundle and emits
 `featureCreated` so the window manager and coordinator can attach behavior to
 late-created widgets. Navigation may also call `ensure_feature()` if Map or the
-Albums dashboard was not constructed during the post-paint warm-up. On Windows,
-the QRhi-backed detail bundle is constructed before `show()` because inserting
-it into a visible top-level window can recreate the native window; preview and
-People remain post-paint. Other desktop platforms defer all three.
+Albums dashboard was not constructed during the post-paint warm-up. On Windows
+and Linux, the QRhi-backed detail bundle is constructed before `show()` because
+inserting it into a visible top-level window can recreate the native window;
+preview and People remain post-paint. macOS defers all three.
 
 ## Layer Boundaries
 

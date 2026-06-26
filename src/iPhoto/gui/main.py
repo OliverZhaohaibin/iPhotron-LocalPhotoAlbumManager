@@ -194,16 +194,16 @@ def _startup_feature_plan(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return features created before and after the main window is shown.
 
-    On Windows, inserting the detail page's ``QRhiWidget`` children into an
-    already visible top-level widget can make Qt recreate the native window.
-    That appears as a short-lived first window followed by the real one.  Keep
-    the GPU-backed detail page in the pre-show phase there, while retaining the
-    faster first-frame path on the other desktop platforms.
+    On Windows and Linux, inserting the detail page's OpenGL-backed
+    ``QRhiWidget`` children into an already visible top-level widget can make
+    Qt recreate the native window.  That appears as a short-lived first window
+    followed by the real one.  Keep the GPU-backed detail page in the pre-show
+    phase there, while retaining the faster first-frame path on macOS.
     """
 
     target_platform = sys.platform if platform is None else platform
     deferred = ("detail", "preview", "people")
-    if target_platform == "win32":
+    if target_platform == "win32" or target_platform.startswith("linux"):
         return (("detail",), ("preview", "people"))
     return ((), deferred)
 
@@ -301,10 +301,10 @@ def main(argv: list[str] | None = None) -> int:
     pre_show_features, post_show_features = _startup_feature_plan()
     for feature in pre_show_features:
         if feature == "detail":
-            mark("windows_detail.before_create")
+            mark("pre_show_detail.before_create")
         window.ui.ensure_feature(feature)
         if feature == "detail":
-            mark("windows_detail.created")
+            mark("pre_show_detail.created")
 
     # Coordinator needs Window, Context, and Container
     def _initialize_after_show() -> None:

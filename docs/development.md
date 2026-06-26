@@ -930,9 +930,9 @@ Run the focused startup guardrails with:
 python -m pytest tests/gui/test_startup_import_boundary.py tests/gui/test_main.py
 ```
 
-On Windows, also verify that startup shows one stable top-level window. The
-detail feature intentionally remains pre-show there because adding its QRhi
-widgets after the window is visible can recreate the native window.
+On Windows and Linux, also verify that startup shows one stable top-level
+window. The detail feature intentionally remains pre-show there because adding
+its QRhi widgets after the window is visible can recreate the native window.
 
 ---
 

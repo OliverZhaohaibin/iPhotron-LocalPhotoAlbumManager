@@ -19,9 +19,9 @@ memory-aware thumbnail publishing.*
 - Split the main UI into on-demand detail, preview, Map, People, and Albums
   feature bundles, with `featureCreated` wiring for components that appear
   after the window shell.
-- Kept the GPU-backed detail page in the Windows pre-show phase to avoid native
-  window recreation and a visible false first window; macOS and Linux defer it
-  for the faster first-frame path.
+- Kept the GPU-backed detail page in the Windows/Linux pre-show phase to avoid
+  native window recreation and a visible false first window; macOS defers it for
+  the faster first-frame path.
 - Reused the settings object loaded during early startup and avoided rewriting
   an unchanged settings file on every launch.
 

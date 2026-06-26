@@ -13,6 +13,7 @@ from PySide6.QtCore import QCoreApplication, QLocale, QObject, QTranslator, Sign
 from ...settings import SettingsManager
 from . import formatters
 from .language import LanguageInfo
+from .ui_font import apply_language_font
 
 _LOGGER = logging.getLogger(__name__)
 _RESOURCE_PACKAGE = "iPhoto.resources.i18n"
@@ -94,6 +95,7 @@ class TranslationManager(QObject):
                 effective = _DEFAULT_LANGUAGE
 
         self._apply_formatter_locale(effective)
+        apply_language_font(effective)
 
         changed = requested != self._current_language or effective != self._effective_language
         self._current_language = requested

@@ -11,10 +11,11 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", exc_type=ImportError)
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QFont
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
 
-from iPhoto.gui.i18n import TranslationManager
+from iPhoto.gui.i18n import TranslationManager, ui_font
 from iPhoto.gui.i18n.language import LanguageInfo
 from iPhoto.gui.ui.main_window import MainWindow
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
@@ -37,6 +38,15 @@ def _settings(tmp_path: Path) -> SettingsManager:
     manager = SettingsManager(path=tmp_path / "settings.json")
     manager.load()
     return manager
+
+
+@pytest.fixture()
+def preserved_app_font(qapp: QApplication):
+    original = QFont(qapp.font())
+    ui_font._ORIGINAL_APP_FONT = None
+    yield
+    qapp.setFont(original)
+    ui_font._ORIGINAL_APP_FONT = None
 
 
 class _RetranslateControl:
@@ -116,7 +126,10 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
     assert QCoreApplication.translate("EditLight", "Brilliance", None) == "鲜明度"
     assert QCoreApplication.translate("EditBW", "Neutrals", None) == "中性"
     assert QCoreApplication.translate("EditPerspective", "Aspect", None) == "宽高比"
-    assert QCoreApplication.translate("ShareController", "Copied to Clipboard", None) == "已复制到剪贴板"
+    assert (
+        QCoreApplication.translate("ShareController", "Copied to Clipboard", None)
+        == "已复制到剪贴板"
+    )
     assert QCoreApplication.translate("MainCoordinator", "Moved", None) == "已移动"
     assert QCoreApplication.translate("InformationPopup", "Information", None) == "信息"
     assert QCoreApplication.translate("GalleryPage", "Return to Map", None) == "返回地图"
@@ -141,6 +154,111 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
         assert player_bar._mute_button.toolTip() == "静音"
     finally:
         player_bar.close()
+
+
+def test_windows_chinese_font_prefers_english_yahei_name(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "win32")
+    monkeypatch.setattr(
+        ui_font.QFontDatabase,
+        "families",
+        staticmethod(lambda: ["微软雅黑", "Microsoft Yahei"]),
+    )
+
+    ui_font.apply_language_font("zh-CN")
+
+    assert qapp.font().family() == "Microsoft Yahei"
+
+
+def test_windows_chinese_font_uses_chinese_yahei_name(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "win32")
+    monkeypatch.setattr(ui_font.QFontDatabase, "families", staticmethod(lambda: ["微软雅黑"]))
+
+    ui_font.apply_language_font("zh-CN")
+
+    assert qapp.font().family() == "微软雅黑"
+
+
+def test_non_windows_chinese_font_does_not_change_app_font(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        ui_font.QFontDatabase,
+        "families",
+        staticmethod(lambda: ["Microsoft Yahei"]),
+    )
+
+    ui_font.apply_language_font("zh-CN")
+
+    assert qapp.font().family() == "Arial"
+
+
+def test_linux_chinese_font_uses_noto_sans_cjk_sc_when_available(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "linux")
+    monkeypatch.setattr(
+        ui_font.QFontDatabase,
+        "families",
+        staticmethod(lambda: ["Noto Sans", "Noto Sans CJK SC"]),
+    )
+
+    ui_font.apply_language_font("zh-CN")
+
+    assert qapp.font().family() == "Noto Sans CJK SC"
+
+
+def test_linux_chinese_font_keeps_current_font_when_noto_cjk_is_missing(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "linux")
+    monkeypatch.setattr(
+        ui_font.QFontDatabase,
+        "families",
+        staticmethod(lambda: ["Noto Sans", "DejaVu Sans"]),
+    )
+
+    ui_font.apply_language_font("zh-CN")
+
+    assert qapp.font().family() == "Arial"
+
+
+def test_windows_chinese_font_restores_original_when_language_changes(
+    monkeypatch,
+    qapp: QApplication,
+    preserved_app_font,
+) -> None:
+    qapp.setFont(QFont("Arial"))
+    monkeypatch.setattr(ui_font.sys, "platform", "win32")
+    monkeypatch.setattr(
+        ui_font.QFontDatabase,
+        "families",
+        staticmethod(lambda: ["Microsoft Yahei"]),
+    )
+
+    ui_font.apply_language_font("zh-CN")
+    ui_font.apply_language_font("de")
+
+    assert qapp.font().family() == "Arial"
 
 
 def test_detail_page_retranslate_updates_standard_placeholder_only(

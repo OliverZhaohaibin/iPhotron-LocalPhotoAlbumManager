@@ -1200,6 +1200,14 @@ def test_location_confirm_updates_current_header_immediately(monkeypatch: pytest
     coordinator._location_write_queue = Mock(enqueue=Mock())
     coordinator._event_bus = None
     coordinator._location_session_invalidator = None
+    coordinator._info_panel_metadata_cache = {
+        str(asset_path): {
+            "gps": {"lat": 1.0, "lon": 2.0},
+            "location": "Paris",
+        },
+    }
+    coordinator._info_panel_metadata_attempted = set()
+    coordinator._info_panel_metadata_inflight = {str(asset_path)}
     coordinator._player_view = Mock(
         video_area=Mock(current_source=Mock(return_value=None), stop=Mock())
     )
@@ -1259,6 +1267,11 @@ def test_location_confirm_updates_current_header_immediately(monkeypatch: pytest
     store.update_asset_metadata.assert_called_once_with(0, updated.info)
     coordinator._location_write_queue.enqueue.assert_called_once_with(write_job)
     assert coordinator._location_write_jobs_by_path[asset_path] == "job-1"
+    cached_metadata = coordinator._info_panel_metadata_cache[str(asset_path)]
+    assert cached_metadata["location"] == "Munich"
+    assert cached_metadata["gps"] == {"lat": 48.137154, "lon": 11.576124}
+    assert str(asset_path) in coordinator._info_panel_metadata_attempted
+    assert str(asset_path) not in coordinator._info_panel_metadata_inflight
 
 
 def test_confirmed_location_protects_repeated_stale_presentations_for_detail_session() -> None:

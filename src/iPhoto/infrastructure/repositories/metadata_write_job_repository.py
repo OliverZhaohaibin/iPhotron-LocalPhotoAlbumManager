@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ...application.ports import LocationWriteJobRecord
-from ...cache.index_store.repository import get_global_repository
+from ...cache.index_store.repository import AssetRepository
 
 
 class MetadataWriteJobRepository:
@@ -18,10 +18,13 @@ class MetadataWriteJobRepository:
 
     def __init__(self, library_root: Path) -> None:
         self._library_root = Path(library_root)
+        self._repo = AssetRepository(self._library_root)
+
+    def close(self) -> None:
+        self._repo.close()
 
     def list_recoverable_jobs(self) -> list[LocationWriteJobRecord]:
-        repo = get_global_repository(self._library_root)
-        with repo.transaction() as conn:
+        with self._repo.transaction() as conn:
             rows = conn.execute(
                 """
                 SELECT *
@@ -34,13 +37,12 @@ class MetadataWriteJobRepository:
         return [self._job_from_row(row) for row in rows]
 
     def list_failed_jobs(self, *, asset_rel: str | None = None) -> list[LocationWriteJobRecord]:
-        repo = get_global_repository(self._library_root)
         params: list[object] = ["failed"]
         rel_clause = ""
         if asset_rel:
             rel_clause = " AND asset_rel = ?"
             params.append(str(asset_rel))
-        with repo.transaction() as conn:
+        with self._repo.transaction() as conn:
             rows = conn.execute(
                 f"""
                 SELECT *
@@ -85,8 +87,7 @@ class MetadataWriteJobRepository:
         )
 
     def is_superseded(self, job_id: str) -> bool:
-        repo = get_global_repository(self._library_root)
-        with repo.transaction() as conn:
+        with self._repo.transaction() as conn:
             row = conn.execute(
                 "SELECT status FROM metadata_write_jobs WHERE job_id = ?",
                 (job_id,),
@@ -104,9 +105,8 @@ class MetadataWriteJobRepository:
         increment_attempts: bool,
         last_error: str | None,
     ) -> None:
-        repo = get_global_repository(self._library_root)
         attempts_sql = "attempts = attempts + 1," if increment_attempts else ""
-        with repo.transaction(begin_mode="IMMEDIATE") as conn:
+        with self._repo.transaction(begin_mode="IMMEDIATE") as conn:
             conn.execute(
                 f"""
                 UPDATE metadata_write_jobs

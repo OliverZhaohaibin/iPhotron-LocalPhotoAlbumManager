@@ -10,6 +10,9 @@ from iPhoto.cache.index_store import get_global_repository, reset_global_reposit
 from iPhoto.infrastructure.repositories.location_assignment_repository import (
     IndexStoreLocationAssignmentRepository,
 )
+from iPhoto.infrastructure.repositories.metadata_write_job_repository import (
+    MetadataWriteJobRepository,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -142,3 +145,52 @@ def test_location_assignment_repository_supersedes_old_failed_jobs_for_asset(
     )
     assert rows[1][0] == new_job.job_id
     assert rows[1][1:] == ("queued", None)
+
+
+def test_metadata_write_job_repository_does_not_switch_global_repository(
+    tmp_path: Path,
+) -> None:
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_repo = get_global_repository(old_root)
+    old_repo.write_rows([{"rel": "clip.mov", "id": "old-asset", "bytes": 10}])
+    old_db_path = old_repo.path
+    with sqlite3.connect(old_db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO metadata_write_jobs (
+                job_id, asset_rel, asset_path, gps_json, location, media_kind,
+                status, attempts, last_error, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "old-job",
+                "clip.mov",
+                str(old_root / "clip.mov"),
+                json.dumps({"lat": 1.0, "lon": 2.0}),
+                "Old",
+                "video",
+                "queued",
+                0,
+                None,
+                1,
+                1,
+            ),
+        )
+
+    new_repo = get_global_repository(new_root)
+    new_repo.write_rows([{"rel": "photo.jpg", "id": "new-asset", "bytes": 10}])
+    job_repo = MetadataWriteJobRepository(old_root)
+    try:
+        job_repo.mark_verified("old-job")
+    finally:
+        job_repo.close()
+
+    assert get_global_repository(new_root) is new_repo
+    with sqlite3.connect(old_db_path) as conn:
+        status = conn.execute(
+            "SELECT status FROM metadata_write_jobs WHERE job_id = ?",
+            ("old-job",),
+        ).fetchone()[0]
+    assert status == "verified"

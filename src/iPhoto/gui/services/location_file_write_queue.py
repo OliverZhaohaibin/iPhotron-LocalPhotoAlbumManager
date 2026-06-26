@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,8 @@ from iPhoto.infrastructure.repositories.metadata_write_job_repository import (
     MetadataWriteJobRepository,
 )
 from iPhoto.infrastructure.services.exiftool_metadata_writer import ExifToolMetadataWriter
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,15 +64,19 @@ class LocationFileWriteQueue(QObject):
         self._lock = threading.RLock()
         self._futures: set[concurrent.futures.Future] = set()
         self._submitted_job_ids: set[str] = set()
+        self._repositories: set[MetadataWriteJobRepository] = set()
         self._shutdown = False
 
     def bind_library_root(self, library_root: Path | None) -> None:
+        repository = (
+            MetadataWriteJobRepository(Path(library_root))
+            if library_root is not None
+            else None
+        )
         with self._lock:
-            self._repository = (
-                MetadataWriteJobRepository(Path(library_root))
-                if library_root is not None
-                else None
-            )
+            self._repository = repository
+            if repository is not None:
+                self._repositories.add(repository)
         if library_root is not None:
             self.recover_pending_jobs()
 
@@ -130,6 +137,8 @@ class LocationFileWriteQueue(QObject):
         if wait:
             self.drain(timeout=None)
         self._executor.shutdown(wait=wait, cancel_futures=not wait)
+        if wait:
+            self._close_repositories()
 
     def _run_job(
         self,
@@ -246,6 +255,17 @@ class LocationFileWriteQueue(QObject):
         with self._lock:
             self._futures.discard(future)
             self._submitted_job_ids.discard(job_id)
+
+    def _close_repositories(self) -> None:
+        with self._lock:
+            repositories = list(self._repositories)
+            self._repositories.clear()
+            self._repository = None
+        for repository in repositories:
+            try:
+                repository.close()
+            except Exception:
+                LOGGER.debug("Failed to close location write job repository", exc_info=True)
 
 
 __all__ = ["LocationFileWriteQueue", "LocationFileWriteResult"]

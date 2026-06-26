@@ -1382,6 +1382,7 @@ class PlaybackCoordinator(QObject):
         row = self._asset_model.row_for_path(assignment.asset_path)
         if row is not None:
             self._asset_model.store.update_asset_metadata(row, dict(metadata))
+        self._cache_info_panel_metadata(assignment.asset_path, metadata)
 
         self._apply_location_assignment_to_current_presentation(
             assignment.asset_path,
@@ -1733,15 +1734,7 @@ class PlaybackCoordinator(QObject):
 
     @Slot(object)
     def _handle_info_panel_metadata_ready(self, result: InfoPanelMetadataResult) -> None:
-        self._ensure_info_panel_metadata_state()
-        path_key = str(result.path)
-        # Evict oldest entry (insertion-order FIFO, Python 3.7+) before inserting
-        # so the cache never grows beyond _INFO_PANEL_METADATA_CACHE_MAX entries.
-        if len(self._info_panel_metadata_cache) >= _INFO_PANEL_METADATA_CACHE_MAX:
-            evict_key = next(iter(self._info_panel_metadata_cache))
-            del self._info_panel_metadata_cache[evict_key]
-            self._info_panel_metadata_attempted.discard(evict_key)
-        self._info_panel_metadata_cache[path_key] = dict(result.metadata)
+        self._cache_info_panel_metadata(result.path, result.metadata)
 
         if not self._info_panel or not self._info_panel.isVisible():
             return
@@ -1752,6 +1745,20 @@ class PlaybackCoordinator(QObject):
         with self._info_panel_content_update():
             self._info_panel.set_asset_metadata(local_info)
             self._refresh_info_panel_faces(presentation.asset_id)
+
+    def _cache_info_panel_metadata(self, path: Path, metadata: dict[str, Any]) -> None:
+        self._ensure_info_panel_metadata_state()
+        path_key = str(path)
+        if (
+            path_key not in self._info_panel_metadata_cache
+            and len(self._info_panel_metadata_cache) >= _INFO_PANEL_METADATA_CACHE_MAX
+        ):
+            evict_key = next(iter(self._info_panel_metadata_cache))
+            del self._info_panel_metadata_cache[evict_key]
+            self._info_panel_metadata_attempted.discard(evict_key)
+        self._info_panel_metadata_cache[path_key] = dict(metadata)
+        self._info_panel_metadata_attempted.add(path_key)
+        self._info_panel_metadata_inflight.discard(path_key)
 
     def _info_panel_content_update(self):
         info_panel = getattr(self, "_info_panel", None)

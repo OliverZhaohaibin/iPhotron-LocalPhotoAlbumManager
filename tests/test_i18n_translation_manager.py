@@ -13,10 +13,10 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMenuBar, QStackedWidget, QWidget
 
 from iPhoto.gui.i18n import TranslationManager, font_policy
-from iPhoto.gui.i18n.font_policy import simplified_chinese_font_family
+from iPhoto.gui.i18n.font_policy import language_font, simplified_chinese_font_family
 from iPhoto.gui.i18n.language import LanguageInfo
 from iPhoto.gui.ui.main_window import MainWindow
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
@@ -180,6 +180,54 @@ def test_translation_manager_applies_and_restores_simplified_chinese_font(
 
         assert qapp.font().family() == original_font.family()
     finally:
+        qapp.setFont(original_font)
+        font_policy._STATE.app_id = None
+        font_policy._STATE.original_font = None
+        font_policy._STATE.applied_family = None
+
+
+def test_translation_manager_syncs_existing_widget_fonts_for_windows_chinese(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_font = QFont(qapp.font())
+    label = QLabel("中文")
+    menu_bar = QMenuBar()
+    menu = QMenu("菜单", menu_bar)
+    menu_bar.addMenu(menu)
+    original_label_font = QFont(label.font())
+    original_menu_bar_font = QFont(menu_bar.font())
+    original_menu_font = QFont(menu.font())
+    font_policy._STATE.app_id = None
+    font_policy._STATE.original_font = None
+    font_policy._STATE.applied_family = None
+    monkeypatch.setattr(font_policy.sys, "platform", "win32")
+    monkeypatch.setattr(font_policy, "_available_font_families", lambda: ["微软雅黑"])
+    manager = _settings(tmp_path)
+    translations = TranslationManager(manager)
+
+    try:
+        translations.apply_language("zh-CN")
+
+        assert qapp.font().family() == "微软雅黑"
+        assert label.font().family() == "微软雅黑"
+        assert menu_bar.font().family() == "微软雅黑"
+        assert menu.font().family() == "微软雅黑"
+        assert language_font(QFont("Segoe UI", 12)).family() == "微软雅黑"
+
+        translations.apply_language("de")
+
+        assert qapp.font().family() == original_font.family()
+        assert label.font().family() == original_label_font.family()
+        assert menu_bar.font().family() == original_menu_bar_font.family()
+        assert menu.font().family() == original_menu_font.family()
+        base_font = QFont("Segoe UI", 12)
+        assert language_font(base_font).family() == base_font.family()
+    finally:
+        translations._remove_installed_translator(qapp)
+        label.close()
+        menu_bar.close()
         qapp.setFont(original_font)
         font_policy._STATE.app_id = None
         font_policy._STATE.original_font = None

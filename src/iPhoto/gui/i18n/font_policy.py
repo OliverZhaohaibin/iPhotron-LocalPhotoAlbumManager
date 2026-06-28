@@ -8,9 +8,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 _LOGGER = logging.getLogger(__name__)
 _SIMPLIFIED_CHINESE_LANGUAGE = "zh-CN"
+_ORIGINAL_WIDGET_FONT_PROPERTY = "_iPhoto_original_language_font"
 _WINDOWS_SIMPLIFIED_CHINESE_FONTS = (
     "Microsoft YaHei",
     "Microsoft Yahei",
@@ -71,10 +73,29 @@ def apply_language_font(effective_language: str) -> str | None:
     return _apply_windows_simplified_chinese_font(app)
 
 
+def language_font(base_font: QFont) -> QFont:
+    """Return *base_font* with the active language font family, when required."""
+
+    font = QFont(base_font)
+    if _STATE.applied_family:
+        font.setFamily(_STATE.applied_family)
+    return font
+
+
+def sync_widget_language_font(widget: QWidget) -> None:
+    """Synchronise one existing widget with the active language font family."""
+
+    if _STATE.applied_family:
+        _apply_font_to_widget(widget, _STATE.applied_family)
+    else:
+        _restore_font_on_widget(widget)
+
+
 def _apply_windows_simplified_chinese_font(app: QGuiApplication) -> str | None:
     family = simplified_chinese_font_family(sys.platform, _available_font_families())
     if family is None:
         _LOGGER.info("No Simplified Chinese UI font override available on %s", sys.platform)
+        _restore_windows_font(app)
         return None
 
     if _STATE.original_font is None:
@@ -84,6 +105,7 @@ def _apply_windows_simplified_chinese_font(app: QGuiApplication) -> str | None:
     font.setFamily(family)
     app.setFont(font)
     _STATE.applied_family = family
+    _sync_existing_widget_fonts(family)
     return family
 
 
@@ -119,8 +141,48 @@ def _restore_windows_font(app: QGuiApplication) -> None:
         return
     if _STATE.original_font is not None:
         app.setFont(QFont(_STATE.original_font))
+    _restore_existing_widget_fonts()
     _STATE.original_font = None
     _STATE.applied_family = None
 
 
-__all__ = ["apply_language_font", "simplified_chinese_font_family"]
+def _sync_existing_widget_fonts(family: str) -> None:
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.allWidgets():
+        _apply_font_to_widget(widget, family)
+
+
+def _apply_font_to_widget(widget: QWidget, family: str) -> None:
+    if widget.property(_ORIGINAL_WIDGET_FONT_PROPERTY) is None:
+        widget.setProperty(_ORIGINAL_WIDGET_FONT_PROPERTY, QFont(widget.font()))
+
+    font = QFont(widget.font())
+    if font.family() == family:
+        return
+    font.setFamily(family)
+    widget.setFont(font)
+
+
+def _restore_existing_widget_fonts() -> None:
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.allWidgets():
+        _restore_font_on_widget(widget)
+
+
+def _restore_font_on_widget(widget: QWidget) -> None:
+    original = widget.property(_ORIGINAL_WIDGET_FONT_PROPERTY)
+    if isinstance(original, QFont):
+        widget.setFont(QFont(original))
+    widget.setProperty(_ORIGINAL_WIDGET_FONT_PROPERTY, None)
+
+
+__all__ = [
+    "apply_language_font",
+    "language_font",
+    "simplified_chinese_font_family",
+    "sync_widget_language_font",
+]

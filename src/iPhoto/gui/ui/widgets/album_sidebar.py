@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from ....config import ALL_PHOTOS_TITLE as _ALL_PHOTOS_TITLE
 from ....library.runtime_controller import LibraryRuntimeController
 from ...i18n import tr
+from ...i18n.font_policy import sync_widget_language_font
 from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from ..delegates.album_sidebar_delegate import (
     AlbumSidebarDelegate,
@@ -401,7 +402,16 @@ class AlbumSidebar(QWidget):
             self._title.setText(tr("AlbumSidebar", "Basic Library"))
         # Recalculate the manual minimum so manual splitter drags continue to honour the
         # configured width even if the displayed path becomes longer or shorter.
+        self._sync_language_fonts()
         self._refresh_manual_minimum_width()
+
+    def _sync_language_fonts(self) -> None:
+        """Keep sidebar text widgets aligned with the active language font."""
+
+        sync_widget_language_font(self)
+        sync_widget_language_font(self._title)
+        sync_widget_language_font(self._tree)
+        self._tree.viewport().update()
 
     def _on_selection_changed(self, _selected, _deselected) -> None:
         index = self._tree.currentIndex()

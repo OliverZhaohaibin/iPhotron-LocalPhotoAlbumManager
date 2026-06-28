@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from typing import Iterable, Iterator, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Iterable, Iterator, cast
 
-from PySide6.QtCore import QCoreApplication, Property, QEvent, QObject, QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import Property, QCoreApplication, QEvent, QObject, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QMouseEvent,
-    QPaintEvent,
     QPainter,
     QPainterPath,
+    QPaintEvent,
     QPalette,
 )
 from PySide6.QtWidgets import (
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n.font_policy import sync_widget_language_font
 from .icon import load_icon
 from .styles import modern_scrollbar_style
 from .widgets.custom_tooltip import FloatingToolTip, ToolTipEventFilter
@@ -33,9 +34,9 @@ from .window_snap import EdgeSnapHelper
 if TYPE_CHECKING:  # pragma: no cover - used only for type checking
     from PySide6.QtGui import QResizeEvent
 
-    from .ui_main_window import Ui_MainWindow
-    from ..coordinators.main_coordinator import MainCoordinator
     from ..coordinators.edit_coordinator import EditCoordinator
+    from ..coordinators.main_coordinator import MainCoordinator
+    from .ui_main_window import Ui_MainWindow
 
 
 # ``PLAYBACK_RESUME_DELAY_MS`` mirrors the behaviour found in the original
@@ -833,6 +834,7 @@ class FramelessWindowManager(QObject):
         menu.setPalette(self._window.palette())
         menu.setBackgroundRole(QPalette.ColorRole.Base)
         menu.setStyleSheet(stylesheet)
+        sync_widget_language_font(menu)
         menu.setGraphicsEffect(None)
 
     def _apply_menu_styles(self) -> None:
@@ -845,6 +847,7 @@ class FramelessWindowManager(QObject):
             self._ui.menu_bar.setStyleSheet(menubar_style)
             self._ui.menu_bar.setAutoFillBackground(True)
             self._ui.menu_bar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            sync_widget_language_font(self._ui.menu_bar)
 
             app = QApplication.instance()
             if app is not None:

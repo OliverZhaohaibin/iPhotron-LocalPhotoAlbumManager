@@ -10,7 +10,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -379,7 +379,6 @@ class InfoPanel(QWidget):
     faceMoveRequested = Signal(object, str)
     faceMoveToNewPersonRequested = Signal(object, str)
     locationQueryChanged = Signal(str)
-    locationSuggestionActivated = Signal(object)
     locationConfirmRequested = Signal(str, object)
     downloadMapExtensionRequested = Signal()
     _DRAG_EVENT_TYPES = frozenset(
@@ -574,7 +573,15 @@ class InfoPanel(QWidget):
         self._location_editor_layout.addWidget(self._location_confirm_button, 0)
         self._location_layout.addWidget(self._location_editor_row)
 
-        self._location_results = QListWidget(self._location_container)
+        self._location_results = QListWidget(self)
+        self._location_results.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self._location_results.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._location_results.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._location_results.setAlternatingRowColors(True)
         self._location_results.setMaximumHeight(150)
         self._location_results.hide()
@@ -582,7 +589,6 @@ class InfoPanel(QWidget):
         self._location_results.itemClicked.connect(self._handle_location_item_clicked)
         self._location_results.itemActivated.connect(self._handle_location_item_activated)
         self._location_results.currentRowChanged.connect(self._handle_location_row_changed)
-        self._location_layout.addWidget(self._location_results)
 
         self._location_map = InfoLocationMapView(self._location_container)
         self._location_map.hide()
@@ -784,9 +790,10 @@ class InfoPanel(QWidget):
             return
 
         self._location_results.setCurrentRow(0)
+        self._position_location_results_popup()
         self._set_widget_explicitly_visible(self._location_results, True)
+        self._location_results.raise_()
         self._location_confirm_button.setEnabled(True)
-        self._refresh_or_schedule_panel_geometry()
 
     def set_location_busy(self, busy: bool) -> None:
         self._location_busy = bool(busy)
@@ -800,27 +807,8 @@ class InfoPanel(QWidget):
             self._assigning_button_text() if busy else self._confirm_button_text()
         )
 
-    def preview_location(self, display_name: str, latitude: float, longitude: float) -> None:
-        metadata = dict(self._metadata or {})
-        metadata["location"] = display_name
-        metadata["place"] = display_name
-        metadata["gps"] = {
-            "lat": float(latitude),
-            "lon": float(longitude),
-        }
-        self._metadata = metadata
-        self._updating_location_ui = True
-        try:
-            self._location_editor.setText(display_name)
-        finally:
-            self._updating_location_ui = False
-        self._location_dirty = False
-        self._location_editor.setPlaceholderText("")
-        self._clear_location_results()
-        self._show_location_map(float(latitude), float(longitude))
-        self._refresh_or_schedule_panel_geometry()
-
     def shutdown(self) -> None:
+        self._clear_location_results()
         self._location_map.shutdown()
 
     # ------------------------------------------------------------------
@@ -996,6 +984,9 @@ class InfoPanel(QWidget):
         self._location_confirm_button.setEnabled(False)
         if not text.strip():
             self._clear_location_results()
+        if not self._location_capability_enabled:
+            self._clear_location_results()
+            return
         self.locationQueryChanged.emit(text)
 
     def _handle_location_item_clicked(self, item: QListWidgetItem) -> None:
@@ -1006,20 +997,52 @@ class InfoPanel(QWidget):
         self._queue_location_confirm_requested()
 
     def _handle_location_row_changed(self, row: int) -> None:
-        if row < 0 or row >= len(self._location_suggestions):
+        if not self._apply_location_suggestion_for_results_row(
+            row,
+            update_editor=False,
+        ):
             self._selected_location_suggestion = None
             self._location_confirm_button.setEnabled(False)
-            return
-        suggestion = self._location_suggestions[row]
-        self._selected_location_suggestion = suggestion
-        self.locationSuggestionActivated.emit(suggestion)
-        self._location_confirm_button.setEnabled(True)
 
     def _select_location_item(self, item: QListWidgetItem, *, update_editor: bool) -> None:
-        index = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(index, int) or index < 0 or index >= len(self._location_suggestions):
+        row = self._location_results.row(item)
+        if row < 0:
             return
-        self._location_results.setCurrentItem(item)
+        blocker = QSignalBlocker(self._location_results)
+        try:
+            self._location_results.setCurrentItem(item)
+        finally:
+            del blocker
+        self._apply_location_suggestion_for_results_row(
+            row,
+            update_editor=update_editor,
+        )
+
+    def _apply_location_suggestion_for_results_row(
+        self,
+        row: int,
+        *,
+        update_editor: bool,
+    ) -> bool:
+        if row < 0 or row >= self._location_results.count():
+            return False
+        item = self._location_results.item(row)
+        index = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(index, int) or index < 0 or index >= len(self._location_suggestions):
+            return False
+        return self._apply_location_suggestion(
+            index,
+            update_editor=update_editor,
+        )
+
+    def _apply_location_suggestion(
+        self,
+        index: int,
+        *,
+        update_editor: bool,
+    ) -> bool:
+        if index < 0 or index >= len(self._location_suggestions):
+            return False
         suggestion = self._location_suggestions[index]
         self._selected_location_suggestion = suggestion
         if update_editor:
@@ -1031,9 +1054,24 @@ class InfoPanel(QWidget):
                 finally:
                     self._updating_location_ui = False
                 self._location_editor.setFocus(Qt.FocusReason.OtherFocusReason)
-        self._location_dirty = True
-        self.locationSuggestionActivated.emit(suggestion)
+            self._location_dirty = True
         self._location_confirm_button.setEnabled(True)
+        return True
+
+    def _apply_current_location_suggestion(
+        self,
+        *,
+        update_editor: bool,
+    ) -> bool:
+        if self._location_results.count() <= 0:
+            return False
+        row = self._location_results.currentRow()
+        if row < 0:
+            row = 0
+        return self._apply_location_suggestion_for_results_row(
+            row,
+            update_editor=update_editor,
+        )
 
     def _queue_location_confirm_requested(self) -> None:
         if self._location_confirm_queued:
@@ -1045,16 +1083,13 @@ class InfoPanel(QWidget):
         self._location_confirm_queued = False
         if not self._location_capability_enabled:
             return
+        self._apply_current_location_suggestion(
+            update_editor=True,
+        )
         query = self._location_editor.text().strip()
         if not query:
             return
         suggestion = self._selected_location_suggestion
-        if suggestion is None and self._location_results.count() > 0:
-            row = self._location_results.currentRow()
-            if row < 0:
-                row = 0
-            if 0 <= row < len(self._location_suggestions):
-                suggestion = self._location_suggestions[row]
         if suggestion is None:
             return
         self._clear_location_results()
@@ -1066,6 +1101,21 @@ class InfoPanel(QWidget):
         self._location_results.clear()
         self._set_widget_explicitly_visible(self._location_results, False)
         self._location_confirm_button.setEnabled(False)
+
+    def _position_location_results_popup(self) -> None:
+        row_height = max(28, self._location_results.sizeHintForRow(0))
+        visible_rows = min(max(1, self._location_results.count()), 5)
+        height = min(150, row_height * visible_rows + 8)
+        width = max(self._location_editor.width(), self._location_editor_row.width())
+        global_top_left = self._location_editor.mapToGlobal(
+            QPoint(0, self._location_editor.height() + 4)
+        )
+        self._location_results.setGeometry(
+            global_top_left.x(),
+            global_top_left.y(),
+            max(220, width),
+            max(36, height),
+        )
 
     @staticmethod
     def _set_widget_explicitly_visible(widget: QWidget, visible: bool) -> None:
@@ -1143,19 +1193,49 @@ class InfoPanel(QWidget):
             current_row = min(self._location_results.count() - 1, current_row + 1)
         else:
             current_row = max(0, current_row - 1)
-        self._location_results.setCurrentRow(current_row)
+        blocker = QSignalBlocker(self._location_results)
+        try:
+            self._location_results.setCurrentRow(current_row)
+        finally:
+            del blocker
+        self._apply_location_suggestion_for_results_row(
+            current_row,
+            update_editor=True,
+        )
         return True
 
     def _handle_location_results_key_press(self, event: QKeyEvent) -> bool:
         key = event.key()
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._apply_current_location_suggestion(
+                update_editor=True,
+            )
             self._queue_location_confirm_requested()
             return True
         if key == Qt.Key.Key_Escape:
             self._clear_location_results()
             self._location_editor.setFocus(Qt.FocusReason.OtherFocusReason)
             return True
-        return False
+        if key not in (Qt.Key.Key_Down, Qt.Key.Key_Up) or self._location_results.count() <= 0:
+            return False
+        current_row = self._location_results.currentRow()
+        if current_row < 0:
+            current_row = 0
+        if key == Qt.Key.Key_Down:
+            current_row = min(self._location_results.count() - 1, current_row + 1)
+        else:
+            current_row = max(0, current_row - 1)
+        blocker = QSignalBlocker(self._location_results)
+        try:
+            self._location_results.setCurrentRow(current_row)
+        finally:
+            del blocker
+        self._apply_location_suggestion_for_results_row(
+            current_row,
+            update_editor=True,
+        )
+        self._location_editor.setFocus(Qt.FocusReason.OtherFocusReason)
+        return True
 
     def _rebuild_face_strip(self) -> None:
         updates_enabled = self._face_container.updatesEnabled()
@@ -1338,7 +1418,13 @@ class InfoPanel(QWidget):
         if watched in (self._location_editor, self._location_results):
             if event.type() == QEvent.Type.ShortcutOverride:
                 key_event = event  # type: ignore[assignment]
-                if key_event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+                if key_event.key() in (
+                    Qt.Key.Key_Down,
+                    Qt.Key.Key_Up,
+                    Qt.Key.Key_Return,
+                    Qt.Key.Key_Enter,
+                    Qt.Key.Key_Escape,
+                ):
                     key_event.accept()
                     return True
             if event.type() == QEvent.Type.KeyPress:
@@ -1353,7 +1439,13 @@ class InfoPanel(QWidget):
                     return True
             if event.type() == QEvent.Type.KeyRelease:
                 key_event = event  # type: ignore[assignment]
-                if key_event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+                if key_event.key() in (
+                    Qt.Key.Key_Down,
+                    Qt.Key.Key_Up,
+                    Qt.Key.Key_Return,
+                    Qt.Key.Key_Enter,
+                    Qt.Key.Key_Escape,
+                ):
                     key_event.accept()
                     return True
         return super().eventFilter(watched, event)
@@ -1373,6 +1465,20 @@ class InfoPanel(QWidget):
             self._centered = True
         self._refresh_panel_geometry(recenter=first_show)
         self._schedule_post_show_reflow(recenter=first_show)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._set_widget_explicitly_visible(self._location_results, False)
+        super().hideEvent(event)
+
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        super().moveEvent(event)
+        if not self._location_results.isHidden():
+            self._position_location_results_popup()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if not self._location_results.isHidden():
+            self._position_location_results_popup()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Emit a dismissal signal so the detail state stays in sync."""

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.gui.i18n import formatters, tr
+from iPhoto.gui.i18n.font_policy import language_font
 
 from ..icon import load_icon
 
@@ -186,7 +187,7 @@ class _WarmthSlider(QWidget):
         painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
         painter.drawLine(QPointF(zero_x, 0), QPointF(zero_x, rect.bottom()))
 
-        font = QFont("Inter", 12, QFont.Weight.Medium)
+        font = language_font(QFont("Inter", 12, QFont.Weight.Medium))
         painter.setFont(font)
         painter.setPen(QColor(240, 240, 240))
         painter.drawText(
@@ -313,7 +314,7 @@ class _TemperatureSlider(QWidget):
             h = 6 if i % 5 == 0 else 3
             painter.drawLine(QPointF(x, 0), QPointF(x, h))
 
-        font = QFont("Inter", 12, QFont.Weight.Medium)
+        font = language_font(QFont("Inter", 12, QFont.Weight.Medium))
         painter.setFont(font)
         painter.setPen(QColor(220, 220, 220))
         painter.drawText(
@@ -439,7 +440,7 @@ class _TintSlider(QWidget):
         painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
         painter.drawLine(QPointF(zero_x, 0), QPointF(zero_x, rect.bottom()))
 
-        font = QFont("Inter", 12, QFont.Weight.Medium)
+        font = language_font(QFont("Inter", 12, QFont.Weight.Medium))
         painter.setFont(font)
         painter.setPen(QColor(220, 220, 220))
         painter.drawText(

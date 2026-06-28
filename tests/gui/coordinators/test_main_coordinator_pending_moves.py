@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
@@ -80,3 +81,33 @@ def test_move_finished_failure_rolls_back_pending_moves() -> None:
 
     assert model.rollback_count == 1
     assert model.cleared == []
+
+
+def test_library_tree_update_rebinds_location_write_queue() -> None:
+    root = Path("/library")
+    location_queue = Mock(bind_library_root=Mock())
+    coordinator = SimpleNamespace(
+        _library_root=lambda: root,
+        _logger=Mock(debug=Mock()),
+        _context=SimpleNamespace(asset_runtime=Mock(bind_library_root=Mock())),
+        _location_write_queue=location_queue,
+        _asset_list_vm=Mock(rebind_asset_query_service=Mock()),
+        _asset_query_service=Mock(return_value=object()),
+        _asset_state_service=Mock(return_value=object()),
+        _gallery_vm=Mock(
+            bind_asset_state_service=Mock(),
+            on_library_tree_updated=Mock(),
+        ),
+        _detail_vm=Mock(bind_asset_state_service=Mock()),
+        _window=SimpleNamespace(ui=None),
+        _people_service=Mock(return_value=None),
+        _map_runtime=Mock(return_value=None),
+        _map_interaction_service=Mock(return_value=None),
+        _map_extension_download=Mock(set_package_root=Mock()),
+        _resolve_map_package_root=Mock(return_value=None),
+        _playback=None,
+    )
+
+    MainCoordinator._on_library_tree_updated(coordinator)
+
+    location_queue.bind_library_root.assert_called_once_with(root)

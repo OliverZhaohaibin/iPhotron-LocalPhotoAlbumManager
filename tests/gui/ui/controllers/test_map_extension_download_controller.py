@@ -196,12 +196,16 @@ def test_startup_pending_install_is_recovered_and_verified(
     ) as information, patch(
         "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.critical",
         return_value=0,
-    ) as critical:
+    ) as critical, patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.QProcess.startDetached",
+        return_value=True,
+    ) as start_detached:
         controller.maybe_prompt_on_startup()
 
     apply_pending.assert_called_once_with(controller._package_root)
     information.assert_called_once()
     critical.assert_not_called()
+    start_detached.assert_not_called()
     owner.close()
 
 
@@ -233,10 +237,14 @@ def test_startup_pending_install_reports_verification_failure(
     ), patch(
         "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.critical",
         return_value=0,
-    ) as critical:
+    ) as critical, patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.QProcess.startDetached",
+        return_value=True,
+    ) as start_detached:
         controller.maybe_prompt_on_startup()
 
     critical.assert_called_once()
+    start_detached.assert_not_called()
     message = critical.call_args.args[2]
     assert "pending map extension install" in message
     assert "Pending folder:" in message

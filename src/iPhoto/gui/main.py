@@ -6,16 +6,17 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from iPhoto.bootstrap.startup_profile import mark
 
 mark("module.before_qt_imports")
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt  # noqa: E402, I001
+from PySide6.QtGui import QColor, QPalette, QSurfaceFormat  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
-from iPhoto.gui.render_backend import should_configure_global_desktop_opengl
+from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment  # noqa: E402
+from iPhoto.gui.render_backend import should_configure_global_desktop_opengl  # noqa: E402
 
 mark("module.imported")
 
@@ -29,6 +30,112 @@ _MACOS_EXTERNAL_TOOL_PATHS = (
     Path("/opt/local/bin"),
     Path("/opt/local/sbin"),
 )
+_LINUX_FIRST_POST_PAINT_DELAY_MS = 120
+_LINUX_POST_SHOW_FEATURE_INTERVAL_MS = 50
+_LINUX_COORDINATOR_READY_DELAY_MS = 100
+_STARTUP_INPUT_EVENT_TYPES = frozenset(
+    event_type
+    for name in (
+        "MouseButtonPress",
+        "MouseButtonRelease",
+        "MouseButtonDblClick",
+        "MouseMove",
+        "Wheel",
+        "KeyPress",
+        "KeyRelease",
+        "Shortcut",
+        "ShortcutOverride",
+        "ContextMenu",
+        "TabletPress",
+        "TabletMove",
+        "TabletRelease",
+        "TouchBegin",
+        "TouchUpdate",
+        "TouchEnd",
+        "TouchCancel",
+        "NativeGesture",
+    )
+    if (event_type := getattr(QEvent.Type, name, None)) is not None
+)
+
+
+class _StartupTimingPlan(NamedTuple):
+    first_post_paint_delay_ms: int
+    feature_interval_ms: int
+    coordinator_ready_delay_ms: int
+
+
+class _StartupInputGuard(QObject):
+    """Temporarily discard early input while Linux finishes GUI startup."""
+
+    def __init__(self, window: QObject, app: QApplication) -> None:
+        try:
+            super().__init__(window)
+        except TypeError:
+            # Unit tests use light fake windows; production always passes a QObject.
+            super().__init__()
+        self._window = window
+        self._app = app
+        self._active = False
+        self._installed = False
+
+    def install(self) -> None:
+        """Install this event filter if the application object supports it."""
+
+        if self._installed:
+            self._active = True
+            return
+        install_filter = getattr(self._app, "installEventFilter", None)
+        if callable(install_filter):
+            install_filter(self)
+            self._installed = True
+        self._active = True
+
+    def release(self) -> None:
+        """Stop filtering startup input and detach from the application."""
+
+        self._active = False
+        if not self._installed:
+            return
+        remove_filter = getattr(self._app, "removeEventFilter", None)
+        if callable(remove_filter):
+            try:
+                remove_filter(self)
+            except RuntimeError:
+                pass
+        self._installed = False
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if not self._active:
+            return False
+        if event.type() not in _STARTUP_INPUT_EVENT_TYPES:
+            return False
+        return self._belongs_to_window(watched)
+
+    def _belongs_to_window(self, watched: QObject) -> bool:
+        if watched is self._window:
+            return True
+
+        is_ancestor = getattr(self._window, "isAncestorOf", None)
+        if callable(is_ancestor):
+            try:
+                if is_ancestor(watched):
+                    return True
+            except (RuntimeError, TypeError):
+                pass
+
+        current = watched
+        while current is not None:
+            if current is self._window:
+                return True
+            parent = getattr(current, "parent", None)
+            if not callable(parent):
+                return False
+            try:
+                current = parent()
+            except RuntimeError:
+                return False
+        return False
 
 
 def _bootstrap_macos_external_tool_path() -> None:
@@ -148,12 +255,17 @@ def _prepare_qt_runtime_for_maps() -> None:
         os.environ["QT_QPA_PLATFORM"] = "xcb"
     else:
         try:
-            from maps.map_sources import has_usable_osmand_native_widget, prefer_osmand_native_widget
-        except Exception:
+            from maps.map_sources import (
+                has_usable_osmand_native_widget,
+                prefer_osmand_native_widget,
+            )
+        except Exception:  # noqa: BLE001
             return
 
         maps_package_root = Path(__file__).resolve().parents[2] / "maps"
-        if not prefer_osmand_native_widget() or not has_usable_osmand_native_widget(maps_package_root):
+        if not prefer_osmand_native_widget() or not has_usable_osmand_native_widget(
+            maps_package_root
+        ):
             return
 
     if not os.environ.get("QT_QPA_PLATFORM"):
@@ -173,18 +285,18 @@ def _configure_qt_opengl_defaults(library_root: Path | None = None) -> None:
 
     try:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     if should_configure_global_desktop_opengl():
         try:
             QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
     try:
         QSurfaceFormat.setDefaultFormat(_map_gl_surface_format())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return
 
 
@@ -193,18 +305,31 @@ def _startup_feature_plan(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return features created before and after the main window is shown.
 
-    On Windows, inserting the detail page's ``QRhiWidget`` children into an
-    already visible top-level widget can make Qt recreate the native window.
-    That appears as a short-lived first window followed by the real one.  Keep
-    the GPU-backed detail page in the pre-show phase there, while retaining the
-    faster first-frame path on the other desktop platforms.
+    On OpenGL-backed desktop platforms, inserting the detail page's
+    ``QRhiWidget`` children into an already visible top-level widget can make
+    Qt recreate the native window. That appears as a short-lived first window
+    followed by the real one. Keep the GPU-backed detail page in the pre-show
+    phase there, while retaining the faster first-frame path on macOS.
     """
 
     target_platform = sys.platform if platform is None else platform
     deferred = ("detail", "preview", "people")
-    if target_platform == "win32":
+    if target_platform in {"win32", "linux"}:
         return (("detail",), ("preview", "people"))
     return ((), deferred)
+
+
+def _startup_timing_plan(platform: str | None = None) -> _StartupTimingPlan:
+    """Return post-paint startup delays for the target platform."""
+
+    target_platform = sys.platform if platform is None else platform
+    if target_platform == "linux":
+        return _StartupTimingPlan(
+            _LINUX_FIRST_POST_PAINT_DELAY_MS,
+            _LINUX_POST_SHOW_FEATURE_INTERVAL_MS,
+            _LINUX_COORDINATOR_READY_DELAY_MS,
+        )
+    return _StartupTimingPlan(0, 0, 0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -294,37 +419,59 @@ def main(argv: list[str] | None = None) -> int:
     # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)
     mark("main_window.created")
+    startup_input_guard = _StartupInputGuard(window, app)
+    startup_input_guard.install()
 
     pre_show_features, post_show_features = _startup_feature_plan()
+    startup_timing = _startup_timing_plan()
     for feature in pre_show_features:
         if feature == "detail":
-            mark("windows_detail.before_create")
+            mark("rhi_detail.before_create")
         window.ui.ensure_feature(feature)
         if feature == "detail":
-            mark("windows_detail.created")
+            mark("rhi_detail.created")
 
     # Coordinator needs Window, Context, and Container
     def _initialize_after_show() -> None:
-        mark("post_paint.begin")
-        # Importing the coordinator expands the controller/view-model graph;
-        # keep that work behind the OS-confirmed first paint.
-        from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+        try:
+            mark("post_paint.begin")
+            # Importing the coordinator expands the controller/view-model graph;
+            # keep that work behind the OS-confirmed first paint.
+            from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
-        mark("main_coordinator.imported")
-        _logger.info("_initialize_after_show: creating MainCoordinator")
-        coordinator = MainCoordinator(window, context)
-        window.set_coordinator(coordinator)
-        coordinator.start()
-        mark("main_coordinator.started")
-        _logger.info("_initialize_after_show: coordinator started, resuming startup tasks")
-        context.resume_startup_tasks()
+            mark("main_coordinator.imported")
+            _logger.info("_initialize_after_show: creating MainCoordinator")
+            coordinator = MainCoordinator(window, context)
+            window.set_coordinator(coordinator)
+            coordinator.start()
+            mark("main_coordinator.started")
 
-        if len(arguments) > 1:
-            _logger.info("_initialize_after_show: opening album from CLI argument %s", arguments[1])
-            coordinator.open_album_from_path(Path(arguments[1]))
-            return
-        _logger.info("_initialize_after_show: selecting All Photos in sidebar")
-        window.ui.sidebar.select_all_photos(emit_signal=True)
+            def _resume_startup_tasks() -> None:
+                try:
+                    _logger.info(
+                        "_initialize_after_show: coordinator started, resuming startup tasks"
+                    )
+                    context.resume_startup_tasks()
+
+                    if len(arguments) > 1:
+                        _logger.info(
+                            "_initialize_after_show: opening album from CLI argument %s",
+                            arguments[1],
+                        )
+                        coordinator.open_album_from_path(Path(arguments[1]))
+                        return
+                    _logger.info("_initialize_after_show: selecting All Photos in sidebar")
+                    window.ui.sidebar.select_all_photos(emit_signal=True)
+                finally:
+                    startup_input_guard.release()
+
+            QTimer.singleShot(
+                startup_timing.coordinator_ready_delay_ms,
+                _resume_startup_tasks,
+            )
+        except Exception:
+            startup_input_guard.release()
+            raise
 
     def _initialize_features_after_show() -> None:
         # QWidget creation must remain on the GUI thread. Splitting hidden
@@ -334,18 +481,27 @@ def main(argv: list[str] | None = None) -> int:
 
         def _create_next() -> None:
             try:
-                feature = next(pending)
-            except StopIteration:
-                QTimer.singleShot(0, _initialize_after_show)
-                return
-            mark("feature.before_create", feature=feature)
-            window.ui.ensure_feature(feature)
-            mark("feature.created", feature=feature)
-            QTimer.singleShot(0, _create_next)
+                try:
+                    feature = next(pending)
+                except StopIteration:
+                    QTimer.singleShot(0, _initialize_after_show)
+                    return
+                mark("feature.before_create", feature=feature)
+                window.ui.ensure_feature(feature)
+                mark("feature.created", feature=feature)
+                QTimer.singleShot(startup_timing.feature_interval_ms, _create_next)
+            except Exception:
+                startup_input_guard.release()
+                raise
 
         _create_next()
 
-    window.firstPainted.connect(lambda: QTimer.singleShot(0, _initialize_features_after_show))
+    window.firstPainted.connect(
+        lambda: QTimer.singleShot(
+            startup_timing.first_post_paint_delay_ms,
+            _initialize_features_after_show,
+        )
+    )
     window.show()
     mark("main_window.show_called")
 

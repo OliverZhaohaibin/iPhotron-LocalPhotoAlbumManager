@@ -49,6 +49,27 @@ def _is_executable_file(path: Path) -> bool:
         return False
 
 
+def _bundled_exiftool_candidates() -> tuple[Path, ...]:
+    executable_name = "exiftool.exe" if os.name == "nt" else "exiftool"
+    roots: list[Path] = []
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        roots.append(Path(frozen_root))
+    package_root = Path(__file__).resolve().parents[1]
+    roots.append(package_root)
+    candidates: list[Path] = []
+    for root in roots:
+        candidates.extend(
+            [
+                root / executable_name,
+                root / "bin" / executable_name,
+                root / "resources" / executable_name,
+                root / "resources" / "bin" / executable_name,
+            ]
+        )
+    return tuple(dict.fromkeys(candidates))
+
+
 def _resolve_exiftool_executable() -> str:
     configured = os.environ.get(_EXIFTOOL_ENV_VAR, "").strip()
     if configured:
@@ -70,6 +91,11 @@ def _resolve_exiftool_executable() -> str:
             searched.append(str(candidate))
             if _is_executable_file(candidate):
                 return str(candidate)
+
+    for candidate in _bundled_exiftool_candidates():
+        searched.append(str(candidate))
+        if _is_executable_file(candidate):
+            return str(candidate)
 
     raise ExternalToolError(
         "exiftool executable not found. Install it from https://exiftool.org/ "
@@ -236,7 +262,15 @@ def _write_gps_metadata_once(
     ]
     if is_video:
         iso6709 = _format_iso6709(latitude, longitude)
-        cmd.append(f"-GPSCoordinates={iso6709}")
+        cmd.extend(
+            [
+                f"-Keys:GPSCoordinates={iso6709}",
+                f"-ItemList:GPSCoordinates={iso6709}",
+                f"-QuickTime:GPSCoordinates={iso6709}",
+                f"-XMP:GPSLatitude={float(latitude):.8f}",
+                f"-XMP:GPSLongitude={float(longitude):.8f}",
+            ]
+        )
     else:
         cmd.extend(
             [

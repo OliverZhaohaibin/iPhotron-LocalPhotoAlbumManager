@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.gui.i18n import tr
+from iPhoto.gui.i18n.font_policy import language_font
 from iPhoto.people.repository import PersonSummary
 
 from ..styles import modern_scrollbar_style
@@ -108,7 +109,7 @@ class MergeConfirmDialog(QDialog):
         title_label.setTextFormat(Qt.TextFormat.PlainText)
         title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         title_label.setFixedWidth(text_width)
-        title_font = QFont("Segoe UI", 17, QFont.Weight.Bold)
+        title_font = language_font(QFont("Segoe UI", 17, QFont.Weight.Bold))
         title_label.setFont(title_font)
         title_label.setMinimumHeight(max(56, title_label.heightForWidth(text_width)))
         title_label.setStyleSheet(
@@ -120,7 +121,7 @@ class MergeConfirmDialog(QDialog):
         body_label.setTextFormat(Qt.TextFormat.PlainText)
         body_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         body_label.setFixedWidth(text_width)
-        body_font = QFont("Segoe UI", 14, QFont.Weight.Medium)
+        body_font = language_font(QFont("Segoe UI", 14, QFont.Weight.Medium))
         body_label.setFont(body_font)
         body_label.setMinimumHeight(max(46, body_label.heightForWidth(text_width)))
         body_label.setStyleSheet(
@@ -366,7 +367,7 @@ class GroupAvatarTile(QWidget):
         name = self.summary.name or ""
         if name:
             painter.setPen(QColor("#E8ECF8") if self._dark_mode else QColor("#1F2937"))
-            painter.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+            painter.setFont(language_font(QFont("Segoe UI", 11, QFont.Weight.Bold)))
             label_rect = QRectF(4, AVATAR_SIZE + 12, self.width() - 8, 36)
             painter.drawText(
                 label_rect,

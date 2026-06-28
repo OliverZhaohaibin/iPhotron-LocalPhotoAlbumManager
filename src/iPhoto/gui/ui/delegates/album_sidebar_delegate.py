@@ -9,15 +9,31 @@ from PySide6.QtCore import (
     QEasingCurve,
     QModelIndex,
     QObject,
+    QPersistentModelIndex,
     QRect,
     QSize,
     Qt,
     QVariantAnimation,
-    QPersistentModelIndex,
 )
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPalette, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QTreeView, QStyle, QWidget
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QTreeView,
+    QWidget,
+)
 
+from ...i18n.font_policy import language_font
 from ..icon import load_icon
 from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, AlbumTreeRole, NodeType
 from ..palette import (
@@ -402,7 +418,7 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
             font.setCapitalization(QFont.Capitalization.SmallCaps)
         if node_type == NodeType.ACTION:
             font.setItalic(True)
-        return font
+        return language_font(font)
 
     def _draw_branch_indicator(self, painter: QPainter, state: _PaintState, x: int) -> int:
         """Draw the disclosure triangle and return the next text origin."""

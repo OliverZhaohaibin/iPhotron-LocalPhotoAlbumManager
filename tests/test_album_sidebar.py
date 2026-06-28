@@ -7,10 +7,12 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for sidebar tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.gui.i18n import TranslationManager
+from iPhoto.gui.i18n import TranslationManager, font_policy
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
+from iPhoto.gui.ui.delegates.album_sidebar_delegate import AlbumSidebarDelegate
 from iPhoto.gui.ui.menus.album_sidebar_menu import AlbumSidebarContextMenu
 from iPhoto.gui.ui.models.album_tree_model import NodeType
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
@@ -116,6 +118,46 @@ def test_sidebar_retranslate_updates_title_and_menu_labels(
     ]
 
     translations._remove_installed_translator(qapp)
+
+
+def test_sidebar_existing_widgets_sync_windows_chinese_font(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    original_font = QFont(qapp.font())
+    font_policy._STATE.app_id = None
+    font_policy._STATE.original_font = None
+    font_policy._STATE.applied_family = None
+    monkeypatch.setattr(font_policy.sys, "platform", "win32")
+    monkeypatch.setattr(font_policy, "_available_font_families", lambda: ["微软雅黑"])
+    sidebar = AlbumSidebar(manager)
+    translations = TranslationManager(_settings(tmp_path))
+
+    try:
+        translations.apply_language("zh-CN")
+        sidebar.retranslate_ui()
+        qapp.processEvents()
+
+        assert sidebar._title.font().family() == "微软雅黑"
+        assert sidebar._tree.font().family() == "微软雅黑"
+        delegate = sidebar._tree.itemDelegate()
+        assert isinstance(delegate, AlbumSidebarDelegate)
+        assert delegate._font_for_node(QFont("Segoe UI", 12), NodeType.HEADER).family() == "微软雅黑"
+    finally:
+        sidebar.close()
+        translations.apply_language("de")
+        translations._remove_installed_translator(qapp)
+        qapp.setFont(original_font)
+        font_policy._STATE.app_id = None
+        font_policy._STATE.original_font = None
+        font_policy._STATE.applied_family = None
 
 
 def test_programmatic_selection_can_emit_signals(tmp_path: Path, qapp: QApplication) -> None:

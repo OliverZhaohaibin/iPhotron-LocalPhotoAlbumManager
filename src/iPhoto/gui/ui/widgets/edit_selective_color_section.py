@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.gui.i18n import formatters, tr
+from iPhoto.gui.i18n.font_policy import language_font
 
 from ....core.selective_color_resolver import (
     DEFAULT_CENTERS,
@@ -171,7 +172,7 @@ class _SelectiveSlider(QWidget):
             painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
             painter.drawLine(QPointF(zero_x, 0), QPointF(zero_x, rect.bottom()))
 
-        font = QFont("Inter", 12, QFont.Weight.Medium)
+        font = language_font(QFont("Inter", 12, QFont.Weight.Medium))
         painter.setFont(font)
         painter.setPen(QColor(240, 240, 240))
         painter.drawText(

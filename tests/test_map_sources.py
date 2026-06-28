@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from maps import map_sources
@@ -15,8 +16,10 @@ from maps.map_sources import (
     default_pending_osmand_extension_root,
     has_usable_osmand_default,
     has_installed_osmand_extension,
-    resolve_osmand_native_widget_library,
+    has_usable_osmand_search_extension,
+    is_valid_osmand_search_database,
     resolve_osmand_helper_command,
+    resolve_osmand_native_widget_library,
 )
 
 
@@ -38,11 +41,85 @@ def _create_extension_assets_at(extension_root: Path) -> Path:
         "<renderingStyle />",
         encoding="utf-8",
     )
-    (extension_root / "search" / "geonames.sqlite3").write_bytes(b"sqlite")
-    (extension_root / DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(Path("tiles") / "extension")).write_bytes(
-        b"helper"
+    _create_search_database(extension_root / "search" / "geonames.sqlite3")
+    helper_path = extension_root / DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(
+        Path("tiles") / "extension"
     )
+    helper_path.write_bytes(b"helper")
     return extension_root
+
+
+def _create_search_database(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE search_index (
+                norm_name TEXT NOT NULL,
+                name_priority INTEGER NOT NULL,
+                population INTEGER NOT NULL,
+                geoname_id INTEGER NOT NULL,
+                matched_name TEXT NOT NULL,
+                primary_name TEXT NOT NULL,
+                asciiname TEXT,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                feature_code TEXT,
+                country_code TEXT,
+                admin1_code TEXT,
+                admin2_code TEXT,
+                admin3_code TEXT,
+                admin4_code TEXT,
+                PRIMARY KEY (norm_name, name_priority, population DESC, geoname_id)
+            ) WITHOUT ROWID;
+            CREATE TABLE prefix_cache (
+                prefix TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                name_priority INTEGER NOT NULL,
+                population INTEGER NOT NULL,
+                geoname_id INTEGER NOT NULL,
+                matched_name TEXT NOT NULL,
+                primary_name TEXT NOT NULL,
+                asciiname TEXT,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                feature_code TEXT,
+                country_code TEXT,
+                admin1_code TEXT,
+                admin2_code TEXT,
+                admin3_code TEXT,
+                admin4_code TEXT,
+                PRIMARY KEY (prefix, rank)
+            ) WITHOUT ROWID;
+            """
+        )
+
+
+def _create_search_database_without_prefix_cache(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE search_index (
+                norm_name TEXT NOT NULL,
+                name_priority INTEGER NOT NULL,
+                population INTEGER NOT NULL,
+                geoname_id INTEGER NOT NULL,
+                matched_name TEXT NOT NULL,
+                primary_name TEXT NOT NULL,
+                asciiname TEXT,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                feature_code TEXT,
+                country_code TEXT,
+                admin1_code TEXT,
+                admin2_code TEXT,
+                admin3_code TEXT,
+                admin4_code TEXT,
+                PRIMARY KEY (norm_name, name_priority, population DESC, geoname_id)
+            ) WITHOUT ROWID;
+            """
+        )
 
 
 def test_default_map_source_prefers_osmand_when_assets_exist(tmp_path) -> None:
@@ -312,6 +389,40 @@ def test_has_installed_osmand_extension_requires_search_database_and_helper(
     assert has_installed_osmand_extension(package_root) is False
 
 
+def test_osmand_search_extension_rejects_lfs_pointer_database(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package_root = tmp_path / "maps"
+    extension_root = _create_extension_assets(package_root)
+    search_db = extension_root / "search" / "geonames.sqlite3"
+    search_db.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:86f6d278e320740d81a02bf6d59eee452e79421e0b7b959a9cbfa066ea22db97\n"
+        "size 345563136\n",
+        encoding="utf-8",
+    )
+    if map_sources.os.name == "nt":
+        monkeypatch.setenv("APPDATA", str(tmp_path / "empty-appdata"))
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+
+    assert is_valid_osmand_search_database(search_db) is False
+    assert has_usable_osmand_search_extension(package_root) is False
+    assert has_installed_osmand_extension(package_root) is False
+
+
+def test_osmand_search_extension_accepts_optimized_database_without_prefix_cache(
+    tmp_path,
+) -> None:
+    search_db = tmp_path / "geonames.sqlite3"
+    _create_search_database_without_prefix_cache(search_db)
+
+    assert is_valid_osmand_search_database(search_db) is True
+
+
 def test_has_installed_osmand_extension_detects_external_runtime_when_bundled_exists(
     tmp_path,
     monkeypatch,
@@ -443,7 +554,7 @@ def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_pa
         encoding="utf-8",
     )
     (pending_root / "search").mkdir()
-    (pending_root / "search" / "geonames.sqlite3").write_bytes(b"sqlite")
+    _create_search_database(pending_root / "search" / "geonames.sqlite3")
     (pending_root / "bin").mkdir()
     helper_name = DEFAULT_HELPER_RELATIVE_PATHS[0].name
     (pending_root / "bin" / helper_name).write_bytes(b"helper")
@@ -476,7 +587,7 @@ def test_apply_pending_osmand_extension_install_promotes_to_external_runtime_for
         encoding="utf-8",
     )
     (pending_root / "search").mkdir()
-    (pending_root / "search" / "geonames.sqlite3").write_bytes(b"sqlite")
+    _create_search_database(pending_root / "search" / "geonames.sqlite3")
     (pending_root / "bin").mkdir()
     (pending_root / "bin" / DEFAULT_HELPER_RELATIVE_PATHS[0].name).write_bytes(b"helper")
     (pending_root / "marker.txt").write_text("external", encoding="utf-8")

@@ -1066,6 +1066,13 @@
         </message>
     </context>
     <context>
+        <name>PlaybackCoordinator</name>
+        <message>
+            <source>Writing data, please wait...</source>
+            <translation>Daten werden geschrieben, bitte warten …</translation>
+        </message>
+    </context>
+    <context>
         <name>PlayerBar</name>
         <message>
             <source>Play/Pause</source>

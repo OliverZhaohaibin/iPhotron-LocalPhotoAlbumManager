@@ -19,11 +19,7 @@ from ..infrastructure.repositories.library_state_repository import (
     IndexStoreLibraryStateRepository,
 )
 from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
-from ..infrastructure.services.location_metadata_service import (
-    ExifToolLocationMetadataService,
-)
 from ..infrastructure.services.map_runtime_service import SessionMapRuntimeService
-from ..application.services.assign_location_service import AssignLocationService
 from ..people.service import PeopleService
 from .library_asset_state_service import LibraryAssetStateService
 from .library_album_metadata_service import LibraryAlbumMetadataService
@@ -119,9 +115,6 @@ class LibrarySession:
     def state(self) -> LibraryStateRepositoryPort:
         assert self.state_repository is not None
         return self.state_repository
-
-    def assign_location_service(self) -> AssignLocationService:
-        return AssignLocationService(self.state, ExifToolLocationMetadataService())
 
     def shutdown(self) -> None:
         shutdown_queries = getattr(self.asset_queries, "shutdown", None)

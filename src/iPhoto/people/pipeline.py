@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
+import builtins
+import hashlib
 import logging
 import os
 import sys
-import builtins
 import typing
 import uuid
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-import hashlib
 from pathlib import Path
 from types import ModuleType
 from typing import Callable, Sequence
 
 import numpy as np
 
-from .image_utils import load_image_rgb, pil_image_to_bgr, save_face_thumbnail
+from .image_utils import (
+    PeopleImageLoadError,
+    load_image_rgb,
+    pil_image_to_bgr,
+    save_face_thumbnail,
+)
 from .repository import (
     FaceRecord,
     FaceStateRepository,
@@ -90,6 +95,24 @@ class FaceClusterPipeline:
                 image = load_image_rgb(image_path)
                 image_bgr = pil_image_to_bgr(image)
                 detected_faces = face_app.get(image_bgr)
+            except PeopleImageLoadError as exc:
+                if cancellation_requested():
+                    break
+                reason = str(exc).strip() or exc.__class__.__name__
+                _LOGGER.warning(
+                    "Skipping face detection for unreadable image %s: %s",
+                    image_path,
+                    reason,
+                )
+                results.append(
+                    DetectedAssetFaces(
+                        asset_id=asset_id,
+                        asset_rel=asset_rel,
+                        faces=[],
+                        error=reason,
+                    )
+                )
+                continue
             except Exception as exc:
                 if cancellation_requested():
                     break
@@ -368,7 +391,10 @@ def canonicalize_cluster_identities(
         if not members:
             continue
         for member in members:
-            updated_faces[faces_by_face_id[member.face_id]] = replace(member, person_id=canonical_id)
+            updated_faces[faces_by_face_id[member.face_id]] = replace(
+                member,
+                person_id=canonical_id,
+            )
     canonical_persons = build_person_records_from_faces(
         updated_faces,
         names_by_person_id=canonical_names,

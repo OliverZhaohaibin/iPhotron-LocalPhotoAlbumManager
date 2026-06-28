@@ -16,6 +16,8 @@ from .repositories import (
     AssetFavoriteQueryPort,
     AssetRepositoryPort,
     LibraryStateRepositoryPort,
+    LocationAssignmentRepositoryPort,
+    LocationWriteJobRecord,
     PinnedStateRepositoryPort,
 )
 from .runtime import (
@@ -37,6 +39,8 @@ __all__ = [
     "EditServicePort",
     "EditSidecarPort",
     "LibraryStateRepositoryPort",
+    "LocationAssignmentRepositoryPort",
+    "LocationWriteJobRecord",
     "LocationAssetServicePort",
     "LocationMetadataPort",
     "MapBackendKind",

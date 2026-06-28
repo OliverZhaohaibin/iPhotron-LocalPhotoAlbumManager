@@ -8,8 +8,9 @@ from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
-from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.gui.i18n.font_policy import language_font
 from iPhoto.people.image_utils import load_image_rgb
+from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 
 from .people_dashboard_shared import (
     CARD_HEIGHT,
@@ -19,12 +20,13 @@ from .people_dashboard_shared import (
     GROUP_CARD_RADIUS,
     GROUP_CARD_WIDTH,
     PLACEHOLDER_BACKDROPS,
+    _pixmap_from_image_path,
+    _qcolor,
+    _rounded_path,
     people_cover_cache,
     qimage_from_cover_image,
     request_cover_pixmap,
     request_rendered_cover_pixmap,
-    _qcolor,
-    _rounded_path, _pixmap_from_image_path,
 )
 
 
@@ -153,7 +155,7 @@ class PeopleCard(QWidget):
         initial = self.display_name()[:1].upper()
         if initial:
             painter.setPen(_qcolor("#0F172A"))
-            painter.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
+            painter.setFont(language_font(QFont("Segoe UI", 28, QFont.Weight.Bold)))
             painter.drawText(QRectF(0, 42, CARD_WIDTH, 56), Qt.AlignmentFlag.AlignCenter, initial)
 
         painter.end()
@@ -195,7 +197,7 @@ class PeopleCard(QWidget):
         painter.fillRect(card_rect, gradient)
 
         text_rect = card_rect.adjusted(14, 0, -14, -12)
-        title_font = QFont("Segoe UI", 14, QFont.Weight.Bold)
+        title_font = language_font(QFont("Segoe UI", 14, QFont.Weight.Bold))
 
         shadow_rect = text_rect.translated(0, 1.5)
         painter.setPen(QColor(0, 0, 0, 150))
@@ -219,7 +221,7 @@ class PeopleCard(QWidget):
         painter.setBrush(_qcolor("#111827", 175))
         painter.drawRoundedRect(badge_rect, 14, 14)
         painter.setPen(_qcolor("#FFFFFF"))
-        painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
         painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self.summary.face_count))
 
     def enterEvent(self, _event) -> None:  # noqa: N802
@@ -505,7 +507,7 @@ class GroupCard(QWidget):
         if not self.summary.name:
             return
         text_rect = card_rect.adjusted(14, 0, -14, -13)
-        painter.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        painter.setFont(language_font(QFont("Segoe UI", 13, QFont.Weight.Bold)))
         painter.setPen(QColor(0, 0, 0, 150))
         painter.drawText(
             text_rect.translated(0, 1.5),

@@ -122,6 +122,22 @@ class SchemaMigrator:
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS metadata_write_jobs (
+                job_id TEXT PRIMARY KEY,
+                asset_rel TEXT NOT NULL,
+                asset_path TEXT NOT NULL,
+                gps_json TEXT NOT NULL,
+                location TEXT,
+                media_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER DEFAULT 0,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        """)
+
         # Perform incremental schema migration (add columns if missing)
         SchemaMigrator._migrate_columns(conn)
 
@@ -360,6 +376,8 @@ class SchemaMigrator:
             "CREATE INDEX IF NOT EXISTS idx_assets_updated_at ON assets (index_updated_at_ms)",
             "CREATE INDEX IF NOT EXISTS idx_scan_jobs_root_scope ON scan_jobs (root, scope, updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_scan_events_job ON scan_events (job_id, event_id)",
+            "CREATE INDEX IF NOT EXISTS idx_metadata_write_jobs_status ON metadata_write_jobs (status, updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_metadata_write_jobs_asset ON metadata_write_jobs (asset_rel)",
         ]
 
         for index_sql in indexes:

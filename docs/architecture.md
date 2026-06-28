@@ -174,7 +174,6 @@ LibrarySession
   map_interactions
   edit
   locations
-  assign_location_service()
   shutdown()
 ```
 
@@ -204,10 +203,11 @@ paint boundary.
 preview, Map, People, and Albums bundles. It caches each bundle and emits
 `featureCreated` so the window manager and coordinator can attach behavior to
 late-created widgets. Navigation may also call `ensure_feature()` if Map or the
-Albums dashboard was not constructed during the post-paint warm-up. On Windows,
-the QRhi-backed detail bundle is constructed before `show()` because inserting
-it into a visible top-level window can recreate the native window; preview and
-People remain post-paint. Other desktop platforms defer all three.
+Albums dashboard was not constructed during the post-paint warm-up. On Windows
+and Linux, the QRhi-backed detail bundle is constructed before `show()` because
+inserting it into a visible top-level window can recreate the native window;
+preview and People remain post-paint. macOS keeps all three in the post-paint
+warm-up path.
 
 ## Layer Boundaries
 
@@ -444,21 +444,26 @@ carry full thumbnail cache keys so visible media rows are immediately drawable.
 ```mermaid
 sequenceDiagram
     participant UI as Info Panel
-    participant Service as AssignLocationService
-    participant State as LibraryStateRepositoryPort
+    participant Coordinator as PlaybackCoordinator
+    participant Repository as LocationAssignmentRepositoryPort
+    participant Queue as LocationFileWriteQueue
     participant Writer as MetadataWriterPort
 
-    UI->>Service: assign(asset, lat, lon, name)
-    Service->>State: persist local location state
-    Service->>Writer: best-effort write GPS
+    UI->>Coordinator: confirm(asset, lat, lon, name)
+    Coordinator->>Repository: assign_location(...)
+    Repository-->>Coordinator: local state + durable write job
+    Coordinator->>Queue: enqueue(job)
+    Queue->>Writer: write GPS
     alt write fails
-        Writer-->>Service: recoverable warning
+        Writer-->>Queue: recoverable warning
+        Queue-->>Coordinator: warning event
     end
-    Service-->>UI: result + optional warning
+    Coordinator-->>UI: refresh local location state
 ```
 
 The local assignment is authoritative. ExifTool failures are warnings and do not
-roll back local state.
+roll back local state; pending durable write-back jobs are recovered on the next
+session.
 
 ### Thumbnail Rendering
 

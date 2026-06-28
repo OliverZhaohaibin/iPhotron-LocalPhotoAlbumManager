@@ -13,7 +13,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_t
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QMouseEvent, QPainter, QPixmap, QWindow
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QPainter, QPixmap, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.i18n import formatters
@@ -1392,7 +1392,7 @@ def test_info_panel_content_update_batches_visible_geometry_refresh(
     panel.close()
 
 
-def test_info_panel_location_preview_reflow_stabilizes_on_first_event_pass(
+def test_info_panel_location_map_reflow_stabilizes_on_first_event_pass(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1405,11 +1405,15 @@ def test_info_panel_location_preview_reflow_stabilizes_on_first_event_pass(
 
     panel = InfoPanel()
     panel.set_location_capability(enabled=True)
-    panel.set_asset_metadata({"rel": "map.jpg", "name": "map.jpg"})
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "location": "Munich",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+        }
+    )
     panel.show()
-    qapp.processEvents()
-
-    panel.preview_location("Munich", 48.137154, 11.576124)
     qapp.processEvents()
 
     first_height = panel.height()
@@ -1422,6 +1426,126 @@ def test_info_panel_location_preview_reflow_stabilizes_on_first_event_pass(
         qapp.processEvents()
 
     assert panel.height() == first_height
+    panel.close()
+
+
+def test_info_panel_location_suggestions_use_non_focus_floating_tool(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata({"rel": "map.jpg", "name": "map.jpg"})
+    panel.show()
+    qapp.processEvents()
+    height_before = panel.height()
+
+    panel._location_editor.setFocus(Qt.FocusReason.OtherFocusReason)
+    panel.set_location_suggestions(
+        [
+            SimpleNamespace(display_name="Munich", secondary_text="Germany"),
+            SimpleNamespace(display_name="Munich Airport", secondary_text="Germany"),
+        ]
+    )
+    qapp.processEvents()
+
+    assert not panel._location_results.isHidden()
+    assert panel._location_results.windowType() == Qt.WindowType.Tool
+    assert panel._location_results.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert panel._location_results.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert panel._location_layout.indexOf(panel._location_results) == -1
+    assert panel.height() == height_before
+    panel.close()
+
+
+def test_info_panel_location_keyboard_navigation_autocompletes_and_confirms(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata({"rel": "map.jpg", "name": "map.jpg"})
+    panel.show()
+    qapp.processEvents()
+    suggestions = [
+        SimpleNamespace(display_name="Munich", secondary_text="Germany"),
+        SimpleNamespace(display_name="Munich Airport", secondary_text="Germany"),
+    ]
+    calls: list[tuple[str, object]] = []
+    panel.locationConfirmRequested.connect(
+        lambda query, suggestion: calls.append((query, suggestion))
+    )
+
+    panel._location_editor.setFocus(Qt.FocusReason.OtherFocusReason)
+    panel.set_location_suggestions(suggestions)
+    qapp.processEvents()
+
+    assert panel._location_editor.text() == ""
+    assert panel._location_results.currentRow() == 0
+
+    down_event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Down,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert panel.eventFilter(panel._location_editor, down_event) is True
+    assert panel._location_results.currentRow() == 1
+    assert panel._location_editor.text() == "Munich Airport"
+
+    up_event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Up,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert panel.eventFilter(panel._location_editor, up_event) is True
+    assert panel._location_results.currentRow() == 0
+    assert panel._location_editor.text() == "Munich"
+
+    assert panel.eventFilter(panel._location_editor, down_event) is True
+    enter_event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Return,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert panel.eventFilter(panel._location_editor, enter_event) is True
+    qapp.processEvents()
+
+    assert calls == [("Munich Airport", suggestions[1])]
+    assert panel._location_results.isHidden()
+    panel.close()
+
+
+def test_info_panel_location_keyboard_escape_closes_suggestions_without_confirm(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata({"rel": "map.jpg", "name": "map.jpg"})
+    panel.show()
+    qapp.processEvents()
+    calls: list[tuple[str, object]] = []
+    panel.locationConfirmRequested.connect(
+        lambda query, suggestion: calls.append((query, suggestion))
+    )
+
+    panel._location_editor.setFocus(Qt.FocusReason.OtherFocusReason)
+    panel.set_location_suggestions(
+        [
+            SimpleNamespace(display_name="Munich", secondary_text="Germany"),
+            SimpleNamespace(display_name="Munich Airport", secondary_text="Germany"),
+        ]
+    )
+    qapp.processEvents()
+
+    escape_event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Escape,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert panel.eventFilter(panel._location_editor, escape_event) is True
+
+    assert calls == []
+    assert panel._location_results.isHidden()
+    assert panel._selected_location_suggestion is None
+    assert not panel._location_confirm_button.isEnabled()
     panel.close()
 
 
@@ -1469,6 +1593,31 @@ def test_info_panel_shows_download_button_when_location_extension_is_unavailable
     assert not panel._location_fallback_label.isHidden()
     assert not panel._location_download_button.isHidden()
     assert panel._location_editor_row.isHidden()
+    panel.close()
+
+
+def test_info_panel_shows_download_prompt_when_search_is_unavailable_with_location_metadata(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    panel = InfoPanel()
+    panel.set_location_capability(
+        enabled=False,
+        fallback_text="Install the map extension to use Assign a Location.",
+    )
+    panel.set_asset_metadata(
+        {
+            "rel": "img.jpg",
+            "name": "img.jpg",
+            "location": "Munich",
+        }
+    )
+
+    assert panel._location_editor_row.isHidden()
+    assert not panel._location_fallback_label.isHidden()
+    assert not panel._location_download_button.isHidden()
+    assert panel._location_results.isHidden()
+    assert not panel._location_confirm_button.isEnabled()
     panel.close()
 
 

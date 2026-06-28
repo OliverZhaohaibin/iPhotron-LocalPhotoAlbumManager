@@ -7,13 +7,21 @@ from .album_events import (
     ScanProgressEvent,
     ThumbnailReadyEvent,
 )
+from .asset_events import (
+    AssetMetadataUpdated,
+    LocationFileWriteFailed,
+    LocationFileWriteVerified,
+)
 
 __all__ = [
     "AlbumOpenedEvent",
     "AssetImportedEvent",
+    "AssetMetadataUpdated",
     "DomainEvent",
     "Event",
     "EventBus",
+    "LocationFileWriteFailed",
+    "LocationFileWriteVerified",
     "ScanCompletedEvent",
     "ScanProgressEvent",
     "Subscription",

@@ -11,10 +11,12 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", exc_type=ImportError)
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QFont
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMenuBar, QStackedWidget, QWidget
 
-from iPhoto.gui.i18n import TranslationManager
+from iPhoto.gui.i18n import TranslationManager, font_policy
+from iPhoto.gui.i18n.font_policy import language_font, simplified_chinese_font_family
 from iPhoto.gui.i18n.language import LanguageInfo
 from iPhoto.gui.ui.main_window import MainWindow
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
@@ -107,6 +109,10 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
     assert QCoreApplication.translate("GalleryMenu", "Export", None) == "导出"
     assert QCoreApplication.translate("GalleryContextMenu", "Deleted", None) == "已删除"
     assert QCoreApplication.translate("DetailPage", "Rotate Left", None) == "向左旋转"
+    assert (
+        QCoreApplication.translate("PlaybackCoordinator", "Writing data, please wait...", None)
+        == "正在写入数据，请稍候…"
+    )
     assert QCoreApplication.translate("PlayerBar", "Volume", None) == "音量"
     assert QCoreApplication.translate("EditSidebar", "Light", None) == "光效"
     assert QCoreApplication.translate("EditLight", "Brilliance", None) == "鲜明度"
@@ -137,6 +143,202 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
         assert player_bar._mute_button.toolTip() == "静音"
     finally:
         player_bar.close()
+
+
+def test_simplified_chinese_font_policy_matches_windows_font_names() -> None:
+    assert simplified_chinese_font_family("win32", ["Microsoft YaHei"]) == "Microsoft YaHei"
+    assert simplified_chinese_font_family("win32", ["Microsoft Yahei"]) == "Microsoft Yahei"
+    assert simplified_chinese_font_family("win32", ["微软雅黑"]) == "微软雅黑"
+    assert simplified_chinese_font_family("win32", ["@Microsoft Yahei"]) is None
+
+
+def test_simplified_chinese_font_policy_delegates_linux_to_system_fallback() -> None:
+    assert simplified_chinese_font_family("linux", []) is None
+    assert simplified_chinese_font_family("linux", ["Noto Sans CJK SC"]) is None
+
+
+def test_translation_manager_applies_and_restores_simplified_chinese_font(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_font = QFont(qapp.font())
+    font_policy._STATE.app_id = None
+    font_policy._STATE.original_font = None
+    font_policy._STATE.applied_family = None
+    monkeypatch.setattr(font_policy.sys, "platform", "win32")
+    monkeypatch.setattr(font_policy, "_available_font_families", lambda: ["微软雅黑"])
+    manager = _settings(tmp_path)
+    translations = TranslationManager(manager)
+
+    try:
+        translations.apply_language("zh-CN")
+
+        assert qapp.font().family() == "微软雅黑"
+
+        translations.apply_language("de")
+
+        assert qapp.font().family() == original_font.family()
+    finally:
+        qapp.setFont(original_font)
+        font_policy._STATE.app_id = None
+        font_policy._STATE.original_font = None
+        font_policy._STATE.applied_family = None
+
+
+def test_translation_manager_syncs_existing_widget_fonts_for_windows_chinese(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_font = QFont(qapp.font())
+    label = QLabel("中文")
+    menu_bar = QMenuBar()
+    menu = QMenu("菜单", menu_bar)
+    menu_bar.addMenu(menu)
+    original_label_font = QFont(label.font())
+    original_menu_bar_font = QFont(menu_bar.font())
+    original_menu_font = QFont(menu.font())
+    font_policy._STATE.app_id = None
+    font_policy._STATE.original_font = None
+    font_policy._STATE.applied_family = None
+    monkeypatch.setattr(font_policy.sys, "platform", "win32")
+    monkeypatch.setattr(font_policy, "_available_font_families", lambda: ["微软雅黑"])
+    manager = _settings(tmp_path)
+    translations = TranslationManager(manager)
+
+    try:
+        translations.apply_language("zh-CN")
+
+        assert qapp.font().family() == "微软雅黑"
+        assert label.font().family() == "微软雅黑"
+        assert menu_bar.font().family() == "微软雅黑"
+        assert menu.font().family() == "微软雅黑"
+        assert language_font(QFont("Segoe UI", 12)).family() == "微软雅黑"
+
+        translations.apply_language("de")
+
+        assert qapp.font().family() == original_font.family()
+        assert label.font().family() == original_label_font.family()
+        assert menu_bar.font().family() == original_menu_bar_font.family()
+        assert menu.font().family() == original_menu_font.family()
+        base_font = QFont("Segoe UI", 12)
+        assert language_font(base_font).family() == base_font.family()
+    finally:
+        translations._remove_installed_translator(qapp)
+        label.close()
+        menu_bar.close()
+        qapp.setFont(original_font)
+        font_policy._STATE.app_id = None
+        font_policy._STATE.original_font = None
+        font_policy._STATE.applied_family = None
+
+
+def test_translation_manager_restores_widgets_created_during_windows_chinese(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_app_font = QFont(qapp.font())
+    original_font = QFont("Segoe UI", 10)
+    qapp.setFont(original_font)
+    font_policy._STATE.app_id = None
+    font_policy._STATE.original_font = None
+    font_policy._STATE.applied_family = None
+    monkeypatch.setattr(font_policy.sys, "platform", "win32")
+    monkeypatch.setattr(font_policy, "_available_font_families", lambda: ["微软雅黑"])
+    manager = _settings(tmp_path)
+    translations = TranslationManager(manager)
+    label: QLabel | None = None
+
+    try:
+        translations.apply_language("zh-CN")
+
+        label = QLabel("中文")
+        label_font = QFont(label.font())
+        label_font.setBold(True)
+        label_font.setPointSizeF(label_font.pointSizeF() + 0.5)
+        label.setFont(label_font)
+        font_policy.sync_widget_language_font(label)
+
+        assert label.font().family() == "微软雅黑"
+        assert label.font().bold()
+
+        translations.apply_language("de")
+
+        assert qapp.font().family() == original_font.family()
+        assert label.font().family() == original_font.family()
+        assert label.font().bold()
+        assert label.font().pointSizeF() == pytest.approx(original_font.pointSizeF() + 0.5)
+    finally:
+        translations._remove_installed_translator(qapp)
+        if label is not None:
+            label.close()
+        qapp.setFont(saved_app_font)
+        font_policy._STATE.app_id = None
+        font_policy._STATE.original_font = None
+        font_policy._STATE.applied_family = None
+
+
+def test_translation_manager_leaves_linux_font_fallback_to_qt_and_fontconfig(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_family = qapp.font().family()
+    original_top_levels = list(qapp.topLevelWidgets())
+    font_policy._STATE.app_id = None
+    font_policy._STATE.original_font = None
+    font_policy._STATE.applied_family = None
+    monkeypatch.setattr(font_policy.sys, "platform", "linux")
+    monkeypatch.setattr(
+        font_policy,
+        "_available_font_families",
+        lambda: pytest.fail("Linux font policy must not enumerate the font database"),
+    )
+    monkeypatch.setattr(
+        font_policy.QGuiApplication,
+        "setFont",
+        lambda *_args, **_kwargs: pytest.fail("Linux font policy must not set app font"),
+    )
+    monkeypatch.setattr(
+        font_policy.QFont,
+        "insertSubstitution",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Linux font policy must not mutate Qt font substitutions"
+        ),
+    )
+    monkeypatch.setattr(
+        font_policy.QFont,
+        "insertSubstitutions",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Linux font policy must not mutate Qt font substitutions"
+        ),
+    )
+    monkeypatch.setattr(
+        font_policy.QFont,
+        "removeSubstitutions",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Linux font policy must not mutate Qt font substitutions"
+        ),
+    )
+    manager = _settings(tmp_path)
+    translations = TranslationManager(manager)
+
+    try:
+        translations.apply_language("zh-CN")
+
+        assert qapp.font().family() == base_family
+        assert list(qapp.topLevelWidgets()) == original_top_levels
+
+        translations.apply_language("de")
+
+        assert qapp.font().family() == base_family
+        assert list(qapp.topLevelWidgets()) == original_top_levels
+    finally:
+        font_policy._STATE.app_id = None
+        font_policy._STATE.original_font = None
+        font_policy._STATE.applied_family = None
 
 
 def test_detail_page_retranslate_updates_standard_placeholder_only(

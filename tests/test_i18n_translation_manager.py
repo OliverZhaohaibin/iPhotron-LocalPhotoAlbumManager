@@ -11,10 +11,12 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", exc_type=ImportError)
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QFont
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
 
-from iPhoto.gui.i18n import TranslationManager
+from iPhoto.gui.i18n import TranslationManager, font_policy
+from iPhoto.gui.i18n.font_policy import simplified_chinese_font_family
 from iPhoto.gui.i18n.language import LanguageInfo
 from iPhoto.gui.ui.main_window import MainWindow
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
@@ -141,6 +143,49 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
         assert player_bar._mute_button.toolTip() == "静音"
     finally:
         player_bar.close()
+
+
+def test_simplified_chinese_font_policy_matches_windows_font_names() -> None:
+    assert simplified_chinese_font_family("win32", ["Microsoft Yahei"]) == "Microsoft Yahei"
+    assert simplified_chinese_font_family("win32", ["微软雅黑"]) == "微软雅黑"
+    assert simplified_chinese_font_family("win32", ["@Microsoft Yahei"]) is None
+
+
+def test_simplified_chinese_font_policy_is_best_effort_on_linux() -> None:
+    assert simplified_chinese_font_family("linux", []) is None
+    assert (
+        simplified_chinese_font_family("linux", ["Noto Sans CJK SC"])
+        == "Noto Sans CJK SC"
+    )
+
+
+def test_translation_manager_applies_and_restores_simplified_chinese_font(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_font = QFont(qapp.font())
+    font_policy._STATE.app_id = None
+    font_policy._STATE.original_font = None
+    font_policy._STATE.applied_family = None
+    monkeypatch.setattr(font_policy.sys, "platform", "win32")
+    monkeypatch.setattr(font_policy, "_available_font_families", lambda: ["微软雅黑"])
+    manager = _settings(tmp_path)
+    translations = TranslationManager(manager)
+
+    try:
+        translations.apply_language("zh-CN")
+
+        assert qapp.font().family() == "微软雅黑"
+
+        translations.apply_language("de")
+
+        assert qapp.font().family() == original_font.family()
+    finally:
+        qapp.setFont(original_font)
+        font_policy._STATE.app_id = None
+        font_policy._STATE.original_font = None
+        font_policy._STATE.applied_family = None
 
 
 def test_detail_page_retranslate_updates_standard_placeholder_only(

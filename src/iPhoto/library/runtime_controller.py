@@ -36,7 +36,10 @@ LOGGER = get_logger()
 if TYPE_CHECKING:  # pragma: no cover
     from ..people.index_coordinator import PeopleIndexCoordinator
     from ..people.service import PeopleService
+    from ..pets.index_coordinator import PetIndexCoordinator
+    from ..pets.service import PetService
     from .workers.face_scan_worker import FaceScanWorker
+    from .workers.pet_scan_worker import PetScanWorker
     from .workers.scanner_worker import ScannerWorker
     from ..application.ports import (
         AssetStateServicePort,
@@ -76,6 +79,9 @@ class LibraryRuntimeController(
     peopleIndexUpdated = Signal()
     peopleSnapshotCommitted = Signal(object)
     faceScanStatusChanged = Signal(str)
+    petIndexUpdated = Signal()
+    petSnapshotCommitted = Signal(object)
+    petScanStatusChanged = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -102,6 +108,7 @@ class LibraryRuntimeController(
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
         self._current_face_scanner: Optional[FaceScanWorker] = None
+        self._current_pet_scanner: Optional[PetScanWorker] = None
         self._cancelled_scanner_workers: set[int] = set()
         self._scan_thread_pool = QThreadPool.globalInstance()
         self._live_scan_buffer: List[Dict] = []
@@ -111,7 +118,9 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
         self._face_scan_status_message: Optional[str] = None
+        self._pet_scan_status_message: Optional[str] = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
+        self._pet_index_coordinator: PetIndexCoordinator | None = None
         self._library_session: "LibrarySession | None" = None
         self._owns_library_session = False
         self._scan_service: "LibraryScanService | None" = None
@@ -122,6 +131,7 @@ class LibraryRuntimeController(
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
         self._asset_operation_service: "LibraryAssetOperationService | None" = None
         self._people_service: PeopleService | None = None
+        self._pet_service: PetService | None = None
         self._map_runtime: "MapRuntimePort | None" = None
         self._map_interaction_service: "MapInteractionServicePort | None" = None
         self._edit_service: "EditServicePort | None" = None
@@ -169,7 +179,9 @@ class LibraryRuntimeController(
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
         self._face_scan_status_message = None
+        self._pet_scan_status_message = None
         self._unbind_people_index_coordinator()
+        self._unbind_pet_index_coordinator()
 
         normalized = root.expanduser().resolve()
         if not normalized.exists() or not normalized.is_dir():
@@ -186,6 +198,7 @@ class LibraryRuntimeController(
                     session_root = Path(session.library_root)
                 if session_root == normalized:
                     self.bind_people_service(session.people)
+                    self.bind_pet_service(session.pets)
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)
@@ -256,9 +269,13 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         self._unbind_people_index_coordinator()
+        self._unbind_pet_index_coordinator()
 
     def face_scan_status_message(self) -> str | None:
         return self._face_scan_status_message
+
+    def pet_scan_status_message(self) -> str | None:
+        return self._pet_scan_status_message
 
     def bind_library_session(
         self,
@@ -283,6 +300,7 @@ class LibraryRuntimeController(
             self.bind_map_interaction_service(None)
             self.bind_map_runtime(None)
             self.bind_people_service(None)
+            self.bind_pet_service(None)
             self.bind_asset_operation_service(None)
             self.bind_asset_lifecycle_service(None)
             self.bind_album_metadata_service(None)
@@ -301,6 +319,7 @@ class LibraryRuntimeController(
             self.bind_asset_lifecycle_service(library_session.asset_lifecycle)
             self.bind_asset_operation_service(library_session.asset_operations)
             self.bind_people_service(library_session.people)
+            self.bind_pet_service(library_session.pets)
             self.bind_map_runtime(library_session.maps)
             self.bind_map_interaction_service(library_session.map_interactions)
 
@@ -429,6 +448,26 @@ class LibraryRuntimeController(
     def people_service(self) -> PeopleService | None:
         return self._people_service
 
+    def bind_pet_service(self, pet_service: "PetService | None") -> None:
+        """Bind the current library session Pets surface."""
+
+        self._unbind_pet_index_coordinator()
+        self._pet_service = pet_service
+        if pet_service is None:
+            return
+        coordinator = pet_service.coordinator
+        if coordinator is None:
+            return
+        coordinator.resume()
+        coordinator.snapshotCommitted.connect(
+            self._on_pet_snapshot_committed, Qt.ConnectionType.QueuedConnection
+        )
+        self._pet_index_coordinator = coordinator
+
+    @property
+    def pet_service(self) -> "PetService | None":
+        return self._pet_service
+
     def bind_map_runtime(self, map_runtime: "MapRuntimePort | None") -> None:
         """Bind the current library session Maps runtime surface."""
 
@@ -491,6 +530,7 @@ class LibraryRuntimeController(
             # bound for this root, restore the People surface so snapshot events
             # keep flowing after the tree refresh completes.
             self.bind_people_service(session.people)
+            self.bind_pet_service(session.pets)
             return
 
         from ..bootstrap.library_session import create_headless_library_session
@@ -512,9 +552,25 @@ class LibraryRuntimeController(
             pass
         self._people_index_coordinator = None
 
+    def _unbind_pet_index_coordinator(self) -> None:
+        if self._pet_index_coordinator is None:
+            return
+        self._pet_index_coordinator.begin_shutdown()
+        try:
+            self._pet_index_coordinator.snapshotCommitted.disconnect(
+                self._on_pet_snapshot_committed
+            )
+        except (RuntimeError, TypeError):
+            pass
+        self._pet_index_coordinator = None
+
     def _on_people_snapshot_committed(self, event: object) -> None:
         self.peopleIndexUpdated.emit()
         self.peopleSnapshotCommitted.emit(event)
+
+    def _on_pet_snapshot_committed(self, event: object) -> None:
+        self.petIndexUpdated.emit()
+        self.petSnapshotCommitted.emit(event)
 
     # ------------------------------------------------------------------
     # Internal helpers (coordinator-level)

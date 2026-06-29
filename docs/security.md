@@ -6,7 +6,7 @@
 
 ## Overview
 
-iPhotron is a **local-first photo manager**. It does not upload data to any cloud service, does not require an internet connection for core functionality, and does not collect user telemetry. All library data remains on the user's local filesystem. The only network-facing flow is an optional user-triggered maps-extension download on platforms where a published extension archive exists.
+iPhotron is a **local-first photo manager**. It does not upload data to any cloud service, does not require an internet connection for core functionality, and does not collect user telemetry. All library data remains on the user's local filesystem. Network-facing flows are limited to optional extension/model downloads: a user-triggered maps-extension download on platforms where a published extension archive exists, and first-use People/Pets model downloads when local AI model caches are absent.
 
 ---
 
@@ -40,10 +40,11 @@ extension is installed.
 | **Map rendering** | Offline (bundled OBF/vector map assets) | Render map tiles for the location view |
 | **Reverse geocoding** | Local database lookup | Convert GPS coordinates to place names (offline, via `reverse-geocoder` library) |
 | **Map extension download** | Optional HTTPS download | Fetch a published extension archive only when the user chooses the download path |
+| **People/Pets model download** | Optional HTTPS download | Populate missing local AI model caches before background recognition scans |
 
 > **Note:** No telemetry or cloud sync is performed. A network connection is only
-> needed if the user chooses to download a missing map extension from a release
-> archive.
+> needed if the user chooses to download a missing map extension or lets a
+> background People/Pets scan populate a missing model cache.
 
 ---
 
@@ -60,6 +61,9 @@ iPhotron does **not** encrypt data at rest. The following files are stored in pl
 | `global_index.db` | SQLite | Asset/index facts plus repository-backed user state such as favorites, hidden/trash flags, pinned/order data, and manual metadata |
 | `.iPhoto/faces/face_index.db` | SQLite | Rebuildable People runtime snapshot |
 | `.iPhoto/faces/face_state.db` | SQLite | Stable People decisions: names, covers, hidden flags, groups, ordering |
+| `.iPhoto/pets/pet_index.db` | SQLite | Rebuildable Pets runtime snapshot |
+| `.iPhoto/pets/pet_state.db` | SQLite | Stable Pets decisions: names, covers, hidden flags, rejected detections |
+| `extension/models/` | Model files | Local AI model cache for People and Pets recognition |
 | Thumbnail cache | Image files | Downscaled preview images |
 | `settings.json` | JSON | Theme, language, recent library, export destination, and other application preferences |
 
@@ -68,8 +72,8 @@ iPhotron does **not** encrypt data at rest. The following files are stored in pl
 ### In Transit
 
 - No media, metadata, telemetry, or library state is transmitted by normal app
-  operation. The optional maps-extension download retrieves a release archive
-  only when the user chooses that path.
+  operation. Optional downloads retrieve only extension/model files; media and
+  library databases are not uploaded.
 
 ---
 
@@ -81,10 +85,14 @@ LibraryRoot/                          # User-selected photo library folder
 │   ├── global_index.db               # SQLite database (all asset metadata)
 │   ├── cache/
 │   │   └── thumbs/                   # Rebuildable thumbnail cache
-│   └── faces/
-│       ├── face_index.db             # Rebuildable People runtime snapshot
-│       ├── face_state.db             # Stable People user decisions
-│       └── thumbnails/               # Cropped face thumbnails
+│   ├── faces/
+│   │   ├── face_index.db             # Rebuildable People runtime snapshot
+│   │   ├── face_state.db             # Stable People user decisions
+│   │   └── thumbnails/               # Cropped face thumbnails
+│   └── pets/
+│       ├── pet_index.db              # Rebuildable Pets runtime snapshot
+│       ├── pet_state.db              # Stable Pets user decisions
+│       └── thumbnails/               # Cropped pet thumbnails
 ├── Album1/
 │   ├── .iphoto.album.json            # Album manifest
 │   ├── photo.jpg                     # Original photo (edits are sidecar-only)
@@ -116,7 +124,7 @@ state, are stored in a validated `settings.json` file:
 | GPS coordinates in metadata | Location data (medium) | Stored in SQLite index and, when ExifTool write-back succeeds, in the original file metadata |
 | Album organization | Low | Stored in JSON manifests alongside photos |
 | Edit parameters | Low | Stored in `.ipo` sidecar files |
-| Durable library and People choices | Personal | Stored in `global_index.db` and `.iPhoto/faces/face_state.db`; include `.iPhoto/` in backups |
+| Durable library, People, and Pets choices | Personal | Stored in `global_index.db`, `.iPhoto/faces/face_state.db`, and `.iPhoto/pets/pet_state.db`; include `.iPhoto/` in backups |
 
 ### Threat Scenarios
 

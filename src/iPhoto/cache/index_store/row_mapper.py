@@ -48,7 +48,7 @@ def _asset_insert_columns(conn: sqlite3.Connection) -> list[str]:
         "media_type", "is_favorite", "is_deleted", "has_gps", "thumbnail_state",
         "location", "micro_thumbnail", "thumb_cache_key", "thumb_updated_at",
         "thumb_error", "scan_job_id", "index_revision", "index_updated_at_ms",
-        "face_status"
+        "face_status", "pet_status"
     ]
     table_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(assets)")}
     if "metadata" in table_columns:
@@ -130,6 +130,7 @@ def row_to_db_params(row: dict[str, Any], *, include_metadata: bool = False) -> 
         row.get("index_revision", 0),
         row.get("index_updated_at_ms", 0),
         row.get("face_status"),
+        row.get("pet_status"),
     ]
     if include_metadata:
         params.append(_metadata_to_json(row.get("metadata")))

@@ -292,6 +292,9 @@ class RuntimeContext:
             bind_people_service = getattr(self.library, "bind_people_service", None)
             if callable(bind_people_service):
                 bind_people_service(self.library_session.people)
+            bind_pet_service = getattr(self.library, "bind_pet_service", None)
+            if callable(bind_pet_service):
+                bind_pet_service(self.library_session.pets)
             bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
             if callable(bind_map_runtime):
                 bind_map_runtime(self.library_session.maps)
@@ -330,6 +333,9 @@ class RuntimeContext:
             bind_people_service = getattr(self.library, "bind_people_service", None)
             if callable(bind_people_service):
                 bind_people_service(None)
+            bind_pet_service = getattr(self.library, "bind_pet_service", None)
+            if callable(bind_pet_service):
+                bind_pet_service(None)
             bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
             if callable(bind_map_runtime):
                 bind_map_runtime(None)

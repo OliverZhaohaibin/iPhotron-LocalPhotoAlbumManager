@@ -53,6 +53,7 @@ from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.people.service import PeopleService
+from iPhoto.pets.service import PetService
 from maps.map_sources import supports_map_extension_download
 
 if TYPE_CHECKING:
@@ -104,6 +105,7 @@ class MainCoordinator(QObject):
         self._media_session.bind_collection(self._gallery_store)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
         bound_people_service = self._people_service(library_root=lib_root)
+        bound_pet_service = self._pet_service(library_root=lib_root)
         self._playback_people_service = bound_people_service or PeopleService()
         if hasattr(window.ui, "people_page"):
             if bound_people_service is not None and hasattr(
@@ -112,7 +114,13 @@ class MainCoordinator(QObject):
                 window.ui.people_page.set_people_service(self._playback_people_service)
             else:
                 window.ui.people_page.set_library_root(lib_root)
+            if hasattr(window.ui.people_page, "set_pet_service"):
+                window.ui.people_page.set_pet_service(bound_pet_service or PetService())
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
+            if hasattr(window.ui.people_page, "set_pet_status_message"):
+                window.ui.people_page.set_pet_status_message(
+                    context.library.pet_scan_status_message()
+                )
         self._pinned_items_service = PinnedItemsService(
             context.settings,
             people_service_getter=self._people_service,
@@ -560,14 +568,24 @@ class MainCoordinator(QObject):
         if hasattr(ui, "people_page"):
             ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
             ui.people_page.groupActivated.connect(self._on_people_group_activated)
+            if hasattr(ui.people_page, "petActivated"):
+                ui.people_page.petActivated.connect(self._on_pet_activated)
             self._context.library.peopleIndexUpdated.connect(ui.people_page.schedule_index_refresh)
+            self._context.library.petIndexUpdated.connect(ui.people_page.schedule_index_refresh)
             self._context.library.peopleSnapshotCommitted.connect(
+                self._gallery_vm.handle_people_snapshot_committed
+            )
+            self._context.library.petSnapshotCommitted.connect(
                 self._gallery_vm.handle_people_snapshot_committed
             )
             self._context.library.peopleSnapshotCommitted.connect(
                 self._playback.handle_people_snapshot_committed
             )
             self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
+            if hasattr(ui.people_page, "set_pet_status_message"):
+                self._context.library.petScanStatusChanged.connect(
+                    ui.people_page.set_pet_status_message
+                )
 
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
@@ -672,6 +690,7 @@ class MainCoordinator(QObject):
         ui = getattr(window, "ui", None)
         people_page = getattr(ui, "people_page", None)
         bound_people_service = self._people_service(library_root=root)
+        bound_pet_service = self._pet_service(library_root=root)
         if bound_people_service is not None:
             self._playback_people_service = bound_people_service
         if people_page is not None:
@@ -679,7 +698,13 @@ class MainCoordinator(QObject):
                 people_page.set_people_service(bound_people_service)
             else:
                 people_page.set_library_root(root)
+            if hasattr(people_page, "set_pet_service"):
+                people_page.set_pet_service(bound_pet_service or PetService())
             people_page.set_status_message(self._context.library.face_scan_status_message())
+            if hasattr(people_page, "set_pet_status_message"):
+                people_page.set_pet_status_message(
+                    self._context.library.pet_scan_status_message()
+                )
         map_runtime = self._map_runtime()
         map_interaction_service = self._map_interaction_service()
         self._map_extension_download.set_package_root(self._resolve_map_package_root(map_runtime))
@@ -732,6 +757,18 @@ class MainCoordinator(QObject):
             self._context.library,
             library_root=library_root,
         )
+
+    def _pet_service(self, library_root: Path | None = None):
+        session = self._active_session()
+        session_root = getattr(session, "library_root", None) if session is not None else None
+        if session is not None and (library_root is None or session_root == library_root):
+            return getattr(session, "pets", None)
+        service = getattr(self._context.library, "pet_service", None)
+        if service is not None:
+            bound_root = getattr(service, "library_root", lambda: None)()
+            if library_root is None or bound_root == library_root:
+                return service
+        return None
 
     def _map_runtime(self):
         session = self._active_session()
@@ -965,6 +1002,17 @@ class MainCoordinator(QObject):
             query,
             kind="group",
             entity_id=group_id,
+        )
+        self._view_router.show_gallery()
+
+    def _on_pet_activated(self, pet_id: str) -> None:
+        query = self._window.ui.people_page.build_pet_query(pet_id)
+        if not query.asset_ids:
+            return
+        self._gallery_vm.open_people_cluster_gallery(
+            query,
+            kind="pet",
+            entity_id=pet_id,
         )
         self._view_router.show_gallery()
 

@@ -53,6 +53,13 @@ ai-demo = [
     "insightface>=0.7.3,<1.0",
     "onnxruntime>=1.18,<2",
 ]
+pets-ai = [
+    "certifi>=2024",
+    "onnxruntime>=1.18,<2",
+    "torch",
+    "torchvision",
+    "hdbscan",
+]
 
 [project.scripts]
 iphoto = "iPhoto.cli:app"

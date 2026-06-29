@@ -91,7 +91,8 @@ class SchemaMigrator:
                 scan_job_id TEXT,
                 index_revision INTEGER DEFAULT 0,
                 index_updated_at_ms INTEGER DEFAULT 0,
-                face_status TEXT
+                face_status TEXT,
+                pet_status TEXT
             )
         """)
 
@@ -201,6 +202,7 @@ class SchemaMigrator:
             "index_updated_at_ms": "ALTER TABLE assets ADD COLUMN index_updated_at_ms INTEGER DEFAULT 0",
             "location": "ALTER TABLE assets ADD COLUMN location TEXT",
             "face_status": "ALTER TABLE assets ADD COLUMN face_status TEXT",
+            "pet_status": "ALTER TABLE assets ADD COLUMN pet_status TEXT",
         }
 
         # Add missing columns
@@ -219,6 +221,18 @@ class SchemaMigrator:
                 ELSE 'pending'
             END
             WHERE face_status IS NULL OR TRIM(face_status) = ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE assets
+            SET pet_status = CASE
+                WHEN CAST(media_type AS TEXT) = '1' THEN 'skipped'
+                WHEN live_role IS NOT NULL AND CAST(live_role AS INTEGER) != 0 THEN 'skipped'
+                WHEN mime LIKE 'video/%' THEN 'skipped'
+                ELSE 'pending'
+            END
+            WHERE pet_status IS NULL OR TRIM(pet_status) = ''
             """
         )
         conn.execute("UPDATE assets SET sort_ts = ts WHERE sort_ts IS NULL")
@@ -337,6 +351,7 @@ class SchemaMigrator:
              "ON assets (parent_album_path, dt DESC, id DESC)"),
 
             "CREATE INDEX IF NOT EXISTS idx_assets_face_status ON assets (face_status)",
+            "CREATE INDEX IF NOT EXISTS idx_assets_pet_status ON assets (pet_status)",
 
             # Global view index (all photos sorted by date)
             ("CREATE INDEX IF NOT EXISTS idx_assets_global_sort "

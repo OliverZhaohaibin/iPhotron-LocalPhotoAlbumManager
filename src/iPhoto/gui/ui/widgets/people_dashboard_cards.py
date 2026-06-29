@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 from iPhoto.gui.i18n.font_policy import language_font
 from iPhoto.people.image_utils import load_image_rgb
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.pets.records import PetSummary
 
 from .people_dashboard_shared import (
     CARD_HEIGHT,
@@ -279,6 +280,68 @@ class PeopleCard(QWidget):
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         self.menuRequested.emit(self.person_id, event.globalPos())
         event.accept()
+
+
+class PetCard(PeopleCard):
+    def __init__(
+        self,
+        *,
+        board: "PeopleBoard",
+        summary: PetSummary,
+        seed_index: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(
+            board=board,
+            summary=summary,  # type: ignore[arg-type]
+            seed_index=seed_index,
+            parent=parent,
+        )
+        self.summary = summary
+
+    @property
+    def person_id(self) -> str:
+        return self.summary.pet_id
+
+    @property
+    def pet_id(self) -> str:
+        return self.summary.pet_id
+
+    def display_name(self) -> str:
+        name = (self.summary.name or "").strip()
+        if name:
+            return name
+        species = str(self.summary.species_label or "").strip().title()
+        return f"Unnamed {species}" if species else "Unnamed Pet"
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        card_rect = QRectF(4, 4, CARD_WIDTH - 8, CARD_HEIGHT - 8)
+        species = str(self.summary.species_label or "").strip().title()
+        if not species:
+            return
+        badge_rect = QRectF(card_rect.right() - 70, card_rect.top() + 12, 58, 28)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_qcolor("#0B5C63", 190))
+        painter.drawRoundedRect(badge_rect, 14, 14)
+        painter.setPen(_qcolor("#FFFFFF"))
+        painter.setFont(language_font(QFont("Segoe UI", 9, QFont.Weight.Bold)))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, species)
+
+    def _paint_count_badge(self, painter: QPainter, card_rect: QRectF) -> None:
+        badge_rect = QRectF(card_rect.left() + 12, card_rect.top() + 12, 44, 28)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_qcolor("#111827", 175))
+        painter.drawRoundedRect(badge_rect, 14, 14)
+        painter.setPen(_qcolor("#FFFFFF"))
+        painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
+        painter.drawText(
+            badge_rect,
+            Qt.AlignmentFlag.AlignCenter,
+            str(self.summary.detection_count),
+        )
 
 
 class GroupCard(QWidget):

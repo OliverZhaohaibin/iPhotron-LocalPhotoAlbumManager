@@ -21,6 +21,7 @@ from ..infrastructure.repositories.library_state_repository import (
 from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
 from ..infrastructure.services.map_runtime_service import SessionMapRuntimeService
 from ..people.service import PeopleService
+from ..pets.service import PetService
 from .library_asset_state_service import LibraryAssetStateService
 from .library_album_metadata_service import LibraryAlbumMetadataService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
@@ -29,6 +30,7 @@ from .library_asset_query_service import LibraryAssetQueryService
 from .library_edit_service import LibraryEditService
 from .library_location_service import LibraryLocationService
 from .library_people_service import create_people_service
+from .library_pet_service import create_pet_service
 from .library_scan_service import LibraryScanService
 
 
@@ -46,6 +48,7 @@ class LibrarySession:
     asset_lifecycle: LibraryAssetLifecycleService | None = None
     asset_operations: LibraryAssetOperationService | None = None
     people: PeopleService | None = None
+    pets: PetService | None = None
     maps: MapRuntimePort | None = None
     map_interactions: MapInteractionServicePort | None = None
     edit: EditServicePort | None = None
@@ -88,6 +91,8 @@ class LibrarySession:
             )
         if self.people is None:
             self.people = create_people_service(self.library_root)
+        if self.pets is None:
+            self.pets = create_pet_service(self.library_root)
         if self.maps is None:
             self.maps = SessionMapRuntimeService()
         if self.map_interactions is None:

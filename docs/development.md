@@ -204,6 +204,48 @@ desktop app should still open libraries and use albums, maps, Live Photos, and
 editing; only the background People face scan is unavailable until `ai-demo` is
 installed.
 
+### Optional Pets AI Runtime
+
+Pet recognition and clustering is installed through the optional `pets-ai`
+extra:
+
+```bash
+pip install -e ".[pets-ai]"
+```
+
+The runtime uses the same model-cache posture as People: local files are used
+first, and a missing cache can be downloaded on first scan. The default shared
+cache is `src/extension/models/pets/`, or `IPHOTO_PET_MODEL_DIR` when that
+environment variable is set:
+
+```text
+pets/
+  detector/yolox_nano_coco.onnx
+  embedding/dinov2_vits14/dinov2_vits14.pt
+```
+
+When the YOLOX detector is missing, iPhotron downloads it from the configured
+HTTPS model URL into the shared cache. The default URL points to the upstream
+YOLOX release asset and can be overridden with:
+
+```bash
+export IPHOTO_PET_DETECTOR_MODEL_URL="https://example.invalid/yolox_nano.onnx"
+```
+
+When the DINOv2 TorchScript cache is missing, iPhotron loads `dinov2_vits14`
+through Torch Hub (`facebookresearch/dinov2`) and then attempts to cache a
+TorchScript copy under `extension/models/pets`.
+
+For offline or packaged validation, disable first-use downloads with:
+
+```bash
+export IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0
+```
+
+When `pets-ai` is missing, or model download/initialization fails, normal
+browsing, People, editing, and maps continue to work; pet scan candidates remain
+pending so scanning can resume after the runtime or model cache is installed.
+
 ### Dev Dependencies
 
 ```bash

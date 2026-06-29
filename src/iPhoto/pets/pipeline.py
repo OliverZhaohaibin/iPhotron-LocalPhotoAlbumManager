@@ -572,24 +572,45 @@ def _cluster_embeddings(
 ) -> np.ndarray:
     if embeddings.shape[0] < max(1, min_samples):
         return np.full(embeddings.shape[0], -1, dtype=np.int32)
+
+    def dbscan_labels() -> np.ndarray:
+        return run_dbscan(
+            embeddings,
+            eps=distance_threshold,
+            min_samples=min_samples,
+        )
+
+    if embeddings.shape[0] <= max(2, min_samples):
+        return dbscan_labels()
     if prefer_hdbscan:
         try:
             import hdbscan
         except ImportError:
             hdbscan = None
         if hdbscan is not None:
-            distance = cosine_distance_matrix(embeddings)
-            clusterer = hdbscan.HDBSCAN(
-                metric="precomputed",
-                min_cluster_size=max(2, min_samples),
-                min_samples=max(1, min_samples - 1),
-            )
-            return np.asarray(clusterer.fit_predict(distance), dtype=np.int32)
-    return run_dbscan(
-        embeddings,
-        eps=distance_threshold,
-        min_samples=min_samples,
-    )
+            try:
+                distance = np.ascontiguousarray(
+                    cosine_distance_matrix(embeddings),
+                    dtype=np.float64,
+                )
+                clusterer = hdbscan.HDBSCAN(
+                    metric="precomputed",
+                    min_cluster_size=max(2, min_samples),
+                    min_samples=max(1, min_samples - 1),
+                )
+                labels = np.asarray(clusterer.fit_predict(distance), dtype=np.int32)
+                if labels.shape != (embeddings.shape[0],):
+                    return dbscan_labels()
+                fallback_labels = dbscan_labels()
+                if np.all(labels == -1) and np.any(fallback_labels != -1):
+                    return fallback_labels
+                return labels
+            except (TypeError, ValueError, RuntimeError):
+                _LOGGER.debug(
+                    "HDBSCAN pet clustering failed; falling back to DBSCAN",
+                    exc_info=True,
+                )
+    return dbscan_labels()
 
 
 def _normalize_bbox(

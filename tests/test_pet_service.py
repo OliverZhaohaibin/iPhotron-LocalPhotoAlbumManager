@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -157,6 +158,123 @@ def test_cluster_pet_records_keeps_species_separate() -> None:
     assert len(cat_ids) == 1
     assert len(dog_ids) == 1
     assert cat_ids != dog_ids
+
+
+def test_cluster_pet_records_default_clusters_small_similar_pet_samples() -> None:
+    detections = [
+        _detection(detection_id="cat-a", embedding=np.asarray([1.0, 0.0])),
+        _detection(detection_id="cat-b", embedding=np.asarray([0.99, 0.01])),
+    ]
+
+    clustered, pets = cluster_pet_records(
+        detections,
+        distance_threshold=0.2,
+        min_samples=2,
+    )
+
+    assert len(pets) == 1
+    assert {item.pet_id for item in clustered} == {pets[0].pet_id}
+
+
+def test_cluster_pet_records_passes_float64_distance_matrix_to_hdbscan(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeHdbscan:
+        def __init__(self, **kwargs) -> None:
+            captured["kwargs"] = kwargs
+
+        def fit_predict(self, distance: np.ndarray) -> np.ndarray:
+            captured["dtype"] = distance.dtype
+            captured["contiguous"] = bool(distance.flags.c_contiguous)
+            return np.asarray([0, 0, 1], dtype=np.int32)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "hdbscan",
+        SimpleNamespace(HDBSCAN=_FakeHdbscan),
+    )
+    detections = [
+        _detection(
+            detection_id="cat-a",
+            asset_id="asset-a",
+            embedding=np.asarray([1.0, 0.0]),
+        ),
+        _detection(
+            detection_id="cat-b",
+            asset_id="asset-b",
+            embedding=np.asarray([0.99, 0.01]),
+        ),
+        _detection(
+            detection_id="cat-c",
+            asset_id="asset-c",
+            embedding=np.asarray([0.0, 1.0]),
+        ),
+    ]
+
+    clustered, pets = cluster_pet_records(
+        detections,
+        distance_threshold=0.2,
+        min_samples=2,
+    )
+
+    assert captured["kwargs"] == {
+        "metric": "precomputed",
+        "min_cluster_size": 2,
+        "min_samples": 1,
+    }
+    assert captured["dtype"] == np.dtype(np.float64)
+    assert captured["contiguous"] is True
+    assert len(pets) == 2
+    assert clustered[0].pet_id == clustered[1].pet_id
+    assert clustered[2].pet_id != clustered[0].pet_id
+
+
+def test_cluster_pet_records_falls_back_when_hdbscan_rejects_distance_dtype(
+    monkeypatch,
+) -> None:
+    class _RejectingHdbscan:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def fit_predict(self, _distance: np.ndarray) -> np.ndarray:
+            raise ValueError(
+                "Buffer dtype mismatch, expected 'double_t' but got 'float'"
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "hdbscan",
+        SimpleNamespace(HDBSCAN=_RejectingHdbscan),
+    )
+    detections = [
+        _detection(
+            detection_id="cat-a",
+            asset_id="asset-a",
+            embedding=np.asarray([1.0, 0.0]),
+        ),
+        _detection(
+            detection_id="cat-b",
+            asset_id="asset-b",
+            embedding=np.asarray([0.99, 0.01]),
+        ),
+        _detection(
+            detection_id="cat-c",
+            asset_id="asset-c",
+            embedding=np.asarray([0.0, 1.0]),
+        ),
+    ]
+
+    clustered, pets = cluster_pet_records(
+        detections,
+        distance_threshold=0.2,
+        min_samples=2,
+    )
+
+    assert len(pets) == 2
+    assert clustered[0].pet_id == clustered[1].pet_id
+    assert clustered[2].pet_id != clustered[0].pet_id
 
 
 def test_decode_yolox_raw_grid_output_expands_pet_box() -> None:

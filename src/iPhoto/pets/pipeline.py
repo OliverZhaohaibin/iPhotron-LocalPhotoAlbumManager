@@ -36,6 +36,7 @@ from .repository_utils import (
 from .state_repository import PetStateRepository
 
 SUPPORTED_DEFAULT_SPECIES = frozenset({"cat", "dog"})
+PET_DETECTOR_PIPELINE_VERSION = "yolox-raw-grid-v2"
 DEFAULT_PET_DETECTOR_MODEL_URL = (
     "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/"
     "0.1.1rc0/yolox_nano.onnx"
@@ -45,6 +46,8 @@ PET_DETECTOR_MODEL_URL_ENV = "IPHOTO_PET_DETECTOR_MODEL_URL"
 _DINO_HUB_REPO = "facebookresearch/dinov2"
 _DOWNLOAD_TIMEOUT_SECONDS = 60
 _DOWNLOAD_CHUNK_SIZE = 1024 * 256
+_YOLOX_STRIDES = (8, 16, 32)
+_YOLOX_RAW_COORD_LIMIT = 32.0
 _LOGGER = logging.getLogger(__name__)
 COCO_ANIMAL_LABELS = {
     15: "cat",
@@ -74,6 +77,14 @@ class _DetectedPetBox:
     species_label: str
 
 
+@dataclass(frozen=True)
+class PetScanMetrics:
+    candidate_boxes: int = 0
+    unsupported_species: int = 0
+    too_small: int = 0
+    accepted_detections: int = 0
+
+
 class PetClusterPipeline:
     def __init__(
         self,
@@ -101,6 +112,7 @@ class PetClusterPipeline:
         self._supported_species = frozenset(supported_species)
         self._detector: _YoloxOnnxPetDetector | None = None
         self._embedder: _DinoV2Embedder | None = None
+        self._last_scan_metrics = PetScanMetrics()
 
     @property
     def distance_threshold(self) -> float:
@@ -109,6 +121,14 @@ class PetClusterPipeline:
     @property
     def min_samples(self) -> int:
         return self._min_samples
+
+    @property
+    def detector_pipeline_version(self) -> str:
+        return PET_DETECTOR_PIPELINE_VERSION
+
+    @property
+    def last_scan_metrics(self) -> PetScanMetrics:
+        return self._last_scan_metrics
 
     def detect_pets_for_rows(
         self,
@@ -124,6 +144,10 @@ class PetClusterPipeline:
         detector = self._ensure_detector()
         cancellation_requested = is_cancelled or (lambda: False)
         results: list[DetectedAssetPets] = []
+        candidate_boxes = 0
+        unsupported_species = 0
+        too_small = 0
+        accepted_detections = 0
         for row in rows:
             if cancellation_requested():
                 break
@@ -160,8 +184,10 @@ class PetClusterPipeline:
 
             image_width, image_height = image.size
             detections: list[PetDetectionRecord] = []
+            candidate_boxes += len(boxes)
             for detected in boxes:
                 if detected.species_label not in self._supported_species:
+                    unsupported_species += 1
                     continue
                 bbox = _normalize_bbox(
                     detected.bbox,
@@ -169,6 +195,7 @@ class PetClusterPipeline:
                     image_height=image_height,
                 )
                 if bbox[2] < self._min_pet_size or bbox[3] < self._min_pet_size:
+                    too_small += 1
                     continue
                 detection_id = uuid.uuid4().hex
                 thumbnail_path = thumbnail_dir / f"{detection_id}.png"
@@ -216,6 +243,7 @@ class PetClusterPipeline:
                         image_height=image_height,
                     )
                 )
+                accepted_detections += 1
             has_asset_error = any(
                 result.asset_id == asset_id and result.error for result in results
             )
@@ -227,6 +255,12 @@ class PetClusterPipeline:
                         detections=detections,
                     )
                 )
+        self._last_scan_metrics = PetScanMetrics(
+            candidate_boxes=candidate_boxes,
+            unsupported_species=unsupported_species,
+            too_small=too_small,
+            accepted_detections=accepted_detections,
+        )
         return results
 
     def _ensure_detector(self) -> _YoloxOnnxPetDetector:
@@ -625,10 +659,10 @@ class _YoloxOnnxPetDetector:
         boxes: list[_DetectedPetBox] = []
         scale_x = image_width / float(input_width)
         scale_y = image_height / float(input_height)
-        for prediction in predictions:
-            if prediction.shape[0] < 6:
-                continue
-            x0, y0, x1, y1, confidence, class_id = _decode_prediction(prediction)
+        for x0, y0, x1, y1, confidence, class_id in _decode_yolox_predictions(
+            predictions,
+            input_size=self._input_size,
+        ):
             species = COCO_ANIMAL_LABELS.get(int(class_id))
             if species is None or confidence < self._score_threshold:
                 continue
@@ -776,6 +810,23 @@ def _flatten_predictions(outputs: Sequence[np.ndarray]) -> np.ndarray:
     return prediction.reshape(-1, prediction.shape[-1])
 
 
+def _decode_yolox_predictions(
+    predictions: np.ndarray,
+    *,
+    input_size: tuple[int, int],
+) -> list[tuple[float, float, float, float, float, int]]:
+    if predictions.size == 0:
+        return []
+    decoded = np.asarray(predictions, dtype=np.float32)
+    if _looks_like_raw_yolox_output(decoded, input_size=input_size):
+        decoded = _decode_raw_yolox_output(decoded, input_size=input_size)
+    return [
+        _decode_prediction(prediction)
+        for prediction in decoded
+        if prediction.shape[0] >= 6
+    ]
+
+
 def _decode_prediction(prediction: np.ndarray) -> tuple[float, float, float, float, float, int]:
     if prediction.shape[0] >= 85:
         cx, cy, width, height = [float(value) for value in prediction[:4]]
@@ -792,6 +843,50 @@ def _decode_prediction(prediction: np.ndarray) -> tuple[float, float, float, flo
     confidence = float(prediction[4])
     class_id = round(float(prediction[5]))
     return x0, y0, x1, y1, confidence, class_id
+
+
+def _looks_like_raw_yolox_output(
+    predictions: np.ndarray,
+    *,
+    input_size: tuple[int, int],
+) -> bool:
+    if predictions.ndim != 2 or predictions.shape[1] < 85:
+        return False
+    grids, _strides = _yolox_grids(input_size)
+    if predictions.shape[0] != grids.shape[0]:
+        return False
+    coord_max = float(np.nanmax(np.abs(predictions[:, :4]))) if predictions.size else 0.0
+    return coord_max <= _YOLOX_RAW_COORD_LIMIT
+
+
+def _decode_raw_yolox_output(
+    predictions: np.ndarray,
+    *,
+    input_size: tuple[int, int],
+) -> np.ndarray:
+    grids, strides = _yolox_grids(input_size)
+    decoded = np.array(predictions, dtype=np.float32, copy=True)
+    decoded[:, :2] = (decoded[:, :2] + grids) * strides
+    decoded[:, 2:4] = np.exp(np.clip(decoded[:, 2:4], -20.0, 20.0)) * strides
+    return decoded
+
+
+def _yolox_grids(input_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    input_width, input_height = input_size
+    grid_parts: list[np.ndarray] = []
+    stride_parts: list[np.ndarray] = []
+    for stride in _YOLOX_STRIDES:
+        grid_height = int(input_height) // stride
+        grid_width = int(input_width) // stride
+        yv, xv = np.meshgrid(
+            np.arange(grid_height, dtype=np.float32),
+            np.arange(grid_width, dtype=np.float32),
+            indexing="ij",
+        )
+        grid = np.stack((xv, yv), axis=-1).reshape(-1, 2)
+        grid_parts.append(grid)
+        stride_parts.append(np.full((grid.shape[0], 1), stride, dtype=np.float32))
+    return np.concatenate(grid_parts, axis=0), np.concatenate(stride_parts, axis=0)
 
 
 def _nms_pet_boxes(

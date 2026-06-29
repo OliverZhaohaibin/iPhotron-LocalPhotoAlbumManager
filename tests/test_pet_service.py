@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.pets.index_coordinator import reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
+    PET_DETECTOR_PIPELINE_VERSION,
+    PetClusterPipeline,
+    _decode_yolox_predictions,
     build_pet_key,
     canonicalize_pet_identities,
     cluster_pet_records,
@@ -19,6 +24,45 @@ from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 from iPhoto.pets.state_repository import PetStateRepository
+
+
+class _FakePetAssetRepository:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = [dict(row) for row in rows]
+        self.update_calls: list[tuple[tuple[str, ...], str]] = []
+
+    def get_rows_by_ids(self, asset_ids):
+        wanted = {str(asset_id) for asset_id in asset_ids}
+        return {str(row["id"]): dict(row) for row in self.rows if str(row.get("id")) in wanted}
+
+    def read_rows_by_pet_status(self, statuses, *, limit=None):
+        wanted = {str(status) for status in statuses}
+        count = 0
+        for row in self.rows:
+            if row.get("pet_status") not in wanted:
+                continue
+            yield dict(row)
+            count += 1
+            if limit is not None and count >= int(limit):
+                return
+
+    def update_pet_status(self, asset_id: str, status: str) -> None:
+        self.update_pet_statuses([asset_id], status)
+
+    def update_pet_statuses(self, asset_ids, status: str) -> None:
+        ids = tuple(str(asset_id) for asset_id in asset_ids if asset_id)
+        self.update_calls.append((ids, status))
+        wanted = set(ids)
+        for row in self.rows:
+            if str(row.get("id")) in wanted:
+                row["pet_status"] = status
+
+    def count_by_pet_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in self.rows:
+            status = str(row.get("pet_status") or "")
+            counts[status] = counts.get(status, 0) + 1
+        return counts
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +157,61 @@ def test_cluster_pet_records_keeps_species_separate() -> None:
     assert len(cat_ids) == 1
     assert len(dog_ids) == 1
     assert cat_ids != dog_ids
+
+
+def test_decode_yolox_raw_grid_output_expands_pet_box() -> None:
+    predictions = np.zeros((3549, 85), dtype=np.float32)
+    predictions[0, 0] = 1.0
+    predictions[0, 1] = 2.0
+    predictions[0, 2] = np.log(20.0)
+    predictions[0, 3] = np.log(18.0)
+    predictions[0, 4] = 0.9
+    predictions[0, 5 + 16] = 0.8
+
+    decoded = _decode_yolox_predictions(predictions, input_size=(416, 416))
+
+    x0, y0, x1, y1, confidence, class_id = decoded[0]
+    assert class_id == 16
+    assert confidence == pytest.approx(0.72)
+    assert x1 - x0 == pytest.approx(160.0)
+    assert y1 - y0 == pytest.approx(144.0)
+
+
+def test_pet_pipeline_filters_detector_boxes_and_records_metrics(tmp_path: Path) -> None:
+    image_dir = tmp_path / "album"
+    image_dir.mkdir()
+    image_path = image_dir / "a.jpg"
+    Image.new("RGB", (400, 300), color=(128, 96, 64)).save(image_path)
+    pipeline = PetClusterPipeline(
+        model_root=tmp_path / "models",
+        allow_model_download=False,
+        min_pet_size=48,
+    )
+    pipeline._detector = SimpleNamespace(
+        detect=lambda _image: [
+            SimpleNamespace(bbox=(10, 20, 160, 120), confidence=0.91, species_label="dog"),
+            SimpleNamespace(bbox=(20, 30, 160, 120), confidence=0.92, species_label="horse"),
+            SimpleNamespace(bbox=(30, 40, 20, 20), confidence=0.93, species_label="cat"),
+        ]
+    )
+    pipeline._embedder = SimpleNamespace(
+        embed=lambda _image: normalize_vector(np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
+    )
+
+    results = pipeline.detect_pets_for_rows(
+        [{"id": "asset-a", "rel": "album/a.jpg"}],
+        library_root=tmp_path,
+        thumbnail_dir=tmp_path / ".iPhoto" / "pets" / "thumbnails",
+    )
+
+    assert len(results) == 1
+    assert results[0].error is None
+    assert [detection.species_label for detection in results[0].detections] == ["dog"]
+    assert results[0].detections[0].box_w == 160
+    assert pipeline.last_scan_metrics.candidate_boxes == 3
+    assert pipeline.last_scan_metrics.unsupported_species == 1
+    assert pipeline.last_scan_metrics.too_small == 1
+    assert pipeline.last_scan_metrics.accepted_detections == 1
 
 
 def test_canonicalize_pet_identities_prefers_pet_key_vote(tmp_path: Path) -> None:
@@ -232,6 +331,44 @@ def test_pet_detector_model_downloads_when_missing(tmp_path: Path, monkeypatch) 
 
     assert resolved == target
     assert target.read_bytes() == b"pet-detector"
+
+
+def test_pet_scan_worker_resets_done_rows_for_detector_upgrade(tmp_path: Path) -> None:
+    asset_repo = _FakePetAssetRepository(
+        [
+            {"id": "asset-photo", "rel": "photo.jpg", "media_type": 0, "pet_status": "done"},
+            {"id": "asset-video", "rel": "clip.mov", "media_type": 1, "pet_status": "done"},
+        ]
+    )
+    service = create_pet_service(tmp_path, asset_repository=asset_repo)
+    worker = PetScanWorker(tmp_path, pet_service=service)
+
+    worker._reset_done_rows_for_detector_upgrade()
+
+    assert asset_repo.update_calls == [(("asset-photo",), "pending")]
+    assert asset_repo.rows[0]["pet_status"] == "pending"
+    assert asset_repo.rows[1]["pet_status"] == "done"
+    repository = service.repository()
+    assert repository is not None
+    assert repository.get_scan_metadata("detector_pipeline_version") == (
+        PET_DETECTOR_PIPELINE_VERSION
+    )
+
+
+def test_pet_scan_worker_does_not_reset_current_detector_version(tmp_path: Path) -> None:
+    asset_repo = _FakePetAssetRepository(
+        [{"id": "asset-photo", "rel": "photo.jpg", "media_type": 0, "pet_status": "done"}]
+    )
+    service = create_pet_service(tmp_path, asset_repository=asset_repo)
+    repository = service.repository()
+    assert repository is not None
+    repository.set_scan_metadata("detector_pipeline_version", PET_DETECTOR_PIPELINE_VERSION)
+    worker = PetScanWorker(tmp_path, pet_service=service)
+
+    worker._reset_done_rows_for_detector_upgrade()
+
+    assert asset_repo.update_calls == []
+    assert asset_repo.rows[0]["pet_status"] == "done"
 
 
 def test_pet_scan_worker_missing_runtime_keeps_pending(tmp_path: Path, monkeypatch) -> None:

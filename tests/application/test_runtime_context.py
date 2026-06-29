@@ -62,6 +62,7 @@ class _FakeLibrary:
         self.bound_asset_lifecycle_services: list[object | None] = []
         self.bound_asset_operation_services: list[object | None] = []
         self.bound_people_services: list[object | None] = []
+        self.bound_pet_services: list[object | None] = []
         self.bound_map_runtimes: list[object | None] = []
         self.bound_map_interaction_services: list[object | None] = []
         self.bound_location_services: list[object | None] = []
@@ -92,6 +93,7 @@ class _FakeLibrary:
             self.bind_map_interaction_service(None)
             self.bind_map_runtime(None)
             self.bind_people_service(None)
+            self.bind_pet_service(None)
             self.bind_asset_operation_service(None)
             self.bind_asset_lifecycle_service(None)
             self.bind_album_metadata_service(None)
@@ -111,6 +113,7 @@ class _FakeLibrary:
         self.bind_asset_lifecycle_service(library_session.asset_lifecycle)
         self.bind_asset_operation_service(library_session.asset_operations)
         self.bind_people_service(library_session.people)
+        self.bind_pet_service(library_session.pets)
         self.bind_map_runtime(library_session.maps)
         self.bind_map_interaction_service(library_session.map_interactions)
 
@@ -166,6 +169,9 @@ class _FakeLibrary:
 
     def bind_people_service(self, people_service: object | None) -> None:
         self.bound_people_services.append(people_service)
+
+    def bind_pet_service(self, pet_service: object | None) -> None:
+        self.bound_pet_services.append(pet_service)
 
     def bind_map_runtime(self, map_runtime: object | None) -> None:
         self.bound_map_runtimes.append(map_runtime)

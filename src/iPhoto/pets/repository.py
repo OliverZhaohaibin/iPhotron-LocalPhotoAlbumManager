@@ -118,6 +118,37 @@ class PetRepository:
         if sync_runtime_state:
             self.sync_runtime_state()
 
+    def get_scan_metadata(self, key: str) -> str | None:
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT value FROM scan_metadata WHERE key = ?",
+                (normalized_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = row["value"]
+        return str(value) if value is not None else None
+
+    def set_scan_metadata(self, key: str, value: str) -> None:
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO scan_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (normalized_key, str(value)),
+            )
+            conn.commit()
+
     def sync_runtime_state(self) -> None:
         if self._state_repo is None:
             return

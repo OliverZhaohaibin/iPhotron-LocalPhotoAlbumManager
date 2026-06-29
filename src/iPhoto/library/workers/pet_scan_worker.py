@@ -14,9 +14,10 @@ from ...pets.index_coordinator import (
     PetIndexCoordinator,
     PetSnapshotCommittedError,
 )
-from ...pets.pipeline import PetClusterPipeline
+from ...pets.pipeline import PET_DETECTOR_PIPELINE_VERSION, PetClusterPipeline
 from ...pets.service import PetService, pet_library_paths
 from ...pets.status import (
+    PET_STATUS_DONE,
     PET_STATUS_FAILED,
     PET_STATUS_PENDING,
     PET_STATUS_RETRY,
@@ -82,6 +83,7 @@ class PetScanWorker(QThread):
             self.statusChanged.emit("Pet scanning is disabled.")
             return
 
+        self._reset_done_rows_for_detector_upgrade()
         self._prime_pending_rows()
         if self._cancelled:
             return
@@ -224,12 +226,55 @@ class PetScanWorker(QThread):
         retry_detected = [
             item for item in detected if not item.asset_id or str(item.asset_id) not in failed_ids
         ]
+        metrics = pipeline.last_scan_metrics
+        LOGGER.info(
+            "Pet scan batch processed for %s: assets=%d candidates=%d accepted=%d "
+            "unsupported_species=%d too_small=%d retry=%d failed=%d",
+            self._library_root,
+            len(batch),
+            metrics.candidate_boxes,
+            metrics.accepted_detections,
+            metrics.unsupported_species,
+            metrics.too_small,
+            len(first_retry_ids),
+            len(failed_ids),
+        )
         event = coordinator.submit_detected_batch(
             retry_detected,
             distance_threshold=pipeline.distance_threshold,
             min_samples=pipeline.min_samples,
+            detector_pipeline_version=pipeline.detector_pipeline_version,
         )
         return event is not None
+
+    def _reset_done_rows_for_detector_upgrade(self) -> None:
+        repository = self._pet_service.repository()
+        store = self._pet_service.asset_repository
+        if repository is None or store is None:
+            return
+        current_version = repository.get_scan_metadata("detector_pipeline_version")
+        if current_version == PET_DETECTOR_PIPELINE_VERSION:
+            return
+
+        reset_ids = [
+            str(row.get("id") or "")
+            for row in store.read_rows_by_pet_status([PET_STATUS_DONE])
+            if row.get("id") and is_pet_scan_candidate(row)
+        ]
+        if reset_ids:
+            store.update_pet_statuses(reset_ids, PET_STATUS_PENDING)
+            LOGGER.info(
+                "Reset %d pet-scanned assets to pending for detector pipeline upgrade "
+                "%s -> %s in %s",
+                len(reset_ids),
+                current_version or "<missing>",
+                PET_DETECTOR_PIPELINE_VERSION,
+                self._library_root,
+            )
+        repository.set_scan_metadata(
+            "detector_pipeline_version",
+            PET_DETECTOR_PIPELINE_VERSION,
+        )
 
     def _mark_rows_retry(self, rows: Iterable[dict]) -> None:
         ids = [str(row.get("id") or "") for row in rows if row.get("id")]

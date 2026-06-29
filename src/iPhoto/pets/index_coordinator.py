@@ -76,6 +76,7 @@ class PetIndexCoordinator(QObject):
         *,
         distance_threshold: float,
         min_samples: int,
+        detector_pipeline_version: str | None = None,
     ) -> PetSnapshotEvent | None:
         detected_batch = list(detected_results)
         if not detected_batch:
@@ -111,6 +112,11 @@ class PetIndexCoordinator(QObject):
                 )
             )
             session.commit(repository, detections=detections, pets=pets)
+            if detector_pipeline_version:
+                repository.set_scan_metadata(
+                    "detector_pipeline_version",
+                    detector_pipeline_version,
+                )
             event = self._emit_snapshot(
                 changed_asset_ids=tuple(done_ids + retry_ids),
                 changed_pet_ids=changed_pet_ids,

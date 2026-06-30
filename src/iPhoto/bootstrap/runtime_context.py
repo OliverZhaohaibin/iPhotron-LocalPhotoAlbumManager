@@ -88,6 +88,7 @@ class RuntimeContext:
         repr=False,
     )
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
+    _deferred_startup_scan_root: Path | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.translation = _create_translation_manager(self.settings)
@@ -160,7 +161,7 @@ class RuntimeContext:
             self._container = DependencyContainer()
         return self._container
 
-    def resume_startup_tasks(self) -> None:
+    def resume_startup_tasks(self, *, defer_scan: bool = False) -> None:
         """Run deferred startup work such as binding the default library path."""
 
         from ..config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
@@ -182,6 +183,7 @@ class RuntimeContext:
                     "resume_startup_tasks: bind_path succeeded, root=%s",
                     self.library.root(),
                 )
+                bound_root = self.library.root() or candidate
                 scan_service = getattr(self.library, "scan_service", None)
                 is_scan_scope_complete = getattr(
                     scan_service,
@@ -190,13 +192,20 @@ class RuntimeContext:
                 )
                 scan_complete = False
                 if callable(is_scan_scope_complete):
-                    scan_complete = bool(is_scan_scope_complete(candidate))
-                if not scan_complete and not self.library.is_scanning_path(candidate):
-                    self.facade.scan_root_async(
-                        candidate,
-                        include=DEFAULT_INCLUDE,
-                        exclude=DEFAULT_EXCLUDE,
-                    )
+                    scan_complete = bool(is_scan_scope_complete(bound_root))
+                if not scan_complete and not self.library.is_scanning_path(bound_root):
+                    if defer_scan:
+                        self._deferred_startup_scan_root = bound_root
+                        _logger.info(
+                            "resume_startup_tasks: deferred startup scan for %s",
+                            bound_root,
+                        )
+                    else:
+                        self.facade.scan_root_async(
+                            bound_root,
+                            include=DEFAULT_INCLUDE,
+                            exclude=DEFAULT_EXCLUDE,
+                        )
             except LibraryError as exc:
                 _logger.error("resume_startup_tasks: bind_path failed: %s", exc)
                 self.library.errorRaised.emit(str(exc))
@@ -206,6 +215,36 @@ class RuntimeContext:
                 candidate,
             )
             self.library.errorRaised.emit(f"Basic Library path is unavailable: {candidate}")
+
+    def start_deferred_startup_scan(self) -> None:
+        """Start a scan that was intentionally delayed until after first gallery load."""
+
+        from ..config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
+
+        candidate = getattr(self, "_deferred_startup_scan_root", None)
+        self._deferred_startup_scan_root = None
+        if candidate is None:
+            _logger.info("start_deferred_startup_scan: no deferred scan")
+            return
+        if self.library.root() != candidate:
+            _logger.info(
+                "start_deferred_startup_scan: skipping stale root %s (current=%s)",
+                candidate,
+                self.library.root(),
+            )
+            return
+        if self.library.is_scanning_path(candidate):
+            _logger.info(
+                "start_deferred_startup_scan: already scanning %s",
+                candidate,
+            )
+            return
+        _logger.info("start_deferred_startup_scan: scanning %s", candidate)
+        self.facade.scan_root_async(
+            candidate,
+            include=DEFAULT_INCLUDE,
+            exclude=DEFAULT_EXCLUDE,
+        )
 
     def open_library(self, root: Path) -> "LibrarySession":
         """Bind *root* as the active library and rebuild library-scoped adapters."""

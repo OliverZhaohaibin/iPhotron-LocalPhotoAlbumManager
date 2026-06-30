@@ -33,6 +33,9 @@ _MACOS_EXTERNAL_TOOL_PATHS = (
 _LINUX_FIRST_POST_PAINT_DELAY_MS = 120
 _LINUX_POST_SHOW_FEATURE_INTERVAL_MS = 50
 _LINUX_COORDINATOR_READY_DELAY_MS = 100
+_STARTUP_FIRST_FRAME_GATE_TIMEOUT_MS = 3000
+_STARTUP_HANG_DIAG_ENV = "IPHOTO_STARTUP_HANG_DIAG"
+_STARTUP_HANG_DIAG_TIMEOUT_SECONDS = 15
 _STARTUP_INPUT_EVENT_TYPES = frozenset(
     event_type
     for name in (
@@ -185,6 +188,32 @@ def _opengl_explicitly_disabled() -> bool:
     """Return whether all OpenGL-backed UI surfaces should be disabled."""
 
     return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _startup_hang_diagnostics_enabled() -> bool:
+    """Return whether verbose startup hang diagnostics are enabled."""
+
+    return os.environ.get(_STARTUP_HANG_DIAG_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _enable_startup_hang_diagnostics() -> None:
+    """Enable opt-in traceback dumps for startup freezes."""
+
+    if not _startup_hang_diagnostics_enabled():
+        return
+    try:
+        import faulthandler
+
+        faulthandler.dump_traceback_later(
+            _STARTUP_HANG_DIAG_TIMEOUT_SECONDS,
+            repeat=True,
+        )
+        _logger.info(
+            "Startup hang diagnostics enabled; dumping thread stacks every %ss",
+            _STARTUP_HANG_DIAG_TIMEOUT_SECONDS,
+        )
+    except Exception:  # noqa: BLE001
+        _logger.warning("Failed to enable startup hang diagnostics", exc_info=True)
 
 
 def _map_gl_surface_format(platform: str | None = None) -> QSurfaceFormat:
@@ -345,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     # stderr at INFO level by default.
     from iPhoto.utils.logging import get_logger as _init_logging
     _init_logging()
+    _enable_startup_hang_diagnostics()
 
     arguments = list(sys.argv if argv is None else argv)
     from iPhoto.settings.manager import SettingsManager
@@ -451,17 +481,64 @@ def main(argv: list[str] | None = None) -> int:
                     _logger.info(
                         "_initialize_after_show: coordinator started, resuming startup tasks"
                     )
-                    context.resume_startup_tasks()
+                    context.resume_startup_tasks(defer_scan=True)
+                    startup_scan_started = False
+
+                    def _start_deferred_startup_scan() -> None:
+                        nonlocal startup_scan_started
+                        if startup_scan_started:
+                            return
+                        startup_scan_started = True
+                        starter = getattr(context, "start_deferred_startup_scan", None)
+                        if callable(starter):
+                            _logger.info(
+                                "_initialize_after_show: starting deferred startup scan"
+                            )
+                            starter()
+
+                    def _schedule_startup_scan_fallback() -> None:
+                        QTimer.singleShot(
+                            _STARTUP_FIRST_FRAME_GATE_TIMEOUT_MS,
+                            _start_deferred_startup_scan,
+                        )
+
+                    def _arm_startup_first_frame_gate() -> bool:
+                        model_getter = getattr(coordinator, "gallery_startup_model", None)
+                        model = model_getter() if callable(model_getter) else None
+                        begin_gate = getattr(model, "begin_startup_first_frame_gate", None)
+                        ready_signal = getattr(model, "startupFirstFrameReady", None)
+                        connect = getattr(ready_signal, "connect", None)
+                        if not callable(begin_gate) or not callable(connect):
+                            return False
+                        begin_gate(timeout_ms=_STARTUP_FIRST_FRAME_GATE_TIMEOUT_MS)
+                        connect(_start_deferred_startup_scan)
+                        return True
 
                     if len(arguments) > 1:
                         _logger.info(
                             "_initialize_after_show: opening album from CLI argument %s",
                             arguments[1],
                         )
+                        startup_input_guard.release()
+                        gate_armed = _arm_startup_first_frame_gate()
                         coordinator.open_album_from_path(Path(arguments[1]))
+                        if not gate_armed:
+                            _schedule_startup_scan_fallback()
                         return
                     _logger.info("_initialize_after_show: selecting All Photos in sidebar")
-                    window.ui.sidebar.select_all_photos(emit_signal=True)
+                    startup_input_guard.release()
+                    gate_armed = _arm_startup_first_frame_gate()
+
+                    def _select_all_photos_after_startup() -> None:
+                        if _startup_hang_diagnostics_enabled():
+                            _logger.info(
+                                "_initialize_after_show: triggering All Photos selection"
+                            )
+                        window.ui.sidebar.select_all_photos(emit_signal=True)
+                        if not gate_armed:
+                            _schedule_startup_scan_fallback()
+
+                    QTimer.singleShot(0, _select_all_photos_after_startup)
                 finally:
                     startup_input_guard.release()
 

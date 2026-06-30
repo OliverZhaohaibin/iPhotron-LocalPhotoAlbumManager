@@ -1,3 +1,5 @@
+import logging
+import os
 import shutil
 import threading
 import time
@@ -44,6 +46,14 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
 )
 from iPhoto.io import sidecar
 from iPhoto.utils import image_loader
+
+_LOGGER = logging.getLogger(__name__)
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _startup_hang_diag_enabled() -> bool:
+    return os.environ.get("IPHOTO_STARTUP_HANG_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
+
 
 ThumbnailScrollPhase = Literal["settled", "slow", "medium", "fast"]
 ThumbnailScrollIntent = Literal[
@@ -304,6 +314,7 @@ class ThumbnailCacheService(QObject):
         self._publish_guard: Deque[ThumbnailLoadResult] = deque()
         self._publish_prefetch: Deque[ThumbnailLoadResult] = deque()
         self._publish_keys: Set[str] = set()
+        self._startup_diag_logged_publish_batch = False
         self._publish_timer = QTimer(self)
         self._publish_timer.setSingleShot(True)
         self._publish_timer.timeout.connect(self._drain_publish_queue)
@@ -1327,8 +1338,21 @@ class ThumbnailCacheService(QObject):
         self._ensure_publish_timer()
 
     def _ensure_publish_timer(self) -> None:
+        delay_ms = self._publish_timer_delay_ms()
         if not self._publish_timer.isActive():
-            self._publish_timer.start(0)
+            self._publish_timer.start(delay_ms)
+            return
+        if delay_ms <= 1:
+            remaining = self._publish_timer.remainingTime()
+            if remaining < 0 or remaining > delay_ms:
+                self._publish_timer.start(delay_ms)
+
+    def _publish_timer_delay_ms(self) -> int:
+        if not self._runtime_policy.platform.lower().startswith("darwin"):
+            return 0
+        if self._publish_visible:
+            return 1
+        return 8
 
     def _drain_publish_queue(self) -> None:
         started = monotonic_ms()
@@ -1336,10 +1360,11 @@ class ThumbnailCacheService(QObject):
         converted = 0
         publish_max_items = self._effective_publish_max_items()
         publish_budget_ms = self._effective_publish_budget_ms()
+        limit_visible_items = self._runtime_policy.platform.lower().startswith("darwin")
         while self._publish_visible or self._publish_guard or self._publish_prefetch:
             if (
                 processed >= publish_max_items
-                and not self._publish_visible
+                and (limit_visible_items or not self._publish_visible)
             ):
                 break
             result = (
@@ -1372,7 +1397,11 @@ class ThumbnailCacheService(QObject):
             )
             if relevant and not result.image.isNull():
                 convert_started = monotonic_ms()
-                stored = self._store_image_in_l1(key, result.image)
+                stored = self._store_image_in_l1(
+                    key,
+                    result.image,
+                    allow_overcommit=result.kind is ThumbnailRequestKind.VISIBLE,
+                )
                 convert_ms = max(0.0, monotonic_ms() - convert_started)
                 emit_perf_event(
                     "thumbnail_pixmap_converted",
@@ -1448,6 +1477,29 @@ class ThumbnailCacheService(QObject):
             publish_budget_ms=publish_budget_ms,
             publish_max_items=publish_max_items,
         )
+        if processed and not self._startup_diag_logged_publish_batch:
+            self._startup_diag_logged_publish_batch = True
+            _LOGGER.info(
+                "Gallery startup: first thumbnail publish batch processed=%s converted=%s "
+                "visible_depth=%s guard_depth=%s prefetch_depth=%s elapsed_ms=%.3f",
+                processed,
+                converted,
+                len(self._publish_visible),
+                len(self._publish_guard),
+                len(self._publish_prefetch),
+                max(0.0, monotonic_ms() - started),
+            )
+        elif _startup_hang_diag_enabled() and processed:
+            _LOGGER.info(
+                "Gallery startup diag: thumbnail publish batch processed=%s converted=%s "
+                "visible_depth=%s guard_depth=%s prefetch_depth=%s elapsed_ms=%.3f",
+                processed,
+                converted,
+                len(self._publish_visible),
+                len(self._publish_guard),
+                len(self._publish_prefetch),
+                max(0.0, monotonic_ms() - started),
+            )
         if self._publish_visible or self._publish_guard or self._publish_prefetch:
             self._ensure_publish_timer()
         self._drain_generation_queue()
@@ -2063,7 +2115,13 @@ class ThumbnailCacheService(QObject):
             - sum(self._active_decode_reservations.values()),
         )
 
-    def _store_image_in_l1(self, key: str, image: QImage) -> bool:
+    def _store_image_in_l1(
+        self,
+        key: str,
+        image: QImage,
+        *,
+        allow_overcommit: bool = False,
+    ) -> bool:
         """Publish an image into a stable GUI-thread pixmap slot."""
 
         if image.isNull():
@@ -2075,6 +2133,13 @@ class ThumbnailCacheService(QObject):
                 reason="outside_current_demand",
             )
             return False
+
+        if self._runtime_policy.platform.lower().startswith("darwin"):
+            return self._store_image_in_l1_without_pixmap_reuse(
+                key,
+                image,
+                allow_overcommit=allow_overcommit,
+            )
 
         existing = self._memory_cache.get(key)
         if isinstance(existing, QPixmap) and not existing.isNull():
@@ -2162,6 +2227,69 @@ class ThumbnailCacheService(QObject):
             slot_count=len(self._memory_cache),
             pool_bytes=self._memory_used_bytes,
         )
+        return True
+
+    def _store_image_in_l1_without_pixmap_reuse(
+        self,
+        key: str,
+        image: QImage,
+        *,
+        allow_overcommit: bool,
+    ) -> bool:
+        """Publish a fresh pixmap instead of repainting an existing one.
+
+        macOS has shown intermittent hangs around GUI-thread QPixmap slot reuse
+        during startup thumbnail bursts.  Keep the existing memory policy, but
+        replace native pixmap surfaces instead of mutating them in place.
+        """
+
+        image_bytes = self._image_bytes(image)
+        pool_limit = self._pixmap_pool_limit_bytes()
+        old_bytes = self._memory_bytes.pop(key, 0)
+        had_slot = key in self._memory_cache
+        if had_slot:
+            self._memory_cache.pop(key, None)
+            self._memory_used_bytes = max(0, self._memory_used_bytes - old_bytes)
+            self._slot_releases += 1
+
+        target_before_insert = max(0, pool_limit - image_bytes)
+        self._evict_l1_until(
+            target_before_insert,
+            protected_keys={key},
+            reason_prefix="macos_write_admission",
+            max_items=8,
+            budget_ms=2.0,
+        )
+        over_limit = self._memory_used_bytes + image_bytes > pool_limit
+        if over_limit and not allow_overcommit:
+            emit_perf_event(
+                "thumbnail_pixmap_slot_unavailable",
+                key=key,
+                image_width=image.width(),
+                image_height=image.height(),
+                reason="macos_no_reuse_budget",
+            )
+            return False
+
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return False
+        self._memory_cache[key] = pixmap
+        self._memory_cache.move_to_end(key)
+        self._memory_bytes[key] = image_bytes
+        self._memory_used_bytes += image_bytes
+        self._slot_allocations += 1
+        emit_perf_event(
+            "thumbnail_pixmap_slot_allocated",
+            key=key,
+            slot_count=len(self._memory_cache),
+            pool_bytes=self._memory_used_bytes,
+            pool_limit_bytes=pool_limit,
+            mode="macos_no_reuse",
+            overcommit=over_limit,
+        )
+        if over_limit:
+            self._schedule_l1_eviction(pool_limit)
         return True
 
     @staticmethod

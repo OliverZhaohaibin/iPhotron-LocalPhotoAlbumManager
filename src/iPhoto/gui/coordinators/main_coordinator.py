@@ -1038,6 +1038,9 @@ class MainCoordinator(QObject):
             return
         self._navigation.open_album(target)
 
+    def gallery_startup_model(self) -> GalleryListModelAdapter:
+        return self._asset_list_vm
+
     def _ensure_session_for_open_album(self, path: Path) -> bool:
         """Ensure standalone album opens have a session-bound query surface."""
 

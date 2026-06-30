@@ -1475,6 +1475,117 @@ def test_staging_publisher_honors_time_budget(tmp_path: Path, qapp) -> None:
     assert len(service._publish_prefetch) == 2
 
 
+def test_macos_publish_timer_yields_between_batches(tmp_path: Path, qapp) -> None:
+    policy = ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 4096)
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+
+    class FakeTimer:
+        def __init__(self) -> None:
+            self.started: list[int] = []
+            self.active = False
+            self.remaining = -1
+
+        def isActive(self) -> bool:
+            return self.active
+
+        def start(self, delay: int) -> None:
+            self.started.append(delay)
+            self.active = True
+            self.remaining = delay
+
+        def remainingTime(self) -> int:
+            return self.remaining
+
+    fake_timer = FakeTimer()
+    service._publish_timer = fake_timer
+    size = QSize(8, 8)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+
+    service._publish_prefetch.append(
+        ThumbnailLoadResult(
+            tmp_path / "prefetch.jpg",
+            size,
+            image,
+            1,
+            ThumbnailRequestKind.PREFETCH,
+        )
+    )
+    service._ensure_publish_timer()
+
+    service._publish_visible.append(
+        ThumbnailLoadResult(
+            tmp_path / "visible.jpg",
+            size,
+            image,
+            1,
+            ThumbnailRequestKind.VISIBLE,
+        )
+    )
+    service._ensure_publish_timer()
+
+    assert fake_timer.started == [8, 1]
+
+
+def test_macos_visible_publish_honors_item_budget(tmp_path: Path, qapp) -> None:
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 4096),
+        publish_max_items=2,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor("blue"))
+    service._current_generation = 1
+    paths = [tmp_path / f"visible-{index}.jpg" for index in range(3)]
+    for path in paths:
+        service._stage_result(
+            ThumbnailLoadResult(path, size, image, 1, ThumbnailRequestKind.VISIBLE)
+        )
+
+    service._drain_publish_queue()
+
+    assert len(service._memory_cache) == 2
+    assert len(service._publish_visible) == 1
+
+
+def test_visible_only_demand_discards_stale_prefetch_publish_state(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(8, 8)
+    visible = tmp_path / "visible.jpg"
+    prefetch = tmp_path / "prefetch.jpg"
+    prefetch_key = service._cache_key(prefetch, size)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor("green"))
+    service._publish_prefetch.append(
+        ThumbnailLoadResult(prefetch, size, image, 1, ThumbnailRequestKind.PREFETCH)
+    )
+    service._publish_keys.add(prefetch_key)
+    service._staging_used_bytes = service._image_bytes(image)
+    service._prefetch_pending.add(prefetch_key)
+    service._prefetch_queued[prefetch_key] = ThumbnailRequest(
+        prefetch,
+        size,
+        ThumbnailRequestKind.PREFETCH,
+        1,
+    )
+    service._prefetch_queue.append(prefetch_key)
+
+    service.reconcile_demand(
+        ThumbnailDemandSnapshot(
+            revision=2,
+            size=size,
+            visible_paths=(visible,),
+        )
+    )
+
+    assert not service._publish_prefetch
+    assert prefetch_key not in service._publish_keys
+    assert prefetch_key not in service._prefetch_queued
+
+
 def test_slow_publisher_uses_four_item_batch_budget(tmp_path: Path, qapp) -> None:
     policy = ThumbnailRuntimePolicy.detect(
         platform="linux",
@@ -1787,6 +1898,65 @@ def test_pixmap_pool_rebinds_cold_slot_without_new_allocation(
     assert snapshot.slot_allocations == 2
     assert snapshot.slot_reuses == 1
     assert snapshot.slot_count == 2
+    assert service._memory_cache[incoming_key].toImage().pixelColor(0, 0).blue() > 200
+
+
+def test_macos_l1_publish_avoids_pixmap_slot_reuse(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 8 * 1024**3),
+        memory_limit_bytes=1024 * 1024,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    key = service._cache_key(tmp_path / "visible.jpg", size)
+    red = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    red.fill(QColor("red"))
+    blue = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    blue.fill(QColor("blue"))
+
+    assert service._store_image_in_l1(key, red)
+    first_slot = service._memory_cache[key]
+    with patch.object(
+        service,
+        "_overwrite_pixmap_slot",
+        side_effect=AssertionError("macOS publisher must not repaint QPixmap slots"),
+    ):
+        assert service._store_image_in_l1(key, blue)
+
+    assert service._memory_cache[key] is not first_slot
+    assert service._memory_cache[key].toImage().pixelColor(0, 0).blue() > 200
+
+
+def test_macos_visible_publish_can_overcommit_when_l1_pool_is_protected(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    tile_bytes = 8 * 8 * 4
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 8 * 1024**3),
+        memory_limit_bytes=2 * tile_bytes,
+        pixmap_pool_target_ratio=1.0,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    pinned_key = service._cache_key(tmp_path / "pinned.jpg", size)
+    incoming_key = service._cache_key(tmp_path / "incoming.jpg", size)
+    red = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    red.fill(QColor("red"))
+    blue = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    blue.fill(QColor("blue"))
+
+    assert service._store_image_in_l1(pinned_key, red)
+    service._pinned_keys = {pinned_key}
+    service._current_l1_demand_keys = {pinned_key, incoming_key}
+
+    assert service._store_image_in_l1(incoming_key, blue, allow_overcommit=True)
+
+    assert pinned_key in service._memory_cache
+    assert incoming_key in service._memory_cache
     assert service._memory_cache[incoming_key].toImage().pixelColor(0, 0).blue() > 200
 
 

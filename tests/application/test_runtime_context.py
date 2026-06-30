@@ -256,6 +256,25 @@ def test_resume_startup_tasks_scans_when_index_preexists_without_completed_job(
     assert [request[0] for request in context.facade.scan_requests] == [library_root]
 
 
+def test_resume_startup_tasks_can_defer_scan_until_gallery_opens(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    context, library, asset_runtime = _runtime_context(library_root)
+
+    context.resume_startup_tasks(defer_scan=True)
+
+    assert asset_runtime.bound_roots == [library_root]
+    assert library.bound_scan_services[-1] is not None
+    assert context.facade.scan_requests == []
+
+    context.start_deferred_startup_scan()
+    context.start_deferred_startup_scan()
+
+    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+
+
 def test_resume_startup_tasks_skips_scan_when_scope_complete(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     library_root.mkdir(parents=True)

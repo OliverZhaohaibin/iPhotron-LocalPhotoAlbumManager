@@ -357,11 +357,18 @@ def test_main_creates_required_features_in_platform_safe_order(
             assert self._callback is not None
             self._callback()
 
+    startup_ready_signal = _FakeSignal()
+
     class _FakeUi:
         sidebar = type(
             "FakeSidebar",
             (),
-            {"select_all_photos": lambda *args, **kwargs: call_order.append("select")},
+            {
+                "select_all_photos": lambda *args, **kwargs: (
+                    call_order.append("select"),
+                    startup_ready_signal.emit(),
+                )
+            },
         )()
 
         def ensure_feature(self, feature: str) -> None:
@@ -385,7 +392,16 @@ def test_main_creates_required_features_in_platform_safe_order(
             return type(
                 "FakeContext",
                 (),
-                {"resume_startup_tasks": lambda self: call_order.append("resume")},
+                {
+                    "resume_startup_tasks": (
+                        lambda self, *, defer_scan=False: call_order.append(
+                            f"resume:{defer_scan}"
+                        )
+                    ),
+                    "start_deferred_startup_scan": (
+                        lambda self: call_order.append("scan")
+                    ),
+                },
             )()
 
     class _FakeCoordinator:
@@ -394,6 +410,34 @@ def test_main_creates_required_features_in_platform_safe_order(
 
         def start(self) -> None:
             call_order.append("coordinator:start")
+
+        def gallery_startup_model(self):
+            return type(
+                "FakeStartupModel",
+                (),
+                {
+                    "startupFirstFrameReady": startup_ready_signal,
+                    "begin_startup_first_frame_gate": (
+                        lambda self, *, timeout_ms=3000: call_order.append(
+                            f"gate:{timeout_ms}"
+                        )
+                    ),
+                },
+            )()
+
+    class _FakeStartupInputGuard:
+        def __init__(self, _window, _app) -> None:
+            self._active = False
+
+        def install(self) -> None:
+            self._active = True
+            call_order.append("guard:install")
+
+        def release(self) -> None:
+            if not self._active:
+                return
+            self._active = False
+            call_order.append("guard:release")
 
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", platform)
     monkeypatch.setattr(
@@ -421,6 +465,7 @@ def test_main_creates_required_features_in_platform_safe_order(
         "iPhoto.gui.main.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
+    monkeypatch.setattr("iPhoto.gui.main._StartupInputGuard", _FakeStartupInputGuard)
     monkeypatch.setattr(
         "iPhoto.settings.manager.SettingsManager",
         lambda: type(
@@ -467,6 +512,10 @@ def test_main_creates_required_features_in_platform_safe_order(
     assert "windows_detail.before_create" not in profile_marks
     assert "windows_detail.created" not in profile_marks
     assert show_index < preview_index < people_index < coordinator_index
+    assert call_order.index("resume:True") < call_order.index("guard:release")
+    assert call_order.index("guard:release") < call_order.index("select")
+    assert call_order.index("gate:3000") < call_order.index("select")
+    assert call_order.index("select") < call_order.index("scan")
 
 
 def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> None:

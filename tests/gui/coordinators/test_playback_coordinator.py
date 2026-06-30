@@ -414,7 +414,7 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._player_view = Mock(
-        video_area=Mock(stop=Mock()),
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=True)),
         show_placeholder=Mock(),
     )
     coordinator._player_bar = Mock(setEnabled=Mock())
@@ -438,6 +438,81 @@ def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> Non
     coordinator._info_panel.close.assert_called_once_with()
     coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
     assert coordinator._confirmed_location_metadata == {}
+
+
+def test_reset_for_gallery_skips_media_cleanup_when_idle() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=False)),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = False
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=False))
+    coordinator._detail_vm = Mock(hide_info_panel=Mock())
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._confirmed_location_metadata = {
+        Path("/fake/video.mp4"): {"location": "Munich"}
+    }
+
+    PlaybackCoordinator.reset_for_gallery(coordinator)
+
+    coordinator._player_view.video_area.stop.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_not_called()
+    coordinator._hide_face_name_overlay.assert_not_called()
+    coordinator._player_bar.setEnabled.assert_called_once_with(False)
+    coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=False)
+    coordinator._update_header.assert_called_once_with(None)
+    assert coordinator._confirmed_location_metadata == {}
+
+
+def test_reset_for_gallery_releases_loaded_video_source_even_without_presentation() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=True)),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = False
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=False))
+    coordinator._detail_vm = Mock(hide_info_panel=Mock())
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._confirmed_location_metadata = {}
+
+    PlaybackCoordinator.reset_for_gallery(coordinator)
+
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.show_placeholder.assert_called_once_with()
+    coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
+
+
+def test_reset_for_gallery_clears_detail_view_without_video_stop_for_photo() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=False)),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = False
+    coordinator._current_presentation = _make_presentation(path="/fake/photo.jpg")
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._detail_vm = Mock(hide_info_panel=Mock())
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._confirmed_location_metadata = {}
+
+    PlaybackCoordinator.reset_for_gallery(coordinator)
+
+    coordinator._player_view.video_area.stop.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_called_once_with()
+    coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
 
 
 def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:

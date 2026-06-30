@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -49,6 +49,8 @@ class NavigationCoordinator(QObject):
 
         self._suppress_tree_refresh = False
         self._tree_refresh_suppression_reason: Optional[Literal["edit", "operation"]] = None
+        self._pending_navigation: tuple[str, tuple[Any, ...]] | None = None
+        self._navigation_flush_scheduled = False
 
         self._connect_signals()
 
@@ -56,10 +58,18 @@ class NavigationCoordinator(QObject):
         self._playback_coordinator = coordinator
 
     def _connect_signals(self) -> None:
-        self._sidebar.albumSelected.connect(self.open_album)
-        self._sidebar.pinnedItemSelected.connect(self.open_pinned_item)
-        self._sidebar.allPhotosSelected.connect(self.open_all_photos)
-        self._sidebar.staticNodeSelected.connect(self._handle_static_node)
+        self._sidebar.albumSelected.connect(
+            lambda path: self._schedule_navigation("album", path)
+        )
+        self._sidebar.pinnedItemSelected.connect(
+            lambda pinned_item: self._schedule_navigation("pinned_item", pinned_item)
+        )
+        self._sidebar.allPhotosSelected.connect(
+            lambda: self._schedule_navigation("all_photos")
+        )
+        self._sidebar.staticNodeSelected.connect(
+            lambda name: self._schedule_navigation("static_node", name)
+        )
         self._sidebar.bindLibraryRequested.connect(self._handle_bind_library)
 
         self._gallery_vm.route_requested.connect(self._handle_route_requested)
@@ -211,9 +221,38 @@ class NavigationCoordinator(QObject):
             library_root=library_root,
         )
 
+    def _schedule_navigation(self, kind: str, *args: Any) -> None:
+        self._pending_navigation = (kind, args)
+        if self._navigation_flush_scheduled:
+            return
+        self._navigation_flush_scheduled = True
+        QTimer.singleShot(0, self._flush_scheduled_navigation)
+
+    def _flush_scheduled_navigation(self) -> None:
+        pending = self._pending_navigation
+        self._pending_navigation = None
+        self._navigation_flush_scheduled = False
+        if pending is None:
+            return
+
+        kind, args = pending
+        if kind == "album":
+            self.open_album(args[0])
+        elif kind == "pinned_item":
+            self.open_pinned_item(args[0])
+        elif kind == "all_photos":
+            self.open_all_photos()
+        elif kind == "static_node":
+            self._handle_static_node(args[0])
+        else:
+            self._logger.warning("Ignoring unknown queued navigation kind %r", kind)
+
     def open_all_photos(self) -> None:
+        self._logger.info("open_all_photos: begin")
         self._reset_playback()
+        self._logger.info("open_all_photos: reset_done")
         self._gallery_vm.open_all_photos()
+        self._logger.info("open_all_photos: gallery_vm_done")
 
     def open_recently_deleted(self) -> None:
         self._reset_playback()

@@ -1041,9 +1041,40 @@ class PlaybackCoordinator(QObject):
     def reset_for_gallery(self) -> None:
         self._clear_play_request_state()
         self._reset_location_search_service(clear_cache=True)
-        self._player_view.video_area.stop()
-        self._player_view.show_placeholder()
-        self._hide_face_name_overlay(clear_annotations=True)
+        video_area = self._player_view.video_area
+        has_video = False
+        has_video_method = getattr(video_area, "has_video", None)
+        if callable(has_video_method):
+            has_video = bool(has_video_method())
+        router = getattr(self, "_router", None)
+        is_detail_active = False
+        if router is not None:
+            is_detail_view_active = getattr(router, "is_detail_view_active", None)
+            if callable(is_detail_view_active):
+                is_detail_active = bool(is_detail_view_active())
+        needs_view_cleanup = bool(
+            has_video
+            or getattr(self, "_is_playing", False)
+            or getattr(self, "_current_presentation", None) is not None
+            or is_detail_active
+        )
+        LOGGER.info(
+            "reset_for_gallery: needs_view_cleanup=%s has_video=%s is_playing=%s detail_active=%s",
+            needs_view_cleanup,
+            has_video,
+            getattr(self, "_is_playing", False),
+            is_detail_active,
+        )
+        if needs_view_cleanup:
+            if has_video:
+                video_area.stop()
+                LOGGER.info("reset_for_gallery: video_stop_done")
+            else:
+                LOGGER.info("reset_for_gallery: video_stop_skipped")
+            self._player_view.show_placeholder()
+            self._hide_face_name_overlay(clear_annotations=True)
+        else:
+            LOGGER.info("reset_for_gallery: idle_view_cleanup_skipped")
         self._player_bar.setEnabled(False)
         self._is_playing = False
         self._current_presentation = None

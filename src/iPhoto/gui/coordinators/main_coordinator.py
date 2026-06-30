@@ -107,6 +107,7 @@ class MainCoordinator(QObject):
         bound_people_service = self._people_service(library_root=lib_root)
         bound_pet_service = self._pet_service(library_root=lib_root)
         self._playback_people_service = bound_people_service or PeopleService()
+        self._playback_pet_service = bound_pet_service or PetService()
         if hasattr(window.ui, "people_page"):
             if bound_people_service is not None and hasattr(
                 window.ui.people_page, "set_people_service"
@@ -226,6 +227,7 @@ class MainCoordinator(QObject):
             header_controller=self._header_controller,
             face_name_overlay=window.ui.face_name_overlay,
             people_service=self._playback_people_service,
+            pet_service=self._playback_pet_service,
             people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
@@ -238,6 +240,9 @@ class MainCoordinator(QObject):
         self._playback.set_navigation_coordinator(self._navigation)
         self._navigation.set_playback_coordinator(self._playback)
         context.library.peopleSnapshotCommitted.connect(
+            self._handle_people_snapshot_sidebar_refresh
+        )
+        context.library.petSnapshotCommitted.connect(
             self._handle_people_snapshot_sidebar_refresh
         )
         # Manually attach info panel if available
@@ -581,6 +586,9 @@ class MainCoordinator(QObject):
             self._context.library.peopleSnapshotCommitted.connect(
                 self._playback.handle_people_snapshot_committed
             )
+            self._context.library.petSnapshotCommitted.connect(
+                self._playback.handle_people_snapshot_committed
+            )
             self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
             if hasattr(ui.people_page, "set_pet_status_message"):
                 self._context.library.petScanStatusChanged.connect(
@@ -693,6 +701,8 @@ class MainCoordinator(QObject):
         bound_pet_service = self._pet_service(library_root=root)
         if bound_people_service is not None:
             self._playback_people_service = bound_people_service
+        if bound_pet_service is not None:
+            self._playback_pet_service = bound_pet_service
         if people_page is not None:
             if bound_people_service is not None and hasattr(people_page, "set_people_service"):
                 people_page.set_people_service(bound_people_service)
@@ -720,6 +730,8 @@ class MainCoordinator(QObject):
                 playback.set_people_service(bound_people_service)
             else:
                 playback.set_people_library_root(root)
+            if bound_pet_service is not None and hasattr(playback, "set_pet_service"):
+                playback.set_pet_service(bound_pet_service)
 
     def _active_session(self):
         return getattr(self._context, "library_session", None)
@@ -811,13 +823,17 @@ class MainCoordinator(QObject):
     def _handle_people_snapshot_sidebar_refresh(self, event: object) -> None:
         library_root = self._context.library.root()
         if library_root is not None and getattr(event, "library_root", None) == library_root:
-            self._pinned_items_service.prune_missing_people_entities(
-                library_root,
-                person_ids=tuple(getattr(event, "changed_person_ids", ()) or ()),
-                group_ids=tuple(getattr(event, "changed_group_ids", ()) or ()),
-                person_redirects=dict(getattr(event, "person_redirects", {}) or {}),
-                group_redirects=dict(getattr(event, "group_redirects", {}) or {}),
-            )
+            prune_kwargs: dict[str, object] = {
+                "person_ids": tuple(getattr(event, "changed_person_ids", ()) or ()),
+                "group_ids": tuple(getattr(event, "changed_group_ids", ()) or ()),
+                "person_redirects": dict(getattr(event, "person_redirects", {}) or {}),
+                "group_redirects": dict(getattr(event, "group_redirects", {}) or {}),
+            }
+            if hasattr(event, "changed_pet_ids"):
+                prune_kwargs["pet_ids"] = tuple(getattr(event, "changed_pet_ids", ()) or ())
+            if hasattr(event, "pet_redirects"):
+                prune_kwargs["pet_redirects"] = dict(getattr(event, "pet_redirects", {}) or {})
+            self._pinned_items_service.prune_missing_people_entities(library_root, **prune_kwargs)
         self._window.ui.sidebar.refresh_tree_model()
 
     def _handle_move_finished_toast(

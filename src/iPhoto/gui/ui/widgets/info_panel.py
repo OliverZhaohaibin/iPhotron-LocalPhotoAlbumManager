@@ -183,8 +183,8 @@ class _FaceAvatarWidget(QLabel):
 
     def __init__(
         self,
-        annotation: AssetFaceAnnotation,
-        candidates: list[PersonSummary],
+        annotation: object,
+        candidates: list[object],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -196,7 +196,7 @@ class _FaceAvatarWidget(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._refresh_visual_state()
 
-    def set_candidates(self, candidates: list[PersonSummary]) -> None:
+    def set_candidates(self, candidates: list[object]) -> None:
         self._candidates = list(candidates)
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
@@ -226,8 +226,8 @@ class _FaceAvatarWidget(QLabel):
         context = MenuContext(
             surface="info_panel",
             selection_kind="empty",
-            entity_kind="person",
-            entity_id=self._annotation.person_id,
+            entity_kind=self._annotation_kind(),
+            entity_id=self._annotation_entity_id(),
         )
         populate_menu(
             menu,
@@ -257,6 +257,15 @@ class _FaceAvatarWidget(QLabel):
         return menu
 
     def _menu_action_labels(self) -> tuple[str, str, tuple[tuple[str, str], tuple[str, str]]]:
+        if self._annotation_kind() == "pet":
+            return (
+                tr("InfoPanel", "Delete Detection"),
+                self._not_this_label(),
+                (
+                    ("choose_someone_else", tr("InfoPanel", "Choose Another Pet…")),
+                    ("new_person", tr("InfoPanel", "New Pet…")),
+                ),
+            )
         return (
             tr("InfoPanel", "Delete"),
             self._not_this_label(),
@@ -270,21 +279,43 @@ class _FaceAvatarWidget(QLabel):
         display_name = str(self._annotation.display_name or "").strip()
         if display_name:
             return tr("InfoPanel", "Not {name}").format(name=display_name)
+        if self._annotation_kind() == "pet":
+            return tr("InfoPanel", "Not This Pet")
         return tr("InfoPanel", "Not This Person")
 
     def _prompt_choose_person(self) -> None:
+        annotation_kind = self._annotation_kind()
+        annotation_entity_id = self._annotation_entity_id()
+        species_label = getattr(self._annotation, "species_label", None)
         options = [
             summary
             for summary in self._candidates
-            if summary.person_id and summary.person_id != self._annotation.person_id
+            if getattr(summary, "person_id", None)
+            and summary.person_id != annotation_entity_id
+            and _candidate_kind(summary) == annotation_kind
+            and (
+                annotation_kind != "pet"
+                or not species_label
+                or getattr(summary, "species_label", None) == species_label
+            )
         ]
         if not options:
             return
+        title = (
+            tr("InfoPanel", "Choose Another Pet")
+            if annotation_kind == "pet"
+            else tr("InfoPanel", "Choose Someone Else")
+        )
+        prompt = (
+            tr("InfoPanel", "Assign this detection to")
+            if annotation_kind == "pet"
+            else tr("InfoPanel", "Assign this face to")
+        )
         host = self.window() if isinstance(self.window(), QWidget) else self
         dialog = GroupPeopleDialog(
             options,
-            title_text=tr("InfoPanel", "Choose Someone Else"),
-            prompt_text=tr("InfoPanel", "Assign this face to"),
+            title_text=title,
+            prompt_text=prompt,
             confirm_text=tr("InfoPanel", "Choose"),
             min_selection=1,
             max_selection=1,
@@ -299,10 +330,11 @@ class _FaceAvatarWidget(QLabel):
         self.moveRequested.emit(self._annotation, selected_ids[0])
 
     def _prompt_new_person(self) -> None:
+        is_pet = self._annotation_kind() == "pet"
         host = self.window() if isinstance(self.window(), QWidget) else self
         dialog = QInputDialog(host)
-        dialog.setWindowTitle(tr("InfoPanel", "New Person"))
-        dialog.setLabelText(tr("InfoPanel", "Person name:"))
+        dialog.setWindowTitle(tr("InfoPanel", "New Pet") if is_pet else tr("InfoPanel", "New Person"))
+        dialog.setLabelText(tr("InfoPanel", "Pet name:") if is_pet else tr("InfoPanel", "Person name:"))
         dialog.setTextValue("")
         _style_popup_input_dialog(dialog, host)
         if dialog.exec() != QInputDialog.DialogCode.Accepted:
@@ -311,6 +343,15 @@ class _FaceAvatarWidget(QLabel):
         if not new_name:
             return
         self.newPersonRequested.emit(self._annotation, new_name)
+
+    def _annotation_kind(self) -> str:
+        return "pet" if getattr(self._annotation, "kind", "person") == "pet" else "person"
+
+    def _annotation_entity_id(self) -> str | None:
+        entity_id = getattr(self._annotation, "person_id", None)
+        if isinstance(entity_id, str) and entity_id:
+            return entity_id
+        return None
 
     def _set_menu_active(self, active: bool) -> None:
         self._is_menu_active = bool(active)
@@ -346,6 +387,11 @@ def _person_choice_label(summary: PersonSummary) -> str:
         name=display_name,
         count=formatters.format_integer(summary.face_count),
     )
+
+
+def _candidate_kind(candidate: object) -> str:
+    person_id = getattr(candidate, "person_id", "")
+    return "pet" if isinstance(person_id, str) and person_id.startswith("pet:") else "person"
 
 @dataclass
 class _FormattedMetadata:
@@ -403,9 +449,9 @@ class InfoPanel(QWidget):
 
         self._metadata: Optional[dict[str, Any]] = None
         self._current_rel: Optional[str] = None
-        self._asset_faces: list[AssetFaceAnnotation] = []
+        self._asset_faces: list[object] = []
         self._asset_face_signature: tuple[tuple[object, ...], ...] | None = None
-        self._face_action_candidates: list[PersonSummary] = []
+        self._face_action_candidates: list[object] = []
         self._drag_active = False
         self._drag_offset = None
         self._centered = False
@@ -646,7 +692,7 @@ class InfoPanel(QWidget):
         self._apply_location_metadata(metadata, previous_rel=previous_rel)
         self._refresh_or_schedule_panel_geometry()
 
-    def set_asset_faces(self, annotations: list[AssetFaceAnnotation]) -> None:
+    def set_asset_faces(self, annotations: list[object]) -> None:
         next_signature = tuple(self._face_signature(annotation) for annotation in annotations)
         if next_signature == self._asset_face_signature:
             self._asset_faces = list(annotations)
@@ -656,7 +702,7 @@ class InfoPanel(QWidget):
         self._rebuild_face_strip()
         self._refresh_or_schedule_panel_geometry()
 
-    def set_face_action_candidates(self, candidates: list[PersonSummary]) -> None:
+    def set_face_action_candidates(self, candidates: list[object]) -> None:
         self._face_action_candidates = list(candidates)
         for avatar in self._face_avatar_widgets():
             avatar.set_candidates(self._face_action_candidates)
@@ -887,20 +933,22 @@ class InfoPanel(QWidget):
             label.setVisible(visible)
 
     @staticmethod
-    def _face_signature(annotation: AssetFaceAnnotation) -> tuple[object, ...]:
-        thumbnail_path = annotation.thumbnail_path
+    def _face_signature(annotation: object) -> tuple[object, ...]:
+        thumbnail_path = getattr(annotation, "thumbnail_path", None)
         return (
-            annotation.face_id,
-            annotation.person_id,
-            annotation.display_name,
-            annotation.box_x,
-            annotation.box_y,
-            annotation.box_w,
-            annotation.box_h,
-            annotation.image_width,
-            annotation.image_height,
+            getattr(annotation, "kind", "person"),
+            getattr(annotation, "face_id", None),
+            getattr(annotation, "person_id", None),
+            getattr(annotation, "display_name", None),
+            getattr(annotation, "species_label", None),
+            getattr(annotation, "box_x", None),
+            getattr(annotation, "box_y", None),
+            getattr(annotation, "box_w", None),
+            getattr(annotation, "box_h", None),
+            getattr(annotation, "image_width", None),
+            getattr(annotation, "image_height", None),
             str(thumbnail_path) if thumbnail_path is not None else None,
-            annotation.is_manual,
+            getattr(annotation, "is_manual", False),
         )
 
     def _face_avatar_widgets(self) -> list[_FaceAvatarWidget]:
@@ -1261,7 +1309,7 @@ class InfoPanel(QWidget):
             if updates_enabled:
                 self._face_container.setUpdatesEnabled(True)
 
-    def _make_face_avatar(self, annotation: AssetFaceAnnotation) -> QLabel:
+    def _make_face_avatar(self, annotation: object) -> QLabel:
         label = _FaceAvatarWidget(annotation, self._face_action_candidates, self._face_container)
         label.deleteRequested.connect(self.faceDeleteRequested.emit)
         label.moveRequested.connect(self.faceMoveRequested.emit)

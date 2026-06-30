@@ -6,7 +6,7 @@ import logging
 import sqlite3
 import time
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -41,10 +41,14 @@ from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
 from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
+from iPhoto.gui.ui.widgets.recognition_annotations import (
+    pet_annotation_adapter,
+)
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.people.repository import AssetFaceAnnotation
 from iPhoto.people.service import PeopleService
+from iPhoto.pets.service import PetService
 from maps.osmand_search import SearchSuggestion
 
 if TYPE_CHECKING:
@@ -76,6 +80,15 @@ _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE = (
     "GPS 信息未能写入原始照片/视频文件：{reason}"
 )
 _LOCATION_VIDEO_WRITE_PLACEHOLDER = "Writing data, please wait..."
+
+
+@dataclass(frozen=True)
+class _RecognitionActionCandidate:
+    person_id: str
+    name: str | None
+    thumbnail_path: Path | None
+    face_count: int
+    species_label: str | None = None
 
 
 def _location_video_write_placeholder() -> str:
@@ -110,6 +123,7 @@ class PlaybackCoordinator(QObject):
         header_controller: HeaderController | None = None,
         face_name_overlay: FaceNameOverlayWidget | None = None,
         people_service: PeopleService | None = None,
+        pet_service: PetService | None = None,
         people_dashboard_refresh_callback: Callable[[], None] | None = None,
         library_manager: LibraryRuntimeController | None = None,
         location_session_invalidator: Callable[[], None] | None = None,
@@ -142,6 +156,7 @@ class PlaybackCoordinator(QObject):
         self._header_controller = header_controller
         self._face_name_overlay = face_name_overlay
         self._people_service = people_service or PeopleService()
+        self._pet_service = pet_service or PetService()
         self._people_dashboard_refresh_callback = people_dashboard_refresh_callback
         self._library_manager = library_manager
         self._location_session_invalidator = location_session_invalidator
@@ -209,6 +224,10 @@ class PlaybackCoordinator(QObject):
 
     def set_people_service(self, service: PeopleService | None) -> None:
         self._people_service = service or PeopleService()
+        self._refresh_face_name_overlay_for_current_presentation()
+
+    def set_pet_service(self, service: PetService | None) -> None:
+        self._pet_service = service or PetService()
         self._refresh_face_name_overlay_for_current_presentation()
 
     def set_info_panel(self, panel: InfoPanel) -> None:
@@ -788,14 +807,74 @@ class PlaybackCoordinator(QObject):
         return True
 
     def _load_face_name_annotations(self, asset_id: str) -> list:
+        if not asset_id:
+            return []
+        annotations: list[object] = []
         people_service = getattr(self, "_people_service", None)
-        if people_service is None or not asset_id:
-            return []
+        if people_service is not None:
+            try:
+                annotations.extend(people_service.list_asset_face_annotations(asset_id))
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to load face annotations for asset %s", asset_id)
+        pet_service = getattr(self, "_pet_service", None)
+        if pet_service is not None:
+            try:
+                annotations.extend(
+                    pet_annotation_adapter(annotation)
+                    for annotation in pet_service.list_asset_pet_annotations(asset_id)
+                )
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to load pet annotations for asset %s", asset_id)
+        return annotations
+
+    def _refresh_recognition_views_after_mutation(self) -> None:
+        self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @staticmethod
+    def _entity_kind_and_id(entity_key: str | None) -> tuple[str, str]:
+        if not entity_key:
+            return ("person", "")
+        if entity_key.startswith("pet:"):
+            return ("pet", entity_key.removeprefix("pet:"))
+        if entity_key.startswith("person:"):
+            return ("person", entity_key.removeprefix("person:"))
+        return ("person", entity_key)
+
+    @staticmethod
+    def _annotation_kind(annotation: object) -> str:
+        return "pet" if getattr(annotation, "kind", "person") == "pet" else "person"
+
+    @staticmethod
+    def _annotation_id(annotation: object) -> str:
+        if getattr(annotation, "kind", "person") == "pet":
+            return str(getattr(annotation, "detection_id", "") or getattr(annotation, "annotation_id", ""))
+        return str(getattr(annotation, "face_id", ""))
+
+    @staticmethod
+    def _target_entity_id(entity_key: str) -> str:
+        if entity_key.startswith("pet:"):
+            return entity_key.removeprefix("pet:")
+        if entity_key.startswith("person:"):
+            return entity_key.removeprefix("person:")
+        return entity_key
+
+    def _rename_pet_from_overlay(self, pet_id: str, new_name: object) -> bool:
+        pet_service = getattr(self, "_pet_service", None)
+        if pet_service is None or not pet_id:
+            return False
+        name = new_name.strip() if isinstance(new_name, str) else None
         try:
-            return people_service.list_asset_face_annotations(asset_id)
+            pet_service.rename_pet(pet_id, name or None)
         except (sqlite3.Error, OSError):
-            LOGGER.exception("Failed to load face annotations for asset %s", asset_id)
-            return []
+            LOGGER.exception("Failed to rename pet %s", pet_id)
+            return False
+        return True
 
     @Slot(str, object)
     def _handle_face_name_rename_submitted(
@@ -805,44 +884,52 @@ class PlaybackCoordinator(QObject):
     ) -> None:
         if not person_id:
             return
+        entity_kind, entity_id = self._entity_kind_and_id(person_id)
+        if entity_kind == "pet":
+            if self._rename_pet_from_overlay(entity_id, new_name):
+                self._refresh_recognition_views_after_mutation()
+            return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:
             return
         name = new_name.strip() if isinstance(new_name, str) else None
         try:
-            people_service.rename_cluster(person_id, name or None)
+            people_service.rename_cluster(entity_id, name or None)
         except (sqlite3.Error, OSError):
-            LOGGER.exception("Failed to rename person %s", person_id)
+            LOGGER.exception("Failed to rename person %s", entity_id)
             return
-        self._refresh_face_name_overlay_for_current_presentation()
-        presentation = getattr(self, "_current_presentation", None)
-        if presentation is not None and presentation.asset_id:
-            self._refresh_info_panel_faces(presentation.asset_id)
-        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
-        if callable(refresh_callback):
-            refresh_callback()
+        self._refresh_recognition_views_after_mutation()
 
     @Slot(object)
     def _handle_info_panel_face_delete_requested(self, annotation: object) -> None:
+        annotation_id = self._annotation_id(annotation)
+        if not annotation_id:
+            return
+        if self._annotation_kind(annotation) == "pet":
+            pet_service = getattr(self, "_pet_service", None)
+            if pet_service is None:
+                return
+            try:
+                changed = pet_service.delete_detection(annotation_id)
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to delete pet detection %s", annotation_id)
+                return
+            if changed:
+                self._refresh_recognition_views_after_mutation()
+            return
         if not isinstance(annotation, AssetFaceAnnotation):
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:
             return
         try:
-            changed = people_service.delete_face(annotation.face_id)
+            changed = people_service.delete_face(annotation_id)
         except (sqlite3.Error, OSError):
-            LOGGER.exception("Failed to delete face %s", annotation.face_id)
+            LOGGER.exception("Failed to delete face %s", annotation_id)
             return
         if not changed:
             return
-        self._refresh_face_name_overlay_for_current_presentation()
-        presentation = getattr(self, "_current_presentation", None)
-        if presentation is not None and presentation.asset_id:
-            self._refresh_info_panel_faces(presentation.asset_id)
-        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
-        if callable(refresh_callback):
-            refresh_callback()
+        self._refresh_recognition_views_after_mutation()
 
     @Slot(object, str)
     def _handle_info_panel_face_move_requested(
@@ -850,29 +937,46 @@ class PlaybackCoordinator(QObject):
         annotation: object,
         target_person_id: str,
     ) -> None:
-        if not isinstance(annotation, AssetFaceAnnotation) or not target_person_id:
+        if not target_person_id:
+            return
+        annotation_id = self._annotation_id(annotation)
+        if not annotation_id:
+            return
+        if self._annotation_kind(annotation) == "pet":
+            pet_service = getattr(self, "_pet_service", None)
+            if pet_service is None:
+                return
+            target_pet_id = self._target_entity_id(target_person_id)
+            try:
+                changed = pet_service.move_detection_to_pet(annotation_id, target_pet_id)
+            except (sqlite3.Error, OSError):
+                LOGGER.exception(
+                    "Failed to move pet detection %s to pet %s",
+                    annotation_id,
+                    target_pet_id,
+                )
+                return
+            if changed:
+                self._refresh_recognition_views_after_mutation()
+            return
+        if not isinstance(annotation, AssetFaceAnnotation):
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:
             return
+        target_person_id = self._target_entity_id(target_person_id)
         try:
-            changed = people_service.move_face_to_person(annotation.face_id, target_person_id)
+            changed = people_service.move_face_to_person(annotation_id, target_person_id)
         except (sqlite3.Error, OSError):
             LOGGER.exception(
                 "Failed to move face %s to person %s",
-                annotation.face_id,
+                annotation_id,
                 target_person_id,
             )
             return
         if not changed:
             return
-        self._refresh_face_name_overlay_for_current_presentation()
-        presentation = getattr(self, "_current_presentation", None)
-        if presentation is not None and presentation.asset_id:
-            self._refresh_info_panel_faces(presentation.asset_id)
-        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
-        if callable(refresh_callback):
-            refresh_callback()
+        self._refresh_recognition_views_after_mutation()
 
     @Slot(object, str)
     def _handle_info_panel_face_move_to_new_person_requested(
@@ -880,25 +984,34 @@ class PlaybackCoordinator(QObject):
         annotation: object,
         new_name: str,
     ) -> None:
+        annotation_id = self._annotation_id(annotation)
+        if not annotation_id:
+            return
+        if self._annotation_kind(annotation) == "pet":
+            pet_service = getattr(self, "_pet_service", None)
+            if pet_service is None:
+                return
+            try:
+                created_pet_id = pet_service.move_detection_to_new_pet(annotation_id, new_name)
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to move pet detection %s into a new pet", annotation_id)
+                return
+            if created_pet_id:
+                self._refresh_recognition_views_after_mutation()
+            return
         if not isinstance(annotation, AssetFaceAnnotation):
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:
             return
         try:
-            created_person_id = people_service.move_face_to_new_person(annotation.face_id, new_name)
+            created_person_id = people_service.move_face_to_new_person(annotation_id, new_name)
         except (sqlite3.Error, OSError):
-            LOGGER.exception("Failed to move face %s into a new person", annotation.face_id)
+            LOGGER.exception("Failed to move face %s into a new person", annotation_id)
             return
         if not created_person_id:
             return
-        self._refresh_face_name_overlay_for_current_presentation()
-        presentation = getattr(self, "_current_presentation", None)
-        if presentation is not None and presentation.asset_id:
-            self._refresh_info_panel_faces(presentation.asset_id)
-        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
-        if callable(refresh_callback):
-            refresh_callback()
+        self._refresh_recognition_views_after_mutation()
 
     def _sync_filmstrip_selection(self, row: int) -> None:
         idx = self._asset_model.index(row, 0)
@@ -1601,21 +1714,41 @@ class PlaybackCoordinator(QObject):
         info_panel = getattr(self, "_info_panel", None)
         if info_panel is None:
             return
+        candidates: list[object] = []
         people_service = getattr(self, "_people_service", None)
         if people_service is not None:
             try:
-                info_panel.set_face_action_candidates(
-                    people_service.list_clusters(include_hidden=True)
-                )
+                people_candidates = people_service.list_clusters(include_hidden=True)
+                if isinstance(people_candidates, (list, tuple)):
+                    candidates.extend(people_candidates)
             except (sqlite3.Error, OSError):
                 LOGGER.exception("Failed to load face action candidates")
-                info_panel.set_face_action_candidates([])
+        pet_service = getattr(self, "_pet_service", None)
+        if pet_service is not None:
+            try:
+                pet_candidates = pet_service.list_pets(include_hidden=True)
+                if isinstance(pet_candidates, (list, tuple)):
+                    candidates.extend(
+                        _RecognitionActionCandidate(
+                            person_id=f"pet:{summary.pet_id}",
+                            name=summary.name or summary.species_label.title(),
+                            thumbnail_path=summary.thumbnail_path,
+                            face_count=summary.detection_count,
+                            species_label=summary.species_label,
+                        )
+                        for summary in pet_candidates
+                    )
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to load pet action candidates")
+        set_candidates = getattr(info_panel, "set_face_action_candidates", None)
+        if callable(set_candidates):
+            set_candidates(candidates)
         if not asset_id:
             info_panel.set_asset_faces([])
             return
         info_panel.set_asset_faces(self._compose_info_panel_faces(asset_id))
 
-    def _compose_info_panel_faces(self, asset_id: str) -> list[AssetFaceAnnotation]:
+    def _compose_info_panel_faces(self, asset_id: str) -> list[object]:
         annotations = list(self._load_face_name_annotations(asset_id))
         pending = getattr(self, "_pending_manual_face_annotations", {}).get(asset_id, [])
         if pending:

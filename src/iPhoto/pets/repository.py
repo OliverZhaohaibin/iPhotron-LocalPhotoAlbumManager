@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from iPhoto.people.face_repository import FaceRepository
+from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
 from .records import AssetPetAnnotation, PetDetectionRecord, PetRecord, PetSummary
@@ -369,12 +372,38 @@ class PetRepository:
             )
             conn.execute("DELETE FROM pets WHERE pet_id = ?", (source_pet_id,))
             conn.commit()
+        self._remap_people_groups_for_pet_merge(source_pet_id, target_pet_id)
         self._rebuild_pet_records_from_detections()
         return PetMutationResult(
             changed_asset_ids=tuple(str(row["asset_id"]) for row in asset_rows if row["asset_id"]),
             changed_pet_ids=(source_pet_id, target_pet_id),
             pet_redirects={source_pet_id: target_pet_id},
         )
+
+    def _remap_people_groups_for_pet_merge(self, source_pet_id: str, target_pet_id: str) -> None:
+        face_state_db_path = self._db_path.parent.parent / "faces" / "face_state.db"
+        face_index_db_path = self._db_path.parent.parent / "faces" / "face_index.db"
+        if not face_state_db_path.exists():
+            return
+        FaceStateRepository(face_state_db_path).remap_pet_in_groups(source_pet_id, target_pet_id)
+        if face_index_db_path.exists():
+            FaceRepository(face_index_db_path, face_state_db_path).refresh_all_group_assets()
+
+    def _refresh_people_group_assets_for_pets(self, pet_ids: Iterable[str]) -> None:
+        unique_pet_ids = tuple(dict.fromkeys(str(pet_id) for pet_id in pet_ids if pet_id))
+        if not unique_pet_ids:
+            return
+        face_state_db_path = self._db_path.parent.parent / "faces" / "face_state.db"
+        face_index_db_path = self._db_path.parent.parent / "faces" / "face_index.db"
+        if not face_state_db_path.exists() or not face_index_db_path.exists():
+            return
+        state_repository = FaceStateRepository(face_state_db_path)
+        group_ids = state_repository.list_group_ids_for_pets(unique_pet_ids)
+        if not group_ids:
+            return
+        face_repository = FaceRepository(face_index_db_path, face_state_db_path)
+        for group_id in group_ids:
+            face_repository.refresh_group_assets(group_id)
 
     def delete_detection(self, detection_id: str) -> PetMutationResult | None:
         detection = self.get_detection(detection_id)
@@ -386,6 +415,7 @@ class PetRepository:
             conn.execute("DELETE FROM pet_detections WHERE detection_id = ?", (detection_id,))
             conn.commit()
         self._rebuild_pet_records_from_detections()
+        self._refresh_people_group_assets_for_pets((detection.pet_id,))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
             changed_pet_ids=(detection.pet_id,) if detection.pet_id else (),
@@ -412,6 +442,7 @@ class PetRepository:
             )
             conn.commit()
         self._rebuild_pet_records_from_detections()
+        self._refresh_people_group_assets_for_pets((detection.pet_id, target_pet_id))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
             changed_pet_ids=tuple(
@@ -437,6 +468,7 @@ class PetRepository:
         self._rebuild_pet_records_from_detections()
         if new_name:
             self.rename_pet(new_pet_id, new_name)
+        self._refresh_people_group_assets_for_pets((detection.pet_id, new_pet_id))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
             changed_pet_ids=tuple(pet_id for pet_id in (detection.pet_id, new_pet_id) if pet_id),

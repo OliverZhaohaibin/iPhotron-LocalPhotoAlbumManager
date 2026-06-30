@@ -14,6 +14,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets.face_name_overlay import FaceNameOverlayWidget
+from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.people.repository import AssetFaceAnnotation
 
 
@@ -141,6 +142,45 @@ def test_face_name_overlay_hover_updates_highlighted_face(qapp) -> None:
     chip = overlay._states["face-2"].chip
     QTest.mouseMove(chip, chip.rect().center())
     _wait_until(qapp, lambda: overlay._hovered_face_id == "face-2")
+
+    QTest.mouseMove(surface, QPoint(5, 5))
+    _wait_until(qapp, lambda: overlay._hovered_face_id is None)
+
+
+def test_face_name_overlay_chip_stays_above_overlay_after_activation(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    overlay.hide()
+    overlay.set_annotations([_annotation(face_id="face-1", box_x=80, box_y=80, display_name="Julie")])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    chip = overlay._states["face-1"].chip
+    widget_at_chip = QApplication.widgetAt(chip.mapToGlobal(chip.rect().center()))
+
+    assert widget_at_chip is chip
+
+
+def test_face_name_overlay_pet_annotation_uses_same_hover_path(qapp) -> None:
+    surface, viewer, overlay = _make_overlay(qapp)
+    annotation = RecognitionAnnotation(
+        kind="pet",
+        annotation_id="det-1",
+        entity_id="pet-1",
+        display_name="Miso",
+        box_x=80,
+        box_y=80,
+        box_w=120,
+        box_h=90,
+        image_width=420,
+        image_height=320,
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    chip = overlay._states["pet:det-1"].chip
+    QTest.mouseMove(chip, chip.rect().center())
+    _wait_until(qapp, lambda: overlay._hovered_face_id == "pet:det-1")
 
     QTest.mouseMove(surface, QPoint(5, 5))
     _wait_until(qapp, lambda: overlay._hovered_face_id is None)

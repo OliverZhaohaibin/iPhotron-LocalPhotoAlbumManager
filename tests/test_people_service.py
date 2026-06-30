@@ -29,6 +29,10 @@ from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
 from iPhoto.people import service as people_service
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
+from iPhoto.pets.records import PetDetectionRecord, PetRecord
+from iPhoto.pets.repository import PetRepository
+from iPhoto.pets.service import pet_library_paths
+from iPhoto.pets.repository_utils import utc_now_iso
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +117,54 @@ def _person_record(
         updated_at=timestamp,
         sample_count=sample_count,
         profile_state="stable" if sample_count >= 3 else "unstable",
+    )
+
+
+def _pet_record(*, pet_id: str, key_detection_id: str, detection_count: int, name: str | None = None) -> PetRecord:
+    embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    timestamp = utc_now_iso()
+    return PetRecord(
+        pet_id=pet_id,
+        name=name,
+        species_label="cat",
+        key_detection_id=key_detection_id,
+        detection_count=detection_count,
+        center_embedding=embedding,
+        embedding_dim=int(embedding.shape[0]),
+        created_at=timestamp,
+        updated_at=timestamp,
+        sample_count=detection_count,
+    )
+
+
+def _pet_detection_record(
+    *,
+    detection_id: str,
+    asset_id: str,
+    asset_rel: str,
+    pet_id: str,
+) -> PetDetectionRecord:
+    embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    return PetDetectionRecord(
+        detection_id=detection_id,
+        pet_key=f"key-{detection_id}",
+        asset_id=asset_id,
+        asset_rel=asset_rel,
+        species_label="cat",
+        box_x=10,
+        box_y=12,
+        box_w=80,
+        box_h=80,
+        confidence=0.99,
+        embedding=embedding,
+        embedding_dim=int(embedding.shape[0]),
+        embedding_model="dinov2_vits14",
+        detector_model="yolox_nano_coco",
+        thumbnail_path=None,
+        pet_id=pet_id,
+        detected_at=utc_now_iso(),
+        image_width=400,
+        image_height=300,
     )
 
 
@@ -321,6 +373,105 @@ def test_people_service_creates_groups_and_queries_common_assets(tmp_path: Path)
     assert service.has_group(group.group_id) is True
     assert service.get_group_summary(group.group_id) is not None
     assert service.has_group("missing-group") is False
+
+
+def test_people_service_creates_mixed_person_pet_group_with_common_assets(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {
+                "rel": "album/shared.jpg",
+                "id": "asset-shared",
+                "media_type": 0,
+                "face_status": "done",
+                "pet_status": "done",
+            },
+            {
+                "rel": "album/person-only.jpg",
+                "id": "asset-person-only",
+                "media_type": 0,
+                "face_status": "done",
+                "pet_status": "done",
+            },
+            {
+                "rel": "album/pet-only.jpg",
+                "id": "asset-pet-only",
+                "media_type": 0,
+                "face_status": "done",
+                "pet_status": "done",
+            },
+        ]
+    )
+
+    service = create_people_service(library_root)
+    repository = service.repository()
+    assert repository is not None
+    repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a-shared",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-a-only",
+                asset_id="asset-person-only",
+                asset_rel="album/person-only.jpg",
+                person_id="person-a",
+            ),
+        ],
+        [
+            _person_record(
+                person_id="person-a",
+                key_face_id="face-a-shared",
+                face_count=2,
+                name="Alice",
+            )
+        ],
+    )
+
+    pet_paths = pet_library_paths(library_root)
+    pet_repository = PetRepository(pet_paths.index_db_path, pet_paths.state_db_path)
+    pet_repository.replace_all(
+        [
+            _pet_detection_record(
+                detection_id="det-shared",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                pet_id="pet-a",
+            ),
+            _pet_detection_record(
+                detection_id="det-only",
+                asset_id="asset-pet-only",
+                asset_rel="album/pet-only.jpg",
+                pet_id="pet-a",
+            ),
+        ],
+        [
+            _pet_record(
+                pet_id="pet-a",
+                key_detection_id="det-shared",
+                detection_count=2,
+                name="Miso",
+            )
+        ],
+    )
+
+    group = service.create_group(["person:person-a", "pet:pet-a"])
+
+    assert group is not None
+    assert [(member.kind, member.entity_id) for member in group.member_entities] == [
+        ("person", "person-a"),
+        ("pet", "pet-a"),
+    ]
+    assert [member.pet_id for member in group.pet_members] == ["pet-a"]
+    assert service.build_group_query(group.group_id).asset_ids == ["asset-shared"]
+
+    assert pet_repository.delete_detection("det-shared") is not None
+    assert service.build_group_query(group.group_id).asset_ids == []
 
 
 def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:

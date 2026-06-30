@@ -163,6 +163,7 @@ class AlbumSidebarContextMenu(QMenu):
             self.addAction(tr("AlbumSidebar", "Unpin"), self._unpin_sidebar_item)
         if self._item.node_type in {
             NodeType.PINNED_PERSON,
+            NodeType.PINNED_PET,
             NodeType.PINNED_GROUP,
         }:
             self.addAction(tr("AlbumSidebar", "Rename…"), self._prompt_rename_pinned_item)

@@ -131,6 +131,39 @@ class NavigationCoordinator(QObject):
             )
             return
 
+        if pinned_item.kind == "pet":
+            pet_service = getattr(self._context.library, "pet_service", None)
+            if pet_service is None:
+                self._logger.warning(
+                    "Pinned pet '%s' requested without an active Pet service",
+                    pinned_item.item_id,
+                )
+                return
+            try:
+                query = pet_service.build_pet_query(pinned_item.item_id)
+                entity_exists = pet_service.has_pet(pinned_item.item_id)
+            except Exception:
+                self._logger.warning(
+                    "Failed to open pinned pet '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
+                )
+                return
+            if not query.asset_ids and not entity_exists:
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned pet '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                )
+                return
+            self._gallery_vm.open_pinned_people_query(
+                query,
+                kind="pet",
+                entity_id=pinned_item.item_id,
+            )
+            return
+
         if pinned_item.kind == "group":
             try:
                 query = people_service.build_group_query(pinned_item.item_id)

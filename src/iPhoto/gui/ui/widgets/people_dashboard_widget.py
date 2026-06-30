@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -43,6 +44,14 @@ from .people_dashboard_shared import (
 
 logger = logging.getLogger(__name__)
 _LOCKED_RETRY_INTERVAL_MS = 1500
+
+
+@dataclass(frozen=True)
+class _IdentityChoice:
+    person_id: str
+    name: str | None
+    thumbnail_path: Path | None
+    face_count: int
 
 
 class _PeopleDashboardLoaderSignals(QObject):
@@ -576,7 +585,7 @@ class PeopleDashboardWidget(QWidget):
                 MenuActionSpec(
                     action_id="new_group",
                     label=tr("PeopleDashboard", "New Group"),
-                    on_trigger=lambda _ctx: self._open_group_dialog(summary.person_id),
+                    on_trigger=lambda _ctx: self._open_group_dialog(f"person:{summary.person_id}"),
                 ),
                 MenuActionSpec(
                     action_id="toggle_hidden",
@@ -638,6 +647,11 @@ class PeopleDashboardWidget(QWidget):
                     on_trigger=lambda _ctx: self._rename_pet(summary),
                 ),
                 MenuActionSpec(
+                    action_id="new_group",
+                    label=tr("PeopleDashboard", "New Group"),
+                    on_trigger=lambda _ctx: self._open_group_dialog(f"pet:{summary.pet_id}"),
+                ),
+                MenuActionSpec(
                     action_id="toggle_pet_hidden",
                     label=(
                         tr("PeopleDashboard", "Unhide")
@@ -645,6 +659,16 @@ class PeopleDashboardWidget(QWidget):
                         else tr("PeopleDashboard", "Hide")
                     ),
                     on_trigger=lambda _ctx: self._toggle_pet_hidden(summary),
+                ),
+                MenuActionSpec(
+                    action_id="toggle_pet_pin",
+                    label=(
+                        tr("PeopleDashboard", "Unpin")
+                        if self._is_pet_pinned(summary.pet_id)
+                        else tr("PeopleDashboard", "Pin")
+                    ),
+                    on_trigger=lambda _ctx: self._toggle_pet_pin(summary),
+                    is_enabled=lambda _ctx: self._pin_actions_available(),
                 ),
                 MenuActionSpec(
                     action_id="merge_pet",
@@ -844,6 +868,25 @@ class PeopleDashboardWidget(QWidget):
         if changed:
             self.reload(preserve_content=bool(self._summaries or self._groups))
 
+    def _toggle_pet_pin(self, summary: PetSummary) -> None:
+        if self._pinned_service is None:
+            return
+        library_root = self._service.library_root()
+        if library_root is None:
+            return
+        if self._is_pet_pinned(summary.pet_id):
+            self._pinned_service.unpin(
+                kind="pet",
+                item_id=summary.pet_id,
+                library_root=library_root,
+            )
+            return
+        self._pinned_service.pin_pet(
+            summary.pet_id,
+            self._pet_label(summary),
+            library_root=library_root,
+        )
+
     def _toggle_group_pin(self, summary: PeopleGroupSummary) -> None:
         if self._pinned_service is None:
             return
@@ -913,10 +956,11 @@ class PeopleDashboardWidget(QWidget):
         self._confirm_merge(summary.person_id, selected_ids[0])
 
     def _open_group_dialog(self, initial_person_id: str) -> None:
-        if len(self._summaries) < 2:
+        choices = self._group_dialog_choices()
+        if len(choices) < 2:
             return
         dialog = GroupPeopleDialog(
-            self._summaries,
+            choices,  # type: ignore[arg-type]
             initial_selected_ids=[initial_person_id],
             dark_mode=self._uses_dark_theme(),
             parent=self,
@@ -926,6 +970,28 @@ class PeopleDashboardWidget(QWidget):
         group = self._service.create_group(dialog.selected_person_ids())
         if group is not None:
             self.reload(preserve_content=bool(self._summaries))
+
+    def _group_dialog_choices(self) -> list[_IdentityChoice]:
+        choices: list[_IdentityChoice] = []
+        for summary in self._summaries:
+            choices.append(
+                _IdentityChoice(
+                    person_id=f"person:{summary.person_id}",
+                    name=summary.name or tr("PeopleDashboard", "Unnamed"),
+                    thumbnail_path=summary.thumbnail_path,
+                    face_count=summary.face_count,
+                )
+            )
+        for summary in self._pet_summaries:
+            choices.append(
+                _IdentityChoice(
+                    person_id=f"pet:{summary.pet_id}",
+                    name=self._pet_label(summary),
+                    thumbnail_path=summary.thumbnail_path,
+                    face_count=summary.detection_count,
+                )
+            )
+        return choices
 
     def _merge_cluster_pair(self, source_person_id: str, target_person_id: str) -> None:
         self._confirm_merge(source_person_id, target_person_id)
@@ -985,7 +1051,7 @@ class PeopleDashboardWidget(QWidget):
     def _confirm_disband_group(self, summary: PeopleGroupSummary) -> bool:
         label = summary.name.strip() or tr("PeopleDashboard", "this group")
         return MergeConfirmDialog.confirm_action(
-            item_count=max(2, len(summary.member_person_ids)),
+            item_count=max(2, len(summary.member_entities) or len(summary.member_person_ids)),
             parent=self,
             title_text=tr("PeopleDashboard", "Disband This Group?"),
             body_text=tr(
@@ -1028,6 +1094,15 @@ class PeopleDashboardWidget(QWidget):
         return self._pinned_service.is_pinned(
             kind="person",
             item_id=person_id,
+            library_root=self._service.library_root(),
+        )
+
+    def _is_pet_pinned(self, pet_id: str) -> bool:
+        if self._pinned_service is None:
+            return False
+        return self._pinned_service.is_pinned(
+            kind="pet",
+            item_id=pet_id,
             library_root=self._service.library_root(),
         )
 

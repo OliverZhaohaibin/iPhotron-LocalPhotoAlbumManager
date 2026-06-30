@@ -26,9 +26,11 @@ class _PeopleResolver:
         self,
         *,
         clusters: set[str] | None = None,
+        pets: set[str] | None = None,
         groups: set[str] | None = None,
     ) -> None:
         self.clusters = clusters or set()
+        self.pets = pets or set()
         self.groups = groups or set()
 
     def has_cluster(self, person_id: str) -> bool:
@@ -36,6 +38,9 @@ class _PeopleResolver:
 
     def has_group(self, group_id: str) -> bool:
         return group_id in self.groups
+
+    def has_pet(self, pet_id: str) -> bool:
+        return pet_id in self.pets
 
 
 def test_pinned_state_service_scopes_items_by_library(tmp_path: Path) -> None:
@@ -122,3 +127,29 @@ def test_pinned_state_service_redirects_and_prunes_people_entities(tmp_path: Pat
     assert ("person", "person-ok") in items
     assert ("group", "group-old") not in items
     assert ("group", "group-ok") in items
+
+
+def test_pinned_state_service_pins_redirects_and_prunes_pets(tmp_path: Path) -> None:
+    repository = _MemoryPinnedRepository()
+    resolver = _PeopleResolver(pets={"pet-new", "pet-ok"})
+    service = PinnedSidebarStateService(
+        repository,
+        people_resolver_getter=lambda _library_root: resolver,
+    )
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    service.pin_pet("pet-old", "Miso", library_root=library_root)
+    service.pin_pet("pet-ok", "Nori", library_root=library_root)
+    service.pin_pet("pet-stale", "Stale", library_root=library_root)
+
+    assert service.prune_missing_people_entities(
+        library_root,
+        pet_ids=("pet-old", "pet-ok", "pet-stale"),
+        pet_redirects={"pet-old": "pet-new"},
+    )
+
+    items = {(item.kind, item.item_id) for item in service.items_for_library(library_root)}
+    assert ("pet", "pet-old") not in items
+    assert ("pet", "pet-new") in items
+    assert ("pet", "pet-ok") in items
+    assert ("pet", "pet-stale") not in items

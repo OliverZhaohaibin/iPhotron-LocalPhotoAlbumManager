@@ -14,6 +14,7 @@ from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
+from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
 from iPhoto.people.repository import AssetFaceAnnotation
 from maps.osmand_search import SearchSuggestion
@@ -713,6 +714,53 @@ def test_handle_info_panel_face_move_to_new_person_requested_refreshes_views() -
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
     coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+
+
+def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._pet_service = Mock(
+        delete_detection=Mock(return_value=True),
+        move_detection_to_pet=Mock(return_value=True),
+        move_detection_to_new_pet=Mock(return_value="pet-new"),
+    )
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    annotation = RecognitionAnnotation(
+        kind="pet",
+        annotation_id="det-1",
+        entity_id="pet-a",
+        display_name="Miso",
+        species_label="cat",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+
+    PlaybackCoordinator._handle_info_panel_face_delete_requested(coordinator, annotation)
+    PlaybackCoordinator._handle_info_panel_face_move_requested(
+        coordinator,
+        annotation,
+        "pet:pet-b",
+    )
+    PlaybackCoordinator._handle_info_panel_face_move_to_new_person_requested(
+        coordinator,
+        annotation,
+        "Nori",
+    )
+
+    coordinator._pet_service.delete_detection.assert_called_once_with("det-1")
+    coordinator._pet_service.move_detection_to_pet.assert_called_once_with("det-1", "pet-b")
+    coordinator._pet_service.move_detection_to_new_pet.assert_called_once_with("det-1", "Nori")
+    assert coordinator._refresh_info_panel_faces.call_count == 3
 
 
 def test_handle_people_snapshot_committed_refreshes_current_overlay() -> None:

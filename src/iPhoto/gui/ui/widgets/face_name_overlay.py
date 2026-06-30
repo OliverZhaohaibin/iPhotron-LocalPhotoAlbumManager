@@ -504,11 +504,14 @@ class FaceNameOverlayWidget(QWidget):
         if self.isVisible():
             self.raise_()
         for state in self._states.values():
-            state.chip.setVisible(
+            chip_visible = (
                 show_saved
                 and not state.face_rect.isEmpty()
                 and state.annotation.face_id != self._editing_face_id
             )
+            state.chip.setVisible(chip_visible)
+            if chip_visible:
+                state.chip.raise_()
         if self._editor is not None:
             self._editor.setVisible(show_saved and self._editing_face_id is not None)
         if self._manual_editor is not None:

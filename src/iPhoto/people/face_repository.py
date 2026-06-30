@@ -26,6 +26,7 @@ from .repository_utils import (
     _key_face_sort_key,
     _normalize_name,
     _serialize_embedding,
+    _unique_group_members,
     _unique_person_ids,
     _utc_now_iso,
     compute_cluster_center,
@@ -915,7 +916,7 @@ class FaceRepository:
             changed_person_ids=(manual_face.person_id, new_person_id),
         )
 
-    def create_group(self, member_person_ids: Iterable[str]) -> PeopleGroupRecord | None:
+    def create_group(self, member_person_ids: Iterable[object]) -> PeopleGroupRecord | None:
         if self._state_repo is None:
             return None
         self.initialize()
@@ -1006,6 +1007,83 @@ class FaceRepository:
         common_rows = sorted(common_rows, key=lambda item: (item[1], item[2]), reverse=True)
         return [(asset_id, last_detected_at) for asset_id, last_detected_at, _rowid in common_rows]
 
+    def _common_asset_rows_for_group_members(
+        self,
+        members: Iterable[object],
+    ) -> list[tuple[str, str]]:
+        group_members = _unique_group_members(members)
+        if len(group_members) < 2:
+            return []
+        per_member_assets: list[dict[str, str]] = []
+        for member in group_members:
+            if member.kind == "person":
+                per_member_assets.append(self._person_asset_rows(member.entity_id))
+            elif member.kind == "pet":
+                per_member_assets.append(self._pet_asset_rows(member.entity_id))
+        if not per_member_assets or any(not assets for assets in per_member_assets):
+            return []
+        common_ids = set(per_member_assets[0])
+        for assets in per_member_assets[1:]:
+            common_ids.intersection_update(assets)
+        rows = [
+            (asset_id, max(assets[asset_id] for assets in per_member_assets))
+            for asset_id in common_ids
+        ]
+        rows.sort(key=lambda item: item[0])
+        rows.sort(key=lambda item: item[1], reverse=True)
+        return rows
+
+    def _person_asset_rows(self, person_id: str) -> dict[str, str]:
+        if not person_id:
+            return {}
+        self.initialize()
+        assets: dict[str, str] = {}
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT asset_id, MAX(detected_at) AS last_detected_at
+                FROM faces
+                WHERE person_id = ?
+                GROUP BY asset_id
+                ORDER BY last_detected_at DESC, asset_id ASC
+                """,
+                (person_id,),
+            ).fetchall()
+        for row in rows:
+            if row["asset_id"]:
+                assets[str(row["asset_id"])] = str(row["last_detected_at"])
+        if self._state_repo is not None:
+            for face in self._state_repo.get_manual_faces_for_persons((person_id,)):
+                previous = assets.get(face.asset_id)
+                if previous is None or face.created_at > previous:
+                    assets[face.asset_id] = face.created_at
+        return assets
+
+    def _pet_asset_rows(self, pet_id: str) -> dict[str, str]:
+        if not pet_id:
+            return {}
+        pet_db_path = self._db_path.parent.parent / "pets" / "pet_index.db"
+        if not pet_db_path.exists():
+            return {}
+        with closing(connect_sqlite(pet_db_path, check_same_thread=False)) as conn:
+            conn.row_factory = sqlite3.Row
+            configure_sqlite_connection(conn, pet_db_path, foreign_keys=True, wal=True)
+            rows = conn.execute(
+                """
+                SELECT asset_id, MAX(detected_at) AS last_detected_at
+                FROM pet_detections
+                WHERE pet_id = ?
+                GROUP BY asset_id
+                ORDER BY last_detected_at DESC, asset_id ASC
+                """,
+                (pet_id,),
+            ).fetchall()
+        return {
+            str(row["asset_id"]): str(row["last_detected_at"])
+            for row in rows
+            if row["asset_id"]
+        }
+
     def get_common_asset_ids_for_group(self, group_id: str) -> list[str]:
         if self._state_repo is None:
             return []
@@ -1033,7 +1111,7 @@ class FaceRepository:
         group = self.get_group(group_id)
         if group is None:
             return []
-        asset_rows = self._common_asset_rows_for_persons(group.member_person_ids)
+        asset_rows = self._common_asset_rows_for_group_members(group.member_entities)
         self._state_repo.replace_group_assets(group.group_id, asset_rows)
         return [asset_id for asset_id, _last_detected_at in asset_rows]
 

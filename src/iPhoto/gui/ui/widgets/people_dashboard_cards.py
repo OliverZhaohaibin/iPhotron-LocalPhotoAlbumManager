@@ -457,7 +457,7 @@ class GroupCard(QWidget):
         gradient.setColorAt(1.0, _qcolor(bottom))
         painter.fillRect(rect, gradient)
 
-        members = list(self.summary.members[:4])
+        members = list((self.summary.members + self.summary.pet_members)[:4])
         if members:
             columns = 2 if len(members) > 1 else 1
             rows = 2 if len(members) > 2 else 1
@@ -489,7 +489,7 @@ class GroupCard(QWidget):
 
         width = GROUP_CARD_WIDTH * 2
         height = GROUP_CARD_HEIGHT * 2
-        members = list(self.summary.members[:4])
+        members = list((self.summary.members + self.summary.pet_members)[:4])
         collage = Image.new("RGBA", (width, height))
         if not members:
             return None
@@ -521,7 +521,7 @@ class GroupCard(QWidget):
 
     def _collage_signature_parts(self) -> list[str]:
         parts = [self.group_id]
-        for member in self.summary.members[:4]:
+        for member in (self.summary.members + self.summary.pet_members)[:4]:
             thumbnail_path = member.thumbnail_path
             if thumbnail_path is None:
                 parts.append("missing")

@@ -16,11 +16,15 @@ from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
     AssetFaceAnnotation,
     FaceRepository,
+    IdentityGroupMember,
     PeopleGroupRecord,
     PeopleGroupSummary,
     PersonSummary,
 )
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
+from iPhoto.pets.records import PetSummary
+from iPhoto.pets.service import pet_library_paths
+from iPhoto.pets.repository import PetRepository
 
 def _default_shared_face_model_dir() -> Path:
     override = os.environ.get("IPHOTO_FACE_MODEL_DIR")
@@ -148,7 +152,13 @@ class PeopleService:
             return []
         summary_list = summaries if summaries is not None else repository.get_person_summaries()
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
-        return self._build_group_summaries(repository, repository.list_groups(), summaries_by_id)
+        pet_summaries_by_id = {summary.pet_id: summary for summary in self._list_pet_summaries()}
+        return self._build_group_summaries(
+            repository,
+            repository.list_groups(),
+            summaries_by_id,
+            pet_summaries_by_id,
+        )
 
     def get_group_summary(self, group_id: str) -> PeopleGroupSummary | None:
         if self._library_root is None or not group_id:
@@ -161,7 +171,8 @@ class PeopleService:
             return None
         summaries = repository.get_person_summaries()
         summaries_by_id = {summary.person_id: summary for summary in summaries}
-        return self._build_group_summary(repository, group, summaries_by_id)
+        pet_summaries_by_id = {summary.pet_id: summary for summary in self._list_pet_summaries()}
+        return self._build_group_summary(repository, group, summaries_by_id, pet_summaries_by_id)
 
     def load_dashboard(
         self,
@@ -177,14 +188,17 @@ class PeopleService:
         pending = counts.get("pending", 0) + counts.get("retry", 0)
         return summaries, groups, pending
 
-    def create_group(
-        self, member_person_ids: list[str] | tuple[str, ...]
-    ) -> PeopleGroupSummary | None:
+    def create_group(self, member_person_ids: list[str] | tuple[str, ...]) -> PeopleGroupSummary | None:
         repository = self.repository()
         if repository is None or self._library_root is None:
             return None
         summaries_by_id = {summary.person_id: summary for summary in self.list_clusters()}
-        valid_member_ids = _ordered_valid_person_ids(member_person_ids, summaries_by_id)
+        pet_summaries_by_id = {summary.pet_id: summary for summary in self._list_pet_summaries()}
+        valid_member_ids = _ordered_valid_identity_members(
+            member_person_ids,
+            summaries_by_id,
+            pet_summaries_by_id,
+        )
         if len(valid_member_ids) < 2:
             return None
         coordinator = self.coordinator
@@ -193,7 +207,7 @@ class PeopleService:
         group = coordinator.create_group(valid_member_ids)
         if group is None:
             return None
-        return self._build_group_summary(repository, group, summaries_by_id)
+        return self._build_group_summary(repository, group, summaries_by_id, pet_summaries_by_id)
 
     def rename_cluster(self, person_id: str, new_name: str | None) -> None:
         if self._library_root is None:
@@ -360,6 +374,9 @@ class PeopleService:
     def has_group(self, group_id: str) -> bool:
         return self.get_group_summary(group_id) is not None
 
+    def has_pet(self, pet_id: str) -> bool:
+        return any(summary.pet_id == pet_id for summary in self._list_pet_summaries())
+
     def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
         repository = self.repository()
         if repository is None or not asset_id:
@@ -469,6 +486,7 @@ class PeopleService:
         repository: FaceRepository,
         group: PeopleGroupRecord,
         summaries_by_id: dict[str, PersonSummary],
+        pet_summaries_by_id: dict[str, PetSummary],
         cover_paths_by_asset_id: dict[str, Path] | None = None,
     ) -> PeopleGroupSummary | None:
         if self._library_root is None:
@@ -478,7 +496,12 @@ class PeopleService:
             for person_id in group.member_person_ids
             if person_id in summaries_by_id
         )
-        if len(members) < 2:
+        pet_members = tuple(
+            pet_summaries_by_id[member.entity_id]
+            for member in group.member_entities
+            if member.kind == "pet" and member.entity_id in pet_summaries_by_id
+        )
+        if len(members) + len(pet_members) < 2:
             return None
 
         asset_ids = self._valid_asset_ids(repository.get_common_asset_ids_for_group(group.group_id))
@@ -490,7 +513,7 @@ class PeopleService:
 
         return PeopleGroupSummary(
             group_id=group.group_id,
-            name=_format_group_name(member.name for member in members),
+            name=_format_group_name(_identity_display_names(members, pet_members)),
             member_person_ids=tuple(member.person_id for member in members),
             members=members,
             asset_count=len(asset_ids),
@@ -499,6 +522,8 @@ class PeopleService:
                 rows_by_id=cover_paths_by_asset_id,
             ),
             created_at=group.created_at,
+            member_entities=group.member_entities,
+            pet_members=pet_members,
         )
 
     def _build_group_summaries(
@@ -506,8 +531,17 @@ class PeopleService:
         repository: FaceRepository,
         groups: list[PeopleGroupRecord],
         summaries_by_id: dict[str, PersonSummary],
+        pet_summaries_by_id: dict[str, PetSummary],
     ) -> list[PeopleGroupSummary]:
-        prepared: list[tuple[PeopleGroupRecord, tuple[PersonSummary, ...], list[str], list[str]]] = []
+        prepared: list[
+            tuple[
+                PeopleGroupRecord,
+                tuple[PersonSummary, ...],
+                tuple[PetSummary, ...],
+                list[str],
+                list[str],
+            ]
+        ] = []
         all_cover_candidate_ids: list[str] = []
         for group in groups:
             members = tuple(
@@ -515,7 +549,12 @@ class PeopleService:
                 for person_id in group.member_person_ids
                 if person_id in summaries_by_id
             )
-            if len(members) < 2:
+            pet_members = tuple(
+                pet_summaries_by_id[member.entity_id]
+                for member in group.member_entities
+                if member.kind == "pet" and member.entity_id in pet_summaries_by_id
+            )
+            if len(members) + len(pet_members) < 2:
                 continue
             asset_ids = self._valid_asset_ids(repository.get_common_asset_ids_for_group(group.group_id))
             cover_asset_id = repository.get_group_cover_asset_id(group.group_id)
@@ -524,14 +563,14 @@ class PeopleService:
                 cover_candidates.append(cover_asset_id)
             cover_candidates.extend(asset_id for asset_id in asset_ids if asset_id != cover_asset_id)
             all_cover_candidate_ids.extend(cover_candidates)
-            prepared.append((group, members, asset_ids, cover_candidates))
+            prepared.append((group, members, pet_members, asset_ids, cover_candidates))
 
         cover_paths_by_asset_id = self._cover_asset_paths(all_cover_candidate_ids)
         summaries: list[PeopleGroupSummary] = []
-        for group, members, asset_ids, cover_candidates in prepared:
+        for group, members, pet_members, asset_ids, cover_candidates in prepared:
             summary = PeopleGroupSummary(
                 group_id=group.group_id,
-                name=_format_group_name(member.name for member in members),
+                name=_format_group_name(_identity_display_names(members, pet_members)),
                 member_person_ids=tuple(member.person_id for member in members),
                 members=members,
                 asset_count=len(asset_ids),
@@ -540,9 +579,18 @@ class PeopleService:
                     rows_by_id=cover_paths_by_asset_id,
                 ),
                 created_at=group.created_at,
+                member_entities=group.member_entities,
+                pet_members=pet_members,
             )
             summaries.append(summary)
         return summaries
+
+    def _list_pet_summaries(self) -> list[PetSummary]:
+        if self._library_root is None:
+            return []
+        paths = pet_library_paths(self._library_root)
+        repository = PetRepository(paths.index_db_path, paths.state_db_path)
+        return repository.get_pet_summaries(include_hidden=True)
 
     def _valid_asset_ids(self, asset_ids: list[str]) -> list[str]:
         if self._library_root is None or not asset_ids:
@@ -622,6 +670,24 @@ def _format_group_name(names: object) -> str:
     return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
 
 
+def _identity_display_names(
+    people: tuple[PersonSummary, ...],
+    pets: tuple[PetSummary, ...],
+) -> list[str]:
+    names: list[str] = []
+    for person in people:
+        label = str(person.name or "").strip()
+        if label:
+            names.append(label)
+    for pet in pets:
+        label = str(pet.name or "").strip()
+        if not label:
+            species = str(pet.species_label or "").strip().title()
+            label = f"Unnamed {species}" if species else "Unnamed Pet"
+        names.append(label)
+    return names
+
+
 def _ordered_valid_person_ids(
     person_ids: list[str] | tuple[str, ...],
     summaries_by_id: dict[str, PersonSummary],
@@ -633,4 +699,31 @@ def _ordered_valid_person_ids(
             continue
         seen.add(person_id)
         valid.append(person_id)
+    return valid
+
+
+def _ordered_valid_identity_members(
+    member_ids: list[str] | tuple[str, ...],
+    summaries_by_id: dict[str, PersonSummary],
+    pet_summaries_by_id: dict[str, PetSummary],
+) -> list[IdentityGroupMember]:
+    valid: list[IdentityGroupMember] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_id in member_ids:
+        text = str(raw_id or "").strip()
+        if not text:
+            continue
+        if ":" in text:
+            kind, entity_id = (part.strip() for part in text.split(":", 1))
+        else:
+            kind, entity_id = "person", text
+        if kind == "person" and entity_id not in summaries_by_id:
+            continue
+        if kind == "pet" and entity_id not in pet_summaries_by_id:
+            continue
+        key = (kind, entity_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        valid.append(IdentityGroupMember(kind=kind, entity_id=entity_id))
     return valid

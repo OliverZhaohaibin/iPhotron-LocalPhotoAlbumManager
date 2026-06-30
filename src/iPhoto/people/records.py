@@ -70,12 +70,23 @@ class PersonSummary:
 
 
 @dataclass(frozen=True)
+class IdentityGroupMember:
+    kind: str
+    entity_id: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.kind}:{self.entity_id}"
+
+
+@dataclass(frozen=True)
 class PeopleGroupRecord:
     group_id: str
     member_person_ids: tuple[str, ...]
     member_key: str
     created_at: str
     updated_at: str
+    member_entities: tuple[IdentityGroupMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +98,8 @@ class PeopleGroupSummary:
     asset_count: int
     cover_asset_path: Path | None
     created_at: str
+    member_entities: tuple[IdentityGroupMember, ...] = ()
+    pet_members: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True)

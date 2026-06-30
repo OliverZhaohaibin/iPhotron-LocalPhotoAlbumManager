@@ -40,6 +40,9 @@ class PetScanSession:
         existing_detections: list[PetDetectionRecord],
     ) -> tuple[list[PetDetectionRecord], list[PetRecord]]:
         done_asset_ids = {result.asset_id for result in self._staged_results if result.asset_id}
+        done_asset_rels = {
+            str(result.asset_rel or "") for result in self._staged_results if result.asset_rel
+        }
         staged_detections = [
             detection
             for result in self._staged_results
@@ -49,6 +52,7 @@ class PetScanSession:
             detection
             for detection in existing_detections
             if detection.asset_id not in done_asset_ids
+            and detection.asset_rel not in done_asset_rels
         ]
         all_detections = retained + staged_detections
         state_repository = repository.state_repository
@@ -80,4 +84,17 @@ class PetScanSession:
         detections: list[PetDetectionRecord],
         pets: list[PetRecord],
     ) -> None:
-        repository.replace_all(detections, pets)
+        previous_detections = repository.get_all_detections()
+        previous_pets = repository.get_all_pet_records()
+
+        repository.replace_all(detections, pets, sync_runtime_state=False)
+        try:
+            repository.sync_runtime_state()
+        except Exception:
+            repository.replace_all(
+                previous_detections,
+                previous_pets,
+                sync_runtime_state=False,
+            )
+            repository.sync_runtime_state()
+            raise

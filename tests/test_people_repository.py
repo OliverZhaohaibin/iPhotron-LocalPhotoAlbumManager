@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 
 import numpy as np
 import pytest
@@ -101,6 +101,19 @@ def _person_record(
         sample_count=sample_count,
         profile_state="stable" if sample_count >= 3 else "unstable",
     )
+
+
+def test_person_summaries_read_while_writer_holds_reserved_lock(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db")
+    repository.initialize()
+    locker = sqlite3.connect(repository.db_path, timeout=0.1)
+    try:
+        locker.execute("BEGIN IMMEDIATE")
+
+        assert repository.get_person_summaries() == []
+    finally:
+        locker.rollback()
+        locker.close()
 
 
 def test_remove_faces_for_assets_deletes_affected_person_rows_first(tmp_path: Path) -> None:

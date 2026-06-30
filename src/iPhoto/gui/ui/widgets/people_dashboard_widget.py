@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -39,9 +41,13 @@ from .people_dashboard_shared import (
     configure_people_cover_cache,
 )
 
+logger = logging.getLogger(__name__)
+_LOCKED_RETRY_INTERVAL_MS = 1500
+
 
 class _PeopleDashboardLoaderSignals(QObject):
     loaded = Signal(int, int, bool, list, list, list, int, int, object, object)
+    failed = Signal(int, int, object, bool)
 
 
 class _PeopleDashboardLoaderWorker(QRunnable):
@@ -68,6 +74,20 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
+        try:
+            self._run()
+        except sqlite3.OperationalError as exc:
+            locked = "database is locked" in str(exc).lower()
+            if locked:
+                logger.info("People & Pets dashboard load deferred while SQLite DB is locked")
+            else:
+                logger.exception("People & Pets dashboard load failed due to SQLite error")
+            self._signals.failed.emit(self._generation, self._index_version, exc, locked)
+        except Exception as exc:
+            logger.exception("People & Pets dashboard load failed")
+            self._signals.failed.emit(self._generation, self._index_version, exc, False)
+
+    def _run(self) -> None:
         if self._people_service.library_root() is None:
             self._signals.loaded.emit(
                 self._generation,
@@ -131,6 +151,7 @@ class PeopleDashboardWidget(QWidget):
         self._show_hidden_people = False
         self._load_signals = _PeopleDashboardLoaderSignals()
         self._load_signals.loaded.connect(self._on_load_completed)
+        self._load_signals.failed.connect(self._on_load_failed)
         self._load_pool = QThreadPool.globalInstance()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -409,6 +430,32 @@ class PeopleDashboardWidget(QWidget):
 
         if self._loaded_index_version < self._index_version:
             self._schedule_visible_refresh()
+
+    def _on_load_failed(
+        self,
+        generation: int,
+        index_version: int,
+        error: object,
+        retryable: bool,
+    ) -> None:
+        if generation != self._load_generation:
+            return
+        self._loading = False
+        if retryable:
+            self._pending_index_refresh = True
+            self._set_database_busy_message()
+            if not self._summaries and not self._pet_summaries and not self._groups:
+                self._empty.show()
+                self._scroll.hide()
+            if self.isVisible():
+                self._refresh_timer.start(_LOCKED_RETRY_INTERVAL_MS)
+            return
+
+        self._loaded_index_version = index_version
+        self._set_load_failed_message(error)
+        if not self._summaries and not self._pet_summaries and not self._groups:
+            self._empty.show()
+            self._scroll.hide()
 
     def _populate_groups(self) -> None:
         self._clear_group_cards()
@@ -1051,6 +1098,23 @@ class PeopleDashboardWidget(QWidget):
 
     def _set_loading_message(self) -> None:
         text = tr("PeopleDashboard", "Loading People & Pets dashboard…")
+        self._message.setText(text)
+        self._empty.setText(text)
+
+    def _set_database_busy_message(self) -> None:
+        text = tr(
+            "PeopleDashboard",
+            "People & Pets is updating in the background. This page will retry shortly.",
+        )
+        self._message.setText(text)
+        self._empty.setText(text)
+
+    def _set_load_failed_message(self, error: object) -> None:
+        del error
+        text = tr(
+            "PeopleDashboard",
+            "People & Pets could not be loaded. Please try refreshing the page.",
+        )
         self._message.setText(text)
         self._empty.setText(text)
 

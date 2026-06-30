@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.pets.index_coordinator import reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
     PET_DETECTOR_PIPELINE_VERSION,
+    DetectedAssetPets,
     PetClusterPipeline,
     _decode_yolox_predictions,
     build_pet_key,
@@ -24,6 +26,7 @@ from iPhoto.pets.pipeline import (
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
+from iPhoto.pets.scan_session import PetScanSession
 from iPhoto.pets.state_repository import PetStateRepository
 
 
@@ -414,6 +417,100 @@ def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Pa
     assert summaries == []
     assert repository.state_repository is not None
     assert repository.state_repository.get_rejected_pet_keys(["pet-key-a"]) == {"pet-key-a"}
+
+
+def test_pet_scan_session_replaces_stale_detections_for_same_asset_path(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    old_detection = replace(
+        _detection(detection_id="old", asset_id="asset-old", pet_id="pet-old"),
+        asset_rel="album/shared.jpg",
+    )
+    old_pet = PetRecord(
+        pet_id="pet-old",
+        name=None,
+        species_label="cat",
+        key_detection_id="old",
+        detection_count=1,
+        center_embedding=old_detection.embedding,
+        embedding_dim=old_detection.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=1,
+    )
+    repository.replace_all([old_detection], [old_pet])
+    new_detection = replace(
+        _detection(detection_id="new", asset_id="asset-new"),
+        asset_rel="album/shared.jpg",
+    )
+    session = PetScanSession()
+    session.stage_detection_results(
+        [
+            DetectedAssetPets(
+                asset_id="asset-new",
+                asset_rel="album/shared.jpg",
+                detections=[new_detection],
+            )
+        ]
+    )
+
+    detections, _pets = session.build_runtime_snapshot(
+        repository,
+        distance_threshold=0.2,
+        min_samples=1,
+        existing_detections=repository.get_all_detections(),
+    )
+
+    assert [detection.asset_id for detection in detections] == ["asset-new"]
+
+
+def test_pet_scan_session_rolls_back_runtime_snapshot_when_state_sync_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    old_detection = _detection(detection_id="old", asset_id="asset-old", pet_id="pet-old")
+    old_pet = PetRecord(
+        pet_id="pet-old",
+        name=None,
+        species_label="cat",
+        key_detection_id="old",
+        detection_count=1,
+        center_embedding=old_detection.embedding,
+        embedding_dim=old_detection.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=1,
+    )
+    repository.replace_all([old_detection], [old_pet])
+    new_detection = _detection(detection_id="new", asset_id="asset-new", pet_id="pet-new")
+    new_pet = PetRecord(
+        pet_id="pet-new",
+        name=None,
+        species_label="cat",
+        key_detection_id="new",
+        detection_count=1,
+        center_embedding=new_detection.embedding,
+        embedding_dim=new_detection.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=1,
+    )
+    original_sync_runtime_state = repository.sync_runtime_state
+    calls = {"count": 0}
+
+    def fail_once() -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("state db locked")
+        original_sync_runtime_state()
+
+    monkeypatch.setattr(repository, "sync_runtime_state", fail_once)
+
+    with pytest.raises(RuntimeError, match="state db locked"):
+        PetScanSession().commit(repository, detections=[new_detection], pets=[new_pet])
+
+    assert [detection.detection_id for detection in repository.get_all_detections()] == ["old"]
+    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-old"]
 
 
 def test_pet_status_helpers_and_scan_merge(tmp_path: Path) -> None:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
+import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,9 +17,11 @@ from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
-from iPhoto.gui.ui.widgets import people_dashboard_cards
-from iPhoto.gui.ui.widgets import people_dashboard_dialogs
-from iPhoto.gui.ui.widgets import people_dashboard_widget
+from iPhoto.gui.ui.widgets import (
+    people_dashboard_cards,
+    people_dashboard_dialogs,
+    people_dashboard_widget,
+)
 from iPhoto.gui.ui.widgets.people_dashboard import (
     GroupPeopleDialog,
     MergeConfirmDialog,
@@ -540,7 +543,7 @@ def test_status_message_updates_without_reloading_cards(
     widget.set_status_message("Scanning...")
 
     assert widget._board.visible_cards()[0] is original_card
-    assert "Click a cluster or group card" in widget._message.text()
+    assert "Click a person, pet, or group card" in widget._message.text()
 
 
 def test_people_dashboard_retranslate_refreshes_loaded_text_without_reloading_cards(
@@ -566,7 +569,7 @@ def test_people_dashboard_retranslate_refreshes_loaded_text_without_reloading_ca
     assert widget._refresh_button.text() == "XX:Refresh"
     assert widget._groups_title.text() == "XX:Groups"
     assert widget._people_title.text() == "XX:People & Pets"
-    assert widget._message.text().startswith("XX:Click a cluster or group card")
+    assert widget._message.text().startswith("XX:Click a person, pet, or group card")
     assert widget._board.visible_cards()[0] is original_card
 
 
@@ -590,8 +593,8 @@ def test_people_dashboard_retranslate_keeps_unbound_message_after_unbind(
 
     widget.retranslate_ui()
 
-    assert widget._message.text() == "XX:Bind a Basic Library to see People clusters."
-    assert widget._empty.text() == "XX:People appears here after a library is bound and scanned."
+    assert widget._message.text() == "XX:Bind a Basic Library to see People & Pets clusters."
+    assert widget._empty.text() == "XX:People & Pets appear here after a library is bound and scanned."
 
 
 def test_set_library_root_uses_asset_aware_people_service_factory(
@@ -618,6 +621,70 @@ def test_set_library_root_uses_asset_aware_people_service_factory(
     assert widget._service is service
     assert created_roots == [tmp_path]
     assert reloads == [False]
+
+
+def test_people_dashboard_loader_reports_locked_database_without_raising(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    del qapp
+
+    class _LockedPeopleService:
+        def library_root(self) -> Path:
+            return tmp_path
+
+        def load_dashboard(self, *, include_hidden: bool = False):
+            del include_hidden
+            raise sqlite3.OperationalError("database is locked")
+
+    class _PetService:
+        def load_dashboard(self, *, include_hidden: bool = False):
+            del include_hidden
+            return [], 0
+
+    failures: list[tuple[int, int, object, bool]] = []
+    signals = people_dashboard_widget._PeopleDashboardLoaderSignals()
+    signals.failed.connect(
+        lambda generation, index_version, error, retryable: failures.append(
+            (generation, index_version, error, retryable)
+        )
+    )
+    worker = people_dashboard_widget._PeopleDashboardLoaderWorker(
+        generation=7,
+        index_version=3,
+        people_service=_LockedPeopleService(),
+        pet_service=_PetService(),
+        status_message=None,
+        pet_status_message=None,
+        show_hidden_people=False,
+        signals=signals,
+    )
+
+    worker.run()
+
+    assert len(failures) == 1
+    assert failures[0][0:2] == (7, 3)
+    assert isinstance(failures[0][2], sqlite3.OperationalError)
+    assert failures[0][3] is True
+
+
+def test_people_dashboard_locked_load_schedules_retry(
+    monkeypatch, qapp: QApplication
+) -> None:
+    del qapp
+    widget = PeopleDashboardWidget()
+    widget._load_generation = 4
+    widget._loading = True
+    monkeypatch.setattr(widget, "isVisible", lambda: True)
+
+    widget._on_load_failed(4, 2, sqlite3.OperationalError("database is locked"), True)
+
+    assert widget._loading is False
+    assert widget._pending_index_refresh is True
+    assert widget._refresh_timer.isActive()
+    assert widget._message.text() == (
+        "People & Pets is updating in the background. This page will retry shortly."
+    )
+    widget._refresh_timer.stop()
 
 
 def test_person_menu_shows_pin_action_when_pinned_service_is_available(

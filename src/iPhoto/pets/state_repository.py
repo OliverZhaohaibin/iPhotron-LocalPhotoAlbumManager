@@ -10,6 +10,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
+
 from .records import PetDetectionRecord, PetProfile, PetRecord
 from .repository_utils import (
     deserialize_embedding,
@@ -411,8 +413,9 @@ class PetStateRepository:
         return True
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_sqlite(self._db_path)
         conn.row_factory = sqlite3.Row
+        configure_sqlite_connection(conn, self._db_path, wal=True)
         return conn
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:

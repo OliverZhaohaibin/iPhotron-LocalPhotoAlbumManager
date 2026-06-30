@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+
+from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
 from .records import (
     FaceRecord,
@@ -1654,11 +1656,9 @@ class FaceStateRepository:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn = connect_sqlite(self._db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        configure_sqlite_connection(conn, self._db_path, foreign_keys=True, wal=True)
         return conn
 
     @staticmethod

@@ -23,6 +23,7 @@ from PySide6.QtGui import QImage, QPixmap
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.ports import EditServicePort
+from iPhoto.bootstrap.startup_profile import mark
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.gallery_demand import GalleryViewportDemand
 from iPhoto.gui.ui.models.roles import Roles, role_names
@@ -61,6 +62,7 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     _scan_batch_received = QtSignal(object)
     thumbnailBackfillProgress = QtSignal(Path, int, int)
+    startupGalleryReady = QtSignal()
     startupFirstFrameReady = QtSignal()
 
     def __init__(
@@ -97,12 +99,12 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_diag_logged_viewport = False
         self._startup_diag_logged_window = False
         self._startup_diag_logged_thumbnail_ready = False
-        self._startup_first_frame_gate_active = False
-        self._startup_first_frame_ready_emitted = False
-        self._startup_first_frame_window_seen = False
-        self._startup_first_frame_viewport_seen = False
-        self._startup_first_frame_thumbnail_seen = False
-        self._startup_first_frame_heartbeat_count = 0
+        self._startup_gallery_warmup_active = False
+        self._startup_gallery_ready_emitted = False
+        self._startup_gallery_window_seen = False
+        self._startup_gallery_viewport_seen = False
+        self._startup_gallery_thumbnail_seen = False
+        self._startup_gallery_heartbeat_count = 0
         self._prioritize_timer = QTimer(self)
         self._prioritize_timer.setSingleShot(True)
         self._prioritize_timer.setInterval(16)
@@ -119,23 +121,14 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._scan_batch_timer.setSingleShot(True)
         self._scan_batch_timer.setInterval(150)
         self._scan_batch_timer.timeout.connect(self._flush_pending_scan_batches)
-        self._startup_first_frame_fallback_timer = QTimer(self)
-        self._startup_first_frame_fallback_timer.setSingleShot(True)
-        self._startup_first_frame_fallback_timer.setInterval(1500)
-        self._startup_first_frame_fallback_timer.timeout.connect(
-            lambda: self._finish_startup_first_frame_gate("fallback")
+        self._startup_gallery_heartbeat_timer = QTimer(self)
+        self._startup_gallery_heartbeat_timer.setSingleShot(False)
+        self._startup_gallery_heartbeat_timer.setInterval(250)
+        self._startup_gallery_heartbeat_timer.timeout.connect(
+            self._log_startup_gallery_heartbeat
         )
-        self._startup_first_frame_timeout_timer = QTimer(self)
-        self._startup_first_frame_timeout_timer.setSingleShot(True)
-        self._startup_first_frame_timeout_timer.timeout.connect(
-            lambda: self._finish_startup_first_frame_gate("timeout")
-        )
-        self._startup_first_frame_heartbeat_timer = QTimer(self)
-        self._startup_first_frame_heartbeat_timer.setSingleShot(False)
-        self._startup_first_frame_heartbeat_timer.setInterval(250)
-        self._startup_first_frame_heartbeat_timer.timeout.connect(
-            self._log_startup_first_frame_heartbeat
-        )
+        # Compatibility for older tests/embedders that inspected the old name.
+        self._startup_first_frame_heartbeat_timer = self._startup_gallery_heartbeat_timer
         self._scan_batch_received.connect(
             self._enqueue_scan_batch_on_ui_thread,
             Qt.ConnectionType.QueuedConnection,
@@ -146,6 +139,10 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._store.data_changed.connect(self._on_source_changed)
         self._store.row_changed.connect(self._on_row_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
+        thumbnail_status_signal = getattr(self._thumbnails, "thumbnailStatusChanged", None)
+        thumbnail_status_connect = getattr(thumbnail_status_signal, "connect", None)
+        if callable(thumbnail_status_connect):
+            thumbnail_status_connect(self._on_thumbnail_status_changed)
         self._bind_backfill_completion_signal(self._current_asset_query_service())
 
     @classmethod
@@ -332,24 +329,27 @@ class GalleryListModelAdapter(QAbstractListModel):
     def row_for_path(self, path: Path) -> int | None:
         return self._store.row_for_path(path)
 
-    def begin_startup_first_frame_gate(self, *, timeout_ms: int = 3000) -> None:
-        """Temporarily prioritize the first visible Gallery frame during startup."""
+    def begin_startup_gallery_warmup(self) -> None:
+        """Prioritize startup Gallery demand without starving guard thumbnails."""
 
-        timeout = max(1, int(timeout_ms))
-        self._startup_first_frame_gate_active = True
-        self._startup_first_frame_ready_emitted = False
-        self._startup_first_frame_window_seen = False
-        self._startup_first_frame_viewport_seen = False
-        self._startup_first_frame_thumbnail_seen = False
-        self._startup_first_frame_heartbeat_count = 0
-        self._startup_first_frame_fallback_timer.stop()
-        self._startup_first_frame_timeout_timer.stop()
-        self._startup_first_frame_timeout_timer.start(timeout)
+        self._startup_gallery_warmup_active = True
+        self._startup_gallery_ready_emitted = False
+        self._startup_gallery_window_seen = False
+        self._startup_gallery_viewport_seen = False
+        self._startup_gallery_thumbnail_seen = False
+        self._startup_gallery_heartbeat_count = 0
         if _startup_hang_diag_enabled():
-            self._startup_first_frame_heartbeat_timer.start()
+            self._startup_gallery_heartbeat_timer.start()
         else:
-            self._startup_first_frame_heartbeat_timer.stop()
-        _LOGGER.info("Gallery startup: first-frame gate begin timeout_ms=%s", timeout)
+            self._startup_gallery_heartbeat_timer.stop()
+        mark("gallery_startup_warmup.begin")
+        _LOGGER.info("Gallery startup: warmup begin")
+
+    def begin_startup_first_frame_gate(self, *, timeout_ms: int = 3000) -> None:
+        """Compatibility wrapper for older startup wiring."""
+
+        del timeout_ms
+        self.begin_startup_gallery_warmup()
 
     def prioritize_rows(self, first: int, last: int) -> None:
         first = max(0, int(first))
@@ -384,10 +384,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._thumb_size = QSize(effective.display_bucket, effective.display_bucket)
         self._viewport_generation = effective.generation
         self._viewport_demand = effective
-        if self._startup_first_frame_gate_active:
-            self._startup_first_frame_viewport_seen = True
-            self._store.prioritize_rows(effective.visible_first, effective.visible_last)
-            self._maybe_schedule_startup_first_frame_fallback()
+        if self._startup_gallery_warmup_active:
+            self._startup_gallery_viewport_seen = True
+            mark("gallery_startup_warmup.viewport_demand")
+            self._store.reconcile_viewport_demand(effective)
+            self._request_thumbnail_hints(effective, guard_only=True)
         else:
             self._store.reconcile_viewport_demand(effective)
             self._request_thumbnail_hints(effective)
@@ -404,9 +405,9 @@ class GalleryListModelAdapter(QAbstractListModel):
     @Slot(object)
     def _on_window_result(self, result: GalleryWindowResult) -> None:
         if self._store.apply_window_result(result):
-            if self._startup_first_frame_gate_active:
-                self._startup_first_frame_window_seen = True
-                self._maybe_schedule_startup_first_frame_fallback()
+            if self._startup_gallery_warmup_active:
+                self._startup_gallery_window_seen = True
+                mark("gallery_startup_warmup.first_window_applied")
             if not self._startup_diag_logged_window:
                 self._startup_diag_logged_window = True
                 _LOGGER.info(
@@ -419,6 +420,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             if self._store.row_cache_needs_trim() and not self._micro_trim_timer.isActive():
                 self._micro_trim_timer.start()
             self._reconcile_full_thumbnail_demand()
+            self._maybe_finish_startup_gallery_warmup("window_applied")
 
     @Slot()
     def _trim_micro_cache_step(self) -> None:
@@ -677,7 +679,10 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._ensure_coordinator_viewport(demand)
         effective = self._viewport_demand or demand
         self._viewport_generation = effective.generation
-        self._request_thumbnail_hints(effective)
+        self._request_thumbnail_hints(
+            effective,
+            guard_only=self._startup_gallery_warmup_active,
+        )
         self._reconcile_full_thumbnail_demand()
 
     def _emit_data_refresh(
@@ -775,12 +780,17 @@ class GalleryListModelAdapter(QAbstractListModel):
             return
         if not self._startup_diag_logged_thumbnail_ready:
             self._startup_diag_logged_thumbnail_ready = True
+            mark("gallery_startup_warmup.first_full_thumbnail_ready")
             _LOGGER.info("Gallery startup: first thumbnail ready row=%s path=%s", row, path)
-        if self._startup_first_frame_gate_active:
-            self._startup_first_frame_thumbnail_seen = True
+        if self._startup_gallery_warmup_active:
+            self._startup_gallery_thumbnail_seen = True
         self._pending_thumbnail_rows.add(row)
         if not self._thumbnail_update_timer.isActive():
             self._thumbnail_update_timer.start()
+
+    def _on_thumbnail_status_changed(self, path: Path) -> None:
+        del path
+        self._maybe_finish_startup_gallery_warmup("thumbnail_status")
 
     @Slot()
     def _flush_thumbnail_updates(self) -> None:
@@ -797,8 +807,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._emit_thumbnail_range(range_first, range_last)
             range_first = range_last = row
         self._emit_thumbnail_range(range_first, range_last)
-        if self._startup_first_frame_gate_active and self._startup_first_frame_thumbnail_seen:
-            self._finish_startup_first_frame_gate("thumbnail_ready")
+        self._maybe_finish_startup_gallery_warmup("thumbnail_ready")
 
     def _emit_thumbnail_range(self, first: int, last: int) -> None:
         top = self.index(first, 0)
@@ -810,60 +819,76 @@ class GalleryListModelAdapter(QAbstractListModel):
                 [Qt.DecorationRole, Roles.TILE_SNAPSHOT],
             )
 
-    def _maybe_schedule_startup_first_frame_fallback(self) -> None:
-        if not self._startup_first_frame_gate_active:
+    def _finish_startup_gallery_warmup(self, reason: str) -> None:
+        if not self._startup_gallery_warmup_active and self._startup_gallery_ready_emitted:
             return
-        if not self._startup_first_frame_window_seen or not self._startup_first_frame_viewport_seen:
-            return
-        if not self._startup_first_frame_fallback_timer.isActive():
-            _LOGGER.info("Gallery startup: first-frame gate fallback armed")
-            self._startup_first_frame_fallback_timer.start()
+        self._startup_gallery_warmup_active = False
+        self._startup_gallery_ready_emitted = True
+        self._startup_gallery_heartbeat_timer.stop()
+        mark("gallery_startup_warmup.ready", reason=reason)
+        _LOGGER.info(
+            "Gallery startup: warmup ready reason=%s window=%s viewport=%s thumbnail=%s",
+            reason,
+            self._startup_gallery_window_seen,
+            self._startup_gallery_viewport_seen,
+            self._startup_gallery_thumbnail_seen,
+        )
+        self.startupGalleryReady.emit()
+        self.startupFirstFrameReady.emit()
 
     def _finish_startup_first_frame_gate(self, reason: str) -> None:
-        if not self._startup_first_frame_gate_active and self._startup_first_frame_ready_emitted:
-            return
-        self._startup_first_frame_gate_active = False
-        self._startup_first_frame_ready_emitted = True
-        self._startup_first_frame_fallback_timer.stop()
-        self._startup_first_frame_timeout_timer.stop()
-        self._startup_first_frame_heartbeat_timer.stop()
-        _LOGGER.info(
-            "Gallery startup: first-frame gate ready reason=%s window=%s viewport=%s thumbnail=%s",
-            reason,
-            self._startup_first_frame_window_seen,
-            self._startup_first_frame_viewport_seen,
-            self._startup_first_frame_thumbnail_seen,
-        )
-        self.startupFirstFrameReady.emit()
-        QTimer.singleShot(100, self._reconcile_full_thumbnail_demand)
+        """Compatibility wrapper for older tests."""
 
-    def _log_startup_first_frame_heartbeat(self) -> None:
-        if not self._startup_first_frame_gate_active:
-            self._startup_first_frame_heartbeat_timer.stop()
+        self._finish_startup_gallery_warmup(reason)
+
+    def _maybe_finish_startup_gallery_warmup(self, reason: str) -> None:
+        if not self._startup_gallery_warmup_active or self._startup_gallery_ready_emitted:
             return
-        self._startup_first_frame_heartbeat_count += 1
+        if not self._startup_gallery_window_seen or not self._startup_gallery_viewport_seen:
+            return
+        demand = self._viewport_demand
+        if demand is None:
+            return
+        visible_rows = self._store.cached_rows(*demand.visible_range)
+        visible_paths = tuple(dict.fromkeys(Path(dto.abs_path) for _row, dto in visible_rows))
+        if not visible_paths:
+            if self.rowCount() == 0:
+                self._finish_startup_gallery_warmup("empty_gallery")
+            return
+        status_getter = getattr(self._thumbnails, "demand_status", None)
+        if not callable(status_getter):
+            return
+        status = status_getter(visible_paths, self._thumb_size)
+        if getattr(status, "is_terminal", False):
+            self._finish_startup_gallery_warmup(reason)
+
+    def _log_startup_gallery_heartbeat(self) -> None:
+        if not self._startup_gallery_warmup_active:
+            self._startup_gallery_heartbeat_timer.stop()
+            return
+        self._startup_gallery_heartbeat_count += 1
         visible_depth = len(getattr(self._thumbnails, "_publish_visible", ()))
         guard_depth = len(getattr(self._thumbnails, "_publish_guard", ()))
         prefetch_depth = len(getattr(self._thumbnails, "_publish_prefetch", ()))
         queued_visible = len(getattr(self._thumbnails, "_queued_tasks", {}))
         prefetch_active = int(getattr(self._thumbnails, "_prefetch_active_tasks", 0))
         _LOGGER.info(
-            "Gallery startup: first-frame heartbeat count=%s source=%s window=%s viewport=%s "
+            "Gallery startup: warmup heartbeat count=%s source=%s window=%s viewport=%s "
             "thumbnail=%s visible_depth=%s guard_depth=%s prefetch_depth=%s "
             "queued_visible=%s prefetch_active=%s",
-            self._startup_first_frame_heartbeat_count,
+            self._startup_gallery_heartbeat_count,
             self._startup_diag_logged_source,
-            self._startup_first_frame_window_seen,
-            self._startup_first_frame_viewport_seen,
-            self._startup_first_frame_thumbnail_seen,
+            self._startup_gallery_window_seen,
+            self._startup_gallery_viewport_seen,
+            self._startup_gallery_thumbnail_seen,
             visible_depth,
             guard_depth,
             prefetch_depth,
             queued_visible,
             prefetch_active,
         )
-        if self._startup_first_frame_heartbeat_count >= 12:
-            self._startup_first_frame_heartbeat_timer.stop()
+        if self._startup_gallery_heartbeat_count >= 12:
+            self._startup_gallery_heartbeat_timer.stop()
 
     def _reconcile_full_thumbnail_demand(self) -> None:
         demand = self._viewport_demand
@@ -872,10 +897,12 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._ensure_coordinator_viewport(demand)
         demand = self._viewport_demand or demand
         visible_rows = self._store.cached_rows(*demand.visible_range)
-        if self._startup_first_frame_gate_active:
-            visible_snapshot = self._visible_only_thumbnail_snapshot(demand, visible_rows)
-            if visible_snapshot is not None:
-                self._thumbnails.reconcile_demand(visible_snapshot)
+        if self._startup_gallery_warmup_active:
+            startup_snapshot = self._startup_thumbnail_snapshot(demand, visible_rows)
+            if startup_snapshot is not None:
+                mark("gallery_startup_warmup.visible_demand_reconciled")
+                self._thumbnails.reconcile_demand(startup_snapshot)
+                self._maybe_finish_startup_gallery_warmup("demand_terminal")
             return
         prefetched_rows = dict(self._store.cached_rows(*demand.full_prefetch_range))
         visible_count = demand.visible_last - demand.visible_first + 1
@@ -924,25 +951,38 @@ class GalleryListModelAdapter(QAbstractListModel):
             )
         self._thumbnails.reconcile_demand(snapshot)
 
-    def _visible_only_thumbnail_snapshot(
+    def _startup_thumbnail_snapshot(
         self,
         demand: GalleryViewportDemand,
         visible_rows: list[tuple[int, AssetDTO]],
     ):
-        visible_paths = tuple(
-            dict.fromkeys(Path(dto.abs_path) for _row, dto in visible_rows)
+        guard_rows = dict(self._store.cached_rows(*demand.full_guard_range))
+        snapshot = self._demand_coordinator.build_thumbnail_snapshot(
+            visible_rows=visible_rows,
+            prefetched_rows=guard_rows,
+            size=self._thumb_size,
         )
-        if not visible_paths:
+        if snapshot is None:
             return None
         return ThumbnailDemandSnapshot(
-            revision=demand.generation,
-            size=self._thumb_size,
-            visible_paths=visible_paths,
+            revision=snapshot.revision,
+            size=snapshot.size,
+            visible_paths=snapshot.visible_paths,
+            guard_paths=snapshot.guard_paths,
+            speculative_paths=(),
+            candidates=tuple(
+                candidate for candidate in snapshot.candidates if candidate.kind == "guard"
+            ),
             phase=demand.phase,
             intent=demand.intent,
         )
 
-    def _request_thumbnail_hints(self, demand: GalleryViewportDemand) -> None:
+    def _request_thumbnail_hints(
+        self,
+        demand: GalleryViewportDemand,
+        *,
+        guard_only: bool = False,
+    ) -> None:
         if demand.intent == "continuous_burst":
             self._thumbnail_hint_request_id += 1
             self._thumbnail_hint_loader.discard_queued()
@@ -951,7 +991,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         root = self._store.active_root() or self._store.library_root()
         query_service = self._current_asset_query_service()
         reader = getattr(query_service, "read_thumbnail_hint_window", None)
-        ordered_rows = tuple(demand.iter_full_prefetch_rows())
+        ordered_rows = (
+            tuple(demand.iter_full_guard_rows())
+            if guard_only
+            else tuple(demand.iter_full_prefetch_rows())
+        )
         if (
             not isinstance(query, AssetQuery)
             or root is None
@@ -960,13 +1004,20 @@ class GalleryListModelAdapter(QAbstractListModel):
         ):
             return
         guard_rows = frozenset(demand.iter_full_guard_rows())
+        if guard_only:
+            first = max(0, min(ordered_rows))
+            last = max(ordered_rows)
+        else:
+            first = demand.full_prefetch_first
+            last = demand.full_prefetch_last
         emit_perf_event(
             "gallery_thumbnail_hint_requested",
             generation=demand.generation,
             intent=demand.intent,
-            first=demand.full_prefetch_first,
-            limit=demand.full_prefetch_last - demand.full_prefetch_first + 1,
+            first=first,
+            limit=last - first + 1,
             guard_rows=len(guard_rows),
+            guard_only=guard_only,
         )
         self._thumbnail_hint_request_id += 1
         request_id = self._thumbnail_hint_request_id
@@ -978,8 +1029,8 @@ class GalleryListModelAdapter(QAbstractListModel):
                 root=Path(root),
                 query=query,
                 query_service=query_service,
-                first=demand.full_prefetch_first,
-                limit=demand.full_prefetch_last - demand.full_prefetch_first + 1,
+                first=first,
+                limit=last - first + 1,
                 ordered_rows=ordered_rows,
                 guard_rows=guard_rows,
             )

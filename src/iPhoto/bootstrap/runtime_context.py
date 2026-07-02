@@ -205,6 +205,7 @@ class RuntimeContext:
                             bound_root,
                             include=DEFAULT_INCLUDE,
                             exclude=DEFAULT_EXCLUDE,
+                            startup=True,
                         )
             except LibraryError as exc:
                 _logger.error("resume_startup_tasks: bind_path failed: %s", exc)
@@ -244,6 +245,7 @@ class RuntimeContext:
             candidate,
             include=DEFAULT_INCLUDE,
             exclude=DEFAULT_EXCLUDE,
+            startup=True,
         )
 
     def open_library(self, root: Path) -> "LibrarySession":

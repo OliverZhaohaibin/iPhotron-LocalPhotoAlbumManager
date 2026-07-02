@@ -126,6 +126,31 @@ class ThumbnailDemandSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ThumbnailDemandStatus:
+    """Observable state for a set of thumbnail demand paths."""
+
+    total: int
+    resident: int = 0
+    queued: int = 0
+    active: int = 0
+    staged: int = 0
+    failed: int = 0
+    missing: int = 0
+
+    @property
+    def pending(self) -> int:
+        return self.queued + self.active + self.staged
+
+    @property
+    def terminal(self) -> int:
+        return self.resident + self.failed
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.total > 0 and self.terminal >= self.total and self.pending == 0
+
+
+@dataclass(frozen=True, slots=True)
 class ThumbnailMemorySnapshot:
     """Live thumbnail memory accounted by the cache scheduler."""
 
@@ -249,6 +274,7 @@ class ThumbnailCacheService(QObject):
     """
 
     thumbnailReady = Signal(Path)
+    thumbnailStatusChanged = Signal(Path)
     _THREAD_POOL_SHUTDOWN_TIMEOUT_MS = 3000
 
     def __init__(
@@ -454,6 +480,44 @@ class ThumbnailCacheService(QObject):
         if self._is_shutting_down:
             return False
         return self._cache_key(path, size) in self._memory_cache
+
+    def demand_status(self, paths: Iterable[Path], size: QSize) -> ThumbnailDemandStatus:
+        """Return queue/cache status for the requested full-thumbnail paths."""
+
+        if self._is_shutting_down:
+            return ThumbnailDemandStatus(total=0)
+        unique_paths = tuple(dict.fromkeys(Path(path) for path in paths))
+        now = time.monotonic()
+        resident = queued = active = staged = failed = missing = 0
+        for path in unique_paths:
+            key = self._cache_key(path, size)
+            failure_until = self._failure_until.get(key, 0.0)
+            if failure_until and failure_until <= now:
+                self._failure_until.pop(key, None)
+                failure_until = 0.0
+            if key in self._memory_cache:
+                resident += 1
+            elif key in self._publish_keys:
+                staged += 1
+            elif key in self._active_decode_reservations or key in self._prefetch_active_tokens:
+                active += 1
+            elif key in self._queued_tasks or key in self._prefetch_queued:
+                queued += 1
+            elif key in self._pending_tasks or key in self._prefetch_pending:
+                queued += 1
+            elif failure_until > now:
+                failed += 1
+            else:
+                missing += 1
+        return ThumbnailDemandStatus(
+            total=len(unique_paths),
+            resident=resident,
+            queued=queued,
+            active=active,
+            staged=staged,
+            failed=failed,
+            missing=missing,
+        )
 
     def memory_snapshot(self) -> ThumbnailMemorySnapshot:
         urgent_staging = self._urgent_staging_bytes()
@@ -1870,6 +1934,7 @@ class ThumbnailCacheService(QObject):
             )
             return
         self._failure_until[key] = time.monotonic() + self._failure_cooldown_seconds
+        self.thumbnailStatusChanged.emit(path)
         emit_perf_event(
             "thumbnail_generate_failed",
             path=path,

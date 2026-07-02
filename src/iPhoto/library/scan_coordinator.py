@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
+from ..bootstrap.startup_profile import mark
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -58,12 +59,20 @@ class ScanCoordinatorMixin:
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        startup: bool = False,
     ) -> None:
         """Start a scan through the session-facing runtime controller surface."""
 
-        self.start_scanning(root, include, exclude)
+        self.start_scanning(root, include, exclude, startup=startup)
 
-    def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
+    def start_scanning(
+        self,
+        root: Path,
+        include: Iterable[str],
+        exclude: Iterable[str],
+        *,
+        startup: bool = False,
+    ) -> None:
         """Start a background scan for the given root directory.
         
         All scanned assets are written to the global database at the library root.
@@ -71,8 +80,6 @@ class ScanCoordinatorMixin:
         # Scanner and face-recognition workers bring Pillow/NumPy and optional
         # AI runtimes into the process. Import them only when a scan actually
         # starts, never while constructing the first window frame.
-        from .workers.face_scan_worker import FaceScanWorker
-        from .workers.pet_scan_worker import PetScanWorker
         from .workers.scanner_worker import ScannerSignals, ScannerWorker
 
         signals = ScannerSignals()
@@ -82,18 +89,18 @@ class ScanCoordinatorMixin:
         if self._current_scanner_worker is not None:
             if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
                 return
-            self._queue_deferred_scan(root, include, exclude)
+            self._queue_deferred_scan(root, include, exclude, startup=startup)
             return
         if self._current_face_scanner is not None:
             is_running = getattr(self._current_face_scanner, "isRunning", None)
             if callable(is_running) and is_running():
-                self._queue_deferred_scan(root, include, exclude)
+                self._queue_deferred_scan(root, include, exclude, startup=startup)
                 return
             self._current_face_scanner = None
         if self._current_pet_scanner is not None:
             is_running = getattr(self._current_pet_scanner, "isRunning", None)
             if callable(is_running) and is_running():
-                self._queue_deferred_scan(root, include, exclude)
+                self._queue_deferred_scan(root, include, exclude, startup=startup)
                 return
             self._current_pet_scanner = None
 
@@ -109,6 +116,7 @@ class ScanCoordinatorMixin:
             library_root=self._root,
             scan_service=getattr(self, "_scan_service", None),
         )
+        setattr(worker, "_defer_ai_workers_until_scan_finished", bool(startup))
         self._current_scanner_worker = worker
         signals.progressUpdated.connect(self.scanProgress)
         signals.batchCommitted.connect(self._on_scan_batch_committed)
@@ -131,14 +139,33 @@ class ScanCoordinatorMixin:
         self.faceScanStatusChanged.emit("")
         self._pet_scan_status_message = None
         self.petScanStatusChanged.emit("")
-        face_library_root = self._root if self._root is not None else root
+        ai_scan_root = self._root if self._root is not None else root
+        start_ai_scan_root = None if startup else ai_scan_root
+        # Release lock before starting the worker
+        del locker
+
+        if start_ai_scan_root is not None:
+            self._start_ai_scan_workers(start_ai_scan_root)
+        if startup:
+            mark("startup_metadata_scan.started", root=root)
+        self._scan_thread_pool.start(worker)
+
+    def _start_ai_scan_workers(self, library_root: Path, *, startup: bool = False) -> None:
+        """Start face and pet workers for an already-bound scan root."""
+
+        if self._current_face_scanner is not None or self._current_pet_scanner is not None:
+            return
+        from .workers.face_scan_worker import FaceScanWorker
+        from .workers.pet_scan_worker import PetScanWorker
+
+        ai_root = Path(library_root)
         face_worker = FaceScanWorker(
-            face_library_root,
+            ai_root,
             self,
             people_service=getattr(self, "_people_service", None),
         )
         pet_worker = PetScanWorker(
-            face_library_root,
+            ai_root,
             self,
             pet_service=getattr(self, "_pet_service", None),
         )
@@ -152,12 +179,12 @@ class ScanCoordinatorMixin:
         )
         self._current_face_scanner = face_worker
         self._current_pet_scanner = pet_worker
-        # Release lock before starting the worker
-        del locker
-
+        if startup:
+            mark("startup_ai_scan.started", root=ai_root)
+            face_worker.finish_input()
+            pet_worker.finish_input()
         face_worker.start()
         pet_worker.start()
-        self._scan_thread_pool.start(worker)
 
     def stop_scanning(self, *, wait: bool = False, timeout_ms: int = 2000) -> None:
         """Cancel the currently running scan, if any."""
@@ -473,15 +500,18 @@ class ScanCoordinatorMixin:
                 return
             return
         self._current_scanner_worker = None
+        defer_ai_workers = (
+            getattr(worker, "_defer_ai_workers_until_scan_finished", False) is True
+        )
         face_scanner = self._current_face_scanner
         pet_scanner = self._current_pet_scanner
         self._live_scan_root = None
         del locker
         self.invalidate_geotagged_assets_cache()
 
-        if face_scanner is not None:
+        if face_scanner is not None and not defer_ai_workers:
             face_scanner.finish_input()
-        if pet_scanner is not None:
+        if pet_scanner is not None and not defer_ai_workers:
             pet_scanner.finish_input()
 
         if worker.cancelled:
@@ -509,6 +539,12 @@ class ScanCoordinatorMixin:
             self.scanFinished.emit(root, False)
             self._start_next_deferred_scan()
             return
+
+        if defer_ai_workers:
+            self._start_ai_scan_workers(
+                self._root if self._root is not None else root,
+                startup=True,
+            )
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.
@@ -551,15 +587,17 @@ class ScanCoordinatorMixin:
         root: Path,
         include: Iterable[str],
         exclude: Iterable[str],
+        *,
+        startup: bool = False,
     ) -> None:
         queue = getattr(self, "_deferred_scan_queue", None)
         if queue is None:
             queue = []
             setattr(self, "_deferred_scan_queue", queue)
-        for queued_root, _queued_include, _queued_exclude in queue:
+        for queued_root, _queued_include, _queued_exclude, _queued_startup in queue:
             if self._paths_equal(queued_root, root):
                 return
-        queue.append((Path(root), list(include), list(exclude)))
+        queue.append((Path(root), list(include), list(exclude), bool(startup)))
 
     def _start_next_deferred_scan(self) -> None:
         queue = getattr(self, "_deferred_scan_queue", None)
@@ -579,8 +617,8 @@ class ScanCoordinatorMixin:
             if not callable(is_running) or is_running():
                 return
             self._current_pet_scanner = None
-        root, include, exclude = queue.pop(0)
-        self.start_scanning(root, include, exclude)
+        root, include, exclude, startup = queue.pop(0)
+        self.start_scanning(root, include, exclude, startup=startup)
 
     def _on_face_scan_status_changed(self, message: str) -> None:
         self._face_scan_status_message = message or None

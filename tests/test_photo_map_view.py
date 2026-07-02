@@ -473,6 +473,113 @@ def test_photo_map_view_renders_markers_inside_gl_widget(
         view.close()
 
 
+def test_photo_map_view_shutdown_is_idempotent(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qapp
+    widget_instances: list[_FallbackMapWidget] = []
+    controller_instances: list[_DummyMarkerController] = []
+
+    class _RecordingMapWidget(_FallbackMapWidget):
+        def __init__(
+            self,
+            parent: QWidget | None = None,
+            *,
+            map_source: MapSourceSpec | None = None,
+        ) -> None:
+            super().__init__(parent, map_source=map_source)
+            self.shutdown_calls = 0
+            widget_instances.append(self)
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    class _RecordingMarkerController(_DummyMarkerController):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.shutdown_calls = 0
+            controller_instances.append(self)
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    def _create_widget(
+        parent: QWidget,
+        *,
+        map_source: MapSourceSpec | None,
+        package_root: Path,
+        **_kwargs,
+    ) -> MapWidgetFactoryResult:
+        resolved_source = (
+            map_source.resolved(package_root)
+            if map_source is not None
+            else MapSourceSpec.osmand_default(package_root).resolved(package_root)
+        )
+        return MapWidgetFactoryResult(
+            _RecordingMapWidget(parent, map_source=resolved_source),
+            resolved_source,
+            "legacy_python",
+            False,
+        )
+
+    monkeypatch.setattr(photo_map_view_module, "create_map_widget", _create_widget)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _RecordingMarkerController)
+
+    view = photo_map_view_module.PhotoMapView()
+    view.shutdown()
+    view.shutdown()
+
+    assert len(widget_instances) == 1
+    assert widget_instances[0].shutdown_calls == 1
+    assert len(controller_instances) == 1
+    assert controller_instances[0].shutdown_calls == 1
+
+
+def test_photo_map_view_close_event_uses_idempotent_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qapp
+    shutdown_calls: list[bool] = []
+
+    class _RecordingPhotoMapView(photo_map_view_module.PhotoMapView):
+        def shutdown(self) -> None:
+            if not getattr(self, "_shutdown_complete", False):
+                shutdown_calls.append(True)
+            super().shutdown()
+
+    def _create_widget(
+        parent: QWidget,
+        *,
+        map_source: MapSourceSpec | None,
+        package_root: Path,
+        **_kwargs,
+    ) -> MapWidgetFactoryResult:
+        resolved_source = (
+            map_source.resolved(package_root)
+            if map_source is not None
+            else MapSourceSpec.osmand_default(package_root).resolved(package_root)
+        )
+        return MapWidgetFactoryResult(
+            _FallbackMapWidget(parent, map_source=resolved_source),
+            resolved_source,
+            "legacy_python",
+            False,
+        )
+
+    monkeypatch.setattr(photo_map_view_module, "create_map_widget", _create_widget)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
+
+    view = _RecordingPhotoMapView()
+    view.close()
+    view.close()
+
+    assert shutdown_calls == [True]
+
+
 def test_marker_callout_background_is_opaque(qapp: QApplication, tmp_path) -> None:
     del qapp
 

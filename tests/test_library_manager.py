@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -437,14 +439,14 @@ def test_scan_request_is_queued_until_active_scan_finishes(
     manager._live_scan_root = first
 
     manager.start_scanning(second, ["*.jpg"], ["*.mov"])
-    assert manager._deferred_scan_queue == [(second, ["*.jpg"], ["*.mov"])]
+    assert manager._deferred_scan_queue == [(second, ["*.jpg"], ["*.mov"], False)]
 
     with patch.object(manager, "start_scanning") as start_mock:
         manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
         qapp.processEvents()
 
     scan_service.finalize_scan_result.assert_called_once()
-    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"])
+    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"], startup=False)
 
 
 def test_deferred_scan_waits_for_face_scan_to_finish(
@@ -478,4 +480,119 @@ def test_deferred_scan_waits_for_face_scan_to_finish(
         face_scanner.isRunning.return_value = False
         manager._on_face_scan_finished(face_scanner)
 
-    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"])
+    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"], startup=False)
+
+
+def test_regular_scan_starts_ai_workers_immediately(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    manager.bind_scan_service(Mock())
+
+    with (
+        patch.object(manager._scan_thread_pool, "start") as start_thread,
+        patch.object(manager, "_start_ai_scan_workers") as start_ai,
+    ):
+        manager.start_scanning(root, ["*.jpg"], ["*.mov"])
+
+    start_ai.assert_called_once_with(root)
+    start_thread.assert_called_once()
+
+
+def test_startup_scan_defers_ai_workers_until_metadata_scan_finishes(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    scan_service = Mock()
+    manager.bind_scan_service(scan_service)
+
+    with (
+        patch.object(manager._scan_thread_pool, "start") as start_thread,
+        patch.object(manager, "_start_ai_scan_workers") as start_ai,
+        patch("iPhoto.library.scan_coordinator.mark") as profile_mark,
+    ):
+        manager.start_scanning(root, ["*.jpg"], ["*.mov"], startup=True)
+
+        worker = manager._current_scanner_worker
+        assert worker is not None
+        assert getattr(worker, "_defer_ai_workers_until_scan_finished") is True
+        start_ai.assert_not_called()
+        profile_mark.assert_called_once_with("startup_metadata_scan.started", root=root)
+        start_thread.assert_called_once_with(worker)
+
+        manager._on_scan_finished(worker, root, [])
+
+    scan_service.finalize_scan_result.assert_called_once_with(
+        root,
+        [],
+        pair_live=False,
+        preserve_modified_after_ms=None,
+        current_scan_job_id=None,
+    )
+    start_ai.assert_called_once_with(root, startup=True)
+
+
+def test_startup_ai_workers_close_input_after_metadata_scan(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    created: list[object] = []
+
+    class _FakeSignal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class _FakeAiWorker:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.statusChanged = _FakeSignal()
+            self.finished = _FakeSignal()
+            self.input_closed = False
+            self.started = False
+            created.append(self)
+
+        def finish_input(self) -> None:
+            self.input_closed = True
+
+        def cancel(self) -> None:
+            self.input_closed = True
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.started = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.face_scan_worker",
+        SimpleNamespace(FaceScanWorker=_FakeAiWorker),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.pet_scan_worker",
+        SimpleNamespace(PetScanWorker=_FakeAiWorker),
+    )
+
+    with patch("iPhoto.library.scan_coordinator.mark") as profile_mark:
+        manager._start_ai_scan_workers(root, startup=True)
+
+    profile_mark.assert_called_once_with("startup_ai_scan.started", root=root)
+    assert len(created) == 2
+    assert all(worker.input_closed for worker in created)
+    assert all(worker.started for worker in created)

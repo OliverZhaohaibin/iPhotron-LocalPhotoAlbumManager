@@ -100,6 +100,7 @@ def mock_store():
 def mock_thumb_service():
     service = MagicMock(spec=ThumbnailCacheService)
     service.peek_full_thumbnail.return_value = None
+    service.demand_status.return_value = SimpleNamespace(is_terminal=False)
     return service
 
 
@@ -546,13 +547,18 @@ def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
     assert demand.full_prefetch_last > demand.visible_last
 
 
-def test_startup_first_frame_gate_uses_visible_only_thumbnail_demand(
+def test_startup_gallery_warmup_keeps_guard_thumbnail_demand(
     adapter,
     mock_store,
     mock_thumb_service,
 ):
     visible = _make_dto(abs_path=Path("/library/visible.jpg"))
-    mock_store.cached_rows.return_value = [(0, visible)]
+    guard = _make_dto(abs_path=Path("/library/guard.jpg"))
+    mock_store.cached_rows.side_effect = [
+        [(0, visible)],
+        [(16, guard)],
+        [(0, visible)],
+    ]
     demand = build_viewport_demand(
         generation=1,
         row_count=100,
@@ -563,53 +569,72 @@ def test_startup_first_frame_gate_uses_visible_only_thumbnail_demand(
         actively_scrolling=False,
     )
 
-    adapter.begin_startup_first_frame_gate(timeout_ms=3000)
+    adapter.begin_startup_gallery_warmup()
     with patch.object(adapter, "_request_thumbnail_hints") as request_hints:
         adapter.update_viewport(demand)
 
-    mock_store.prioritize_rows.assert_called_once_with(0, 15)
-    mock_store.reconcile_viewport_demand.assert_not_called()
-    request_hints.assert_not_called()
+    mock_store.reconcile_viewport_demand.assert_called_once()
+    request_hints.assert_called_once()
+    assert request_hints.call_args.kwargs == {"guard_only": True}
     snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
     assert snapshot.visible_paths == (Path("/library/visible.jpg"),)
-    assert snapshot.guard_paths == ()
+    assert snapshot.guard_paths == (Path("/library/guard.jpg"),)
     assert snapshot.speculative_paths == ()
 
 
-def test_startup_first_frame_heartbeat_is_diag_gated(adapter, monkeypatch) -> None:
+def test_startup_gallery_heartbeat_is_diag_gated(adapter, monkeypatch) -> None:
     monkeypatch.delenv("IPHOTO_STARTUP_HANG_DIAG", raising=False)
 
-    adapter.begin_startup_first_frame_gate(timeout_ms=3000)
+    adapter.begin_startup_gallery_warmup()
 
-    assert not adapter._startup_first_frame_heartbeat_timer.isActive()
+    assert not adapter._startup_gallery_heartbeat_timer.isActive()
 
-    adapter._finish_startup_first_frame_gate("test")
+    adapter._finish_startup_gallery_warmup("test")
     monkeypatch.setenv("IPHOTO_STARTUP_HANG_DIAG", "1")
 
-    adapter.begin_startup_first_frame_gate(timeout_ms=3000)
+    adapter.begin_startup_gallery_warmup()
 
-    assert adapter._startup_first_frame_heartbeat_timer.isActive()
-    adapter._finish_startup_first_frame_gate("test")
+    assert adapter._startup_gallery_heartbeat_timer.isActive()
+    adapter._finish_startup_gallery_warmup("test")
 
 
-def test_startup_first_frame_ready_after_visible_thumbnail_flush(
+def test_startup_gallery_ready_after_visible_thumbnail_terminal(
     adapter,
     mock_store,
+    mock_thumb_service,
 ) -> None:
     emitted: list[None] = []
-    adapter.startupFirstFrameReady.connect(lambda: emitted.append(None))
+    adapter.startupGalleryReady.connect(lambda: emitted.append(None))
     mock_store.cached_row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.cached_rows.return_value = [
+        (0, _make_dto(abs_path=Path("/library/visible.jpg")))
+    ]
+    mock_thumb_service.demand_status.return_value = SimpleNamespace(is_terminal=True)
+    demand = build_viewport_demand(
+        generation=1,
+        row_count=1,
+        visible_first=0,
+        visible_last=0,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter._viewport_demand = demand
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
 
-    adapter.begin_startup_first_frame_gate(timeout_ms=3000)
+    adapter.begin_startup_gallery_warmup()
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
     adapter._on_thumbnail_ready(Path("/library/visible.jpg"))
     adapter._flush_thumbnail_updates()
-    adapter._finish_startup_first_frame_gate("timeout")
 
     assert emitted == [None]
-    assert adapter._startup_first_frame_gate_active is False
+    assert adapter._startup_gallery_warmup_active is False
 
 
-def test_startup_first_frame_gate_restores_full_prefetch_after_ready(
+def test_startup_gallery_warmup_restores_full_prefetch_after_ready(
     adapter,
     mock_store,
     mock_thumb_service,
@@ -618,6 +643,7 @@ def test_startup_first_frame_gate_restores_full_prefetch_after_ready(
     guard = _make_dto(abs_path=Path("/library/guard.jpg"))
     mock_store.cached_rows.side_effect = [
         [(0, visible)],
+        [],
         [(0, visible)],
         [(0, visible), (16, guard)],
     ]
@@ -632,14 +658,14 @@ def test_startup_first_frame_gate_restores_full_prefetch_after_ready(
     )
     adapter._viewport_demand = demand
 
-    adapter.begin_startup_first_frame_gate(timeout_ms=3000)
+    adapter.begin_startup_gallery_warmup()
     adapter._reconcile_full_thumbnail_demand()
-    adapter._finish_startup_first_frame_gate("fallback")
+    adapter._finish_startup_gallery_warmup("ready")
     adapter._reconcile_full_thumbnail_demand()
 
-    visible_only = mock_thumb_service.reconcile_demand.call_args_list[0].args[0]
+    startup_snapshot = mock_thumb_service.reconcile_demand.call_args_list[0].args[0]
     restored = mock_thumb_service.reconcile_demand.call_args_list[-1].args[0]
-    assert visible_only.guard_paths == ()
+    assert startup_snapshot.guard_paths == ()
     assert restored.guard_paths == (Path("/library/guard.jpg"),)
 
 
@@ -1267,7 +1293,7 @@ def test_source_revision_change_republishes_static_viewport_demand(
 
     assert adapter._demand_coordinator.collection_revision == 2
     assert adapter._viewport_demand.generation > previous_generation
-    request_hints.assert_called_once_with(adapter._viewport_demand)
+    request_hints.assert_called_once_with(adapter._viewport_demand, guard_only=False)
     reconcile_full.assert_called_once_with()
 
 

@@ -30,10 +30,7 @@ _MACOS_EXTERNAL_TOOL_PATHS = (
     Path("/opt/local/bin"),
     Path("/opt/local/sbin"),
 )
-_LINUX_FIRST_POST_PAINT_DELAY_MS = 120
-_LINUX_POST_SHOW_FEATURE_INTERVAL_MS = 50
-_LINUX_COORDINATOR_READY_DELAY_MS = 100
-_STARTUP_FIRST_FRAME_GATE_TIMEOUT_MS = 3000
+_STARTUP_GALLERY_WARMUP_FALLBACK_MS = 3000
 _STARTUP_HANG_DIAG_ENV = "IPHOTO_STARTUP_HANG_DIAG"
 _STARTUP_HANG_DIAG_TIMEOUT_SECONDS = 15
 _STARTUP_INPUT_EVENT_TYPES = frozenset(
@@ -351,13 +348,7 @@ def _startup_feature_plan(
 def _startup_timing_plan(platform: str | None = None) -> _StartupTimingPlan:
     """Return post-paint startup delays for the target platform."""
 
-    target_platform = sys.platform if platform is None else platform
-    if target_platform == "linux":
-        return _StartupTimingPlan(
-            _LINUX_FIRST_POST_PAINT_DELAY_MS,
-            _LINUX_POST_SHOW_FEATURE_INTERVAL_MS,
-            _LINUX_COORDINATOR_READY_DELAY_MS,
-        )
+    del platform
     return _StartupTimingPlan(0, 0, 0)
 
 
@@ -498,20 +489,24 @@ def main(argv: list[str] | None = None) -> int:
 
                     def _schedule_startup_scan_fallback() -> None:
                         QTimer.singleShot(
-                            _STARTUP_FIRST_FRAME_GATE_TIMEOUT_MS,
+                            _STARTUP_GALLERY_WARMUP_FALLBACK_MS,
                             _start_deferred_startup_scan,
                         )
 
-                    def _arm_startup_first_frame_gate() -> bool:
+                    def _arm_startup_gallery_warmup() -> bool:
                         model_getter = getattr(coordinator, "gallery_startup_model", None)
                         model = model_getter() if callable(model_getter) else None
-                        begin_gate = getattr(model, "begin_startup_first_frame_gate", None)
-                        ready_signal = getattr(model, "startupFirstFrameReady", None)
+                        begin_warmup = getattr(model, "begin_startup_gallery_warmup", None)
+                        if not callable(begin_warmup):
+                            begin_warmup = getattr(model, "begin_startup_first_frame_gate", None)
+                        ready_signal = getattr(model, "startupGalleryReady", None)
+                        if ready_signal is None:
+                            ready_signal = getattr(model, "startupFirstFrameReady", None)
                         connect = getattr(ready_signal, "connect", None)
-                        if not callable(begin_gate) or not callable(connect):
+                        if not callable(begin_warmup) or not callable(connect):
                             return False
-                        begin_gate(timeout_ms=_STARTUP_FIRST_FRAME_GATE_TIMEOUT_MS)
                         connect(_start_deferred_startup_scan)
+                        begin_warmup()
                         return True
 
                     if len(arguments) > 1:
@@ -520,23 +515,29 @@ def main(argv: list[str] | None = None) -> int:
                             arguments[1],
                         )
                         startup_input_guard.release()
-                        gate_armed = _arm_startup_first_frame_gate()
+                        warmup_armed = _arm_startup_gallery_warmup()
+                        mark("startup_gallery.selection_requested")
                         coordinator.open_album_from_path(Path(arguments[1]))
-                        if not gate_armed:
+                        if warmup_armed:
                             _schedule_startup_scan_fallback()
+                        else:
+                            _start_deferred_startup_scan()
                         return
                     _logger.info("_initialize_after_show: selecting All Photos in sidebar")
                     startup_input_guard.release()
-                    gate_armed = _arm_startup_first_frame_gate()
+                    warmup_armed = _arm_startup_gallery_warmup()
 
                     def _select_all_photos_after_startup() -> None:
                         if _startup_hang_diagnostics_enabled():
                             _logger.info(
                                 "_initialize_after_show: triggering All Photos selection"
                             )
+                        mark("startup_gallery.selection_requested")
                         window.ui.sidebar.select_all_photos(emit_signal=True)
-                        if not gate_armed:
+                        if warmup_armed:
                             _schedule_startup_scan_fallback()
+                        else:
+                            _start_deferred_startup_scan()
 
                     QTimer.singleShot(0, _select_all_photos_after_startup)
                 finally:

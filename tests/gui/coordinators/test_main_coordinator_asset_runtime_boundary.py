@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.coordinators import main_coordinator as main_coordinator_module
 from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 from iPhoto.people.service import PeopleService
 
@@ -61,6 +62,59 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator._window.ui.info_panel.set_map_runtime.assert_called_once_with(
         map_runtime
     )
+
+
+def test_shutdown_is_idempotent_and_does_not_request_app_quit(monkeypatch) -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    coordinator._is_shutting_down = False
+    coordinator._shutdown_complete = False
+    coordinator._logger = MagicMock()
+    coordinator._location_write_queue = MagicMock()
+    coordinator._facade = MagicMock()
+    coordinator._playback = MagicMock()
+    coordinator._edit = MagicMock()
+    coordinator._window = MagicMock()
+    coordinator._window.ui = SimpleNamespace(
+        preview_window=MagicMock(),
+        map_view=MagicMock(),
+    )
+    coordinator._context = MagicMock()
+    coordinator._context.event_bus.shutdown = MagicMock()
+    coordinator._context._asset_runtime.shutdown = MagicMock()
+
+    thread_pool = MagicMock()
+    thread_pool.waitForDone.return_value = True
+    monkeypatch.setattr(
+        main_coordinator_module.QThreadPool,
+        "globalInstance",
+        lambda: thread_pool,
+    )
+    original_qapp_instance = main_coordinator_module.QCoreApplication.instance
+    qapp_instance_calls: list[bool] = []
+    monkeypatch.setattr(
+        main_coordinator_module.QCoreApplication,
+        "instance",
+        lambda: qapp_instance_calls.append(True) or original_qapp_instance(),
+    )
+
+    coordinator.shutdown()
+    coordinator.shutdown()
+
+    coordinator._location_write_queue.drain.assert_called_once_with(timeout=None)
+    coordinator._playback.shutdown.assert_called_once_with()
+    coordinator._edit.shutdown.assert_called_once_with()
+    coordinator._window.ui.preview_window.close_preview.assert_called_once_with(False)
+    coordinator._window.ui.map_view.shutdown.assert_called_once_with()
+    coordinator._window.ui.map_view.close.assert_called_once_with()
+    coordinator._facade.cancel_active_scans.assert_called_once_with()
+    coordinator._context.library.shutdown.assert_called_once_with()
+    coordinator._context.close_library.assert_called_once_with()
+    coordinator._context._asset_runtime.shutdown.assert_called_once_with()
+    coordinator._location_write_queue.shutdown.assert_called_once_with(wait=True)
+    coordinator._context.event_bus.shutdown.assert_called_once_with()
+    thread_pool.waitForDone.assert_called_once_with(2000)
+    thread_pool.clear.assert_not_called()
+    assert qapp_instance_calls == []
 
 
 def test_open_album_from_path_creates_session_when_no_library_is_bound(

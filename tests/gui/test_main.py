@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QCloseEvent
 
 from iPhoto.gui.main import (
     _bootstrap_macos_external_tool_path,
@@ -14,6 +16,7 @@ from iPhoto.gui.main import (
     _startup_timing_plan,
     _StartupInputGuard,
 )
+from iPhoto.gui.ui import main_window as main_window_module
 
 
 def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeypatch) -> None:
@@ -44,6 +47,54 @@ def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeyp
         "/usr/bin",
         "/bin",
     ]
+
+
+def test_main_window_close_event_runs_shutdown_once(monkeypatch, qapp) -> None:
+    del qapp
+    cleanup_calls: list[bool] = []
+    shutdown_calls: list[bool] = []
+
+    class _FakeSignal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class _FakeUi:
+        featureCreated = _FakeSignal()
+
+        def setupUi(self, _window, _library) -> None:
+            return None
+
+    class _FakeWindowManager:
+        def __init__(self, _window, _ui) -> None:
+            return None
+
+        def cleanup(self) -> None:
+            cleanup_calls.append(True)
+
+        def set_controller(self, _controller) -> None:
+            return None
+
+    monkeypatch.setattr(main_window_module, "Ui_MainWindow", _FakeUi)
+    monkeypatch.setattr(main_window_module, "FramelessWindowManager", _FakeWindowManager)
+
+    window = main_window_module.MainWindow(
+        SimpleNamespace(library=object(), translation=None)
+    )
+
+    class _ReentrantCoordinator:
+        def shutdown(self) -> None:
+            shutdown_calls.append(True)
+            window.closeEvent(QCloseEvent())
+
+    window.coordinator = _ReentrantCoordinator()
+    try:
+        window.closeEvent(QCloseEvent())
+        window.closeEvent(QCloseEvent())
+    finally:
+        window.deleteLater()
+
+    assert cleanup_calls == [True]
+    assert shutdown_calls == [True]
 
 
 def test_bootstrap_macos_external_tool_path_skips_non_macos(monkeypatch) -> None:
@@ -234,12 +285,12 @@ def test_startup_feature_plan_keeps_opengl_rhi_detail_before_show(
 @pytest.mark.parametrize(
     ("platform", "expected"),
     (
-        ("linux", (120, 50, 100)),
+        ("linux", (0, 0, 0)),
         ("win32", (0, 0, 0)),
         ("darwin", (0, 0, 0)),
     ),
 )
-def test_startup_timing_plan_only_slows_linux_post_paint_startup(
+def test_startup_timing_plan_has_no_fixed_platform_delay(
     platform: str,
     expected: tuple[int, int, int],
 ) -> None:
@@ -291,9 +342,11 @@ def test_startup_input_guard_filters_only_window_startup_input() -> None:
 
 
 @pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
+@pytest.mark.parametrize("emit_startup_ready", (True, False))
 def test_main_creates_required_features_in_platform_safe_order(
     monkeypatch,
     platform: str,
+    emit_startup_ready: bool,
 ) -> None:
     call_order: list[str] = []
     profile_marks: list[str] = []
@@ -366,7 +419,7 @@ def test_main_creates_required_features_in_platform_safe_order(
             {
                 "select_all_photos": lambda *args, **kwargs: (
                     call_order.append("select"),
-                    startup_ready_signal.emit(),
+                    startup_ready_signal.emit() if emit_startup_ready else None,
                 )
             },
         )()
@@ -416,11 +469,9 @@ def test_main_creates_required_features_in_platform_safe_order(
                 "FakeStartupModel",
                 (),
                 {
-                    "startupFirstFrameReady": startup_ready_signal,
-                    "begin_startup_first_frame_gate": (
-                        lambda self, *, timeout_ms=3000: call_order.append(
-                            f"gate:{timeout_ms}"
-                        )
+                    "startupGalleryReady": startup_ready_signal,
+                    "begin_startup_gallery_warmup": (
+                        lambda self: call_order.append("warmup")
                     ),
                 },
             )()
@@ -514,8 +565,9 @@ def test_main_creates_required_features_in_platform_safe_order(
     assert show_index < preview_index < people_index < coordinator_index
     assert call_order.index("resume:True") < call_order.index("guard:release")
     assert call_order.index("guard:release") < call_order.index("select")
-    assert call_order.index("gate:3000") < call_order.index("select")
+    assert call_order.index("warmup") < call_order.index("select")
     assert call_order.index("select") < call_order.index("scan")
+    assert call_order.count("scan") == 1
 
 
 def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> None:

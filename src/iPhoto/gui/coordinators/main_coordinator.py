@@ -74,6 +74,8 @@ class MainCoordinator(QObject):
         super().__init__(window)
         self._window = window
         self._context = context
+        self._is_shutting_down = False
+        self._shutdown_complete = False
         # facade reference kept for signal wiring as some systems still emit through it
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
@@ -450,49 +452,68 @@ class MainCoordinator(QObject):
 
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
+        if self._shutdown_complete or self._is_shutting_down:
+            return
+        self._is_shutting_down = True
+
         location_queue = getattr(self, "_location_write_queue", None)
-        if location_queue is not None:
-            location_queue.drain(timeout=None)
+        try:
+            if location_queue is not None:
+                location_queue.drain(timeout=None)
 
-        # 1. Cancel any active background scans/imports via Facade
-        if self._facade:
-            self._facade.cancel_active_scans()
-        if self._context and self._context.library:
-            self._context.library.shutdown()
-        if self._context:
-            self._context.close_library()
+            # 1. Stop UI-owned workers and widgets before their QObject graph is destroyed.
+            if self._playback:
+                self._playback.shutdown()
 
-        # 2. Stop playback (video/audio)
-        if self._playback:
-            self._playback.shutdown()
+            if self._edit:
+                self._edit.shutdown()
 
-        if location_queue is not None:
-            location_queue.shutdown(wait=True)
+            if hasattr(self._window.ui, "preview_window"):
+                try:
+                    self._window.ui.preview_window.close_preview(False)
+                except AttributeError:
+                    self._window.ui.preview_window.close()
 
-        # 3. Shutdown other coordinators if they have cleanup logic
-        if self._edit:
-            self._edit.shutdown()
+            if hasattr(self._window.ui, "map_view"):
+                map_view = self._window.ui.map_view
+                try:
+                    shutdown = getattr(map_view, "shutdown", None)
+                    if callable(shutdown):
+                        shutdown()
+                    map_view.close()
+                except RuntimeError:
+                    self._logger.warning(
+                        "Failed to close map view during shutdown",
+                        exc_info=True,
+                    )
 
-        if hasattr(self._window.ui, "preview_window"):
-            try:
-                self._window.ui.preview_window.close_preview(False)
-            except AttributeError:
-                self._window.ui.preview_window.close()
-        if hasattr(self._window.ui, "map_view"):
-            try:
-                self._window.ui.map_view.close()
-            except RuntimeError:
-                self._logger.warning("Failed to close map view during shutdown", exc_info=True)
+            # 2. Cancel active scans/imports and close library-scoped runtime services.
+            if self._facade:
+                self._facade.cancel_active_scans()
+            if self._context and self._context.library:
+                self._context.library.shutdown()
+            if self._context:
+                self._context.close_library()
+                asset_runtime = getattr(self._context, "_asset_runtime", None)
+                asset_runtime_shutdown = getattr(asset_runtime, "shutdown", None)
+                if callable(asset_runtime_shutdown):
+                    asset_runtime_shutdown()
 
-        # 4. Wait briefly for background threads (e.g. thumbnail generation) to finish
-        thread_pool = QThreadPool.globalInstance()
-        if not thread_pool.waitForDone(2000):
-            thread_pool.clear()
+            if location_queue is not None:
+                location_queue.shutdown(wait=True)
 
-        app = QCoreApplication.instance()
-        if app is not None:
-            app.closeAllWindows()
-            app.quit()
+            event_bus = getattr(self._context, "event_bus", None)
+            event_bus_shutdown = getattr(event_bus, "shutdown", None)
+            if callable(event_bus_shutdown):
+                event_bus_shutdown()
+
+            # 3. Wait briefly for background threads (e.g. thumbnail generation) to finish.
+            thread_pool = QThreadPool.globalInstance()
+            if not thread_pool.waitForDone(2000):
+                thread_pool.clear()
+        finally:
+            self._shutdown_complete = True
+            self._is_shutting_down = False
 
     def _connect_signals(self) -> None:
         """Connect application signals."""

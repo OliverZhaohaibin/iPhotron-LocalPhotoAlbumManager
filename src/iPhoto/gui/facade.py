@@ -239,6 +239,7 @@ class AppFacade(QObject):
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        startup: bool = False,
     ) -> None:
         """Start a background scan for *root* through the bound session surface."""
 
@@ -246,6 +247,7 @@ class AppFacade(QObject):
             root,
             include=include,
             exclude=exclude,
+            startup=startup,
         )
 
     def _inject_scan_dependencies_for_tests(

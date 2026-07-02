@@ -140,6 +140,52 @@ def test_l1_l2_hit_does_not_enqueue_generation(tmp_path: Path) -> None:
     queue_generation.assert_not_called()
 
 
+def test_demand_status_reports_cache_queue_stage_failure_and_missing(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(64, 64)
+    resident = tmp_path / "resident.jpg"
+    queued = tmp_path / "queued.jpg"
+    active = tmp_path / "active.jpg"
+    staged = tmp_path / "staged.jpg"
+    failed = tmp_path / "failed.jpg"
+    missing = tmp_path / "missing.jpg"
+
+    service._memory_cache[service._cache_key(resident, size)] = QPixmap(1, 1)
+    queued_key = service._cache_key(queued, size)
+    service._queued_tasks[queued_key] = ThumbnailRequest(
+        queued,
+        size,
+        ThumbnailRequestKind.VISIBLE,
+        1,
+    )
+    service._pending_tasks.add(queued_key)
+    service._active_decode_reservations[service._cache_key(active, size)] = 1
+    service._publish_keys.add(service._cache_key(staged, size))
+    service._failure_until[service._cache_key(failed, size)] = time.monotonic() + 60.0
+
+    status = service.demand_status(
+        [resident, queued, active, staged, failed, missing],
+        size,
+    )
+
+    assert status.total == 6
+    assert status.resident == 1
+    assert status.queued == 1
+    assert status.active == 1
+    assert status.staged == 1
+    assert status.failed == 1
+    assert status.missing == 1
+    assert status.pending == 3
+    assert status.terminal == 2
+    assert status.is_terminal is False
+
+    terminal = service.demand_status([resident, failed], size)
+    assert terminal.is_terminal is True
+
+
 def test_l2_hit_is_not_read_synchronously_from_get_thumbnail(
     tmp_path: Path,
     qapp,

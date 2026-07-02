@@ -6,6 +6,7 @@ import pytest
 
 from iPhoto.bootstrap.runtime_context import RuntimeContext
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
+from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from iPhoto.events.bus import EventBus
 
 
@@ -36,7 +37,7 @@ class _FakeAssetRuntime:
 
 class _FakeFacade:
     def __init__(self) -> None:
-        self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
+        self.scan_requests: list[tuple[Path, list[str], list[str], bool]] = []
 
     def scan_root_async(
         self,
@@ -44,8 +45,9 @@ class _FakeFacade:
         *,
         include,
         exclude,
+        startup: bool = False,
     ) -> None:
-        self.scan_requests.append((Path(root), list(include), list(exclude)))
+        self.scan_requests.append((Path(root), list(include), list(exclude), bool(startup)))
 
 
 class _FakeLibrary:
@@ -225,7 +227,9 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
-    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+    assert context.facade.scan_requests == [
+        (library_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), True)
+    ]
 
 
 def test_resume_startup_tasks_scans_when_index_preexists_without_completed_job(
@@ -253,7 +257,9 @@ def test_resume_startup_tasks_scans_when_index_preexists_without_completed_job(
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
-    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+    assert context.facade.scan_requests == [
+        (library_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), True)
+    ]
 
 
 def test_resume_startup_tasks_can_defer_scan_until_gallery_opens(
@@ -272,7 +278,9 @@ def test_resume_startup_tasks_can_defer_scan_until_gallery_opens(
     context.start_deferred_startup_scan()
     context.start_deferred_startup_scan()
 
-    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+    assert context.facade.scan_requests == [
+        (library_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), True)
+    ]
 
 
 def test_resume_startup_tasks_skips_scan_when_scope_complete(tmp_path: Path) -> None:

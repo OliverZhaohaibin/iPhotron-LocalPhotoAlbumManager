@@ -442,19 +442,13 @@ class DetailPageWidget(QWidget):
         # ``hide_rhi_init_cover()`` once any QRhiWidget child signals
         # ``firstFrameReady``.
         self._rhi_init_cover = QWidget(player_container)
-        self._rhi_init_cover.setAutoFillBackground(True)
-        self._rhi_init_cover.setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground, False,
-        )
-        self._rhi_init_cover.setStyleSheet(
-            "background-color: palette(window);"
-        )
+        self._configure_rhi_init_cover(self._rhi_init_cover)
         player_layout.addWidget(self._rhi_init_cover, 0, 0)
         self._rhi_init_cover.raise_()
 
         self.live_badge.setParent(player_container)
         self.badge_host = player_container
-        self.live_badge.raise_()
+        self._raise_player_overlays()
 
     def _build_edit_container(self, main_window: QWidget, parent_layout: QVBoxLayout) -> None:
         """Wrap the shared viewer with the edit header and sidebar."""
@@ -616,8 +610,7 @@ class DetailPageWidget(QWidget):
             self._rhi_init_cover.hide()
             self._rhi_init_cover.deleteLater()
             self._rhi_init_cover = None
-        self.face_name_overlay.raise_()
-        self.live_badge.raise_()
+        self._raise_player_overlays()
 
     def show_rhi_init_cover(self) -> None:
         """Re-create and show the opaque init cover.
@@ -632,6 +625,7 @@ class DetailPageWidget(QWidget):
             # Cover still exists – just make sure it is visible and on top.
             self._rhi_init_cover.show()
             self._rhi_init_cover.raise_()
+            self._raise_player_overlays()
             return
 
         player_container = self.player_container
@@ -639,17 +633,29 @@ class DetailPageWidget(QWidget):
             return
 
         self._rhi_init_cover = QWidget(player_container)
-        self._rhi_init_cover.setAutoFillBackground(True)
-        self._rhi_init_cover.setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground, False,
-        )
-        self._rhi_init_cover.setStyleSheet(
-            "background-color: palette(window);"
-        )
+        self._configure_rhi_init_cover(self._rhi_init_cover)
         layout = player_container.layout()
         if layout is not None:
             layout.addWidget(self._rhi_init_cover, 0, 0)
         self._rhi_init_cover.raise_()
+        self._raise_player_overlays()
+
+    def _configure_rhi_init_cover(self, cover: QWidget) -> None:
+        cover.setAutoFillBackground(True)
+        cover.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        cover.setStyleSheet("background-color: palette(window);")
+
+    def _raise_player_overlays(self) -> None:
+        refresh_overlay = getattr(self.face_name_overlay, "refresh_view_state", None)
+        if callable(refresh_overlay):
+            refresh_overlay()
+        raise_overlay_controls = getattr(self.face_name_overlay, "raise_interactive_controls", None)
+        if callable(raise_overlay_controls):
+            raise_overlay_controls()
+        else:
+            self.face_name_overlay.raise_()
+        self.live_badge.raise_()
 
 
 __all__ = ["DetailPageWidget"]

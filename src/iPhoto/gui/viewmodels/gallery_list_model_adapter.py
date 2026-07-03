@@ -51,6 +51,7 @@ from .gallery_window_loader import GalleryWindowLoader, GalleryWindowResult
 
 _LOGGER = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_STARTUP_GALLERY_WARMUP_TIMEOUT_MS = 2000
 
 
 def _startup_hang_diag_enabled() -> bool:
@@ -126,6 +127,14 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_gallery_heartbeat_timer.setInterval(250)
         self._startup_gallery_heartbeat_timer.timeout.connect(
             self._log_startup_gallery_heartbeat
+        )
+        self._startup_gallery_timeout_timer = QTimer(self)
+        self._startup_gallery_timeout_timer.setSingleShot(True)
+        self._startup_gallery_timeout_timer.setInterval(
+            _STARTUP_GALLERY_WARMUP_TIMEOUT_MS
+        )
+        self._startup_gallery_timeout_timer.timeout.connect(
+            self._on_startup_gallery_warmup_timeout
         )
         # Compatibility for older tests/embedders that inspected the old name.
         self._startup_first_frame_heartbeat_timer = self._startup_gallery_heartbeat_timer
@@ -342,6 +351,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._startup_gallery_heartbeat_timer.start()
         else:
             self._startup_gallery_heartbeat_timer.stop()
+        self._startup_gallery_timeout_timer.start()
         mark("gallery_startup_warmup.begin")
         _LOGGER.info("Gallery startup: warmup begin")
 
@@ -825,6 +835,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_gallery_warmup_active = False
         self._startup_gallery_ready_emitted = True
         self._startup_gallery_heartbeat_timer.stop()
+        self._startup_gallery_timeout_timer.stop()
         mark("gallery_startup_warmup.ready", reason=reason)
         _LOGGER.info(
             "Gallery startup: warmup ready reason=%s window=%s viewport=%s thumbnail=%s",
@@ -835,6 +846,15 @@ class GalleryListModelAdapter(QAbstractListModel):
         )
         self.startupGalleryReady.emit()
         self.startupFirstFrameReady.emit()
+        if self._viewport_demand is not None:
+            QTimer.singleShot(0, self._restore_full_thumbnail_demand_after_startup)
+
+    @Slot()
+    def _restore_full_thumbnail_demand_after_startup(self) -> None:
+        try:
+            self._reconcile_full_thumbnail_demand()
+        except Exception:  # noqa: BLE001 - optional startup recovery path
+            _LOGGER.exception("Gallery startup: full thumbnail demand restore failed")
 
     def _finish_startup_first_frame_gate(self, reason: str) -> None:
         """Compatibility wrapper for older tests."""
@@ -861,6 +881,46 @@ class GalleryListModelAdapter(QAbstractListModel):
         status = status_getter(visible_paths, self._thumb_size)
         if getattr(status, "is_terminal", False):
             self._finish_startup_gallery_warmup(reason)
+
+    def _startup_gallery_status_snapshot(self) -> tuple[int, str]:
+        demand = self._viewport_demand
+        if demand is None:
+            return 0, "no_viewport"
+        try:
+            visible_rows = self._store.cached_rows(*demand.visible_range)
+        except Exception as exc:  # noqa: BLE001 - diagnostic fallback
+            return 0, f"visible_rows_error={type(exc).__name__}"
+        visible_paths = tuple(dict.fromkeys(Path(dto.abs_path) for _row, dto in visible_rows))
+        if not visible_paths:
+            return 0, "no_visible_paths"
+        status_getter = getattr(self._thumbnails, "demand_status", None)
+        if not callable(status_getter):
+            return len(visible_paths), "unavailable"
+        try:
+            status = status_getter(visible_paths, self._thumb_size)
+        except Exception as exc:  # noqa: BLE001 - diagnostic fallback
+            return len(visible_paths), f"status_error={type(exc).__name__}"
+        status_parts = []
+        for name in ("resident", "queued", "active", "staged", "failed", "missing"):
+            status_parts.append(f"{name}={getattr(status, name, 'n/a')}")
+        status_parts.append(f"terminal={getattr(status, 'is_terminal', 'n/a')}")
+        return len(visible_paths), " ".join(status_parts)
+
+    @Slot()
+    def _on_startup_gallery_warmup_timeout(self) -> None:
+        if not self._startup_gallery_warmup_active or self._startup_gallery_ready_emitted:
+            return
+        visible_count, status = self._startup_gallery_status_snapshot()
+        _LOGGER.warning(
+            "Gallery startup: warmup timeout window=%s viewport=%s thumbnail=%s "
+            "visible_paths=%s status=%s",
+            self._startup_gallery_window_seen,
+            self._startup_gallery_viewport_seen,
+            self._startup_gallery_thumbnail_seen,
+            visible_count,
+            status,
+        )
+        self._finish_startup_gallery_warmup("timeout")
 
     def _log_startup_gallery_heartbeat(self) -> None:
         if not self._startup_gallery_warmup_active:

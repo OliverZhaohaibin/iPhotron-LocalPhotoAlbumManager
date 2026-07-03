@@ -516,16 +516,18 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         startup_input_guard.release()
                         warmup_armed = _arm_startup_gallery_warmup()
-                        mark("startup_gallery.selection_requested")
-                        coordinator.open_album_from_path(Path(arguments[1]))
                         if warmup_armed:
                             _schedule_startup_scan_fallback()
-                        else:
+                        mark("startup_gallery.selection_requested")
+                        coordinator.open_album_from_path(Path(arguments[1]))
+                        if not warmup_armed:
                             _start_deferred_startup_scan()
                         return
                     _logger.info("_initialize_after_show: selecting All Photos in sidebar")
                     startup_input_guard.release()
                     warmup_armed = _arm_startup_gallery_warmup()
+                    if warmup_armed:
+                        _schedule_startup_scan_fallback()
 
                     def _select_all_photos_after_startup() -> None:
                         if _startup_hang_diagnostics_enabled():
@@ -534,9 +536,7 @@ def main(argv: list[str] | None = None) -> int:
                             )
                         mark("startup_gallery.selection_requested")
                         window.ui.sidebar.select_all_photos(emit_signal=True)
-                        if warmup_armed:
-                            _schedule_startup_scan_fallback()
-                        else:
+                        if not warmup_armed:
                             _start_deferred_startup_scan()
 
                     QTimer.singleShot(0, _select_all_photos_after_startup)

@@ -350,6 +350,7 @@ def test_main_creates_required_features_in_platform_safe_order(
 ) -> None:
     call_order: list[str] = []
     profile_marks: list[str] = []
+    delayed_callbacks = []
     fake_color_role = type(
         "ColorRole",
         (),
@@ -512,10 +513,13 @@ def test_main_creates_required_features_in_platform_safe_order(
             },
         ),
     )
-    monkeypatch.setattr(
-        "iPhoto.gui.main.QTimer.singleShot",
-        lambda _delay, callback: callback(),
-    )
+    def _single_shot(delay, callback) -> None:
+        if delay == 0:
+            callback()
+            return
+        delayed_callbacks.append(callback)
+
+    monkeypatch.setattr("iPhoto.gui.main.QTimer.singleShot", _single_shot)
     monkeypatch.setattr("iPhoto.gui.main._StartupInputGuard", _FakeStartupInputGuard)
     monkeypatch.setattr(
         "iPhoto.settings.manager.SettingsManager",
@@ -566,6 +570,9 @@ def test_main_creates_required_features_in_platform_safe_order(
     assert call_order.index("resume:True") < call_order.index("guard:release")
     assert call_order.index("guard:release") < call_order.index("select")
     assert call_order.index("warmup") < call_order.index("select")
+    assert len(delayed_callbacks) == 1
+    for callback in list(delayed_callbacks):
+        callback()
     assert call_order.index("select") < call_order.index("scan")
     assert call_order.count("scan") == 1
 

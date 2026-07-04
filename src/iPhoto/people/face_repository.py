@@ -288,6 +288,19 @@ class FaceRepository:
                 LEFT JOIN faces ON faces.face_id = persons.key_face_id
                 ORDER BY persons.face_count DESC, persons.created_at ASC
                 """).fetchall()
+            asset_rows = conn.execute(
+                """
+                SELECT person_id, asset_id
+                FROM faces
+                WHERE person_id IS NOT NULL
+                """
+            ).fetchall()
+        auto_asset_ids_by_person_id: dict[str, set[str]] = defaultdict(set)
+        for asset_row in asset_rows:
+            if asset_row["person_id"] and asset_row["asset_id"]:
+                auto_asset_ids_by_person_id[str(asset_row["person_id"])].add(
+                    str(asset_row["asset_id"])
+                )
         auto_rows_by_person_id = {str(row["person_id"]): row for row in rows if row["person_id"]}
         manual_faces_by_person_id: dict[str, list[ManualFaceRecord]] = defaultdict(list)
         profile_map = {}
@@ -335,6 +348,8 @@ class FaceRepository:
             resolved_thumbnail: Path | None = None
             if thumbnail_path:
                 resolved_thumbnail = (self._db_path.parent / thumbnail_path).resolve()
+            asset_ids = set(auto_asset_ids_by_person_id.get(person_id, set()))
+            asset_ids.update(face.asset_id for face in manual_faces if face.asset_id)
             summaries.append(
                 PersonSummary(
                     person_id=person_id,
@@ -344,6 +359,7 @@ class FaceRepository:
                     thumbnail_path=resolved_thumbnail,
                     created_at=str(created_at),
                     is_hidden=bool(hidden_map.get(person_id, False)),
+                    asset_count=len(asset_ids),
                 )
             )
         summaries.sort(key=lambda summary: (-summary.face_count, summary.created_at, summary.person_id))
@@ -381,27 +397,7 @@ class FaceRepository:
     def get_asset_ids_by_person(self, person_id: str) -> list[str]:
         if not person_id:
             return []
-        self.initialize()
-        asset_dates: dict[str, str] = {}
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                """
-                SELECT asset_id, MAX(detected_at) AS last_detected_at
-                FROM faces
-                WHERE person_id = ?
-                GROUP BY asset_id
-                ORDER BY last_detected_at DESC, asset_id ASC
-                """,
-                (person_id,),
-            ).fetchall()
-        for row in rows:
-            if row["asset_id"]:
-                asset_dates[str(row["asset_id"])] = str(row["last_detected_at"])
-        if self._state_repo is not None:
-            for face in self._state_repo.get_manual_faces_for_persons([person_id]):
-                previous = asset_dates.get(face.asset_id)
-                if previous is None or face.created_at > previous:
-                    asset_dates[face.asset_id] = face.created_at
+        asset_dates = self._person_asset_rows(person_id)
         ordered = sorted(asset_dates.items(), key=lambda item: item[0])
         ordered = sorted(ordered, key=lambda item: item[1], reverse=True)
         return [asset_id for asset_id, _last_seen in ordered]
@@ -1036,6 +1032,25 @@ class FaceRepository:
     def _person_asset_rows(self, person_id: str) -> dict[str, str]:
         if not person_id:
             return {}
+        assets = self._direct_person_asset_rows(person_id)
+        if self._state_repo is not None:
+            for redirect in self._state_repo.get_identity_redirects():
+                if redirect.target_kind != "person" or redirect.target_id != person_id:
+                    continue
+                source_assets = (
+                    self._direct_person_asset_rows(redirect.source_id)
+                    if redirect.source_kind == "person"
+                    else self._direct_pet_asset_rows(redirect.source_id)
+                )
+                for asset_id, last_seen in source_assets.items():
+                    previous = assets.get(asset_id)
+                    if previous is None or last_seen > previous:
+                        assets[asset_id] = last_seen
+        return assets
+
+    def _direct_person_asset_rows(self, person_id: str) -> dict[str, str]:
+        if not person_id:
+            return {}
         self.initialize()
         assets: dict[str, str] = {}
         with closing(self._connect()) as conn:
@@ -1060,6 +1075,25 @@ class FaceRepository:
         return assets
 
     def _pet_asset_rows(self, pet_id: str) -> dict[str, str]:
+        if not pet_id:
+            return {}
+        assets = self._direct_pet_asset_rows(pet_id)
+        if self._state_repo is not None:
+            for redirect in self._state_repo.get_identity_redirects():
+                if redirect.target_kind != "pet" or redirect.target_id != pet_id:
+                    continue
+                source_assets = (
+                    self._direct_person_asset_rows(redirect.source_id)
+                    if redirect.source_kind == "person"
+                    else self._direct_pet_asset_rows(redirect.source_id)
+                )
+                for asset_id, last_seen in source_assets.items():
+                    previous = assets.get(asset_id)
+                    if previous is None or last_seen > previous:
+                        assets[asset_id] = last_seen
+        return assets
+
+    def _direct_pet_asset_rows(self, pet_id: str) -> dict[str, str]:
         if not pet_id:
             return {}
         pet_db_path = self._db_path.parent.parent / "pets" / "pet_index.db"

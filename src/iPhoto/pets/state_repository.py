@@ -61,7 +61,7 @@ class PetStateRepository:
             rows = conn.execute(
                 """
                 SELECT
-                    pet_id, name, species_label, center_embedding, embedding_dim,
+                    pet_id, name, center_embedding, embedding_dim,
                     created_at, updated_at, sample_count, profile_state
                 FROM pet_profiles
                 """
@@ -76,7 +76,6 @@ class PetStateRepository:
                 PetProfile(
                     pet_id=pet_id,
                     name=row["name"],
-                    species_label=str(row["species_label"] or ""),
                     center_embedding=deserialize_embedding(
                         row["center_embedding"],
                         int(row["embedding_dim"] or 0),
@@ -190,12 +189,11 @@ class PetStateRepository:
                 conn.execute(
                     """
                     INSERT INTO pet_profiles (
-                        pet_id, name, species_label, center_embedding, embedding_dim,
+                        pet_id, name, center_embedding, embedding_dim,
                         created_at, updated_at, sample_count, profile_state
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pet_id) DO UPDATE SET
                         name = COALESCE(pet_profiles.name, excluded.name),
-                        species_label = excluded.species_label,
                         center_embedding = excluded.center_embedding,
                         embedding_dim = excluded.embedding_dim,
                         updated_at = excluded.updated_at,
@@ -205,7 +203,6 @@ class PetStateRepository:
                     (
                         pet.pet_id,
                         normalize_name(name),
-                        pet.species_label,
                         serialize_embedding(pet.center_embedding),
                         pet.embedding_dim,
                         created_at,
@@ -220,14 +217,13 @@ class PetStateRepository:
                     continue
                 conn.execute(
                     """
-                    INSERT INTO pet_keys (pet_key, pet_id, species_label, updated_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO pet_keys (pet_key, pet_id, updated_at)
+                    VALUES (?, ?, ?)
                     ON CONFLICT(pet_key) DO UPDATE SET
                         pet_id = excluded.pet_id,
-                        species_label = excluded.species_label,
                         updated_at = excluded.updated_at
                     """,
-                    (detection.pet_key, detection.pet_id, detection.species_label, timestamp),
+                    (detection.pet_key, detection.pet_id, timestamp),
                 )
 
             for pet in pets:
@@ -392,6 +388,11 @@ class PetStateRepository:
             ).fetchone()
             if source is None or target is None:
                 return False
+            hidden_map = self.get_pet_hidden_map((source_pet_id, target_pet_id))
+            if bool(hidden_map.get(source_pet_id, False)) != bool(
+                hidden_map.get(target_pet_id, False)
+            ):
+                return False
             conn.execute(
                 "UPDATE pet_keys SET pet_id = ?, updated_at = ? WHERE pet_id = ?",
                 (target_pet_id, timestamp, source_pet_id),
@@ -424,7 +425,6 @@ class PetStateRepository:
             CREATE TABLE IF NOT EXISTS pet_profiles (
                 pet_id TEXT PRIMARY KEY,
                 name TEXT,
-                species_label TEXT NOT NULL,
                 center_embedding BLOB,
                 embedding_dim INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
@@ -439,7 +439,6 @@ class PetStateRepository:
             CREATE TABLE IF NOT EXISTS pet_keys (
                 pet_key TEXT PRIMARY KEY,
                 pet_id TEXT NOT NULL,
-                species_label TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """

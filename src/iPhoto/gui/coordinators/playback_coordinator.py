@@ -88,7 +88,6 @@ class _RecognitionActionCandidate:
     name: str | None
     thumbnail_path: Path | None
     face_count: int
-    species_label: str | None = None
 
 
 def _location_video_write_placeholder() -> str:
@@ -1762,10 +1761,9 @@ class PlaybackCoordinator(QObject):
                     candidates.extend(
                         _RecognitionActionCandidate(
                             person_id=f"pet:{summary.pet_id}",
-                            name=summary.name or summary.species_label.title(),
+                            name=summary.name,
                             thumbnail_path=summary.thumbnail_path,
                             face_count=summary.detection_count,
-                            species_label=summary.species_label,
                         )
                         for summary in pet_candidates
                     )

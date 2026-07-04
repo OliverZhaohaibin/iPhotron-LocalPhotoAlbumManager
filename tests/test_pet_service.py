@@ -18,6 +18,12 @@ from iPhoto.pets.pipeline import (
     DetectedAssetPets,
     PetClusterPipeline,
     _decode_yolox_predictions,
+    _dedupe_supported_species_boxes,
+    _DetectedPetBox,
+    _map_yolox_box_to_source,
+    _preprocess_yolox,
+    _tile_scan_regions,
+    _YoloxOnnxPetDetector,
     build_pet_key,
     canonicalize_pet_identities,
     cluster_pet_records,
@@ -84,7 +90,6 @@ def _detection(
     asset_id: str = "asset-a",
     pet_key: str | None = None,
     pet_id: str | None = None,
-    species_label: str = "cat",
     embedding: np.ndarray | None = None,
 ) -> PetDetectionRecord:
     vector = normalize_vector(
@@ -95,7 +100,6 @@ def _detection(
         pet_key=pet_key or f"key-{detection_id}",
         asset_id=asset_id,
         asset_rel=f"album/{asset_id}.jpg",
-        species_label=species_label,
         box_x=10,
         box_y=20,
         box_w=80,
@@ -119,33 +123,30 @@ def test_build_pet_key_is_stable_for_small_bbox_jitter() -> None:
         bbox=(100, 80, 120, 110),
         image_width=1000,
         image_height=800,
-        species_label="cat",
     )
     jittered = build_pet_key(
         asset_id="asset-a",
         bbox=(102, 82, 119, 111),
         image_width=1000,
         image_height=800,
-        species_label="cat",
     )
-    dog = build_pet_key(
+    different_box = build_pet_key(
         asset_id="asset-a",
-        bbox=(102, 82, 119, 111),
+        bbox=(200, 180, 119, 111),
         image_width=1000,
         image_height=800,
-        species_label="dog",
     )
 
     assert jittered == first
-    assert dog != first
+    assert different_box != first
 
 
-def test_cluster_pet_records_keeps_species_separate() -> None:
+def test_cluster_pet_records_does_not_split_by_detector_species() -> None:
     detections = [
-        _detection(detection_id="cat-a", species_label="cat", embedding=np.asarray([1.0, 0.0])),
-        _detection(detection_id="cat-b", species_label="cat", embedding=np.asarray([0.99, 0.01])),
-        _detection(detection_id="dog-a", species_label="dog", embedding=np.asarray([1.0, 0.0])),
-        _detection(detection_id="dog-b", species_label="dog", embedding=np.asarray([0.99, 0.01])),
+        _detection(detection_id="cat-a", embedding=np.asarray([1.0, 0.0])),
+        _detection(detection_id="cat-b", embedding=np.asarray([0.99, 0.01])),
+        _detection(detection_id="dog-a", embedding=np.asarray([1.0, 0.0])),
+        _detection(detection_id="dog-b", embedding=np.asarray([0.99, 0.01])),
     ]
 
     clustered, pets = cluster_pet_records(
@@ -155,12 +156,8 @@ def test_cluster_pet_records_keeps_species_separate() -> None:
         prefer_hdbscan=False,
     )
 
-    assert len(pets) == 2
-    cat_ids = {item.pet_id for item in clustered if item.species_label == "cat"}
-    dog_ids = {item.pet_id for item in clustered if item.species_label == "dog"}
-    assert len(cat_ids) == 1
-    assert len(dog_ids) == 1
-    assert cat_ids != dog_ids
+    assert len(pets) == 1
+    assert {item.pet_id for item in clustered} == {pets[0].pet_id}
 
 
 def test_cluster_pet_records_default_clusters_small_similar_pet_samples() -> None:
@@ -298,6 +295,84 @@ def test_decode_yolox_raw_grid_output_expands_pet_box() -> None:
     assert y1 - y0 == pytest.approx(144.0)
 
 
+def test_preprocess_yolox_letterboxes_without_distorting_aspect_ratio() -> None:
+    image = Image.new("RGB", (400, 200), color=(10, 20, 30))
+
+    preprocessed = _preprocess_yolox(image, input_width=416, input_height=416)
+
+    assert preprocessed.tensor.shape == (1, 3, 416, 416)
+    assert preprocessed.resize_ratio == pytest.approx(1.04)
+    assert preprocessed.tensor[0, 0, 220, 10] == pytest.approx(114.0)
+
+    mapped = _map_yolox_box_to_source(
+        (104.0, 52.0, 208.0, 156.0),
+        preprocessed=preprocessed,
+        image_width=400,
+        image_height=200,
+        offset=(20, 30),
+    )
+
+    assert mapped == (120, 80, 100, 100)
+
+
+def test_yolox_detector_scans_tiles_when_full_image_has_no_supported_pet() -> None:
+    detector = object.__new__(_YoloxOnnxPetDetector)
+    detector._enable_tiled_detection = True
+    detector._tile_scan_min_confidence = 0.30
+    detector._tile_species = frozenset({"cat", "dog"})
+    calls: list[tuple[tuple[int, int], tuple[int, int]]] = []
+
+    def fake_detect_single_image(image, *, offset=(0, 0)):
+        calls.append((image.size, offset))
+        if offset == (0, 0):
+            return [_DetectedPetBox((5, 5, 80, 80), 0.95, "sheep")]
+        return [_DetectedPetBox((100, 100, 80, 80), 0.60, "dog")]
+
+    detector._detect_single_image = fake_detect_single_image
+
+    boxes = detector.detect(Image.new("RGB", (400, 300)))
+
+    assert len(calls) == 1 + len(_tile_scan_regions(400, 300))
+    assert [box.species_label for box in boxes] == ["sheep", "dog"]
+    assert [box.confidence for box in boxes] == [pytest.approx(0.95), pytest.approx(0.60)]
+
+
+def test_yolox_detector_skips_tiles_when_full_image_has_supported_pet() -> None:
+    detector = object.__new__(_YoloxOnnxPetDetector)
+    detector._enable_tiled_detection = True
+    detector._tile_scan_min_confidence = 0.30
+    detector._tile_species = frozenset({"cat", "dog"})
+    calls = 0
+
+    def fake_detect_single_image(image, *, offset=(0, 0)):
+        nonlocal calls
+        calls += 1
+        return [_DetectedPetBox((5, 5, 80, 80), 0.60, "dog")]
+
+    detector._detect_single_image = fake_detect_single_image
+
+    boxes = detector.detect(Image.new("RGB", (400, 300)))
+
+    assert calls == 1
+    assert len(boxes) == 1
+    assert boxes[0].species_label == "dog"
+
+
+def test_dedupe_supported_species_boxes_keeps_best_overlapping_pet_label() -> None:
+    boxes = [
+        _DetectedPetBox((10, 10, 100, 100), 0.61, "cat"),
+        _DetectedPetBox((12, 12, 98, 98), 0.72, "dog"),
+        _DetectedPetBox((250, 10, 100, 100), 0.55, "cat"),
+    ]
+
+    deduped = _dedupe_supported_species_boxes(boxes)
+
+    assert [(box.species_label, box.confidence) for box in deduped] == [
+        ("dog", 0.72),
+        ("cat", 0.55),
+    ]
+
+
 def test_pet_pipeline_filters_detector_boxes_and_records_metrics(tmp_path: Path) -> None:
     image_dir = tmp_path / "album"
     image_dir.mkdir()
@@ -327,12 +402,52 @@ def test_pet_pipeline_filters_detector_boxes_and_records_metrics(tmp_path: Path)
 
     assert len(results) == 1
     assert results[0].error is None
-    assert [detection.species_label for detection in results[0].detections] == ["dog"]
+    assert len(results[0].detections) == 1
     assert results[0].detections[0].box_w == 160
     assert pipeline.last_scan_metrics.candidate_boxes == 3
     assert pipeline.last_scan_metrics.unsupported_species == 1
     assert pipeline.last_scan_metrics.too_small == 1
     assert pipeline.last_scan_metrics.accepted_detections == 1
+
+
+def test_pet_pipeline_dedupes_overlapping_supported_species_after_filtering(
+    tmp_path: Path,
+) -> None:
+    image_dir = tmp_path / "album"
+    image_dir.mkdir()
+    image_path = image_dir / "a.jpg"
+    Image.new("RGB", (400, 300), color=(128, 96, 64)).save(image_path)
+    pipeline = PetClusterPipeline(
+        model_root=tmp_path / "models",
+        allow_model_download=False,
+        min_pet_size=48,
+    )
+    pipeline._detector = SimpleNamespace(
+        detect=lambda _image: [
+            SimpleNamespace(bbox=(10, 20, 160, 120), confidence=0.88, species_label="sheep"),
+            SimpleNamespace(bbox=(10, 20, 160, 120), confidence=0.70, species_label="cat"),
+            SimpleNamespace(bbox=(12, 22, 158, 118), confidence=0.82, species_label="dog"),
+            SimpleNamespace(bbox=(260, 20, 90, 90), confidence=0.76, species_label="cat"),
+        ]
+    )
+    pipeline._embedder = SimpleNamespace(
+        embed=lambda _image: normalize_vector(np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
+    )
+
+    results = pipeline.detect_pets_for_rows(
+        [{"id": "asset-a", "rel": "album/a.jpg"}],
+        library_root=tmp_path,
+        thumbnail_dir=tmp_path / ".iPhoto" / "pets" / "thumbnails",
+    )
+
+    assert len(results) == 1
+    assert [round(detection.confidence, 2) for detection in results[0].detections] == [
+        0.82,
+        0.76,
+    ]
+    assert pipeline.last_scan_metrics.candidate_boxes == 4
+    assert pipeline.last_scan_metrics.unsupported_species == 1
+    assert pipeline.last_scan_metrics.accepted_detections == 2
 
 
 def test_canonicalize_pet_identities_prefers_pet_key_vote(tmp_path: Path) -> None:
@@ -346,7 +461,6 @@ def test_canonicalize_pet_identities_prefers_pet_key_vote(tmp_path: Path) -> Non
     existing_pet = PetRecord(
         pet_id="pet-stable",
         name="Miso",
-        species_label="cat",
         key_detection_id="existing",
         detection_count=2,
         center_embedding=existing.embedding,
@@ -367,7 +481,6 @@ def test_canonicalize_pet_identities_prefers_pet_key_vote(tmp_path: Path) -> Non
     current_pet = PetRecord(
         pet_id="temporary",
         name=None,
-        species_label="cat",
         key_detection_id="current",
         detection_count=1,
         center_embedding=current.embedding,
@@ -395,7 +508,6 @@ def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Pa
     pet = PetRecord(
         pet_id="pet-a",
         name=None,
-        species_label="cat",
         key_detection_id="det-a",
         detection_count=1,
         center_embedding=detection.embedding,
@@ -419,6 +531,102 @@ def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Pa
     assert repository.state_repository.get_rejected_pet_keys(["pet-key-a"]) == {"pet-key-a"}
 
 
+def test_merge_pets_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection(detection_id="det-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection(detection_id="det-b", asset_id="asset-b", pet_id="pet-b")
+    pets = [
+        PetRecord(
+            pet_id="pet-a",
+            name="Miso",
+            key_detection_id="det-a",
+            detection_count=1,
+            center_embedding=first.embedding,
+            embedding_dim=first.embedding_dim,
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+            sample_count=1,
+        ),
+        PetRecord(
+            pet_id="pet-b",
+            name="Nori",
+            key_detection_id="det-b",
+            detection_count=1,
+            center_embedding=second.embedding,
+            embedding_dim=second.embedding_dim,
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+            sample_count=1,
+        ),
+    ]
+    repository.replace_all([first, second], pets)
+    assert repository.set_pet_hidden("pet-a", True) is True
+
+    assert repository.merge_pets("pet-a", "pet-b") is None
+    assert {summary.pet_id for summary in repository.get_pet_summaries(include_hidden=True)} == {
+        "pet-a",
+        "pet-b",
+    }
+
+
+def test_pet_summary_asset_count_counts_unique_assets(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    detections = [
+        _detection(detection_id="det-a", asset_id="asset-a", pet_id="pet-a"),
+        _detection(detection_id="det-b", asset_id="asset-a", pet_id="pet-a"),
+        _detection(detection_id="det-c", asset_id="asset-b", pet_id="pet-a"),
+    ]
+    pet = PetRecord(
+        pet_id="pet-a",
+        name=None,
+        key_detection_id="det-a",
+        detection_count=3,
+        center_embedding=detections[0].embedding,
+        embedding_dim=detections[0].embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=3,
+    )
+
+    repository.replace_all(detections, [pet])
+
+    summaries = repository.get_pet_summaries()
+    assert summaries[0].detection_count == 3
+    assert summaries[0].asset_count == 2
+
+
+def test_pet_service_summary_asset_count_matches_filtered_query(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "pet_status": "done"}]
+    )
+    service = create_pet_service(library_root)
+    repository = service.repository()
+    assert repository is not None
+    detections = [
+        _detection(detection_id="det-a", asset_id="asset-a", pet_id="pet-a"),
+        _detection(detection_id="det-b", asset_id="asset-b", pet_id="pet-a"),
+    ]
+    pet = PetRecord(
+        pet_id="pet-a",
+        name=None,
+        key_detection_id="det-a",
+        detection_count=2,
+        center_embedding=detections[0].embedding,
+        embedding_dim=detections[0].embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=2,
+    )
+    repository.replace_all(detections, [pet])
+
+    summaries = service.list_pets()
+
+    assert summaries[0].asset_count == 1
+    assert service.build_pet_query("pet-a").asset_ids == ["asset-a"]
+
+
 def test_pet_scan_session_replaces_stale_detections_for_same_asset_path(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     old_detection = replace(
@@ -428,7 +636,6 @@ def test_pet_scan_session_replaces_stale_detections_for_same_asset_path(tmp_path
     old_pet = PetRecord(
         pet_id="pet-old",
         name=None,
-        species_label="cat",
         key_detection_id="old",
         detection_count=1,
         center_embedding=old_detection.embedding,
@@ -472,7 +679,6 @@ def test_pet_scan_session_rolls_back_runtime_snapshot_when_state_sync_fails(
     old_pet = PetRecord(
         pet_id="pet-old",
         name=None,
-        species_label="cat",
         key_detection_id="old",
         detection_count=1,
         center_embedding=old_detection.embedding,
@@ -486,7 +692,6 @@ def test_pet_scan_session_rolls_back_runtime_snapshot_when_state_sync_fails(
     new_pet = PetRecord(
         pet_id="pet-new",
         name=None,
-        species_label="cat",
         key_detection_id="new",
         detection_count=1,
         center_embedding=new_detection.embedding,

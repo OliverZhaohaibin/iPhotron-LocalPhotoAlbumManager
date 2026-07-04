@@ -5,53 +5,33 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 
-_HEIF_REGISTERED = False
+from ..image_io import (
+    ImageLoadError,
+    ensure_pillow_image_plugins,
+)
+from ..image_io import (
+    load_image_rgb as _load_image_rgb,
+)
+
+__all__ = [
+    "PetImageLoadError",
+    "crop_pet_region",
+    "ensure_pillow_image_plugins",
+    "image_to_chw_float",
+    "load_image_rgb",
+    "padded_bbox",
+    "save_pet_thumbnail",
+]
 
 
-class PetImageLoadError(RuntimeError):
+class PetImageLoadError(ImageLoadError):
     """Raised when an asset cannot be decoded for pet processing."""
 
 
-def ensure_pillow_image_plugins() -> None:
-    global _HEIF_REGISTERED
-    if _HEIF_REGISTERED:
-        return
-    try:
-        from pillow_heif import register_heif_opener
-    except ImportError:
-        _HEIF_REGISTERED = True
-        return
-    register_heif_opener()
-    _HEIF_REGISTERED = True
-
-
 def load_image_rgb(image_path: Path) -> Image.Image:
-    ensure_pillow_image_plugins()
-    try:
-        return _load_image_rgb(image_path)
-    except OSError as exc:
-        if "image file is truncated" not in str(exc).lower():
-            raise PetImageLoadError(str(exc)) from exc
-
-    previous_truncated_setting = ImageFile.LOAD_TRUNCATED_IMAGES
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
-    try:
-        return _load_image_rgb(image_path)
-    except (OSError, UnidentifiedImageError) as exc:
-        raise PetImageLoadError(str(exc)) from exc
-    finally:
-        ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated_setting
-
-
-def _load_image_rgb(image_path: Path) -> Image.Image:
-    try:
-        with Image.open(image_path) as image:
-            corrected = ImageOps.exif_transpose(image)
-            return corrected.convert("RGB")
-    except UnidentifiedImageError as exc:
-        raise PetImageLoadError(str(exc)) from exc
+    return _load_image_rgb(image_path, error_cls=PetImageLoadError)
 
 
 def padded_bbox(

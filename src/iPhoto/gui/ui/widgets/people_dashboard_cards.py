@@ -223,7 +223,12 @@ class PeopleCard(QWidget):
         painter.drawRoundedRect(badge_rect, 14, 14)
         painter.setPen(_qcolor("#FFFFFF"))
         painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
-        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self.summary.face_count))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self._badge_count()))
+
+    def _badge_count(self) -> int:
+        if hasattr(self.summary, "asset_count"):
+            return max(0, int(getattr(self.summary, "asset_count") or 0))
+        return max(0, int(getattr(self.summary, "face_count", 0) or 0))
 
     def enterEvent(self, _event) -> None:  # noqa: N802
         if not self._dragging:
@@ -311,24 +316,7 @@ class PetCard(PeopleCard):
         name = (self.summary.name or "").strip()
         if name:
             return name
-        species = str(self.summary.species_label or "").strip().title()
-        return f"Unnamed {species}" if species else "Unnamed Pet"
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        card_rect = QRectF(4, 4, CARD_WIDTH - 8, CARD_HEIGHT - 8)
-        species = str(self.summary.species_label or "").strip().title()
-        if not species:
-            return
-        badge_rect = QRectF(card_rect.right() - 70, card_rect.top() + 12, 58, 28)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_qcolor("#0B5C63", 190))
-        painter.drawRoundedRect(badge_rect, 14, 14)
-        painter.setPen(_qcolor("#FFFFFF"))
-        painter.setFont(language_font(QFont("Segoe UI", 9, QFont.Weight.Bold)))
-        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, species)
+        return ""
 
     def _paint_count_badge(self, painter: QPainter, card_rect: QRectF) -> None:
         badge_rect = QRectF(card_rect.left() + 12, card_rect.top() + 12, 44, 28)
@@ -337,11 +325,12 @@ class PetCard(PeopleCard):
         painter.drawRoundedRect(badge_rect, 14, 14)
         painter.setPen(_qcolor("#FFFFFF"))
         painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
-        painter.drawText(
-            badge_rect,
-            Qt.AlignmentFlag.AlignCenter,
-            str(self.summary.detection_count),
-        )
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self._badge_count()))
+
+    def _badge_count(self) -> int:
+        if hasattr(self.summary, "asset_count"):
+            return max(0, int(getattr(self.summary, "asset_count") or 0))
+        return max(0, int(getattr(self.summary, "detection_count", 0) or 0))
 
 
 class GroupCard(QWidget):

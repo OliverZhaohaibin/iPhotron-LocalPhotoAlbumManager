@@ -286,18 +286,12 @@ class _FaceAvatarWidget(QLabel):
     def _prompt_choose_person(self) -> None:
         annotation_kind = self._annotation_kind()
         annotation_entity_id = self._annotation_entity_id()
-        species_label = getattr(self._annotation, "species_label", None)
         options = [
             summary
             for summary in self._candidates
             if getattr(summary, "person_id", None)
             and summary.person_id != annotation_entity_id
             and _candidate_kind(summary) == annotation_kind
-            and (
-                annotation_kind != "pet"
-                or not species_label
-                or getattr(summary, "species_label", None) == species_label
-            )
         ]
         if not options:
             return
@@ -940,7 +934,6 @@ class InfoPanel(QWidget):
             getattr(annotation, "face_id", None),
             getattr(annotation, "person_id", None),
             getattr(annotation, "display_name", None),
-            getattr(annotation, "species_label", None),
             getattr(annotation, "box_x", None),
             getattr(annotation, "box_y", None),
             getattr(annotation, "box_w", None),

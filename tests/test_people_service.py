@@ -10,29 +10,30 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.bootstrap.library_people_service import (
     create_people_asset_repository,
     create_people_service,
 )
+from iPhoto.bootstrap.library_pet_service import create_pet_service
+from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.library.workers.face_scan_worker import FaceScanWorker
+from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
+from iPhoto.people import service as people_service
 from iPhoto.people.index_coordinator import (
     PeopleSnapshotCommittedError,
     get_people_index_coordinator,
     reset_people_index_coordinators,
 )
-from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 from iPhoto.people.pipeline import DetectedAssetFaces, FaceClusterPipeline
 from iPhoto.people.records import AssetFaceAnnotation
 from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
-from iPhoto.people import service as people_service
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository import PetRepository
-from iPhoto.pets.service import pet_library_paths
 from iPhoto.pets.repository_utils import utc_now_iso
+from iPhoto.pets.service import pet_library_paths
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +127,6 @@ def _pet_record(*, pet_id: str, key_detection_id: str, detection_count: int, nam
     return PetRecord(
         pet_id=pet_id,
         name=name,
-        species_label="cat",
         key_detection_id=key_detection_id,
         detection_count=detection_count,
         center_embedding=embedding,
@@ -150,7 +150,6 @@ def _pet_detection_record(
         pet_key=f"key-{detection_id}",
         asset_id=asset_id,
         asset_rel=asset_rel,
-        species_label="cat",
         box_x=10,
         box_y=12,
         box_w=80,
@@ -280,6 +279,41 @@ def test_people_service_rename_merge_and_build_query(tmp_path: Path) -> None:
     assert merged[0].person_id == "person-b"
     assert merged[0].face_count == 2
     assert merged[0].name == "Bob"
+
+
+def test_people_service_summary_asset_count_matches_filtered_query(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
+    )
+    service = create_people_service(library_root)
+    repository = service.repository()
+    assert repository is not None
+    face_a = _face_record(
+        face_id="face-a",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    face_b = _face_record(
+        face_id="face-b",
+        asset_id="asset-b",
+        asset_rel="album/b.jpg",
+        person_id="person-a",
+    )
+    person = _person_record(
+        person_id="person-a",
+        key_face_id="face-a",
+        face_count=2,
+        name="Alice",
+    )
+    repository.replace_all([face_a, face_b], [person])
+
+    summaries = service.list_clusters()
+
+    assert summaries[0].asset_count == 1
+    assert service.build_cluster_query("person-a").asset_ids == ["asset-a"]
 
 
 def test_people_service_creates_groups_and_queries_common_assets(tmp_path: Path) -> None:
@@ -714,6 +748,326 @@ def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -
         "person-a",
         "person-b",
     }
+
+
+def test_cross_merge_pet_into_person_redirects_pet_assets(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/person.jpg", "id": "asset-person", "media_type": 0},
+            {"rel": "album/pet.jpg", "id": "asset-pet", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [_person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice")],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [pet_detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1, name="Miso")],
+    )
+
+    result = people_service.merge_identities("pet:pet-a", "person:person-a")
+
+    assert result is not None and result.merged is True
+    assert [summary.pet_id for summary in pet_service.list_pets(include_hidden=True)] == []
+    assert set(people_service.build_cluster_query("person-a").asset_ids) == {
+        "asset-person",
+        "asset-pet",
+    }
+    assert pet_service.build_pet_query("pet-a").asset_ids == []
+
+
+def test_cross_merge_person_into_pet_redirects_person_assets(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/person.jpg", "id": "asset-person", "media_type": 0},
+            {"rel": "album/pet.jpg", "id": "asset-pet", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [_person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice")],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [pet_detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1, name="Miso")],
+    )
+
+    result = people_service.merge_identities("person:person-a", "pet:pet-a")
+
+    assert result is not None and result.merged is True
+    assert [summary.person_id for summary in people_service.list_clusters(include_hidden=True)] == []
+    assert set(pet_service.build_pet_query("pet-a").asset_ids) == {
+        "asset-pet",
+        "asset-person",
+    }
+    assert people_service.build_cluster_query("person-a").asset_ids == []
+
+
+def test_cross_merge_retargets_existing_redirect_sources(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/source-person.jpg", "id": "asset-source-person", "media_type": 0},
+            {"rel": "album/source-pet.jpg", "id": "asset-source-pet", "media_type": 0},
+            {"rel": "album/target-person.jpg", "id": "asset-target-person", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-source-person",
+                asset_rel="album/source-person.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-c",
+                asset_id="asset-target-person",
+                asset_rel="album/target-person.jpg",
+                person_id="person-c",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+            _person_record(person_id="person-c", key_face_id="face-c", face_count=1, name="Casey"),
+        ],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_detection = _pet_detection_record(
+        detection_id="det-b",
+        asset_id="asset-source-pet",
+        asset_rel="album/source-pet.jpg",
+        pet_id="pet-b",
+    )
+    pet_repository.replace_all(
+        [pet_detection],
+        [_pet_record(pet_id="pet-b", key_detection_id="det-b", detection_count=1, name="Miso")],
+    )
+
+    first = people_service.merge_identities("person:person-a", "pet:pet-b")
+    second = people_service.merge_identities("pet:pet-b", "person:person-c")
+
+    assert first is not None and first.merged is True
+    assert second is not None and second.merged is True
+    assert set(people_service.build_cluster_query("person-c").asset_ids) == {
+        "asset-source-person",
+        "asset-source-pet",
+        "asset-target-person",
+    }
+    assert people_service.build_cluster_query("person-a").asset_ids == []
+    assert pet_service.build_pet_query("pet-b").asset_ids == []
+
+
+def test_person_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/person-a.jpg", "id": "asset-person-a", "media_type": 0},
+            {"rel": "album/person-b.jpg", "id": "asset-person-b", "media_type": 0},
+            {"rel": "album/pet.jpg", "id": "asset-pet", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person-a",
+                asset_rel="album/person-a.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b",
+                asset_id="asset-person-b",
+                asset_rel="album/person-b.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+        ],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [pet_detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1, name="Miso")],
+    )
+
+    cross_merge = people_service.merge_identities("pet:pet-a", "person:person-a")
+    same_kind_merge = people_service.merge_clusters("person-a", "person-b")
+
+    assert cross_merge is not None and cross_merge.merged is True
+    assert same_kind_merge is True
+    assert set(people_service.build_cluster_query("person-b").asset_ids) == {
+        "asset-person-a",
+        "asset-person-b",
+        "asset-pet",
+    }
+    assert people_service.build_cluster_query("person-a").asset_ids == []
+
+
+def test_pet_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/person.jpg", "id": "asset-person", "media_type": 0},
+            {"rel": "album/pet-a.jpg", "id": "asset-pet-a", "media_type": 0},
+            {"rel": "album/pet-b.jpg", "id": "asset-pet-b", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [_person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice")],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_a = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet-a",
+        asset_rel="album/pet-a.jpg",
+        pet_id="pet-a",
+    )
+    pet_b = _pet_detection_record(
+        detection_id="det-b",
+        asset_id="asset-pet-b",
+        asset_rel="album/pet-b.jpg",
+        pet_id="pet-b",
+    )
+    pet_repository.replace_all(
+        [pet_a, pet_b],
+        [
+            _pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1, name="Miso"),
+            _pet_record(pet_id="pet-b", key_detection_id="det-b", detection_count=1, name="Nori"),
+        ],
+    )
+
+    cross_merge = people_service.merge_identities("person:person-a", "pet:pet-a")
+    same_kind_merge = pet_service.merge_pets("pet-a", "pet-b")
+
+    assert cross_merge is not None and cross_merge.merged is True
+    assert same_kind_merge is True
+    assert set(pet_service.build_pet_query("pet-b").asset_ids) == {
+        "asset-person",
+        "asset-pet-a",
+        "asset-pet-b",
+    }
+    assert pet_service.build_pet_query("pet-a").asset_ids == []
+
+
+def test_cross_merge_blocks_hidden_state_mismatch(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/person.jpg", "id": "asset-person", "media_type": 0},
+            {"rel": "album/pet.jpg", "id": "asset-pet", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [_person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice")],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [pet_detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1, name="Miso")],
+    )
+    people_service.set_cluster_hidden("person-a", True)
+
+    assert people_service.merge_identities("person:person-a", "pet:pet-a") is None
+    assert people_service.has_cluster("person-a") is True
+    assert pet_service.has_pet("pet-a") is True
 
 
 def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:

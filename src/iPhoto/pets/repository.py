@@ -76,27 +76,26 @@ class PetRepository:
             conn.executemany(
                 """
                 INSERT INTO pet_detections (
-                    detection_id, pet_key, asset_id, asset_rel, species_label,
+                    detection_id, pet_key, asset_id, asset_rel,
                     box_x, box_y, box_w, box_h, confidence, embedding, embedding_dim,
                     embedding_model, detector_model, thumbnail_path, pet_id, detected_at,
                     image_width, image_height, quality_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [self._detection_to_row(detection) for detection in detections],
             )
             conn.executemany(
                 """
                 INSERT INTO pets (
-                    pet_id, name, species_label, key_detection_id, detection_count,
+                    pet_id, name, key_detection_id, detection_count,
                     center_embedding, embedding_dim, created_at, updated_at,
                     sample_count, profile_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         pet.pet_id,
                         normalize_name(pet.name),
-                        pet.species_label,
                         pet.key_detection_id,
                         pet.detection_count,
                         serialize_embedding(pet.center_embedding),
@@ -165,7 +164,7 @@ class PetRepository:
             rows = conn.execute(
                 """
                 SELECT
-                    detection_id, pet_key, asset_id, asset_rel, species_label,
+                    detection_id, pet_key, asset_id, asset_rel,
                     box_x, box_y, box_w, box_h, confidence, embedding, embedding_dim,
                     embedding_model, detector_model, thumbnail_path, pet_id, detected_at,
                     image_width, image_height, quality_score
@@ -186,7 +185,7 @@ class PetRepository:
             rows = conn.execute(
                 """
                 SELECT
-                    pet_id, name, species_label, key_detection_id, detection_count,
+                    pet_id, name, key_detection_id, detection_count,
                     center_embedding, embedding_dim, created_at, updated_at,
                     sample_count, profile_state
                 FROM pets
@@ -203,7 +202,6 @@ class PetRepository:
                 SELECT
                     pets.pet_id,
                     pets.name,
-                    pets.species_label,
                     pets.key_detection_id,
                     pets.detection_count,
                     pets.created_at,
@@ -214,6 +212,19 @@ class PetRepository:
                 ORDER BY pets.detection_count DESC, pets.created_at ASC
                 """
             ).fetchall()
+            asset_rows = conn.execute(
+                """
+                SELECT pet_id, asset_id
+                FROM pet_detections
+                WHERE pet_id IS NOT NULL
+                """
+            ).fetchall()
+        asset_ids_by_pet_id: dict[str, set[str]] = {}
+        for asset_row in asset_rows:
+            if not asset_row["pet_id"] or not asset_row["asset_id"]:
+                continue
+            pet_asset_ids = asset_ids_by_pet_id.setdefault(str(asset_row["pet_id"]), set())
+            pet_asset_ids.add(str(asset_row["asset_id"]))
         pet_ids = [str(row["pet_id"]) for row in rows if row["pet_id"]]
         hidden_map: dict[str, bool] = {}
         cover_paths: dict[str, str] = {}
@@ -235,12 +246,12 @@ class PetRepository:
                 PetSummary(
                     pet_id=pet_id,
                     name=name,
-                    species_label=str(row["species_label"] or ""),
                     key_detection_id=str(row["key_detection_id"] or ""),
                     detection_count=int(row["detection_count"] or 0),
                     thumbnail_path=resolved_thumbnail,
                     created_at=str(row["created_at"] or ""),
                     is_hidden=bool(hidden_map.get(pet_id, False)),
+                    asset_count=len(asset_ids_by_pet_id.get(pet_id, set())),
                 )
             )
         if not include_hidden:
@@ -271,7 +282,7 @@ class PetRepository:
             rows = conn.execute(
                 """
                 SELECT
-                    detection_id, pet_id, species_label, box_x, box_y, box_w, box_h,
+                    detection_id, pet_id, box_x, box_y, box_w, box_h,
                     image_width, image_height, thumbnail_path
                 FROM pet_detections
                 WHERE asset_id = ?
@@ -292,7 +303,6 @@ class PetRepository:
                     detection_id=str(row["detection_id"]),
                     pet_id=str(row["pet_id"]) if row["pet_id"] else None,
                     display_name=names.get(str(row["pet_id"])) if row["pet_id"] else None,
-                    species_label=str(row["species_label"] or ""),
                     box_x=int(row["box_x"] or 0),
                     box_y=int(row["box_y"] or 0),
                     box_w=int(row["box_w"] or 0),
@@ -316,7 +326,7 @@ class PetRepository:
             row = conn.execute(
                 """
                 SELECT
-                    detection_id, pet_key, asset_id, asset_rel, species_label,
+                    detection_id, pet_key, asset_id, asset_rel,
                     box_x, box_y, box_w, box_h, confidence, embedding, embedding_dim,
                     embedding_model, detector_model, thumbnail_path, pet_id, detected_at,
                     image_width, image_height, quality_score
@@ -385,7 +395,13 @@ class PetRepository:
         face_index_db_path = self._db_path.parent.parent / "faces" / "face_index.db"
         if not face_state_db_path.exists():
             return
-        FaceStateRepository(face_state_db_path).remap_pet_in_groups(source_pet_id, target_pet_id)
+        face_state_repository = FaceStateRepository(face_state_db_path)
+        face_state_repository.remap_pet_in_groups(source_pet_id, target_pet_id)
+        face_state_repository.remap_identity_redirect_targets(
+            target_kind="pet",
+            source_target_id=source_pet_id,
+            target_target_id=target_pet_id,
+        )
         if face_index_db_path.exists():
             FaceRepository(face_index_db_path, face_state_db_path).refresh_all_group_assets()
 
@@ -505,7 +521,6 @@ class PetRepository:
                 pet_key TEXT NOT NULL,
                 asset_id TEXT NOT NULL,
                 asset_rel TEXT NOT NULL,
-                species_label TEXT NOT NULL,
                 box_x INTEGER NOT NULL,
                 box_y INTEGER NOT NULL,
                 box_w INTEGER NOT NULL,
@@ -529,7 +544,6 @@ class PetRepository:
             CREATE TABLE IF NOT EXISTS pets (
                 pet_id TEXT PRIMARY KEY,
                 name TEXT,
-                species_label TEXT NOT NULL,
                 key_detection_id TEXT NOT NULL,
                 detection_count INTEGER NOT NULL,
                 center_embedding BLOB NOT NULL,
@@ -566,7 +580,6 @@ class PetRepository:
             detection.pet_key,
             detection.asset_id,
             detection.asset_rel,
-            detection.species_label,
             detection.box_x,
             detection.box_y,
             detection.box_w,
@@ -590,7 +603,6 @@ class PetRepository:
             pet_key=str(row["pet_key"]),
             asset_id=str(row["asset_id"]),
             asset_rel=str(row["asset_rel"]),
-            species_label=str(row["species_label"]),
             box_x=int(row["box_x"]),
             box_y=int(row["box_y"]),
             box_w=int(row["box_w"]),
@@ -614,7 +626,6 @@ class PetRepository:
         return PetRecord(
             pet_id=str(row["pet_id"]),
             name=row["name"],
-            species_label=str(row["species_label"]),
             key_detection_id=str(row["key_detection_id"]),
             detection_count=int(row["detection_count"]),
             center_embedding=deserialize_embedding(

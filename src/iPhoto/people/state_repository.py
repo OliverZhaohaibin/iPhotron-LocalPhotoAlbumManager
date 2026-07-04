@@ -43,6 +43,15 @@ class PersonCoverRecord:
     is_custom: bool
 
 
+@dataclass(frozen=True)
+class IdentityRedirectRecord:
+    source_kind: str
+    source_id: str
+    target_kind: str
+    target_id: str
+    updated_at: str
+
+
 class FaceStateRepository:
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
@@ -881,6 +890,13 @@ class FaceStateRepository:
                 "UPDATE face_keys SET person_id = ?, updated_at = ? WHERE person_id = ?",
                 (target_person_id, updated_at, source_person_id),
             )
+            self._remap_identity_redirect_targets(
+                conn,
+                target_kind="person",
+                source_target_id=source_person_id,
+                target_target_id=target_person_id,
+                updated_at=updated_at,
+            )
             conn.execute(
                 "UPDATE manual_faces SET person_id = ? WHERE person_id = ?",
                 (target_person_id, source_person_id),
@@ -1262,6 +1278,137 @@ class FaceStateRepository:
             conn.commit()
         return redirects
 
+    def remap_identity_in_groups(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        target_kind: str,
+        target_id: str,
+    ) -> dict[str, str | None]:
+        source_kind = str(source_kind or "").strip()
+        target_kind = str(target_kind or "").strip()
+        source_id = str(source_id or "").strip()
+        target_id = str(target_id or "").strip()
+        if (
+            source_kind not in {"person", "pet"}
+            or target_kind not in {"person", "pet"}
+            or not source_id
+            or not target_id
+            or (source_kind == target_kind and source_id == target_id)
+        ):
+            return {}
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            redirects = self._remap_groups_for_merged_identity(
+                conn,
+                source_kind=source_kind,
+                source_id=source_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                updated_at=updated_at,
+            )
+            conn.commit()
+        return redirects
+
+    def add_identity_redirect(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        target_kind: str,
+        target_id: str,
+    ) -> bool:
+        source_kind = str(source_kind or "").strip()
+        target_kind = str(target_kind or "").strip()
+        source_id = str(source_id or "").strip()
+        target_id = str(target_id or "").strip()
+        if (
+            source_kind not in {"person", "pet"}
+            or target_kind not in {"person", "pet"}
+            or not source_id
+            or not target_id
+            or (source_kind == target_kind and source_id == target_id)
+        ):
+            return False
+        self.initialize()
+        timestamp = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO identity_redirects (
+                    source_kind, source_id, target_kind, target_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_kind, source_id) DO UPDATE SET
+                    target_kind = excluded.target_kind,
+                    target_id = excluded.target_id,
+                    updated_at = excluded.updated_at
+                """,
+                (source_kind, source_id, target_kind, target_id, timestamp),
+            )
+            conn.execute(
+                """
+                UPDATE identity_redirects
+                SET target_kind = ?, target_id = ?, updated_at = ?
+                WHERE target_kind = ? AND target_id = ?
+                """,
+                (target_kind, target_id, timestamp, source_kind, source_id),
+            )
+            conn.commit()
+        return True
+
+    def get_identity_redirects(self) -> list[IdentityRedirectRecord]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT source_kind, source_id, target_kind, target_id, updated_at
+                FROM identity_redirects
+                ORDER BY updated_at ASC, source_kind ASC, source_id ASC
+                """
+            ).fetchall()
+        return [
+            IdentityRedirectRecord(
+                source_kind=str(row["source_kind"]),
+                source_id=str(row["source_id"]),
+                target_kind=str(row["target_kind"]),
+                target_id=str(row["target_id"]),
+                updated_at=str(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
+    def remap_identity_redirect_targets(
+        self,
+        *,
+        target_kind: str,
+        source_target_id: str,
+        target_target_id: str,
+    ) -> int:
+        target_kind = str(target_kind or "").strip()
+        source_target_id = str(source_target_id or "").strip()
+        target_target_id = str(target_target_id or "").strip()
+        if (
+            target_kind not in {"person", "pet"}
+            or not source_target_id
+            or not target_target_id
+            or source_target_id == target_target_id
+        ):
+            return 0
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            cursor = self._remap_identity_redirect_targets(
+                conn,
+                target_kind=target_kind,
+                source_target_id=source_target_id,
+                target_target_id=target_target_id,
+                updated_at=updated_at,
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0)
+
     def has_group_asset_cache(self, group_id: str) -> bool:
         if not group_id:
             return False
@@ -1515,6 +1662,111 @@ class FaceStateRepository:
                     for index, member in enumerate(next_members)
                 ],
             )
+        return redirects
+
+    def _remap_identity_redirect_targets(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        target_kind: str,
+        source_target_id: str,
+        target_target_id: str,
+        updated_at: str,
+    ) -> sqlite3.Cursor:
+        return conn.execute(
+            """
+            UPDATE identity_redirects
+            SET target_id = ?, updated_at = ?
+            WHERE target_kind = ? AND target_id = ?
+            """,
+            (target_target_id, updated_at, target_kind, source_target_id),
+        )
+
+    def _remap_groups_for_merged_identity(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source_kind: str,
+        source_id: str,
+        target_kind: str,
+        target_id: str,
+        updated_at: str,
+    ) -> dict[str, str | None]:
+        affected = conn.execute(
+            """
+            SELECT DISTINCT group_id
+            FROM people_group_members
+            WHERE (member_kind = ? AND member_id = ?)
+               OR (member_kind = ? AND member_id = ?)
+            ORDER BY group_id ASC
+            """,
+            (source_kind, source_id, target_kind, target_id),
+        ).fetchall()
+        if not affected:
+            return {}
+
+        redirects: dict[str, str | None] = {}
+        for row in affected:
+            group_id = str(row["group_id"])
+            group = self._group_from_id(conn, group_id)
+            if group is None:
+                continue
+            next_members = _unique_group_members(
+                (
+                    target_kind if member.kind == source_kind and member.entity_id == source_id else member.kind,
+                    target_id if member.kind == source_kind and member.entity_id == source_id else member.entity_id,
+                )
+                for member in group.member_entities
+            )
+            if len(next_members) < 2:
+                self._delete_group(conn, group_id)
+                redirects[group_id] = None
+                continue
+
+            next_member_key = _group_member_key(next_members)
+            if next_member_key == group.member_key:
+                continue
+
+            duplicate = conn.execute(
+                """
+                SELECT group_id
+                FROM people_groups
+                WHERE member_key = ? AND group_id != ?
+                """,
+                (next_member_key, group_id),
+            ).fetchone()
+            if duplicate is not None:
+                target_group_id = str(duplicate["group_id"])
+                self._transfer_group_cover_if_needed(
+                    conn,
+                    source_group_id=group_id,
+                    target_group_id=target_group_id,
+                    updated_at=updated_at,
+                )
+                self._delete_group(conn, group_id)
+                redirects[group_id] = target_group_id
+                continue
+
+            conn.execute(
+                """
+                UPDATE people_groups
+                SET member_key = ?, updated_at = ?
+                WHERE group_id = ?
+                """,
+                (next_member_key, updated_at, group_id),
+            )
+            conn.execute("DELETE FROM people_group_members WHERE group_id = ?", (group_id,))
+            conn.executemany(
+                """
+                INSERT INTO people_group_members (group_id, member_kind, member_id, position)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (group_id, member.kind, member.entity_id, index)
+                    for index, member in enumerate(next_members)
+                ],
+            )
+            redirects[group_id] = group_id
         return redirects
 
     def _transfer_group_cover_if_needed(
@@ -1913,6 +2165,20 @@ class FaceStateRepository:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_people_group_assets_group_id "
             "ON people_group_assets(group_id)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS identity_redirects (
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (source_kind, source_id)
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_identity_redirects_target "
+            "ON identity_redirects(target_kind, target_id)"
         )
 
     @staticmethod

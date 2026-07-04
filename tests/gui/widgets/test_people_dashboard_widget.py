@@ -30,6 +30,7 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
 from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.people.service import PeopleService
+from iPhoto.pets.records import PetSummary
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -67,6 +68,27 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
     widget._board.finish_drag(cards[0])
 
     assert len(confirm_calls) == 1
+
+
+def test_drag_merge_removes_source_card_immediately(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    widget._populate_cards()
+
+    cards = widget._board.visible_cards()
+    monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(lambda *_args: True))
+    monkeypatch.setattr(widget._service, "merge_clusters", lambda _source, _target: True)
+    monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
+    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
+    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+
+    widget._board.proximity_pair = (cards[0], cards[1])
+    widget._board.finish_drag(cards[0])
+
+    assert [card.person_id for card in widget._board.visible_cards()] == ["person-b"]
 
 
 def test_drag_reorder_persists_cluster_order(monkeypatch, qapp: QApplication) -> None:
@@ -272,6 +294,58 @@ def test_unnamed_people_card_has_no_display_placeholder(qapp: QApplication) -> N
     card = widget._board.visible_cards()[0]
 
     assert card.display_name() == ""
+
+
+def test_people_and_pet_card_badges_use_asset_count(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary(
+            "person-a",
+            "Alice",
+            "face-a",
+            4,
+            None,
+            "2024-01-01T00:00:00Z",
+            asset_count=2,
+        )
+    ]
+    widget._pet_summaries = [
+        PetSummary(
+            "pet-a",
+            "Miso",
+            "det-a",
+            5,
+            None,
+            "2024-01-01T00:00:01Z",
+            asset_count=3,
+        )
+    ]
+
+    widget._populate_cards()
+
+    people_card, pet_card = widget._board.visible_cards()
+    assert people_card._badge_count() == 2
+    assert pet_card._badge_count() == 3
+
+
+def test_people_card_badge_falls_back_for_legacy_summary_object(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    legacy_summary = SimpleNamespace(
+        person_id="person-a",
+        name="Alice",
+        key_face_id="face-a",
+        face_count=4,
+        thumbnail_path=None,
+        created_at="2024-01-01T00:00:00Z",
+        is_hidden=False,
+    )
+    card = people_dashboard_cards.PeopleCard(
+        board=widget._board,
+        summary=legacy_summary,
+        seed_index=0,
+    )
+
+    assert card._badge_count() == 4
 
 
 def test_group_people_dialog_defaults_and_shift_selects_range(qapp: QApplication) -> None:
@@ -794,7 +868,7 @@ def test_merge_person_shows_warning_when_hidden_state_differs(
     assert warnings == [
         (
             "Cannot Merge People",
-            "People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.",
+            "Hidden and visible identity cards cannot be merged. Please make both cards hidden or visible first.",
         )
     ]
 
@@ -819,7 +893,7 @@ def test_merge_person_reuses_group_people_dialog(
             return 1
 
         def selected_person_ids(self) -> list[str]:
-            return ["person-b"]
+            return ["person:person-b"]
 
     monkeypatch.setattr(people_dashboard_widget, "GroupPeopleDialog", _FakeDialog)
     monkeypatch.setattr(
@@ -831,13 +905,103 @@ def test_merge_person_reuses_group_people_dialog(
     widget._merge_person(widget._summaries[0])
 
     assert len(dialog_calls) == 1
-    assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == ["person-b"]
+    assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == ["person:person-b"]
     assert dialog_calls[0]["kwargs"]["title_text"] == "Merge Person"
     assert dialog_calls[0]["kwargs"]["prompt_text"] == "Merge into"
     assert dialog_calls[0]["kwargs"]["confirm_text"] == "Choose"
     assert dialog_calls[0]["kwargs"]["min_selection"] == 1
     assert dialog_calls[0]["kwargs"]["max_selection"] == 1
-    assert confirmed == [("person-a", "person-b")]
+    assert confirmed == [("person:person-a", "person:person-b")]
+
+
+def test_merge_person_dialog_includes_same_hidden_people_and_pets(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    widget._pet_summaries = [
+        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:02Z"),
+    ]
+
+    dialog_calls: list[list[str]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **_kwargs) -> None:
+            dialog_calls.append([summary.person_id for summary in summaries])
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(people_dashboard_widget, "GroupPeopleDialog", _FakeDialog)
+
+    widget._merge_person(widget._summaries[0])
+
+    assert dialog_calls == [["person:person-b", "pet:pet-a"]]
+
+
+def test_merge_pet_dialog_includes_all_same_hidden_pets(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._pet_summaries = [
+        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:00Z"),
+        PetSummary("pet-b", "Nori", "det-b", 1, None, "2024-01-01T00:00:01Z"),
+    ]
+
+    dialog_calls: list[list[str]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **_kwargs) -> None:
+            dialog_calls.append([summary.person_id for summary in summaries])
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(people_dashboard_widget, "GroupPeopleDialog", _FakeDialog)
+
+    widget._merge_pet(widget._pet_summaries[0])
+
+    assert dialog_calls == [["pet:pet-b"]]
+
+
+def test_merge_pet_shows_warning_when_only_hidden_mismatch_exists(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._pet_summaries = [
+        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:00Z", True),
+        PetSummary("pet-b", "Nori", "det-b", 1, None, "2024-01-01T00:00:01Z", False),
+    ]
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        people_dashboard_widget.dialogs,
+        "show_information",
+        lambda _parent, message, title="iPhoto": warnings.append((title, message)),
+    )
+
+    widget._merge_pet(widget._pet_summaries[0])
+
+    assert warnings == [
+        (
+            "Cannot Merge People",
+            "Hidden and visible identity cards cannot be merged. Please make both cards hidden or visible first.",
+        )
+    ]
+
+
+def test_pet_card_does_not_use_species_fallback_label(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    card = people_dashboard_cards.PetCard(
+        board=widget._board,
+        summary=PetSummary("pet-a", None, "det-a", 1, None, "2024-01-01T00:00:00Z"),
+        seed_index=0,
+    )
+
+    assert card.display_name() == ""
 
 
 def test_toggle_person_hidden_updates_service_and_reloads(

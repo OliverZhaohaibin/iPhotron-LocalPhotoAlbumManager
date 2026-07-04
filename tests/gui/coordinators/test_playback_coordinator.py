@@ -811,7 +811,6 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
         annotation_id="det-1",
         entity_id="pet-a",
         display_name="Miso",
-        species_label="cat",
         box_x=0,
         box_y=0,
         box_w=10,

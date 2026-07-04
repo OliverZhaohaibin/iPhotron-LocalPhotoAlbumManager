@@ -14,7 +14,6 @@ class PetDetectionRecord:
     pet_key: str
     asset_id: str
     asset_rel: str
-    species_label: str
     box_x: int
     box_y: int
     box_w: int
@@ -36,7 +35,6 @@ class PetDetectionRecord:
 class PetRecord:
     pet_id: str
     name: str | None
-    species_label: str
     key_detection_id: str
     detection_count: int
     center_embedding: np.ndarray
@@ -51,7 +49,6 @@ class PetRecord:
 class PetProfile:
     pet_id: str
     name: str | None
-    species_label: str
     center_embedding: np.ndarray
     embedding_dim: int
     created_at: str
@@ -64,12 +61,12 @@ class PetProfile:
 class PetSummary:
     pet_id: str
     name: str | None
-    species_label: str
     key_detection_id: str
     detection_count: int
     thumbnail_path: Path | None
     created_at: str
     is_hidden: bool = False
+    asset_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -77,7 +74,6 @@ class AssetPetAnnotation:
     detection_id: str
     pet_id: str | None
     display_name: str | None
-    species_label: str
     box_x: int
     box_y: int
     box_w: int

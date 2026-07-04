@@ -560,8 +560,8 @@ class PeopleDashboardWidget(QWidget):
         menu = QMenu(self)
         apply_menu_style(menu, self)
         merge_enabled = any(
-            target.person_id != summary.person_id and target.is_hidden == summary.is_hidden
-            for target in self._summaries
+            choice.person_id != f"person:{summary.person_id}"
+            for choice in self._merge_choices("person", summary.person_id, summary.is_hidden)
         )
         context = MenuContext(
             surface="people_dashboard",
@@ -622,10 +622,8 @@ class PeopleDashboardWidget(QWidget):
         menu = QMenu(self)
         apply_menu_style(menu, self)
         merge_enabled = any(
-            target.pet_id != summary.pet_id
-            and target.species_label == summary.species_label
-            and target.is_hidden == summary.is_hidden
-            for target in self._pet_summaries
+            choice.person_id != f"pet:{summary.pet_id}"
+            for choice in self._merge_choices("pet", summary.pet_id, summary.is_hidden)
         )
         context = MenuContext(
             surface="people_dashboard",
@@ -774,31 +772,21 @@ class PeopleDashboardWidget(QWidget):
             )
 
     def _merge_pet(self, summary: PetSummary) -> None:
-        choices = [
-            target
-            for target in self._pet_summaries
-            if target.pet_id != summary.pet_id
-            and target.species_label == summary.species_label
-            and target.is_hidden == summary.is_hidden
-        ]
+        has_other_identities = len(self._summaries) + len(self._pet_summaries) > 1
+        choices = self._merge_choices("pet", summary.pet_id, summary.is_hidden)
         if not choices:
+            if has_other_identities:
+                dialogs.show_information(
+                    self,
+                    self._hidden_state_merge_message(),
+                    title=tr("PeopleDashboard", "Cannot Merge People"),
+                )
             return
-        labels = [self._pet_label(choice) for choice in choices]
-        selected, accepted = QInputDialog.getItem(
-            self,
-            tr("PeopleDashboard", "Merge Pet"),
-            tr("PeopleDashboard", "Merge into"),
-            labels,
-            0,
-            False,
+        self._open_merge_dialog(
+            f"pet:{summary.pet_id}",
+            choices,
+            title_text=tr("PeopleDashboard", "Merge Pet"),
         )
-        if not accepted or not selected:
-            return
-        target = choices[labels.index(selected)]
-        if not MergeConfirmDialog.confirm(2, self):
-            return
-        if self._pet_service.merge_pets(summary.pet_id, target.pet_id):
-            self.reload(preserve_content=bool(self._summaries or self._pet_summaries))
 
     def _set_pet_cover(self, summary: PetSummary) -> None:
         if summary.key_detection_id and self._pet_service.set_pet_cover(
@@ -923,14 +911,10 @@ class PeopleDashboardWidget(QWidget):
             self.reload(preserve_content=bool(self._summaries or self._groups))
 
     def _merge_person(self, summary: PersonSummary) -> None:
-        has_other_people = any(target.person_id != summary.person_id for target in self._summaries)
-        choices = [
-            target
-            for target in self._summaries
-            if target.person_id != summary.person_id and target.is_hidden == summary.is_hidden
-        ]
+        has_other_identities = len(self._summaries) + len(self._pet_summaries) > 1
+        choices = self._merge_choices("person", summary.person_id, summary.is_hidden)
         if not choices:
-            if has_other_people:
+            if has_other_identities:
                 dialogs.show_information(
                     self,
                     self._hidden_state_merge_message(),
@@ -938,9 +922,36 @@ class PeopleDashboardWidget(QWidget):
                 )
             return
 
-        dialog = GroupPeopleDialog(
+        self._open_merge_dialog(
+            f"person:{summary.person_id}",
             choices,
             title_text=tr("PeopleDashboard", "Merge Person"),
+        )
+
+    def _merge_choices(
+        self,
+        source_kind: str,
+        source_id: str,
+        source_hidden: bool,
+    ) -> list[_IdentityChoice]:
+        source_identity = f"{source_kind}:{source_id}"
+        return [
+            choice
+            for choice in self._group_dialog_choices()
+            if choice.person_id != source_identity
+            and self._identity_hidden(choice.person_id) == source_hidden
+        ]
+
+    def _open_merge_dialog(
+        self,
+        source_identity: str,
+        choices: list[_IdentityChoice],
+        *,
+        title_text: str,
+    ) -> None:
+        dialog = GroupPeopleDialog(
+            choices,  # type: ignore[arg-type]
+            title_text=title_text,
             prompt_text=tr("PeopleDashboard", "Merge into"),
             confirm_text=tr("PeopleDashboard", "Choose"),
             min_selection=1,
@@ -953,7 +964,7 @@ class PeopleDashboardWidget(QWidget):
         selected_ids = dialog.selected_person_ids()
         if not selected_ids:
             return
-        self._confirm_merge(summary.person_id, selected_ids[0])
+        self._confirm_merge(source_identity, selected_ids[0])
 
     def _open_group_dialog(self, initial_person_id: str) -> None:
         choices = self._group_dialog_choices()
@@ -994,17 +1005,27 @@ class PeopleDashboardWidget(QWidget):
         return choices
 
     def _merge_cluster_pair(self, source_person_id: str, target_person_id: str) -> None:
-        self._confirm_merge(source_person_id, target_person_id)
+        source_identity = self._identity_for_card_id(source_person_id)
+        target_identity = self._identity_for_card_id(target_person_id)
+        if source_identity is None or target_identity is None:
+            return
+        self._confirm_merge(source_identity, target_identity)
 
     def _confirm_merge(self, source_person_id: str, target_person_id: str) -> bool:
-        if source_person_id == target_person_id:
+        source_identity = self._normalize_identity(source_person_id)
+        target_identity = self._normalize_identity(target_person_id)
+        if (
+            source_identity is None
+            or target_identity is None
+            or source_identity == target_identity
+        ):
             return False
 
-        source = self._summary_for_person(source_person_id)
-        target = self._summary_for_person(target_person_id)
-        if source is None or target is None:
+        source_hidden = self._identity_hidden(source_identity)
+        target_hidden = self._identity_hidden(target_identity)
+        if source_hidden is None or target_hidden is None:
             return False
-        if source.is_hidden != target.is_hidden:
+        if source_hidden != target_hidden:
             dialogs.show_information(
                 self,
                 self._hidden_state_merge_message(),
@@ -1015,10 +1036,125 @@ class PeopleDashboardWidget(QWidget):
         if not MergeConfirmDialog.confirm(2, self):
             return False
 
-        merged = self._service.merge_clusters(source_person_id, target_person_id)
+        source_kind, source_id = source_identity.split(":", 1)
+        target_kind, target_id = target_identity.split(":", 1)
+        if source_kind == "person" and target_kind == "person":
+            merged = self._service.merge_clusters(source_id, target_id)
+        elif source_kind == "pet" and target_kind == "pet":
+            merged = self._pet_service.merge_pets(source_id, target_id)
+        else:
+            result = self._service.merge_identities(source_identity, target_identity)
+            merged = bool(result and result.merged)
+            if result is not None:
+                self._remap_pinned_identity(
+                    source_identity,
+                    target_identity,
+                    group_redirects=result.group_redirects,
+                )
         if merged:
-            self.reload(preserve_content=bool(self._summaries))
+            self._remove_merged_source_card(source_identity)
+            self.reload(preserve_content=bool(self._summaries or self._pet_summaries or self._groups))
         return merged
+
+    def _remove_merged_source_card(self, source_identity: str) -> None:
+        normalized = self._normalize_identity(source_identity)
+        if normalized is None:
+            return
+        kind, entity_id = normalized.split(":", 1)
+        if kind == "person":
+            self._summaries = [
+                summary for summary in self._summaries if summary.person_id != entity_id
+            ]
+        else:
+            self._pet_summaries = [
+                summary for summary in self._pet_summaries if summary.pet_id != entity_id
+            ]
+        self._populate_cards()
+
+    def _identity_for_card_id(self, card_id: str) -> str | None:
+        if self._summary_for_person(card_id) is not None:
+            return f"person:{card_id}"
+        if self._summary_for_pet(card_id) is not None:
+            return f"pet:{card_id}"
+        return None
+
+    def _normalize_identity(self, identity: str) -> str | None:
+        text = str(identity or "").strip()
+        if not text:
+            return None
+        if ":" not in text:
+            return self._identity_for_card_id(text)
+        kind, entity_id = (part.strip() for part in text.split(":", 1))
+        if kind not in {"person", "pet"} or not entity_id:
+            return None
+        return f"{kind}:{entity_id}"
+
+    def _identity_hidden(self, identity: str) -> bool | None:
+        normalized = self._normalize_identity(identity)
+        if normalized is None:
+            return None
+        kind, entity_id = normalized.split(":", 1)
+        if kind == "person":
+            summary = self._summary_for_person(entity_id)
+        else:
+            summary = self._summary_for_pet(entity_id)
+        return bool(summary.is_hidden) if summary is not None else None
+
+    def _remap_pinned_identity(
+        self,
+        source_identity: str,
+        target_identity: str,
+        *,
+        group_redirects: dict[str, str | None],
+    ) -> None:
+        if self._pinned_service is None:
+            return
+        library_root = self._service.library_root()
+        if library_root is None:
+            return
+        source_kind, source_id = source_identity.split(":", 1)
+        target_kind, target_id = target_identity.split(":", 1)
+        source_item = next(
+            (
+                item
+                for item in self._pinned_service.items_for_library(library_root)
+                if item.kind == source_kind and item.item_id == source_id
+            ),
+            None,
+        )
+        if source_item is not None:
+            self._pinned_service.unpin(
+                kind=source_kind,
+                item_id=source_id,
+                library_root=library_root,
+            )
+            if target_kind == "person":
+                self._pinned_service.pin_person(
+                    target_id,
+                    source_item.label or self._identity_label(target_identity),
+                    library_root=library_root,
+                )
+            else:
+                self._pinned_service.pin_pet(
+                    target_id,
+                    source_item.label or self._identity_label(target_identity),
+                    library_root=library_root,
+                )
+        self._pinned_service.prune_missing_people_entities(
+            library_root,
+            group_redirects=group_redirects,
+        )
+
+    def _identity_label(self, identity: str) -> str:
+        normalized = self._normalize_identity(identity)
+        if normalized is None:
+            return tr("PeopleDashboard", "Unnamed")
+        kind, entity_id = normalized.split(":", 1)
+        if kind == "person":
+            summary = self._summary_for_person(entity_id)
+            return (summary.name or "").strip() if summary is not None else tr("PeopleDashboard", "Unnamed")
+        summary = self._summary_for_pet(entity_id)
+        return self._pet_label(summary) if summary is not None else tr("PeopleDashboard", "Unnamed")
 
     def _confirm_hide_person(self, summary: PersonSummary) -> bool:
         name = (summary.name or "").strip() or tr("PeopleDashboard", "this person")
@@ -1214,8 +1350,8 @@ class PeopleDashboardWidget(QWidget):
     def _hidden_state_merge_message(self) -> str:
         return tr(
             "PeopleDashboard",
-            "People in hidden and visible states cannot be merged. Please make both People "
-            "cards hidden or visible first.",
+            "Hidden and visible identity cards cannot be merged. Please make both cards "
+            "hidden or visible first.",
         )
 
     def _schedule_visible_refresh(self) -> None:
@@ -1237,10 +1373,7 @@ class PeopleDashboardWidget(QWidget):
         name = (summary.name or "").strip()
         if name:
             return name
-        species = str(summary.species_label or "").strip().title()
-        return tr("PeopleDashboard", "Unnamed {species}").format(
-            species=species or tr("PeopleDashboard", "Pet")
-        )
+        return tr("PeopleDashboard", "Unnamed")
 
     def _apply_theme_styles(self) -> None:
         dark_mode = self._uses_dark_theme()

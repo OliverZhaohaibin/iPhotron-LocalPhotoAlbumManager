@@ -67,6 +67,7 @@ class PersonSummary:
     thumbnail_path: Path | None
     created_at: str
     is_hidden: bool = False
+    asset_count: int = 0
 
 
 @dataclass(frozen=True)

@@ -116,6 +116,53 @@ def test_person_summaries_read_while_writer_holds_reserved_lock(tmp_path: Path) 
         locker.close()
 
 
+def test_person_summary_asset_count_counts_unique_auto_and_manual_assets(
+    tmp_path: Path,
+) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    face_a = _face_record(
+        face_id="face-a",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    face_b = _face_record(
+        face_id="face-b",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    person = _person_record(
+        person_id="person-a",
+        key_face_id="face-a",
+        face_count=2,
+        name="Alice",
+    )
+    repository.replace_all([face_a, face_b], [person])
+    assert repository.state_repository is not None
+    repository.state_repository.add_manual_face(
+        ManualFaceRecord(
+            face_id="manual-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            box_x=20,
+            box_y=20,
+            box_w=80,
+            box_h=80,
+            thumbnail_path=None,
+            person_id="person-a",
+            created_at=_now_iso(),
+            image_width=400,
+            image_height=300,
+        )
+    )
+
+    summaries = repository.get_person_summaries()
+
+    assert summaries[0].face_count == 3
+    assert summaries[0].asset_count == 1
+
+
 def test_group_members_legacy_schema_migrates_to_identity_members(tmp_path: Path) -> None:
     db_path = tmp_path / "face_state.db"
     timestamp = _now_iso()

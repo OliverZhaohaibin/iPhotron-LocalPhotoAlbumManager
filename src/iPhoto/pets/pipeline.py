@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib import request
 
 import numpy as np
+from PIL import Image
 
 from .image_utils import (
     PetImageLoadError,
@@ -36,7 +37,7 @@ from .repository_utils import (
 from .state_repository import PetStateRepository
 
 SUPPORTED_DEFAULT_SPECIES = frozenset({"cat", "dog"})
-PET_DETECTOR_PIPELINE_VERSION = "yolox-raw-grid-v2"
+PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-v3"
 DEFAULT_PET_DETECTOR_MODEL_URL = (
     "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/"
     "0.1.1rc0/yolox_nano.onnx"
@@ -78,6 +79,14 @@ class _DetectedPetBox:
 
 
 @dataclass(frozen=True)
+class _YoloxPreprocessResult:
+    tensor: np.ndarray
+    resize_ratio: float
+    pad_left: int = 0
+    pad_top: int = 0
+
+
+@dataclass(frozen=True)
 class PetScanMetrics:
     candidate_boxes: int = 0
     unsupported_species: int = 0
@@ -97,6 +106,9 @@ class PetClusterPipeline:
         min_samples: int = 2,
         min_pet_size: int = 48,
         supported_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
+        detector_score_threshold: float = 0.30,
+        enable_tiled_detection: bool = True,
+        tile_scan_min_confidence: float | None = None,
     ) -> None:
         self._model_root = Path(model_root)
         self._detector_model_name = detector_model_name
@@ -110,6 +122,13 @@ class PetClusterPipeline:
         self._min_samples = int(min_samples)
         self._min_pet_size = int(min_pet_size)
         self._supported_species = frozenset(supported_species)
+        self._detector_score_threshold = float(detector_score_threshold)
+        self._enable_tiled_detection = bool(enable_tiled_detection)
+        self._tile_scan_min_confidence = (
+            self._detector_score_threshold
+            if tile_scan_min_confidence is None
+            else float(tile_scan_min_confidence)
+        )
         self._detector: _YoloxOnnxPetDetector | None = None
         self._embedder: _DinoV2Embedder | None = None
         self._last_scan_metrics = PetScanMetrics()
@@ -184,6 +203,7 @@ class PetClusterPipeline:
 
             image_width, image_height = image.size
             detections: list[PetDetectionRecord] = []
+            supported_boxes: list[_DetectedPetBox] = []
             candidate_boxes += len(boxes)
             for detected in boxes:
                 if detected.species_label not in self._supported_species:
@@ -197,6 +217,16 @@ class PetClusterPipeline:
                 if bbox[2] < self._min_pet_size or bbox[3] < self._min_pet_size:
                     too_small += 1
                     continue
+                supported_boxes.append(
+                    _DetectedPetBox(
+                        bbox=bbox,
+                        confidence=detected.confidence,
+                        species_label=detected.species_label,
+                    )
+                )
+
+            for detected in _dedupe_supported_species_boxes(supported_boxes):
+                bbox = detected.bbox
                 detection_id = uuid.uuid4().hex
                 thumbnail_path = thumbnail_dir / f"{detection_id}.png"
                 try:
@@ -222,11 +252,9 @@ class PetClusterPipeline:
                             bbox=bbox,
                             image_width=image_width,
                             image_height=image_height,
-                            species_label=detected.species_label,
                         ),
                         asset_id=asset_id,
                         asset_rel=asset_rel,
-                        species_label=detected.species_label,
                         box_x=bbox[0],
                         box_y=bbox[1],
                         box_w=bbox[2],
@@ -268,7 +296,11 @@ class PetClusterPipeline:
             model_path = self._model_root / "detector" / self._detector_model_name
             self._detector = _YoloxOnnxPetDetector(
                 model_path,
+                score_threshold=self._detector_score_threshold,
                 allow_model_download=self._allow_model_download,
+                enable_tiled_detection=self._enable_tiled_detection,
+                tile_scan_min_confidence=self._tile_scan_min_confidence,
+                tile_species=self._supported_species,
             )
         return self._detector
 
@@ -289,7 +321,6 @@ def build_pet_key(
     bbox: tuple[int, int, int, int],
     image_width: int,
     image_height: int,
-    species_label: str,
     quantization: int = 12,
 ) -> str:
     x, y, width, height = bbox
@@ -302,7 +333,7 @@ def build_pet_key(
         _quantize_value(height, quantization),
     )
     payload = (
-        f"{asset_id}|{image_width}x{image_height}|{species_label}|"
+        f"{asset_id}|{image_width}x{image_height}|"
         f"{quantized[0]}|{quantized[1]}|{quantized[2]}|{quantized[3]}"
     )
     return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
@@ -320,53 +351,46 @@ def cluster_pet_records(
 
     updated_detections = list(detections)
     pets: list[PetRecord] = []
-    by_species: dict[str, list[int]] = defaultdict(list)
-    for index, detection in enumerate(detections):
-        by_species[detection.species_label].append(index)
+    embeddings = np.stack([detection.embedding for detection in detections], axis=0).astype(
+        np.float32
+    )
+    labels = _cluster_embeddings(
+        embeddings,
+        distance_threshold=distance_threshold,
+        min_samples=min_samples,
+        prefer_hdbscan=prefer_hdbscan,
+    )
+    grouped_indices: dict[str, list[int]] = defaultdict(list)
+    for index, label in enumerate(labels.tolist()):
+        if label == -1:
+            grouped_indices[f"noise-{index}"].append(index)
+        else:
+            grouped_indices[f"cluster-{label}"].append(index)
 
-    for species_label, indices in by_species.items():
-        embeddings = np.stack(
-            [detections[index].embedding for index in indices],
-            axis=0,
-        ).astype(np.float32)
-        labels = _cluster_embeddings(
-            embeddings,
-            distance_threshold=distance_threshold,
-            min_samples=min_samples,
-            prefer_hdbscan=prefer_hdbscan,
+    for grouped in grouped_indices.values():
+        members = [detections[index] for index in grouped]
+        key_detection = max(members, key=key_detection_sort_key)
+        pet_id = uuid.uuid4().hex
+        center_embedding = compute_cluster_center(
+            np.stack([member.embedding for member in members], axis=0)
         )
-        grouped_indices: dict[str, list[int]] = defaultdict(list)
-        for local_index, label in enumerate(labels.tolist()):
-            if label == -1:
-                grouped_indices[f"noise-{indices[local_index]}"].append(indices[local_index])
-            else:
-                grouped_indices[f"{species_label}-cluster-{label}"].append(indices[local_index])
-
-        for grouped in grouped_indices.values():
-            members = [detections[index] for index in grouped]
-            key_detection = max(members, key=key_detection_sort_key)
-            pet_id = uuid.uuid4().hex
-            center_embedding = compute_cluster_center(
-                np.stack([member.embedding for member in members], axis=0)
+        timestamp = utc_now_iso()
+        pets.append(
+            PetRecord(
+                pet_id=pet_id,
+                name=None,
+                key_detection_id=key_detection.detection_id,
+                detection_count=len(members),
+                center_embedding=center_embedding,
+                embedding_dim=int(center_embedding.shape[0]),
+                created_at=timestamp,
+                updated_at=timestamp,
+                sample_count=len(members),
+                profile_state=profile_state_for_sample_count(len(members)),
             )
-            timestamp = utc_now_iso()
-            pets.append(
-                PetRecord(
-                    pet_id=pet_id,
-                    name=None,
-                    species_label=species_label,
-                    key_detection_id=key_detection.detection_id,
-                    detection_count=len(members),
-                    center_embedding=center_embedding,
-                    embedding_dim=int(center_embedding.shape[0]),
-                    created_at=timestamp,
-                    updated_at=timestamp,
-                    sample_count=len(members),
-                    profile_state=profile_state_for_sample_count(len(members)),
-                )
-            )
-            for index in grouped:
-                updated_detections[index] = replace(updated_detections[index], pet_id=pet_id)
+        )
+        for index in grouped:
+            updated_detections[index] = replace(updated_detections[index], pet_id=pet_id)
 
     pets.sort(key=lambda pet: (-pet.detection_count, pet.created_at, pet.pet_id))
     return updated_detections, pets
@@ -397,7 +421,6 @@ def build_pet_records_from_detections(
             PetRecord(
                 pet_id=pet_id,
                 name=names.get(pet_id),
-                species_label=key_detection.species_label,
                 key_detection_id=key_detection.detection_id,
                 detection_count=sample_count,
                 center_embedding=center_embedding,
@@ -497,8 +520,6 @@ def resolve_canonical_pet_id(
     best_profile_id: str | None = None
     best_distance = float("inf")
     for profile in profiles.values():
-        if profile.species_label != pet.species_label:
-            continue
         if str(profile.profile_state or "unstable") != "stable":
             continue
         if profile.embedding_dim <= 0 or profile.center_embedding.size == 0:
@@ -638,11 +659,21 @@ class _YoloxOnnxPetDetector:
         self,
         model_path: Path,
         *,
-        score_threshold: float = 0.35,
+        score_threshold: float = 0.30,
         allow_model_download: bool = True,
+        enable_tiled_detection: bool = True,
+        tile_scan_min_confidence: float | None = None,
+        tile_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
     ) -> None:
         self._model_path = Path(model_path)
         self._score_threshold = float(score_threshold)
+        self._enable_tiled_detection = bool(enable_tiled_detection)
+        self._tile_scan_min_confidence = (
+            self._score_threshold
+            if tile_scan_min_confidence is None
+            else float(tile_scan_min_confidence)
+        )
+        self._tile_species = frozenset(tile_species)
         try:
             import onnxruntime as ort
         except ImportError as exc:
@@ -672,14 +703,33 @@ class _YoloxOnnxPetDetector:
             ) from exc
 
     def detect(self, image) -> list[_DetectedPetBox]:
+        boxes = self._detect_single_image(image)
+        if not self._enable_tiled_detection or self._has_tile_species_box(boxes):
+            return _nms_pet_boxes(boxes)
+
+        image_width, image_height = image.size
+        for crop_box in _tile_scan_regions(image_width, image_height):
+            left, top, *_ = crop_box
+            crop = image.crop(crop_box)
+            boxes.extend(self._detect_single_image(crop, offset=(left, top)))
+        return _nms_pet_boxes(boxes)
+
+    def _detect_single_image(
+        self,
+        image,
+        *,
+        offset: tuple[int, int] = (0, 0),
+    ) -> list[_DetectedPetBox]:
         image_width, image_height = image.size
         input_width, input_height = self._input_size
-        tensor = _preprocess_yolox(image, input_width=input_width, input_height=input_height)
-        outputs = self._session.run(None, {self._input_name: tensor})
+        preprocessed = _preprocess_yolox(
+            image,
+            input_width=input_width,
+            input_height=input_height,
+        )
+        outputs = self._session.run(None, {self._input_name: preprocessed.tensor})
         predictions = _flatten_predictions(outputs)
         boxes: list[_DetectedPetBox] = []
-        scale_x = image_width / float(input_width)
-        scale_y = image_height / float(input_height)
         for x0, y0, x1, y1, confidence, class_id in _decode_yolox_predictions(
             predictions,
             input_size=self._input_size,
@@ -687,18 +737,28 @@ class _YoloxOnnxPetDetector:
             species = COCO_ANIMAL_LABELS.get(int(class_id))
             if species is None or confidence < self._score_threshold:
                 continue
-            left = round(x0 * scale_x)
-            top = round(y0 * scale_y)
-            right = round(x1 * scale_x)
-            bottom = round(y1 * scale_y)
+            bbox = _map_yolox_box_to_source(
+                (x0, y0, x1, y1),
+                preprocessed=preprocessed,
+                image_width=image_width,
+                image_height=image_height,
+                offset=offset,
+            )
             boxes.append(
                 _DetectedPetBox(
-                    bbox=(left, top, max(1, right - left), max(1, bottom - top)),
+                    bbox=bbox,
                     confidence=float(confidence),
                     species_label=species,
                 )
             )
-        return _nms_pet_boxes(boxes)
+        return boxes
+
+    def _has_tile_species_box(self, boxes: list[_DetectedPetBox]) -> bool:
+        return any(
+            box.species_label in self._tile_species
+            and box.confidence >= self._tile_scan_min_confidence
+            for box in boxes
+        )
 
 
 class _DinoV2Embedder:
@@ -817,11 +877,78 @@ def _input_size_from_shape(shape: Sequence[object]) -> tuple[int, int]:
     return 640, 640
 
 
-def _preprocess_yolox(image, *, input_width: int, input_height: int) -> np.ndarray:
-    resized = image.resize((input_width, input_height))
-    array = np.asarray(resized, dtype=np.float32)
+def _preprocess_yolox(
+    image,
+    *,
+    input_width: int,
+    input_height: int,
+) -> _YoloxPreprocessResult:
+    image_width, image_height = image.size
+    resize_ratio = min(
+        input_width / float(max(1, image_width)),
+        input_height / float(max(1, image_height)),
+    )
+    resized_width = max(1, int(image_width * resize_ratio))
+    resized_height = max(1, int(image_height * resize_ratio))
+    resized = image.resize((resized_width, resized_height), Image.Resampling.BILINEAR)
+    canvas = Image.new("RGB", (input_width, input_height), (114, 114, 114))
+    canvas.paste(resized, (0, 0))
+    array = np.asarray(canvas, dtype=np.float32)
     array = np.transpose(array, (2, 0, 1))[None, :, :, :]
-    return np.ascontiguousarray(array)
+    return _YoloxPreprocessResult(
+        tensor=np.ascontiguousarray(array),
+        resize_ratio=float(resize_ratio),
+    )
+
+
+def _map_yolox_box_to_source(
+    box: tuple[float, float, float, float],
+    *,
+    preprocessed: _YoloxPreprocessResult,
+    image_width: int,
+    image_height: int,
+    offset: tuple[int, int] = (0, 0),
+) -> tuple[int, int, int, int]:
+    ratio = max(float(preprocessed.resize_ratio), 1e-6)
+    offset_x, offset_y = offset
+    x0, y0, x1, y1 = box
+    left = round((x0 - preprocessed.pad_left) / ratio)
+    top = round((y0 - preprocessed.pad_top) / ratio)
+    right = round((x1 - preprocessed.pad_left) / ratio)
+    bottom = round((y1 - preprocessed.pad_top) / ratio)
+    left = max(0, min(left, image_width - 1))
+    top = max(0, min(top, image_height - 1))
+    right = max(left + 1, min(right, image_width))
+    bottom = max(top + 1, min(bottom, image_height))
+    return (
+        left + offset_x,
+        top + offset_y,
+        max(1, right - left),
+        max(1, bottom - top),
+    )
+
+
+def _tile_scan_regions(image_width: int, image_height: int) -> list[tuple[int, int, int, int]]:
+    width = max(1, int(image_width))
+    height = max(1, int(image_height))
+
+    def region(left: float, top: float, right: float, bottom: float) -> tuple[int, int, int, int]:
+        x0 = max(0, min(round(width * left), width - 1))
+        y0 = max(0, min(round(height * top), height - 1))
+        x1 = max(x0 + 1, min(round(width * right), width))
+        y1 = max(y0 + 1, min(round(height * bottom), height))
+        return x0, y0, x1, y1
+
+    candidates = [
+        region(0.0, 0.0, 0.70, 1.0),
+        region(0.30, 0.0, 1.0, 1.0),
+        region(0.0, 0.0, 1.0, 0.70),
+        region(0.0, 0.30, 1.0, 1.0),
+        region(0.0, 0.0, 0.65, 0.65),
+        region(0.35, 0.0, 1.0, 0.65),
+        region(0.15, 0.15, 0.85, 0.85),
+    ]
+    return list(dict.fromkeys(candidates))
 
 
 def _flatten_predictions(outputs: Sequence[np.ndarray]) -> np.ndarray:
@@ -922,6 +1049,19 @@ def _nms_pet_boxes(
             and _bbox_iou(existing.bbox, box.bbox) >= threshold
             for existing in selected
         ):
+            continue
+        selected.append(box)
+    return selected
+
+
+def _dedupe_supported_species_boxes(
+    boxes: list[_DetectedPetBox],
+    *,
+    threshold: float = 0.65,
+) -> list[_DetectedPetBox]:
+    selected: list[_DetectedPetBox] = []
+    for box in sorted(boxes, key=lambda item: item.confidence, reverse=True):
+        if any(_bbox_iou(existing.bbox, box.bbox) >= threshold for existing in selected):
             continue
         selected.append(box)
     return selected

@@ -79,8 +79,8 @@ class PetRepository:
                     detection_id, pet_key, asset_id, asset_rel,
                     box_x, box_y, box_w, box_h, confidence, embedding, embedding_dim,
                     embedding_model, detector_model, thumbnail_path, pet_id, detected_at,
-                    image_width, image_height, quality_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    image_width, image_height, species_label, quality_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [self._detection_to_row(detection) for detection in detections],
             )
@@ -89,8 +89,8 @@ class PetRepository:
                 INSERT INTO pets (
                     pet_id, name, key_detection_id, detection_count,
                     center_embedding, embedding_dim, created_at, updated_at,
-                    sample_count, profile_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sample_count, profile_state, species_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -106,6 +106,7 @@ class PetRepository:
                         profile_state_for_sample_count(
                             max(int(pet.sample_count), int(pet.detection_count))
                         ),
+                        _normalize_species_label(pet.species_label),
                     )
                     for pet in pets
                 ],
@@ -158,6 +159,32 @@ class PetRepository:
             return
         self._state_repo.sync_scan_results(self.get_all_pet_records(), self.get_all_detections())
 
+    def recluster_detections(
+        self,
+        *,
+        distance_threshold: float,
+        min_samples: int,
+    ) -> int:
+        from .pipeline import canonicalize_pet_identities, cluster_pet_records
+
+        detections = self.get_all_detections()
+        if not detections:
+            return 0
+        clustered_detections, pets = cluster_pet_records(
+            detections,
+            distance_threshold=distance_threshold,
+            min_samples=min_samples,
+        )
+        if self._state_repo is not None:
+            clustered_detections, pets = canonicalize_pet_identities(
+                clustered_detections,
+                pets,
+                self._state_repo,
+                distance_threshold=distance_threshold,
+            )
+        self.replace_all(clustered_detections, pets)
+        return len(clustered_detections)
+
     def get_all_detections(self) -> list[PetDetectionRecord]:
         self.initialize()
         with closing(self._connect()) as conn:
@@ -167,7 +194,7 @@ class PetRepository:
                     detection_id, pet_key, asset_id, asset_rel,
                     box_x, box_y, box_w, box_h, confidence, embedding, embedding_dim,
                     embedding_model, detector_model, thumbnail_path, pet_id, detected_at,
-                    image_width, image_height, quality_score
+                    image_width, image_height, species_label, quality_score
                 FROM pet_detections
                 ORDER BY detected_at ASC, detection_id ASC
                 """
@@ -187,7 +214,7 @@ class PetRepository:
                 SELECT
                     pet_id, name, key_detection_id, detection_count,
                     center_embedding, embedding_dim, created_at, updated_at,
-                    sample_count, profile_state
+                    sample_count, profile_state, species_label
                 FROM pets
                 ORDER BY detection_count DESC, created_at ASC, pet_id ASC
                 """
@@ -329,7 +356,7 @@ class PetRepository:
                     detection_id, pet_key, asset_id, asset_rel,
                     box_x, box_y, box_w, box_h, confidence, embedding, embedding_dim,
                     embedding_model, detector_model, thumbnail_path, pet_id, detected_at,
-                    image_width, image_height, quality_score
+                    image_width, image_height, species_label, quality_score
                 FROM pet_detections
                 WHERE detection_id = ?
                 """,
@@ -535,6 +562,7 @@ class PetRepository:
                 detected_at TEXT NOT NULL,
                 image_width INTEGER NOT NULL,
                 image_height INTEGER NOT NULL,
+                species_label TEXT,
                 quality_score REAL
             )
             """
@@ -551,7 +579,8 @@ class PetRepository:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 sample_count INTEGER DEFAULT 0,
-                profile_state TEXT DEFAULT 'unstable'
+                profile_state TEXT DEFAULT 'unstable',
+                species_label TEXT
             )
             """
         )
@@ -594,6 +623,7 @@ class PetRepository:
             detection.detected_at,
             detection.image_width,
             detection.image_height,
+            _normalize_species_label(detection.species_label),
             detection.quality_score,
         )
 
@@ -617,6 +647,7 @@ class PetRepository:
             detected_at=str(row["detected_at"]),
             image_width=int(row["image_width"]),
             image_height=int(row["image_height"]),
+            species_label=_normalize_species_label(row["species_label"]),
             quality_score=(
                 float(row["quality_score"]) if row["quality_score"] is not None else None
             ),
@@ -637,4 +668,12 @@ class PetRepository:
             updated_at=str(row["updated_at"]),
             sample_count=int(row["sample_count"] or 0),
             profile_state=str(row["profile_state"] or "unstable"),
+            species_label=_normalize_species_label(row["species_label"]),
         )
+
+
+def _normalize_species_label(value: object) -> str | None:
+    if value is None:
+        return None
+    label = str(value).strip().lower()
+    return label or None

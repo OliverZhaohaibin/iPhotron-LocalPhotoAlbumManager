@@ -14,6 +14,7 @@ from iPhoto.cache.index_store import get_global_repository, reset_global_reposit
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.pets.index_coordinator import reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
+    PET_CLUSTERING_PIPELINE_VERSION,
     PET_DETECTOR_PIPELINE_VERSION,
     DetectedAssetPets,
     PetClusterPipeline,
@@ -91,6 +92,7 @@ def _detection(
     pet_key: str | None = None,
     pet_id: str | None = None,
     embedding: np.ndarray | None = None,
+    species_label: str | None = None,
 ) -> PetDetectionRecord:
     vector = normalize_vector(
         embedding if embedding is not None else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
@@ -114,6 +116,7 @@ def _detection(
         detected_at=utc_now_iso(),
         image_width=400,
         image_height=300,
+        species_label=species_label,
     )
 
 
@@ -141,12 +144,28 @@ def test_build_pet_key_is_stable_for_small_bbox_jitter() -> None:
     assert different_box != first
 
 
-def test_cluster_pet_records_does_not_split_by_detector_species() -> None:
+def test_cluster_pet_records_splits_known_detector_species() -> None:
     detections = [
-        _detection(detection_id="cat-a", embedding=np.asarray([1.0, 0.0])),
-        _detection(detection_id="cat-b", embedding=np.asarray([0.99, 0.01])),
-        _detection(detection_id="dog-a", embedding=np.asarray([1.0, 0.0])),
-        _detection(detection_id="dog-b", embedding=np.asarray([0.99, 0.01])),
+        _detection(
+            detection_id="cat-a",
+            embedding=np.asarray([1.0, 0.0]),
+            species_label="cat",
+        ),
+        _detection(
+            detection_id="cat-b",
+            embedding=np.asarray([0.99, 0.01]),
+            species_label="cat",
+        ),
+        _detection(
+            detection_id="dog-a",
+            embedding=np.asarray([1.0, 0.0]),
+            species_label="dog",
+        ),
+        _detection(
+            detection_id="dog-b",
+            embedding=np.asarray([0.99, 0.01]),
+            species_label="dog",
+        ),
     ]
 
     clustered, pets = cluster_pet_records(
@@ -154,6 +173,25 @@ def test_cluster_pet_records_does_not_split_by_detector_species() -> None:
         distance_threshold=0.2,
         min_samples=2,
         prefer_hdbscan=False,
+    )
+
+    assert len(pets) == 2
+    assert clustered[0].pet_id == clustered[1].pet_id
+    assert clustered[2].pet_id == clustered[3].pet_id
+    assert clustered[0].pet_id != clustered[2].pet_id
+    assert {pet.species_label for pet in pets} == {"cat", "dog"}
+
+
+def test_cluster_pet_records_keeps_unknown_species_backward_compatible() -> None:
+    detections = [
+        _detection(detection_id="old-a", embedding=np.asarray([1.0, 0.0])),
+        _detection(detection_id="old-b", embedding=np.asarray([0.99, 0.01])),
+    ]
+
+    clustered, pets = cluster_pet_records(
+        detections,
+        distance_threshold=0.2,
+        min_samples=2,
     )
 
     assert len(pets) == 1
@@ -176,19 +214,15 @@ def test_cluster_pet_records_default_clusters_small_similar_pet_samples() -> Non
     assert {item.pet_id for item in clustered} == {pets[0].pet_id}
 
 
-def test_cluster_pet_records_passes_float64_distance_matrix_to_hdbscan(
+def test_cluster_pet_records_ignores_hdbscan_for_default_identity_grouping(
     monkeypatch,
 ) -> None:
-    captured: dict[str, object] = {}
-
     class _FakeHdbscan:
-        def __init__(self, **kwargs) -> None:
-            captured["kwargs"] = kwargs
+        def __init__(self, **_kwargs) -> None:
+            pass
 
-        def fit_predict(self, distance: np.ndarray) -> np.ndarray:
-            captured["dtype"] = distance.dtype
-            captured["contiguous"] = bool(distance.flags.c_contiguous)
-            return np.asarray([0, 0, 1], dtype=np.int32)
+        def fit_predict(self, _distance: np.ndarray) -> np.ndarray:
+            raise AssertionError("cluster_pet_records should not use HDBSCAN")
 
     monkeypatch.setitem(
         sys.modules,
@@ -200,16 +234,19 @@ def test_cluster_pet_records_passes_float64_distance_matrix_to_hdbscan(
             detection_id="cat-a",
             asset_id="asset-a",
             embedding=np.asarray([1.0, 0.0]),
+            species_label="cat",
         ),
         _detection(
             detection_id="cat-b",
             asset_id="asset-b",
             embedding=np.asarray([0.99, 0.01]),
+            species_label="cat",
         ),
         _detection(
             detection_id="cat-c",
             asset_id="asset-c",
             embedding=np.asarray([0.0, 1.0]),
+            species_label="cat",
         ),
     ]
 
@@ -219,50 +256,32 @@ def test_cluster_pet_records_passes_float64_distance_matrix_to_hdbscan(
         min_samples=2,
     )
 
-    assert captured["kwargs"] == {
-        "metric": "precomputed",
-        "min_cluster_size": 2,
-        "min_samples": 1,
-    }
-    assert captured["dtype"] == np.dtype(np.float64)
-    assert captured["contiguous"] is True
     assert len(pets) == 2
     assert clustered[0].pet_id == clustered[1].pet_id
     assert clustered[2].pet_id != clustered[0].pet_id
 
 
-def test_cluster_pet_records_falls_back_when_hdbscan_rejects_distance_dtype(
-    monkeypatch,
-) -> None:
-    class _RejectingHdbscan:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        def fit_predict(self, _distance: np.ndarray) -> np.ndarray:
-            raise ValueError(
-                "Buffer dtype mismatch, expected 'double_t' but got 'float'"
-            )
-
-    monkeypatch.setitem(
-        sys.modules,
-        "hdbscan",
-        SimpleNamespace(HDBSCAN=_RejectingHdbscan),
-    )
+def test_cluster_pet_records_complete_link_blocks_similarity_chain() -> None:
+    sixty_degrees = np.asarray([0.5, 0.8660254])
+    thirty_degrees = np.asarray([0.8660254, 0.5])
     detections = [
         _detection(
             detection_id="cat-a",
             asset_id="asset-a",
             embedding=np.asarray([1.0, 0.0]),
+            species_label="cat",
         ),
         _detection(
             detection_id="cat-b",
             asset_id="asset-b",
-            embedding=np.asarray([0.99, 0.01]),
+            embedding=thirty_degrees,
+            species_label="cat",
         ),
         _detection(
             detection_id="cat-c",
             asset_id="asset-c",
-            embedding=np.asarray([0.0, 1.0]),
+            embedding=sixty_degrees,
+            species_label="cat",
         ),
     ]
 
@@ -404,6 +423,7 @@ def test_pet_pipeline_filters_detector_boxes_and_records_metrics(tmp_path: Path)
     assert results[0].error is None
     assert len(results[0].detections) == 1
     assert results[0].detections[0].box_w == 160
+    assert results[0].detections[0].species_label == "dog"
     assert pipeline.last_scan_metrics.candidate_boxes == 3
     assert pipeline.last_scan_metrics.unsupported_species == 1
     assert pipeline.last_scan_metrics.too_small == 1
@@ -529,6 +549,35 @@ def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Pa
     assert summaries == []
     assert repository.state_repository is not None
     assert repository.state_repository.get_rejected_pet_keys(["pet-key-a"]) == {"pet-key-a"}
+
+
+def test_pet_repository_persists_detection_and_profile_species(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    detection = _detection(
+        detection_id="det-a",
+        pet_id="pet-a",
+        pet_key="pet-key-a",
+        species_label="Cat",
+    )
+    pet = PetRecord(
+        pet_id="pet-a",
+        name=None,
+        key_detection_id="det-a",
+        detection_count=1,
+        center_embedding=detection.embedding,
+        embedding_dim=detection.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=1,
+        species_label="Cat",
+    )
+
+    repository.replace_all([detection], [pet])
+
+    assert repository.get_all_detections()[0].species_label == "cat"
+    assert repository.get_all_pet_records()[0].species_label == "cat"
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_profiles()[0].species_label == "cat"
 
 
 def test_merge_pets_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
@@ -789,6 +838,116 @@ def test_pet_scan_worker_does_not_reset_current_detector_version(tmp_path: Path)
 
     assert asset_repo.update_calls == []
     assert asset_repo.rows[0]["pet_status"] == "done"
+
+
+def test_pet_scan_worker_reclusters_for_clustering_upgrade_without_resetting_assets(
+    tmp_path: Path,
+) -> None:
+    asset_repo = _FakePetAssetRepository(
+        [
+            {"id": "asset-cat", "rel": "cat.jpg", "media_type": 0, "pet_status": "done"},
+            {"id": "asset-dog", "rel": "dog.jpg", "media_type": 0, "pet_status": "done"},
+        ]
+    )
+    service = create_pet_service(tmp_path, asset_repository=asset_repo)
+    repository = service.repository()
+    assert repository is not None
+    cat = _detection(
+        detection_id="det-cat",
+        asset_id="asset-cat",
+        pet_id="pet-old",
+        embedding=np.asarray([1.0, 0.0]),
+        species_label="cat",
+    )
+    dog = _detection(
+        detection_id="det-dog",
+        asset_id="asset-dog",
+        pet_id="pet-old",
+        embedding=np.asarray([1.0, 0.0]),
+        species_label="dog",
+    )
+    old_pet = PetRecord(
+        pet_id="pet-old",
+        name=None,
+        key_detection_id="det-cat",
+        detection_count=2,
+        center_embedding=cat.embedding,
+        embedding_dim=cat.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=2,
+    )
+    repository.replace_all([cat, dog], [old_pet])
+    repository.set_scan_metadata("clustering_pipeline_version", "old-clustering")
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    pipeline = PetClusterPipeline(
+        model_root=tmp_path / "models",
+        allow_model_download=False,
+    )
+
+    assert worker._recluster_for_clustering_upgrade(pipeline) is True
+
+    assert asset_repo.update_calls == []
+    assert [row["pet_status"] for row in asset_repo.rows] == ["done", "done"]
+    assert repository.get_scan_metadata("clustering_pipeline_version") == (
+        PET_CLUSTERING_PIPELINE_VERSION
+    )
+    detections = repository.get_all_detections()
+    assert len({detection.pet_id for detection in detections}) == 2
+
+
+def test_pet_scan_worker_recluster_does_not_let_old_key_votes_remerge_split_cats(
+    tmp_path: Path,
+) -> None:
+    asset_repo = _FakePetAssetRepository(
+        [
+            {"id": "asset-cat-a", "rel": "cat-a.jpg", "media_type": 0, "pet_status": "done"},
+            {"id": "asset-cat-b", "rel": "cat-b.jpg", "media_type": 0, "pet_status": "done"},
+        ]
+    )
+    service = create_pet_service(tmp_path, asset_repository=asset_repo)
+    repository = service.repository()
+    assert repository is not None
+    first_cat = _detection(
+        detection_id="det-cat-a",
+        asset_id="asset-cat-a",
+        pet_id="pet-old",
+        embedding=np.asarray([1.0, 0.0]),
+        species_label="cat",
+    )
+    second_cat = _detection(
+        detection_id="det-cat-b",
+        asset_id="asset-cat-b",
+        pet_id="pet-old",
+        embedding=np.asarray([0.0, 1.0]),
+        species_label="cat",
+    )
+    old_pet = PetRecord(
+        pet_id="pet-old",
+        name=None,
+        key_detection_id="det-cat-a",
+        detection_count=2,
+        center_embedding=first_cat.embedding,
+        embedding_dim=first_cat.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=2,
+        species_label="cat",
+    )
+    repository.replace_all([first_cat, second_cat], [old_pet])
+    repository.set_scan_metadata("clustering_pipeline_version", "old-clustering")
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    pipeline = PetClusterPipeline(
+        model_root=tmp_path / "models",
+        allow_model_download=False,
+    )
+
+    assert worker._recluster_for_clustering_upgrade(pipeline) is True
+
+    detections = repository.get_all_detections()
+    pet_ids = {detection.pet_id for detection in detections}
+    assert len(pet_ids) == 2
+    assert "pet-old" in pet_ids
 
 
 def test_pet_scan_worker_missing_runtime_keeps_pending(tmp_path: Path, monkeypatch) -> None:

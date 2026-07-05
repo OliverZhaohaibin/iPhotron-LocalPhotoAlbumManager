@@ -28,6 +28,7 @@ class PetDetectionRecord:
     detected_at: str
     image_width: int
     image_height: int
+    species_label: str | None = None
     quality_score: float | None = None
 
 
@@ -43,6 +44,7 @@ class PetRecord:
     updated_at: str
     sample_count: int = 0
     profile_state: str = "unstable"
+    species_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class PetProfile:
     updated_at: str
     sample_count: int = 0
     profile_state: str = "unstable"
+    species_label: str | None = None
 
 
 @dataclass(frozen=True)

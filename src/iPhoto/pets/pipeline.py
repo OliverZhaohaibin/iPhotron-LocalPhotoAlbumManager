@@ -38,6 +38,7 @@ from .state_repository import PetStateRepository
 
 SUPPORTED_DEFAULT_SPECIES = frozenset({"cat", "dog"})
 PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-v3"
+PET_CLUSTERING_PIPELINE_VERSION = "species-complete-link-v1"
 DEFAULT_PET_DETECTOR_MODEL_URL = (
     "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/"
     "0.1.1rc0/yolox_nano.onnx"
@@ -269,6 +270,7 @@ class PetClusterPipeline:
                         detected_at=utc_now_iso(),
                         image_width=image_width,
                         image_height=image_height,
+                        species_label=detected.species_label,
                     )
                 )
                 accepted_detections += 1
@@ -351,21 +353,15 @@ def cluster_pet_records(
 
     updated_detections = list(detections)
     pets: list[PetRecord] = []
-    embeddings = np.stack([detection.embedding for detection in detections], axis=0).astype(
-        np.float32
-    )
-    labels = _cluster_embeddings(
-        embeddings,
+    labels = _cluster_pet_detection_labels(
+        detections,
         distance_threshold=distance_threshold,
         min_samples=min_samples,
         prefer_hdbscan=prefer_hdbscan,
     )
     grouped_indices: dict[str, list[int]] = defaultdict(list)
     for index, label in enumerate(labels.tolist()):
-        if label == -1:
-            grouped_indices[f"noise-{index}"].append(index)
-        else:
-            grouped_indices[f"cluster-{label}"].append(index)
+        grouped_indices[f"cluster-{label}"].append(index)
 
     for grouped in grouped_indices.values():
         members = [detections[index] for index in grouped]
@@ -387,6 +383,7 @@ def cluster_pet_records(
                 updated_at=timestamp,
                 sample_count=len(members),
                 profile_state=profile_state_for_sample_count(len(members)),
+                species_label=_dominant_species_label(members),
             )
         )
         for index in grouped:
@@ -432,6 +429,7 @@ def build_pet_records_from_detections(
                 updated_at=updated_at,
                 sample_count=sample_count,
                 profile_state=profile_state_for_sample_count(sample_count),
+                species_label=_dominant_species_label(members),
             )
         )
     pets.sort(key=lambda pet: (-pet.detection_count, pet.created_at, pet.pet_id))
@@ -468,6 +466,12 @@ def canonicalize_pet_identities(
             pet_key_map=pet_key_map,
             distance_threshold=distance_threshold,
         )
+        if canonical_members.get(canonical_id) and not _detection_groups_compatible(
+            canonical_members[canonical_id],
+            members,
+            distance_threshold=distance_threshold,
+        ):
+            canonical_id = uuid.uuid4().hex
         profile = profiles.get(canonical_id)
         canonical_members[canonical_id].extend(members)
         canonical_names.setdefault(canonical_id, profile.name if profile is not None else None)
@@ -519,8 +523,12 @@ def resolve_canonical_pet_id(
 
     best_profile_id: str | None = None
     best_distance = float("inf")
+    pet_species = _normalize_species_label(pet.species_label)
     for profile in profiles.values():
         if str(profile.profile_state or "unstable") != "stable":
+            continue
+        profile_species = _normalize_species_label(profile.species_label)
+        if pet_species and profile_species and pet_species != profile_species:
             continue
         if profile.embedding_dim <= 0 or profile.center_embedding.size == 0:
             continue
@@ -534,6 +542,148 @@ def resolve_canonical_pet_id(
     if best_profile_id is not None and best_distance <= distance_threshold:
         return best_profile_id
     return uuid.uuid4().hex
+
+
+def _cluster_pet_detection_labels(
+    detections: Sequence[PetDetectionRecord],
+    *,
+    distance_threshold: float,
+    min_samples: int,
+    prefer_hdbscan: bool,
+) -> np.ndarray:
+    del min_samples, prefer_hdbscan
+    if not detections:
+        return np.empty((0,), dtype=np.int32)
+    embeddings = np.stack([detection.embedding for detection in detections], axis=0).astype(
+        np.float32
+    )
+    return _cluster_embeddings_complete_link(
+        embeddings,
+        species_labels=[detection.species_label for detection in detections],
+        distance_threshold=distance_threshold,
+    )
+
+
+def _cluster_embeddings_complete_link(
+    embeddings: np.ndarray,
+    *,
+    species_labels: Sequence[str | None],
+    distance_threshold: float,
+) -> np.ndarray:
+    count = int(embeddings.shape[0])
+    if count == 0:
+        return np.empty((0,), dtype=np.int32)
+    distance_matrix = cosine_distance_matrix(embeddings)
+    clusters: list[list[int]] = [[index] for index in range(count)]
+    normalized_species = [_normalize_species_label(label) for label in species_labels]
+
+    while True:
+        best_pair: tuple[int, int] | None = None
+        best_distance = float("inf")
+        for left_index in range(len(clusters)):
+            for right_index in range(left_index + 1, len(clusters)):
+                left = clusters[left_index]
+                right = clusters[right_index]
+                if not _species_compatible(left, right, normalized_species):
+                    continue
+                complete_distance = _complete_link_distance(left, right, distance_matrix)
+                if complete_distance > distance_threshold:
+                    continue
+                tie_key = (complete_distance, left[0], right[0])
+                best_key = (
+                    best_distance,
+                    clusters[best_pair[0]][0] if best_pair is not None else count,
+                    clusters[best_pair[1]][0] if best_pair is not None else count,
+                )
+                if tie_key < best_key:
+                    best_distance = complete_distance
+                    best_pair = (left_index, right_index)
+        if best_pair is None:
+            break
+        left_index, right_index = best_pair
+        merged = sorted(clusters[left_index] + clusters[right_index])
+        clusters[left_index] = merged
+        del clusters[right_index]
+        clusters.sort(key=lambda values: values[0])
+
+    labels = np.empty((count,), dtype=np.int32)
+    for cluster_id, members in enumerate(clusters):
+        for member in members:
+            labels[member] = cluster_id
+    return labels
+
+
+def _complete_link_distance(
+    left: Sequence[int],
+    right: Sequence[int],
+    distance_matrix: np.ndarray,
+) -> float:
+    return max(
+        float(distance_matrix[left_index, right_index])
+        for left_index in left
+        for right_index in right
+    )
+
+
+def _species_compatible(
+    left: Sequence[int],
+    right: Sequence[int],
+    species_labels: Sequence[str | None],
+) -> bool:
+    known = {
+        species_labels[index]
+        for index in [*left, *right]
+        if species_labels[index] is not None
+    }
+    return len(known) <= 1
+
+
+def _detection_species_compatible(
+    left: Sequence[PetDetectionRecord],
+    right: Sequence[PetDetectionRecord],
+) -> bool:
+    labels = [
+        *(_normalize_species_label(detection.species_label) for detection in left),
+        *(_normalize_species_label(detection.species_label) for detection in right),
+    ]
+    known = {label for label in labels if label is not None}
+    return len(known) <= 1
+
+
+def _detection_groups_compatible(
+    left: Sequence[PetDetectionRecord],
+    right: Sequence[PetDetectionRecord],
+    *,
+    distance_threshold: float,
+) -> bool:
+    if not _detection_species_compatible(left, right):
+        return False
+    for left_detection in left:
+        for right_detection in right:
+            if (
+                cosine_distance(left_detection.embedding, right_detection.embedding)
+                > distance_threshold
+            ):
+                return False
+    return True
+
+
+def _dominant_species_label(detections: Sequence[PetDetectionRecord]) -> str | None:
+    counter = Counter(
+        label
+        for label in (_normalize_species_label(detection.species_label) for detection in detections)
+        if label is not None
+    )
+    if not counter:
+        return None
+    return max(counter.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def _normalize_species_label(value: object) -> str | None:
+    if value is None:
+        return None
+    label = str(value).strip().lower()
+    return label or None
 
 
 def run_dbscan(

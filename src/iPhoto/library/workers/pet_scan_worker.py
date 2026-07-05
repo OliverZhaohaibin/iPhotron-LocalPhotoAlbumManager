@@ -14,7 +14,11 @@ from ...pets.index_coordinator import (
     PetIndexCoordinator,
     PetSnapshotCommittedError,
 )
-from ...pets.pipeline import PET_DETECTOR_PIPELINE_VERSION, PetClusterPipeline
+from ...pets.pipeline import (
+    PET_CLUSTERING_PIPELINE_VERSION,
+    PET_DETECTOR_PIPELINE_VERSION,
+    PetClusterPipeline,
+)
 from ...pets.service import PetService, pet_library_paths
 from ...pets.status import (
     PET_STATUS_DONE,
@@ -83,13 +87,15 @@ class PetScanWorker(QThread):
             self.statusChanged.emit("Pet scanning is disabled.")
             return
 
+        paths = pet_library_paths(self._library_root)
+        pipeline = PetClusterPipeline(model_root=paths.model_dir)
         self._reset_done_rows_for_detector_upgrade()
+        if self._recluster_for_clustering_upgrade(pipeline):
+            self.petIndexUpdated.emit()
         self._prime_pending_rows()
         if self._cancelled:
             return
 
-        paths = pet_library_paths(self._library_root)
-        pipeline = PetClusterPipeline(model_root=paths.model_dir)
         coordinator = self._pet_service.coordinator
         if coordinator is None:
             self.statusChanged.emit("Pet scanning is unavailable for this library.")
@@ -244,8 +250,34 @@ class PetScanWorker(QThread):
             distance_threshold=pipeline.distance_threshold,
             min_samples=pipeline.min_samples,
             detector_pipeline_version=pipeline.detector_pipeline_version,
+            clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
         )
         return event is not None
+
+    def _recluster_for_clustering_upgrade(self, pipeline: PetClusterPipeline) -> bool:
+        repository = self._pet_service.repository()
+        if repository is None:
+            return False
+        current_version = repository.get_scan_metadata("clustering_pipeline_version")
+        if current_version == PET_CLUSTERING_PIPELINE_VERSION:
+            return False
+        reclustered_count = repository.recluster_detections(
+            distance_threshold=pipeline.distance_threshold,
+            min_samples=pipeline.min_samples,
+        )
+        repository.set_scan_metadata(
+            "clustering_pipeline_version",
+            PET_CLUSTERING_PIPELINE_VERSION,
+        )
+        if reclustered_count:
+            LOGGER.info(
+                "Reclustered %d pet detections for clustering pipeline upgrade %s -> %s in %s",
+                reclustered_count,
+                current_version or "<missing>",
+                PET_CLUSTERING_PIPELINE_VERSION,
+                self._library_root,
+            )
+        return reclustered_count > 0
 
     def _reset_done_rows_for_detector_upgrade(self) -> None:
         repository = self._pet_service.repository()

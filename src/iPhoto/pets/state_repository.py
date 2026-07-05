@@ -62,7 +62,7 @@ class PetStateRepository:
                 """
                 SELECT
                     pet_id, name, center_embedding, embedding_dim,
-                    created_at, updated_at, sample_count, profile_state
+                    created_at, updated_at, sample_count, profile_state, species_label
                 FROM pet_profiles
                 """
             ).fetchall()
@@ -85,6 +85,7 @@ class PetStateRepository:
                     updated_at=str(row["updated_at"] or ""),
                     sample_count=sample_count,
                     profile_state=profile_state_for_sample_count(sample_count),
+                    species_label=_normalize_species_label(row["species_label"]),
                 )
             )
         return profiles
@@ -190,15 +191,16 @@ class PetStateRepository:
                     """
                     INSERT INTO pet_profiles (
                         pet_id, name, center_embedding, embedding_dim,
-                        created_at, updated_at, sample_count, profile_state
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, sample_count, profile_state, species_label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pet_id) DO UPDATE SET
                         name = COALESCE(pet_profiles.name, excluded.name),
                         center_embedding = excluded.center_embedding,
                         embedding_dim = excluded.embedding_dim,
                         updated_at = excluded.updated_at,
                         sample_count = excluded.sample_count,
-                        profile_state = excluded.profile_state
+                        profile_state = excluded.profile_state,
+                        species_label = excluded.species_label
                     """,
                     (
                         pet.pet_id,
@@ -209,6 +211,7 @@ class PetStateRepository:
                         timestamp,
                         sample_count,
                         profile_state_for_sample_count(sample_count),
+                        _normalize_species_label(pet.species_label),
                     ),
                 )
 
@@ -430,7 +433,8 @@ class PetStateRepository:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 sample_count INTEGER DEFAULT 0,
-                profile_state TEXT DEFAULT 'unstable'
+                profile_state TEXT DEFAULT 'unstable',
+                species_label TEXT
             )
             """
         )
@@ -483,3 +487,10 @@ class PetStateRepository:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pet_keys_pet_id ON pet_keys (pet_id)")
         conn.commit()
+
+
+def _normalize_species_label(value: object) -> str | None:
+    if value is None:
+        return None
+    label = str(value).strip().lower()
+    return label or None

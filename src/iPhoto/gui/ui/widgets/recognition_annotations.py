@@ -9,6 +9,22 @@ from iPhoto.pets.records import AssetPetAnnotation
 
 
 @dataclass(frozen=True)
+class RecognitionIdentitySuggestion:
+    identity_key: str
+    name: str
+    thumbnail_path: Path | None
+    count: int = 0
+
+    @property
+    def person_id(self) -> str:
+        return self.identity_key
+
+    @property
+    def face_count(self) -> int:
+        return self.count
+
+
+@dataclass(frozen=True)
 class RecognitionAnnotation:
     kind: str
     annotation_id: str

@@ -1217,6 +1217,42 @@ def test_add_manual_face_creates_manual_only_person(tmp_path: Path) -> None:
     assert annotations[0].display_name == "Manual Person"
 
 
+def test_asset_face_annotations_skip_manual_person_redirected_to_pet(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    _write_image(library_root, "album/a.jpg")
+    get_global_repository(library_root).write_rows(
+        [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
+    )
+
+    people_service = create_people_service(library_root)
+    result = people_service.add_manual_face(
+        asset_id="asset-a",
+        requested_box=(40, 50, 80, 80),
+        name_or_none="Miso",
+        person_id=None,
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_repository.replace_all(
+        [
+            _pet_detection_record(
+                detection_id="det-a",
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                pet_id="pet-a",
+            )
+        ],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1, name="Miso")],
+    )
+
+    merge = people_service.merge_identities(f"person:{result.person_id}", "pet:pet-a")
+
+    assert merge is not None and merge.merged is True
+    assert people_service.list_asset_face_annotations("asset-a") == []
+
+
 def test_merge_manual_only_people_keeps_profiles_embedding_free(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()

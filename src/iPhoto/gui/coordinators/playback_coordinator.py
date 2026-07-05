@@ -6,7 +6,7 @@ import logging
 import sqlite3
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -42,6 +42,7 @@ from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.ui.widgets.recognition_annotations import (
+    RecognitionIdentitySuggestion,
     pet_annotation_adapter,
 )
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
@@ -80,14 +81,6 @@ _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE = (
     "GPS 信息未能写入原始照片/视频文件：{reason}"
 )
 _LOCATION_VIDEO_WRITE_PLACEHOLDER = "Writing data, please wait..."
-
-
-@dataclass(frozen=True)
-class _RecognitionActionCandidate:
-    person_id: str
-    name: str | None
-    thumbnail_path: Path | None
-    face_count: int
 
 
 def _location_video_write_placeholder() -> str:
@@ -179,6 +172,7 @@ class PlaybackCoordinator(QObject):
         self._play_profile_row: int | None = None
         self._manual_face_add_inflight = False
         self._manual_face_inflight_asset_id: str | None = None
+        self._manual_face_pending_merge_target: str | None = None
         self._pending_manual_face_annotations: dict[str, list[AssetFaceAnnotation]] = {}
         self._pending_manual_face_sequence = 0
         self._location_search_controller = LocationSearchController(self)
@@ -779,12 +773,7 @@ class PlaybackCoordinator(QObject):
             self._hide_face_name_overlay(clear_annotations=True)
             return
         annotations = self._load_face_name_annotations(presentation.asset_id)
-        try:
-            people_service = getattr(self, "_people_service", None)
-            if people_service is not None:
-                overlay.set_name_suggestions(people_service.list_person_name_suggestions())
-        except (sqlite3.Error, OSError):
-            LOGGER.exception("Failed to load person name suggestions")
+        self._apply_recognition_identity_suggestions(overlay, include_hidden=False)
         overlay.set_annotations(annotations)
         overlay.set_overlay_active(bool(annotations))
 
@@ -825,6 +814,69 @@ class PlaybackCoordinator(QObject):
             except (sqlite3.Error, OSError):
                 LOGGER.exception("Failed to load pet annotations for asset %s", asset_id)
         return annotations
+
+    def _load_recognition_identity_suggestions(
+        self,
+        *,
+        include_hidden: bool,
+    ) -> list[RecognitionIdentitySuggestion]:
+        suggestions: list[RecognitionIdentitySuggestion] = []
+        people_service = getattr(self, "_people_service", None)
+        if people_service is not None:
+            try:
+                people_candidates = people_service.list_clusters(include_hidden=include_hidden)
+                if isinstance(people_candidates, (list, tuple)):
+                    suggestions.extend(
+                        RecognitionIdentitySuggestion(
+                            identity_key=f"person:{summary.person_id}",
+                            name=summary.name.strip(),
+                            thumbnail_path=summary.thumbnail_path,
+                            count=int(getattr(summary, "face_count", 0) or 0),
+                        )
+                        for summary in people_candidates
+                        if getattr(summary, "person_id", None)
+                        and isinstance(summary.name, str)
+                        and summary.name.strip()
+                    )
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to load person identity suggestions")
+        pet_service = getattr(self, "_pet_service", None)
+        if pet_service is not None:
+            try:
+                pet_candidates = pet_service.list_pets(include_hidden=include_hidden)
+                if isinstance(pet_candidates, (list, tuple)):
+                    suggestions.extend(
+                        RecognitionIdentitySuggestion(
+                            identity_key=f"pet:{summary.pet_id}",
+                            name=summary.name.strip(),
+                            thumbnail_path=summary.thumbnail_path,
+                            count=int(getattr(summary, "detection_count", 0) or 0),
+                        )
+                        for summary in pet_candidates
+                        if getattr(summary, "pet_id", None)
+                        and isinstance(summary.name, str)
+                        and summary.name.strip()
+                    )
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to load pet identity suggestions")
+        return suggestions
+
+    def _apply_recognition_identity_suggestions(
+        self,
+        overlay: object,
+        *,
+        include_hidden: bool,
+    ) -> None:
+        suggestions = self._load_recognition_identity_suggestions(
+            include_hidden=include_hidden,
+        )
+        set_identity_suggestions = getattr(overlay, "set_identity_suggestions", None)
+        if callable(set_identity_suggestions):
+            set_identity_suggestions(suggestions)
+            return
+        set_name_suggestions = getattr(overlay, "set_name_suggestions", None)
+        if callable(set_name_suggestions):
+            set_name_suggestions(suggestions)
 
     def _refresh_recognition_views_after_mutation(self) -> None:
         self._refresh_face_name_overlay_for_current_presentation()
@@ -1744,31 +1796,7 @@ class PlaybackCoordinator(QObject):
         info_panel = getattr(self, "_info_panel", None)
         if info_panel is None:
             return
-        candidates: list[object] = []
-        people_service = getattr(self, "_people_service", None)
-        if people_service is not None:
-            try:
-                people_candidates = people_service.list_clusters(include_hidden=True)
-                if isinstance(people_candidates, (list, tuple)):
-                    candidates.extend(people_candidates)
-            except (sqlite3.Error, OSError):
-                LOGGER.exception("Failed to load face action candidates")
-        pet_service = getattr(self, "_pet_service", None)
-        if pet_service is not None:
-            try:
-                pet_candidates = pet_service.list_pets(include_hidden=True)
-                if isinstance(pet_candidates, (list, tuple)):
-                    candidates.extend(
-                        _RecognitionActionCandidate(
-                            person_id=f"pet:{summary.pet_id}",
-                            name=summary.name,
-                            thumbnail_path=summary.thumbnail_path,
-                            face_count=summary.detection_count,
-                        )
-                        for summary in pet_candidates
-                    )
-            except (sqlite3.Error, OSError):
-                LOGGER.exception("Failed to load pet action candidates")
+        candidates = self._load_recognition_identity_suggestions(include_hidden=True)
         set_candidates = getattr(info_panel, "set_face_action_candidates", None)
         if callable(set_candidates):
             set_candidates(candidates)
@@ -1944,10 +1972,7 @@ class PlaybackCoordinator(QObject):
         overlay = getattr(self, "_face_name_overlay", None)
         if overlay is None or presentation is None or presentation.is_video or not presentation.asset_id:
             return
-        try:
-            overlay.set_name_suggestions(self._people_service.list_person_name_suggestions())
-        except (sqlite3.Error, OSError):
-            LOGGER.exception("Failed to load person name suggestions")
+        self._apply_recognition_identity_suggestions(overlay, include_hidden=False)
         overlay.set_annotations(self._load_face_name_annotations(presentation.asset_id))
         overlay.set_overlay_active(True)
         overlay.start_manual_face()
@@ -1975,6 +2000,15 @@ class PlaybackCoordinator(QObject):
         ):
             overlay.show_manual_error("The face circle could not be mapped back to the photo.")
             return
+        identity_key = payload.get("identity_key")
+        selected_identity_key = identity_key if isinstance(identity_key, str) else None
+        selected_person_id = payload.get("person_id") if isinstance(payload.get("person_id"), str) else None
+        worker_person_id = selected_person_id
+        if selected_identity_key and selected_identity_key.startswith("pet:"):
+            worker_person_id = None
+            self._manual_face_pending_merge_target = selected_identity_key
+        else:
+            self._manual_face_pending_merge_target = None
         self._manual_face_add_inflight = True
         self._manual_face_inflight_asset_id = presentation.asset_id
         overlay.set_manual_face_busy(True)
@@ -1985,7 +2019,7 @@ class PlaybackCoordinator(QObject):
             asset_id=presentation.asset_id,
             requested_box=requested_box,
             name_or_none=payload.get("name") if isinstance(payload.get("name"), str) else None,
-            person_id=payload.get("person_id") if isinstance(payload.get("person_id"), str) else None,
+            person_id=worker_person_id,
             people_service=self._people_service,
         )
         worker.signals.ready.connect(self._handle_manual_face_ready)
@@ -1998,6 +2032,32 @@ class PlaybackCoordinator(QObject):
         submitted_asset_id = self._manual_face_inflight_asset_id
         if submitted_asset_id:
             self._clear_pending_manual_faces(submitted_asset_id)
+        merge_target = getattr(self, "_manual_face_pending_merge_target", None)
+        if isinstance(merge_target, str) and merge_target.startswith("pet:"):
+            person_id = getattr(result, "person_id", None)
+            if isinstance(person_id, str) and person_id:
+                try:
+                    merged = self._people_service.merge_identities(
+                        f"person:{person_id}",
+                        merge_target,
+                    )
+                except (sqlite3.Error, OSError):
+                    LOGGER.exception(
+                        "Failed to merge manual face person %s into %s",
+                        person_id,
+                        merge_target,
+                    )
+                    merged = None
+                if merged is None:
+                    LOGGER.warning(
+                        "Manual face was saved but could not be merged into %s",
+                        merge_target,
+                    )
+                    overlay = getattr(self, "_face_name_overlay", None)
+                    if overlay is not None:
+                        overlay.show_manual_error(
+                            "The face was saved, but could not be linked to that name."
+                        )
         presentation = getattr(self, "_current_presentation", None)
         if presentation is not None and presentation.asset_id == submitted_asset_id:
             self._refresh_face_name_overlay_for_current_presentation()
@@ -2008,6 +2068,7 @@ class PlaybackCoordinator(QObject):
 
     @Slot(str)
     def _handle_manual_face_error(self, message: str) -> None:
+        self._manual_face_pending_merge_target = None
         submitted_asset_id = getattr(self, "_manual_face_inflight_asset_id", None)
         if not submitted_asset_id:
             presentation = getattr(self, "_current_presentation", None)
@@ -2030,6 +2091,7 @@ class PlaybackCoordinator(QObject):
     def _handle_manual_face_finished(self) -> None:
         self._manual_face_add_inflight = False
         self._manual_face_inflight_asset_id = None
+        self._manual_face_pending_merge_target = None
         overlay = getattr(self, "_face_name_overlay", None)
         if overlay is not None:
             overlay.set_manual_face_busy(False)

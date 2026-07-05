@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QCompleter, QLineEdit, QListView, QT
 from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
+from .recognition_annotations import RecognitionIdentitySuggestion
 
 _LABEL_MARGIN_X = 10
 _LABEL_MARGIN_Y = 4
@@ -48,9 +49,17 @@ class _SavedFaceLayout:
 
 @dataclass(frozen=True)
 class _NameSuggestion:
-    person_id: str
+    identity_key: str
     name: str
     thumbnail_path: Path | None
+
+    @classmethod
+    def from_identity(cls, suggestion: RecognitionIdentitySuggestion) -> "_NameSuggestion":
+        return cls(
+            identity_key=suggestion.identity_key,
+            name=suggestion.name,
+            thumbnail_path=suggestion.thumbnail_path,
+        )
 
 
 @dataclass
@@ -74,6 +83,8 @@ class _FaceNameEditor(QLineEdit):
         self._closing = False
         self._suppress_cancel_once = False
         self._suggestions: list[_NameSuggestion] = []
+        self._selected_identity_key: str | None = None
+        self._selected_identity_name: str | None = None
         self._model = QStandardItemModel(self)
         self._completer = QCompleter(self._model, self)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -87,6 +98,8 @@ class _FaceNameEditor(QLineEdit):
             "QListView::item:selected { background-color: rgba(33,108,255,32); color: rgba(18,18,18,235); }"
         )
         self._completer.setPopup(popup)
+        self._completer.activated.connect(self._handle_completion_activated)
+        self.textEdited.connect(self._clear_selected_identity)
         self.setCompleter(self._completer)
         self.setFrame(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -99,9 +112,11 @@ class _FaceNameEditor(QLineEdit):
 
     def set_name_suggestions(self, suggestions: list[_NameSuggestion]) -> None:
         self._suggestions = list(suggestions)
+        self._clear_selected_identity()
         self._model.clear()
         for suggestion in self._suggestions:
             item = QStandardItem(suggestion.name)
+            item.setData(suggestion.identity_key, Qt.ItemDataRole.UserRole)
             if suggestion.thumbnail_path is not None and suggestion.thumbnail_path.exists():
                 icon = _icon_for_thumbnail(suggestion.thumbnail_path)
                 if not icon.isNull():
@@ -109,13 +124,45 @@ class _FaceNameEditor(QLineEdit):
             self._model.appendRow(item)
 
     def suggestion_person_id(self) -> str | None:
+        identity_key = self.suggestion_identity_key()
+        if identity_key is None:
+            return None
+        if identity_key.startswith("person:"):
+            return identity_key.removeprefix("person:")
+        if identity_key.startswith("pet:"):
+            return None
+        return identity_key
+
+    def suggestion_identity_key(self) -> str | None:
+        text = self.text().strip()
+        if (
+            self._selected_identity_key
+            and self._selected_identity_name is not None
+            and self._selected_identity_name.strip().casefold() == text.casefold()
+        ):
+            return self._selected_identity_key
         normalized = self.text().strip().casefold()
         matches = [
-            suggestion.person_id
+            suggestion.identity_key
             for suggestion in self._suggestions
             if suggestion.name.strip().casefold() == normalized
         ]
         return matches[0] if len(matches) == 1 else None
+
+    def _handle_completion_activated(self, _completion: object) -> None:
+        index = self._completer.currentIndex()
+        if not index.isValid():
+            return
+        identity_key = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(identity_key, str) or not identity_key:
+            return
+        name = str(index.data() or "").strip()
+        self._selected_identity_key = identity_key
+        self._selected_identity_name = name
+
+    def _clear_selected_identity(self) -> None:
+        self._selected_identity_key = None
+        self._selected_identity_name = None
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -248,10 +295,31 @@ class FaceNameOverlayWidget(QWidget):
         self.update()
 
     def set_name_suggestions(self, suggestions: list[PersonSummary]) -> None:
+        self.set_identity_suggestions(
+            [
+                RecognitionIdentitySuggestion(
+                    identity_key=(
+                        summary.person_id
+                        if str(summary.person_id).startswith(("person:", "pet:"))
+                        else f"person:{summary.person_id}"
+                    ),
+                    name=summary.name.strip(),
+                    thumbnail_path=summary.thumbnail_path,
+                    count=int(getattr(summary, "face_count", 0) or 0),
+                )
+                for summary in suggestions
+                if isinstance(summary.name, str) and summary.name.strip()
+            ]
+        )
+
+    def set_identity_suggestions(
+        self,
+        suggestions: list[RecognitionIdentitySuggestion],
+    ) -> None:
         self._name_suggestions = [
-            _NameSuggestion(summary.person_id, summary.name.strip(), summary.thumbnail_path)
-            for summary in suggestions
-            if isinstance(summary.name, str) and summary.name.strip()
+            _NameSuggestion.from_identity(suggestion)
+            for suggestion in suggestions
+            if isinstance(suggestion.name, str) and suggestion.name.strip()
         ]
         if self._editor is not None:
             self._editor.set_name_suggestions(self._name_suggestions)
@@ -1164,6 +1232,7 @@ class FaceNameOverlayWidget(QWidget):
             {
                 "name": trimmed,
                 "person_id": self._manual_editor.suggestion_person_id(),
+                "identity_key": self._manual_editor.suggestion_identity_key(),
                 "requested_box": requested_box,
             }
         )

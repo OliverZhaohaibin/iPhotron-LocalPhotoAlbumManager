@@ -15,7 +15,10 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from iPhoto.gui.ui.widgets.face_name_overlay import FaceNameOverlayWidget
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
-from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
+from iPhoto.gui.ui.widgets.recognition_annotations import (
+    RecognitionAnnotation,
+    RecognitionIdentitySuggestion,
+)
 from iPhoto.people.repository import AssetFaceAnnotation
 
 
@@ -596,6 +599,84 @@ def test_face_name_overlay_commits_entered_name(qapp, entered_text: str, expecte
 
     assert _spy_records(spy) == [["person-1", expected_name]]
     assert overlay._states["face-1"].layout.label_text == (expected_name or "unnamed")
+
+
+def test_face_name_overlay_identity_suggestions_mix_people_and_pets(qapp) -> None:
+    _surface, _viewer, overlay = _make_overlay(qapp)
+
+    overlay.set_identity_suggestions(
+        [
+            RecognitionIdentitySuggestion("person:person-a", "Miso", None, 2),
+            RecognitionIdentitySuggestion("pet:pet-a", "Miso", None, 3),
+        ]
+    )
+    overlay.start_manual_face()
+    assert overlay._manual_editor is not None
+
+    model = overlay._manual_editor._model
+    assert [model.item(row).text() for row in range(model.rowCount())] == ["Miso", "Miso"]
+    assert [model.item(row).data(Qt.ItemDataRole.UserRole) for row in range(model.rowCount())] == [
+        "person:person-a",
+        "pet:pet-a",
+    ]
+    assert all("pet:" not in model.item(row).text() for row in range(model.rowCount()))
+    overlay.clear_manual_face_draft()
+    qapp.processEvents()
+
+
+def test_manual_face_submission_preserves_selected_pet_identity(qapp) -> None:
+    _surface, _viewer, overlay = _make_overlay(qapp)
+    overlay.set_identity_suggestions(
+        [
+            RecognitionIdentitySuggestion("person:person-a", "Miso", None, 2),
+            RecognitionIdentitySuggestion("pet:pet-a", "Miso", None, 3),
+        ]
+    )
+    overlay.start_manual_face()
+    assert overlay._manual_editor is not None
+    overlay._manual_editor.setText("Miso")
+    assert overlay._manual_editor._completer.setCurrentRow(1)
+    overlay._manual_editor._handle_completion_activated("Miso")
+
+    spy = QSignalSpy(overlay.manualFaceSubmitted)
+    QTest.keyClick(overlay._manual_editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    records = _spy_records(spy)
+    assert len(records) == 1
+    payload = records[0][0]
+    assert payload["identity_key"] == "pet:pet-a"
+    assert payload["person_id"] is None
+    assert payload["name"] == "Miso"
+    overlay.set_manual_face_busy(False)
+    overlay.clear_manual_face_draft()
+    qapp.processEvents()
+
+
+def test_manual_face_submission_leaves_ambiguous_typed_name_unlinked(qapp) -> None:
+    _surface, _viewer, overlay = _make_overlay(qapp)
+    overlay.set_identity_suggestions(
+        [
+            RecognitionIdentitySuggestion("person:person-a", "Miso", None, 2),
+            RecognitionIdentitySuggestion("pet:pet-a", "Miso", None, 3),
+        ]
+    )
+    overlay.start_manual_face()
+    assert overlay._manual_editor is not None
+    overlay._manual_editor.setText("Miso")
+
+    spy = QSignalSpy(overlay.manualFaceSubmitted)
+    QTest.keyClick(overlay._manual_editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    records = _spy_records(spy)
+    assert len(records) == 1
+    payload = records[0][0]
+    assert payload["identity_key"] is None
+    assert payload["person_id"] is None
+    overlay.set_manual_face_busy(False)
+    overlay.clear_manual_face_draft()
+    qapp.processEvents()
 
 
 def test_face_name_overlay_escape_and_focus_loss_cancel_edit(qapp) -> None:

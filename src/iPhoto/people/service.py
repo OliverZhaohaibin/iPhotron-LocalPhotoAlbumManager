@@ -499,7 +499,14 @@ class PeopleService:
             rows_by_id = asset_repository.get_rows_by_ids([asset_id])
             if asset_id not in rows_by_id:
                 return []
-        return repository.list_asset_face_annotations(asset_id)
+        redirected_people = self._redirected_source_ids("person")
+        if not redirected_people:
+            return repository.list_asset_face_annotations(asset_id)
+        return [
+            annotation
+            for annotation in repository.list_asset_face_annotations(asset_id)
+            if annotation.person_id not in redirected_people
+        ]
 
     def list_person_name_suggestions(self) -> list[PersonSummary]:
         return [

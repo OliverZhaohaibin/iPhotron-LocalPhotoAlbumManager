@@ -16,6 +16,7 @@ from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResul
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
+from iPhoto.people.service import ManualFaceAddResult
 from iPhoto.people.repository import AssetFaceAnnotation
 from maps.osmand_search import SearchSuggestion
 
@@ -625,8 +626,49 @@ def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
     )
 
     coordinator._load_face_name_annotations.assert_called_once_with("asset-photo")
+    overlay.set_identity_suggestions.assert_called_once_with([])
     overlay.set_annotations.assert_called_once()
     overlay.set_overlay_active.assert_called_once_with(True)
+
+
+def test_load_recognition_identity_suggestions_mixes_people_and_pets() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(
+        list_clusters=Mock(
+            return_value=[
+                SimpleNamespace(
+                    person_id="person-a",
+                    name="Alice",
+                    thumbnail_path=Path("/tmp/alice.jpg"),
+                    face_count=4,
+                )
+            ]
+        )
+    )
+    coordinator._pet_service = Mock(
+        list_pets=Mock(
+            return_value=[
+                SimpleNamespace(
+                    pet_id="pet-a",
+                    name="Miso",
+                    thumbnail_path=Path("/tmp/miso.jpg"),
+                    detection_count=2,
+                )
+            ]
+        )
+    )
+
+    suggestions = PlaybackCoordinator._load_recognition_identity_suggestions(
+        coordinator,
+        include_hidden=False,
+    )
+
+    assert [(item.identity_key, item.name, item.count) for item in suggestions] == [
+        ("person:person-a", "Alice", 4),
+        ("pet:pet-a", "Miso", 2),
+    ]
+    coordinator._people_service.list_clusters.assert_called_once_with(include_hidden=False)
+    coordinator._pet_service.list_pets.assert_called_once_with(include_hidden=False)
 
 
 def test_refresh_face_name_overlay_hides_for_video() -> None:
@@ -1586,6 +1628,86 @@ def test_handle_manual_face_submitted_queues_background_worker() -> None:
         people_service=coordinator._people_service,
     )
     fake_pool.start.assert_called_once_with(fake_worker, -1)
+
+
+def test_handle_manual_face_submitted_defers_pet_identity_to_merge() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._manual_face_add_inflight = False
+    coordinator._pending_manual_face_annotations = {}
+    coordinator._pending_manual_face_sequence = 0
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._face_name_overlay = Mock()
+    coordinator._people_service = Mock(library_root=Mock(return_value=Path("/fake/library")))
+
+    fake_worker = SimpleNamespace(
+        signals=SimpleNamespace(
+            ready=Mock(connect=Mock()),
+            error=Mock(connect=Mock()),
+            finished=Mock(connect=Mock()),
+        )
+    )
+    fake_pool = Mock(start=Mock())
+
+    with patch(
+        "iPhoto.gui.coordinators.playback_coordinator.ManualFaceAddWorker",
+        return_value=fake_worker,
+    ) as worker_cls, patch(
+        "iPhoto.gui.coordinators.playback_coordinator.QThreadPool.globalInstance",
+        return_value=fake_pool,
+    ):
+        PlaybackCoordinator._handle_manual_face_submitted(
+            coordinator,
+            {
+                "requested_box": (10, 20, 30, 40),
+                "name": "Miso",
+                "identity_key": "pet:pet-a",
+                "person_id": None,
+            },
+        )
+
+    assert coordinator._manual_face_pending_merge_target == "pet:pet-a"
+    worker_cls.assert_called_once()
+    assert worker_cls.call_args.kwargs["person_id"] is None
+    assert worker_cls.call_args.kwargs["name_or_none"] == "Miso"
+    fake_pool.start.assert_called_once_with(fake_worker, -1)
+
+
+def test_handle_manual_face_ready_merges_selected_pet_identity() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._manual_face_inflight_asset_id = "asset-photo"
+    coordinator._manual_face_pending_merge_target = "pet:pet-a"
+    coordinator._pending_manual_face_annotations = {"asset-photo": []}
+    coordinator._people_service = Mock(merge_identities=Mock(return_value=SimpleNamespace(merged=True)))
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+
+    PlaybackCoordinator._handle_manual_face_ready(
+        coordinator,
+        ManualFaceAddResult(
+            asset_id="asset-photo",
+            face_id="face-manual",
+            person_id="person-new",
+            created_new_person=True,
+        ),
+    )
+
+    coordinator._people_service.merge_identities.assert_called_once_with(
+        "person:person-new",
+        "pet:pet-a",
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
 def test_handle_manual_face_submitted_immediately_refreshes_info_panel_with_pending_face() -> None:

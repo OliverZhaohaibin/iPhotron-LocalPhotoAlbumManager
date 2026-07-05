@@ -444,7 +444,11 @@
         </message>
         <message>
             <source>Choose Someone Else…</source>
-            <translation>选择其他人…</translation>
+            <translation>选择其他名称…</translation>
+        </message>
+        <message>
+            <source>New Name…</source>
+            <translation>新建名称…</translation>
         </message>
         <message>
             <source>New Person…</source>
@@ -459,8 +463,16 @@
             <translation>不是此人物</translation>
         </message>
         <message>
+            <source>Not This Name</source>
+            <translation>不是此名称</translation>
+        </message>
+        <message>
             <source>Choose Someone Else</source>
-            <translation>选择其他人</translation>
+            <translation>选择其他名称</translation>
+        </message>
+        <message>
+            <source>Assign to</source>
+            <translation>分配给</translation>
         </message>
         <message>
             <source>Assign this face to</source>
@@ -475,8 +487,16 @@
             <translation>新建人物</translation>
         </message>
         <message>
+            <source>New Name</source>
+            <translation>新建名称</translation>
+        </message>
+        <message>
             <source>Person name:</source>
             <translation>人物姓名：</translation>
+        </message>
+        <message>
+            <source>Name:</source>
+            <translation>名称：</translation>
         </message>
         <message>
             <source>Unnamed</source>

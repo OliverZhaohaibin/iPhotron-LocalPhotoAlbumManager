@@ -257,21 +257,12 @@ class _FaceAvatarWidget(QLabel):
         return menu
 
     def _menu_action_labels(self) -> tuple[str, str, tuple[tuple[str, str], tuple[str, str]]]:
-        if self._annotation_kind() == "pet":
-            return (
-                tr("InfoPanel", "Delete Detection"),
-                self._not_this_label(),
-                (
-                    ("choose_someone_else", tr("InfoPanel", "Choose Another Pet…")),
-                    ("new_person", tr("InfoPanel", "New Pet…")),
-                ),
-            )
         return (
             tr("InfoPanel", "Delete"),
             self._not_this_label(),
             (
                 ("choose_someone_else", tr("InfoPanel", "Choose Someone Else…")),
-                ("new_person", tr("InfoPanel", "New Person…")),
+                ("new_person", tr("InfoPanel", "New Name…")),
             ),
         )
 
@@ -279,32 +270,22 @@ class _FaceAvatarWidget(QLabel):
         display_name = str(self._annotation.display_name or "").strip()
         if display_name:
             return tr("InfoPanel", "Not {name}").format(name=display_name)
-        if self._annotation_kind() == "pet":
-            return tr("InfoPanel", "Not This Pet")
-        return tr("InfoPanel", "Not This Person")
+        return tr("InfoPanel", "Not This Name")
 
     def _prompt_choose_person(self) -> None:
         annotation_kind = self._annotation_kind()
-        annotation_entity_id = self._annotation_entity_id()
+        annotation_entity_key = self._annotation_entity_key()
         options = [
             summary
             for summary in self._candidates
             if getattr(summary, "person_id", None)
-            and summary.person_id != annotation_entity_id
+            and _candidate_identity_key(summary) != annotation_entity_key
             and _candidate_kind(summary) == annotation_kind
         ]
         if not options:
             return
-        title = (
-            tr("InfoPanel", "Choose Another Pet")
-            if annotation_kind == "pet"
-            else tr("InfoPanel", "Choose Someone Else")
-        )
-        prompt = (
-            tr("InfoPanel", "Assign this detection to")
-            if annotation_kind == "pet"
-            else tr("InfoPanel", "Assign this face to")
-        )
+        title = tr("InfoPanel", "Choose Someone Else")
+        prompt = tr("InfoPanel", "Assign to")
         host = self.window() if isinstance(self.window(), QWidget) else self
         dialog = GroupPeopleDialog(
             options,
@@ -324,11 +305,10 @@ class _FaceAvatarWidget(QLabel):
         self.moveRequested.emit(self._annotation, selected_ids[0])
 
     def _prompt_new_person(self) -> None:
-        is_pet = self._annotation_kind() == "pet"
         host = self.window() if isinstance(self.window(), QWidget) else self
         dialog = QInputDialog(host)
-        dialog.setWindowTitle(tr("InfoPanel", "New Pet") if is_pet else tr("InfoPanel", "New Person"))
-        dialog.setLabelText(tr("InfoPanel", "Pet name:") if is_pet else tr("InfoPanel", "Person name:"))
+        dialog.setWindowTitle(tr("InfoPanel", "New Name"))
+        dialog.setLabelText(tr("InfoPanel", "Name:"))
         dialog.setTextValue("")
         _style_popup_input_dialog(dialog, host)
         if dialog.exec() != QInputDialog.DialogCode.Accepted:
@@ -339,6 +319,9 @@ class _FaceAvatarWidget(QLabel):
         self.newPersonRequested.emit(self._annotation, new_name)
 
     def _annotation_kind(self) -> str:
+        entity_id = self._annotation_entity_id()
+        if isinstance(entity_id, str) and entity_id.startswith("pet:"):
+            return "pet"
         return "pet" if getattr(self._annotation, "kind", "person") == "pet" else "person"
 
     def _annotation_entity_id(self) -> str | None:
@@ -346,6 +329,14 @@ class _FaceAvatarWidget(QLabel):
         if isinstance(entity_id, str) and entity_id:
             return entity_id
         return None
+
+    def _annotation_entity_key(self) -> str | None:
+        entity_id = self._annotation_entity_id()
+        if not entity_id:
+            return None
+        if entity_id.startswith(("person:", "pet:")):
+            return entity_id
+        return f"{self._annotation_kind()}:{entity_id}"
 
     def _set_menu_active(self, active: bool) -> None:
         self._is_menu_active = bool(active)
@@ -386,6 +377,16 @@ def _person_choice_label(summary: PersonSummary) -> str:
 def _candidate_kind(candidate: object) -> str:
     person_id = getattr(candidate, "person_id", "")
     return "pet" if isinstance(person_id, str) and person_id.startswith("pet:") else "person"
+
+
+def _candidate_identity_key(candidate: object) -> str | None:
+    person_id = getattr(candidate, "person_id", None)
+    if not isinstance(person_id, str) or not person_id:
+        return None
+    if person_id.startswith(("person:", "pet:")):
+        return person_id
+    return f"{_candidate_kind(candidate)}:{person_id}"
+
 
 @dataclass
 class _FormattedMetadata:

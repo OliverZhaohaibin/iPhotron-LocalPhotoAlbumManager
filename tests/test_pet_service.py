@@ -14,6 +14,7 @@ from iPhoto.cache.index_store import get_global_repository, reset_global_reposit
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.pets.index_coordinator import reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
+    _DINO_HUB_REPO,
     PET_CLUSTERING_PIPELINE_VERSION,
     PET_DETECTOR_PIPELINE_VERSION,
     DetectedAssetPets,
@@ -28,6 +29,7 @@ from iPhoto.pets.pipeline import (
     build_pet_key,
     canonicalize_pet_identities,
     cluster_pet_records,
+    default_pet_model_dir,
     ensure_pet_detector_model,
 )
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
@@ -93,6 +95,7 @@ def _detection(
     pet_id: str | None = None,
     embedding: np.ndarray | None = None,
     species_label: str | None = None,
+    thumbnail_path: str | None = None,
 ) -> PetDetectionRecord:
     vector = normalize_vector(
         embedding if embedding is not None else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
@@ -111,7 +114,7 @@ def _detection(
         embedding_dim=int(vector.shape[0]),
         embedding_model="dinov2_vits14",
         detector_model="yolox_nano_coco",
-        thumbnail_path=None,
+        thumbnail_path=thumbnail_path,
         pet_id=pet_id,
         detected_at=utc_now_iso(),
         image_width=400,
@@ -551,6 +554,100 @@ def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Pa
     assert repository.state_repository.get_rejected_pet_keys(["pet-key-a"]) == {"pet-key-a"}
 
 
+def test_delete_detection_replaces_custom_cover_and_removes_thumbnail(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    thumbnail_dir = tmp_path / "thumbnails"
+    thumbnail_dir.mkdir()
+    deleted_thumbnail = thumbnail_dir / "det-a.png"
+    retained_thumbnail = thumbnail_dir / "det-b.png"
+    deleted_thumbnail.write_bytes(b"deleted")
+    retained_thumbnail.write_bytes(b"retained")
+    first = _detection(
+        detection_id="det-a",
+        asset_id="asset-a",
+        pet_id="pet-a",
+        thumbnail_path="thumbnails/det-a.png",
+    )
+    second = _detection(
+        detection_id="det-b",
+        asset_id="asset-b",
+        pet_id="pet-a",
+        thumbnail_path="thumbnails/det-b.png",
+    )
+    pet = PetRecord(
+        pet_id="pet-a",
+        name=None,
+        key_detection_id="det-a",
+        detection_count=2,
+        center_embedding=first.embedding,
+        embedding_dim=first.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=2,
+    )
+    repository.replace_all([first, second], [pet])
+    assert repository.set_pet_cover("pet-a", "det-a") is True
+
+    assert repository.delete_detection("det-a") is not None
+
+    summary = repository.get_pet_summaries()[0]
+    assert summary.key_detection_id == "det-b"
+    assert summary.thumbnail_path == retained_thumbnail.resolve()
+    assert not deleted_thumbnail.exists()
+    assert retained_thumbnail.exists()
+
+
+def test_replace_all_prunes_unreferenced_pet_thumbnails(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    thumbnail_dir = tmp_path / "thumbnails"
+    thumbnail_dir.mkdir()
+    referenced_thumbnail = thumbnail_dir / "current.png"
+    orphaned_thumbnail = thumbnail_dir / "old.png"
+    uncommitted_thumbnail = thumbnail_dir / "inflight.png"
+    referenced_thumbnail.write_bytes(b"current")
+    orphaned_thumbnail.write_bytes(b"old")
+    uncommitted_thumbnail.write_bytes(b"inflight")
+    old_detection = _detection(
+        detection_id="old",
+        pet_id="pet-a",
+        thumbnail_path="thumbnails/old.png",
+    )
+    old_pet = PetRecord(
+        pet_id="pet-a",
+        name=None,
+        key_detection_id="old",
+        detection_count=1,
+        center_embedding=old_detection.embedding,
+        embedding_dim=old_detection.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=1,
+    )
+    repository.replace_all([old_detection], [old_pet])
+    detection = _detection(
+        detection_id="current",
+        pet_id="pet-a",
+        thumbnail_path="thumbnails/current.png",
+    )
+    pet = PetRecord(
+        pet_id="pet-a",
+        name=None,
+        key_detection_id="current",
+        detection_count=1,
+        center_embedding=detection.embedding,
+        embedding_dim=detection.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=1,
+    )
+
+    repository.replace_all([detection], [pet])
+
+    assert referenced_thumbnail.exists()
+    assert not orphaned_thumbnail.exists()
+    assert uncommitted_thumbnail.exists()
+
+
 def test_pet_repository_persists_detection_and_profile_species(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     detection = _detection(
@@ -800,6 +897,21 @@ def test_pet_detector_model_downloads_when_missing(tmp_path: Path, monkeypatch) 
 
     assert resolved == target
     assert target.read_bytes() == b"pet-detector"
+
+
+def test_pet_embedding_hub_source_is_pinned_to_commit() -> None:
+    _owner_repo, separator, revision = _DINO_HUB_REPO.partition(":")
+
+    assert separator == ":"
+    assert len(revision) == 40
+    assert all(character in "0123456789abcdef" for character in revision)
+
+
+def test_default_pet_model_dir_stays_under_extension(monkeypatch) -> None:
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    expected = Path(__file__).resolve().parents[1] / "src" / "extension" / "models" / "pets"
+
+    assert default_pet_model_dir() == expected
 
 
 def test_pet_scan_worker_resets_done_rows_for_detector_upgrade(tmp_path: Path) -> None:

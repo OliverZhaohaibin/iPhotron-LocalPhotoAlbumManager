@@ -45,7 +45,11 @@ DEFAULT_PET_DETECTOR_MODEL_URL = (
 )
 PET_MODEL_AUTO_DOWNLOAD_ENV = "IPHOTO_PET_MODEL_AUTO_DOWNLOAD"
 PET_DETECTOR_MODEL_URL_ENV = "IPHOTO_PET_DETECTOR_MODEL_URL"
-_DINO_HUB_REPO = "facebookresearch/dinov2"
+# Torch Hub executes the checked-out repository's ``hubconf.py``. Keep the
+# repository pinned to an immutable revision so a background model
+# download cannot silently start executing a changed upstream default branch.
+_DINO_HUB_REVISION = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
+_DINO_HUB_REPO = f"facebookresearch/dinov2:{_DINO_HUB_REVISION}"
 _DOWNLOAD_TIMEOUT_SECONDS = 60
 _DOWNLOAD_CHUNK_SIZE = 1024 * 256
 _YOLOX_STRIDES = (8, 16, 32)

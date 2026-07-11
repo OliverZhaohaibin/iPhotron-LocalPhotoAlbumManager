@@ -4,6 +4,54 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — People & Pets Recognition
+
+🐾 *Adds a library-scoped Pets bounded context and composes pet identities with
+the existing People dashboard, gallery, groups, pins, and media annotations.*
+
+### Key Updates
+
+#### 🐕 Pet Detection And Clustering
+- Added optional YOLOX/ONNXRuntime pet detection, DINOv2 embeddings, and
+  species-separated identity clustering through the `pets-ai` extra.
+- Added tiled fallback detection for small cats/dogs, stable `pet_key`
+  canonicalization, detector/clustering pipeline versioning, and graceful
+  pending-state recovery when optional dependencies or models are unavailable.
+- Pinned the DINOv2 Torch Hub source to an immutable revision and kept the
+  shared model contract under `src/extension/models/pets/`.
+
+#### 💾 Library-Scoped Pets State
+- Added independent `pet_status` bookkeeping to `global_index.db`, rebuildable
+  `.iPhoto/pets/pet_index.db`, and durable `.iPhoto/pets/pet_state.db` state.
+- Added durable names, covers, hidden flags, rejected detections, merges, moves,
+  identity redirects, and reference-safe cleanup of replaced pet thumbnails.
+- Added `LibrarySession.pets`, Pets application ports, bootstrap composition,
+  snapshot coordination, and background `PetScanWorker` scheduling.
+
+#### 👥 People & Pets UI
+- Extended the People dashboard with pet cards, naming, merge/move, hide,
+  cover, delete-detection, pin, and gallery navigation actions.
+- Added mixed person/pet identity groups and cross-kind redirects while keeping
+  People and Pets runtime records in separate bounded contexts.
+- Added pet bounding-box/name annotations to image playback, detail overlays,
+  and information surfaces through the shared recognition annotation transport.
+
+#### 🚀 Startup And Worker Lifecycle
+- Deferred saved-library metadata scanning until the first gallery window is
+  warmed, with a bounded fallback timer.
+- Deferred startup Face/Pet AI workers until metadata scanning completes;
+  interactive rescans continue to feed both workers from committed scan rows.
+- Hardened cancellation and shutdown waits for scanner, face, pet, thumbnail,
+  map, playback, and event-bus resources.
+
+#### 📚 Documentation
+- Updated the production architecture, security, development, packaging, and
+  localized README surfaces for Pets.
+- Added `docs/misc/PETS_RECOGNITION_RUNTIME.md` as the current maintenance
+  contract and marked the original Pets requirements as historical inputs.
+
+---
+
 ## 🚀 v6.6.8 — Gallery Scroll Performance, Async Windows & Thumbnail Demand
 
 🖼️ *A Gallery performance release focused on low-latency scrolling, sparse
@@ -20,8 +68,8 @@ memory-aware thumbnail publishing.*
   feature bundles, with `featureCreated` wiring for components that appear
   after the window shell.
 - Kept the GPU-backed detail page in the Windows pre-show phase to avoid native
-  window recreation and a visible false first window; macOS and Linux defer it
-  for the faster first-frame path.
+  window recreation and a visible false first window; Linux follows the same
+  pre-show rule, while macOS defers it for the faster first-frame path.
 - Reused the settings object loaded during early startup and avoided rewriting
   an unchanged settings file on every launch.
 

@@ -167,6 +167,50 @@ Nuitka command, include the equivalent flags:
 --nofollow-import-to=typing_inspection
 ```
 
+## Pets Recognition in Release Builds
+
+Pets is a separate optional runtime; including People dependencies alone does
+not enable it. Build environments that promise Pets support must install:
+
+```powershell
+python -m pip install -e ".[pets-ai]"
+```
+
+The standalone bundle must retain `onnxruntime`, `torch`, `torchvision`,
+`hdbscan`, and `certifi`. An offline-ready build must also include:
+
+```text
+extension/models/pets/
+├── detector/yolox_nano_coco.onnx
+└── embedding/dinov2_vits14/dinov2_vits14.pt
+```
+
+The existing `--include-data-dir=src/extension/models=extension/models` flag
+copies both People and Pets models when those files exist. Manual Nuitka builds
+that enable Pets should also include the optional runtime explicitly:
+
+```bash
+--include-package=onnxruntime
+--include-package=torch
+--include-package=torchvision
+--include-package=hdbscan
+--include-package=certifi
+--include-data-dir=src/extension/models=extension/models
+```
+
+The current platform build scripts explicitly include the People runtime but do
+not yet add `torch`, `torchvision`, or `hdbscan` flags. Therefore a stock script
+build must not be advertised as Pets-enabled merely because the model directory
+was copied; add the flags above (or update the script) and perform the Pets smoke
+test before release.
+
+If models are intentionally omitted, first-use download requires a writable
+`extension/models/pets` location or an explicit writable
+`IPHOTO_PET_MODEL_DIR`. Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` for controlled
+offline deployments. See
+[`PETS_RECOGNITION_RUNTIME.md`](PETS_RECOGNITION_RUNTIME.md) for the runtime and
+persistence contract.
+
 ## Step 1: AOT Compilation
 
 Before packaging with Nuitka, you **must** compile the Numba JIT filters into
@@ -206,7 +250,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -Outpu
 ```
 
 The default is a fast-starting base package: it omits the map extension's
-roughly 45,000 files and the InsightFace model cache. Those resources are
+roughly 45,000 files and the People/Pets model cache. Those resources are
 resolved from the per-user extension cache when their feature is used. Pass
 `-IncludeOptionalAssets` when a controlled deployment requires a completely
 offline bundle. Every build writes `nuitka-compilation-report.xml` below the
@@ -245,7 +289,7 @@ Useful flags:
   Skip the copy into `src/maps/tiles/extension/bin` if you already staged the
   runtime manually.
 - `-IncludeOptionalAssets`
-  Bundle the staged map extension and face models for a fully offline build.
+  Bundle the staged map extension and recognition models for a fully offline build.
 - `-ConsoleMode disable|attach|force`
   Control the Windows console mode.
 - `-Jobs <n>`
@@ -360,7 +404,7 @@ Notes:
 | `--include-package=iPhoto` | Ensures all iPhoto sub-packages (including the AOT `.so`/`.pyd`) are included |
 | `--include-package=insightface` | Bundles the InsightFace runtime used by People scanning |
 | `--include-package=onnxruntime` | Bundles the ONNX runtime used by InsightFace models |
-| `--include-data-dir=src/extension/models=extension/models` | Optional: bundles the shared face model cache for an offline build |
+| `--include-data-dir=src/extension/models=extension/models` | Optional: bundles the shared People/Pets model cache for an offline build |
 | `--nofollow-import-to=albumentations` and related pydantic packages | Avoids unused InsightFace mask-rendering dependencies that are not needed for People clustering |
 | QRhi `.qsb` data files | Required for macOS/Metal and OpenGL QRhi media previews; include `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` |
 
@@ -415,17 +459,19 @@ After building, confirm that:
    find dist/ -name "video_renderer.frag.qsb"
    ```
 
-6. The packaged output includes the face model cache when it is intended to be
+6. The packaged output includes the recognition model cache when it is intended to be
    shipped offline:
 
    ```powershell
    Get-ChildItem -Recurse dist\ -Filter "det_500m.onnx"
    Get-ChildItem -Recurse dist\ -Filter "w600k_mbf.onnx"
+   Get-ChildItem -Recurse dist\ -Filter "yolox_nano_coco.onnx"
+   Get-ChildItem -Recurse dist\ -Filter "dinov2_vits14.pt"
    ```
 
-7. The People page can scan a small image folder and create face clusters.
-   Name a person, set a cover, create a group with at least two people, and
-   restart the packaged app to confirm the stable People state persists.
+7. The People & Pets page can scan a small image folder and create the enabled
+   face/pet clusters. Name an identity, set a cover, create a group, and restart
+   the packaged app to confirm stable recognition state persists.
    During a diagnostic run, check the app log at
    `%LOCALAPPDATA%\iPhoto\iPhoto.log` for messages such as `Face detection
    failed for ...` or `Face scan failed for asset ...`.

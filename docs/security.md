@@ -18,7 +18,8 @@ iPhotron is a **local-first photo manager**. It does not upload data to any clou
 |--------|-------|---------|
 | **Read** | User-selected library folders | Scan photos/videos, read metadata (EXIF, GPS) |
 | **Write** | Library folders | Create `.iphoto.album.json` manifests, `.ipo` sidecar files |
-| **Write** | `.iPhoto/` directory at library root | Global SQLite database (`global_index.db`), thumbnail and People caches, durable People state |
+| **Write** | `.iPhoto/` directory at library root | Global SQLite database, thumbnail caches, and durable People/Pets state |
+| **Read/Write** | `extension/models/` or an explicit model override | Read bundled AI models and populate an allowed first-use model cache |
 | **Write** | Selected original media file | Best-effort GPS metadata write-back after an explicit Assign Location action |
 | **Read/Write** | Application settings directory | User preferences (theme, export destination) |
 
@@ -168,7 +169,16 @@ state, are stored in a validated `settings.json` file:
 |---|---|
 | **Threat** | A compromised PyPI package is installed |
 | **Impact** | Arbitrary code execution |
-| **Mitigation** | Pin dependency versions in `pyproject.toml`; review dependency updates; use virtual environments |
+| **Mitigation** | Constrain dependencies in `pyproject.toml`; review resolved dependency updates; use isolated virtual environments and reproducible release lock inputs |
+
+#### T6: AI Model Supply Chain
+
+| | |
+|---|---|
+| **Threat** | A model or model-loader source changes upstream or is replaced in transit/cache |
+| **Impact** | Recognition failure, unsafe model parsing, or execution of changed loader code |
+| **Mitigation** | HTTPS downloads, a pinned immutable DINOv2 Torch Hub revision, explicit model-cache overrides, and offline release builds with reviewed files under `extension/models/` |
+| **Operator control** | Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` to require pre-provisioned Pets models |
 
 ---
 

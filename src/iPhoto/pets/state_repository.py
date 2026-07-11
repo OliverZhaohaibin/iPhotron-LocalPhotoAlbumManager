@@ -261,6 +261,20 @@ class PetStateRepository:
                         timestamp,
                     ),
                 )
+
+            current_pet_ids = {pet.pet_id for pet in pets if pet.pet_id}
+            automatic_cover_rows = conn.execute(
+                "SELECT pet_id FROM pet_covers WHERE is_custom = 0"
+            ).fetchall()
+            stale_automatic_cover_ids = [
+                str(row["pet_id"])
+                for row in automatic_cover_rows
+                if row["pet_id"] and str(row["pet_id"]) not in current_pet_ids
+            ]
+            conn.executemany(
+                "DELETE FROM pet_covers WHERE pet_id = ? AND is_custom = 0",
+                [(pet_id,) for pet_id in stale_automatic_cover_ids],
+            )
             conn.commit()
 
     def rename_pet(self, pet_id: str, name_or_none: str | None) -> None:
@@ -374,6 +388,30 @@ class PetStateRepository:
             for row in rows
             if row["pet_id"] and row["thumbnail_path"]
         }
+
+    def get_cover_thumbnail_paths(self) -> set[str]:
+        """Return thumbnail paths still retained by persisted cover choices."""
+
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT thumbnail_path FROM pet_covers WHERE thumbnail_path IS NOT NULL"
+            ).fetchall()
+        return {str(row["thumbnail_path"]) for row in rows if row["thumbnail_path"]}
+
+    def clear_cover_for_detection(self, detection_id: str) -> bool:
+        """Remove a cover choice that points at a detection being deleted."""
+
+        if not detection_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                "DELETE FROM pet_covers WHERE detection_id = ?",
+                (detection_id,),
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0) > 0
 
     def merge_pets(self, source_pet_id: str, target_pet_id: str) -> bool:
         if not source_pet_id or not target_pet_id or source_pet_id == target_pet_id:

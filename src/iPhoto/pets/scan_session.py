@@ -87,14 +87,20 @@ class PetScanSession:
         previous_detections = repository.get_all_detections()
         previous_pets = repository.get_all_pet_records()
 
-        repository.replace_all(detections, pets, sync_runtime_state=False)
+        replaced_thumbnail_paths = repository.replace_all(
+            detections,
+            pets,
+            sync_runtime_state=False,
+        )
         try:
             repository.sync_runtime_state()
         except Exception:
-            repository.replace_all(
+            rollback_thumbnail_paths = repository.replace_all(
                 previous_detections,
                 previous_pets,
                 sync_runtime_state=False,
             )
             repository.sync_runtime_state()
+            repository.prune_unreferenced_thumbnails(rollback_thumbnail_paths)
             raise
+        repository.prune_unreferenced_thumbnails(replaced_thumbnail_paths)

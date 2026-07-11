@@ -110,6 +110,8 @@ Key highlights:
 - 🗺 Optional map view that visualizes GPS metadata across all photos & videos and falls back gracefully when the maps extension is unavailable.
 - 👥 Optional People scanning with face clusters, names, covers, hidden people,
   and multi-person groups.
+- 🐾 Optional Pets scanning with cat/dog detection, identity clusters, names,
+  covers, hidden pets, pins, and People & Pets groups.
 ![Main interface](docs/picture/mainview.png)
 ![Preview interface](docs/picture/preview.png)
 ---
@@ -170,17 +172,25 @@ A "LIVE" badge appears on still photos — click to play the motion video inline
 The sidebar provides an auto-generated **Basic Library**, grouping photos into:
 `All Photos`, `Videos`, `Live Photos`, `Favorites`, and `Recently Deleted`.
 
-### 👥 People, Face Clusters & Groups
+### 👥🐾 People, Pets, Face Clusters & Groups
 The optional People pipeline detects faces, builds face clusters, and presents
 them as People cards. You can name people, merge duplicate clusters, hide or
 show hidden people, and keep chosen covers persistent across rescans.
+
+The independent Pets pipeline detects cats and dogs with YOLOX, creates DINOv2
+embeddings, and presents pet identity cards in the same dashboard. Pets can be
+named, merged, hidden, pinned, assigned covers, and opened as gallery queries.
+People and Pets may participate in the same identity groups while their runtime
+indexes and durable state remain separate.
 
 Drag people into groups to collect shared photos for multiple people. Group
 cards can use a selected cover, be reordered, and be disbanded when they are not
 pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo
 manager remains usable without installing the AI runtime, and People state is
 kept behind the library session so names, covers, hidden flags, groups, and
-manual faces survive rescans.
+manual faces survive rescans. Pet scanning uses the optional `pets-ai` extra;
+missing pet dependencies or models leave eligible rows pending without blocking
+the rest of the application.
 ![People and groups interface](docs/picture/People%20%26%20Group.png)
 
 ### ⚡ Large-Library Gallery
@@ -225,8 +235,9 @@ preserving original photos untouched.
 ### ℹ️ Floating Info Panel
 Toggle a floating metadata panel with EXIF, camera/lens details, exposure,
 aperture, focal length, dimensions, file size, and capture time. For assets
-with People data, the panel shows detected face avatars and lets you remove a
-face, move it to another person, or create a new person annotation.
+with recognition data, the panel and image overlay show face and pet
+annotations. Face and pet detections can be removed or moved to another/new
+identity through their owning service.
 
 Location tools are built in as well: geotagged assets can show an inline map,
 and assets without a location can use the "Assign a Location" search flow to
@@ -261,6 +272,7 @@ For deeper technical details, see the following docs:
 |----------|-------------|
 | [Architecture](docs/architecture.md) | Current vNext library-scoped modular monolith architecture, module boundaries, legacy quarantine policy, data flow, and key design decisions |
 | [Development](docs/development.md) | Dev environment, dependencies, debugging, and the side-project-based maps extension workflow for Windows, Linux, and macOS |
+| [Pets Runtime](docs/misc/PETS_RECOGNITION_RUNTIME.md) | Current Pets models, scan scheduling, persistence, mutation safety, and People & Pets composition contract |
 | [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, QRhi shader assets, maps extension sync, and platform runtime notes |
 | [Security](docs/security.md) | Permissions, encryption, data storage locations, threat model |
 | [Changelog](docs/CHANGELOG.md) | All version release notes and changes |
@@ -274,11 +286,13 @@ For deeper technical details, see the following docs:
 | **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata; writes GPS metadata for explicit Assign Location actions. |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info. |
 | **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning: face detection (`det_500m.onnx`) and face embeddings (`w600k_mbf.onnx`) from `src/extension/models/buffalo_s/`. |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optional Pets scanning: cat/dog detection and pet identity embeddings from `src/extension/models/pets/`. |
 
 > Ensure FFmpeg/FFprobe are available in your system `PATH`; install ExifTool if
 > you want assigned GPS coordinates written back into original media files.
-> The AI face runtime is optional; install it with `pip install -e ".[ai-demo]"`
-> for source builds, and keep `extension/models` bundled for offline packaged builds.
+> Recognition runtimes are optional; install them with
+> `pip install -e ".[ai-demo,pets-ai]"` for source builds, and keep
+> `extension/models` bundled for offline packaged builds.
 
 Python dependencies (e.g., `Pillow`, `reverse-geocoder`) are auto-installed via `pyproject.toml`.
 

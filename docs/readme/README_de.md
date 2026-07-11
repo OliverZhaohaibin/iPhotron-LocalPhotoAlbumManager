@@ -109,6 +109,7 @@ Wichtige Highlights:
 - 🎥 Vollständige **Live Photo**-Paarungs- und Wiedergabeunterstützung.
 - 🗺 Optionale Kartenansicht, die GPS-Metadaten über alle Fotos und Videos visualisiert und ohne Maps Extension sauber zurückfällt.
 - 👥 Optionales People-Scanning mit Face Clusters, Namen, Covern, versteckten Personen und Mehrpersonen-Gruppen.
+- 🐾 Optionales Pets-Scanning mit Katzen-/Hundeerkennung, Tier-Identitätsclustern, Namen, Covern, versteckten und angepinnten Tieren.
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
 ---
@@ -173,11 +174,17 @@ Ein "LIVE"-Badge erscheint auf Standbildern — klicken Sie, um das Bewegungsvid
 Die Seitenleiste bietet eine automatisch generierte **Grundbibliothek**, die Fotos in Gruppen einteilt:
 `Alle Fotos`, `Videos`, `Live Photos`, `Favoriten` und `Kürzlich gelöscht`.
 
-### 👥 People, Face Clusters & Gruppen
+### 👥🐾 People, Pets, Face Clusters & Gruppen
 Die optionale People-Pipeline erkennt Gesichter, erstellt Face Clusters und
 zeigt sie als People-Karten an. Personen können benannt, doppelte Cluster
 zusammengeführt, versteckt oder wieder eingeblendet werden; ausgewählte Cover
 bleiben über erneute Scans hinweg erhalten.
+
+Die unabhängige Pets-Pipeline erkennt Katzen und Hunde mit YOLOX, erzeugt
+DINOv2-Embeddings und zeigt Tier-Identitätskarten im selben Dashboard. Tiere
+können benannt, zusammengeführt, versteckt, angepinnt und mit einem Cover
+versehen werden. Personen und Tiere können in gemeinsamen Identity-Gruppen
+erscheinen, während Laufzeitindex und dauerhafter Zustand getrennt bleiben.
 
 Mehrere Personen lassen sich zu Gruppen zusammenfassen, um gemeinsame Fotos
 anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
@@ -186,7 +193,8 @@ Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
 Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar. People-Zustand bleibt
 hinter der Library-Session-Grenze dauerhaft erhalten, damit Namen, Cover,
 versteckte Personen, Gruppen und manuelle Gesichtsanmerkungen erneute Scans
-überstehen.
+überstehen. Das Pets-Scanning verwendet das optionale `pets-ai`-Extra; fehlende
+Abhängigkeiten oder Modelle blockieren die übrige Anwendung nicht.
 ![People and groups interface](<../picture/People & Group.png>)
 
 ### ⚡ Gallery für große Bibliotheken
@@ -233,9 +241,10 @@ Alle Bearbeitungen werden über die Edit-Session-Oberfläche in
 ### ℹ️ Schwebendes Info-Panel
 Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF,
 Kamera-/Objektivinformationen, Belichtung, Blende, Brennweite, Abmessungen,
-Dateigröße und Aufnahmezeit anzeigt. Für Assets mit People-Daten zeigt das
-Panel erkannte Gesicht-Avatare und erlaubt es, ein Gesicht zu entfernen, einer
-anderen Person zuzuweisen oder eine neue Personenannotation zu erstellen.
+Dateigröße und Aufnahmezeit anzeigt. Für Assets mit Erkennungsdaten zeigen das
+Panel und das Bild-Overlay Gesichts- und Tierannotationen; Erkennungen können
+über den jeweils zuständigen Dienst entfernt oder einer anderen/neuen Identität
+zugewiesen werden.
 
 Auch Standortwerkzeuge sind integriert: Assets mit GPS-Daten können eine
 eingebettete Karte anzeigen, und Assets ohne Standort können über den
@@ -271,6 +280,7 @@ Detaillierte technische Dokumentation (auf Englisch):
 |----------|-------------|
 | [Architecture](../architecture.md) | Aktuelle vNext library-scoped modular monolith Architektur, Modulgrenzen, Legacy-Quarantäne, Datenfluss und wichtige Designentscheidungen |
 | [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der maps-extension-Workflow für Windows, Linux und macOS |
+| [Pets Runtime](../misc/PETS_RECOGNITION_RUNTIME.md) | Aktueller Vertrag für Tiermodelle, Scan-Planung, Persistenz, Mutationssicherheit und People-&-Pets-Komposition |
 | [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, QRhi-Shader-Assets, maps-extension-Synchronisierung und Plattformlaufzeit-Hinweise |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |
 | [Changelog](../CHANGELOG.md) | Alle Versionshinweise und Änderungen |
@@ -284,12 +294,13 @@ Detaillierte technische Dokumentation (auf Englisch):
 | **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten und schreibt GPS-Daten bei expliziten Assign-Location-Aktionen. |
 | **FFmpeg / FFprobe** | Erzeugt Video-Miniaturansichten und analysiert Videoinformationen. |
 | **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning: Gesichtserkennung (`det_500m.onnx`) und Face Embeddings (`w600k_mbf.onnx`) aus `src/extension/models/buffalo_s/`. |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optionales Pets-Scanning: Katzen-/Hundeerkennung und Tier-Identitäts-Embeddings aus `src/extension/models/pets/`. |
 
 > FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein. Installieren Sie
 > ExifTool zusätzlich, wenn zugewiesene GPS-Koordinaten in Originaldateien
 > zurückgeschrieben werden sollen.
-> Die AI-Gesichtslaufzeit ist optional; für Source-Builds kann sie mit
-> `pip install -e ".[ai-demo]"` installiert werden. Offline-Pakete sollten
+> Die AI-Erkennungslaufzeiten sind optional; für Source-Builds können sie mit
+> `pip install -e ".[ai-demo,pets-ai]"` installiert werden. Offline-Pakete sollten
 > `extension/models` mitliefern.
 
 Python-Abhängigkeiten wie `Pillow` und `reverse-geocoder` werden über

@@ -3,7 +3,10 @@
 > 版本：1.0
 > 日期：2026-06-07
 > 配套需求：`pet_recognition_clustering_requirements.md`
-> 目标读者：后续实现该功能的工程师 / agent
+> 状态：历史实施指南；功能已落地
+> 当前生产契约：[`../../misc/PETS_RECOGNITION_RUNTIME.md`](../../misc/PETS_RECOGNITION_RUNTIME.md)
+
+本文保留实施前的设计推导和建议文件落点。涉及“应新增”“建议”“Phase”或未来时态的内容均是历史计划，不代表当前代码仍未实现。维护现有运行时应以 `docs/architecture.md`、上述 production contract 和代码测试为准。
 
 ## 1. 结论先行
 
@@ -693,4 +696,3 @@ MegaDescriptor / WildlifeTools 可作为后续增强，但不要默认打包非�
 - `tests/test_pet_service.py` 与 `tests/cache/`：核心回归覆盖。
 
 这份指南的实现顺序应从数据层开始，再进入 pipeline 和 worker。不要先做 UI；没有稳定 service/query 前，UI 容易绑定到错误的数据模型。
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
@@ -21,6 +22,8 @@ from .repository_utils import (
     utc_now_iso,
 )
 from .state_repository import PetStateRepository
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,7 @@ class PetRepository:
         pets: list[PetRecord],
         *,
         sync_runtime_state: bool = True,
-    ) -> None:
+    ) -> tuple[str, ...]:
         self.initialize()
         if self._state_repo is not None and detections:
             rejected = self._state_repo.get_rejected_pet_keys(
@@ -71,6 +74,17 @@ class PetRepository:
                 }
                 pets = [pet for pet in pets if pet.pet_id in retained_pet_ids]
         with closing(self._connect()) as conn:
+            previous_thumbnail_paths = tuple(
+                str(row["thumbnail_path"])
+                for row in conn.execute(
+                    """
+                    SELECT thumbnail_path
+                    FROM pet_detections
+                    WHERE thumbnail_path IS NOT NULL
+                    """
+                ).fetchall()
+                if row["thumbnail_path"]
+            )
             conn.execute("DELETE FROM pets")
             conn.execute("DELETE FROM pet_detections")
             conn.executemany(
@@ -122,6 +136,8 @@ class PetRepository:
             conn.commit()
         if sync_runtime_state:
             self.sync_runtime_state()
+            self.prune_unreferenced_thumbnails(previous_thumbnail_paths)
+        return previous_thumbnail_paths
 
     def get_scan_metadata(self, key: str) -> str | None:
         normalized_key = str(key or "").strip()
@@ -158,6 +174,44 @@ class PetRepository:
         if self._state_repo is None:
             return
         self._state_repo.sync_scan_results(self.get_all_pet_records(), self.get_all_detections())
+
+    def prune_unreferenced_thumbnails(self, candidates: Iterable[str | Path]) -> int:
+        """Delete candidate thumbnails no longer referenced by index or state."""
+
+        thumbnail_dir = (self._db_path.parent / "thumbnails").resolve()
+        if not thumbnail_dir.is_dir():
+            return 0
+
+        referenced_paths = {
+            (self._db_path.parent / str(detection.thumbnail_path)).resolve()
+            for detection in self.get_all_detections()
+            if detection.thumbnail_path
+        }
+        if self._state_repo is not None:
+            referenced_paths.update(
+                (self._db_path.parent / thumbnail_path).resolve()
+                for thumbnail_path in self._state_repo.get_cover_thumbnail_paths()
+            )
+
+        removed = 0
+        for stored_path in dict.fromkeys(str(path) for path in candidates if path):
+            candidate = (self._db_path.parent / stored_path).resolve()
+            if (
+                candidate.parent != thumbnail_dir
+                or not candidate.is_file()
+                or candidate in referenced_paths
+            ):
+                continue
+            try:
+                candidate.unlink()
+                removed += 1
+            except OSError:
+                LOGGER.warning(
+                    "Failed to remove unreferenced pet thumbnail %s",
+                    candidate,
+                    exc_info=True,
+                )
+        return removed
 
     def recluster_detections(
         self,
@@ -454,10 +508,13 @@ class PetRepository:
             return None
         if self._state_repo is not None:
             self._state_repo.add_rejected_pet_key(detection.pet_key)
+            self._state_repo.clear_cover_for_detection(detection_id)
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM pet_detections WHERE detection_id = ?", (detection_id,))
             conn.commit()
         self._rebuild_pet_records_from_detections()
+        if detection.thumbnail_path:
+            self.prune_unreferenced_thumbnails((detection.thumbnail_path,))
         self._refresh_people_group_assets_for_pets((detection.pet_id,))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),

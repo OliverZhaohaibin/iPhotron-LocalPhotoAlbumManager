@@ -578,6 +578,12 @@ def main(argv: list[str] | None = None) -> int:
                             return
                         try:
                             committer(prepared, defer_scan=True)
+                            if "migration_restored" in prepared.warnings:
+                                window.show_startup_warning(
+                                    "The photo library index was restored after "
+                                    "an interrupted update.",
+                                    details="code=migration_restored",
+                                )
                             _continue_after_library_ready()
                         except Exception as exc:  # noqa: BLE001 - probe commit boundary
                             startup.fail(
@@ -596,6 +602,9 @@ def main(argv: list[str] | None = None) -> int:
                                 phase=StartupPhase.LIBRARY_PROBING,
                                 message=failure.message,
                                 exception_type=failure.exception_type,
+                                recoverable=failure.recoverable,
+                                code=failure.code,
+                                suggested_action=failure.suggested_action,
                             )
                         )
 
@@ -673,9 +682,11 @@ def main(argv: list[str] | None = None) -> int:
             failure.message,
             details=(
                 f"phase={failure.phase.value}; "
+                f"code={failure.code}; "
                 f"exception={failure.exception_type or 'unknown'}"
             ),
             retry_callback=_retry_startup,
+            suggested_action=failure.suggested_action,
         )
     )
     window.firstPainted.connect(startup.first_painted)

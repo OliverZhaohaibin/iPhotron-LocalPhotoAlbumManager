@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QPaintEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
 )
 
 from ...application.contracts.runtime_entry_contract import RuntimeEntryContract
-
 from .ui_main_window import ChromeStatusBar, FeatureKind, Ui_MainWindow
 from .window_manager import FramelessWindowManager
+
 # MainController import removed; logic is now in MainCoordinator via self.coordinator
 
 
@@ -103,6 +103,8 @@ class MainWindow(QMainWindow):
         self.ui.window_shell_layout.insertWidget(2, panel)
         panel.hide()
         self._startup_recovery_panel = panel
+        self._startup_retry_button = retry_button
+        self._startup_continue_button = continue_button
 
     def set_startup_orchestrator(self, orchestrator: object) -> None:
         self._startup_orchestrator = orchestrator
@@ -113,6 +115,7 @@ class MainWindow(QMainWindow):
         *,
         details: str | None = None,
         retry_callback=None,
+        suggested_action: str = "retry",
     ) -> None:
         if not hasattr(self, "_startup_recovery_panel"):
             return
@@ -122,6 +125,25 @@ class MainWindow(QMainWindow):
         )
         self._startup_recovery_details.setText(details or message)
         self._startup_recovery_details.hide()
+        self._startup_continue_button.setText(self.tr("Continue without library"))
+        self._startup_retry_button.setVisible(
+            suggested_action == "retry" and callable(retry_callback)
+        )
+        self._startup_continue_button.show()
+        self._startup_recovery_panel.show()
+
+    def show_startup_warning(self, message: str, *, details: str | None = None) -> None:
+        """Show a non-blocking notice after automatic startup recovery."""
+
+        if not hasattr(self, "_startup_recovery_panel"):
+            return
+        self._startup_retry_callback = None
+        self._startup_recovery_label.setText(message)
+        self._startup_recovery_details.setText(details or message)
+        self._startup_recovery_details.hide()
+        self._startup_retry_button.hide()
+        self._startup_continue_button.setText(self.tr("Dismiss"))
+        self._startup_continue_button.show()
         self._startup_recovery_panel.show()
 
     def _retry_startup(self) -> None:

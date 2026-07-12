@@ -412,9 +412,9 @@ def test_main_creates_required_features_in_platform_safe_order(
         def connect(self, callback) -> None:
             self._callback = callback
 
-        def emit(self) -> None:
+        def emit(self, *args) -> None:
             assert self._callback is not None
-            self._callback()
+            self._callback(*args)
 
     startup_ready_signal = _FakeSignal()
 
@@ -452,6 +452,14 @@ def test_main_creates_required_features_in_platform_safe_order(
                 "FakeContext",
                 (),
                 {
+                    "request_startup_library_probe": (
+                        lambda self: SimpleNamespace(request_id="startup-request")
+                    ),
+                    "commit_prepared_library": (
+                        lambda self, prepared, *, defer_scan=False: call_order.append(
+                            f"commit:{prepared.request_id}:{defer_scan}"
+                        )
+                    ),
                     "resume_startup_tasks": (
                         lambda self, *, defer_scan=False: call_order.append(
                             f"resume:{defer_scan}"
@@ -462,6 +470,23 @@ def test_main_creates_required_features_in_platform_safe_order(
                     ),
                 },
             )()
+
+    class _FakeProbeController:
+        def __init__(self, _parent=None) -> None:
+            self.ready = _FakeSignal()
+            self.failed = _FakeSignal()
+
+        def start(self, request) -> None:
+            call_order.append(f"probe:{request.request_id}")
+            self.ready.emit(
+                SimpleNamespace(
+                    request_id=request.request_id,
+                    warnings=(),
+                )
+            )
+
+        def cancel(self) -> None:
+            call_order.append("probe:cancel")
 
     class _FakeCoordinator:
         def __init__(self, _window, _context) -> None:
@@ -542,6 +567,11 @@ def test_main_creates_required_features_in_platform_safe_order(
     )
     monkeypatch.setitem(
         __import__("sys").modules,
+        "iPhoto.bootstrap.library_probe",
+        type("Mod", (), {"LibraryProbeController": _FakeProbeController})(),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
         "iPhoto.gui.coordinators.main_coordinator",
         type("Mod", (), {"MainCoordinator": _FakeCoordinator})(),
     )
@@ -578,7 +608,11 @@ def test_main_creates_required_features_in_platform_safe_order(
     # The shell becomes interactive immediately after the first-paint/watchdog
     # boundary; library probing and hidden feature creation must not retain the
     # global input filter.
-    assert call_order.index("guard:release") < call_order.index("resume:True")
+    assert call_order.index("guard:release") < call_order.index("probe:startup-request")
+    assert call_order.index("probe:startup-request") < call_order.index(
+        "commit:startup-request:True"
+    )
+    assert call_order.index("commit:startup-request:True") < call_order.index("select")
     assert call_order.index("guard:release") < call_order.index("select")
     assert call_order.index("warmup") < call_order.index("select")
     assert len(delayed_callbacks) == 1

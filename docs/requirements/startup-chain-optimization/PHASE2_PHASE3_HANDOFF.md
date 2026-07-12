@@ -1,16 +1,16 @@
 # 启动链路第二、第三阶段交接文档
 
-更新日期：2026-07-12
+更新日期：2026-07-13
 
 ## 1. 交接结论
 
 第二、第三阶段都已经完成了核心代码改造，但尚未达到“所有平台与异常介质均完成生产验收”的关闭条件。
 
 - 第二阶段当前状态：**核心链路、迁移恢复协议和 probe P0 加固已落地，慢存储策略和 packaged 验证待闭环**。
-- 第三阶段当前状态：**主要重对象已懒加载，GUI 时间片预算和跨平台性能门禁待闭环**。
+- 第三阶段当前状态：**主要重对象已懒加载，GUI job 时间片观测层和 100 ms 超预算诊断已落地，热点拆分与跨平台性能门禁待闭环**。
 - 第一阶段状态机、首帧 watchdog、输入释放、取消与异常降级已经完成，可作为后续工作的稳定基线。
 
-因此，后续不应重新设计启动架构；应沿用现有接口补齐恢复语义、性能分片和平台证据。
+因此，后续不应重新设计启动架构；应沿用现有接口，根据 job 观测结果拆分真实热点并补齐平台证据。
 
 ## 2. 已完成的基础能力
 
@@ -58,11 +58,16 @@
 - Linux 不再为可选地图强制全局 XCB；Wayland 下原生地图不兼容时降级。
 - Preview、People、InfoPanel、EditCoordinator、地图能力探测、部分 facade 服务及图像/地理编码重依赖已经改为首次使用时创建或导入。
 - 地图扩展提示已经改为非模态。
+- 已增加 `GuiStartupJobQueue`：每个 event-loop tick 最多执行一个带名称、generation、前置条件和 100 ms 预算的 GUI 启动 job。
+- Detail post-show 创建、`MainCoordinator` 构造/启动、library probe、prepared commit、初始图库选择和 idle startup jobs 已进入统一队列；Windows/Linux 的 pre-show Detail 顺序保持不变并增加同步耗时观测。
+- job 异常会取消当前 generation 并进入现有降级协议；关闭、失败、降级和重试会拒绝旧 generation 及 probe 迟到结果，重试不会重复构造 coordinator。
+- startup JSONL 已增加 `startup.gui_job.started`、`startup.gui_job.finished` 和超预算 `startup.gui_stall`，字段不包含用户库路径。
 - 当前本地冷导入测量中，`iPhoto.gui.main` 累计导入时间相对改造前约下降 74%，`MainCoordinator` 约下降 27%。这些数字只用于定位趋势，不能替代 packaged P50/P95。
 
 主要入口：
 
 - `src/iPhoto/bootstrap/bootstrap_settings.py`
+- `src/iPhoto/bootstrap/gui_startup_job_queue.py`
 - `src/iPhoto/bootstrap/qt_shader_cache.py`
 - `src/iPhoto/gui/coordinators/main_coordinator.py`
 - `src/iPhoto/gui/facade.py`
@@ -125,18 +130,20 @@
 
 ## 4. 第三阶段剩余改造
 
-### P0：GUI event-loop 时间片门禁
+### P0：GUI event-loop 时间片门禁（观测层已完成，性能闭环待完成）
 
-目前完成了较多懒加载，但还没有统一执行“单次 GUI 初始化不超过 100 ms”的时间预算。
+统一调度和超预算观测已经完成：
 
-建议新增 `GuiStartupJobQueue` 或等价小型调度器：
+- `GuiStartupJobQueue` 使用不可变 job 描述名称、generation、回调、前置条件和目标预算。
+- 每次 event-loop tick 最多执行一个 job；当前 job 完成后才在下一 tick 调度后续 job。
+- job 使用单调时钟计时；超过 100 ms 时记录唯一 `startup.gui_stall` 并输出 warning，生产运行不会因此强制失败。
+- job 的 started/finished 事件统一记录 job、generation、duration、budget、over-budget、线程和结果状态。
+- 窗口关闭、启动失败、进入降级状态或重试时会取消过期 generation；probe ready 必须同时匹配 request ID 和 generation 才能重新入队 commit。
+- 回调异常只上报一次并停止当前 generation 的剩余 job，仍由 `StartupOrchestrator` 和非模态恢复面板负责用户可见降级。
 
-- 每个 job 标注名称、generation、前置条件和目标预算。
-- 每次 event-loop tick 只执行一个短 job；超预算时记录 `startup.gui_stall`，剩余 job 延后。
-- 窗口关闭、切库或进入降级状态时取消过期 job。
-- 不要把不可分割的重型 Python 构造仅用多个 `singleShot(0, ...)` 包裹；应继续拆分对象内部工作或移到 worker。
+自动化已覆盖单 tick 单 job、严格顺序、前置条件、100 ms 阈值、stall 唯一性、异常、关闭、旧 generation、回调中追加 job，以及主启动链的跨平台 Detail 顺序、probe ready→commit、gallery warmup 和 deferred scan 竞争。
 
-优先剖析 Gallery 核心协调器装配、初始 collection 查询、首批 model publish 和缩略图请求提交。
+剩余工作不是继续增加 `singleShot(0, ...)`，而是采集真实源码运行和 packaged 样本，根据 `startup.gui_stall` 继续拆分对象内部工作或移到 worker。优先剖析 Gallery 核心协调器装配、初始 collection 查询、首批 model publish 和缩略图请求提交。
 
 ### P0：packaged 性能基线与门禁
 
@@ -188,8 +195,8 @@
 ## 5. 推荐接手顺序
 
 1. probe/SQLite 故障协议和中断恢复测试已完成，作为后续工作的稳定基线。
-2. 下一步实现 GUI job 时间片观测，不急于拆更多对象，先得到超过 100 ms 的准确调用点。
-3. 根据 profiler 结果继续拆 Gallery/Detail/Playback 的实际热点。
+2. GUI job 时间片观测已经完成；下一步在本地真实库和 packaged 产物中采集 job 耗时，列出超过 100 ms 的准确调用点。
+3. 根据 profiler 和 `startup.gui_stall` 结果继续拆 Gallery/Detail/Playback 的实际热点，不凭模块大小猜测。
 4. 建立 packaged 平台基线，逐平台修复 P95 和降级路径。
 5. 最后收口日志字段、隐私检查和交付文档；所有门禁通过后再把本目录移动到 `docs/finished/requirements`。
 
@@ -199,17 +206,20 @@
 
 当前改造完成时已验证：
 
-- 全量测试：2580 passed，11 skipped。
+- 全量测试：2588 passed，11 skipped。
 - 架构测试：23 passed。
+- GUI 启动队列与主链定向测试：36 passed。
 - `python tools/check_architecture.py`：通过。
 - `.venv/bin/python -m compileall -q src`：通过。
 - `git diff --check`：通过。
+- 使用临时 profile 输出验证：七个关键 job 均生成成对 started/finished JSONL 记录，且这些 job 记录没有写入库路径。
 
 接手后至少运行：
 
 ```bash
 .venv/bin/python -m pytest -q
-.venv/bin/python -m pytest -q tests/gui/test_startup_orchestrator.py tests/application/test_library_probe.py tests/application/test_bootstrap_settings.py
+.venv/bin/python -m pytest -q tests/gui/test_gui_startup_job_queue.py tests/gui/test_main.py tests/gui/test_startup_orchestrator.py
+.venv/bin/python -m pytest -q tests/application/test_library_probe.py tests/application/test_bootstrap_settings.py
 .venv/bin/python -m pytest -q tests/architecture
 .venv/bin/python tools/check_architecture.py
 .venv/bin/python -m compileall -q src

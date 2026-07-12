@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -367,10 +369,35 @@ def main(argv: list[str] | None = None) -> int:
         StartupOrchestrator,
         StartupPhase,
     )
+    from iPhoto.bootstrap.gui_startup_job_queue import GuiStartupJobQueue
 
     startup = StartupOrchestrator(app if isinstance(app, QObject) else None)
     startup.begin()
     startup.transition(StartupPhase.APP_CREATED)
+    startup_jobs = GuiStartupJobQueue(
+        app if isinstance(app, QObject) else None,
+        is_generation_current=startup.is_current,
+    )
+
+    def _handle_startup_job_failure(failure) -> None:
+        if not startup.is_current(failure.generation):
+            return
+        phase = startup.phase
+        if phase in {
+            StartupPhase.DEGRADED,
+            StartupPhase.FAILED,
+            StartupPhase.CANCELLED,
+        }:
+            return
+        startup.fail(
+            StartupFailure(
+                phase=phase,
+                message=str(failure.exception) or type(failure.exception).__name__,
+                exception_type=type(failure.exception).__name__,
+            )
+        )
+
+    startup_jobs.jobFailed.connect(_handle_startup_job_failure)
 
     from iPhoto.settings.manager import SettingsManager
 
@@ -458,224 +485,282 @@ def main(argv: list[str] | None = None) -> int:
     from iPhoto.bootstrap.library_probe import LibraryProbeController
 
     probe_controller = LibraryProbeController(window if isinstance(window, QObject) else None)
-    startup.phaseChanged.connect(
-        lambda snapshot: (
+
+    def _handle_startup_phase_changed(snapshot) -> None:
+        if snapshot.phase in {
+            StartupPhase.DEGRADED,
+            StartupPhase.FAILED,
+            StartupPhase.CANCELLED,
+        }:
+            startup_jobs.cancel_generation(snapshot.generation)
+        if snapshot.phase in {
+            StartupPhase.DEGRADED,
+            StartupPhase.FAILED,
+            StartupPhase.CANCELLED,
+        }:
             probe_controller.cancel()
-            if snapshot.phase is StartupPhase.CANCELLED
-            else None
-        )
-    )
+
+    startup.phaseChanged.connect(_handle_startup_phase_changed)
 
     pre_show_features, post_show_features = _startup_feature_plan()
     startup_timing = _startup_timing_plan()
     for feature in pre_show_features:
-        if feature == "detail":
-            mark("rhi_detail.before_create")
-        window.ui.ensure_feature(feature)
-        if feature == "detail":
-            mark("rhi_detail.created")
+        job_name = f"feature.{feature}.pre_show"
+        thread_name = threading.current_thread().name
+        mark(
+            "startup.gui_job.started",
+            job=job_name,
+            generation=startup.generation,
+            duration_ms=0.0,
+            budget_ms=100.0,
+            over_budget=False,
+            thread=thread_name,
+            result="running",
+        )
+        started_ns = time.perf_counter_ns()
+        feature_error = False
+        try:
+            if feature == "detail":
+                mark("rhi_detail.before_create")
+            window.ui.ensure_feature(feature)
+            if feature == "detail":
+                mark("rhi_detail.created")
+        except Exception:
+            feature_error = True
+            raise
+        finally:
+            duration_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
+            details = {
+                "job": job_name,
+                "generation": startup.generation,
+                "duration_ms": round(duration_ms, 3),
+                "budget_ms": 100.0,
+                "over_budget": duration_ms > 100.0,
+                "thread": thread_name,
+                "result": "error" if feature_error else "success",
+            }
+            mark("startup.gui_job.finished", **details)
+            if duration_ms > 100.0:
+                mark("startup.gui_stall", **details)
+                _logger.warning(
+                    "GUI startup job %s exceeded 100.0ms budget (%.1fms)",
+                    job_name,
+                    duration_ms,
+                )
 
     # Coordinator needs Window, Context, and Container
     coordinator = None
+    coordinator_started = False
 
-    def _initialize_after_show() -> None:
-        nonlocal coordinator
-        try:
-            mark("post_paint.begin")
-            # Importing the coordinator expands the controller/view-model graph;
-            # keep that work behind the OS-confirmed first paint.
-            from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+    def _enqueue_startup_job(
+        name: str,
+        generation: int,
+        callback,
+        *,
+        prerequisite=None,
+    ) -> bool:
+        return startup_jobs.enqueue(
+            name,
+            generation,
+            callback,
+            prerequisite=prerequisite,
+        )
 
-            mark("main_coordinator.imported")
-            _logger.info("_initialize_after_show: creating MainCoordinator")
-            if coordinator is None:
-                coordinator = MainCoordinator(window, context)
-                window.set_coordinator(coordinator)
-                coordinator.start()
-                mark("main_coordinator.started")
+    def _continue_after_library_ready(generation: int) -> None:
+        if not startup.is_current(generation):
+            return
+        startup.transition(StartupPhase.LIBRARY_READY)
+        startup_scan_enqueued = False
 
-            def _resume_startup_tasks() -> None:
-                try:
-                    _logger.info(
-                        "_initialize_after_show: coordinator started, resuming startup tasks"
-                    )
+        def _run_idle_startup_jobs() -> None:
+            if not startup.is_current(generation):
+                return
+            startup.transition(StartupPhase.GALLERY_READY)
+            starter = getattr(context, "schedule_idle_startup_jobs", None)
+            if not callable(starter):
+                starter = getattr(context, "start_deferred_startup_scan", None)
+            if callable(starter):
+                _logger.info("Starting deferred startup scan")
+                starter()
+            startup.complete()
 
-                    def _continue_after_library_ready() -> None:
-                        startup.transition(StartupPhase.LIBRARY_READY)
-                        startup_scan_started = False
-
-                        def _start_deferred_startup_scan() -> None:
-                            nonlocal startup_scan_started
-                            if startup_scan_started:
-                                return
-                            startup_scan_started = True
-                            startup.transition(StartupPhase.GALLERY_READY)
-                            starter = getattr(context, "schedule_idle_startup_jobs", None)
-                            if not callable(starter):
-                                starter = getattr(context, "start_deferred_startup_scan", None)
-                            if callable(starter):
-                                _logger.info(
-                                    "_initialize_after_show: starting deferred startup scan"
-                                )
-                                starter()
-                            startup.complete()
-
-                        def _schedule_startup_scan_fallback() -> None:
-                            QTimer.singleShot(
-                                _STARTUP_GALLERY_WARMUP_FALLBACK_MS,
-                                _start_deferred_startup_scan,
-                            )
-
-                        def _arm_startup_gallery_warmup() -> bool:
-                            model_getter = getattr(coordinator, "gallery_startup_model", None)
-                            model = model_getter() if callable(model_getter) else None
-                            begin_warmup = getattr(model, "begin_startup_gallery_warmup", None)
-                            if not callable(begin_warmup):
-                                begin_warmup = getattr(model, "begin_startup_first_frame_gate", None)
-                            ready_signal = getattr(model, "startupGalleryReady", None)
-                            if ready_signal is None:
-                                ready_signal = getattr(model, "startupFirstFrameReady", None)
-                            connect = getattr(ready_signal, "connect", None)
-                            if not callable(begin_warmup) or not callable(connect):
-                                return False
-                            connect(_start_deferred_startup_scan)
-                            begin_warmup()
-                            return True
-
-                        startup_input_guard.release()
-                        warmup_armed = _arm_startup_gallery_warmup()
-                        if warmup_armed:
-                            _schedule_startup_scan_fallback()
-                        if len(arguments) > 1:
-                            mark("startup_gallery.selection_requested")
-                            coordinator.open_album_from_path(Path(arguments[1]))
-                            if not warmup_armed:
-                                _start_deferred_startup_scan()
-                            return
-
-                        def _select_all_photos_after_startup() -> None:
-                            mark("startup_gallery.selection_requested")
-                            window.ui.sidebar.select_all_photos(emit_signal=True)
-                            if not warmup_armed:
-                                _start_deferred_startup_scan()
-
-                        QTimer.singleShot(0, _select_all_photos_after_startup)
-
-                    request_getter = getattr(context, "request_startup_library_probe", None)
-                    committer = getattr(context, "commit_prepared_library", None)
-                    request = request_getter() if callable(request_getter) else None
-                    if request is None or not callable(committer):
-                        startup.transition(StartupPhase.LIBRARY_PROBING)
-                        context.resume_startup_tasks(defer_scan=True)
-                        _continue_after_library_ready()
-                        return
-
-                    expected_request_id = request.request_id
-                    startup.transition(StartupPhase.LIBRARY_PROBING)
-
-                    def _probe_ready(prepared) -> None:
-                        if prepared.request_id != expected_request_id:
-                            return
-                        try:
-                            committer(prepared, defer_scan=True)
-                            if "migration_restored" in prepared.warnings:
-                                window.show_startup_warning(
-                                    "The photo library index was restored after "
-                                    "an interrupted update.",
-                                    details="code=migration_restored",
-                                )
-                            _continue_after_library_ready()
-                        except Exception as exc:  # noqa: BLE001 - probe commit boundary
-                            startup.fail(
-                                StartupFailure(
-                                    phase=StartupPhase.LIBRARY_PROBING,
-                                    message=str(exc) or type(exc).__name__,
-                                    exception_type=type(exc).__name__,
-                                )
-                            )
-
-                    def _probe_failed(failure) -> None:
-                        if failure.request_id != expected_request_id:
-                            return
-                        startup.fail(
-                            StartupFailure(
-                                phase=StartupPhase.LIBRARY_PROBING,
-                                message=failure.message,
-                                exception_type=failure.exception_type,
-                                recoverable=failure.recoverable,
-                                code=failure.code,
-                                suggested_action=failure.suggested_action,
-                            )
-                        )
-
-                    probe_controller.ready.connect(_probe_ready)
-                    probe_controller.failed.connect(_probe_failed)
-                    probe_controller.start(request)
-                except Exception as exc:  # noqa: BLE001 - Qt timer boundary
-                    startup.fail(
-                        StartupFailure(
-                            phase=StartupPhase.LIBRARY_PROBING,
-                            message=str(exc) or type(exc).__name__,
-                            exception_type=type(exc).__name__,
-                        )
-                    )
-                finally:
-                    startup_input_guard.release()
-
-            QTimer.singleShot(
-                startup_timing.coordinator_ready_delay_ms,
-                _resume_startup_tasks,
+        def _enqueue_idle_startup_jobs() -> None:
+            nonlocal startup_scan_enqueued
+            if startup_scan_enqueued or not startup.is_current(generation):
+                return
+            startup_scan_enqueued = _enqueue_startup_job(
+                "startup.idle_jobs",
+                generation,
+                _run_idle_startup_jobs,
             )
-        except Exception as exc:  # noqa: BLE001 - startup recovery boundary
-            startup_input_guard.release()
+
+        def _arm_startup_gallery_warmup() -> bool:
+            model_getter = getattr(coordinator, "gallery_startup_model", None)
+            model = model_getter() if callable(model_getter) else None
+            begin_warmup = getattr(model, "begin_startup_gallery_warmup", None)
+            if not callable(begin_warmup):
+                begin_warmup = getattr(model, "begin_startup_first_frame_gate", None)
+            ready_signal = getattr(model, "startupGalleryReady", None)
+            if ready_signal is None:
+                ready_signal = getattr(model, "startupFirstFrameReady", None)
+            connect = getattr(ready_signal, "connect", None)
+            if not callable(begin_warmup) or not callable(connect):
+                return False
+            connect(_enqueue_idle_startup_jobs)
+            begin_warmup()
+            return True
+
+        startup_input_guard.release()
+        warmup_armed = _arm_startup_gallery_warmup()
+        if warmup_armed:
+            QTimer.singleShot(
+                _STARTUP_GALLERY_WARMUP_FALLBACK_MS,
+                _enqueue_idle_startup_jobs,
+            )
+
+        def _select_initial_collection() -> None:
+            mark("startup_gallery.selection_requested")
+            if len(arguments) > 1:
+                coordinator.open_album_from_path(Path(arguments[1]))
+            else:
+                window.ui.sidebar.select_all_photos(emit_signal=True)
+            if not warmup_armed:
+                _enqueue_idle_startup_jobs()
+
+        _enqueue_startup_job(
+            "gallery.select_initial",
+            generation,
+            _select_initial_collection,
+        )
+
+    def _start_library_probe(generation: int) -> None:
+        if not startup.is_current(generation):
+            return
+        _logger.info("Coordinator ready; resuming startup tasks")
+        startup_input_guard.release()
+        request_getter = getattr(context, "request_startup_library_probe", None)
+        committer = getattr(context, "commit_prepared_library", None)
+        request = request_getter() if callable(request_getter) else None
+        startup.transition(StartupPhase.LIBRARY_PROBING)
+        if request is None or not callable(committer):
+            context.resume_startup_tasks(defer_scan=True)
+            _continue_after_library_ready(generation)
+            return
+
+        expected_request_id = request.request_id
+
+        def _probe_ready(prepared) -> None:
+            if (
+                not startup.is_current(generation)
+                or prepared.request_id != expected_request_id
+            ):
+                return
+
+            def _commit_prepared_library() -> None:
+                committer(prepared, defer_scan=True)
+                if "migration_restored" in prepared.warnings:
+                    window.show_startup_warning(
+                        "The photo library index was restored after an interrupted update.",
+                        details="code=migration_restored",
+                    )
+                _continue_after_library_ready(generation)
+
+            _enqueue_startup_job(
+                "library.commit",
+                generation,
+                _commit_prepared_library,
+            )
+
+        def _probe_failed(failure) -> None:
+            if (
+                not startup.is_current(generation)
+                or failure.request_id != expected_request_id
+            ):
+                return
             startup.fail(
                 StartupFailure(
-                    phase=StartupPhase.INTERACTIVE,
-                    message=str(exc) or type(exc).__name__,
-                    exception_type=type(exc).__name__,
+                    phase=StartupPhase.LIBRARY_PROBING,
+                    message=failure.message,
+                    exception_type=failure.exception_type,
+                    recoverable=failure.recoverable,
+                    code=failure.code,
+                    suggested_action=failure.suggested_action,
                 )
             )
 
-    def _initialize_features_after_show() -> None:
-        # QWidget creation must remain on the GUI thread. Splitting hidden
-        # feature construction across event-loop turns keeps the newly painted
-        # window responsive while preserving the current coordinator contract.
-        pending = iter(post_show_features)
+        probe_controller.ready.connect(_probe_ready)
+        probe_controller.failed.connect(_probe_failed)
+        probe_controller.start(request)
 
-        def _create_next() -> None:
-            try:
-                try:
-                    feature = next(pending)
-                except StopIteration:
-                    QTimer.singleShot(0, _initialize_after_show)
-                    return
-                mark("feature.before_create", feature=feature)
-                window.ui.ensure_feature(feature)
-                mark("feature.created", feature=feature)
-                QTimer.singleShot(startup_timing.feature_interval_ms, _create_next)
-            except Exception as exc:  # noqa: BLE001 - Qt timer boundary
-                startup_input_guard.release()
-                startup.fail(
-                    StartupFailure(
-                        phase=StartupPhase.INTERACTIVE,
-                        message=str(exc) or type(exc).__name__,
-                        exception_type=type(exc).__name__,
-                    )
-                )
+    def _construct_coordinator() -> None:
+        nonlocal coordinator
+        mark("post_paint.begin")
+        # Importing the coordinator expands the controller/view-model graph;
+        # keep that work behind the OS-confirmed first paint.
+        from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
-        _create_next()
+        mark("main_coordinator.imported")
+        if coordinator is None:
+            _logger.info("Creating MainCoordinator")
+            coordinator = MainCoordinator(window, context)
+            window.set_coordinator(coordinator)
+
+    def _start_coordinator() -> None:
+        nonlocal coordinator_started
+        if coordinator is None or coordinator_started:
+            return
+        coordinator.start()
+        coordinator_started = True
+        mark("main_coordinator.started")
+
+    def _initialize_features_after_show(generation: int) -> None:
+        # QWidget construction stays on the GUI thread, one named job per turn.
+        for feature in post_show_features:
+            def _create_feature(feature_name=feature) -> None:
+                mark("feature.before_create", feature=feature_name)
+                window.ui.ensure_feature(feature_name)
+                mark("feature.created", feature=feature_name)
+
+            _enqueue_startup_job(
+                f"feature.{feature}.post_show",
+                generation,
+                _create_feature,
+            )
+        _enqueue_startup_job(
+            "coordinator.construct",
+            generation,
+            _construct_coordinator,
+        )
+        _enqueue_startup_job(
+            "coordinator.start",
+            generation,
+            _start_coordinator,
+            prerequisite=lambda: coordinator is not None,
+        )
+        _enqueue_startup_job(
+            "library.probe.start",
+            generation,
+            lambda: _start_library_probe(generation),
+            prerequisite=lambda: coordinator_started,
+        )
 
     def _continue_after_shell() -> None:
         startup_input_guard.release()
-        QTimer.singleShot(
-            startup_timing.first_post_paint_delay_ms,
-            _initialize_features_after_show,
-        )
+        generation = startup.generation
+        if startup_timing.first_post_paint_delay_ms > 0:
+            QTimer.singleShot(
+                startup_timing.first_post_paint_delay_ms,
+                lambda: _initialize_features_after_show(generation),
+            )
+            return
+        _initialize_features_after_show(generation)
 
     def _retry_startup() -> None:
         if startup.phase is StartupPhase.CANCELLED:
             return
-        QTimer.singleShot(0, _initialize_features_after_show)
+        generation = startup.begin()
+        startup.transition(StartupPhase.INTERACTIVE, reason="retry")
+        _initialize_features_after_show(generation)
 
     startup.startupDegraded.connect(
         lambda failure: window.show_startup_recovery(

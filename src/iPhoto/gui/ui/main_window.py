@@ -23,6 +23,8 @@ class MainWindow(QMainWindow):
     def __init__(self, context: RuntimeEntryContract) -> None:
         super().__init__()
         self._first_paint_emitted = False
+        self._is_shutting_down = False
+        self._shutdown_complete = False
 
         self.ui = Ui_MainWindow()
 
@@ -87,10 +89,19 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         """Tear down background services before the window closes."""
 
-        if self.window_manager is not None:
-            self.window_manager.cleanup()
-        if self.coordinator:
-            self.coordinator.shutdown()
+        if self._shutdown_complete:
+            super().closeEvent(event)
+            return
+        if not self._is_shutting_down:
+            self._is_shutting_down = True
+            try:
+                if self.window_manager is not None:
+                    self.window_manager.cleanup()
+                if self.coordinator:
+                    self.coordinator.shutdown()
+            finally:
+                self._shutdown_complete = True
+                self._is_shutting_down = False
         super().closeEvent(event)
 
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]

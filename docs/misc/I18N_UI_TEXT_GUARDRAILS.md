@@ -10,7 +10,7 @@ Treat these as regression rules when adding or changing user-visible UI.
 - Keep source strings in English. German and Simplified Chinese translations
   live in `src/iPhoto/resources/i18n/iPhoto_de.ts` and
   `src/iPhoto/resources/i18n/iPhoto_zh_CN.ts`.
-- Do not translate user data or raw technical values: file names, paths, people
+- Do not translate user data or raw technical values: file names, paths, people/pet
   names, place-search results, camera/lens/codec values, backend names,
   environment variables, and exception details should remain original data.
 - Insert dynamic values with named placeholders such as `{filename}` or

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 from iPhoto.gui.i18n.font_policy import language_font
 from iPhoto.people.image_utils import load_image_rgb
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.pets.records import PetSummary
 
 from .people_dashboard_shared import (
     CARD_HEIGHT,
@@ -222,7 +223,12 @@ class PeopleCard(QWidget):
         painter.drawRoundedRect(badge_rect, 14, 14)
         painter.setPen(_qcolor("#FFFFFF"))
         painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
-        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self.summary.face_count))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self._badge_count()))
+
+    def _badge_count(self) -> int:
+        if hasattr(self.summary, "asset_count"):
+            return max(0, int(getattr(self.summary, "asset_count") or 0))
+        return max(0, int(getattr(self.summary, "face_count", 0) or 0))
 
     def enterEvent(self, _event) -> None:  # noqa: N802
         if not self._dragging:
@@ -279,6 +285,52 @@ class PeopleCard(QWidget):
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         self.menuRequested.emit(self.person_id, event.globalPos())
         event.accept()
+
+
+class PetCard(PeopleCard):
+    def __init__(
+        self,
+        *,
+        board: "PeopleBoard",
+        summary: PetSummary,
+        seed_index: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(
+            board=board,
+            summary=summary,  # type: ignore[arg-type]
+            seed_index=seed_index,
+            parent=parent,
+        )
+        self.summary = summary
+
+    @property
+    def person_id(self) -> str:
+        return self.summary.pet_id
+
+    @property
+    def pet_id(self) -> str:
+        return self.summary.pet_id
+
+    def display_name(self) -> str:
+        name = (self.summary.name or "").strip()
+        if name:
+            return name
+        return ""
+
+    def _paint_count_badge(self, painter: QPainter, card_rect: QRectF) -> None:
+        badge_rect = QRectF(card_rect.left() + 12, card_rect.top() + 12, 44, 28)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_qcolor("#111827", 175))
+        painter.drawRoundedRect(badge_rect, 14, 14)
+        painter.setPen(_qcolor("#FFFFFF"))
+        painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self._badge_count()))
+
+    def _badge_count(self) -> int:
+        if hasattr(self.summary, "asset_count"):
+            return max(0, int(getattr(self.summary, "asset_count") or 0))
+        return max(0, int(getattr(self.summary, "detection_count", 0) or 0))
 
 
 class GroupCard(QWidget):
@@ -394,7 +446,7 @@ class GroupCard(QWidget):
         gradient.setColorAt(1.0, _qcolor(bottom))
         painter.fillRect(rect, gradient)
 
-        members = list(self.summary.members[:4])
+        members = list((self.summary.members + self.summary.pet_members)[:4])
         if members:
             columns = 2 if len(members) > 1 else 1
             rows = 2 if len(members) > 2 else 1
@@ -426,7 +478,7 @@ class GroupCard(QWidget):
 
         width = GROUP_CARD_WIDTH * 2
         height = GROUP_CARD_HEIGHT * 2
-        members = list(self.summary.members[:4])
+        members = list((self.summary.members + self.summary.pet_members)[:4])
         collage = Image.new("RGBA", (width, height))
         if not members:
             return None
@@ -458,7 +510,7 @@ class GroupCard(QWidget):
 
     def _collage_signature_parts(self) -> list[str]:
         parts = [self.group_id]
-        for member in self.summary.members[:4]:
+        for member in (self.summary.members + self.summary.pet_members)[:4]:
             thumbnail_path = member.thumbnail_path
             if thumbnail_path is None:
                 parts.append("missing")

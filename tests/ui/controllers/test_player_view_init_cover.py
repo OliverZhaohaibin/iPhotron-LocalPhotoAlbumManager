@@ -18,11 +18,48 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required", e
 
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
 
 from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
 from iPhoto.gui.ui.widgets.video_area import VideoArea
+from iPhoto.people.repository import AssetFaceAnnotation
+
+
+def _assert_ibeam_cursor() -> None:
+    cursor = QApplication.overrideCursor()
+    assert cursor is not None
+    assert cursor.shape() == Qt.CursorShape.IBeamCursor
+
+
+def _chip_margin_point(overlay, face_id: str = "face-1") -> QPointF:
+    hover_rect = overlay._states[face_id].layout.hover_rect
+    visual_rect = overlay._states[face_id].layout.chip_rect
+    candidates = [
+        QPointF(visual_rect.left() - 3.0, visual_rect.center().y()),
+        QPointF(visual_rect.right() + 3.0, visual_rect.center().y()),
+        QPointF(visual_rect.center().x(), visual_rect.top() - 3.0),
+        QPointF(visual_rect.center().x(), visual_rect.bottom() + 3.0),
+    ]
+    for point in candidates:
+        if hover_rect.contains(point) and not visual_rect.contains(point):
+            return point
+    return QPointF(hover_rect.left() + 1.0, hover_rect.center().y())
+
+
+def _send_mouse_move_to_overlay_point(target: QWidget, overlay, point: QPointF) -> None:
+    target_point = target.mapFromGlobal(overlay.mapToGlobal(point.toPoint()))
+    move_event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(target_point),
+        QPointF(target_point),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(target, move_event)
 
 
 class _FakeImageViewer(QWidget):
@@ -34,6 +71,12 @@ class _FakeImageViewer(QWidget):
 
     firstFrameReady = Signal()
     replayRequested = Signal()
+    viewTransformChanged = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._has_image_content = True
+        self.setMouseTracking(True)
 
     def set_image(self, *args, **kwargs):
         pass
@@ -44,6 +87,22 @@ class _FakeImageViewer(QWidget):
     def update(self):
         pass
 
+    def has_image_content(self) -> bool:
+        return self._has_image_content
+
+    def image_rect_to_viewport(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        *,
+        image_width: float | None = None,
+        image_height: float | None = None,
+    ) -> QRectF:
+        del image_width, image_height
+        return QRectF(float(x), float(y), float(width), float(height))
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -53,6 +112,8 @@ def qapp():
     if app is None:
         app = QApplication([])
     yield app
+    while QApplication.overrideCursor() is not None:
+        QApplication.restoreOverrideCursor()
 
 
 @pytest.fixture
@@ -158,6 +219,71 @@ class TestInitCoverTracking:
         controller._on_video_first_render()
         mock_hide.assert_not_called()
         assert controller._video_renderer_rendered is True
+
+
+def test_init_cover_stays_below_face_name_overlay_and_does_not_take_mouse(qapp):
+    main_window = QWidget()
+    image_viewer = _FakeImageViewer()
+    detail = DetailPageWidget(main_window, image_viewer=image_viewer)
+    detail.resize(640, 480)
+    detail.show()
+    detail.player_stack.setCurrentWidget(image_viewer)
+    qapp.processEvents()
+
+    detail.face_name_overlay.set_annotations(
+        [
+            AssetFaceAnnotation(
+                face_id="face-1",
+                person_id="person-1",
+                display_name="Julie",
+                box_x=80,
+                box_y=80,
+                box_w=120,
+                box_h=90,
+                image_width=420,
+                image_height=320,
+            )
+        ]
+    )
+    detail.face_name_overlay.set_overlay_active(True)
+    image_viewer.viewTransformChanged.emit()
+    qapp.processEvents()
+
+    assert detail.face_name_overlay._states["face-1"].layout.chip_rect.isEmpty() is False
+
+    detail.show_rhi_init_cover()
+    qapp.processEvents()
+
+    assert detail._rhi_init_cover is not None
+    assert detail._rhi_init_cover.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    assert detail.face_name_overlay.isVisible() is True
+
+    margin_point = _chip_margin_point(detail.face_name_overlay)
+    _send_mouse_move_to_overlay_point(detail._rhi_init_cover, detail.face_name_overlay, margin_point)
+    qapp.processEvents()
+
+    assert detail.face_name_overlay._hovered_face_id == "face-1"
+    _assert_ibeam_cursor()
+
+    detail.hide_rhi_init_cover()
+    detail.show_rhi_init_cover()
+    qapp.processEvents()
+
+    assert detail._rhi_init_cover is not None
+    assert detail._rhi_init_cover.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    _send_mouse_move_to_overlay_point(image_viewer, detail.face_name_overlay, margin_point)
+    qapp.processEvents()
+    assert detail.face_name_overlay._hovered_face_id == "face-1"
+    _assert_ibeam_cursor()
+
+    image_viewer.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, True)
+    detail.face_name_overlay.refresh_view_state()
+    qapp.processEvents()
+
+    assert not image_viewer.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+
+    while QApplication.overrideCursor() is not None:
+        QApplication.restoreOverrideCursor()
 
 
 class TestPlaceholderMessage:

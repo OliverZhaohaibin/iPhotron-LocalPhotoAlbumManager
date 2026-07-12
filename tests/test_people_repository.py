@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 
 import numpy as np
 import pytest
@@ -101,6 +101,130 @@ def _person_record(
         sample_count=sample_count,
         profile_state="stable" if sample_count >= 3 else "unstable",
     )
+
+
+def test_person_summaries_read_while_writer_holds_reserved_lock(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db")
+    repository.initialize()
+    locker = sqlite3.connect(repository.db_path, timeout=0.1)
+    try:
+        locker.execute("BEGIN IMMEDIATE")
+
+        assert repository.get_person_summaries() == []
+    finally:
+        locker.rollback()
+        locker.close()
+
+
+def test_person_summary_asset_count_counts_unique_auto_and_manual_assets(
+    tmp_path: Path,
+) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    face_a = _face_record(
+        face_id="face-a",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    face_b = _face_record(
+        face_id="face-b",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    person = _person_record(
+        person_id="person-a",
+        key_face_id="face-a",
+        face_count=2,
+        name="Alice",
+    )
+    repository.replace_all([face_a, face_b], [person])
+    assert repository.state_repository is not None
+    repository.state_repository.add_manual_face(
+        ManualFaceRecord(
+            face_id="manual-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            box_x=20,
+            box_y=20,
+            box_w=80,
+            box_h=80,
+            thumbnail_path=None,
+            person_id="person-a",
+            created_at=_now_iso(),
+            image_width=400,
+            image_height=300,
+        )
+    )
+
+    summaries = repository.get_person_summaries()
+
+    assert summaries[0].face_count == 3
+    assert summaries[0].asset_count == 1
+
+
+def test_group_members_legacy_schema_migrates_to_identity_members(tmp_path: Path) -> None:
+    db_path = tmp_path / "face_state.db"
+    timestamp = _now_iso()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE people_groups (
+                group_id TEXT PRIMARY KEY,
+                member_key TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE people_group_members (
+                group_id TEXT NOT NULL,
+                person_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (group_id, person_id)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO people_groups VALUES (?, ?, ?, ?)",
+            ("group-a", "person-a|person-b", timestamp, timestamp),
+        )
+        conn.executemany(
+            "INSERT INTO people_group_members VALUES (?, ?, ?)",
+            [
+                ("group-a", "person-a", 0),
+                ("group-a", "person-b", 1),
+            ],
+        )
+
+    repository = FaceStateRepository(db_path)
+    repository.initialize()
+
+    [group] = repository.list_groups()
+    assert group.member_person_ids == ("person-a", "person-b")
+    assert [(member.kind, member.entity_id) for member in group.member_entities] == [
+        ("person", "person-a"),
+        ("person", "person-b"),
+    ]
+    duplicate = repository.create_group(("person-a", "person-b"))
+    assert duplicate is not None
+    assert duplicate.group_id == "group-a"
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(people_group_members)").fetchall()
+        }
+        [member_key] = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT member_key FROM people_groups WHERE group_id = ?",
+                ("group-a",),
+            ).fetchall()
+        ]
+    assert {"member_kind", "member_id"}.issubset(columns)
+    assert member_key == "person:person-a\x1fperson:person-b"
 
 
 def test_remove_faces_for_assets_deletes_affected_person_rows_first(tmp_path: Path) -> None:

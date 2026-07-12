@@ -53,6 +53,7 @@ from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.people.service import PeopleService
+from iPhoto.pets.service import PetService
 from maps.map_sources import supports_map_extension_download
 
 if TYPE_CHECKING:
@@ -73,6 +74,8 @@ class MainCoordinator(QObject):
         super().__init__(window)
         self._window = window
         self._context = context
+        self._is_shutting_down = False
+        self._shutdown_complete = False
         # facade reference kept for signal wiring as some systems still emit through it
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
@@ -104,7 +107,9 @@ class MainCoordinator(QObject):
         self._media_session.bind_collection(self._gallery_store)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
         bound_people_service = self._people_service(library_root=lib_root)
+        bound_pet_service = self._pet_service(library_root=lib_root)
         self._playback_people_service = bound_people_service or PeopleService()
+        self._playback_pet_service = bound_pet_service or PetService()
         if hasattr(window.ui, "people_page"):
             if bound_people_service is not None and hasattr(
                 window.ui.people_page, "set_people_service"
@@ -112,7 +117,13 @@ class MainCoordinator(QObject):
                 window.ui.people_page.set_people_service(self._playback_people_service)
             else:
                 window.ui.people_page.set_library_root(lib_root)
+            if hasattr(window.ui.people_page, "set_pet_service"):
+                window.ui.people_page.set_pet_service(bound_pet_service or PetService())
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
+            if hasattr(window.ui.people_page, "set_pet_status_message"):
+                window.ui.people_page.set_pet_status_message(
+                    context.library.pet_scan_status_message()
+                )
         self._pinned_items_service = PinnedItemsService(
             context.settings,
             people_service_getter=self._people_service,
@@ -218,6 +229,7 @@ class MainCoordinator(QObject):
             header_controller=self._header_controller,
             face_name_overlay=window.ui.face_name_overlay,
             people_service=self._playback_people_service,
+            pet_service=self._playback_pet_service,
             people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
@@ -230,6 +242,9 @@ class MainCoordinator(QObject):
         self._playback.set_navigation_coordinator(self._navigation)
         self._navigation.set_playback_coordinator(self._playback)
         context.library.peopleSnapshotCommitted.connect(
+            self._handle_people_snapshot_sidebar_refresh
+        )
+        context.library.petSnapshotCommitted.connect(
             self._handle_people_snapshot_sidebar_refresh
         )
         # Manually attach info panel if available
@@ -437,49 +452,68 @@ class MainCoordinator(QObject):
 
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
+        if self._shutdown_complete or self._is_shutting_down:
+            return
+        self._is_shutting_down = True
+
         location_queue = getattr(self, "_location_write_queue", None)
-        if location_queue is not None:
-            location_queue.drain(timeout=None)
+        try:
+            if location_queue is not None:
+                location_queue.drain(timeout=None)
 
-        # 1. Cancel any active background scans/imports via Facade
-        if self._facade:
-            self._facade.cancel_active_scans()
-        if self._context and self._context.library:
-            self._context.library.shutdown()
-        if self._context:
-            self._context.close_library()
+            # 1. Stop UI-owned workers and widgets before their QObject graph is destroyed.
+            if self._playback:
+                self._playback.shutdown()
 
-        # 2. Stop playback (video/audio)
-        if self._playback:
-            self._playback.shutdown()
+            if self._edit:
+                self._edit.shutdown()
 
-        if location_queue is not None:
-            location_queue.shutdown(wait=True)
+            if hasattr(self._window.ui, "preview_window"):
+                try:
+                    self._window.ui.preview_window.close_preview(False)
+                except AttributeError:
+                    self._window.ui.preview_window.close()
 
-        # 3. Shutdown other coordinators if they have cleanup logic
-        if self._edit:
-            self._edit.shutdown()
+            if hasattr(self._window.ui, "map_view"):
+                map_view = self._window.ui.map_view
+                try:
+                    shutdown = getattr(map_view, "shutdown", None)
+                    if callable(shutdown):
+                        shutdown()
+                    map_view.close()
+                except RuntimeError:
+                    self._logger.warning(
+                        "Failed to close map view during shutdown",
+                        exc_info=True,
+                    )
 
-        if hasattr(self._window.ui, "preview_window"):
-            try:
-                self._window.ui.preview_window.close_preview(False)
-            except AttributeError:
-                self._window.ui.preview_window.close()
-        if hasattr(self._window.ui, "map_view"):
-            try:
-                self._window.ui.map_view.close()
-            except RuntimeError:
-                self._logger.warning("Failed to close map view during shutdown", exc_info=True)
+            # 2. Cancel active scans/imports and close library-scoped runtime services.
+            if self._facade:
+                self._facade.cancel_active_scans()
+            if self._context and self._context.library:
+                self._context.library.shutdown()
+            if self._context:
+                self._context.close_library()
+                asset_runtime = getattr(self._context, "_asset_runtime", None)
+                asset_runtime_shutdown = getattr(asset_runtime, "shutdown", None)
+                if callable(asset_runtime_shutdown):
+                    asset_runtime_shutdown()
 
-        # 4. Wait briefly for background threads (e.g. thumbnail generation) to finish
-        thread_pool = QThreadPool.globalInstance()
-        if not thread_pool.waitForDone(2000):
-            thread_pool.clear()
+            if location_queue is not None:
+                location_queue.shutdown(wait=True)
 
-        app = QCoreApplication.instance()
-        if app is not None:
-            app.closeAllWindows()
-            app.quit()
+            event_bus = getattr(self._context, "event_bus", None)
+            event_bus_shutdown = getattr(event_bus, "shutdown", None)
+            if callable(event_bus_shutdown):
+                event_bus_shutdown()
+
+            # 3. Wait briefly for background threads (e.g. thumbnail generation) to finish.
+            thread_pool = QThreadPool.globalInstance()
+            if not thread_pool.waitForDone(2000):
+                thread_pool.clear()
+        finally:
+            self._shutdown_complete = True
+            self._is_shutting_down = False
 
     def _connect_signals(self) -> None:
         """Connect application signals."""
@@ -560,14 +594,27 @@ class MainCoordinator(QObject):
         if hasattr(ui, "people_page"):
             ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
             ui.people_page.groupActivated.connect(self._on_people_group_activated)
+            if hasattr(ui.people_page, "petActivated"):
+                ui.people_page.petActivated.connect(self._on_pet_activated)
             self._context.library.peopleIndexUpdated.connect(ui.people_page.schedule_index_refresh)
+            self._context.library.petIndexUpdated.connect(ui.people_page.schedule_index_refresh)
             self._context.library.peopleSnapshotCommitted.connect(
+                self._gallery_vm.handle_people_snapshot_committed
+            )
+            self._context.library.petSnapshotCommitted.connect(
                 self._gallery_vm.handle_people_snapshot_committed
             )
             self._context.library.peopleSnapshotCommitted.connect(
                 self._playback.handle_people_snapshot_committed
             )
+            self._context.library.petSnapshotCommitted.connect(
+                self._playback.handle_people_snapshot_committed
+            )
             self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
+            if hasattr(ui.people_page, "set_pet_status_message"):
+                self._context.library.petScanStatusChanged.connect(
+                    ui.people_page.set_pet_status_message
+                )
 
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
@@ -672,14 +719,23 @@ class MainCoordinator(QObject):
         ui = getattr(window, "ui", None)
         people_page = getattr(ui, "people_page", None)
         bound_people_service = self._people_service(library_root=root)
+        bound_pet_service = self._pet_service(library_root=root)
         if bound_people_service is not None:
             self._playback_people_service = bound_people_service
+        if bound_pet_service is not None:
+            self._playback_pet_service = bound_pet_service
         if people_page is not None:
             if bound_people_service is not None and hasattr(people_page, "set_people_service"):
                 people_page.set_people_service(bound_people_service)
             else:
                 people_page.set_library_root(root)
+            if hasattr(people_page, "set_pet_service"):
+                people_page.set_pet_service(bound_pet_service or PetService())
             people_page.set_status_message(self._context.library.face_scan_status_message())
+            if hasattr(people_page, "set_pet_status_message"):
+                people_page.set_pet_status_message(
+                    self._context.library.pet_scan_status_message()
+                )
         map_runtime = self._map_runtime()
         map_interaction_service = self._map_interaction_service()
         self._map_extension_download.set_package_root(self._resolve_map_package_root(map_runtime))
@@ -695,6 +751,8 @@ class MainCoordinator(QObject):
                 playback.set_people_service(bound_people_service)
             else:
                 playback.set_people_library_root(root)
+            if bound_pet_service is not None and hasattr(playback, "set_pet_service"):
+                playback.set_pet_service(bound_pet_service)
 
     def _active_session(self):
         return getattr(self._context, "library_session", None)
@@ -732,6 +790,18 @@ class MainCoordinator(QObject):
             self._context.library,
             library_root=library_root,
         )
+
+    def _pet_service(self, library_root: Path | None = None):
+        session = self._active_session()
+        session_root = getattr(session, "library_root", None) if session is not None else None
+        if session is not None and (library_root is None or session_root == library_root):
+            return getattr(session, "pets", None)
+        service = getattr(self._context.library, "pet_service", None)
+        if service is not None:
+            bound_root = getattr(service, "library_root", lambda: None)()
+            if library_root is None or bound_root == library_root:
+                return service
+        return None
 
     def _map_runtime(self):
         session = self._active_session()
@@ -774,13 +844,17 @@ class MainCoordinator(QObject):
     def _handle_people_snapshot_sidebar_refresh(self, event: object) -> None:
         library_root = self._context.library.root()
         if library_root is not None and getattr(event, "library_root", None) == library_root:
-            self._pinned_items_service.prune_missing_people_entities(
-                library_root,
-                person_ids=tuple(getattr(event, "changed_person_ids", ()) or ()),
-                group_ids=tuple(getattr(event, "changed_group_ids", ()) or ()),
-                person_redirects=dict(getattr(event, "person_redirects", {}) or {}),
-                group_redirects=dict(getattr(event, "group_redirects", {}) or {}),
-            )
+            prune_kwargs: dict[str, object] = {
+                "person_ids": tuple(getattr(event, "changed_person_ids", ()) or ()),
+                "group_ids": tuple(getattr(event, "changed_group_ids", ()) or ()),
+                "person_redirects": dict(getattr(event, "person_redirects", {}) or {}),
+                "group_redirects": dict(getattr(event, "group_redirects", {}) or {}),
+            }
+            if hasattr(event, "changed_pet_ids"):
+                prune_kwargs["pet_ids"] = tuple(getattr(event, "changed_pet_ids", ()) or ())
+            if hasattr(event, "pet_redirects"):
+                prune_kwargs["pet_redirects"] = dict(getattr(event, "pet_redirects", {}) or {})
+            self._pinned_items_service.prune_missing_people_entities(library_root, **prune_kwargs)
         self._window.ui.sidebar.refresh_tree_model()
 
     def _handle_move_finished_toast(
@@ -968,11 +1042,25 @@ class MainCoordinator(QObject):
         )
         self._view_router.show_gallery()
 
+    def _on_pet_activated(self, pet_id: str) -> None:
+        query = self._window.ui.people_page.build_pet_query(pet_id)
+        if not query.asset_ids:
+            return
+        self._gallery_vm.open_people_cluster_gallery(
+            query,
+            kind="pet",
+            entity_id=pet_id,
+        )
+        self._view_router.show_gallery()
+
     def open_album_from_path(self, path: Path):
         target = Path(path).expanduser()
         if not self._ensure_session_for_open_album(target):
             return
         self._navigation.open_album(target)
+
+    def gallery_startup_model(self) -> GalleryListModelAdapter:
+        return self._asset_list_vm
 
     def _ensure_session_for_open_album(self, path: Path) -> bool:
         """Ensure standalone album opens have a session-bound query surface."""

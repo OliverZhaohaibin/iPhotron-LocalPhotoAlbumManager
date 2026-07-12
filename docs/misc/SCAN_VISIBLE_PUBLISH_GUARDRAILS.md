@@ -20,6 +20,11 @@ viewmodels, or status/progress plumbing.
   visible range yet.
 - Location/Map scan consumers should subscribe to `ScanBatchCommitted`, not
   legacy chunk payloads.
+- Face and Pet workers may consume committed scan rows, but must not publish
+  uncommitted scanner chunks into their snapshot databases.
+- Interactive scans feed both AI workers while metadata batches commit. Startup
+  scans defer both workers until metadata completion, then drain persisted
+  `pending`/`retry` status rows. Keep `face_status` and `pet_status` independent.
 
 ## Focused Checks
 

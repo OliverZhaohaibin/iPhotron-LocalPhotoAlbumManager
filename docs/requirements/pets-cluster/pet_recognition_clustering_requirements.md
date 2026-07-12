@@ -2,8 +2,15 @@
 
 > 版本：1.0
 > 日期：2026-06-07
-> 状态：待实施需求
-> 范围：只定义需求与实施边界，不包含代码改动
+> 状态：历史需求输入；P0 已在 `codex/pets-cluster-p0` 实现
+> 当前生产契约：[`../../misc/PETS_RECOGNITION_RUNTIME.md`](../../misc/PETS_RECOGNITION_RUNTIME.md)
+
+本文保留最初需求与优先级，不能再作为当前实现清单使用。生产实现相对初稿的主要变化是：
+
+- 当前聚类版本使用 species-separated complete-link，而不是以 HDBSCAN 作为最终默认路径；
+- People & Pets 已支持混合 identity group 和跨 person/pet identity redirect；
+- 信息/播放界面已组合展示 face 与 pet annotations；
+- `LibrarySession.pets`、`PetScanWorker`、独立 `pet_status` 和双数据库状态拆分已经落地。
 
 ## 1. 背景与目标
 
@@ -361,4 +368,3 @@ src/iPhoto/extension/models/pets/
 - 不引入云端识别服务。
 - 不训练自有模型。
 - 不要求视频宠物识别。
-

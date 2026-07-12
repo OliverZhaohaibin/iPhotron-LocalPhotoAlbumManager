@@ -28,27 +28,31 @@ Treat the items below as product contracts, not optional UI polish.
   window, not a nested child widget, so the popup remains visually centered in
   the main UI.
 
-## People dashboard-specific regression contract
+## People & Pets dashboard-specific regression contract
 
 The regression that exposed this issue happened in the People dashboard, so the
 following rules remain important concrete examples of the project-wide popup
 contract.
 
-- Use `MergeConfirmDialog` for People dashboard confirmation flows that should
+- Use `MergeConfirmDialog` for People/Pets dashboard confirmation flows that should
   visually match the merge confirmation popup.
 
 ## People visibility contract
 
 - Each People card must expose a right-click `Hide` / `Unhide` action.
-- Hidden state must persist in the People state database.
+- Each Pet card must expose the corresponding hide/unhide action.
+- Hidden state must persist in the owning People or Pets state database.
 - The `View` menu must expose `Show Hidden People`, backed by
   `ui.show_hidden_people`.
 - When `Show Hidden People` is disabled, hidden people must be excluded from the
-  People dashboard. Group cards must stay in sync with the filtered result.
+  People dashboard; the same dashboard filter includes/excludes hidden pets.
+  Group cards must stay in sync with the filtered result.
 
 ## Merge safety contract
 
 - People in different hidden states must never be merged.
+- Pets or cross-kind person/pet identities in different hidden states must not
+  be merged or redirected into one another.
 - The repository/service layer must reject the merge even if the UI misses the
   guard.
 - The People UI must also block the action early and show the project-styled
@@ -79,6 +83,7 @@ Keep coverage for the following behaviors in
 `tests/test_information_popup.py`:
 
 - People card menu exposes `Hide` / `Unhide`.
+- Pet card menu exposes the matching visibility and management actions.
 - Hidden people can be included again with `Show Hidden People`.
 - Merge is blocked when hidden state differs.
 - Group menu exposes `Disband Group`.
@@ -88,5 +93,5 @@ Keep coverage for the following behaviors in
 - Light-theme popup rendering follows the app theme rather than the OS theme.
 - The themed popup is centered on the top-level window.
 
-When changing popup plumbing, theme detection, People filtering, or group
-actions, run these tests before merging.
+When changing popup plumbing, theme detection, People/Pets filtering, identity
+merges, or group actions, run these tests before merging.

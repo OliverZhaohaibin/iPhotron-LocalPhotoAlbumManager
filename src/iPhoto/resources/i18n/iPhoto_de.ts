@@ -444,7 +444,11 @@
         </message>
         <message>
             <source>Choose Someone Else…</source>
-            <translation>Andere Person auswählen …</translation>
+            <translation>Anderen Namen auswählen …</translation>
+        </message>
+        <message>
+            <source>New Name…</source>
+            <translation>Neuer Name …</translation>
         </message>
         <message>
             <source>New Person…</source>
@@ -459,8 +463,16 @@
             <translation>Nicht diese Person</translation>
         </message>
         <message>
+            <source>Not This Name</source>
+            <translation>Nicht dieser Name</translation>
+        </message>
+        <message>
             <source>Choose Someone Else</source>
-            <translation>Andere Person auswählen</translation>
+            <translation>Anderen Namen auswählen</translation>
+        </message>
+        <message>
+            <source>Assign to</source>
+            <translation>Zuweisen zu</translation>
         </message>
         <message>
             <source>Assign this face to</source>
@@ -475,8 +487,16 @@
             <translation>Neue Person</translation>
         </message>
         <message>
+            <source>New Name</source>
+            <translation>Neuer Name</translation>
+        </message>
+        <message>
             <source>Person name:</source>
             <translation>Name der Person:</translation>
+        </message>
+        <message>
+            <source>Name:</source>
+            <translation>Name:</translation>
         </message>
         <message>
             <source>Unnamed</source>

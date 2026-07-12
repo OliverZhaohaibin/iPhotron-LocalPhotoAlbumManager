@@ -22,10 +22,15 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
         recent_albums=[Path("A")],
         defer_startup_tasks=True,
     )
-    calls: dict[str, Path | bool] = {}
+    calls: dict[str, Path | bool | list[bool]] = {"resume": []}
 
-    def _resume() -> None:
-        calls["resume"] = True
+    def _resume(*, defer_scan: bool = False) -> None:
+        resume_calls = calls["resume"]
+        assert isinstance(resume_calls, list)
+        resume_calls.append(defer_scan)
+
+    def _start_deferred_scan() -> None:
+        calls["deferred_scan"] = True
 
     def _remember(root: Path) -> None:
         calls["remember"] = root
@@ -38,6 +43,7 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
         calls["close"] = True
 
     runtime.resume_startup_tasks = _resume
+    runtime.start_deferred_startup_scan = _start_deferred_scan
     runtime.remember_album = _remember
     runtime.open_library = _open_library
     runtime.close_library = _close_library
@@ -61,11 +67,14 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
     assert context.recent_albums is runtime.recent_albums
 
     context.resume_startup_tasks()
+    context.resume_startup_tasks(defer_scan=True)
+    context.start_deferred_startup_scan()
     context.remember_album(Path("B"))
     assert context.open_library(Path("C")) is runtime.library_session
     context.close_library()
 
-    assert calls["resume"] is True
+    assert calls["resume"] == [False, True]
+    assert calls["deferred_scan"] is True
     assert calls["remember"] == Path("B")
     assert calls["open"] == Path("C")
     assert calls["close"] is True

@@ -49,7 +49,7 @@ class GalleryViewModel(BaseViewModel):
             library_manager_getter=lambda: self._context.library,
         )
         self._cluster_gallery_origin: Literal["location", "people", None] = None
-        self._people_cluster_kind: Literal["person", "group", None] = None
+        self._people_cluster_kind: Literal["person", "group", "pet", None] = None
         self._people_cluster_id: str | None = None
 
         self.current_section = ObservableProperty("gallery")
@@ -267,7 +267,7 @@ class GalleryViewModel(BaseViewModel):
         self,
         query: AssetQuery,
         *,
-        kind: Literal["person", "group", None] = None,
+        kind: Literal["person", "group", "pet", None] = None,
         entity_id: str | None = None,
     ) -> None:
         root = self._context.library.root()
@@ -292,7 +292,7 @@ class GalleryViewModel(BaseViewModel):
         self,
         query: AssetQuery,
         *,
-        kind: Literal["person", "group", None] = None,
+        kind: Literal["person", "group", "pet", None] = None,
         entity_id: str | None = None,
     ) -> None:
         root = self._context.library.root()
@@ -327,9 +327,15 @@ class GalleryViewModel(BaseViewModel):
             self.open_people_dashboard()
 
     def handle_people_snapshot_committed(self, event: object) -> None:
-        if self._cluster_gallery_origin != "people" and self.current_section.value != "pinned_people_gallery":
+        if (
+            self._cluster_gallery_origin != "people"
+            and self.current_section.value != "pinned_people_gallery"
+        ):
             return
-        if self._people_cluster_kind not in {"person", "group"} or not self._people_cluster_id:
+        if (
+            self._people_cluster_kind not in {"person", "group", "pet"}
+            or not self._people_cluster_id
+        ):
             return
         root = self._context.library.root()
         if root is None:
@@ -343,9 +349,12 @@ class GalleryViewModel(BaseViewModel):
         if self._people_cluster_kind == "person":
             redirects = getattr(event, "person_redirects", {}) or {}
             changed_ids = set(getattr(event, "changed_person_ids", ()) or ())
-        else:
+        elif self._people_cluster_kind == "group":
             redirects = getattr(event, "group_redirects", {}) or {}
             changed_ids = set(getattr(event, "changed_group_ids", ()) or ())
+        else:
+            redirects = getattr(event, "pet_redirects", {}) or {}
+            changed_ids = set(getattr(event, "changed_pet_ids", ()) or ())
 
         changed_asset_ids = set(getattr(event, "changed_asset_ids", ()) or ())
         asset_ids = getattr(current_query, "asset_ids", ()) if current_query is not None else ()
@@ -363,16 +372,30 @@ class GalleryViewModel(BaseViewModel):
             self.return_from_cluster_gallery()
             return
 
-        service = resolve_people_service(
-            self._context.library,
-            library_root=root,
-        )
-        if service is None:
-            return
         if self._people_cluster_kind == "person":
+            service = resolve_people_service(
+                self._context.library,
+                library_root=root,
+            )
+            if service is None:
+                return
             query = service.build_cluster_query(current_id)
-        else:
+        elif self._people_cluster_kind == "group":
+            service = resolve_people_service(
+                self._context.library,
+                library_root=root,
+            )
+            if service is None:
+                return
             query = service.build_group_query(current_id)
+        else:
+            pet_service = getattr(self._context.library, "pet_service", None)
+            session = getattr(self._context, "library_session", None)
+            if session is not None:
+                pet_service = getattr(session, "pets", pet_service)
+            if pet_service is None:
+                return
+            query = pet_service.build_pet_query(current_id)
 
         if not query.asset_ids:
             self.return_from_cluster_gallery()
@@ -572,7 +595,7 @@ class GalleryViewModel(BaseViewModel):
             entity_kind = "album"
             entity_id = str(self.active_root.value)
         elif section in {"people_cluster_gallery", "pinned_people_gallery"}:
-            if self._people_cluster_kind in {"person", "group"}:
+            if self._people_cluster_kind in {"person", "group", "pet"}:
                 entity_kind = self._people_cluster_kind
                 entity_id = self._people_cluster_id
 

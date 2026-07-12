@@ -25,6 +25,7 @@ class AssetDTO:
     metadata: Dict[str, Any]
     is_favorite: bool
     face_status: Optional[str] = None
+    pet_status: Optional[str] = None
 
     # Derived flags
     is_live: bool = False

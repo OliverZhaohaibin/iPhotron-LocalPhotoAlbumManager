@@ -71,8 +71,11 @@ class AppContext:
     def recent_albums(self) -> list[Path]:
         return self._runtime.recent_albums
 
-    def resume_startup_tasks(self) -> None:
-        self._runtime.resume_startup_tasks()
+    def resume_startup_tasks(self, *, defer_scan: bool = False) -> None:
+        self._runtime.resume_startup_tasks(defer_scan=defer_scan)
+
+    def start_deferred_startup_scan(self) -> None:
+        self._runtime.start_deferred_startup_scan()
 
     def remember_album(self, root: Path) -> None:
         self._runtime.remember_album(root)

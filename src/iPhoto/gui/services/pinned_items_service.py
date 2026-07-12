@@ -77,6 +77,11 @@ class PinnedItemsService(QObject):
             self._state.pin_person(person_id, label, library_root=library_root)
         )
 
+    def pin_pet(self, pet_id: str, label: str, *, library_root: Path | None) -> None:
+        self._emit_if_changed(
+            self._state.pin_pet(pet_id, label, library_root=library_root)
+        )
+
     def pin_group(self, group_id: str, label: str, *, library_root: Path | None) -> None:
         self._emit_if_changed(
             self._state.pin_group(group_id, label, library_root=library_root)
@@ -143,15 +148,19 @@ class PinnedItemsService(QObject):
         library_root: Path | None,
         *,
         person_ids: tuple[str, ...] = (),
+        pet_ids: tuple[str, ...] = (),
         group_ids: tuple[str, ...] = (),
         person_redirects: dict[str, str] | None = None,
+        pet_redirects: dict[str, str] | None = None,
         group_redirects: dict[str, str | None] | None = None,
     ) -> bool:
         changed = self._state.prune_missing_people_entities(
             library_root,
             person_ids=person_ids,
+            pet_ids=pet_ids,
             group_ids=group_ids,
             person_redirects=person_redirects,
+            pet_redirects=pet_redirects,
             group_redirects=group_redirects,
         )
         self._emit_if_changed(changed)

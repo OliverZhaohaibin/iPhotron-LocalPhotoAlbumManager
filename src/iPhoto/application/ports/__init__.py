@@ -11,6 +11,7 @@ from .media import (
     ThumbnailRendererPort,
 )
 from .people import PeopleAssetRepositoryPort, PeopleIndexPort
+from .pets import PetAssetRepositoryPort, PetIndexPort
 from .repositories import (
     AlbumRepositoryPort,
     AssetFavoriteQueryPort,
@@ -52,6 +53,8 @@ __all__ = [
     "MetadataWriterPort",
     "PeopleIndexPort",
     "PeopleAssetRepositoryPort",
+    "PetAssetRepositoryPort",
+    "PetIndexPort",
     "PinnedStateRepositoryPort",
     "TaskSchedulerPort",
     "ThumbnailRendererPort",

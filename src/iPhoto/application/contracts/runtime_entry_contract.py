@@ -39,8 +39,11 @@ class RuntimeEntryContract(Protocol):
     def close_library(self) -> None:
         """Close the active library session."""
 
-    def resume_startup_tasks(self) -> None:
+    def resume_startup_tasks(self, *, defer_scan: bool = False) -> None:
         """Run deferred startup work."""
+
+    def start_deferred_startup_scan(self) -> None:
+        """Start a scan deferred until after the first gallery load."""
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list."""

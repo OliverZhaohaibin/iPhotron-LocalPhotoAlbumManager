@@ -38,11 +38,12 @@ architecture convergence status.
   then best-effort writes GPS metadata to original media through ExifTool and
   reports warnings on failure.
 - **Rebuildable facts vs durable choices.** Scan rows, thumbnails, Live Photo
-  materialization, and People runtime snapshots can be rebuilt. Favorites,
+  materialization, and People/Pets runtime snapshots can be rebuilt. Favorites,
   hidden/trash state, pinned items, covers, ordering, manual metadata, People
-  names, groups, covers, hidden flags, and manual faces are durable user state.
-- **Optional bounded contexts.** People AI and Maps native/runtime extensions
-  are optional and must degrade gracefully when missing.
+  names/groups/manual faces, and Pets names/covers/hidden/rejected decisions are
+  durable user state.
+- **Optional bounded contexts.** People AI, Pets AI, and Maps native/runtime
+  extensions are optional and must degrade gracefully when missing.
 - **Cross-platform desktop first.** macOS, Windows, and Linux are supported
   through runtime adapters and platform-specific rendering choices.
 
@@ -82,6 +83,7 @@ graph TB
         Scanner["Filesystem Scanner Adapter"]
         Thumbnails["Thumbnail Cache / Renderer"]
         PeopleInfra["People Runtime / State"]
+        PetsInfra["Pets Runtime / State"]
         MapsInfra["Maps Runtime Adapter"]
     end
 
@@ -109,6 +111,7 @@ graph TB
     Scanner -.implements.-> Ports
     Thumbnails -.implements.-> Ports
     PeopleInfra -.implements.-> Ports
+    PetsInfra -.implements.-> Ports
     MapsInfra -.implements.-> Ports
 ```
 
@@ -125,7 +128,7 @@ Forbidden dependency direction:
 ```text
 domain -> application/gui/infrastructure
 application -> gui/concrete cache/concrete infrastructure
-infrastructure/cache/core/io/library/people -> gui
+infrastructure/cache/core/io/library/people/pets -> gui
 production runtime -> iPhoto.legacy
 production runtime -> iPhoto.models.*
 ```
@@ -149,7 +152,8 @@ RuntimeContext
   library_session: LibrarySession | None
   open_library(root)
   close_library()
-  resume_startup_tasks()
+  resume_startup_tasks(defer_scan=False)
+  start_deferred_startup_scan()
   remember_album(root)
 ```
 
@@ -170,6 +174,7 @@ LibrarySession
   asset_operations
   thumbnails
   people
+  pets
   maps
   map_interactions
   edit
@@ -180,9 +185,11 @@ LibrarySession
 CLI and other non-GUI callers create the same session boundary through
 `create_headless_library_session(root)`.
 
-Production GUI and CLI do not create standalone fallback services. If no active
-session exists, GUI services should fail explicitly or no-op safely according to
-their presentation responsibility.
+Production GUI and CLI do not create independently bound fallback services.
+Widgets may receive an unbound `PeopleService()` or `PetService()` as a
+presentation-safe empty object before a library session exists, but it must not
+open repositories or become a second source of library truth. Session-bound
+services fail explicitly or no-op safely according to their responsibility.
 
 `TranslationManager` is created after settings and before theme initialization.
 It reads `ui.language`, installs the active Qt translator, exposes
@@ -244,6 +251,8 @@ Current public boundary names include:
 | `MapRuntimePort` | Maps extension availability and runtime adapter selection. |
 | `PeopleAssetRepositoryPort` | Asset-index reads and face-status updates used by the People bounded context. |
 | `PeopleIndexPort` | People scan candidate enqueue, snapshot commit, and People/group queries. |
+| `PetAssetRepositoryPort` | Asset-index reads plus `pet_status` updates/counts used by the Pets bounded context. |
+| `PetIndexPort` | Pets candidate enqueue and rebuildable snapshot commit boundary. |
 | `PinnedStateRepositoryPort` | Pinned sidebar state persistence across libraries. |
 | `TaskSchedulerPort` | Background task submission and cancellation boundary. |
 | `ThumbnailRendererPort` | Thumbnail/preview generation without GUI ownership. |
@@ -327,6 +336,10 @@ It is not a legacy manager facade.
 
 - `people/`: optional face detection/clustering runtime, People repositories,
   stable People state, manual faces, groups, covers, and People service API.
+- `pets/`: optional YOLOX/DINOv2 detection and identity clustering runtime,
+  rebuildable pet repository, durable pet state, and session-bound Pet service.
+  The People & Pets dashboard composes both services without merging their
+  runtime tables. See [`docs/misc/PETS_RECOGNITION_RUNTIME.md`](misc/PETS_RECOGNITION_RUNTIME.md).
 - `src/maps`: optional offline map runtime, tile parsing, OBF/native
   widget/helper integration, search, and map rendering internals. GUI map
   views construct concrete map widgets through `map_widget_factory`.
@@ -341,12 +354,15 @@ Each library root owns a `.iPhoto/` workspace.
 
 | Path | Ownership |
 | --- | --- |
-| `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, face scan status, and related library state. |
+| `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, independent `face_status`/`pet_status`, and related library state. |
 | `.iPhoto/links.json` | Derived Live Photo compatibility materialization; repository/session Live Photo role state remains authoritative for runtime behavior. |
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
 | `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
 | `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers, and manual faces. |
 | `.iPhoto/faces/thumbnails/` | Rebuildable cropped face thumbnails. |
+| `.iPhoto/pets/pet_index.db` | Rebuildable Pets detections and clustered pet records. |
+| `.iPhoto/pets/pet_state.db` | Durable Pets profiles, names, covers, hidden flags, rejected keys, and merge redirects. |
+| `.iPhoto/pets/thumbnails/` | Rebuildable cropped pet thumbnails; replaced detections are reference-pruned after a successful snapshot commit. |
 | `.ipo` sidecars | Durable non-destructive edit instructions next to source media. |
 | `.iphoto.album.json` / `.iPhoto/manifest.json` | Folder-local album metadata formats. |
 | `.iphoto.album` | Legacy album marker compatibility file. |
@@ -375,16 +391,21 @@ sequenceDiagram
     UI-->>Paint: firstPainted
     Paint->>Feature: create deferred hidden features over event-loop turns
     Feature->>Coordinator: import, wire, and start
-    Coordinator->>Runtime: resume_startup_tasks()
+    Coordinator->>Runtime: resume_startup_tasks(defer_scan=True)
     Runtime->>Runtime: open saved library root
     Runtime->>Session: create library-scoped session
-    Session->>Infra: bind SQLite/cache/people/maps/edit adapters
+    Session->>Infra: bind SQLite/cache/people/pets/maps/edit adapters
     Runtime-->>Coordinator: session surfaces ready
+    Coordinator->>Coordinator: warm first gallery window
+    Coordinator->>Runtime: start_deferred_startup_scan()
 ```
 
 Headless callers do not use the paint boundary; they create the same
-library-scoped session directly. Scan workers, geocoding, People AI, Qt
+library-scoped session directly. Scan workers, geocoding, People/Pets AI, Qt
 Multimedia, and Maps rendering remain demand-loaded by their owning workflow.
+The GUI delays the saved-library metadata scan until the first gallery warm-up
+signals readiness, with a bounded timer fallback so an empty or failed gallery
+cannot suppress scanning indefinitely.
 
 ### Open Collection
 
@@ -421,7 +442,8 @@ sequenceDiagram
     participant Scan as ScanLibraryUseCase
     participant Scanner as MediaScannerPort
     participant Repo as AssetRepositoryPort
-    participant People as PeopleIndexPort
+    participant Faces as FaceScanWorker
+    participant Pets as PetScanWorker
     participant Pairing as Live Photo Pairing
 
     Trigger->>Session: scan(scope, filters)
@@ -430,7 +452,8 @@ sequenceDiagram
     Scanner-->>Scan: scan chunks
     Scan->>Repo: merge scan rows
     Scan->>Repo: append scan job/event records
-    Scan->>People: enqueue eligible rows
+    Scan->>Faces: enqueue face-eligible committed rows
+    Scan->>Pets: enqueue pet-eligible committed rows
     Scan->>Pairing: refresh roles/materialization
     Scan-->>Trigger: progress/result + ScanBatchCommitted
 ```
@@ -438,6 +461,12 @@ sequenceDiagram
 Scanning has one application use case. Qt workers adapt threading/progress, and
 CLI uses the same session surface without Qt. UI scan batches are ready-only and
 carry full thumbnail cache keys so visible media rows are immediately drawable.
+For an interactive rescan, Face and Pet workers run alongside metadata scanning
+and receive committed rows. When saved-library startup requires a metadata
+scan, AI workers are deferred until it finishes, then drain `pending`/`retry`
+rows from the global index. A scan-complete startup does not create AI workers.
+The workers and their databases remain independent; failure or a missing
+optional runtime in one must not block the other.
 
 ### Assign Location
 
@@ -550,12 +579,12 @@ browsing/indexing state lives in the library database and session surfaces.
 ### ADR-2: Library-Scoped Runtime
 
 One active library root owns one runtime session, one asset index, one thumbnail
-cache root, one People state root, and one Maps runtime context.
+cache root, separate People and Pets state roots, and one Maps runtime context.
 
 ### ADR-3: Application Ports Over Concrete Singletons
 
 Use cases and application services depend on ports. Concrete SQLite, ExifTool,
-FFmpeg, thumbnail, People, edit, and Maps implementations are bound through
+FFmpeg, thumbnail, People, Pets, edit, and Maps implementations are bound through
 runtime/session composition.
 
 ### ADR-4: Single Asset Repository Boundary
@@ -568,18 +597,28 @@ application code must not bypass it.
 
 Scanning is an application workflow. GUI workers, CLI commands, watchers, and
 runtime refreshes adapt the same scan/session surface so progress, cache checks,
-metadata fallback, People enqueueing, and Live Photo pairing stay consistent.
+metadata fallback, People/Pets enqueueing, and Live Photo pairing stay consistent.
 
-### ADR-6: Durable People State Split
+### ADR-6: Durable Recognition State Split
 
 People runtime scan output is rebuildable. Human-authored People state is
 durable and survives rescans, reclustering, app restarts, and model changes.
+Pets follows the same split through separate `pet_index.db` and `pet_state.db`;
+the contexts share orchestration patterns but never share detection tables or
+identity record types.
 
 ### ADR-7: Platform Rendering Behind Adapters
 
 OpenGL, QRhi/Metal, native OsmAnd widgets, helper-backed map renderers, and CPU
 fallbacks are runtime-selected adapters. Product workflows must not depend on a
 specific rendering backend.
+
+### ADR-8: Composed People And Pets Identities
+
+The dashboard, pinned sidebar, annotations, and identity groups may compose
+person and pet summaries. Canonical records remain owned by their bounded
+contexts, while cross-kind redirects and mixed identity-group membership are
+durable coordination state in the People state repository.
 
 ## Acceptance Criteria
 
@@ -596,7 +635,7 @@ The current production source satisfies the vNext architecture criteria when:
 - production runtime has no `iPhoto.legacy` or `iPhoto.models.*` imports.
 - architecture checks are in CI.
 - key product behavior remains covered: folder browsing, global indexing, Live
-  Photos, People, Maps fallback, editing, location assignment, trash,
+  Photos, People, Pets, Maps fallback, editing, location assignment, trash,
   import/move/delete/restore, and export.
 
 Recommended verification after architecture-sensitive changes:

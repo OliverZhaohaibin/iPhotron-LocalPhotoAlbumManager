@@ -85,7 +85,8 @@ Small behavior contracts that are easy to break during feature work live in
 | Gallery scrolling, sparse windows, and thumbnail demand | [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) |
 | Trash and restore state | [TRASH_RESTORE_STATE_GUARDRAILS.md](misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |
 | Move/restore optimistic UI | [MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md) |
-| Project popups and People UI regressions | [PROJECT_POPUP_GUARDRAILS.md](misc/PROJECT_POPUP_GUARDRAILS.md) |
+| Project popups and People & Pets UI regressions | [PROJECT_POPUP_GUARDRAILS.md](misc/PROJECT_POPUP_GUARDRAILS.md) |
+| Pets recognition runtime, persistence, and scan scheduling | [PETS_RECOGNITION_RUNTIME.md](misc/PETS_RECOGNITION_RUNTIME.md) |
 | macOS map GL transparency | [MACOS_MAP_GL_TRANSPARENCY_NOTES.md](misc/MACOS_MAP_GL_TRANSPARENCY_NOTES.md) |
 | GUI internationalization | [I18N_UI_TEXT_GUARDRAILS.md](misc/I18N_UI_TEXT_GUARDRAILS.md) |
 
@@ -153,9 +154,10 @@ terminology; the long-term regression contract is
 [`docs/misc/I18N_UI_TEXT_GUARDRAILS.md`](misc/I18N_UI_TEXT_GUARDRAILS.md).
 
 The pet recognition and clustering materials under
-`docs/requirements/pets-cluster/` are requirements and development planning
-documents. Do not treat them as implemented runtime behavior until production
-code and tests land.
+`docs/requirements/pets-cluster/` are historical requirements and development
+planning inputs. Production behavior is now implemented; use
+[`docs/misc/PETS_RECOGNITION_RUNTIME.md`](misc/PETS_RECOGNITION_RUNTIME.md) and
+[`docs/architecture.md`](architecture.md) as the current runtime contracts.
 
 ---
 
@@ -203,6 +205,51 @@ The editable source install remains valid without this extra. In that mode the
 desktop app should still open libraries and use albums, maps, Live Photos, and
 editing; only the background People face scan is unavailable until `ai-demo` is
 installed.
+
+### Optional Pets AI Runtime
+
+Pet recognition and clustering is installed through the optional `pets-ai`
+extra:
+
+```bash
+pip install -e ".[pets-ai]"
+```
+
+The runtime uses the same model-cache posture as People: local files are used
+first, and a missing cache can be downloaded on first scan. The default shared
+cache is `src/extension/models/pets/`, or `IPHOTO_PET_MODEL_DIR` when that
+environment variable is set:
+
+```text
+pets/
+  detector/yolox_nano_coco.onnx
+  embedding/dinov2_vits14/dinov2_vits14.pt
+```
+
+When the YOLOX detector is missing, iPhotron downloads it from the configured
+HTTPS model URL into the shared cache. The default URL points to the upstream
+YOLOX release asset and can be overridden with:
+
+```bash
+export IPHOTO_PET_DETECTOR_MODEL_URL="https://example.invalid/yolox_nano.onnx"
+```
+
+When the DINOv2 TorchScript cache is missing, iPhotron loads `dinov2_vits14`
+through Torch Hub from a pinned, immutable `facebookresearch/dinov2` revision
+and then attempts to cache a TorchScript copy under `extension/models/pets`.
+
+For offline or packaged validation, disable first-use downloads with:
+
+```bash
+export IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0
+```
+
+When `pets-ai` is missing, or model download/initialization fails, normal
+browsing, People, editing, and maps continue to work; pet scan candidates remain
+pending so scanning can resume after the runtime or model cache is installed.
+For worker scheduling, status transitions, snapshot/state ownership, model
+version upgrades, mixed People/Pets identity behavior, and focused tests, see
+[`PETS_RECOGNITION_RUNTIME.md`](misc/PETS_RECOGNITION_RUNTIME.md).
 
 ### Dev Dependencies
 
@@ -892,8 +939,8 @@ startup work must be connected to `MainWindow.firstPainted`. Widget creation
 still belongs on the GUI thread and should be split across event-loop turns.
 
 Keep imports above that boundary narrow. In particular, importing
-`iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the People
-pipeline, map rendering, asset-import services, edit-session models, or
+`iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the
+People/Pets AI pipelines, map rendering, asset-import services, edit-session models, or
 `MainCoordinator`. Package-level convenience imports in startup-reachable
 packages should use `__getattr__` lazy exports, while imports needed only by a
 scan or optional feature should live at the call site. Preserve public names so
@@ -1161,5 +1208,5 @@ Important runtime entry classes:
 | Class / Function | Module | Description |
 |------------------|--------|-------------|
 | `RuntimeContext` | `iPhoto.bootstrap.runtime_context` | Process composition root and active library lifecycle |
-| `LibrarySession` | `iPhoto.bootstrap.library_session` | Library-scoped assets, state, scans, People, Maps, edit, thumbnails, and location surfaces |
+| `LibrarySession` | `iPhoto.bootstrap.library_session` | Library-scoped assets, state, scans, People, Pets, Maps, edit, thumbnails, and location surfaces |
 | `create_headless_library_session()` | `iPhoto.bootstrap.library_session` | CLI/non-GUI session construction |

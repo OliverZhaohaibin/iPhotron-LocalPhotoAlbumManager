@@ -44,6 +44,10 @@ class ZoomController:
         r = self._renderer_provider()
         return bool(r and r.has_texture())
 
+    def _has_geometry(self) -> bool:
+        width, height = self._display_texture_dimensions()
+        return width > 0 and height > 0
+
     # ------------------------------------------------------------------
     # Delegating helpers
     # ------------------------------------------------------------------
@@ -77,12 +81,12 @@ class ZoomController:
         self._tc.apply_image_center_pixels(center, scale)
 
     def image_to_viewport(self, x: float, y: float) -> QPointF:
-        if not self._has_texture():
+        if not self._has_geometry():
             return QPointF()
         return self._tc.convert_image_to_viewport(x, y)
 
     def viewport_to_image(self, point: QPointF) -> QPointF:
-        if not self._has_texture():
+        if not self._has_geometry():
             return QPointF()
         return self._tc.convert_viewport_to_image(point)
 

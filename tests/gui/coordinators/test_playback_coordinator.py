@@ -14,7 +14,9 @@ from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
+from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
+from iPhoto.people.service import ManualFaceAddResult
 from iPhoto.people.repository import AssetFaceAnnotation
 from maps.osmand_search import SearchSuggestion
 
@@ -413,7 +415,7 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._player_view = Mock(
-        video_area=Mock(stop=Mock()),
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=True)),
         show_placeholder=Mock(),
     )
     coordinator._player_bar = Mock(setEnabled=Mock())
@@ -437,6 +439,81 @@ def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> Non
     coordinator._info_panel.close.assert_called_once_with()
     coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
     assert coordinator._confirmed_location_metadata == {}
+
+
+def test_reset_for_gallery_skips_media_cleanup_when_idle() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=False)),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = False
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=False))
+    coordinator._detail_vm = Mock(hide_info_panel=Mock())
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._confirmed_location_metadata = {
+        Path("/fake/video.mp4"): {"location": "Munich"}
+    }
+
+    PlaybackCoordinator.reset_for_gallery(coordinator)
+
+    coordinator._player_view.video_area.stop.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_not_called()
+    coordinator._hide_face_name_overlay.assert_not_called()
+    coordinator._player_bar.setEnabled.assert_called_once_with(False)
+    coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=False)
+    coordinator._update_header.assert_called_once_with(None)
+    assert coordinator._confirmed_location_metadata == {}
+
+
+def test_reset_for_gallery_releases_loaded_video_source_even_without_presentation() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=True)),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = False
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=False))
+    coordinator._detail_vm = Mock(hide_info_panel=Mock())
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._confirmed_location_metadata = {}
+
+    PlaybackCoordinator.reset_for_gallery(coordinator)
+
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.show_placeholder.assert_called_once_with()
+    coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
+
+
+def test_reset_for_gallery_clears_detail_view_without_video_stop_for_photo() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock(), has_video=Mock(return_value=False)),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = False
+    coordinator._current_presentation = _make_presentation(path="/fake/photo.jpg")
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._detail_vm = Mock(hide_info_panel=Mock())
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._confirmed_location_metadata = {}
+
+    PlaybackCoordinator.reset_for_gallery(coordinator)
+
+    coordinator._player_view.video_area.stop.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_called_once_with()
+    coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
 
 
 def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:
@@ -549,8 +626,49 @@ def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
     )
 
     coordinator._load_face_name_annotations.assert_called_once_with("asset-photo")
+    overlay.set_identity_suggestions.assert_called_once_with([])
     overlay.set_annotations.assert_called_once()
     overlay.set_overlay_active.assert_called_once_with(True)
+
+
+def test_load_recognition_identity_suggestions_mixes_people_and_pets() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(
+        list_clusters=Mock(
+            return_value=[
+                SimpleNamespace(
+                    person_id="person-a",
+                    name="Alice",
+                    thumbnail_path=Path("/tmp/alice.jpg"),
+                    face_count=4,
+                )
+            ]
+        )
+    )
+    coordinator._pet_service = Mock(
+        list_pets=Mock(
+            return_value=[
+                SimpleNamespace(
+                    pet_id="pet-a",
+                    name="Miso",
+                    thumbnail_path=Path("/tmp/miso.jpg"),
+                    detection_count=2,
+                )
+            ]
+        )
+    )
+
+    suggestions = PlaybackCoordinator._load_recognition_identity_suggestions(
+        coordinator,
+        include_hidden=False,
+    )
+
+    assert [(item.identity_key, item.name, item.count) for item in suggestions] == [
+        ("person:person-a", "Alice", 4),
+        ("pet:pet-a", "Miso", 2),
+    ]
+    coordinator._people_service.list_clusters.assert_called_once_with(include_hidden=False)
+    coordinator._pet_service.list_pets.assert_called_once_with(include_hidden=False)
 
 
 def test_refresh_face_name_overlay_hides_for_video() -> None:
@@ -713,6 +831,52 @@ def test_handle_info_panel_face_move_to_new_person_requested_refreshes_views() -
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
     coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+
+
+def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._pet_service = Mock(
+        delete_detection=Mock(return_value=True),
+        move_detection_to_pet=Mock(return_value=True),
+        move_detection_to_new_pet=Mock(return_value="pet-new"),
+    )
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    annotation = RecognitionAnnotation(
+        kind="pet",
+        annotation_id="det-1",
+        entity_id="pet-a",
+        display_name="Miso",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+
+    PlaybackCoordinator._handle_info_panel_face_delete_requested(coordinator, annotation)
+    PlaybackCoordinator._handle_info_panel_face_move_requested(
+        coordinator,
+        annotation,
+        "pet:pet-b",
+    )
+    PlaybackCoordinator._handle_info_panel_face_move_to_new_person_requested(
+        coordinator,
+        annotation,
+        "Nori",
+    )
+
+    coordinator._pet_service.delete_detection.assert_called_once_with("det-1")
+    coordinator._pet_service.move_detection_to_pet.assert_called_once_with("det-1", "pet-b")
+    coordinator._pet_service.move_detection_to_new_pet.assert_called_once_with("det-1", "Nori")
+    assert coordinator._refresh_info_panel_faces.call_count == 3
 
 
 def test_handle_people_snapshot_committed_refreshes_current_overlay() -> None:
@@ -1464,6 +1628,86 @@ def test_handle_manual_face_submitted_queues_background_worker() -> None:
         people_service=coordinator._people_service,
     )
     fake_pool.start.assert_called_once_with(fake_worker, -1)
+
+
+def test_handle_manual_face_submitted_defers_pet_identity_to_merge() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._manual_face_add_inflight = False
+    coordinator._pending_manual_face_annotations = {}
+    coordinator._pending_manual_face_sequence = 0
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._face_name_overlay = Mock()
+    coordinator._people_service = Mock(library_root=Mock(return_value=Path("/fake/library")))
+
+    fake_worker = SimpleNamespace(
+        signals=SimpleNamespace(
+            ready=Mock(connect=Mock()),
+            error=Mock(connect=Mock()),
+            finished=Mock(connect=Mock()),
+        )
+    )
+    fake_pool = Mock(start=Mock())
+
+    with patch(
+        "iPhoto.gui.coordinators.playback_coordinator.ManualFaceAddWorker",
+        return_value=fake_worker,
+    ) as worker_cls, patch(
+        "iPhoto.gui.coordinators.playback_coordinator.QThreadPool.globalInstance",
+        return_value=fake_pool,
+    ):
+        PlaybackCoordinator._handle_manual_face_submitted(
+            coordinator,
+            {
+                "requested_box": (10, 20, 30, 40),
+                "name": "Miso",
+                "identity_key": "pet:pet-a",
+                "person_id": None,
+            },
+        )
+
+    assert coordinator._manual_face_pending_merge_target == "pet:pet-a"
+    worker_cls.assert_called_once()
+    assert worker_cls.call_args.kwargs["person_id"] is None
+    assert worker_cls.call_args.kwargs["name_or_none"] == "Miso"
+    fake_pool.start.assert_called_once_with(fake_worker, -1)
+
+
+def test_handle_manual_face_ready_merges_selected_pet_identity() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._manual_face_inflight_asset_id = "asset-photo"
+    coordinator._manual_face_pending_merge_target = "pet:pet-a"
+    coordinator._pending_manual_face_annotations = {"asset-photo": []}
+    coordinator._people_service = Mock(merge_identities=Mock(return_value=SimpleNamespace(merged=True)))
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+
+    PlaybackCoordinator._handle_manual_face_ready(
+        coordinator,
+        ManualFaceAddResult(
+            asset_id="asset-photo",
+            face_id="face-manual",
+            person_id="person-new",
+            created_new_person=True,
+        ),
+    )
+
+    coordinator._people_service.merge_identities.assert_called_once_with(
+        "person:person-new",
+        "pet:pet-a",
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
 def test_handle_manual_face_submitted_immediately_refreshes_info_panel_with_pending_face() -> None:

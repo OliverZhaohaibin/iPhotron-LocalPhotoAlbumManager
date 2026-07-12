@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,11 @@ from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget, _resolve_frame_rotation_cw
 
 _log = logging.getLogger(__name__)
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _startup_hang_diag_enabled() -> bool:
+    return os.environ.get("IPHOTO_STARTUP_HANG_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
 
 
 class VideoArea(QWidget):
@@ -825,6 +831,10 @@ class VideoArea(QWidget):
         texture so that subsequent media transitions never flash the last
         rendered video frame.
         """
+        diag_enabled = _startup_hang_diag_enabled()
+        started_at = time.perf_counter() if diag_enabled else 0.0
+        if diag_enabled:
+            _log.info("VideoArea.stop: begin source=%s", self._current_source)
         self._player.stop()
         self._player.setSource(QUrl())
         self._resize_refit_timer.stop()
@@ -846,6 +856,11 @@ class VideoArea(QWidget):
         self._container_raw_w = 0
         self._container_raw_h = 0
         self._container_linux_180_hint = False
+        if diag_enabled:
+            _log.info(
+                "VideoArea.stop: end elapsed_ms=%.1f",
+                (time.perf_counter() - started_at) * 1000.0,
+            )
         self._adjusted_first_frame_pending = False
         self._profile_load_started_at = None
         self._profile_load_source = None

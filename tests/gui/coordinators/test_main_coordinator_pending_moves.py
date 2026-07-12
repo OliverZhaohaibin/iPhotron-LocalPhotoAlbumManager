@@ -101,6 +101,7 @@ def test_library_tree_update_rebinds_location_write_queue() -> None:
         _detail_vm=Mock(bind_asset_state_service=Mock()),
         _window=SimpleNamespace(ui=None),
         _people_service=Mock(return_value=None),
+        _pet_service=Mock(return_value=None),
         _map_runtime=Mock(return_value=None),
         _map_interaction_service=Mock(return_value=None),
         _map_extension_download=Mock(set_package_root=Mock()),

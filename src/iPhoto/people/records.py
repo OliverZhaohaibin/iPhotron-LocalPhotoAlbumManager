@@ -67,6 +67,17 @@ class PersonSummary:
     thumbnail_path: Path | None
     created_at: str
     is_hidden: bool = False
+    asset_count: int = 0
+
+
+@dataclass(frozen=True)
+class IdentityGroupMember:
+    kind: str
+    entity_id: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.kind}:{self.entity_id}"
 
 
 @dataclass(frozen=True)
@@ -76,6 +87,7 @@ class PeopleGroupRecord:
     member_key: str
     created_at: str
     updated_at: str
+    member_entities: tuple[IdentityGroupMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,8 @@ class PeopleGroupSummary:
     asset_count: int
     cover_asset_path: Path | None
     created_at: str
+    member_entities: tuple[IdentityGroupMember, ...] = ()
+    pet_members: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True)

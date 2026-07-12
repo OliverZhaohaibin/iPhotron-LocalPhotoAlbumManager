@@ -31,6 +31,7 @@ from ...infrastructure.services.performance_events import (
     monotonic_ms,
 )
 from ...people.status import normalize_face_status
+from ...pets.status import normalize_pet_status
 from ...utils.logging import get_logger
 from ...utils.pathutils import ensure_work_dir
 from .engine import DatabaseManager
@@ -443,6 +444,85 @@ class AssetRepository:
             counts: Dict[str, int] = {}
             for status, asset_count in cursor.fetchall():
                 normalized = normalize_face_status(status)
+                if normalized is None:
+                    continue
+                counts[normalized] = int(asset_count or 0)
+            return counts
+        finally:
+            if should_close:
+                conn.close()
+
+    def read_rows_by_pet_status(
+        self,
+        statuses: Iterable[str],
+        *,
+        limit: int | None = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield rows whose ``pet_status`` matches one of *statuses*."""
+
+        normalized_statuses = [
+            status
+            for status in (normalize_pet_status(value) for value in statuses)
+            if status is not None
+        ]
+        if not normalized_statuses:
+            return
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ", ".join(["?"] * len(normalized_statuses))
+            query = f"SELECT * FROM assets WHERE pet_status IN ({placeholders}) ORDER BY dt DESC, id DESC"
+            params: list[Any] = list(normalized_statuses)
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(int(limit))
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            for row in cursor:
+                yield self._db_row_to_dict(row)
+        finally:
+            if should_close:
+                conn.close()
+
+    def update_pet_status(self, asset_id: str, status: str) -> None:
+        """Update the ``pet_status`` for a single asset row."""
+
+        normalized = normalize_pet_status(status)
+        if normalized is None or not asset_id:
+            return
+        self._db_manager.execute_in_transaction(
+            "UPDATE assets SET pet_status = ? WHERE id = ?",
+            (normalized, asset_id),
+        )
+
+    def update_pet_statuses(self, asset_ids: Iterable[str], status: str) -> None:
+        """Update the ``pet_status`` for multiple assets."""
+
+        normalized = normalize_pet_status(status)
+        ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if normalized is None or not ids_list:
+            return
+
+        placeholders = ", ".join(["?"] * len(ids_list))
+        query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
+        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+
+    def count_by_pet_status(self) -> Dict[str, int]:
+        """Return a status-to-count mapping for ``assets.pet_status``."""
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            cursor = conn.execute(
+                "SELECT pet_status, COUNT(*) AS asset_count FROM assets GROUP BY pet_status"
+            )
+            counts: Dict[str, int] = {}
+            for status, asset_count in cursor.fetchall():
+                normalized = normalize_pet_status(status)
                 if normalized is None:
                     continue
                 counts[normalized] = int(asset_count or 0)

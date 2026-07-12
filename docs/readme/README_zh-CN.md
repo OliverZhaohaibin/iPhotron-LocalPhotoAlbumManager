@@ -109,6 +109,7 @@ iphoto-gui /photos/LondonTrip
 - 🎥 完整的**实况照片**配对和播放支持。
 - 🗺 可选地图视图，可视化所有照片和视频的 GPS 元数据；缺少 maps extension 时会优雅降级。
 - 👥 可选的 People 人脸扫描，支持 face cluster、人物命名、封面、隐藏人物与多人 group。
+- 🐾 可选的 Pets 扫描，支持猫狗检测、宠物个体 cluster、命名、封面、隐藏、置顶与 People & Pets group。
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
 ---
@@ -118,7 +119,7 @@ iphoto-gui /photos/LondonTrip
 iPhotron 的离线 OBF 地图运行时以自包含的 **maps extension** 形式提供，
 根目录位于 `src/maps/tiles/extension/`。本项目源码运行、Nuitka 打包产物、
 以及各平台安装产物都以这套目录结构作为运行时约定。
-即使缺少这套 extension，应用的图库浏览、编辑、People 和 Live Photo 功能仍可使用；
+即使缺少这套 extension，应用的图库浏览、编辑、People & Pets 和 Live Photo 功能仍可使用；
 地图相关视图和面板会通过运行时可用性边界显示优雅降级状态。
 
 当前 extension 主要包含：
@@ -169,14 +170,21 @@ Nuitka 打包、runtime 同步与安装器说明请参阅
 侧边栏提供自动生成的**基础图库**，将照片分组为：
 `所有照片`、`视频`、`实况照片`、`收藏`和`最近删除`。
 
-### 👥 People、Face Cluster 与 Group
+### 👥🐾 People、Pets、Face Cluster 与 Group
 可选的 People 管线会检测照片中的人脸，生成 face cluster，并在 People 页面以人物卡片展示。
 您可以为人物命名、合并重复 cluster、隐藏或重新显示隐藏人物，并让选定封面在重新扫描后继续保留。
+
+独立的 Pets 管线使用 YOLOX 检测猫狗、使用 DINOv2 生成 embedding，并在同一页面展示宠物个体卡片。
+宠物可以命名、合并、隐藏、置顶、设置封面并打开对应图库。人物与宠物可以加入同一个 identity group，
+但当同一图片区域同时被识别为 People 人脸和 pet 时，People 结果优先；冲突的 pet 检测会从可重建的
+Pets 快照中移除，因此不会继续生成重复卡片、宠物图库结果、详情标注或 overlay。该规则只组合比较
+检测框，People 与 Pets 的模型、记录、索引和持久状态仍保持独立。
 
 将多个人物组成 group 后，可以查看这些人物共同出现的照片。Group 卡片支持设置封面、拖拽排序，
 未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，
 核心照片管理功能仍可使用。People 状态通过 library session 边界持久化，人物命名、封面、
-隐藏状态、group 和手动人脸标注都会在重新扫描后保留。
+隐藏状态、group 和手动人脸标注都会在重新扫描后保留。宠物扫描依赖可选的 `pets-ai`；缺少依赖或模型时，
+候选资源会保持 pending，且不会阻塞应用的其他功能。
 ![People and groups interface](<../picture/People & Group.png>)
 
 ### ⚡ 大型图库 Gallery
@@ -216,8 +224,8 @@ macOS 默认 QRhi/Metal，Windows 与 Linux 使用 OpenGL-backed QRhi。
 
 ### ℹ️ 浮动信息面板
 切换浮动元数据面板，查看 EXIF、相机/镜头信息、曝光、光圈、焦距、尺寸、文件大小和拍摄时间等。
-如果当前资源已有 People 数据，面板会显示检测到的人脸头像，并支持删除该人脸、移动到其他人物，
-或创建新的人物标注。
+如果当前资源已有识别数据，面板与图片 overlay 会同时显示人脸和宠物标注，并通过各自服务支持删除、
+移动到其他身份或创建新身份。
 
 位置工具也集成在面板中：带 GPS 的资源可以显示内嵌地图；没有位置的资源可以通过
 “Assign a Location” 搜索、选择并确认地点。地点会始终保存到本机图库数据库；如果
@@ -249,6 +257,7 @@ ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回
 |------|------|
 | [Architecture](../architecture.md) | 当前 vNext library-scoped modular monolith 架构、模块边界、legacy 隔离策略、数据流和关键设计决策 |
 | [Development](../development.md) | 开发环境、依赖、调试，以及面向 Windows / Linux / macOS 的 maps extension 构建流程 |
+| [Pets Runtime](../misc/PETS_RECOGNITION_RUNTIME.md) | 当前宠物模型、扫描调度、持久化、变更安全和 People & Pets 组合契约 |
 | [Executable Build](../misc/BUILD_EXE.md) | Nuitka 打包、AOT、QRhi shader 资源、maps extension 同步与平台运行时说明 |
 | [Security](../security.md) | 权限、加密、数据存储位置、威胁模型 |
 | [Changelog](../CHANGELOG.md) | 所有版本更新记录 |
@@ -262,10 +271,11 @@ ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回
 | **ExifTool** | 读取 EXIF、GPS、QuickTime 和实况照片元数据；在用户执行 Assign Location 时写入 GPS 元数据。 |
 | **FFmpeg / FFprobe** | 生成视频缩略图并解析视频信息。 |
 | **InsightFace / ONNXRuntime + `buffalo_s` 模型** | 可选的 People 人脸扫描：使用 `src/extension/models/buffalo_s/` 中的 `det_500m.onnx` 进行人脸检测，使用 `w600k_mbf.onnx` 生成人脸 embedding。 |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | 可选的 Pets 扫描：使用 `src/extension/models/pets/` 中的模型进行猫狗检测和宠物个体 embedding。 |
 
 > 请确保 FFmpeg/FFprobe 已加入系统 `PATH`；如果需要把指定地点的 GPS 写回原始媒体文件，
 > 也请安装 ExifTool。
-> AI 人脸运行时是可选功能；源码安装可使用 `pip install -e ".[ai-demo]"`，
+> AI 识别运行时是可选功能；源码安装可使用 `pip install -e ".[ai-demo,pets-ai]"`，
 > 离线打包版本需要保留 `extension/models`。
 
 Python 依赖（例如 `Pillow`、`reverse-geocoder`）会通过 `pyproject.toml` 自动安装。

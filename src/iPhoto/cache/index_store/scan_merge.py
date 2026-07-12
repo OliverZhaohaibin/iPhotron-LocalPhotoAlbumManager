@@ -12,6 +12,12 @@ from ...people import (
     initial_face_status,
     normalize_face_status,
 )
+from ...pets import (
+    PET_STATUS_DONE,
+    PET_STATUS_SKIPPED,
+    initial_pet_status,
+    normalize_pet_status,
+)
 
 _PRESERVED_SCAN_STATE_FIELDS = (
     "is_favorite",
@@ -54,8 +60,10 @@ def merge_scan_row(
         existing_row is not None and _asset_identity_unchanged(existing_row, merged)
     )
     existing_face_status = None
+    existing_pet_status = None
     if existing_row is not None:
         existing_face_status = normalize_face_status(existing_row.get("face_status"))
+        existing_pet_status = normalize_pet_status(existing_row.get("pet_status"))
 
     if (
         existing_face_status is not None
@@ -65,6 +73,20 @@ def merge_scan_row(
         merged["face_status"] = existing_face_status
     else:
         merged["face_status"] = initial_face_status(
+            _row_for_face_status(
+                merged,
+                preserve_live_state=identity_unchanged,
+            )
+        )
+
+    if (
+        existing_pet_status is not None
+        and existing_pet_status in {PET_STATUS_DONE, PET_STATUS_SKIPPED}
+        and identity_unchanged
+    ):
+        merged["pet_status"] = existing_pet_status
+    else:
+        merged["pet_status"] = initial_pet_status(
             _row_for_face_status(
                 merged,
                 preserve_live_state=identity_unchanged,

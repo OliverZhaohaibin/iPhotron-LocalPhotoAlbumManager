@@ -25,6 +25,10 @@ from iPhoto.gui.ui.widgets.info_panel import (
     _FACE_AVATAR_DIAMETER,
     InfoPanel,
 )
+from iPhoto.gui.ui.widgets.recognition_annotations import (
+    RecognitionAnnotation,
+    RecognitionIdentitySuggestion,
+)
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 
@@ -582,7 +586,7 @@ def test_info_panel_face_avatar_context_menu_labels_and_submenu(qapp: QApplicati
     assert not_this_label == "Not Alice"
     assert submenu_labels == (
         ("choose_someone_else", "Choose Someone Else…"),
-        ("new_person", "New Person…"),
+        ("new_person", "New Name…"),
     )
     menu = avatar._build_context_menu()
     assert menu is not None
@@ -619,7 +623,7 @@ def test_info_panel_face_avatar_context_menu_uses_fallback_name_when_unnamed(
 
     avatar = panel._face_layout.itemAt(0).widget()
     assert avatar is not None
-    assert avatar._menu_action_labels()[1] == "Not This Person"
+    assert avatar._menu_action_labels()[1] == "Not This Name"
     panel.close()
 
 
@@ -759,12 +763,122 @@ def test_info_panel_choose_person_reuses_group_people_dialog(
     assert len(dialog_calls) == 1
     assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == ["person-2"]
     assert dialog_calls[0]["kwargs"]["title_text"] == "Choose Someone Else"
-    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Assign this face to"
+    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Assign to"
     assert dialog_calls[0]["kwargs"]["confirm_text"] == "Choose"
     assert dialog_calls[0]["kwargs"]["min_selection"] == 1
     assert dialog_calls[0]["kwargs"]["max_selection"] == 1
     assert dialog_calls[0]["kwargs"]["dark_mode"] is False
     assert moved == [(annotation, "person-2")]
+    avatar.close()
+
+
+def test_info_panel_choose_person_filters_current_prefixed_identity(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    from iPhoto.people.repository import AssetFaceAnnotation
+
+    dialog_calls: list[dict[str, object]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **kwargs) -> None:
+            dialog_calls.append({"summaries": summaries, "kwargs": kwargs})
+
+        def exec(self) -> int:
+            return 0
+
+        def selected_person_ids(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr(info_panel_module, "GroupPeopleDialog", _FakeDialog)
+
+    annotation = AssetFaceAnnotation(
+        face_id="face-1",
+        person_id="person-1",
+        display_name="Alice",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+    avatar = info_panel_module._FaceAvatarWidget(
+        annotation,
+        [
+            RecognitionIdentitySuggestion("person:person-1", "Alice", None, 3),
+            RecognitionIdentitySuggestion("person:person-2", "Bob", None, 2),
+        ],
+    )
+
+    avatar._prompt_choose_person()
+
+    assert len(dialog_calls) == 1
+    assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == [
+        "person:person-2"
+    ]
+    avatar.close()
+
+
+def test_info_panel_pet_avatar_uses_neutral_menu_and_mixed_candidate_shape(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    dialog_calls: list[dict[str, object]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **kwargs) -> None:
+            dialog_calls.append({"summaries": summaries, "kwargs": kwargs})
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_person_ids(self) -> list[str]:
+            return ["pet:pet-b"]
+
+    monkeypatch.setattr(info_panel_module, "GroupPeopleDialog", _FakeDialog)
+
+    annotation = RecognitionAnnotation(
+        kind="pet",
+        annotation_id="det-a",
+        entity_id="pet-a",
+        display_name="Miso",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+    avatar = info_panel_module._FaceAvatarWidget(
+        annotation,
+        [
+            RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3),
+            RecognitionIdentitySuggestion("pet:pet-a", "Miso", None, 1),
+            RecognitionIdentitySuggestion("pet:pet-b", "Nori", None, 2),
+        ],
+    )
+    moved: list[tuple[object, str]] = []
+    avatar.moveRequested.connect(lambda face, identity_key: moved.append((face, identity_key)))
+
+    delete_label, not_this_label, submenu_labels = avatar._menu_action_labels()
+    assert delete_label == "Delete"
+    assert not_this_label == "Not Miso"
+    assert submenu_labels == (
+        ("choose_someone_else", "Choose Someone Else…"),
+        ("new_person", "New Name…"),
+    )
+
+    avatar._prompt_choose_person()
+
+    assert len(dialog_calls) == 1
+    summaries = dialog_calls[0]["summaries"]
+    assert [summary.person_id for summary in summaries] == ["pet:pet-b"]
+    assert [summary.name for summary in summaries] == ["Nori"]
+    assert dialog_calls[0]["kwargs"]["title_text"] == "Choose Someone Else"
+    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Assign to"
+    assert all("pet:" not in str(summary.name) for summary in summaries)
+    assert moved == [(annotation, "pet:pet-b")]
     avatar.close()
 
 

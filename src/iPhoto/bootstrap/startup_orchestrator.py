@@ -48,6 +48,8 @@ class StartupFailure:
     message: str
     exception_type: str | None = None
     recoverable: bool = True
+    code: str = "startup_failed"
+    suggested_action: str = "retry"
 
 
 class StartupOrchestrator(QObject):

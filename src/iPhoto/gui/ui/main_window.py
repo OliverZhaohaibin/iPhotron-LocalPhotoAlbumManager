@@ -6,7 +6,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QPaintEvent, QResizeEvent
-from PySide6.QtWidgets import QMainWindow, QMenuBar, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMenuBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ...application.contracts.runtime_entry_contract import RuntimeEntryContract
 
@@ -25,6 +34,8 @@ class MainWindow(QMainWindow):
         self._first_paint_emitted = False
         self._is_shutting_down = False
         self._shutdown_complete = False
+        self._startup_orchestrator = None
+        self._startup_retry_callback = None
 
         self.ui = Ui_MainWindow()
 
@@ -35,6 +46,8 @@ class MainWindow(QMainWindow):
         self.window_manager: FramelessWindowManager | None = None
 
         self.ui.setupUi(self, context.library)
+        if hasattr(self.ui, "window_shell") and hasattr(self.ui, "window_shell_layout"):
+            self._create_startup_recovery_panel()
         translation = getattr(context, "translation", None)
         language_changed = getattr(translation, "languageChanged", None)
         if language_changed is not None:
@@ -53,6 +66,69 @@ class MainWindow(QMainWindow):
         # so global shortcuts continue to function when no child widget is
         # active.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+    def _create_startup_recovery_panel(self) -> None:
+        """Create a hidden, non-modal recovery surface for startup failures."""
+
+        panel = QFrame(self.ui.window_shell)
+        panel.setObjectName("startupRecoveryPanel")
+        panel.setStyleSheet(
+            "QFrame#startupRecoveryPanel { background: #fff3cd; color: #3d3300; "
+            "border-bottom: 1px solid #e2c96f; }"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 8, 12, 8)
+        row = QHBoxLayout()
+        self._startup_recovery_label = QLabel(panel)
+        self._startup_recovery_label.setWordWrap(True)
+        row.addWidget(self._startup_recovery_label, 1)
+        retry_button = QPushButton("Retry", panel)
+        continue_button = QPushButton("Continue without library", panel)
+        details_button = QPushButton("Details", panel)
+        row.addWidget(retry_button)
+        row.addWidget(continue_button)
+        row.addWidget(details_button)
+        layout.addLayout(row)
+        self._startup_recovery_details = QLabel(panel)
+        self._startup_recovery_details.setWordWrap(True)
+        self._startup_recovery_details.hide()
+        layout.addWidget(self._startup_recovery_details)
+        retry_button.clicked.connect(self._retry_startup)
+        continue_button.clicked.connect(panel.hide)
+        details_button.clicked.connect(
+            lambda: self._startup_recovery_details.setVisible(
+                not self._startup_recovery_details.isVisible()
+            )
+        )
+        self.ui.window_shell_layout.insertWidget(2, panel)
+        panel.hide()
+        self._startup_recovery_panel = panel
+
+    def set_startup_orchestrator(self, orchestrator: object) -> None:
+        self._startup_orchestrator = orchestrator
+
+    def show_startup_recovery(
+        self,
+        message: str,
+        *,
+        details: str | None = None,
+        retry_callback=None,
+    ) -> None:
+        if not hasattr(self, "_startup_recovery_panel"):
+            return
+        self._startup_retry_callback = retry_callback
+        self._startup_recovery_label.setText(
+            f"The photo library could not be opened during startup: {message}"
+        )
+        self._startup_recovery_details.setText(details or message)
+        self._startup_recovery_details.hide()
+        self._startup_recovery_panel.show()
+
+    def _retry_startup(self) -> None:
+        callback = self._startup_retry_callback
+        self._startup_recovery_panel.hide()
+        if callable(callback):
+            QTimer.singleShot(0, callback)
 
     def _on_feature_created(self, feature: str, _widget: object) -> None:
         if feature == FeatureKind.DETAIL.value and self.window_manager is not None:
@@ -92,6 +168,9 @@ class MainWindow(QMainWindow):
         if self._shutdown_complete:
             super().closeEvent(event)
             return
+        cancel_startup = getattr(self._startup_orchestrator, "cancel", None)
+        if callable(cancel_startup):
+            cancel_startup()
         if not self._is_shutting_down:
             self._is_shutting_down = True
             try:

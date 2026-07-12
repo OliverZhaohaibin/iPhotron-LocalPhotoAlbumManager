@@ -11,8 +11,31 @@ from iPhoto.cache.index_store import (
     reset_global_repository,
     GLOBAL_INDEX_DB_NAME,
 )
+from iPhoto.cache.index_store.repository import AssetRepository
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from iPhoto.domain.models.query import CollectionQuery, CollectionType
+
+
+def test_current_schema_reopen_skips_historical_full_table_repairs(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    repository = AssetRepository(library_root)
+    repository.write_rows(
+        [{"rel": "photo.jpg", "id": "photo", "gps": '{"lat": 1}', "has_gps": 1}]
+    )
+    repository.close()
+    database = library_root / ".iPhoto" / "global_index.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE assets SET has_gps = 0 WHERE rel = 'photo.jpg'")
+
+    reopened = AssetRepository(library_root)
+    try:
+        row = reopened.get_rows_by_rels(["photo.jpg"])["photo.jpg"]
+        assert row["has_gps"] == 0
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] >= 1
+    finally:
+        reopened.close()
 
 
 @pytest.fixture(autouse=True)

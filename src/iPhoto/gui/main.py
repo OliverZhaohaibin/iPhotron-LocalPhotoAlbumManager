@@ -176,7 +176,12 @@ def _bootstrap_macos_external_tool_path() -> None:
 def _configure_qt_shader_disk_cache(library_root: Path | None = None) -> None:
     """Route shader/program caches into a managed ``.iPhoto`` work directory."""
     if library_root is None:
-        configure_shader_cache_environment()
+        try:
+            configure_shader_cache_environment(use_saved_library=False)
+        except TypeError:
+            # Compatibility for embedders/tests that replace the helper with a
+            # historical no-argument callable.
+            configure_shader_cache_environment()
     else:
         configure_shader_cache_environment(library_root=library_root)
 
@@ -260,14 +265,7 @@ def _prefer_local_source_tree() -> None:
 
 
 def _prepare_qt_runtime_for_maps() -> None:
-    """Apply Linux Qt platform flags required by the native OsmAnd widget.
-
-    ``PhotoMapView`` prefers the native OsmAnd widget when its runtime is
-    available. That widget expects Qt to use the XCB/GLX desktop OpenGL path on
-    Linux; without these flags the application can start successfully and only
-    fail later when the map view is opened with GLEW reporting missing GLX
-    support.
-    """
+    """Respect the desktop platform; optional Maps must not decide app startup."""
 
     if sys.platform != "linux":
         return
@@ -275,27 +273,9 @@ def _prepare_qt_runtime_for_maps() -> None:
     if _opengl_explicitly_disabled():
         return
 
-    if _is_packaged_runtime():
-        if _allow_packaged_linux_wayland():
-            return
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
-    else:
-        try:
-            from maps.map_sources import (
-                has_usable_osmand_native_widget,
-                prefer_osmand_native_widget,
-            )
-        except Exception:  # noqa: BLE001
-            return
-
-        maps_package_root = Path(__file__).resolve().parents[2] / "maps"
-        if not prefer_osmand_native_widget() or not has_usable_osmand_native_widget(
-            maps_package_root
-        ):
-            return
-
-    if not os.environ.get("QT_QPA_PLATFORM"):
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    # A user/launcher may explicitly choose XCB.  Configure its GL integration
+    # in that case, but never force a Wayland session onto XCB merely because a
+    # native map extension happens to be packaged.
     if os.environ.get("QT_QPA_PLATFORM") == "xcb":
         os.environ.setdefault("QT_OPENGL", "desktop")
         os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
@@ -339,9 +319,9 @@ def _startup_feature_plan(
     """
 
     target_platform = sys.platform if platform is None else platform
-    deferred = ("detail", "preview", "people")
+    deferred = ("detail",)
     if target_platform in {"win32", "linux"}:
-        return (("detail",), ("preview", "people"))
+        return (("detail",), ())
     return ((), deferred)
 
 
@@ -368,22 +348,43 @@ def main(argv: list[str] | None = None) -> int:
     _enable_startup_hang_diagnostics()
 
     arguments = list(sys.argv if argv is None else argv)
-    from iPhoto.settings.manager import SettingsManager
+    if len(arguments) > 2 and arguments[1] == "--startup-library-probe":
+        from iPhoto.bootstrap.library_probe import _main as _run_library_probe
 
-    startup_settings = SettingsManager()
-    startup_settings.load()
-    mark("settings.loaded")
-    saved_library = startup_settings.get("basic_library_path")
-    saved_library_root = (
-        Path(saved_library).expanduser()
-        if isinstance(saved_library, str) and saved_library
-        else None
-    )
+        return _run_library_probe(arguments[2:])
+    from iPhoto.bootstrap.bootstrap_settings import load_bootstrap_settings
+
+    bootstrap_settings = load_bootstrap_settings()
+    mark("bootstrap_settings.loaded", error=bootstrap_settings.load_error)
     _prepare_qt_runtime_for_maps()
-    _configure_qt_opengl_defaults(saved_library_root)
+    _configure_qt_opengl_defaults()
     mark("qapplication.before_create")
     app = QApplication(arguments)
     mark("qapplication.created")
+
+    from iPhoto.bootstrap.startup_orchestrator import (
+        StartupFailure,
+        StartupOrchestrator,
+        StartupPhase,
+    )
+
+    startup = StartupOrchestrator(app if isinstance(app, QObject) else None)
+    startup.begin()
+    startup.transition(StartupPhase.APP_CREATED)
+
+    from iPhoto.settings.manager import SettingsManager
+
+    try:
+        startup_settings = SettingsManager(path=bootstrap_settings.path)
+    except TypeError:  # lightweight embedders and tests may expose a no-arg factory
+        startup_settings = SettingsManager()
+    recovery_loader = getattr(startup_settings, "load_with_recovery", None)
+    if callable(recovery_loader):
+        settings_recovery_warning = recovery_loader()
+    else:
+        startup_settings.load()
+        settings_recovery_warning = None
+    mark("settings.loaded", recovered=bool(settings_recovery_warning))
 
     # ``QToolTip`` instances inherit ``WA_TranslucentBackground`` from the frameless
     # main window, which means they expect the application to provide an opaque fill
@@ -440,8 +441,30 @@ def main(argv: list[str] | None = None) -> int:
     # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)
     mark("main_window.created")
+    set_startup_orchestrator = getattr(window, "set_startup_orchestrator", None)
+    if callable(set_startup_orchestrator):
+        set_startup_orchestrator(startup)
+    if settings_recovery_warning:
+        QTimer.singleShot(
+            0,
+            lambda: window.show_startup_recovery(
+                settings_recovery_warning,
+                details=settings_recovery_warning,
+            ),
+        )
     startup_input_guard = _StartupInputGuard(window, app)
     startup_input_guard.install()
+
+    from iPhoto.bootstrap.library_probe import LibraryProbeController
+
+    probe_controller = LibraryProbeController(window if isinstance(window, QObject) else None)
+    startup.phaseChanged.connect(
+        lambda snapshot: (
+            probe_controller.cancel()
+            if snapshot.phase is StartupPhase.CANCELLED
+            else None
+        )
+    )
 
     pre_show_features, post_show_features = _startup_feature_plan()
     startup_timing = _startup_timing_plan()
@@ -453,7 +476,10 @@ def main(argv: list[str] | None = None) -> int:
             mark("rhi_detail.created")
 
     # Coordinator needs Window, Context, and Container
+    coordinator = None
+
     def _initialize_after_show() -> None:
+        nonlocal coordinator
         try:
             mark("post_paint.begin")
             # Importing the coordinator expands the controller/view-model graph;
@@ -462,84 +488,128 @@ def main(argv: list[str] | None = None) -> int:
 
             mark("main_coordinator.imported")
             _logger.info("_initialize_after_show: creating MainCoordinator")
-            coordinator = MainCoordinator(window, context)
-            window.set_coordinator(coordinator)
-            coordinator.start()
-            mark("main_coordinator.started")
+            if coordinator is None:
+                coordinator = MainCoordinator(window, context)
+                window.set_coordinator(coordinator)
+                coordinator.start()
+                mark("main_coordinator.started")
 
             def _resume_startup_tasks() -> None:
                 try:
                     _logger.info(
                         "_initialize_after_show: coordinator started, resuming startup tasks"
                     )
-                    context.resume_startup_tasks(defer_scan=True)
-                    startup_scan_started = False
 
-                    def _start_deferred_startup_scan() -> None:
-                        nonlocal startup_scan_started
-                        if startup_scan_started:
-                            return
-                        startup_scan_started = True
-                        starter = getattr(context, "start_deferred_startup_scan", None)
-                        if callable(starter):
-                            _logger.info(
-                                "_initialize_after_show: starting deferred startup scan"
+                    def _continue_after_library_ready() -> None:
+                        startup.transition(StartupPhase.LIBRARY_READY)
+                        startup_scan_started = False
+
+                        def _start_deferred_startup_scan() -> None:
+                            nonlocal startup_scan_started
+                            if startup_scan_started:
+                                return
+                            startup_scan_started = True
+                            startup.transition(StartupPhase.GALLERY_READY)
+                            starter = getattr(context, "schedule_idle_startup_jobs", None)
+                            if not callable(starter):
+                                starter = getattr(context, "start_deferred_startup_scan", None)
+                            if callable(starter):
+                                _logger.info(
+                                    "_initialize_after_show: starting deferred startup scan"
+                                )
+                                starter()
+                            startup.complete()
+
+                        def _schedule_startup_scan_fallback() -> None:
+                            QTimer.singleShot(
+                                _STARTUP_GALLERY_WARMUP_FALLBACK_MS,
+                                _start_deferred_startup_scan,
                             )
-                            starter()
 
-                    def _schedule_startup_scan_fallback() -> None:
-                        QTimer.singleShot(
-                            _STARTUP_GALLERY_WARMUP_FALLBACK_MS,
-                            _start_deferred_startup_scan,
-                        )
+                        def _arm_startup_gallery_warmup() -> bool:
+                            model_getter = getattr(coordinator, "gallery_startup_model", None)
+                            model = model_getter() if callable(model_getter) else None
+                            begin_warmup = getattr(model, "begin_startup_gallery_warmup", None)
+                            if not callable(begin_warmup):
+                                begin_warmup = getattr(model, "begin_startup_first_frame_gate", None)
+                            ready_signal = getattr(model, "startupGalleryReady", None)
+                            if ready_signal is None:
+                                ready_signal = getattr(model, "startupFirstFrameReady", None)
+                            connect = getattr(ready_signal, "connect", None)
+                            if not callable(begin_warmup) or not callable(connect):
+                                return False
+                            connect(_start_deferred_startup_scan)
+                            begin_warmup()
+                            return True
 
-                    def _arm_startup_gallery_warmup() -> bool:
-                        model_getter = getattr(coordinator, "gallery_startup_model", None)
-                        model = model_getter() if callable(model_getter) else None
-                        begin_warmup = getattr(model, "begin_startup_gallery_warmup", None)
-                        if not callable(begin_warmup):
-                            begin_warmup = getattr(model, "begin_startup_first_frame_gate", None)
-                        ready_signal = getattr(model, "startupGalleryReady", None)
-                        if ready_signal is None:
-                            ready_signal = getattr(model, "startupFirstFrameReady", None)
-                        connect = getattr(ready_signal, "connect", None)
-                        if not callable(begin_warmup) or not callable(connect):
-                            return False
-                        connect(_start_deferred_startup_scan)
-                        begin_warmup()
-                        return True
-
-                    if len(arguments) > 1:
-                        _logger.info(
-                            "_initialize_after_show: opening album from CLI argument %s",
-                            arguments[1],
-                        )
                         startup_input_guard.release()
                         warmup_armed = _arm_startup_gallery_warmup()
                         if warmup_armed:
                             _schedule_startup_scan_fallback()
-                        mark("startup_gallery.selection_requested")
-                        coordinator.open_album_from_path(Path(arguments[1]))
-                        if not warmup_armed:
-                            _start_deferred_startup_scan()
+                        if len(arguments) > 1:
+                            mark("startup_gallery.selection_requested")
+                            coordinator.open_album_from_path(Path(arguments[1]))
+                            if not warmup_armed:
+                                _start_deferred_startup_scan()
+                            return
+
+                        def _select_all_photos_after_startup() -> None:
+                            mark("startup_gallery.selection_requested")
+                            window.ui.sidebar.select_all_photos(emit_signal=True)
+                            if not warmup_armed:
+                                _start_deferred_startup_scan()
+
+                        QTimer.singleShot(0, _select_all_photos_after_startup)
+
+                    request_getter = getattr(context, "request_startup_library_probe", None)
+                    committer = getattr(context, "commit_prepared_library", None)
+                    request = request_getter() if callable(request_getter) else None
+                    if request is None or not callable(committer):
+                        startup.transition(StartupPhase.LIBRARY_PROBING)
+                        context.resume_startup_tasks(defer_scan=True)
+                        _continue_after_library_ready()
                         return
-                    _logger.info("_initialize_after_show: selecting All Photos in sidebar")
-                    startup_input_guard.release()
-                    warmup_armed = _arm_startup_gallery_warmup()
-                    if warmup_armed:
-                        _schedule_startup_scan_fallback()
 
-                    def _select_all_photos_after_startup() -> None:
-                        if _startup_hang_diagnostics_enabled():
-                            _logger.info(
-                                "_initialize_after_show: triggering All Photos selection"
+                    expected_request_id = request.request_id
+                    startup.transition(StartupPhase.LIBRARY_PROBING)
+
+                    def _probe_ready(prepared) -> None:
+                        if prepared.request_id != expected_request_id:
+                            return
+                        try:
+                            committer(prepared, defer_scan=True)
+                            _continue_after_library_ready()
+                        except Exception as exc:  # noqa: BLE001 - probe commit boundary
+                            startup.fail(
+                                StartupFailure(
+                                    phase=StartupPhase.LIBRARY_PROBING,
+                                    message=str(exc) or type(exc).__name__,
+                                    exception_type=type(exc).__name__,
+                                )
                             )
-                        mark("startup_gallery.selection_requested")
-                        window.ui.sidebar.select_all_photos(emit_signal=True)
-                        if not warmup_armed:
-                            _start_deferred_startup_scan()
 
-                    QTimer.singleShot(0, _select_all_photos_after_startup)
+                    def _probe_failed(failure) -> None:
+                        if failure.request_id != expected_request_id:
+                            return
+                        startup.fail(
+                            StartupFailure(
+                                phase=StartupPhase.LIBRARY_PROBING,
+                                message=failure.message,
+                                exception_type=failure.exception_type,
+                            )
+                        )
+
+                    probe_controller.ready.connect(_probe_ready)
+                    probe_controller.failed.connect(_probe_failed)
+                    probe_controller.start(request)
+                except Exception as exc:  # noqa: BLE001 - Qt timer boundary
+                    startup.fail(
+                        StartupFailure(
+                            phase=StartupPhase.LIBRARY_PROBING,
+                            message=str(exc) or type(exc).__name__,
+                            exception_type=type(exc).__name__,
+                        )
+                    )
                 finally:
                     startup_input_guard.release()
 
@@ -547,9 +617,15 @@ def main(argv: list[str] | None = None) -> int:
                 startup_timing.coordinator_ready_delay_ms,
                 _resume_startup_tasks,
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - startup recovery boundary
             startup_input_guard.release()
-            raise
+            startup.fail(
+                StartupFailure(
+                    phase=StartupPhase.INTERACTIVE,
+                    message=str(exc) or type(exc).__name__,
+                    exception_type=type(exc).__name__,
+                )
+            )
 
     def _initialize_features_after_show() -> None:
         # QWidget creation must remain on the GUI thread. Splitting hidden
@@ -568,18 +644,44 @@ def main(argv: list[str] | None = None) -> int:
                 window.ui.ensure_feature(feature)
                 mark("feature.created", feature=feature)
                 QTimer.singleShot(startup_timing.feature_interval_ms, _create_next)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - Qt timer boundary
                 startup_input_guard.release()
-                raise
+                startup.fail(
+                    StartupFailure(
+                        phase=StartupPhase.INTERACTIVE,
+                        message=str(exc) or type(exc).__name__,
+                        exception_type=type(exc).__name__,
+                    )
+                )
 
         _create_next()
 
-    window.firstPainted.connect(
-        lambda: QTimer.singleShot(
+    def _continue_after_shell() -> None:
+        startup_input_guard.release()
+        QTimer.singleShot(
             startup_timing.first_post_paint_delay_ms,
             _initialize_features_after_show,
         )
+
+    def _retry_startup() -> None:
+        if startup.phase is StartupPhase.CANCELLED:
+            return
+        QTimer.singleShot(0, _initialize_features_after_show)
+
+    startup.startupDegraded.connect(
+        lambda failure: window.show_startup_recovery(
+            failure.message,
+            details=(
+                f"phase={failure.phase.value}; "
+                f"exception={failure.exception_type or 'unknown'}"
+            ),
+            retry_callback=_retry_startup,
+        )
     )
+    window.firstPainted.connect(startup.first_painted)
+    # Arm before show(): test doubles and a few embedded Qt hosts can paint
+    # synchronously from show(), and that event must not be lost.
+    startup.shell_shown(_continue_after_shell)
     window.show()
     mark("main_window.show_called")
 

@@ -317,10 +317,10 @@ def test_connect_signals_wires_location_scan_updates_from_library_and_service() 
     coordinator._facade.library_updates.scanFinished.connect.assert_any_call(
         coordinator._gallery_vm.handle_location_scan_finished
     )
-    coordinator._facade.move_service.moveFinished.connect.assert_any_call(
+    coordinator._facade.moveFinished.connect.assert_any_call(
         coordinator._status_bar.handle_move_finished
     )
-    coordinator._facade.move_service.moveFinished.connect.assert_any_call(
+    coordinator._facade.moveFinished.connect.assert_any_call(
         coordinator._handle_move_finished_toast
     )
 

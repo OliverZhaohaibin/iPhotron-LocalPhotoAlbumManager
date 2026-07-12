@@ -13,6 +13,11 @@ from ...utils.logging import get_logger
 
 logger = get_logger()
 
+# Version 1 represents the complete schema and one-time data repairs below.
+# Opening an already migrated database must be O(1); in particular it must not
+# revisit every asset row on each desktop launch.
+CURRENT_SCHEMA_VERSION = 1
+
 
 class SchemaMigrator:
     """Manages database schema initialization and migrations.
@@ -38,6 +43,14 @@ class SchemaMigrator:
             logger.warning("Failed to enable WAL mode (read-only filesystem?)")
 
         conn.execute("PRAGMA synchronous=NORMAL;")
+
+        current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if current_version >= CURRENT_SCHEMA_VERSION:
+            # Index definitions are cheap schema metadata checks and may be
+            # repaired independently by older builds or recovery tools. Keep
+            # this guard without repeating any full-table data repair.
+            SchemaMigrator._create_indexes(conn)
+            return
 
         # Create the assets table with support for global library indexing.
         # Key columns:
@@ -144,6 +157,7 @@ class SchemaMigrator:
 
         # Create or update indexes for query optimization
         SchemaMigrator._create_indexes(conn)
+        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
 
     @staticmethod
     def _migrate_columns(conn: sqlite3.Connection) -> None:

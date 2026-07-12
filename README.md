@@ -183,6 +183,13 @@ named, merged, hidden, pinned, assigned covers, and opened as gallery queries.
 People and Pets may participate in the same identity groups while their runtime
 indexes and durable state remain separate.
 
+When a pet detection and a People face detection refer to the same image
+region, People takes priority. The conflicting pet detection is removed from
+the rebuildable Pets snapshot, so it does not create a duplicate dashboard
+card, gallery result, detail annotation, or overlay. This cross-type filter
+compares geometry only; People and Pets records, models, indexes, and durable
+state remain independently owned.
+
 Drag people into groups to collect shared photos for multiple people. Group
 cards can use a selected cover, be reordered, and be disbanded when they are not
 pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo

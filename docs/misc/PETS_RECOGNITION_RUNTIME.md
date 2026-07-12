@@ -23,6 +23,13 @@ People and Pets use the same orchestration pattern but do not share detection,
 embedding, profile, or runtime snapshot tables. The combined dashboard composes
 `PeopleService` and `PetService` summaries at presentation time.
 
+Face and pet workers may commit in either order. Each pet batch uses the People
+boxes currently available and revalidates them inside the serialized Pets
+commit. A later People snapshot triggers Pets reconciliation for its changed
+assets. Reconciliation atomically removes any already-committed conflicts and
+rebuilds the Pets snapshot through the normal clustering, canonicalization,
+durable-state synchronization, and thumbnail cleanup path.
+
 ## Models And Optional Dependencies
 
 Install the optional runtime with:
@@ -61,6 +68,15 @@ available ONNX Runtime providers and uses full-image detection with tiled
 fallback for small subjects. Accepted boxes must meet the configured confidence
 and minimum-size thresholds.
 
+After species filtering and pet-to-pet deduplication, accepted pet boxes are
+compared with automatic and manual People face boxes for the same asset. People
+is authoritative when either intersection-over-union is at least `0.50`, or the
+intersection covers at least `90%` of the smaller box. Conflicting pet boxes are
+discarded before crop embedding and thumbnail generation. Confidence does not
+override People priority. The suppressed result is absent from dashboard cards,
+pet gallery queries, detail annotations, and overlays rather than being hidden
+only in the dashboard.
+
 Each accepted crop receives:
 
 - a normalized DINOv2 embedding;
@@ -78,6 +94,8 @@ values across rebuilds.
 The detector and clustering pipeline versions are stored separately. A detector
 version change resets eligible `done` assets to `pending`; a clustering-only
 version change reclusters stored embeddings without resetting asset scan state.
+The People-priority filter is part of the detector pipeline version so existing
+libraries are re-evaluated after upgrading.
 
 ## Scan Scheduling And Status
 

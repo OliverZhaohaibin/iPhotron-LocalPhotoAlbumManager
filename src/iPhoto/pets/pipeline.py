@@ -37,8 +37,10 @@ from .repository_utils import (
 from .state_repository import PetStateRepository
 
 SUPPORTED_DEFAULT_SPECIES = frozenset({"cat", "dog"})
-PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-v3"
+PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-people-priority-v4"
 PET_CLUSTERING_PIPELINE_VERSION = "species-complete-link-v1"
+DEFAULT_PET_DISTANCE_THRESHOLD = 0.42
+DEFAULT_PET_MIN_SAMPLES = 2
 DEFAULT_PET_DETECTOR_MODEL_URL = (
     "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/"
     "0.1.1rc0/yolox_nano.onnx"
@@ -96,6 +98,7 @@ class PetScanMetrics:
     candidate_boxes: int = 0
     unsupported_species: int = 0
     too_small: int = 0
+    people_overlaps: int = 0
     accepted_detections: int = 0
 
 
@@ -107,8 +110,8 @@ class PetClusterPipeline:
         detector_model_name: str = "yolox_nano_coco.onnx",
         embedding_model_name: str = "dinov2_vits14",
         allow_model_download: bool | None = None,
-        distance_threshold: float = 0.42,
-        min_samples: int = 2,
+        distance_threshold: float = DEFAULT_PET_DISTANCE_THRESHOLD,
+        min_samples: int = DEFAULT_PET_MIN_SAMPLES,
         min_pet_size: int = 48,
         supported_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
         detector_score_threshold: float = 0.30,
@@ -161,6 +164,9 @@ class PetClusterPipeline:
         library_root: Path,
         thumbnail_dir: Path,
         is_cancelled: Callable[[], bool] | None = None,
+        people_boxes_by_asset_id: dict[
+            str, Sequence[tuple[int, int, int, int]]
+        ] | None = None,
     ) -> list[DetectedAssetPets]:
         if not rows:
             return []
@@ -171,7 +177,9 @@ class PetClusterPipeline:
         candidate_boxes = 0
         unsupported_species = 0
         too_small = 0
+        people_overlaps = 0
         accepted_detections = 0
+        excluded_people_boxes = people_boxes_by_asset_id or {}
         for row in rows:
             if cancellation_requested():
                 break
@@ -230,7 +238,16 @@ class PetClusterPipeline:
                     )
                 )
 
-            for detected in _dedupe_supported_species_boxes(supported_boxes):
+            deduped_boxes = _dedupe_supported_species_boxes(supported_boxes)
+            people_boxes = excluded_people_boxes.get(asset_id, ())
+            accepted_boxes: list[_DetectedPetBox] = []
+            for detected in deduped_boxes:
+                if _pet_box_overlaps_people_boxes(detected.bbox, people_boxes):
+                    people_overlaps += 1
+                    continue
+                accepted_boxes.append(detected)
+
+            for detected in accepted_boxes:
                 bbox = detected.bbox
                 detection_id = uuid.uuid4().hex
                 thumbnail_path = thumbnail_dir / f"{detection_id}.png"
@@ -293,6 +310,7 @@ class PetClusterPipeline:
             candidate_boxes=candidate_boxes,
             unsupported_species=unsupported_species,
             too_small=too_small,
+            people_overlaps=people_overlaps,
             accepted_detections=accepted_detections,
         )
         return results
@@ -1222,6 +1240,19 @@ def _dedupe_supported_species_boxes(
 
 
 def _bbox_iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    intersection = _bbox_intersection_area(left, right)
+    left_area = max(0, left[2]) * max(0, left[3])
+    right_area = max(0, right[2]) * max(0, right[3])
+    union = left_area + right_area - intersection
+    if union <= 0:
+        return 0.0
+    return intersection / float(union)
+
+
+def _bbox_intersection_area(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> int:
     lx, ly, lw, lh = left
     rx, ry, rw, rh = right
     left_x2 = lx + lw
@@ -1234,11 +1265,34 @@ def _bbox_iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int])
     inter_bottom = min(left_y2, right_y2)
     inter_width = max(0, inter_right - inter_left)
     inter_height = max(0, inter_bottom - inter_top)
-    intersection = inter_width * inter_height
-    union = lw * lh + rw * rh - intersection
-    if union <= 0:
-        return 0.0
-    return intersection / float(union)
+    return inter_width * inter_height
+
+
+def _pet_box_overlaps_people_boxes(
+    pet_box: tuple[int, int, int, int],
+    people_boxes: Sequence[tuple[int, int, int, int]],
+    *,
+    iou_threshold: float = 0.50,
+    smaller_box_coverage_threshold: float = 0.90,
+) -> bool:
+    """Return whether a pet detection conflicts with a People face region."""
+
+    pet_area = max(0, pet_box[2]) * max(0, pet_box[3])
+    if pet_area <= 0:
+        return False
+    for people_box in people_boxes:
+        people_area = max(0, people_box[2]) * max(0, people_box[3])
+        if people_area <= 0:
+            continue
+        intersection = _bbox_intersection_area(pet_box, people_box)
+        if intersection <= 0:
+            continue
+        if _bbox_iou(pet_box, people_box) >= iou_threshold:
+            return True
+        smaller_area = min(pet_area, people_area)
+        if intersection / float(smaller_area) >= smaller_box_coverage_threshold:
+            return True
+    return False
 
 
 def pet_model_auto_download_enabled() -> bool:

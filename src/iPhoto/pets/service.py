@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -10,13 +11,20 @@ from iPhoto.application.ports.pets import PetAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.state_repository import FaceStateRepository
+from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
-from .index_coordinator import PetIndexCoordinator, get_pet_index_coordinator
+from .index_coordinator import (
+    PetIndexCoordinator,
+    PetSnapshotEvent,
+    get_pet_index_coordinator,
+)
 from .pipeline import default_pet_model_dir
 from .records import AssetPetAnnotation, PetSummary
 from .repository import PetRepository
 from .status import PET_STATUS_RETRY, PET_STATUS_SKIPPED, normalize_pet_status
+
+LOGGER = get_logger()
 
 
 @dataclass(frozen=True)
@@ -114,6 +122,65 @@ class PetService:
         counts = self.pet_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
         return summaries, pending
+
+    def people_boxes_by_asset_ids(
+        self,
+        asset_ids: Iterable[str],
+    ) -> dict[str, tuple[tuple[int, int, int, int], ...]]:
+        repository = self._face_repository()
+        if repository is None:
+            return {}
+        boxes_by_asset_id: dict[str, tuple[tuple[int, int, int, int], ...]] = {}
+        try:
+            redirected_people = self._redirected_source_ids("person")
+            for asset_id in dict.fromkeys(str(value) for value in asset_ids if value):
+                annotations = [
+                    annotation
+                    for annotation in repository.list_asset_face_annotations(asset_id)
+                    if annotation.person_id not in redirected_people
+                ]
+                if annotations:
+                    boxes_by_asset_id[asset_id] = tuple(
+                        (
+                            annotation.box_x,
+                            annotation.box_y,
+                            annotation.box_w,
+                            annotation.box_h,
+                        )
+                        for annotation in annotations
+                    )
+        except Exception:  # noqa: BLE001 - People is an optional peer runtime
+            LOGGER.warning(
+                "People boxes unavailable while filtering pet detections for %s",
+                self._library_root,
+                exc_info=True,
+            )
+            return {}
+        return boxes_by_asset_id
+
+    def reconcile_people_overlaps(
+        self,
+        asset_ids: Iterable[str] | None = None,
+    ) -> PetSnapshotEvent | None:
+        repository = self.repository()
+        coordinator = self.coordinator
+        if repository is None or coordinator is None:
+            return None
+        scoped_ids = (
+            tuple(dict.fromkeys(str(value) for value in asset_ids if value))
+            if asset_ids is not None
+            else tuple(
+                dict.fromkeys(
+                    detection.asset_id
+                    for detection in repository.get_all_detections()
+                    if detection.asset_id
+                )
+            )
+        )
+        if not scoped_ids:
+            return None
+        people_boxes = self.people_boxes_by_asset_ids(scoped_ids)
+        return coordinator.reconcile_people_overlaps(people_boxes)
 
     def rename_pet(self, pet_id: str, new_name: str | None) -> None:
         coordinator = self.coordinator

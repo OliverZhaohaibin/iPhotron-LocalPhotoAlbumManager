@@ -190,12 +190,15 @@ class PetScanWorker(QThread):
         if self._cancelled:
             self._mark_rows_retry(batch)
             return False
+        batch_asset_ids = [str(row.get("id") or "") for row in batch if row.get("id")]
+        people_boxes = self._pet_service.people_boxes_by_asset_ids(batch_asset_ids)
         detected = list(
             pipeline.detect_pets_for_rows(
                 batch,
                 library_root=self._library_root,
                 thumbnail_dir=thumbnail_dir,
                 is_cancelled=lambda: self._cancelled,
+                people_boxes_by_asset_id=people_boxes,
             )
         )
         if self._cancelled:
@@ -235,13 +238,14 @@ class PetScanWorker(QThread):
         metrics = pipeline.last_scan_metrics
         LOGGER.info(
             "Pet scan batch processed for %s: assets=%d candidates=%d accepted=%d "
-            "unsupported_species=%d too_small=%d retry=%d failed=%d",
+            "unsupported_species=%d too_small=%d people_overlaps=%d retry=%d failed=%d",
             self._library_root,
             len(batch),
             metrics.candidate_boxes,
             metrics.accepted_detections,
             metrics.unsupported_species,
             metrics.too_small,
+            metrics.people_overlaps,
             len(first_retry_ids),
             len(failed_ids),
         )
@@ -251,6 +255,7 @@ class PetScanWorker(QThread):
             min_samples=pipeline.min_samples,
             detector_pipeline_version=pipeline.detector_pipeline_version,
             clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+            people_boxes_provider=self._pet_service.people_boxes_by_asset_ids,
         )
         return event is not None
 

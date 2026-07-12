@@ -12,6 +12,9 @@ from PIL import Image
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
+from iPhoto.people.face_repository import FaceRepository
+from iPhoto.people.records import FaceRecord, ManualFaceRecord, PersonRecord
+from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.pets.index_coordinator import reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
     _DINO_HUB_REPO,
@@ -23,6 +26,7 @@ from iPhoto.pets.pipeline import (
     _dedupe_supported_species_boxes,
     _DetectedPetBox,
     _map_yolox_box_to_source,
+    _pet_box_overlaps_people_boxes,
     _preprocess_yolox,
     _tile_scan_regions,
     _YoloxOnnxPetDetector,
@@ -395,6 +399,39 @@ def test_dedupe_supported_species_boxes_keeps_best_overlapping_pet_label() -> No
     ]
 
 
+def test_people_priority_overlap_matches_iou_and_smaller_box_coverage() -> None:
+    people_box = (732, 668, 2089, 2930)
+
+    assert _pet_box_overlaps_people_boxes(
+        (29, 122, 2675, 3882),
+        [people_box],
+    )
+    assert _pet_box_overlaps_people_boxes(
+        (628, 945, 2908, 4175),
+        [people_box],
+    )
+    assert _pet_box_overlaps_people_boxes(
+        (100, 100, 100, 100),
+        [(110, 110, 100, 100)],
+    )
+    assert _pet_box_overlaps_people_boxes(
+        (0, 0, 200, 200),
+        [(-10, 0, 100, 100)],
+    )
+    assert not _pet_box_overlaps_people_boxes(
+        (0, 0, 200, 200),
+        [(-11, 0, 100, 100)],
+    )
+    assert not _pet_box_overlaps_people_boxes(
+        (0, 0, 100, 100),
+        [(60, 60, 100, 100)],
+    )
+    assert not _pet_box_overlaps_people_boxes(
+        (0, 0, 100, 100),
+        [(200, 200, 100, 100)],
+    )
+
+
 def test_pet_pipeline_filters_detector_boxes_and_records_metrics(tmp_path: Path) -> None:
     image_dir = tmp_path / "album"
     image_dir.mkdir()
@@ -471,6 +508,43 @@ def test_pet_pipeline_dedupes_overlapping_supported_species_after_filtering(
     assert pipeline.last_scan_metrics.candidate_boxes == 4
     assert pipeline.last_scan_metrics.unsupported_species == 1
     assert pipeline.last_scan_metrics.accepted_detections == 2
+
+
+def test_pet_pipeline_filters_people_overlaps_before_embedding(tmp_path: Path) -> None:
+    image_dir = tmp_path / "album"
+    image_dir.mkdir()
+    Image.new("RGB", (400, 300), color=(128, 96, 64)).save(image_dir / "a.jpg")
+    pipeline = PetClusterPipeline(
+        model_root=tmp_path / "models",
+        allow_model_download=False,
+        min_pet_size=48,
+    )
+    pipeline._detector = SimpleNamespace(
+        detect=lambda _image: [
+            SimpleNamespace(bbox=(10, 20, 160, 120), confidence=0.88, species_label="dog"),
+            SimpleNamespace(bbox=(260, 20, 90, 90), confidence=0.76, species_label="cat"),
+        ]
+    )
+    embedded_sizes: list[tuple[int, int]] = []
+
+    def embed(image):
+        embedded_sizes.append(image.size)
+        return normalize_vector(np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
+
+    pipeline._embedder = SimpleNamespace(embed=embed)
+
+    results = pipeline.detect_pets_for_rows(
+        [{"id": "asset-a", "rel": "album/a.jpg"}],
+        library_root=tmp_path,
+        thumbnail_dir=tmp_path / ".iPhoto" / "pets" / "thumbnails",
+        people_boxes_by_asset_id={"asset-a": [(20, 25, 140, 110)]},
+    )
+
+    assert len(results[0].detections) == 1
+    assert results[0].detections[0].species_label == "cat"
+    assert len(embedded_sizes) == 1
+    assert pipeline.last_scan_metrics.people_overlaps == 1
+    assert pipeline.last_scan_metrics.accepted_detections == 1
 
 
 def test_canonicalize_pet_identities_prefers_pet_key_vote(tmp_path: Path) -> None:
@@ -816,6 +890,45 @@ def test_pet_scan_session_replaces_stale_detections_for_same_asset_path(tmp_path
     assert [detection.asset_id for detection in detections] == ["asset-new"]
 
 
+def test_pet_batch_revalidates_people_overlaps_inside_serialized_commit(tmp_path: Path) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    coordinator = service.coordinator
+    assert repository is not None
+    assert coordinator is not None
+    thumbnail = tmp_path / ".iPhoto" / "pets" / "thumbnails" / "stale.png"
+    thumbnail.parent.mkdir(parents=True)
+    thumbnail.write_bytes(b"stale")
+    stale_detection = replace(
+        _detection(
+            detection_id="stale",
+            asset_id="asset-face",
+            thumbnail_path="thumbnails/stale.png",
+        ),
+        box_x=29,
+        box_y=122,
+        box_w=2675,
+        box_h=3882,
+    )
+
+    event = coordinator.submit_detected_batch(
+        [
+            DetectedAssetPets(
+                asset_id="asset-face",
+                asset_rel="album/face.jpg",
+                detections=[stale_detection],
+            )
+        ],
+        distance_threshold=0.42,
+        min_samples=1,
+        people_boxes_provider=lambda _asset_ids: {"asset-face": ((732, 668, 2089, 2930),)},
+    )
+
+    assert event is not None
+    assert repository.get_all_detections() == []
+    assert not thumbnail.exists()
+
+
 def test_pet_scan_session_rolls_back_runtime_snapshot_when_state_sync_fails(
     tmp_path: Path,
     monkeypatch,
@@ -862,6 +975,151 @@ def test_pet_scan_session_rolls_back_runtime_snapshot_when_state_sync_fails(
 
     assert [detection.detection_id for detection in repository.get_all_detections()] == ["old"]
     assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-old"]
+
+
+def test_pet_reconciliation_removes_people_overlap_and_preserves_other_pet_state(
+    tmp_path: Path,
+) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    coordinator = service.coordinator
+    assert repository is not None
+    assert coordinator is not None
+    conflicting = replace(
+        _detection(
+            detection_id="conflict",
+            asset_id="asset-face",
+            embedding=np.asarray([1.0, 0.0, 0.0]),
+            species_label="dog",
+            thumbnail_path="thumbnails/conflict.png",
+        ),
+        box_x=29,
+        box_y=122,
+        box_w=2675,
+        box_h=3882,
+        image_width=4160,
+        image_height=6240,
+    )
+    retained = replace(
+        _detection(
+            detection_id="retained",
+            asset_id="asset-cat",
+            embedding=np.asarray([0.0, 1.0, 0.0]),
+            species_label="cat",
+            thumbnail_path="thumbnails/retained.png",
+        ),
+        box_x=3000,
+        box_y=200,
+        box_w=500,
+        box_h=700,
+        image_width=4160,
+        image_height=6240,
+    )
+    thumbnail_dir = tmp_path / ".iPhoto" / "pets" / "thumbnails"
+    conflicting_thumbnail = thumbnail_dir / "conflict.png"
+    retained_thumbnail = thumbnail_dir / "retained.png"
+    retained_thumbnail.parent.mkdir(parents=True)
+    conflicting_thumbnail.write_bytes(b"conflict")
+    retained_thumbnail.write_bytes(b"retained")
+    detections, pets = cluster_pet_records(
+        [conflicting, retained],
+        distance_threshold=0.42,
+        min_samples=1,
+    )
+    repository.replace_all(detections, pets)
+    retained_detection = next(
+        detection
+        for detection in repository.get_all_detections()
+        if detection.asset_id == "asset-cat"
+    )
+    assert retained_detection.pet_id
+    retained_pet_id = retained_detection.pet_id
+    assert repository.rename_pet(retained_detection.pet_id, "Miso")
+    assert repository.set_pet_hidden(retained_detection.pet_id, True)
+    assert repository.set_pet_cover(retained_detection.pet_id, "retained")
+
+    event = coordinator.reconcile_people_overlaps(
+        {"asset-face": ((732, 668, 2089, 2930),)},
+        min_samples=1,
+    )
+
+    assert event is not None
+    assert event.changed_asset_ids == ("asset-face",)
+    assert repository.list_asset_pet_annotations("asset-face") == []
+    remaining = repository.get_all_detections()
+    assert [detection.asset_id for detection in remaining] == ["asset-cat"]
+    summaries = repository.get_pet_summaries(include_hidden=True)
+    assert len(summaries) == 1
+    assert summaries[0].pet_id == retained_pet_id
+    assert summaries[0].name == "Miso"
+    assert summaries[0].is_hidden is True
+    assert summaries[0].thumbnail_path == retained_thumbnail.resolve()
+    assert not conflicting_thumbnail.exists()
+    assert retained_thumbnail.exists()
+
+
+def test_pet_service_uses_auto_and_manual_people_faces_as_exclusion_boxes(
+    tmp_path: Path,
+) -> None:
+    faces_root = tmp_path / ".iPhoto" / "faces"
+    state = FaceStateRepository(faces_root / "face_state.db")
+    state.add_manual_face(
+        ManualFaceRecord(
+            face_id="manual-face",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            box_x=20,
+            box_y=30,
+            box_w=120,
+            box_h=140,
+            thumbnail_path=None,
+            person_id="person-a",
+            created_at=utc_now_iso(),
+            image_width=400,
+            image_height=300,
+        ),
+        person_name="Alice",
+    )
+    embedding = normalize_vector(np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
+    FaceRepository(faces_root / "face_index.db", faces_root / "face_state.db").replace_all(
+        [
+            FaceRecord(
+                face_id="auto-face",
+                face_key="auto-key",
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                box_x=5,
+                box_y=10,
+                box_w=80,
+                box_h=90,
+                confidence=0.9,
+                embedding=embedding,
+                embedding_dim=3,
+                thumbnail_path=None,
+                person_id="person-auto",
+                detected_at=utc_now_iso(),
+                image_width=400,
+                image_height=300,
+            )
+        ],
+        [
+            PersonRecord(
+                person_id="person-auto",
+                name="Bob",
+                key_face_id="auto-face",
+                face_count=1,
+                center_embedding=embedding,
+                created_at=utc_now_iso(),
+                updated_at=utc_now_iso(),
+                sample_count=1,
+            )
+        ],
+    )
+    service = create_pet_service(tmp_path)
+
+    assert service.people_boxes_by_asset_ids(["asset-a", "asset-missing"]) == {
+        "asset-a": ((5, 10, 80, 90), (20, 30, 120, 140))
+    }
 
 
 def test_pet_status_helpers_and_scan_merge(tmp_path: Path) -> None:

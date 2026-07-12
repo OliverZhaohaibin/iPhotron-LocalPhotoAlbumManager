@@ -55,6 +55,22 @@ class PetScanSession:
             and detection.asset_rel not in done_asset_rels
         ]
         all_detections = retained + staged_detections
+        return self.build_snapshot_from_detections(
+            repository,
+            detections=all_detections,
+            distance_threshold=distance_threshold,
+            min_samples=min_samples,
+        )
+
+    def build_snapshot_from_detections(
+        self,
+        repository: PetRepository,
+        *,
+        detections: list[PetDetectionRecord],
+        distance_threshold: float,
+        min_samples: int,
+    ) -> tuple[list[PetDetectionRecord], list[PetRecord]]:
+        all_detections = list(detections)
         state_repository = repository.state_repository
         if state_repository is not None:
             rejected_keys = state_repository.get_rejected_pet_keys(

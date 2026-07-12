@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,7 +14,12 @@ from iPhoto.application.ports.pets import PetAssetRepositoryPort
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
-from .pipeline import DetectedAssetPets
+from .pipeline import (
+    DEFAULT_PET_DISTANCE_THRESHOLD,
+    DEFAULT_PET_MIN_SAMPLES,
+    DetectedAssetPets,
+    _pet_box_overlaps_people_boxes,
+)
 from .repository import PetRepository
 from .scan_session import PetScanSession
 from .status import PET_STATUS_DONE, PET_STATUS_RETRY
@@ -78,6 +83,11 @@ class PetIndexCoordinator(QObject):
         min_samples: int,
         detector_pipeline_version: str | None = None,
         clustering_pipeline_version: str | None = None,
+        people_boxes_provider: Callable[
+            [Iterable[str]],
+            dict[str, tuple[tuple[int, int, int, int], ...]],
+        ]
+        | None = None,
     ) -> PetSnapshotEvent | None:
         detected_batch = list(detected_results)
         if not detected_batch:
@@ -87,6 +97,38 @@ class PetIndexCoordinator(QObject):
             if self._shutdown_requested:
                 return None
             repository = self._repository()
+            filtered_thumbnail_paths: list[str | Path] = []
+            if people_boxes_provider is not None:
+                asset_ids = tuple(
+                    dict.fromkeys(result.asset_id for result in detected_batch if result.asset_id)
+                )
+                people_boxes = people_boxes_provider(asset_ids)
+                revalidated_batch: list[DetectedAssetPets] = []
+                for result in detected_batch:
+                    retained_detections = []
+                    for detection in result.detections:
+                        if _pet_box_overlaps_people_boxes(
+                            (
+                                detection.box_x,
+                                detection.box_y,
+                                detection.box_w,
+                                detection.box_h,
+                            ),
+                            people_boxes.get(result.asset_id, ()),
+                        ):
+                            if detection.thumbnail_path:
+                                filtered_thumbnail_paths.append(detection.thumbnail_path)
+                            continue
+                        retained_detections.append(detection)
+                    revalidated_batch.append(
+                        DetectedAssetPets(
+                            asset_id=result.asset_id,
+                            asset_rel=result.asset_rel,
+                            detections=retained_detections,
+                            error=result.error,
+                        )
+                    )
+                detected_batch = revalidated_batch
             session = PetScanSession()
             done_ids, retry_ids = session.stage_detection_results(detected_batch)
             store = self._asset_repository
@@ -127,6 +169,7 @@ class PetIndexCoordinator(QObject):
                 changed_asset_ids=tuple(done_ids + retry_ids),
                 changed_pet_ids=changed_pet_ids,
             )
+            repository.prune_unreferenced_thumbnails(filtered_thumbnail_paths)
 
         try:
             self._mark_done_asset_ids(done_ids)
@@ -212,6 +255,63 @@ class PetIndexCoordinator(QObject):
             return self._emit_snapshot(
                 changed_asset_ids=result.changed_asset_ids,
                 changed_pet_ids=result.changed_pet_ids,
+            )
+
+    def reconcile_people_overlaps(
+        self,
+        people_boxes_by_asset_id: dict[str, tuple[tuple[int, int, int, int], ...]],
+        *,
+        distance_threshold: float = DEFAULT_PET_DISTANCE_THRESHOLD,
+        min_samples: int = DEFAULT_PET_MIN_SAMPLES,
+    ) -> PetSnapshotEvent | None:
+        """Remove pet detections that conflict with authoritative People boxes."""
+
+        if not people_boxes_by_asset_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            previous_detections = repository.get_all_detections()
+            removed = [
+                detection
+                for detection in previous_detections
+                if _pet_box_overlaps_people_boxes(
+                    (
+                        detection.box_x,
+                        detection.box_y,
+                        detection.box_w,
+                        detection.box_h,
+                    ),
+                    people_boxes_by_asset_id.get(detection.asset_id, ()),
+                )
+            ]
+            if not removed:
+                return None
+
+            removed_ids = {detection.detection_id for detection in removed}
+            retained = [
+                detection
+                for detection in previous_detections
+                if detection.detection_id not in removed_ids
+            ]
+            session = PetScanSession()
+            detections, pets = session.build_snapshot_from_detections(
+                repository,
+                detections=retained,
+                distance_threshold=distance_threshold,
+                min_samples=min_samples,
+            )
+            changed_asset_ids = tuple(
+                dict.fromkeys(detection.asset_id for detection in removed if detection.asset_id)
+            )
+            changed_pet_ids = tuple(
+                dict.fromkeys(str(detection.pet_id) for detection in removed if detection.pet_id)
+            )
+            session.commit(repository, detections=detections, pets=pets)
+            return self._emit_snapshot(
+                changed_asset_ids=changed_asset_ids,
+                changed_pet_ids=changed_pet_ids,
             )
 
     def move_detection_to_pet(

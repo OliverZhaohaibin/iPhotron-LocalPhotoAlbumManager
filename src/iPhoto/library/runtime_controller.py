@@ -565,6 +565,18 @@ class LibraryRuntimeController(
         self._pet_index_coordinator = None
 
     def _on_people_snapshot_committed(self, event: object) -> None:
+        pet_service = self._pet_service
+        if pet_service is not None:
+            try:
+                pet_service.reconcile_people_overlaps(
+                    getattr(event, "changed_asset_ids", ())
+                )
+            except Exception:  # noqa: BLE001 - do not break People snapshot delivery
+                LOGGER.warning(
+                    "Failed to reconcile People-priority pet detections for %s",
+                    self._root,
+                    exc_info=True,
+                )
         self.peopleIndexUpdated.emit()
         self.peopleSnapshotCommitted.emit(event)
 

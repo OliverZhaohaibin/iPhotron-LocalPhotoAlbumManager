@@ -82,6 +82,20 @@ def test_bind_path_relays_people_snapshot_events(tmp_path: Path, qapp: QApplicat
     assert index_spy.count() == 1
 
 
+def test_people_snapshot_reconciles_people_priority_pet_detections(
+    qapp: QApplication,
+) -> None:
+    manager = LibraryRuntimeController()
+    pet_service = SimpleNamespace(reconcile_people_overlaps=Mock())
+    manager._pet_service = pet_service
+    event = SimpleNamespace(changed_asset_ids=("asset-a", "asset-b"))
+
+    manager._on_people_snapshot_committed(event)
+    qapp.processEvents()
+
+    pet_service.reconcile_people_overlaps.assert_called_once_with(("asset-a", "asset-b"))
+
+
 def test_bind_path_rebinds_people_snapshot_events_for_prebound_session(
     tmp_path: Path,
     qapp: QApplication,

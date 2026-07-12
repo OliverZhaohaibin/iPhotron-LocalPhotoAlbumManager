@@ -197,8 +197,11 @@ class LibraryRuntimeController(
             for parent, items in children.items()
         }
         self._nodes = nodes
-        if prepared.storage_kind == "local":
-            self._rebuild_watches()
+        # Probe latency is only a startup scheduling hint.  A large local
+        # library can exceed the ``slow`` threshold during its first schema
+        # migration, and network libraries still need live filesystem updates.
+        # Keep the normal watcher contract for every successfully bound root.
+        self._rebuild_watches()
         LOGGER.info(
             "bind_prepared_library: root=%s albums=%d storage=%s",
             self._root,

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QCloseEvent
 
 from iPhoto.gui.main import (
@@ -50,7 +50,6 @@ def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeyp
 
 
 def test_main_window_close_event_runs_shutdown_once(monkeypatch, qapp) -> None:
-    del qapp
     cleanup_calls: list[bool] = []
     shutdown_calls: list[bool] = []
 
@@ -91,7 +90,13 @@ def test_main_window_close_event_runs_shutdown_once(monkeypatch, qapp) -> None:
         window.closeEvent(QCloseEvent())
         window.closeEvent(QCloseEvent())
     finally:
+        # ``deleteLater`` alone leaves the fake MainWindow alive until some
+        # unrelated test next pumps the application event queue.  Destroy it
+        # while the monkeypatched collaborators are still installed so no
+        # deferred resize/change event can leak into the following test.
         window.deleteLater()
+        QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
 
     assert cleanup_calls == [True]
     assert shutdown_calls == [True]

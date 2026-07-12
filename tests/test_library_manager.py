@@ -356,8 +356,11 @@ def test_shutdown_cancels_and_waits_for_scan_workers(
     worker = _Worker()
     face_scanner = Mock()
     face_scanner.isRunning.return_value = False
+    pet_scanner = Mock()
+    pet_scanner.isRunning.return_value = False
     manager._current_scanner_worker = worker
     manager._current_face_scanner = face_scanner
+    manager._current_pet_scanner = pet_scanner
     manager._live_scan_root = root
 
     with patch.object(
@@ -370,6 +373,8 @@ def test_shutdown_cancels_and_waits_for_scan_workers(
     assert worker.cancelled is True
     face_scanner.cancel.assert_called_once_with()
     face_scanner.wait.assert_called_once_with(2000)
+    pet_scanner.cancel.assert_called_once_with()
+    pet_scanner.wait.assert_called_once_with(2000)
     wait_for_done.assert_called_once_with(2000)
 
 

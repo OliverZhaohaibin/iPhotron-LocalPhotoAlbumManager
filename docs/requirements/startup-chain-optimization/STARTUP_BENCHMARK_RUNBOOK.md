@@ -85,6 +85,21 @@ XCB/Wayland smoke and performance runs; macOS structure checks are not evidence.
   benchmark-output/macos-arm64/candidate/metal/hot/run-*.jsonl
 ```
 
+Generate the macOS package/host detection report after local structure checks
+and any available benchmark batches. The report writes JSON and Markdown and
+keeps unperformed platform checks as `pending_external_run`:
+
+```bash
+.venv/bin/python tools/macos_detection_report.py \
+  --app dist/main.app \
+  --summary benchmark-output/macos-arm64/candidate/metal/hot/summary.json \
+  --output-dir benchmark-output/macos-report
+```
+
+For an A/B gate, pass the matching baseline and candidate summaries with
+`--baseline` and `--candidate`. A source smoke run is diagnostic only and is
+not formal packaged evidence.
+
 Compare matching baseline and candidate summaries:
 
 ```bash

@@ -217,6 +217,8 @@ __marimo__/
 
 # Test artifacts
 /tmp/
+macos-detection-report.json
+macos-detection-report.md
 
 .idea/
 /tools/osmand_render_helper_native/qt6-msvc-importlibs/

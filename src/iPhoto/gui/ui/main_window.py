@@ -21,9 +21,6 @@ from ...application.contracts.runtime_entry_contract import RuntimeEntryContract
 from .ui_main_window import ChromeStatusBar, FeatureKind, Ui_MainWindow
 from .window_manager import FramelessWindowManager
 
-# MainController import removed; logic is now in MainCoordinator via self.coordinator
-
-
 class MainWindow(QMainWindow):
     """Primary window for the desktop experience."""
 
@@ -59,8 +56,9 @@ class MainWindow(QMainWindow):
         self.window_manager = FramelessWindowManager(self, self.ui)
         self.ui.featureCreated.connect(self._on_feature_created)
 
-        # The controller (now coordinator) is assigned via setter or set later.
-        self.coordinator = None
+        self._coordinator_lifecycle = None
+        self._gallery_coordinator = None
+        self._detail_coordinator = None
 
         # Retain the behaviour where clicking the chrome gives the window focus
         # so global shortcuts continue to function when no child widget is
@@ -175,12 +173,14 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, self.retranslate_ui_tree)
 
-    def set_coordinator(self, coordinator):
-        """Inject the MainCoordinator."""
-        self.coordinator = coordinator
-        # The window manager needs a reference to the 'controller' to handle immersive mode.
-        # MainCoordinator implements the necessary interface.
-        self.window_manager.set_controller(self.coordinator)
+    def bind_coordinators(self, lifecycle, gallery, detail) -> None:
+        """Bind the explicit lifecycle, Gallery, and Detail coordinator ports."""
+
+        self._coordinator_lifecycle = lifecycle
+        self._gallery_coordinator = gallery
+        self._detail_coordinator = detail
+        if self.window_manager is not None:
+            self.window_manager.set_detail_coordinator(detail)
 
     # ------------------------------------------------------------------
     # QWidget overrides
@@ -198,8 +198,8 @@ class MainWindow(QMainWindow):
             try:
                 if self.window_manager is not None:
                     self.window_manager.cleanup()
-                if self.coordinator:
-                    self.coordinator.shutdown()
+                if self._coordinator_lifecycle:
+                    self._coordinator_lifecycle.shutdown()
             finally:
                 self._shutdown_complete = True
                 self._is_shutting_down = False
@@ -292,9 +292,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Public API used by sidebar/actions
     def open_album_from_path(self, path: Path) -> None:
-        """Expose navigation for legacy callers."""
-        if self.coordinator:
-            self.coordinator.open_album_from_path(path)
+        """Forward directory navigation through the Gallery port."""
+        if self._gallery_coordinator:
+            self._gallery_coordinator.open_album_from_path(path)
 
     def current_selection(self) -> list[Path]:
         """Return absolute paths for every asset selected in the active view."""
@@ -303,14 +303,14 @@ class MainWindow(QMainWindow):
         if self.ui.grid_view.selectionModel() is not None:
             grid_indexes = self.ui.grid_view.selectionModel().selectedIndexes()
             if grid_indexes:
-                if self.coordinator:
-                    return self.coordinator.paths_from_indexes(grid_indexes)
+                if self._gallery_coordinator:
+                    return self._gallery_coordinator.paths_from_indexes(grid_indexes)
 
         # Priority 2: Filmstrip View
         if self.ui.filmstrip_view.selectionModel() is not None:
             indexes = self.ui.filmstrip_view.selectionModel().selectedIndexes()
             if indexes:
-                if self.coordinator:
-                    return self.coordinator.paths_from_indexes(indexes)
+                if self._gallery_coordinator:
+                    return self._gallery_coordinator.paths_from_indexes(indexes)
 
         return []

@@ -6,11 +6,13 @@ from unittest.mock import MagicMock
 
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators import main_coordinator as main_coordinator_module
-from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
-from iPhoto.people.service import PeopleService
+from iPhoto.gui.coordinators.gallery_coordinator import GalleryCoordinator
+from iPhoto.gui.coordinators.main_coordinator import DesktopCoordinatorRuntime
+
+MainCoordinator = DesktopCoordinatorRuntime
 
 
-def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -> None:
+def test_on_library_tree_updated_rebinds_core_domains_only() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
     map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
@@ -21,46 +23,26 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator._context.library.root.return_value = root
     coordinator._context.library.map_runtime = map_runtime
     coordinator._context.library.map_interaction_service = map_interaction_service
-    coordinator._context.library.asset_query_service = MagicMock()
-    coordinator._context.library.asset_state_service = MagicMock()
-    coordinator._context.asset_runtime.bind_library_root = MagicMock()
-    coordinator._asset_list_vm = MagicMock()
-    coordinator._gallery_vm = MagicMock()
-    coordinator._detail_vm = MagicMock()
+    coordinator.gallery = MagicMock()
+    coordinator.detail = MagicMock()
+    coordinator._recognition = None
+    coordinator._location_info = None
     coordinator._logger = MagicMock()
     coordinator._map_extension_download = MagicMock()
-    coordinator._playback = MagicMock()
-    coordinator._window = MagicMock(ui=MagicMock(people_page=MagicMock()))
+    coordinator._window = MagicMock(ui=MagicMock())
 
     coordinator._on_library_tree_updated()
 
-    coordinator._context.asset_runtime.bind_library_root.assert_called_once_with(root)
-    coordinator._asset_list_vm.rebind_asset_query_service.assert_called_once_with(
-        coordinator._context.library.asset_query_service,
-        root,
-    )
-    coordinator._gallery_vm.bind_asset_state_service.assert_called_once_with(
-        coordinator._context.library.asset_state_service
-    )
-    coordinator._detail_vm.bind_asset_state_service.assert_called_once_with(
-        coordinator._context.library.asset_state_service
-    )
-    coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
-    coordinator._playback.set_map_runtime.assert_called_once_with(
-        map_runtime
-    )
+    coordinator.gallery.rebind_library.assert_called_once_with()
+    coordinator.detail.rebind_library.assert_called_once_with()
     coordinator._map_extension_download.set_package_root.assert_called_once_with(
         Path("/session/maps").resolve()
     )
-    coordinator._playback.set_people_library_root.assert_called_once_with(root)
     coordinator._window.ui.map_view.set_map_runtime.assert_called_once_with(
         map_runtime
     )
     coordinator._window.ui.map_view.set_map_interaction_service.assert_called_once_with(
         map_interaction_service
-    )
-    coordinator._window.ui.info_panel.set_map_runtime.assert_called_once_with(
-        map_runtime
     )
 
 
@@ -69,7 +51,7 @@ def test_shutdown_is_idempotent_and_does_not_request_app_quit(monkeypatch) -> No
     coordinator._is_shutting_down = False
     coordinator._shutdown_complete = False
     coordinator._logger = MagicMock()
-    coordinator._location_write_queue = MagicMock()
+    coordinator._location_info = MagicMock()
     coordinator._facade = MagicMock()
     coordinator._playback = MagicMock()
     coordinator._edit = MagicMock()
@@ -100,7 +82,7 @@ def test_shutdown_is_idempotent_and_does_not_request_app_quit(monkeypatch) -> No
     coordinator.shutdown()
     coordinator.shutdown()
 
-    coordinator._location_write_queue.drain.assert_called_once_with(timeout=None)
+    coordinator._location_info.drain.assert_called_once_with()
     coordinator._playback.shutdown.assert_called_once_with()
     coordinator._edit.shutdown.assert_called_once_with()
     coordinator._window.ui.preview_window.close_preview.assert_called_once_with(False)
@@ -110,7 +92,7 @@ def test_shutdown_is_idempotent_and_does_not_request_app_quit(monkeypatch) -> No
     coordinator._context.library.shutdown.assert_called_once_with()
     coordinator._context.close_library.assert_called_once_with()
     coordinator._context._asset_runtime.shutdown.assert_called_once_with()
-    coordinator._location_write_queue.shutdown.assert_called_once_with(wait=True)
+    coordinator._location_info.shutdown.assert_called_once_with()
     coordinator._context.event_bus.shutdown.assert_called_once_with()
     thread_pool.waitForDone.assert_called_once_with(2000)
     thread_pool.clear.assert_not_called()
@@ -120,7 +102,7 @@ def test_shutdown_is_idempotent_and_does_not_request_app_quit(monkeypatch) -> No
 def test_open_album_from_path_creates_session_when_no_library_is_bound(
     tmp_path: Path,
 ) -> None:
-    coordinator = MainCoordinator.__new__(MainCoordinator)
+    coordinator = GalleryCoordinator.__new__(GalleryCoordinator)
     album_root = tmp_path / "Album"
     album_root.mkdir()
 
@@ -129,19 +111,19 @@ def test_open_album_from_path_creates_session_when_no_library_is_bound(
     coordinator._context.library.root.return_value = None
     coordinator._facade = MagicMock()
     coordinator._navigation = MagicMock()
-    coordinator._on_library_tree_updated = MagicMock()
+    coordinator.rebind_library = MagicMock()
 
-    coordinator.open_album_from_path(album_root)
+    GalleryCoordinator.open_album_from_path(coordinator, album_root)
 
     coordinator._context.open_library.assert_called_once_with(album_root)
-    coordinator._on_library_tree_updated.assert_called_once_with()
+    coordinator.rebind_library.assert_called_once_with()
     coordinator._navigation.open_album.assert_called_once_with(album_root)
 
 
 def test_open_album_from_path_reuses_session_for_album_inside_library(
     tmp_path: Path,
 ) -> None:
-    coordinator = MainCoordinator.__new__(MainCoordinator)
+    coordinator = GalleryCoordinator.__new__(GalleryCoordinator)
     library_root = tmp_path / "Library"
     album_root = library_root / "Album"
     album_root.mkdir(parents=True)
@@ -151,16 +133,16 @@ def test_open_album_from_path_reuses_session_for_album_inside_library(
     coordinator._context.library.root.return_value = library_root
     coordinator._facade = MagicMock()
     coordinator._navigation = MagicMock()
-    coordinator._on_library_tree_updated = MagicMock()
+    coordinator.rebind_library = MagicMock()
 
-    coordinator.open_album_from_path(album_root)
+    GalleryCoordinator.open_album_from_path(coordinator, album_root)
 
     coordinator._context.open_library.assert_not_called()
-    coordinator._on_library_tree_updated.assert_not_called()
+    coordinator.rebind_library.assert_not_called()
     coordinator._navigation.open_album.assert_called_once_with(album_root)
 
 
-def test_on_library_tree_updated_skips_selection_reload_in_location_context() -> None:
+def test_on_library_tree_updated_rebinds_created_optional_domains() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
     map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
@@ -169,66 +151,23 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
     coordinator._context.library_session = None
     coordinator._context.library.root.return_value = root
     coordinator._context.library.map_runtime = map_runtime
-    coordinator._context.library.asset_query_service = MagicMock()
-    coordinator._context.library.asset_state_service = MagicMock()
-    coordinator._context.asset_runtime.bind_library_root = MagicMock()
-    coordinator._asset_list_vm = MagicMock()
-    coordinator._gallery_vm = MagicMock()
-    coordinator._detail_vm = MagicMock()
+    coordinator.gallery = MagicMock()
+    coordinator.detail = MagicMock()
+    coordinator._recognition = MagicMock()
+    coordinator._location_info = MagicMock()
     coordinator._logger = MagicMock()
     coordinator._map_extension_download = MagicMock()
-    coordinator._playback = MagicMock()
-    coordinator._window = MagicMock(ui=MagicMock(people_page=MagicMock()))
+    coordinator._window = MagicMock(ui=MagicMock())
 
     coordinator._on_library_tree_updated()
 
-    coordinator._asset_list_vm.rebind_asset_query_service.assert_called_once_with(
-        coordinator._context.library.asset_query_service,
-        root,
-    )
-    coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
-    coordinator._playback.set_map_runtime.assert_called_once_with(
-        map_runtime
-    )
+    coordinator.gallery.rebind_library.assert_called_once_with()
+    coordinator.detail.rebind_library.assert_called_once_with()
+    coordinator._recognition.rebind_library.assert_called_once_with()
+    coordinator._location_info.rebind_library.assert_called_once_with()
     coordinator._map_extension_download.set_package_root.assert_called_once_with(
         Path("/session/maps").resolve()
     )
-
-
-def test_on_library_tree_updated_uses_bound_people_service_when_available() -> None:
-    coordinator = MainCoordinator.__new__(MainCoordinator)
-    root = Path("/library")
-    people_service = PeopleService(root)
-    people_page = MagicMock()
-    map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
-
-    coordinator._context = MagicMock()
-    coordinator._context.library_session = None
-    coordinator._context.library.root.return_value = root
-    coordinator._context.library.people_service = people_service
-    coordinator._context.library.map_runtime = map_runtime
-    coordinator._context.library.asset_query_service = MagicMock()
-    coordinator._context.library.asset_state_service = MagicMock()
-    coordinator._context.asset_runtime.bind_library_root = MagicMock()
-    coordinator._asset_list_vm = MagicMock()
-    coordinator._gallery_vm = MagicMock()
-    coordinator._detail_vm = MagicMock()
-    coordinator._logger = MagicMock()
-    coordinator._map_extension_download = MagicMock()
-    coordinator._playback = MagicMock()
-    coordinator._window = MagicMock(ui=MagicMock(people_page=people_page))
-
-    coordinator._on_library_tree_updated()
-
-    people_page.set_people_service.assert_called_once_with(people_service)
-    coordinator._playback.set_map_runtime.assert_called_once_with(
-        map_runtime
-    )
-    coordinator._map_extension_download.set_package_root.assert_called_once_with(
-        Path("/session/maps").resolve()
-    )
-    coordinator._playback.set_people_service.assert_called_once_with(people_service)
-    coordinator._playback.set_people_library_root.assert_not_called()
 
 
 def test_resolve_map_package_root_prefers_bound_runtime_root() -> None:
@@ -239,17 +178,17 @@ def test_resolve_map_package_root_prefers_bound_runtime_root() -> None:
     assert package_root == Path("/bound/maps").resolve()
 
 
-def test_handle_face_name_toggle_changed_persists_setting_and_updates_playback() -> None:
+def test_handle_face_name_toggle_changed_persists_setting_and_updates_recognition() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     coordinator._context = MagicMock()
     coordinator._context.settings.get.return_value = False
     coordinator._context.settings.set = MagicMock()
-    coordinator._playback = MagicMock()
+    coordinator._recognition = MagicMock()
 
     coordinator._handle_face_name_toggle_changed(True)
 
     coordinator._context.settings.set.assert_called_once_with("ui.show_face_names_in_detail", True)
-    coordinator._playback.set_face_name_display_enabled.assert_called_once_with(True)
+    coordinator._recognition.set_face_name_display_enabled.assert_called_once_with(True)
 
 
 def test_on_map_asset_activated_delegates_to_navigation() -> None:

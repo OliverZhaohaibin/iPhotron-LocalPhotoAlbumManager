@@ -16,7 +16,7 @@ from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResul
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
-from iPhoto.people.service import ManualFaceAddResult
+from iPhoto.people.service import ManualFaceAddResult, PeopleService
 from iPhoto.people.repository import AssetFaceAnnotation
 from maps.osmand_search import SearchSuggestion
 
@@ -533,9 +533,9 @@ def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:
 
 def test_set_people_library_root_prefers_bound_library_manager_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._people_service = playback_coordinator_module.PeopleService()
+    coordinator._people_service = PeopleService()
     library_root = Path("/fake/library")
-    recreated_service = playback_coordinator_module.PeopleService(
+    recreated_service = PeopleService(
         library_root,
         asset_repository=Mock(),
     )

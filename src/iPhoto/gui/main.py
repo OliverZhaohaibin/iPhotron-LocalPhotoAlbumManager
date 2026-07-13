@@ -577,8 +577,7 @@ def main(argv: list[str] | None = None) -> int:
                     duration_ms,
                 )
 
-    # Coordinator needs Window, Context, and Container
-    coordinator = None
+    coordinator_runtime = None
     coordinator_started = False
 
     def _enqueue_startup_job(
@@ -624,7 +623,8 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         def _arm_startup_gallery_warmup() -> bool:
-            model_getter = getattr(coordinator, "gallery_startup_model", None)
+            gallery = getattr(coordinator_runtime, "gallery", None)
+            model_getter = getattr(gallery, "startup_model", None)
             model = model_getter() if callable(model_getter) else None
             begin_warmup = getattr(model, "begin_startup_gallery_warmup", None)
             if not callable(begin_warmup):
@@ -650,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         def _select_initial_collection() -> None:
             mark("startup_gallery.selection_requested")
             if len(arguments) > 1:
-                coordinator.open_album_from_path(Path(arguments[1]))
+                coordinator_runtime.gallery.open_album_from_path(Path(arguments[1]))
             else:
                 window.ui.sidebar.select_all_photos(emit_signal=True)
             if not warmup_armed:
@@ -742,25 +742,31 @@ def main(argv: list[str] | None = None) -> int:
         probe_controller.start(request)
 
     def _construct_coordinator() -> None:
-        nonlocal coordinator
+        nonlocal coordinator_runtime
         mark("post_paint.begin")
-        # Importing the coordinator expands the controller/view-model graph;
+        # Importing the runtime expands only the core Gallery/Detail graph;
         # keep that work behind the OS-confirmed first paint.
-        from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+        from iPhoto.gui.coordinators.desktop_coordinator_runtime import (
+            DesktopCoordinatorRuntime,
+        )
 
-        mark("main_coordinator.imported")
-        if coordinator is None:
-            _logger.info("Creating MainCoordinator")
-            coordinator = MainCoordinator(window, context)
-            window.set_coordinator(coordinator)
+        mark("desktop_coordinator_runtime.imported")
+        if coordinator_runtime is None:
+            _logger.info("Creating DesktopCoordinatorRuntime")
+            coordinator_runtime = DesktopCoordinatorRuntime(window, context)
+            window.bind_coordinators(
+                coordinator_runtime,
+                coordinator_runtime.gallery,
+                coordinator_runtime.detail,
+            )
 
     def _start_coordinator() -> None:
         nonlocal coordinator_started
-        if coordinator is None or coordinator_started:
+        if coordinator_runtime is None or coordinator_started:
             return
-        coordinator.start()
+        coordinator_runtime.start()
         coordinator_started = True
-        mark("main_coordinator.started")
+        mark("desktop_coordinator_runtime.started")
 
     def _initialize_features_after_show(generation: int) -> None:
         # QWidget construction stays on the GUI thread, one named job per turn.
@@ -784,7 +790,7 @@ def main(argv: list[str] | None = None) -> int:
             "coordinator.start",
             generation,
             _start_coordinator,
-            prerequisite=lambda: coordinator is not None,
+            prerequisite=lambda: coordinator_runtime is not None,
         )
         _enqueue_startup_job(
             "library.probe.start",

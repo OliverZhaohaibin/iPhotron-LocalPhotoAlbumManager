@@ -56,24 +56,44 @@
 - 损坏 settings 会备份为带时间戳的 `corrupt` 文件并使用默认值继续启动。
 - shader cache 固定使用本机用户缓存路径，不再为启动缓存探测保存库。
 - Linux 不再为可选地图强制全局 XCB；Wayland 下原生地图不兼容时降级。
-- Preview、People、InfoPanel、EditCoordinator、地图能力探测、部分 facade 服务及图像/地理编码重依赖已经改为首次使用时创建或导入。
+- Preview、People/Recognition、InfoPanel/Location、EditCoordinator、地图能力探测、部分 facade 服务及图像/地理编码重依赖已经改为首次使用时创建或导入。
 - 地图扩展提示已经改为非模态。
 - 已增加 `GuiStartupJobQueue`：每个 event-loop tick 最多执行一个带名称、generation、前置条件和 100 ms 预算的 GUI 启动 job。
-- Detail post-show 创建、`MainCoordinator` 构造/启动、library probe、prepared commit、初始图库选择和 idle startup jobs 已进入统一队列；Windows/Linux 的 pre-show Detail 顺序保持不变并增加同步耗时观测。
+- Detail post-show 创建、`DesktopCoordinatorRuntime` 构造/启动、library probe、prepared commit、初始图库选择和 idle startup jobs 已进入统一队列；Windows/Linux 的 pre-show Detail 顺序保持不变并增加同步耗时观测。
 - job 异常会取消当前 generation 并进入现有降级协议；关闭、失败、降级和重试会拒绝旧 generation 及 probe 迟到结果，重试不会重复构造 coordinator。
 - startup JSONL 已增加 `startup.gui_job.started`、`startup.gui_job.finished` 和超预算 `startup.gui_stall`，字段不包含用户库路径。
-- 当前本地冷导入测量中，`iPhoto.gui.main` 累计导入时间相对改造前约下降 74%，`MainCoordinator` 约下降 27%。这些数字只用于定位趋势，不能替代 packaged P50/P95。
+- 当前本地冷导入测量中，`iPhoto.gui.main` 累计导入时间相对改造前约下降 74%。这些数字只用于定位趋势，不能替代 packaged P50/P95。
 
 主要入口：
 
 - `src/iPhoto/bootstrap/bootstrap_settings.py`
 - `src/iPhoto/bootstrap/gui_startup_job_queue.py`
 - `src/iPhoto/bootstrap/qt_shader_cache.py`
-- `src/iPhoto/gui/coordinators/main_coordinator.py`
+- `src/iPhoto/gui/coordinators/desktop_coordinator_runtime.py`
 - `src/iPhoto/gui/facade.py`
 - `src/iPhoto/gui/ui/ui_main_window.py`
 - `src/iPhoto/infrastructure/services/map_runtime_service.py`
 - `src/maps/map_sources.py`
+
+### 2.4 Coordinator 领域拆分（已完成）
+
+- 巨型 `MainCoordinator` 类型及兼容 alias 已删除；对外组合根为 `DesktopCoordinatorRuntime`，只暴露 lifecycle 和 `gallery`、`detail` 两个明确入口。
+- `GalleryCoordinator` 承担启动模型、目录打开、选中路径解析和 Gallery library rebind；`DetailCoordinator` 实现 `DetailNavigationPort`、窗口沉浸接口，以及 Recognition/Location 使用的窄 Detail port。
+- `RecognitionCoordinator` 和 `LocationInfoCoordinator` 按首次使用创建。核心 runtime 导入不会加载 manual-face worker、Info metadata worker、LocationSearchController、OsmAnd search、Shapely 或 mapbox vector tile。
+- Recognition 创建时重新解析当前 `LibrarySession` 的 People/Pet 服务；Location/Info 创建时才创建 `LocationFileWriteQueue`，并注入地点搜索、assignment repository/service 和 metadata worker。
+- `NavigationCoordinator` 只依赖 `DetailNavigationPort`；`MainWindow.bind_coordinators(lifecycle, gallery, detail)` 分别处理关闭、目录/选中项和沉浸 Detail；`FramelessWindowManager.set_detail_coordinator()` 不再接受通用 controller。
+- library tree/commit 更新先通知 Gallery 和 Detail，只在 Recognition、Location/Info 已创建时通知其 `rebind_library()`；可选领域首次创建时直接读取最新 session。
+- 关闭保持幂等：先 drain Location 写队列，再关闭 Playback/Edit/Info、Gallery UI worker、library/asset runtime、event bus，最后等待全局线程池。
+- Window theme 首次同步移到 runtime `start()`；`WindowManager` 检测相同的全局 menu stylesheet，避免重复 `QApplication.setStyleSheet()` 导致整棵 widget tree repolish。
+
+新增核心入口：
+
+- `src/iPhoto/gui/coordinators/contracts.py`
+- `src/iPhoto/gui/coordinators/gallery_coordinator.py`
+- `src/iPhoto/gui/coordinators/detail_coordinator.py`
+- `src/iPhoto/gui/coordinators/recognition_coordinator.py`
+- `src/iPhoto/gui/coordinators/location_info_coordinator.py`
+- `src/iPhoto/gui/coordinators/desktop_coordinator_runtime.py`
 
 ## 3. 第二阶段剩余改造
 
@@ -143,7 +163,7 @@
 
 自动化已覆盖单 tick 单 job、严格顺序、前置条件、100 ms 阈值、stall 唯一性、异常、关闭、旧 generation、回调中追加 job，以及主启动链的跨平台 Detail 顺序、probe ready→commit、gallery warmup 和 deferred scan 竞争。
 
-剩余工作不是继续增加 `singleShot(0, ...)`，而是采集真实源码运行和 packaged 样本，根据 `startup.gui_stall` 继续拆分对象内部工作或移到 worker。优先剖析 Gallery 核心协调器装配、初始 collection 查询、首批 model publish 和缩略图请求提交。
+Coordinator 装配已完成本轮闭环。后续工作不是继续增加 `singleShot(0, ...)`，而是采集 packaged 样本，并优先剖析当前剩余的 `feature.detail.post_show` 长任务、初始 collection 查询、首批 model publish 和缩略图请求提交。
 
 ### P0：packaged 性能基线与门禁
 
@@ -165,16 +185,24 @@
 
 门禁：`show()` 后 2 秒内进入 interactive 或 degraded；interactive 后单次 GUI 停顿不超过 100 ms；本地已有索引的首批图库/缩略图 P50 相对旧 packaged baseline 改善至少 30%，P95 不退化。
 
-### P1：继续缩小 MainCoordinator 首用成本
+### P1：Coordinator 领域拆分与首用成本（已完成）
 
-现有改造已延迟 Edit、Preview、People 和部分服务，但仍需以 profiler 结果决定下一批，不应凭模块大小猜测。重点检查：
+`MainCoordinator` 已替换为领域组合根和明确 ports；Gallery/Detail 保持启动期创建，Recognition、Location/Info 和 Edit 延迟到首次使用。稳定 source-smoke 的 `coordinator.construct` 已低于 100 ms，因此本项不再是下一轮 P1。
 
-- `MainCoordinator` 构造期间的信号连接和页面对象访问是否触发隐式 feature 创建。
-- Playback/Detail 在 Windows/Linux 为稳定原生宿主保留的最小对象，是否仍构造了解码器或编辑依赖。
-- 初始 Gallery 是否通过 facade 属性触发 import/move/delete/restoration 服务创建。
-- `controllers/__init__.py`、`tasks/__init__.py` 之外是否还有聚合模块导致重型递归导入。
+仍需遵守的边界：Playback/Detail 为 Windows/Linux 原生宿主保留最小稳定对象；不得把 Recognition/Location 重依赖重新引入核心 import path；只有 profiler 证明处于关键路径时才继续拆 Gallery/Detail 内部对象。
 
-原则：只有 profiler 证明处于关键路径且拆分不会破坏平台窗口稳定性时才继续改造。
+下一真实热点转为 `feature.detail.post_show`。历史交接样本曾约为 365 ms；本轮最终 offscreen source-smoke 的两个连续稳定样本为 165.0 ms 和 162.2 ms，仍超过 100 ms，需继续拆 Detail QWidget 创建/样式与原生宿主准备。
+
+### Source-smoke 对比（仅用于定位，不是 packaged 证据）
+
+同一 source/offscreen 场景、相同 startup JSONL 协议下：
+
+- 重构前 `coordinator.construct` 三次定位样本为 342.3 ms、303.6 ms、315.9 ms。
+- 重构后，源码刚改写且 `.pyc`/文件缓存未稳定的首个样本为 164.7 ms；随后相同命令的连续样本为 63.9 ms、61.5 ms。
+- 重构后 `coordinator.start` 对应为 23.6 ms、22.9 ms；Gallery 和 Detail/Playback 的领域构造均为低个位数毫秒，稳定样本中的 runtime shell 装配约 31 ms。
+- `feature.detail.post_show` 最终连续样本仍为 165.0 ms、162.2 ms；另一个源码冷波动样本为 291.3 ms。
+
+这些数字来自 source、offscreen、未受控缓存环境，只能说明热点转移和验证 100 ms 目标的开发趋势。packaged P50/P95、冷/热缓存控制和真实图形后端仍必须按 runbook 独立验收；原始 JSONL 继续留在忽略的 `benchmark-output/` 或临时目录，不提交机器/用户路径。
 
 ### P1：地图和可选能力的真实降级验证
 
@@ -195,24 +223,24 @@
 ## 5. 推荐接手顺序
 
 1. probe/SQLite 故障协议和中断恢复测试已完成，作为后续工作的稳定基线。
-2. GUI job 时间片观测已经完成；下一步在本地真实库和 packaged 产物中采集 job 耗时，列出超过 100 ms 的准确调用点。
-3. 根据 profiler 和 `startup.gui_stall` 结果继续拆 Gallery/Detail/Playback 的实际热点，不凭模块大小猜测。
+2. Coordinator 领域拆分和 `coordinator.construct < 100 ms` 的稳定 source-smoke 已完成；保持新增 import/port 门禁。
+3. 下一步直接剖析并拆分 `feature.detail.post_show`，重点是 Detail QWidget 树、样式 repolish 和原生宿主准备，不再继续扩张 runtime 门面。
 4. 建立 packaged 平台基线，逐平台修复 P95 和降级路径。
 5. 最后收口日志字段、隐私检查和交付文档；所有门禁通过后再把本目录移动到 `docs/finished/requirements`。
 
-不要并行进行数据库恢复协议和大范围 coordinator 重构；两者同时变化会显著增加竞态问题定位成本。
+Coordinator 大范围重构已结束；后续 Detail 热点优化应保持 library/probe 协议不变，避免重新扩大竞态定位面。
 
 ## 6. 测试与验证命令
 
 当前改造完成时已验证：
 
-- 全量测试：2588 passed，11 skipped。
-- 架构测试：23 passed。
+- 全量测试：2612 passed，11 skipped。
+- 架构/import 门禁：30 passed。
 - GUI 启动队列与主链定向测试：36 passed。
 - `python tools/check_architecture.py`：通过。
-- `.venv/bin/python -m compileall -q src`：通过。
+- `.venv/bin/python -m compileall -q src tests`：通过。
 - `git diff --check`：通过。
-- 使用临时 profile 输出验证：七个关键 job 均生成成对 started/finished JSONL 记录，且这些 job 记录没有写入库路径。
+- 使用临时 profile 输出验证：关键 job 均生成成对 started/finished JSONL 记录，新增 coordinator domain 记录不包含库路径；稳定 source-smoke 中 coordinator construct/start 均低于 100 ms。
 
 接手后至少运行：
 

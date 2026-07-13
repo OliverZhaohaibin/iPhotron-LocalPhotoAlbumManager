@@ -35,7 +35,7 @@ if TYPE_CHECKING:  # pragma: no cover - used only for type checking
     from PySide6.QtGui import QResizeEvent
 
     from ..coordinators.edit_coordinator import EditCoordinator
-    from ..coordinators.main_coordinator import MainCoordinator
+    from ..coordinators.contracts import ImmersiveDetailPort
     from .ui_main_window import Ui_MainWindow
 
 
@@ -76,7 +76,7 @@ class FramelessWindowManager(QObject):
         super().__init__(window)
         self._window = window
         self._ui = ui
-        self._controller: MainCoordinator | None = None
+        self._detail_coordinator: ImmersiveDetailPort | None = None
 
         # Frameless setup -------------------------------------------------
         self._window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
@@ -138,10 +138,10 @@ class FramelessWindowManager(QObject):
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
-    def set_controller(self, controller: MainCoordinator) -> None:
-        """Provide the coordinator reference required for immersive mode."""
+    def set_detail_coordinator(self, coordinator: ImmersiveDetailPort) -> None:
+        """Provide the explicit Detail port required for immersive mode."""
 
-        self._controller = controller
+        self._detail_coordinator = coordinator
 
     def cleanup(self) -> None:
         """Remove global filters and hide tooltip widgets during shutdown."""
@@ -249,8 +249,8 @@ class FramelessWindowManager(QObject):
         edit_controller = self._edit_controller()
         if (
             edit_controller is not None
-            and self._controller is not None
-            and self._controller.is_edit_view_active()
+            and self._detail_coordinator is not None
+            and self._detail_coordinator.is_edit_view_active()
             and edit_controller.is_editing()
         ):
             if edit_controller.is_in_fullscreen():
@@ -270,8 +270,8 @@ class FramelessWindowManager(QObject):
         edit_controller = self._edit_controller()
         if (
             edit_controller is not None
-            and self._controller is not None
-            and self._controller.is_edit_view_active()
+            and self._detail_coordinator is not None
+            and self._detail_coordinator.is_edit_view_active()
             and edit_controller.is_editing()
         ):
             edit_controller.enter_fullscreen_preview()
@@ -279,13 +279,13 @@ class FramelessWindowManager(QObject):
 
         if self._immersive_active:
             return
-        if self._controller is None:
+        if self._detail_coordinator is None:
             return
 
-        resume_after_transition = self._controller.suspend_playback_for_transition()
-        ready = self._controller.prepare_fullscreen_asset()
+        resume_after_transition = self._detail_coordinator.suspend_playback_for_transition()
+        ready = self._detail_coordinator.prepare_fullscreen_asset()
         if not ready:
-            self._controller.show_placeholder_in_viewer()
+            self._detail_coordinator.show_placeholder_in_viewer()
 
         self._previous_geometry = self._window.saveGeometry()
         self._previous_window_state = self._window.windowState()
@@ -320,10 +320,10 @@ class FramelessWindowManager(QObject):
 
         if not self._immersive_active:
             return
-        if self._controller is None:
+        if self._detail_coordinator is None:
             return
 
-        resume_after_transition = self._controller.suspend_playback_for_transition()
+        resume_after_transition = self._detail_coordinator.suspend_playback_for_transition()
         self._immersive_active = False
         self._restore_default_backdrop()
         self._window.showNormal()
@@ -362,11 +362,11 @@ class FramelessWindowManager(QObject):
         return self._immersive_active
 
     def _edit_controller(self) -> "EditCoordinator | None":
-        """Return the edit coordinator if the main coordinator exposes one."""
+        """Return the edit coordinator exposed by the Detail domain."""
 
-        if self._controller is None:
+        if self._detail_coordinator is None:
             return None
-        accessor = getattr(self._controller, "edit_controller", None)
+        accessor = getattr(self._detail_coordinator, "edit_controller", None)
         if callable(accessor):
             return accessor()
         return None
@@ -692,13 +692,13 @@ class FramelessWindowManager(QObject):
     def _schedule_playback_resume(self, *, expect_immersive: bool, resume: bool) -> None:
         if not resume:
             return
-        if self._controller is None:
+        if self._detail_coordinator is None:
             return
 
         def _resume() -> None:
             if self._immersive_active != expect_immersive:
                 return
-            self._controller.resume_playback_after_transition()
+            self._detail_coordinator.resume_playback_after_transition()
 
         QTimer.singleShot(PLAYBACK_RESUME_DELAY_MS, _resume)
 
@@ -851,12 +851,17 @@ class FramelessWindowManager(QObject):
 
             app = QApplication.instance()
             if app is not None:
-                existing = app.styleSheet()
-                if self._global_menu_stylesheet and self._global_menu_stylesheet in existing:
-                    existing = existing.replace(self._global_menu_stylesheet, "").strip()
+                # QApplication.setStyleSheet() repolishes the entire widget tree.
+                # Theme synchronisation can ask us to refresh immediately after
+                # WindowManager installed the same menu stylesheet, so avoid an
+                # otherwise redundant 100+ ms startup repolish.
+                if self._global_menu_stylesheet != qmenu_style:
+                    existing = app.styleSheet()
+                    if self._global_menu_stylesheet and self._global_menu_stylesheet in existing:
+                        existing = existing.replace(self._global_menu_stylesheet, "").strip()
 
-                combined_parts = [part for part in (existing, qmenu_style) if part]
-                app.setStyleSheet("\n".join(combined_parts))
+                    combined_parts = [part for part in (existing, qmenu_style) if part]
+                    app.setStyleSheet("\n".join(combined_parts))
                 self._global_menu_stylesheet = qmenu_style
             else:
                 self._global_menu_stylesheet = qmenu_style

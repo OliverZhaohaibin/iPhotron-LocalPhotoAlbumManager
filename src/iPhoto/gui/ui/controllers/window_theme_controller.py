@@ -27,6 +27,8 @@ class WindowThemeController(QObject):
         ui: Ui_MainWindow,
         window: QObject | None,
         theme_manager: ThemeManager,
+        *,
+        apply_initial_theme: bool = True,
     ) -> None:
         super().__init__(window)
         self._ui = ui
@@ -42,12 +44,16 @@ class WindowThemeController(QObject):
         # Connect to theme changes
         self._theme_manager.themeChanged.connect(self._on_theme_changed)
 
-        # Initial application
-        self._apply_colors(self._theme_manager.current_colors())
+        if apply_initial_theme:
+            self.apply_current_theme()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def apply_current_theme(self) -> None:
+        """Synchronise window widgets with the active application theme."""
+        self._apply_colors(self._theme_manager.current_colors())
+
     def set_detail_ui_controller(
         self, controller: "DetailUIController" | None
     ) -> None:

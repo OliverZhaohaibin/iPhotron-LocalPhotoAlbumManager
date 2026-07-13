@@ -15,43 +15,24 @@ from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
-from iPhoto.application.services.location_assignment_service import (
-    LocationAssignment,
-    LocationAssignmentService,
-)
-from iPhoto.infrastructure.repositories.location_assignment_repository import (
-    IndexStoreLocationAssignmentRepository,
-)
 from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.i18n import tr
-from iPhoto.gui.services.location_file_write_queue import (
-    LocationFileWriteQueue,
-    LocationFileWriteResult,
-)
-from iPhoto.gui.services.location_search_controller import LocationSearchController
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.icons import load_icon
-from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
-    InfoPanelMetadataResult,
-    InfoPanelMetadataWorker,
-)
-from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets import dialogs
-from iPhoto.gui.ui.widgets.recognition_annotations import (
-    RecognitionIdentitySuggestion,
-    pet_annotation_adapter,
-)
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
-from iPhoto.library.runtime_controller import LibraryRuntimeController
-from iPhoto.people.repository import AssetFaceAnnotation
-from iPhoto.people.service import PeopleService
-from iPhoto.pets.service import PetService
-from maps.osmand_search import SearchSuggestion
 
 if TYPE_CHECKING:
+    from iPhoto.application.services.location_assignment_service import LocationAssignment
+    from iPhoto.gui.services.location_search_controller import LocationSearchController
+    from iPhoto.gui.services.location_file_write_queue import LocationFileWriteQueue
+    from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionIdentitySuggestion
     from iPhoto.gui.ui.widgets.info_panel import InfoPanel
+    from iPhoto.library.runtime_controller import LibraryRuntimeController
+    from iPhoto.people.service import PeopleService
+    from iPhoto.pets.service import PetService
     from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
@@ -65,6 +46,12 @@ if TYPE_CHECKING:
     from iPhoto.events.bus import EventBus
 
 LOGGER = logging.getLogger(__name__)
+
+# Lightweight test seams.  Production resolves these optional classes at the
+# point of use, keeping their dependency graphs off the startup import path.
+LocationAssignmentService = None
+IndexStoreLocationAssignmentRepository = None
+ManualFaceAddWorker = None
 
 
 def SessionMapRuntimeService():  # noqa: N802 - compatibility factory name
@@ -154,8 +141,10 @@ class PlaybackCoordinator(QObject):
         self._settings = settings
         self._header_controller = header_controller
         self._face_name_overlay = face_name_overlay
-        self._people_service = people_service or PeopleService()
-        self._pet_service = pet_service or PetService()
+        self._people_service = people_service
+        self._pet_service = pet_service
+        self._people_library_root = self._service_library_root(people_service)
+        self._pet_library_root = self._service_library_root(pet_service)
         self._people_dashboard_refresh_callback = people_dashboard_refresh_callback
         self._library_manager = library_manager
         self._location_session_invalidator = location_session_invalidator
@@ -180,15 +169,9 @@ class PlaybackCoordinator(QObject):
         self._manual_face_add_inflight = False
         self._manual_face_inflight_asset_id: str | None = None
         self._manual_face_pending_merge_target: str | None = None
-        self._pending_manual_face_annotations: dict[str, list[AssetFaceAnnotation]] = {}
+        self._pending_manual_face_annotations: dict[str, list[object]] = {}
         self._pending_manual_face_sequence = 0
-        self._location_search_controller = LocationSearchController(self)
-        self._location_search_controller.suggestionsReady.connect(
-            self._handle_location_suggestions_ready
-        )
-        self._location_search_controller.searchFailed.connect(
-            self._handle_location_search_failed
-        )
+        self._location_search_controller: "LocationSearchController | None" = None
         self._location_assign_inflight = False
         self._location_assign_path: Path | None = None
         self._confirmed_location_metadata: dict[Path, dict[str, Any]] = {}
@@ -223,11 +206,13 @@ class PlaybackCoordinator(QObject):
         self._navigation = nav
 
     def set_people_service(self, service: PeopleService | None) -> None:
-        self._people_service = service or PeopleService()
+        self._people_service = service
+        self._people_library_root = self._service_library_root(service)
         self._refresh_face_name_overlay_for_current_presentation()
 
     def set_pet_service(self, service: PetService | None) -> None:
-        self._pet_service = service or PetService()
+        self._pet_service = service
+        self._pet_library_root = self._service_library_root(service)
         self._refresh_face_name_overlay_for_current_presentation()
 
     def set_info_panel(self, panel: InfoPanel) -> None:
@@ -248,24 +233,77 @@ class PlaybackCoordinator(QObject):
         ) is not None:
             self._refresh_location_extension_state()
 
+    def set_location_write_queue(self, queue: LocationFileWriteQueue | None) -> None:
+        previous = getattr(self, "_location_write_queue", None)
+        if previous is queue:
+            return
+        if previous is not None:
+            for signal_name, handler in (
+                ("writeStarted", self._handle_location_file_write_started),
+                ("writeVerified", self._handle_location_file_write_verified),
+                ("writeFailed", self._handle_location_file_write_failed),
+            ):
+                try:
+                    getattr(previous, signal_name).disconnect(handler)
+                except (RuntimeError, TypeError):
+                    pass
+        self._location_write_queue = queue
+        if queue is not None:
+            queue.writeStarted.connect(self._handle_location_file_write_started)
+            queue.writeVerified.connect(self._handle_location_file_write_verified)
+            queue.writeFailed.connect(self._handle_location_file_write_failed)
+
     def set_people_library_root(self, library_root: Path | None) -> None:
         people_service = getattr(self, "_people_service", None)
-        service_matches_root = (
-            isinstance(people_service, PeopleService)
-            and people_service.library_root() == library_root
-        )
+        service_matches_root = self._service_library_root(people_service) == library_root
         if not service_matches_root:
             bound_people_service = getattr(self._library_manager, "people_service", None)
-            if (
-                isinstance(bound_people_service, PeopleService)
-                and bound_people_service.library_root() == library_root
-            ):
+            if self._service_library_root(bound_people_service) == library_root:
                 self._people_service = bound_people_service
-            elif library_root is None:
-                self._people_service = PeopleService()
             else:
-                self._people_service = PeopleService(library_root)
+                self._people_service = None
+        self._people_library_root = library_root
         self._refresh_face_name_overlay_for_current_presentation()
+
+    @staticmethod
+    def _service_library_root(service: object | None) -> Path | None:
+        getter = getattr(service, "library_root", None)
+        if not callable(getter):
+            return None
+        try:
+            root = getter()
+        except Exception:  # noqa: BLE001 - optional service boundary
+            return None
+        return Path(root) if root is not None else None
+
+    def _ensure_location_search_controller(self):
+        controller = getattr(self, "_location_search_controller", None)
+        if controller is not None:
+            return controller
+        factory = getattr(self, "_location_search_controller_factory", None)
+        if factory is None:
+            raise RuntimeError("Location/Info domain has not been initialised")
+        controller = factory(self)
+        controller.suggestionsReady.connect(self._handle_location_suggestions_ready)
+        controller.searchFailed.connect(self._handle_location_search_failed)
+        self._location_search_controller = controller
+        return controller
+
+    def configure_location_domain(
+        self,
+        *,
+        search_controller_factory,
+        assignment_service_factory,
+        assignment_repository_factory,
+        metadata_worker_factory,
+    ) -> None:
+        self._location_search_controller_factory = search_controller_factory
+        self._location_assignment_service_factory = assignment_service_factory
+        self._location_assignment_repository_factory = assignment_repository_factory
+        self._info_metadata_worker_factory = metadata_worker_factory
+
+    def configure_recognition_domain(self, *, manual_face_worker_factory) -> None:
+        self._manual_face_worker_factory = manual_face_worker_factory
 
     def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
         """Bind the current session map runtime capability surface."""
@@ -813,6 +851,8 @@ class PlaybackCoordinator(QObject):
                 LOGGER.exception("Failed to load face annotations for asset %s", asset_id)
         pet_service = getattr(self, "_pet_service", None)
         if pet_service is not None:
+            from iPhoto.gui.ui.widgets.recognition_annotations import pet_annotation_adapter
+
             try:
                 annotations.extend(
                     pet_annotation_adapter(annotation)
@@ -827,6 +867,10 @@ class PlaybackCoordinator(QObject):
         *,
         include_hidden: bool,
     ) -> list[RecognitionIdentitySuggestion]:
+        from iPhoto.gui.ui.widgets.recognition_annotations import (
+            RecognitionIdentitySuggestion,
+        )
+
         suggestions: list[RecognitionIdentitySuggestion] = []
         people_service = getattr(self, "_people_service", None)
         if people_service is not None:
@@ -960,6 +1004,8 @@ class PlaybackCoordinator(QObject):
 
     @Slot(object)
     def _handle_info_panel_face_delete_requested(self, annotation: object) -> None:
+        from iPhoto.people.repository import AssetFaceAnnotation
+
         annotation_id = self._annotation_id(annotation)
         if not annotation_id:
             return
@@ -995,6 +1041,8 @@ class PlaybackCoordinator(QObject):
         annotation: object,
         target_person_id: str,
     ) -> None:
+        from iPhoto.people.repository import AssetFaceAnnotation
+
         if not target_person_id:
             return
         annotation_id = self._annotation_id(annotation)
@@ -1042,6 +1090,8 @@ class PlaybackCoordinator(QObject):
         annotation: object,
         new_name: str,
     ) -> None:
+        from iPhoto.people.repository import AssetFaceAnnotation
+
         annotation_id = self._annotation_id(annotation)
         if not annotation_id:
             return
@@ -1272,6 +1322,7 @@ class PlaybackCoordinator(QObject):
         if not enabled:
             self._reset_location_search_service()
             return False
+        self._ensure_location_search_controller()
         self._warm_location_search_controller()
         return True
 
@@ -1370,7 +1421,7 @@ class PlaybackCoordinator(QObject):
             return
 
         locale = QLocale.system().bcp47Name()
-        self._location_search_controller.search(
+        self._ensure_location_search_controller().search(
             query,
             target_path=presentation.path,
             package_root=self._map_runtime_package_root(),
@@ -1420,7 +1471,10 @@ class PlaybackCoordinator(QObject):
     def _handle_location_confirm_requested(self, query: str, suggestion_obj: object) -> None:
         if self._location_assign_inflight or not self._refresh_location_extension_state():
             return
-        if not isinstance(suggestion_obj, SearchSuggestion):
+        if not all(
+            hasattr(suggestion_obj, attribute)
+            for attribute in ("display_name", "latitude", "longitude")
+        ):
             return
         presentation = getattr(self, "_current_presentation", None)
         if presentation is None:
@@ -1444,7 +1498,7 @@ class PlaybackCoordinator(QObject):
             rel_value,
         )
 
-        self._location_search_controller.reset()
+        self._ensure_location_search_controller().reset()
 
         display_name = suggestion_obj.display_name.strip() or query.strip()
         if not display_name:
@@ -1461,8 +1515,21 @@ class PlaybackCoordinator(QObject):
 
         assignment: LocationAssignment | None = None
         try:
-            service = LocationAssignmentService(
-                IndexStoreLocationAssignmentRepository(Path(library_root)),
+            service_type = LocationAssignmentService
+            repository_type = IndexStoreLocationAssignmentRepository
+            if service_type is None:
+                service_type = getattr(self, "_location_assignment_service_factory", None)
+            if repository_type is None:
+                repository_type = getattr(
+                    self,
+                    "_location_assignment_repository_factory",
+                    None,
+                )
+            if service_type is None or repository_type is None:
+                raise RuntimeError("Location/Info domain has not been initialised")
+
+            service = service_type(
+                repository_type(Path(library_root)),
                 self._event_bus,
             )
             assignment = service.assign(
@@ -1766,6 +1833,8 @@ class PlaybackCoordinator(QObject):
 
     @Slot(object)
     def _handle_location_file_write_verified(self, result: object) -> None:
+        from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
+
         if not isinstance(result, LocationFileWriteResult):
             return
         self._location_write_jobs_by_path.pop(result.asset_path, None)
@@ -1773,6 +1842,8 @@ class PlaybackCoordinator(QObject):
 
     @Slot(object)
     def _handle_location_file_write_failed(self, result: object) -> None:
+        from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
+
         if not isinstance(result, LocationFileWriteResult):
             return
         message = result.error or "unknown error"
@@ -1825,6 +1896,8 @@ class PlaybackCoordinator(QObject):
         presentation: DetailPresentation,
         payload: dict[str, object],
     ) -> None:
+        from iPhoto.people.repository import AssetFaceAnnotation
+
         requested_box = payload.get("requested_box")
         if (
             not isinstance(requested_box, tuple)
@@ -1917,7 +1990,11 @@ class PlaybackCoordinator(QObject):
             return
         self._info_panel_metadata_inflight.add(path_key)
 
-        worker = InfoPanelMetadataWorker(path, is_video=is_video)
+        worker_factory = getattr(self, "_info_metadata_worker_factory", None)
+        if worker_factory is None:
+            self._info_panel_metadata_inflight.discard(path_key)
+            return
+        worker = worker_factory(path, is_video=is_video)
         worker.signals.ready.connect(self._handle_info_panel_metadata_ready)
         worker.signals.error.connect(self._handle_info_panel_metadata_error)
         worker.signals.finished.connect(self._handle_info_panel_metadata_finished)
@@ -1929,7 +2006,7 @@ class PlaybackCoordinator(QObject):
             self._info_panel_metadata_attempted.discard(path_key)
 
     @Slot(object)
-    def _handle_info_panel_metadata_ready(self, result: InfoPanelMetadataResult) -> None:
+    def _handle_info_panel_metadata_ready(self, result: object) -> None:
         self._ensure_info_panel_metadata_state()
         path_key = str(result.path)
         # Evict oldest entry (insertion-order FIFO, Python 3.7+) before inserting
@@ -2021,7 +2098,13 @@ class PlaybackCoordinator(QObject):
         overlay.set_manual_face_busy(True)
         self._queue_pending_manual_face(presentation.asset_id, presentation, payload)
         self._refresh_info_panel_faces(presentation.asset_id)
-        worker = ManualFaceAddWorker(
+        worker_type = ManualFaceAddWorker
+        if worker_type is None:
+            worker_type = getattr(self, "_manual_face_worker_factory", None)
+        if worker_type is None:
+            self._handle_manual_face_error("Recognition domain has not been initialised")
+            return
+        worker = worker_type(
             library_root=library_root,
             asset_id=presentation.asset_id,
             requested_box=requested_box,

@@ -6,6 +6,7 @@ This replaces the legacy MainController as the top-level orchestrator.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,13 +24,13 @@ from PySide6.QtGui import QAction
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.events.asset_events import AssetMetadataUpdated
+from iPhoto.bootstrap.startup_profile import mark
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.services.location_trash_navigation_service import (
     LocationTrashNavigationService,
 )
-from iPhoto.gui.services.location_file_write_queue import LocationFileWriteQueue
 from iPhoto.gui.services.people_service_resolver import resolve_people_service
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
@@ -51,8 +52,6 @@ from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
-from iPhoto.people.service import PeopleService
-from iPhoto.pets.service import PetService
 from maps.map_sources import supports_map_extension_download
 
 if TYPE_CHECKING:
@@ -60,11 +59,16 @@ if TYPE_CHECKING:
     from iPhoto.gui.ui.main_window import MainWindow
 
 
-class MainCoordinator(QObject):
-    """High-level coordinator for the main window.
-    Acts as the entry point and glue code for the application, initializing
-    legacy controllers and bridging them with the new architecture.
-    """
+def _mark_domain_duration(domain: str, started_ns: int) -> None:
+    mark(
+        "startup.coordinator_domain.finished",
+        domain=domain,
+        duration_ms=round((time.perf_counter_ns() - started_ns) / 1_000_000.0, 3),
+    )
+
+
+class DesktopCoordinatorRuntime(QObject):
+    """Compose desktop coordinators and own their shared lifecycle."""
 
     def __init__(
         self,
@@ -92,6 +96,7 @@ class MainCoordinator(QObject):
         edit_service_getter = self._edit_service
         self._edit_service_getter = edit_service_getter
         asset_state_service = self._asset_state_service()
+        gallery_started_ns = time.perf_counter_ns()
 
         # --- ViewModels Setup ---
         lib_root = self._library_root()
@@ -107,24 +112,10 @@ class MainCoordinator(QObject):
         self._media_session = MediaSelectionSession()
         self._media_session.bind_collection(self._gallery_store)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
-        bound_people_service = self._people_service(library_root=lib_root)
-        bound_pet_service = self._pet_service(library_root=lib_root)
-        self._playback_people_service = bound_people_service or PeopleService()
-        self._playback_pet_service = bound_pet_service or PetService()
-        if hasattr(window.ui, "people_page"):
-            if bound_people_service is not None and hasattr(
-                window.ui.people_page, "set_people_service"
-            ):
-                window.ui.people_page.set_people_service(self._playback_people_service)
-            else:
-                window.ui.people_page.set_library_root(lib_root)
-            if hasattr(window.ui.people_page, "set_pet_service"):
-                window.ui.people_page.set_pet_service(bound_pet_service or PetService())
-            window.ui.people_page.set_status_message(context.library.face_scan_status_message())
-            if hasattr(window.ui.people_page, "set_pet_status_message"):
-                window.ui.people_page.set_pet_status_message(
-                    context.library.pet_scan_status_message()
-                )
+        bound_people_service = None
+        bound_pet_service = None
+        self._playback_people_service = None
+        self._playback_pet_service = None
         self._pinned_items_service = PinnedItemsService(
             context.settings,
             people_service_getter=self._people_service,
@@ -144,10 +135,8 @@ class MainCoordinator(QObject):
             self._facade.set_model_provider(lambda: self._asset_list_vm)
 
         # --- Coordinators Setup ---
-        self._location_write_queue = LocationFileWriteQueue(
-            event_bus=self._event_bus,
-            parent=self,
-        )
+        self._location_info = None
+        self._recognition = None
         self._asset_metadata_subscription = self._event_bus.subscribe(
             AssetMetadataUpdated,
             self._handle_asset_metadata_updated,
@@ -177,6 +166,8 @@ class MainCoordinator(QObject):
             context.facade,  # Legacy Facade Bridge
             pinned_items_service=self._pinned_items_service,
         )
+        _mark_domain_duration("gallery", gallery_started_ns)
+        detail_started_ns = time.perf_counter_ns()
         self._adjustment_committer = MediaAdjustmentCommitter(
             asset_vm=self._asset_list_vm,
             pause_watcher=self._navigation.pause_library_watcher,
@@ -229,39 +220,39 @@ class MainCoordinator(QObject):
             settings=context.settings,
             header_controller=self._header_controller,
             face_name_overlay=window.ui.face_name_overlay,
-            people_service=self._playback_people_service,
-            pet_service=self._playback_pet_service,
+            people_service=bound_people_service,
+            pet_service=bound_pet_service,
             people_dashboard_refresh_callback=self._schedule_people_dashboard_refresh,
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
             map_runtime=self._map_runtime(),
             event_bus=self._event_bus,
-            location_write_queue=self._location_write_queue,
+            location_write_queue=None,
         )
 
         # Inject optional dependencies into Playback
         self._playback.set_navigation_coordinator(self._navigation)
-        self._navigation.set_playback_coordinator(self._playback)
         context.library.peopleSnapshotCommitted.connect(
             self._handle_people_snapshot_sidebar_refresh
         )
         context.library.petSnapshotCommitted.connect(
             self._handle_people_snapshot_sidebar_refresh
         )
-        # Manually attach info panel if available
-        if hasattr(window.ui, "info_panel"):
-            window.ui.info_panel.set_map_runtime(self._map_runtime())
-            self._playback.set_info_panel(window.ui.info_panel)
-            window.ui.info_panel.downloadMapExtensionRequested.connect(
-                lambda: self._map_extension_download.start_download(source="info_panel")
-            )
-        self._location_write_queue.bind_library_root(lib_root)
         if hasattr(window.ui, "map_view"):
             window.ui.map_view.set_map_runtime(self._map_runtime())
             window.ui.map_view.set_map_interaction_service(self._map_interaction_service())
+        _mark_domain_duration("detail_playback", detail_started_ns)
+        shell_started_ns = time.perf_counter_ns()
 
         # 4. Theme Controller
-        self._theme_controller = WindowThemeController(window.ui, window, context.theme)
+        stage_started_ns = time.perf_counter_ns()
+        self._theme_controller = WindowThemeController(
+            window.ui,
+            window,
+            context.theme,
+            apply_initial_theme=False,
+        )
+        _mark_domain_duration("desktop_shell.theme", stage_started_ns)
 
         # The edit graph imports CPU/JIT rendering backends.  Construct it on
         # first edit/fullscreen use, never in the Gallery startup turn.
@@ -276,7 +267,9 @@ class MainCoordinator(QObject):
             window.ui.rescan_action,
             context,
         )
+        _mark_domain_duration("desktop_shell.dialog_status", stage_started_ns)
 
+        stage_started_ns = time.perf_counter_ns()
         self._share_controller = ShareController(
             settings=context.settings,
             current_path_provider=self._detail_vm.current_asset_path,
@@ -290,7 +283,9 @@ class MainCoordinator(QObject):
             edit_service_getter=edit_service_getter,
         )
         self._share_controller.restore_preference()
+        _mark_domain_duration("desktop_shell.share", stage_started_ns)
 
+        stage_started_ns = time.perf_counter_ns()
         self._export_controller = ExportController(
             settings=context.settings,
             library=context.library,
@@ -308,6 +303,9 @@ class MainCoordinator(QObject):
             main_window=window,
             selection_callback=window.current_selection,
         )
+        _mark_domain_duration("desktop_shell.export", stage_started_ns)
+        _mark_domain_duration("desktop_shell.controllers", shell_started_ns)
+        gallery_ui_started_ns = time.perf_counter_ns()
 
         # --- Binding Data to Views ---
         window.ui.grid_view.setModel(self._asset_list_vm)
@@ -357,6 +355,8 @@ class MainCoordinator(QObject):
             gallery_viewmodel=self._gallery_vm,
             parent=self,
         )
+        _mark_domain_duration("desktop_shell.gallery_ui", gallery_ui_started_ns)
+        bindings_started_ns = time.perf_counter_ns()
 
         # --- Centralised shortcut manager ---
         # All window-level shortcuts are owned and dispatched here.
@@ -372,28 +372,45 @@ class MainCoordinator(QObject):
         )
         self._shortcut_manager.set_video_area(window.ui.video_area)
 
+        from iPhoto.gui.coordinators.detail_coordinator import DetailCoordinator
+        from iPhoto.gui.coordinators.gallery_coordinator import GalleryCoordinator
+
+        self.gallery = GalleryCoordinator(
+            context=context,
+            facade=self._facade,
+            navigation=self._navigation,
+            asset_model=self._asset_list_vm,
+            gallery_viewmodel=self._gallery_vm,
+            library_root_getter=self._library_root,
+            asset_query_service_getter=self._asset_query_service,
+            asset_state_service_getter=self._asset_state_service,
+            parent=self,
+        )
+        self.detail = DetailCoordinator(
+            router=self._view_router,
+            playback=self._playback,
+            edit_provider=self._ensure_edit_coordinator,
+            detail_viewmodel=self._detail_vm,
+            asset_state_service_getter=self._asset_state_service,
+            parent=self,
+        )
+        self._navigation.set_detail_navigation_port(self.detail)
+
         self._connect_signals()
         window.ui.featureCreated.connect(self._on_feature_created)
+        _mark_domain_duration("desktop_shell.bindings", bindings_started_ns)
+        _mark_domain_duration("desktop_shell", shell_started_ns)
 
     def start(self):
         """Start the coordinator."""
-        self._logger.info("MainCoordinator started")
+        self._logger.info("DesktopCoordinatorRuntime started")
+        self._theme_controller.apply_current_theme()
         self._view_router.show_gallery()
         self._map_extension_download.maybe_prompt_on_startup()
 
     # ------------------------------------------------------------------
-    # Window manager integration (legacy interface)
+    # Lazy Edit lifecycle used by the Detail immersive port
     # ------------------------------------------------------------------
-    def is_edit_view_active(self) -> bool:
-        """Return True when the edit view is currently active."""
-
-        return self._view_router.is_edit_view_active()
-
-    def edit_controller(self) -> EditCoordinator:
-        """Expose the edit coordinator for immersive mode hooks."""
-
-        return self._ensure_edit_coordinator()
-
     def _ensure_edit_coordinator(self) -> "EditCoordinator":
         if self._edit is not None:
             return self._edit
@@ -416,26 +433,6 @@ class MainCoordinator(QObject):
 
     def _enter_edit_mode(self, *args) -> None:
         self._ensure_edit_coordinator().enter_edit_mode(*args)
-
-    def suspend_playback_for_transition(self) -> bool:
-        """Pause playback before a chrome transition."""
-
-        return self._playback.suspend_playback_for_transition()
-
-    def prepare_fullscreen_asset(self) -> bool:
-        """Ensure the current asset is ready for immersive mode."""
-
-        return self._playback.prepare_fullscreen_asset()
-
-    def show_placeholder_in_viewer(self) -> None:
-        """Display a placeholder while the detail view is preparing."""
-
-        self._playback.show_placeholder_in_viewer()
-
-    def resume_playback_after_transition(self) -> None:
-        """Restore playback after a chrome transition."""
-
-        self._playback.resume_playback_after_transition()
 
     def _handle_asset_metadata_updated(self, event: AssetMetadataUpdated) -> None:
         asset_path = event.asset_path
@@ -469,10 +466,10 @@ class MainCoordinator(QObject):
             return
         self._is_shutting_down = True
 
-        location_queue = getattr(self, "_location_write_queue", None)
+        location_info = getattr(self, "_location_info", None)
         try:
-            if location_queue is not None:
-                location_queue.drain(timeout=None)
+            if location_info is not None:
+                location_info.drain()
 
             # 1. Stop UI-owned workers and widgets before their QObject graph is destroyed.
             if self._playback:
@@ -512,8 +509,8 @@ class MainCoordinator(QObject):
                 if callable(asset_runtime_shutdown):
                     asset_runtime_shutdown()
 
-            if location_queue is not None:
-                location_queue.shutdown(wait=True)
+            if location_info is not None:
+                location_info.shutdown()
 
             event_bus = getattr(self._context, "event_bus", None)
             event_bus_shutdown = getattr(event_bus, "shutdown", None)
@@ -603,7 +600,9 @@ class MainCoordinator(QObject):
 
         # Dashboard Click
         if hasattr(ui, "albums_dashboard_page"):
-            ui.albums_dashboard_page.albumSelected.connect(self.open_album_from_path)
+            ui.albums_dashboard_page.albumSelected.connect(
+                lambda path: self.gallery.open_album_from_path(path)
+            )
         if hasattr(ui, "people_page"):
             ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
             ui.people_page.groupActivated.connect(self._on_people_group_activated)
@@ -708,7 +707,9 @@ class MainCoordinator(QObject):
         if feature == "albums":
             dashboard = getattr(ui, "albums_dashboard_page", widget)
             dashboard.set_pinned_service(self._pinned_items_service)
-            dashboard.albumSelected.connect(self.open_album_from_path)
+            dashboard.albumSelected.connect(
+                lambda path: self.gallery.open_album_from_path(path)
+            )
             self._facade.albumCoverUpdated.connect(dashboard.update_album_cover)
             return
 
@@ -716,16 +717,48 @@ class MainCoordinator(QObject):
             self._bind_people_feature(widget)
 
     def _toggle_info_panel(self) -> None:
-        ui = self._window.ui
-        panel = getattr(ui, "info_panel", None)
-        if panel is None:
-            panel = ui.ensure_info_panel()
-            panel.set_map_runtime(self._map_runtime())
-            self._playback.set_info_panel(panel)
-            panel.downloadMapExtensionRequested.connect(
-                lambda: self._map_extension_download.start_download(source="info_panel")
-            )
-        self._playback.toggle_info_panel()
+        self._ensure_location_info_coordinator().toggle()
+
+    def _ensure_location_info_coordinator(self):
+        current = getattr(self, "_location_info", None)
+        if current is not None:
+            return current
+        from iPhoto.gui.coordinators.location_info_coordinator import (
+            LocationInfoCoordinator,
+        )
+
+        self._location_info = LocationInfoCoordinator(
+            window=self._window,
+            event_bus=self._event_bus,
+            detail=self.detail,
+            map_runtime_getter=self._map_runtime,
+            package_root_resolver=self._resolve_map_package_root,
+            map_extension_download=self._map_extension_download,
+            library_root_getter=self._library_root,
+            recognition_provider=self._ensure_recognition_coordinator,
+            parent=self,
+        )
+        return self._location_info
+
+    def _ensure_recognition_coordinator(self):
+        current = getattr(self, "_recognition", None)
+        if current is not None:
+            return current
+        from iPhoto.gui.coordinators.recognition_coordinator import RecognitionCoordinator
+
+        self._recognition = RecognitionCoordinator(
+            context=self._context,
+            detail=self.detail,
+            pinned_items_service=self._pinned_items_service,
+            library_root_getter=self._library_root,
+            people_service_getter=self._people_service,
+            pet_service_getter=self._pet_service,
+            cluster_callback=self._on_people_cluster_activated,
+            group_callback=self._on_people_group_activated,
+            pet_callback=self._on_pet_activated,
+            parent=self,
+        )
+        return self._recognition
 
     def _ensure_preview_window(self):
         self._window.ui.ensure_feature("preview")
@@ -738,88 +771,27 @@ class MainCoordinator(QObject):
 
     def _bind_people_feature(self, people_page: object) -> None:
         """Attach the People dashboard only when the user first opens it."""
-
-        root = self._library_root()
-        people_service = self._people_service(library_root=root)
-        pet_service = self._pet_service(library_root=root)
-        if people_service is not None and hasattr(people_page, "set_people_service"):
-            people_page.set_people_service(people_service)
-        elif hasattr(people_page, "set_library_root"):
-            people_page.set_library_root(root)
-        if hasattr(people_page, "set_pet_service"):
-            people_page.set_pet_service(pet_service or PetService())
-        if hasattr(people_page, "set_pinned_service"):
-            people_page.set_pinned_service(self._pinned_items_service)
-        people_page.set_status_message(self._context.library.face_scan_status_message())
-        if hasattr(people_page, "set_pet_status_message"):
-            people_page.set_pet_status_message(
-                self._context.library.pet_scan_status_message()
-            )
-        people_page.clusterActivated.connect(self._on_people_cluster_activated)
-        people_page.groupActivated.connect(self._on_people_group_activated)
-        if hasattr(people_page, "petActivated"):
-            people_page.petActivated.connect(self._on_pet_activated)
-        self._context.library.peopleIndexUpdated.connect(people_page.schedule_index_refresh)
-        self._context.library.petIndexUpdated.connect(people_page.schedule_index_refresh)
-        self._context.library.faceScanStatusChanged.connect(people_page.set_status_message)
-        if hasattr(people_page, "set_pet_status_message"):
-            self._context.library.petScanStatusChanged.connect(
-                people_page.set_pet_status_message
-            )
+        self._ensure_recognition_coordinator().bind_people_page(people_page)
 
     def _on_library_tree_updated(self) -> None:
         root = self._library_root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
-        self._context.asset_runtime.bind_library_root(root)
-        location_queue = getattr(self, "_location_write_queue", None)
-        if location_queue is not None:
-            location_queue.bind_library_root(root)
-        self._asset_list_vm.rebind_asset_query_service(
-            self._asset_query_service(),
-            root,
-        )
-        asset_state_service = self._asset_state_service()
-        self._gallery_vm.bind_asset_state_service(asset_state_service)
-        self._detail_vm.bind_asset_state_service(asset_state_service)
-        self._gallery_vm.on_library_tree_updated()
+        self.gallery.rebind_library()
+        self.detail.rebind_library()
         window = getattr(self, "_window", None)
         ui = getattr(window, "ui", None)
-        people_page = getattr(ui, "people_page", None)
-        bound_people_service = self._people_service(library_root=root)
-        bound_pet_service = self._pet_service(library_root=root)
-        if bound_people_service is not None:
-            self._playback_people_service = bound_people_service
-        if bound_pet_service is not None:
-            self._playback_pet_service = bound_pet_service
-        if people_page is not None:
-            if bound_people_service is not None and hasattr(people_page, "set_people_service"):
-                people_page.set_people_service(bound_people_service)
-            else:
-                people_page.set_library_root(root)
-            if hasattr(people_page, "set_pet_service"):
-                people_page.set_pet_service(bound_pet_service or PetService())
-            people_page.set_status_message(self._context.library.face_scan_status_message())
-            if hasattr(people_page, "set_pet_status_message"):
-                people_page.set_pet_status_message(
-                    self._context.library.pet_scan_status_message()
-                )
         map_runtime = self._map_runtime()
         map_interaction_service = self._map_interaction_service()
         self._map_extension_download.set_package_root(self._resolve_map_package_root(map_runtime))
         if ui is not None and hasattr(ui, "map_view"):
             ui.map_view.set_map_runtime(map_runtime)
             ui.map_view.set_map_interaction_service(map_interaction_service)
-        if ui is not None and hasattr(ui, "info_panel"):
-            ui.info_panel.set_map_runtime(map_runtime)
-        playback = getattr(self, "_playback", None)
-        if playback is not None:
-            playback.set_map_runtime(map_runtime)
-            if bound_people_service is not None and hasattr(playback, "set_people_service"):
-                playback.set_people_service(bound_people_service)
-            else:
-                playback.set_people_library_root(root)
-            if bound_pet_service is not None and hasattr(playback, "set_pet_service"):
-                playback.set_pet_service(bound_pet_service)
+        recognition = getattr(self, "_recognition", None)
+        if recognition is not None:
+            recognition.rebind_library()
+        location_info = getattr(self, "_location_info", None)
+        if location_info is not None:
+            location_info.rebind_library()
 
     def _active_session(self):
         return getattr(self._context, "library_session", None)
@@ -923,6 +895,9 @@ class MainCoordinator(QObject):
                 prune_kwargs["pet_redirects"] = dict(getattr(event, "pet_redirects", {}) or {})
             self._pinned_items_service.prune_missing_people_entities(library_root, **prune_kwargs)
         self._window.ui.sidebar.refresh_tree_model()
+        recognition = getattr(self, "_recognition", None)
+        if recognition is not None:
+            recognition.handle_snapshot_committed(event)
 
     def _handle_move_finished_toast(
         self,
@@ -1007,6 +982,14 @@ class MainCoordinator(QObject):
             return True
         return False
 
+    @staticmethod
+    def _path_is_descendant(path: Path, root: Path) -> bool:
+        try:
+            Path(path).resolve().relative_to(Path(root).resolve())
+        except (OSError, ValueError):
+            return False
+        return True
+
     def _is_recently_deleted_move(self, source: Path, destination: Path) -> bool:
         """Return whether a move completion belongs to delete or restore flows."""
 
@@ -1072,7 +1055,7 @@ class MainCoordinator(QObject):
     def _handle_open_album_dialog(self):
         path = self._dialog.open_album_dialog()
         if path:
-            self.open_album_from_path(path)
+            self.gallery.open_album_from_path(path)
 
     def _on_cluster_activated(self, assets: list):
         """Handle cluster click from map view to open cluster gallery.
@@ -1120,46 +1103,6 @@ class MainCoordinator(QObject):
         )
         self._view_router.show_gallery()
 
-    def open_album_from_path(self, path: Path):
-        target = Path(path).expanduser()
-        if not self._ensure_session_for_open_album(target):
-            return
-        self._navigation.open_album(target)
-
-    def gallery_startup_model(self) -> GalleryListModelAdapter:
-        return self._asset_list_vm
-
-    def _ensure_session_for_open_album(self, path: Path) -> bool:
-        """Ensure standalone album opens have a session-bound query surface."""
-
-        if not path.exists() or not path.is_dir():
-            return True
-
-        current_root = self._library_root()
-        if current_root is not None and self._path_is_descendant(path, current_root):
-            return True
-
-        open_library = getattr(self._context, "open_library", None)
-        if not callable(open_library):
-            return True
-
-        try:
-            open_library(path)
-        except Exception as exc:
-            self._facade.errorRaised.emit(str(exc))
-            return False
-
-        self._on_library_tree_updated()
-        return True
-
-    @staticmethod
-    def _path_is_descendant(path: Path, root: Path) -> bool:
-        try:
-            Path(path).resolve().relative_to(Path(root).resolve())
-        except (OSError, ValueError):
-            return False
-        return True
-
     def _restore_preferences(self) -> None:
         """Restore UI preferences for wheel action and volume."""
         ui = self._window.ui
@@ -1180,7 +1123,10 @@ class MainCoordinator(QObject):
         else:
             show_face_names = bool(stored_face_names)
         ui.toggle_face_names_action.setChecked(show_face_names)
-        self._playback.set_face_name_display_enabled(show_face_names)
+        if show_face_names:
+            self._ensure_recognition_coordinator().set_face_name_display_enabled(True)
+        else:
+            self.detail.set_face_name_display_enabled(False)
 
         stored_hidden_people = settings.get("ui.show_hidden_people", False)
         if isinstance(stored_hidden_people, str):
@@ -1240,7 +1186,7 @@ class MainCoordinator(QObject):
     def _handle_face_name_toggle_changed(self, checked: bool) -> None:
         if self._context.settings.get("ui.show_face_names_in_detail") != checked:
             self._context.settings.set("ui.show_face_names_in_detail", checked)
-        self._playback.set_face_name_display_enabled(checked)
+        self._ensure_recognition_coordinator().set_face_name_display_enabled(checked)
 
     def _handle_hidden_people_toggle_changed(self, checked: bool) -> None:
         if self._context.settings.get("ui.show_hidden_people") != checked:
@@ -1270,23 +1216,4 @@ class MainCoordinator(QObject):
         except OSError:
             return str(path)
 
-    # --- Public Accessors for Window ---
-    def toggle_playback(self):
-        self._playback.toggle_playback()
-
-    def replay_live_photo(self):
-        self._playback.replay_live_photo()
-
-    def request_next_item(self):
-        self._playback.select_next()
-
-    def request_previous_item(self):
-        self._playback.select_previous()
-
-    def paths_from_indexes(self, indexes: Iterable[QModelIndex]) -> list[Path]:
-        paths = []
-        for idx in indexes:
-            p = self._asset_list_vm.data(idx, Roles.ABS)
-            if p:
-                paths.append(Path(p))
-        return paths
+__all__ = ["DesktopCoordinatorRuntime"]

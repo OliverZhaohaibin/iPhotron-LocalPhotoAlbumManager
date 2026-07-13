@@ -70,7 +70,7 @@ def test_main_window_close_event_runs_shutdown_once(monkeypatch, qapp) -> None:
         def cleanup(self) -> None:
             cleanup_calls.append(True)
 
-        def set_controller(self, _controller) -> None:
+        def set_detail_coordinator(self, _controller) -> None:
             return None
 
     monkeypatch.setattr(main_window_module, "Ui_MainWindow", _FakeUi)
@@ -85,7 +85,7 @@ def test_main_window_close_event_runs_shutdown_once(monkeypatch, qapp) -> None:
             shutdown_calls.append(True)
             window.closeEvent(QCloseEvent())
 
-    window.coordinator = _ReentrantCoordinator()
+    window._coordinator_lifecycle = _ReentrantCoordinator()
     try:
         window.closeEvent(QCloseEvent())
         window.closeEvent(QCloseEvent())
@@ -443,7 +443,7 @@ def test_main_creates_required_features_in_platform_safe_order(
             call_order.append("show")
             self.firstPainted.emit()
 
-        def set_coordinator(self, _coordinator) -> None:
+        def bind_coordinators(self, _lifecycle, _gallery, _detail) -> None:
             call_order.append("set_coordinator")
 
     class _FakeRuntimeContext:
@@ -492,11 +492,16 @@ def test_main_creates_required_features_in_platform_safe_order(
     class _FakeCoordinator:
         def __init__(self, _window, _context) -> None:
             call_order.append("coordinator:create")
+            self.gallery = SimpleNamespace(
+                startup_model=self._startup_model,
+                open_album_from_path=lambda _path: None,
+            )
+            self.detail = object()
 
         def start(self) -> None:
             call_order.append("coordinator:start")
 
-        def gallery_startup_model(self):
+        def _startup_model(self):
             return type(
                 "FakeStartupModel",
                 (),
@@ -573,8 +578,8 @@ def test_main_creates_required_features_in_platform_safe_order(
     )
     monkeypatch.setitem(
         __import__("sys").modules,
-        "iPhoto.gui.coordinators.main_coordinator",
-        type("Mod", (), {"MainCoordinator": _FakeCoordinator})(),
+        "iPhoto.gui.coordinators.desktop_coordinator_runtime",
+        type("Mod", (), {"DesktopCoordinatorRuntime": _FakeCoordinator})(),
     )
     monkeypatch.setitem(
         __import__("sys").modules,
@@ -703,19 +708,20 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
         def show(self) -> None:
             call_order.append(("show", None))
 
-        def set_coordinator(self, _coordinator) -> None:
+        def bind_coordinators(self, _lifecycle, _gallery, _detail) -> None:
             return None
 
     class _FakeCoordinator:
         def __init__(self, _window, _context):
-            return None
+            self.gallery = SimpleNamespace(startup_model=lambda: None)
+            self.detail = object()
 
         def start(self) -> None:
             return None
 
     monkeypatch.setattr("iPhoto.utils.logging.get_logger", lambda: None)
     monkeypatch.setitem(__import__("sys").modules, "iPhoto.bootstrap.runtime_context", type("Mod", (), {"RuntimeContext": _FakeRuntimeContext})())
-    monkeypatch.setitem(__import__("sys").modules, "iPhoto.gui.coordinators.main_coordinator", type("Mod", (), {"MainCoordinator": _FakeCoordinator})())
+    monkeypatch.setitem(__import__("sys").modules, "iPhoto.gui.coordinators.desktop_coordinator_runtime", type("Mod", (), {"DesktopCoordinatorRuntime": _FakeCoordinator})())
     monkeypatch.setitem(__import__("sys").modules, "iPhoto.gui.ui.main_window", type("Mod", (), {"MainWindow": _FakeWindow})())
 
     from iPhoto.gui.main import main

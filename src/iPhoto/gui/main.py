@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
+from iPhoto.bootstrap.startup_profile import configure as configure_startup_profile
 from iPhoto.bootstrap.startup_profile import mark
 
 mark("module.before_qt_imports")
@@ -239,6 +240,18 @@ def _is_packaged_runtime() -> bool:
     return "__compiled__" in globals() or getattr(sys, "frozen", False)
 
 
+def _benchmark_auto_exit_delay_ms() -> int | None:
+    """Return the opt-in benchmark shutdown delay, or ``None`` in normal runs."""
+
+    value = os.environ.get("IPHOTO_STARTUP_BENCHMARK_AUTO_EXIT_MS", "").strip()
+    if not value:
+        return None
+    try:
+        return max(0, min(10_000, int(value)))
+    except ValueError:
+        return None
+
+
 def _allow_packaged_linux_wayland() -> bool:
     """Return whether packaged Linux builds may keep Qt's default platform selection."""
 
@@ -362,14 +375,30 @@ def main(argv: list[str] | None = None) -> int:
     _configure_qt_opengl_defaults()
     mark("qapplication.before_create")
     app = QApplication(arguments)
+    platform_name = getattr(app, "platformName", None)
+    qt_backend = (
+        platform_name()
+        if callable(platform_name)
+        else os.environ.get("QT_QPA_PLATFORM", "unknown")
+    )
+    configure_startup_profile(
+        qt_backend=qt_backend,
+        graphics_backend=(
+            os.environ.get("IPHOTO_STARTUP_GRAPHICS_BACKEND")
+            or os.environ.get("IPHOTO_RHI_BACKEND")
+            or os.environ.get("QT_OPENGL")
+            or "default"
+        ),
+        runtime="packaged" if _is_packaged_runtime() else "source",
+    )
     mark("qapplication.created")
 
+    from iPhoto.bootstrap.gui_startup_job_queue import GuiStartupJobQueue
     from iPhoto.bootstrap.startup_orchestrator import (
         StartupFailure,
         StartupOrchestrator,
         StartupPhase,
     )
-    from iPhoto.bootstrap.gui_startup_job_queue import GuiStartupJobQueue
 
     startup = StartupOrchestrator(app if isinstance(app, QObject) else None)
     startup.begin()
@@ -642,8 +671,15 @@ def main(argv: list[str] | None = None) -> int:
         committer = getattr(context, "commit_prepared_library", None)
         request = request_getter() if callable(request_getter) else None
         startup.transition(StartupPhase.LIBRARY_PROBING)
+        mark("startup.probe.started", generation=generation)
         if request is None or not callable(committer):
             context.resume_startup_tasks(defer_scan=True)
+            mark(
+                "startup.probe.finished",
+                generation=generation,
+                result="unbound",
+                storage_kind="unbound",
+            )
             _continue_after_library_ready(generation)
             return
 
@@ -655,6 +691,13 @@ def main(argv: list[str] | None = None) -> int:
                 or prepared.request_id != expected_request_id
             ):
                 return
+            mark(
+                "startup.probe.finished",
+                generation=generation,
+                result="success",
+                storage_kind=getattr(prepared, "storage_kind", "unknown"),
+                warnings=prepared.warnings,
+            )
 
             def _commit_prepared_library() -> None:
                 committer(prepared, defer_scan=True)
@@ -677,6 +720,12 @@ def main(argv: list[str] | None = None) -> int:
                 or failure.request_id != expected_request_id
             ):
                 return
+            mark(
+                "startup.probe.finished",
+                generation=generation,
+                result="failure",
+                code=failure.code,
+            )
             startup.fail(
                 StartupFailure(
                     phase=StartupPhase.LIBRARY_PROBING,
@@ -774,10 +823,23 @@ def main(argv: list[str] | None = None) -> int:
             suggested_action=failure.suggested_action,
         )
     )
+    benchmark_exit_delay_ms = _benchmark_auto_exit_delay_ms()
+    benchmark_exit_scheduled = False
+
+    def _schedule_benchmark_exit(_payload=None) -> None:
+        nonlocal benchmark_exit_scheduled
+        if benchmark_exit_delay_ms is None or benchmark_exit_scheduled:
+            return
+        benchmark_exit_scheduled = True
+        QTimer.singleShot(benchmark_exit_delay_ms, window.close)
+
+    startup.startupCompleted.connect(_schedule_benchmark_exit)
+    startup.startupDegraded.connect(_schedule_benchmark_exit)
     window.firstPainted.connect(startup.first_painted)
     # Arm before show(): test doubles and a few embedded Qt hosts can paint
     # synchronously from show(), and that event must not be lost.
     startup.shell_shown(_continue_after_shell)
+    mark("startup.show", generation=startup.generation)
     window.show()
     mark("main_window.show_called")
 

@@ -13,9 +13,10 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.gallery_demand import build_viewport_demand
 from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.viewmodels import gallery_list_model_adapter as adapter_module
+from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
-from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
     GalleryThumbnailCandidate,
     GalleryThumbnailHintResult,
@@ -632,6 +633,45 @@ def test_startup_gallery_ready_after_visible_thumbnail_terminal(
 
     assert emitted == [None]
     assert adapter._startup_gallery_warmup_active is False
+
+
+def test_startup_thumbnail_milestone_requires_visible_active_warmup(
+    adapter,
+    mock_store,
+    monkeypatch,
+) -> None:
+    marks: list[str] = []
+    monkeypatch.setattr(adapter_module, "mark", lambda stage, **_details: marks.append(stage))
+    mock_store.count.return_value = 2
+    adapter._viewport_demand = build_viewport_demand(
+        generation=1,
+        row_count=2,
+        visible_first=0,
+        visible_last=0,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter.begin_startup_gallery_warmup()
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
+
+    adapter._pending_thumbnail_rows.add(1)
+    adapter._flush_thumbnail_updates()
+
+    assert "startup.first_usable_thumbnail" not in marks
+
+    adapter._pending_thumbnail_rows.add(0)
+    adapter._flush_thumbnail_updates()
+
+    assert marks.count("startup.first_usable_thumbnail") == 1
+
+    adapter._finish_startup_gallery_warmup("test")
+    adapter._startup_usable_thumbnail_logged = False
+    adapter._pending_thumbnail_rows.add(0)
+    adapter._flush_thumbnail_updates()
+
+    assert marks.count("startup.first_usable_thumbnail") == 1
 
 
 def test_startup_gallery_timeout_emits_ready_when_thumbnail_never_terminal(

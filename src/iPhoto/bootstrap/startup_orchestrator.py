@@ -73,6 +73,8 @@ class StartupOrchestrator(QObject):
         self._continuation: Callable[[], None] | None = None
         self._continuation_started = False
         self._cancelled = False
+        self._terminal_generations: set[int] = set()
+        self._milestones: set[tuple[int, StartupPhase]] = set()
 
     @property
     def phase(self) -> StartupPhase:
@@ -116,15 +118,34 @@ class StartupOrchestrator(QObject):
             generation=self._generation,
             reason=reason,
         )
+        milestone = {
+            StartupPhase.APP_CREATED: "startup.app_created",
+            StartupPhase.INTERACTIVE: "startup.interactive",
+            StartupPhase.LIBRARY_READY: "startup.library_ready",
+        }.get(phase)
+        milestone_key = (self._generation, phase)
+        if milestone is not None and milestone_key not in self._milestones:
+            self._milestones.add(milestone_key)
+            mark(milestone, generation=self._generation, reason=reason)
         self.phaseChanged.emit(snapshot)
         if phase is StartupPhase.INTERACTIVE:
             self.interactiveReady.emit(snapshot)
         elif phase is StartupPhase.LIBRARY_READY:
             self.libraryReady.emit(snapshot)
         elif phase is StartupPhase.IDLE:
-            mark("startup.completed", generation=self._generation)
+            self._emit_terminal("startup.completed")
             self.startupCompleted.emit(snapshot)
         return snapshot
+
+    def _is_terminal(self) -> bool:
+        return self._generation in self._terminal_generations
+
+    def _emit_terminal(self, stage: str, **details: Any) -> bool:
+        if self._is_terminal():
+            return False
+        self._terminal_generations.add(self._generation)
+        mark(stage, generation=self._generation, **details)
+        return True
 
     def run_guarded(
         self,
@@ -153,30 +174,36 @@ class StartupOrchestrator(QObject):
             return None
 
     def degrade(self, failure: StartupFailure) -> None:
-        if self._cancelled:
+        if self._cancelled or self._is_terminal():
             return
         self._watchdog.stop()
-        self.transition(StartupPhase.DEGRADED, reason=failure.message)
-        mark(
+        self._emit_terminal(
             "startup.degraded",
-            generation=self._generation,
             failed_phase=failure.phase.value,
             exception_type=failure.exception_type,
+            code=failure.code,
         )
+        self.transition(StartupPhase.DEGRADED, reason=failure.message)
         self.startupDegraded.emit(failure)
 
     def fail(self, failure: StartupFailure) -> None:
         if failure.recoverable:
             self.degrade(failure)
             return
-        if self._cancelled:
+        if self._cancelled or self._is_terminal():
             return
         self._watchdog.stop()
+        self._emit_terminal(
+            "startup.failed",
+            failed_phase=failure.phase.value,
+            exception_type=failure.exception_type,
+            code=failure.code,
+        )
         self.transition(StartupPhase.FAILED, reason=failure.message)
         self.startupDegraded.emit(failure)
 
     def complete(self) -> None:
-        if self._cancelled:
+        if self._cancelled or self._is_terminal():
             return
         self._watchdog.stop()
         self.transition(StartupPhase.IDLE)
@@ -188,14 +215,14 @@ class StartupOrchestrator(QObject):
             _LOGGER.debug("Unable to cancel faulthandler startup timer", exc_info=True)
 
     def cancel(self) -> None:
-        if self._cancelled:
+        if self._cancelled or self._is_terminal():
             return
         self._cancelled = True
         self._watchdog.stop()
         self._continuation = None
         self._phase = StartupPhase.CANCELLED
         snapshot = self.snapshot(reason="cancelled")
-        mark("startup.cancelled", generation=self._generation)
+        self._emit_terminal("startup.cancelled")
         self.phaseChanged.emit(snapshot)
 
     def is_current(self, generation: int) -> bool:

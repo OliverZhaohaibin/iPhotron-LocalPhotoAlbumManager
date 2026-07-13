@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export APPDIR
+export PATH="$APPDIR/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$APPDIR/usr/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if [ -x "$APPDIR/usr/bin/main.bin" ]; then
+    exec "$APPDIR/usr/bin/main.bin" "$@"
+fi
+exec "$APPDIR/usr/bin/main" "$@"

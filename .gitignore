@@ -213,6 +213,7 @@ marimo/_lsp/
 __marimo__/
 /maps/.idea/
 /build_output_debug/
+/benchmark-output/
 
 # Test artifacts
 /tmp/

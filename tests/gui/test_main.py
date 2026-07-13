@@ -439,6 +439,7 @@ def test_main_creates_required_features_in_platform_safe_order(
             self.firstPainted = _FakeSignal()
 
         def show(self) -> None:
+            assert profile_marks[-1] == "startup.show"
             call_order.append("show")
             self.firstPainted.emit()
 

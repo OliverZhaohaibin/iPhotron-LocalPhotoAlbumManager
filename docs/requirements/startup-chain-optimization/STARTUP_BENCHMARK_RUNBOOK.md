@@ -43,8 +43,10 @@ Apple Silicon, default Metal path:
   --graphics-backend metal \
   --cache-state hot \
   --samples 30 \
+  --library /absolute/path/to/benchmark-library \
+  --confirm-dedicated-library \
   --output-dir benchmark-output/macos-arm64/candidate/metal/hot \
-  -- dist/main.app/Contents/MacOS/iPhotron /absolute/path/to/benchmark-library
+  -- dist/startup-optimized-low-memory-v4/entrypoint.app/Contents/MacOS/iPhotron
 ```
 
 For the OpenGL compatibility path, use `--graphics-backend opengl`. For
@@ -87,11 +89,11 @@ XCB/Wayland smoke and performance runs; macOS structure checks are not evidence.
 
 Generate the macOS package/host detection report after local structure checks
 and any available benchmark batches. The report writes JSON and Markdown and
-keeps unperformed platform checks as `pending_external_run`:
+keeps unperformed platform checks as `pending_manual_validation`:
 
 ```bash
 .venv/bin/python tools/macos_detection_report.py \
-  --app dist/main.app \
+  --app dist/startup-optimized-low-memory-v4/entrypoint.app \
   --summary benchmark-output/macos-arm64/candidate/metal/hot/summary.json \
   --output-dir benchmark-output/macos-report
 ```
@@ -117,7 +119,7 @@ their P95 does not regress. P95 uses nearest-rank calculation.
 ## Platform completion status
 
 Reports generated on Apple Silicon explicitly retain
-`pending_external_run` entries for Windows packaged, Linux AppImage, and macOS
+`pending_manual_validation` entries for Windows packaged, Linux AppImage, and macOS
 Intel. Phase 2/3 must not be marked complete until those reports and the manual
 offline-storage/map-degradation checks have been collected on their target
 platforms.

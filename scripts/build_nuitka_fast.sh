@@ -19,6 +19,7 @@ python -m nuitka \
   --nofollow-import-to=pydantic \
   --nofollow-import-to=pydantic_core \
   --nofollow-import-to=typing_inspection \
+  --nofollow-import-to=insightface.thirdparty.face3d.mesh.cython.setup \
   --nofollow-import-to=pytest \
   --nofollow-import-to=iPhoto.tests \
   --include-package=iPhoto \
@@ -26,7 +27,7 @@ python -m nuitka \
   --include-package=OpenGL \
   --include-package=OpenGL_accelerate \
   --include-package=insightface \
-  --include-package=onnxruntime \
+  --noinclude-data-files=torch/include \
   --include-data-dir=src/extension/models=extension/models \
   --include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n \
   --include-data-dir=src/maps/tiles=maps/tiles \
@@ -48,4 +49,4 @@ python -m nuitka \
   --include-data-file=src/iPhoto/gui/ui/widgets/video_renderer.vert.qsb=iPhoto/gui/ui/widgets/video_renderer.vert.qsb \
   --assume-yes-for-downloads \
   --output-dir=dist \
-  src/iPhoto/gui/main.py
+  src/entrypoint.py

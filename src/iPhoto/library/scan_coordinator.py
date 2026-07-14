@@ -169,6 +169,12 @@ class ScanCoordinatorMixin:
             self,
             pet_service=getattr(self, "_pet_service", None),
         )
+        set_face_name = getattr(face_worker, "setObjectName", None)
+        if callable(set_face_name):
+            set_face_name("FaceScanWorker")
+        set_pet_name = getattr(pet_worker, "setObjectName", None)
+        if callable(set_pet_name):
+            set_pet_name("PetScanWorker")
         face_worker.statusChanged.connect(self._on_face_scan_status_changed)
         face_worker.finished.connect(
             lambda face_worker=face_worker: self._on_face_scan_finished(face_worker)
@@ -540,11 +546,11 @@ class ScanCoordinatorMixin:
             self._start_next_deferred_scan()
             return
 
-        if defer_ai_workers:
-            self._start_ai_scan_workers(
-                self._root if self._root is not None else root,
-                startup=True,
-            )
+        # A startup metadata scan only prepares the Gallery index.  People and
+        # Pets are feature-scoped services and their model workers are started
+        # by ``activate_recognition_services`` on first use.  Starting them here
+        # used to add model pressure immediately after startup completion and
+        # made a quick window close race QThread destruction.
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.

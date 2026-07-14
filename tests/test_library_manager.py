@@ -522,7 +522,7 @@ def test_regular_scan_starts_ai_workers_immediately(
     start_thread.assert_called_once()
 
 
-def test_startup_scan_defers_ai_workers_until_metadata_scan_finishes(
+def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -556,7 +556,63 @@ def test_startup_scan_defers_ai_workers_until_metadata_scan_finishes(
         preserve_modified_after_ms=None,
         current_scan_job_id=None,
     )
+    start_ai.assert_not_called()
+
+
+def test_recognition_activation_binds_services_and_starts_finite_ai_scan(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    people_service = Mock()
+    people_service.coordinator = None
+    pet_service = Mock()
+    pet_service.coordinator = None
+
+    with patch.object(manager, "_start_ai_scan_workers") as start_ai:
+        manager.activate_recognition_services(people_service, pet_service)
+
+    assert manager.people_service is people_service
+    assert manager.pet_service is pet_service
     start_ai.assert_called_once_with(root, startup=True)
+
+
+def test_map_activation_binds_location_runtime_and_interaction_services() -> None:
+    manager = LibraryRuntimeController.__new__(LibraryRuntimeController)
+    manager.bind_location_service = Mock()
+    manager.bind_map_runtime = Mock()
+    manager.bind_map_interaction_service = Mock()
+    location_service = object()
+    map_runtime = object()
+    interaction_service = object()
+
+    manager.activate_map_services(
+        location_service,
+        map_runtime,
+        interaction_service,
+    )
+
+    manager.bind_location_service.assert_called_once_with(location_service)
+    manager.bind_map_runtime.assert_called_once_with(map_runtime)
+    manager.bind_map_interaction_service.assert_called_once_with(interaction_service)
+
+
+def test_session_binding_does_not_materialize_location_before_map_use(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    session = LibrarySession(root)
+
+    manager.bind_library_session(session)
+
+    assert vars(session)["locations"] is None
+    assert manager.location_service is None
 
 
 def test_startup_ai_workers_close_input_after_metadata_scan(

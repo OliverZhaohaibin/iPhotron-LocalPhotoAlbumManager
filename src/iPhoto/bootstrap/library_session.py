@@ -35,7 +35,7 @@ from .library_pet_service import create_pet_service
 from .library_scan_service import LibraryScanService
 
 if TYPE_CHECKING:
-    from .library_probe import PreparedLibrary
+    from .library_probe import PreparedLibrary, ValidatedPreparedLibrary
 
 
 @dataclass
@@ -58,6 +58,21 @@ class LibrarySession:
     edit: EditServicePort | None = None
     locations: LocationAssetServicePort | None = None
     bind_asset_runtime: bool = True
+
+    _LAZY_SERVICE_NAMES = frozenset(
+        {"people", "pets", "maps", "map_interactions", "edit", "locations"}
+    )
+
+    def __getattribute__(self, name: str):
+        value = object.__getattribute__(self, name)
+        if name not in object.__getattribute__(self, "_LAZY_SERVICE_NAMES"):
+            return value
+        if value is not None:
+            return value
+        factory = object.__getattribute__(self, "_create_lazy_service")
+        value = factory(name)
+        object.__setattr__(self, name, value)
+        return value
 
     def __post_init__(self) -> None:
         self.library_root = Path(self.library_root)
@@ -93,24 +108,30 @@ class LibrarySession:
                 self.library_root,
                 lifecycle_service=self.asset_lifecycle,
             )
-        if self.people is None:
-            self.people = create_people_service(self.library_root)
-        if self.pets is None:
-            self.pets = create_pet_service(self.library_root)
-        if self.maps is None:
-            self.maps = SessionMapRuntimeService()
-        if self.map_interactions is None:
-            self.map_interactions = LibraryMapInteractionService()
-        if self.edit is None:
-            self.edit = LibraryEditService(self.library_root)
-        if self.locations is None:
-            self.locations = LibraryLocationService(
+        # People, Pets, Map, Edit and Location are feature-scoped.  Keep their
+        # dataclass fields untouched until the corresponding property is read.
+
+    def _create_lazy_service(self, name: str):
+        if name == "people":
+            return create_people_service(self.library_root)
+        if name == "pets":
+            return create_pet_service(self.library_root)
+        if name == "maps":
+            return SessionMapRuntimeService()
+        if name == "map_interactions":
+            return LibraryMapInteractionService()
+        if name == "edit":
+            service = LibraryEditService(self.library_root)
+            bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
+            if callable(bind_edit_service):
+                bind_edit_service(service)
+            return service
+        if name == "locations":
+            return LibraryLocationService(
                 self.library_root,
                 query_service=self.asset_queries,
             )
-        bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
-        if callable(bind_edit_service):
-            bind_edit_service(self.edit)
+        raise AttributeError(name)
 
     @property
     def assets(self) -> AssetRepositoryPort:
@@ -146,9 +167,27 @@ class LibrarySession:
 
         from ..cache.index_store import mark_repository_prepared
 
-        mark_repository_prepared(prepared.root)
+        if prepared.credential is None:
+            raise ValueError("prepared library is missing its credential")
+        mark_repository_prepared(prepared.root, prepared.credential)
         return cls(
             prepared.root,
+            asset_runtime=asset_runtime,
+            bind_asset_runtime=bind_asset_runtime,
+        )
+
+    @classmethod
+    def from_validated(
+        cls,
+        validated: "ValidatedPreparedLibrary",
+        *,
+        asset_runtime: LibraryAssetRuntime,
+        bind_asset_runtime: bool = False,
+    ) -> "LibrarySession":
+        """Consume a validated capability and compose one library session."""
+
+        return cls.from_prepared(
+            validated.consume(),
             asset_runtime=asset_runtime,
             bind_asset_runtime=bind_asset_runtime,
         )

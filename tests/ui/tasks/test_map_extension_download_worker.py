@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import sqlite3
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -247,3 +248,44 @@ def test_download_and_stage_returns_success_when_verified_cleanup_fails(
     assert isinstance(result, MapExtensionDownloadResult)
     assert result.pending_root.name == "extension.pending"
     assert result.extension_root.name == "extension"
+
+
+def test_bundled_tar_is_installed_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    source_extension = tmp_path / "source" / "extension"
+    (source_extension / "rendering_styles").mkdir(parents=True)
+    (source_extension / "rendering_styles" / "snowmobile.render.xml").write_text(
+        "<renderingStyle />", encoding="utf-8"
+    )
+    (source_extension / "search").mkdir()
+    _create_search_database(source_extension / "search" / "geonames.sqlite3")
+    (source_extension / "bin").mkdir()
+    helper = source_extension / "bin" / "osmand_render_helper"
+    helper.write_bytes(b"helper")
+    helper.chmod(0o755)
+    (source_extension / "World_basemap_2.obf").write_bytes(b"obf")
+    archive_path = tmp_path / "extension.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        archive.add(source_extension, arcname="extension")
+
+    package_root = tmp_path / "maps"
+    worker = MapExtensionDownloadWorker(
+        MapExtensionDownloadRequest(
+            package_root=package_root,
+            platform="darwin",
+            local_archive_path=archive_path,
+        )
+    )
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.tasks.map_extension_download_worker.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network used")),
+    )
+
+    result = worker._download_and_stage()
+
+    assert result.extension_root == package_root / "tiles" / "extension"
+    assert (result.extension_root / "World_basemap_2.obf").read_bytes() == b"obf"

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
+from ...config import WORK_DIR_NAME
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
     emit_perf_event,
@@ -59,7 +60,7 @@ _OMIT_METADATA_VALUE = object()
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
 _global_lock = threading.Lock()
-_prepared_roots: set[Path] = set()
+_prepared_roots: dict[Path, Any] = {}
 
 
 def _coerce_json_metadata_value(value: Any) -> Any:
@@ -131,7 +132,19 @@ def get_global_repository(library_root: Path) -> "AssetRepository":
             )
             _global_instance.close()
         
-        skip_initialization = resolved_root in _prepared_roots
+        credential = _prepared_roots.pop(resolved_root, None)
+        skip_initialization = False
+        if credential is not None:
+            expected_database = resolved_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
+            identity = getattr(credential, "database_identity", None)
+            matches = getattr(identity, "matches", None)
+            skip_initialization = (
+                getattr(credential, "database_path", None) == expected_database
+                and callable(matches)
+                and bool(matches(expected_database))
+            )
+            if not skip_initialization:
+                raise RuntimeError("prepared repository credential is stale")
         _global_instance = AssetRepository(
             resolved_root,
             initialize=not skip_initialization,
@@ -139,11 +152,11 @@ def get_global_repository(library_root: Path) -> "AssetRepository":
         return _global_instance
 
 
-def mark_repository_prepared(library_root: Path) -> None:
-    """Trust a successful out-of-process schema preparation for this process."""
+def mark_repository_prepared(library_root: Path, credential: Any) -> None:
+    """Register one consume-on-open schema preparation credential."""
 
     with _global_lock:
-        _prepared_roots.add(Path(library_root))
+        _prepared_roots[Path(library_root)] = credential
 
 
 def reset_global_repository() -> None:

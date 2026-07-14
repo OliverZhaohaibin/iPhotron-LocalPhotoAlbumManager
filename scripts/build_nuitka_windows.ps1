@@ -48,7 +48,7 @@ function Sync-NativeRuntime {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $srcRoot = Join-Path $repoRoot 'src'
-$mainScript = Join-Path $srcRoot 'iPhoto\gui\main.py'
+$mainScript = Join-Path $srcRoot 'entrypoint.py'
 $nativeBuildScript = Join-Path $repoRoot 'tools\osmand_render_helper_native\build_native_widget_msvc.ps1'
 $nativeDistDir = Join-Path $repoRoot 'tools\osmand_render_helper_native\dist-msvc'
 $extensionBinDir = Join-Path $srcRoot 'maps\tiles\extension\bin'
@@ -112,6 +112,7 @@ $arguments = @(
     '--nofollow-import-to=pydantic',
     '--nofollow-import-to=pydantic_core',
     '--nofollow-import-to=typing_inspection',
+    '--nofollow-import-to=insightface.thirdparty.face3d.mesh.cython.setup',
     '--nofollow-import-to=iPhoto.tests',
     '--nofollow-import-to=pytest',
     # Keep dynamically resolved compatibility exports available. Nuitka does
@@ -123,7 +124,7 @@ $arguments = @(
     '--include-package=cv2',
     '--include-package=reverse_geocoder',
     '--include-package=insightface',
-    '--include-package=onnxruntime',
+    '--noinclude-data-files=torch/include',
     "--output-dir=$OutputDir",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\resources\i18n')=iPhoto/resources/i18n",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\schemas')=iPhoto/schemas",

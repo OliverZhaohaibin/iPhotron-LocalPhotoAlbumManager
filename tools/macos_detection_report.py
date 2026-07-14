@@ -79,7 +79,16 @@ def _bundle_checks(bundle: Path | None) -> list[dict[str, Any]]:
                 "pass" if exists_in_bundle("maps/style.json") else "warn",
                 "maps/style.json",
             ),
-            _check("map_tiles", "pass" if exists_in_bundle("maps/tiles") else "warn", "maps/tiles"),
+            _check(
+                "map_extension_resource",
+                (
+                    "pass"
+                    if exists_in_bundle("maps/extension.tar")
+                    or exists_in_bundle("maps/tiles")
+                    else "warn"
+                ),
+                "maps/extension.tar or legacy maps/tiles",
+            ),
             _check(
                 "qt_metal_shaders",
                 "pass" if qsb_found else "warn",
@@ -120,6 +129,36 @@ def _summary_checks(paths: list[Path]) -> tuple[list[dict[str, Any]], dict[str, 
     return checks, aggregate
 
 
+def _graphics_backend_checks(paths: list[Path]) -> list[dict[str, Any]]:
+    observed: set[str] = set()
+    for path in paths:
+        try:
+            summary = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        context = summary.get("context", {})
+        if context.get("runtime") != "packaged" or summary.get("eligible_count", 0) < 1:
+            continue
+        observed.add(str(context.get("graphics_backend", "")).lower())
+    return [
+        _check(
+            "metal_path",
+            "pass" if "metal" in observed else "not_checked",
+            "eligible packaged Metal batch" if "metal" in observed else "需运行 packaged Metal 批次",
+        ),
+        _check(
+            "opengl_compatibility_path",
+            "pass" if "opengl" in observed else "not_checked",
+            (
+                "eligible packaged OpenGL batch"
+                if "opengl" in observed
+                else "需运行 packaged OpenGL 批次"
+            ),
+            required=False,
+        ),
+    ]
+
+
 def build_report(
     *,
     bundle: Path | None = None,
@@ -139,17 +178,6 @@ def build_report(
             machine,
         ),
         _check("macos_version", "pass" if system_version != "unknown" else "warn", system_version),
-        _check(
-            "metal_path",
-            "pass" if machine == "arm64" else "warn",
-            "默认 Metal 路径" if machine == "arm64" else "需在目标机器确认",
-        ),
-        _check(
-            "opengl_compatibility_path",
-            "not_checked",
-            "需使用 --graphics-backend opengl 的实际启动批次",
-            required=False,
-        ),
     ]
     checks.extend(_bundle_checks(bundle))
     summary_paths = list(summaries or [])
@@ -157,6 +185,7 @@ def build_report(
         summary_paths.insert(0, baseline)
     if candidate:
         summary_paths.append(candidate)
+    checks.extend(_graphics_backend_checks(summary_paths))
     benchmark_checks, benchmark = _summary_checks(summary_paths)
     checks.extend(benchmark_checks)
     pending = ["manual offline-storage/map-degradation checks"]
@@ -178,9 +207,15 @@ def build_report(
             "macos_version": system_version,
         },
         "checks": checks,
-        "pending_external_run": pending,
+        "pending_manual_validation": pending,
         "benchmark": benchmark,
-        "overall": "fail" if failed else "pass",
+        "overall": (
+            "fail"
+            if failed
+            else "pending_manual_validation"
+            if pending
+            else "pass"
+        ),
     }
 
 
@@ -201,8 +236,11 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         f"| `{item['name']}` | {item['status']} | {item['details']} |" for item in report["checks"]
     )
-    lines.extend(["", "## Pending external runs", ""])
-    lines.extend(f"- `pending_external_run`: {item}" for item in report["pending_external_run"])
+    lines.extend(["", "## Pending manual validation", ""])
+    lines.extend(
+        f"- `pending_manual_validation`: {item}"
+        for item in report["pending_manual_validation"]
+    )
     return "\n".join(lines) + "\n"
 
 

@@ -6,6 +6,26 @@ from iPhoto.bootstrap.startup_orchestrator import (
     StartupOrchestrator,
     StartupPhase,
 )
+from iPhoto.gui.main import _StartupImportRegistry
+
+
+def test_startup_import_registry_isolates_retry_generations() -> None:
+    registry = _StartupImportRegistry()
+    first_error = RuntimeError("first attempt failed")
+    second_value = object()
+
+    registry.fail(1, first_error)
+    registry.publish(2, second_value)
+
+    assert registry.ready(1) is True
+    assert registry.ready(2) is True
+    try:
+        registry.resolve(1)
+    except RuntimeError as exc:
+        assert str(exc) == "first attempt failed"
+    else:
+        raise AssertionError("first startup generation unexpectedly resolved")
+    assert registry.resolve(2) is second_value
 
 
 def test_first_paint_and_watchdog_start_continuation_once(qapp) -> None:
@@ -71,6 +91,40 @@ def test_new_generation_rejects_previous_token(qapp) -> None:
     assert new_generation > old_generation
     assert not orchestrator.is_current(old_generation)
     assert orchestrator.is_current(new_generation)
+
+
+def test_attempt_cleanup_runs_once_for_complete_and_cancel(qapp) -> None:
+    calls: list[str] = []
+    orchestrator = StartupOrchestrator()
+    orchestrator.begin()
+    orchestrator.register_cleanup(lambda: calls.append("cleanup"))
+
+    orchestrator.complete()
+    orchestrator.cancel()
+
+    assert calls == ["cleanup"]
+
+
+def test_superseded_generation_gets_cancelled_terminal_and_cleanup(
+    qapp,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        orchestrator_module,
+        "mark",
+        lambda stage, **details: events.append((stage, details)),
+    )
+    orchestrator = StartupOrchestrator()
+    first = orchestrator.begin()
+    orchestrator.register_cleanup(lambda: calls.append("first"))
+
+    second = orchestrator.begin()
+
+    assert second > first
+    assert calls == ["first"]
+    assert ("startup.cancelled", {"generation": first, "reason": "superseded"}) in events
 
 
 def test_terminal_event_is_unique_when_completed_startup_closes(qapp, monkeypatch) -> None:

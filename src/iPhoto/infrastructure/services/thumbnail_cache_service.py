@@ -279,13 +279,14 @@ class ThumbnailCacheService(QObject):
 
     def __init__(
         self,
-        disk_cache_path: Path,
+        disk_cache_path: Path | None,
         memory_limit_mb: int | None = None,
         runtime_policy: ThumbnailRuntimePolicy | None = None,
     ):
         super().__init__()
         self._disk_cache_path = disk_cache_path
-        self._disk_cache_path.mkdir(parents=True, exist_ok=True)
+        if self._disk_cache_path is not None:
+            self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._generator = PillowThumbnailGenerator()
         self._edit_service: EditServicePort | None = None
 
@@ -427,12 +428,13 @@ class ThumbnailCacheService(QObject):
         self._pending_eviction_target_bytes = None
         self._pending_stale_eviction = False
 
-    def set_disk_cache_path(self, disk_cache_path: Path) -> None:
+    def set_disk_cache_path(self, disk_cache_path: Path | None) -> None:
         self._is_shutting_down = False
         if self._disk_cache_path == disk_cache_path:
             return
         self._disk_cache_path = disk_cache_path
-        self._disk_cache_path.mkdir(parents=True, exist_ok=True)
+        if self._disk_cache_path is not None:
+            self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._release_all_l1_slots("disk_cache_changed")
         self._staging_used_bytes = 0
         self._active_decode_reservations.clear()

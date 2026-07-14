@@ -10,6 +10,15 @@ from pathlib import Path
 
 
 def bootstrap_settings_path() -> Path:
+    benchmark_override = os.environ.get("IPHOTO_SETTINGS_PATH", "").strip()
+    benchmark_mode = (
+        os.environ.get("IPHOTO_STARTUP_BENCHMARK", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and os.environ.get("IPHOTO_STARTUP_PROFILE", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if benchmark_mode and benchmark_override:
+        return Path(benchmark_override).expanduser()
     if os.name == "nt":
         base = os.environ.get("APPDATA")
         if base:

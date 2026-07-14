@@ -85,7 +85,7 @@ def test_bind_path_emits_tree_updated_for_empty_library(tmp_path, qapp):
 
 
 @pytest.mark.parametrize("storage_kind", ["local", "slow", "network"])
-def test_bind_prepared_library_keeps_filesystem_watches(
+def test_bind_prepared_library_configures_background_watch_service(
     tmp_path,
     qapp,
     storage_kind,
@@ -106,9 +106,11 @@ def test_bind_prepared_library_keeps_filesystem_watches(
     manager = LibraryRuntimeController()
     manager.bind_prepared_library(prepared)
 
-    watched = set(manager._watcher.directories())
-    assert str(root) in watched
-    assert str(album) in watched
+    configured = set(manager._watch_service.configured_paths)
+    assert root in configured
+    assert album in configured
+    assert manager._background_watch_generation == manager._watch_service.generation
+    manager.shutdown()
 
 
 def test_watcher_debounce_scans_changed_scope_through_session_service(

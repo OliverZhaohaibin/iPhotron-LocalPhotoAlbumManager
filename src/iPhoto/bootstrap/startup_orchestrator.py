@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -52,6 +52,33 @@ class StartupFailure:
     suggested_action: str = "retry"
 
 
+@dataclass(slots=True)
+class StartupAttempt:
+    """Own cancellable resources for one startup generation."""
+
+    generation: int
+    cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
+    closed: bool = False
+
+    def register_cleanup(self, callback: Callable[[], None]) -> None:
+        if self.closed:
+            callback()
+            return
+        self.cleanup_callbacks.append(callback)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        callbacks = list(reversed(self.cleanup_callbacks))
+        self.cleanup_callbacks.clear()
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 - terminal cleanup is best effort
+                _LOGGER.debug("Startup attempt cleanup failed", exc_info=True)
+
+
 class StartupOrchestrator(QObject):
     """Own the one-shot transition from a shown shell to app initialisation."""
 
@@ -75,6 +102,7 @@ class StartupOrchestrator(QObject):
         self._cancelled = False
         self._terminal_generations: set[int] = set()
         self._milestones: set[tuple[int, StartupPhase]] = set()
+        self._attempt: StartupAttempt | None = None
 
     @property
     def phase(self) -> StartupPhase:
@@ -87,13 +115,23 @@ class StartupOrchestrator(QObject):
     def begin(self) -> int:
         """Start a new generation and invalidate callbacks from an older one."""
 
+        if self._generation > 0 and not self._is_terminal():
+            self._emit_terminal("startup.cancelled", reason="superseded")
         self._generation += 1
         self._started_ns = time.perf_counter_ns()
         self._continuation = None
         self._continuation_started = False
         self._cancelled = False
+        self._attempt = StartupAttempt(self._generation)
         self.transition(StartupPhase.BOOTSTRAP)
         return self._generation
+
+    def register_cleanup(self, callback: Callable[[], None]) -> None:
+        """Attach one idempotent resource cleanup to the current generation."""
+
+        if self._attempt is None:
+            raise RuntimeError("startup generation has not begun")
+        self._attempt.register_cleanup(callback)
 
     def shell_shown(self, continuation: Callable[[], None]) -> None:
         """Arm the paint fast path and an independent liveness watchdog."""
@@ -145,7 +183,19 @@ class StartupOrchestrator(QObject):
             return False
         self._terminal_generations.add(self._generation)
         mark(stage, generation=self._generation, **details)
+        if self._attempt is not None and self._attempt.generation == self._generation:
+            self._attempt.close()
+        self._cancel_hang_diagnostics()
         return True
+
+    @staticmethod
+    def _cancel_hang_diagnostics() -> None:
+        try:
+            import faulthandler
+
+            faulthandler.cancel_dump_traceback_later()
+        except Exception:  # noqa: BLE001 - diagnostics cannot break startup
+            _LOGGER.debug("Unable to cancel faulthandler startup timer", exc_info=True)
 
     def run_guarded(
         self,
@@ -207,12 +257,6 @@ class StartupOrchestrator(QObject):
             return
         self._watchdog.stop()
         self.transition(StartupPhase.IDLE)
-        try:
-            import faulthandler
-
-            faulthandler.cancel_dump_traceback_later()
-        except Exception:  # noqa: BLE001 - diagnostics cannot break completion
-            _LOGGER.debug("Unable to cancel faulthandler startup timer", exc_info=True)
 
     def cancel(self) -> None:
         if self._cancelled or self._is_terminal():
@@ -266,6 +310,7 @@ class StartupOrchestrator(QObject):
 
 __all__ = [
     "StartupFailure",
+    "StartupAttempt",
     "StartupOrchestrator",
     "StartupPhase",
     "StartupSnapshot",

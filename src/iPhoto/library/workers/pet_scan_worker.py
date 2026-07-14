@@ -86,10 +86,16 @@ class PetScanWorker(QThread):
         if str(os.environ.get("IPHOTO_PET_SCAN_DISABLED", "")).strip() == "1":
             self.statusChanged.emit("Pet scanning is disabled.")
             return
+        if self._cancelled:
+            return
 
         paths = pet_library_paths(self._library_root)
         pipeline = PetClusterPipeline(model_root=paths.model_dir)
+        if self._cancelled:
+            return
         self._reset_done_rows_for_detector_upgrade()
+        if self._cancelled:
+            return
         if self._recluster_for_clustering_upgrade(pipeline):
             self.petIndexUpdated.emit()
         self._prime_pending_rows()

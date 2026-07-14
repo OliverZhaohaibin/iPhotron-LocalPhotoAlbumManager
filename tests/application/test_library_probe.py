@@ -15,6 +15,7 @@ from PySide6.QtCore import QProcess
 from PySide6.QtTest import QTest
 
 import iPhoto.cache.index_store.migrations as migrations_module
+import iPhoto.bootstrap.library_probe as probe_module
 from iPhoto.bootstrap.library_probe import (
     MAX_STDERR_BYTES,
     MAX_STDOUT_BYTES,
@@ -22,7 +23,9 @@ from iPhoto.bootstrap.library_probe import (
     LibraryProbeController,
     LibraryProbeRequest,
     PreparedLibrary,
+    ValidatedPreparedLibrary,
     _main,
+    _probe_process_command,
     probe_library,
 )
 from iPhoto.cache.index_store.migrations import (
@@ -78,6 +81,88 @@ def test_probe_reads_schema_and_completed_scan_without_writing(tmp_path: Path) -
     assert round_trip.schema_version == CURRENT_SCHEMA_VERSION
     assert round_trip.scan_complete is True
     assert round_trip.database_path == database
+
+
+def test_validated_prepared_library_is_single_use_and_revalidates_identity(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    prepared = probe_library(LibraryProbeRequest.create(library))
+    validated = ValidatedPreparedLibrary.create(prepared)
+
+    assert validated.consume() is prepared
+    with pytest.raises(RuntimeError, match="already consumed"):
+        validated.consume()
+
+    second = probe_library(LibraryProbeRequest.create(library))
+    stale = ValidatedPreparedLibrary.create(second)
+    replacement = tmp_path / "replacement.db"
+    replacement.write_bytes(second.database_path.read_bytes())
+    os.replace(replacement, second.database_path)
+
+    with pytest.raises(RuntimeError, match="changed before commit"):
+        stale.consume()
+
+
+def test_album_snapshot_budget_returns_partial_result_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library = tmp_path / "library"
+    (library / "A").mkdir(parents=True)
+    (library / "B").mkdir()
+    monkeypatch.setattr(probe_module, "ALBUM_SNAPSHOT_BUDGET_MS", 0.0)
+
+    albums, warnings = probe_module._snapshot_albums(library)
+
+    assert len(albums) < 2
+    assert warnings == ("album_snapshot_truncated_time",)
+
+
+def test_album_snapshot_budget_stops_incremental_directory_enumeration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0]
+    consumed = [0]
+
+    class _SlowEntries:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            consumed[0] += 1
+            clock[0] += 1_000_000_000
+            return Path(f"/album-{consumed[0]}")
+
+    monkeypatch.setattr(Path, "iterdir", lambda _self: _SlowEntries())
+    monkeypatch.setattr(probe_module.time, "perf_counter_ns", lambda: clock[0])
+
+    albums, warnings = probe_module._snapshot_albums(Path("/library"))
+
+    assert albums == ()
+    assert warnings == ("album_snapshot_truncated_time",)
+    assert consumed == [1]
+
+
+def test_linux_mountinfo_classifies_network_and_removable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(probe_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda _self, **_kwargs: (
+            "1 0 0:1 / / rw - ext4 /dev/root rw\n"
+            "2 1 0:2 / /mnt/share rw - nfs server:/share rw\n"
+        ),
+    )
+
+    profile = probe_module._unix_mount_profile(Path("/mnt/share/photos"))
+
+    assert profile is not None
+    assert profile.kind == "network"
+    assert profile.latency_class == "slow"
 
 
 def test_probe_missing_library_is_recoverable_error(tmp_path: Path) -> None:
@@ -602,3 +687,32 @@ def test_controller_real_helper_round_trip(qapp, tmp_path: Path) -> None:
     assert failures == []
     assert ready[0].request_id == request.request_id
     assert controller._process is None
+
+
+def test_probe_process_command_uses_python_module_for_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(probe_module.__dict__, "__compiled__", raising=False)
+    monkeypatch.delattr(probe_module.sys, "frozen", raising=False)
+
+    program, arguments = _probe_process_command()
+
+    assert program == sys.executable
+    assert arguments == ["-m", "iPhoto.bootstrap.library_probe", "--stdin"]
+
+
+def test_probe_process_command_uses_qt_application_path_when_packaged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packaged_executable = "/Applications/iPhotron.app/Contents/MacOS/iPhotron"
+    monkeypatch.setitem(probe_module.__dict__, "__compiled__", object())
+    monkeypatch.setattr(
+        probe_module.QCoreApplication,
+        "applicationFilePath",
+        staticmethod(lambda: packaged_executable),
+    )
+
+    program, arguments = _probe_process_command()
+
+    assert program == packaged_executable
+    assert arguments == ["--startup-library-probe", "--stdin"]

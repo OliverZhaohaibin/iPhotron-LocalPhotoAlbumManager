@@ -8,6 +8,7 @@ from maps.map_sources import (
     ENV_OSMAND_EXTENSION_ROOT,
     MapSourceSpec,
     apply_pending_osmand_extension_install,
+    bundled_osmand_extension_archive,
     _sdk_roots,
     default_osmand_extension_root,
     default_osmand_download_url,
@@ -93,6 +94,47 @@ def _create_search_database(path: Path) -> None:
             ) WITHOUT ROWID;
             """
         )
+
+
+def test_macos_app_bundle_reads_large_map_data_from_resources(tmp_path) -> None:
+    contents_root = tmp_path / "iPhotron.app" / "Contents"
+    package_root = contents_root / "MacOS" / "maps"
+    resources_maps_root = contents_root / "Resources" / "maps"
+    package_root.mkdir(parents=True)
+    resources_maps_root.mkdir(parents=True)
+    (package_root / "style.json").write_text("{}", encoding="utf-8")
+    bundled_extension = _create_extension_assets_at(
+        resources_maps_root / "tiles" / "extension"
+    )
+
+    source = MapSourceSpec.default(package_root)
+
+    assert source.kind == "osmand_obf"
+    assert Path(source.data_path) == bundled_extension / "World_basemap_2.obf"
+    assert MapSourceSpec.legacy_default(package_root).data_path == resources_maps_root / "tiles"
+    assert resolve_osmand_helper_command(package_root) == (
+        str(bundled_extension / "bin" / DEFAULT_HELPER_RELATIVE_PATHS[0].name),
+    )
+
+
+def test_macos_app_bundle_archive_uses_external_install_root(
+    tmp_path, monkeypatch
+) -> None:
+    contents_root = tmp_path / "iPhotron.app" / "Contents"
+    package_root = contents_root / "MacOS" / "maps"
+    archive_path = contents_root / "Resources" / "maps" / "extension.tar"
+    package_root.mkdir(parents=True)
+    archive_path.parent.mkdir(parents=True)
+    archive_path.write_bytes(b"archive")
+    external_root = tmp_path / "managed" / "tiles" / "extension"
+    monkeypatch.setattr(
+        map_sources,
+        "_default_external_osmand_extension_root",
+        lambda: external_root,
+    )
+
+    assert bundled_osmand_extension_archive(package_root) == archive_path.resolve()
+    assert default_osmand_extension_root(package_root) == external_root.resolve()
 
 
 def _create_search_database_without_prefix_cache(path: Path) -> None:

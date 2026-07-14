@@ -43,6 +43,7 @@ def _write_profile(
         ("launcher.process_started", 0.0, {}),
         ("startup.app_created", 100.0 * scale, {"generation": 1}),
         ("startup.show", 200.0 * scale, {"generation": 1}),
+        ("main_window.first_paint", 250.0 * scale, {"generation": 1}),
         ("startup.interactive", 300.0 * scale, {"generation": 1}),
         ("startup.gui_job.started", 320.0 * scale, {"generation": 1, "job": "library.commit"}),
         (
@@ -178,6 +179,8 @@ def test_comparison_enforces_improvement_tail_and_stall_gates(tmp_path) -> None:
         candidate_paths.append(candidate_path)
     baseline = summarize_profiles(baseline_paths)
     candidate = summarize_profiles(candidate_paths)
+    baseline["context"]["revision"] = "6ff592f7"
+    candidate["context"]["revision"] = "306326ab"
 
     result = compare_summaries(baseline, candidate)
 
@@ -212,6 +215,7 @@ context = {
 stages = [
     ("startup.app_created", 10),
     ("startup.show", 20),
+    ("main_window.first_paint", 25),
     ("startup.interactive", 30),
     ("startup.library_ready", 40),
     ("startup.first_gallery_visible", 50),
@@ -233,6 +237,8 @@ with path.open("a", encoding="utf-8") as stream:
         encoding="utf-8",
     )
     output = tmp_path / "output"
+    library = tmp_path / "benchmark-library"
+    library.mkdir()
 
     return_code = benchmark_main(
         [
@@ -241,6 +247,9 @@ with path.open("a", encoding="utf-8") as stream:
             "candidate",
             "--scenario",
             "local-ssd",
+            "--library",
+            str(library),
+            "--confirm-dedicated-library",
             "--runtime",
             "packaged",
             "--qt-backend",

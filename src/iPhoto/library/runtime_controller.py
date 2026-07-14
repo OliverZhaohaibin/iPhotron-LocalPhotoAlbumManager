@@ -30,6 +30,7 @@ from .scan_coordinator import ScanCoordinatorMixin
 from .filesystem_watcher import FileSystemWatcherMixin
 from .geo_aggregator import GeoAggregatorMixin
 from .trash_manager import TrashManagerMixin
+from .watch_service import LibraryWatchResult, LibraryWatchService
 
 LOGGER = get_logger()
 
@@ -105,6 +106,9 @@ class LibraryRuntimeController(
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._debounce.timeout.connect(self._on_watcher_debounce_timeout)
         self.scanFinished.connect(self._on_watcher_scan_finished)
+        self._watch_service = LibraryWatchService(self)
+        self._watch_service.resultReady.connect(self._on_background_watch_result)
+        self._background_watch_generation = 0
 
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
@@ -197,11 +201,15 @@ class LibraryRuntimeController(
             for parent, items in children.items()
         }
         self._nodes = nodes
-        # Probe latency is only a startup scheduling hint.  A large local
-        # library can exceed the ``slow`` threshold during its first schema
-        # migration, and network libraries still need live filesystem updates.
-        # Keep the normal watcher contract for every successfully bound root.
-        self._rebuild_watches()
+        storage_profile = getattr(prepared, "storage_profile", None)
+        storage_kind = getattr(storage_profile, "kind", prepared.storage_kind)
+        polling = storage_kind in {"network", "removable"} or prepared.storage_kind == "slow"
+        watch_paths = (self._root, *(node.path for node in self._nodes.values()))
+        self._background_watch_generation = self._watch_service.configure(
+            self._root,
+            watch_paths,
+            polling=polling,
+        )
         LOGGER.info(
             "bind_prepared_library: root=%s albums=%d storage=%s",
             self._root,
@@ -270,6 +278,8 @@ class LibraryRuntimeController(
             self.treeUpdated.emit()
 
     def _clear_watches_for_rebind(self) -> None:
+        self._watch_service.cancel()
+        self._background_watch_generation = 0
         existing_dirs = self._watcher.directories()
         existing_files = self._watcher.files()
         if existing_dirs:
@@ -314,6 +324,48 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache_root = None
         self._unbind_people_index_coordinator()
         self._unbind_pet_index_coordinator()
+        self._watch_service.shutdown()
+
+    def _on_background_watch_result(self, result: object) -> None:
+        """Apply an immutable worker snapshot without traversing storage in GUI."""
+
+        if not isinstance(result, LibraryWatchResult):
+            return
+        if result.generation != self._background_watch_generation or self._root is None:
+            return
+        if result.warning:
+            LOGGER.warning("Library watcher refresh failed: %s", result.warning)
+            return
+        previous_paths = set(self._nodes)
+        previous_nodes = dict(self._nodes)
+        albums = [node for node in result.albums if node.level == 1]
+        children: Dict[Path, list[AlbumNode]] = {node.path: [] for node in albums}
+        nodes = {node.path: node for node in result.albums}
+        for node in result.albums:
+            if node.level == 2:
+                children.setdefault(node.path.parent, []).append(node)
+        self._albums = sorted(albums, key=lambda item: item.title.casefold())
+        self._children = {
+            parent: sorted(items, key=lambda item: item.title.casefold())
+            for parent, items in children.items()
+        }
+        self._nodes = nodes
+        tree_changed = nodes != previous_nodes
+        if tree_changed:
+            self._geotagged_assets_cache = None
+            self._geotagged_assets_cache_root = None
+            self.treeUpdated.emit()
+        # Root watcher events include internal links/index maintenance.  Never
+        # turn an unchanged root snapshot into a self-sustaining rescan loop;
+        # new albums are still scanned, while direct-root changes remain an
+        # explicit/manual refresh scope.
+        changed = {
+            path
+            for path in result.changed_paths
+            if path != self._root and path in nodes
+        }
+        changed.update(path for path in nodes if path not in previous_paths)
+        self._start_watcher_scans(changed)
 
     def face_scan_status_message(self) -> str | None:
         return self._face_scan_status_message
@@ -357,15 +409,9 @@ class LibraryRuntimeController(
             self.bind_state_repository(library_session.state)
             self.bind_asset_state_service(library_session.asset_state)
             self.bind_album_metadata_service(library_session.album_metadata)
-            self.bind_location_service(library_session.locations)
-            self.bind_edit_service(library_session.edit)
             self.bind_scan_service(library_session.scans)
             self.bind_asset_lifecycle_service(library_session.asset_lifecycle)
             self.bind_asset_operation_service(library_session.asset_operations)
-            self.bind_people_service(library_session.people)
-            self.bind_pet_service(library_session.pets)
-            self.bind_map_runtime(library_session.maps)
-            self.bind_map_interaction_service(library_session.map_interactions)
 
         if previous is not None and previous is not library_session and previous_owned:
             previous.shutdown()
@@ -393,13 +439,11 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         active_session = self._library_session
-        default_location_service = (
-            active_session.locations if active_session is not None else None
-        )
         if (
-            self._root is not None
+            active_session is None
+            and self._root is not None
             and asset_query_service is not None
-            and self._location_service is default_location_service
+            and self._location_service is None
         ):
             from ..bootstrap.library_location_service import LibraryLocationService
 
@@ -512,6 +556,32 @@ class LibraryRuntimeController(
     def pet_service(self) -> "PetService | None":
         return self._pet_service
 
+    def activate_recognition_services(
+        self,
+        people_service: PeopleService | None,
+        pet_service: "PetService | None",
+    ) -> None:
+        """Bind and scan People/Pets only after a recognition surface is used."""
+
+        self.bind_people_service(people_service)
+        self.bind_pet_service(pet_service)
+        root = self._root
+        if root is None or people_service is None or pet_service is None:
+            return
+        self._start_ai_scan_workers(root, startup=True)
+
+    def activate_map_services(
+        self,
+        location_service: "LocationAssetServicePort | None",
+        map_runtime: "MapRuntimePort | None",
+        map_interaction_service: "MapInteractionServicePort | None",
+    ) -> None:
+        """Bind Location and Maps services together on first map use."""
+
+        self.bind_location_service(location_service)
+        self.bind_map_runtime(map_runtime)
+        self.bind_map_interaction_service(map_interaction_service)
+
     def bind_map_runtime(self, map_runtime: "MapRuntimePort | None") -> None:
         """Bind the current library session Maps runtime surface."""
 
@@ -575,14 +645,24 @@ class LibraryRuntimeController(
             # keep flowing after the tree refresh completes.
             self.bind_people_service(session.people)
             self.bind_pet_service(session.pets)
+            self.bind_location_service(session.locations)
+            self.bind_edit_service(session.edit)
+            self.bind_map_runtime(session.maps)
+            self.bind_map_interaction_service(session.map_interactions)
             return
 
         from ..bootstrap.library_session import create_headless_library_session
 
-        self.bind_library_session(
-            create_headless_library_session(root),
-            owned=True,
-        )
+        session = create_headless_library_session(root)
+        self.bind_library_session(session, owned=True)
+        # Explicit synchronous/headless entry points keep the complete legacy
+        # service surface.  Prepared GUI startup stays Gallery-only until use.
+        self.bind_people_service(session.people)
+        self.bind_pet_service(session.pets)
+        self.bind_location_service(session.locations)
+        self.bind_edit_service(session.edit)
+        self.bind_map_runtime(session.maps)
+        self.bind_map_interaction_service(session.map_interactions)
 
     def _unbind_people_index_coordinator(self) -> None:
         if self._people_index_coordinator is None:

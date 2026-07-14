@@ -5,9 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from iPhoto.domain.models.query import AssetQuery
-from iPhoto.gui.coordinators import main_coordinator as main_coordinator_module
+from iPhoto.gui.coordinators import (
+    desktop_coordinator_runtime as main_coordinator_module,
+)
 from iPhoto.gui.coordinators.gallery_coordinator import GalleryCoordinator
-from iPhoto.gui.coordinators.main_coordinator import DesktopCoordinatorRuntime
+from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinatorRuntime
 
 MainCoordinator = DesktopCoordinatorRuntime
 
@@ -176,6 +178,44 @@ def test_resolve_map_package_root_prefers_bound_runtime_root() -> None:
     )
 
     assert package_root == Path("/bound/maps").resolve()
+
+
+def test_map_feature_activation_binds_lazy_location_and_map_services() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    location_service = object()
+    map_runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
+    interaction_service = object()
+    session = SimpleNamespace(
+        locations=location_service,
+        maps=map_runtime,
+        map_interactions=interaction_service,
+    )
+    library = MagicMock()
+    coordinator._context = SimpleNamespace(
+        library_session=session,
+        library=library,
+    )
+    map_view = MagicMock()
+    coordinator._window = SimpleNamespace(
+        ui=SimpleNamespace(
+            map_view=map_view,
+            download_map_extension_action=MagicMock(),
+        )
+    )
+    coordinator._map_extension_download = MagicMock()
+    coordinator._map_extension_download.maybe_prompt_on_startup.return_value = False
+    coordinator._on_map_asset_activated = MagicMock()
+    coordinator._on_cluster_activated = MagicMock()
+
+    coordinator._on_feature_created("map", object())
+
+    library.activate_map_services.assert_called_once_with(
+        location_service,
+        map_runtime,
+        interaction_service,
+    )
+    map_view.set_map_runtime.assert_called_once_with(map_runtime)
+    map_view.set_map_interaction_service.assert_called_once_with(interaction_service)
 
 
 def test_handle_face_name_toggle_changed_persists_setting_and_updates_recognition() -> None:

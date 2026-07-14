@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...application.ports import AssetRepositoryPort, EditServicePort
-from ...config import WORK_DIR_NAME
 from ...cache.index_store import get_global_repository
 from ...utils.pathutils import ensure_work_dir
 from .thumbnail_cache_service import ThumbnailCacheService
@@ -77,9 +76,9 @@ class LibraryAssetRuntime:
             raise RuntimeError("Cannot resolve a repository root without a library")
         return Path(library_root)
 
-    def _cache_root(self, library_root: Path | None) -> Path:
+    def _cache_root(self, library_root: Path | None) -> Path | None:
         if library_root is None:
-            return Path.home() / WORK_DIR_NAME / "cache" / "thumbs"
+            return None
         return ensure_work_dir(library_root) / "cache" / "thumbs"
 
 

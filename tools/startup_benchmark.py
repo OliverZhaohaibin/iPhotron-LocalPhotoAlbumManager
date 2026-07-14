@@ -28,6 +28,7 @@ TERMINAL_STAGES = frozenset(
 MILESTONE_ALIASES: dict[str, tuple[str, ...]] = {
     "app_created": ("startup.app_created", "qapplication.created"),
     "show": ("startup.show", "main_window.show_called"),
+    "first_paint": ("main_window.first_paint",),
     "interactive": ("startup.interactive",),
     "library_ready": ("startup.library_ready",),
     "first_gallery_visible": (
@@ -41,6 +42,9 @@ MILESTONE_ALIASES: dict[str, tuple[str, ...]] = {
 }
 METRIC_ORDER = (
     "process_start_app_created_ms",
+    "app_created_show_ms",
+    "show_first_paint_ms",
+    "first_paint_interactive_ms",
     "show_interactive_ms",
     "interactive_library_ready_ms",
     "library_ready_first_gallery_ms",
@@ -48,6 +52,7 @@ METRIC_ORDER = (
     "first_gallery_visible_ms",
     "first_usable_thumbnail_ms",
     "probe_ms",
+    "max_gui_job_ms",
     "max_post_interactive_gui_stall_ms",
 )
 BATCH_CONTEXT_KEYS = (
@@ -124,6 +129,32 @@ def _event(events: Sequence[dict[str, Any]], milestone: str) -> dict[str, Any] |
 
 def _terminal_events(events: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [event for event in events if event["stage"] in TERMINAL_STAGES]
+
+
+def _validate_generation_terminals(events: Sequence[dict[str, Any]]) -> list[str]:
+    """Require exactly one terminal record for every observed startup generation."""
+
+    observed: set[int] = set()
+    terminal_counts: Counter[int] = Counter()
+    for event in events:
+        details = _details(event)
+        raw_generation = details.get("generation")
+        try:
+            generation = int(raw_generation)
+        except (TypeError, ValueError):
+            continue
+        if generation <= 0:
+            continue
+        if event["stage"].startswith("startup."):
+            observed.add(generation)
+        if event["stage"] in TERMINAL_STAGES:
+            terminal_counts[generation] += 1
+    return [
+        f"expected exactly one terminal event for generation {generation}, "
+        f"found {terminal_counts[generation]}"
+        for generation in sorted(observed)
+        if terminal_counts[generation] != 1
+    ]
 
 
 def _duration(start: dict[str, Any] | None, end: dict[str, Any] | None) -> float | None:
@@ -208,9 +239,8 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
             if return_code != 0:
                 errors.append(f"launcher process exited with code {return_code}")
     terminals = _terminal_events(events)
-    if len(terminals) != 1:
-        errors.append(f"expected exactly one terminal event, found {len(terminals)}")
-    terminal = terminals[0] if terminals else None
+    errors.extend(_validate_generation_terminals(events))
+    terminal = terminals[-1] if terminals else None
     completed = terminal is not None and terminal["stage"] == "startup.completed"
 
     milestones = {name: _event(events, name) for name in MILESTONE_ALIASES}
@@ -219,7 +249,7 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
             (event for event in events if event["stage"] in {"startup.degraded", "startup.failed"}),
             None,
         )
-    required = ["app_created", "show", "interactive"]
+    required = ["app_created", "show", "first_paint", "interactive"]
     if completed and require_gallery:
         required.extend(("library_ready", "first_gallery_visible", "first_usable_thumbnail"))
     for name in required:
@@ -256,6 +286,11 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
         and interactive is not None
         and float(event["elapsed_ms"]) >= float(interactive["elapsed_ms"])
     ]
+    all_gui_job_durations = [
+        float(_details(event).get("duration_ms", 0.0))
+        for event in events
+        if event["stage"] == "startup.gui_job.finished"
+    ]
     probe_started = next(
         (event for event in events if event["stage"] == "startup.probe.started"), None
     )
@@ -275,6 +310,11 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
 
     metrics = {
         "process_start_app_created_ms": process_app_ms,
+        "app_created_show_ms": _duration(milestones["app_created"], milestones["show"]),
+        "show_first_paint_ms": _duration(milestones["show"], milestones["first_paint"]),
+        "first_paint_interactive_ms": _duration(
+            milestones["first_paint"], milestones["interactive"]
+        ),
         "show_interactive_ms": _duration(milestones["show"], interactive),
         "interactive_library_ready_ms": _duration(interactive, milestones["library_ready"]),
         "library_ready_first_gallery_ms": _duration(
@@ -294,6 +334,9 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
             else None
         ),
         "probe_ms": _duration(probe_started, probe_finished),
+        "max_gui_job_ms": (
+            round(max(all_gui_job_durations), 3) if all_gui_job_durations else 0.0
+        ),
         "max_post_interactive_gui_stall_ms": (
             round(max(post_interactive_durations), 3) if post_interactive_durations else 0.0
         ),
@@ -367,6 +410,34 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
 
     candidate_metrics = candidate.get("metrics", {})
     baseline_metrics = baseline.get("metrics", {})
+    baseline_context = baseline.get("context", {})
+    candidate_context = candidate.get("context", {})
+    matching_context_keys = tuple(key for key in BATCH_CONTEXT_KEYS if key != "revision")
+    mismatched_context = {
+        key: (baseline_context.get(key), candidate_context.get(key))
+        for key in matching_context_keys
+        if baseline_context.get(key) != candidate_context.get(key)
+    }
+    add(
+        "baseline_revision_is_6ff592f7",
+        str(baseline_context.get("revision", "")).startswith("6ff592f7"),
+        baseline_context.get("revision"),
+        "6ff592f7",
+    )
+    add(
+        "candidate_revision_is_distinct",
+        bool(candidate_context.get("revision"))
+        and candidate_context.get("revision") not in {"unknown", "working-tree"}
+        and candidate_context.get("revision") != baseline_context.get("revision"),
+        candidate_context.get("revision"),
+        "non-baseline commit SHA",
+    )
+    add(
+        "baseline_candidate_contexts_match",
+        not mismatched_context,
+        mismatched_context or "matched",
+        "same platform/backend/scenario/cache/build context",
+    )
     add(
         "baseline_has_30_eligible_samples",
         baseline.get("eligible_count", 0) >= 30,
@@ -403,6 +474,13 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
         "post_interactive_gui_stall_max_le_100ms",
         stall_max is not None and stall_max <= 100.0,
         stall_max,
+        100.0,
+    )
+    all_job_max = candidate_metrics.get("max_gui_job_ms", {}).get("max")
+    add(
+        "all_named_gui_jobs_max_le_100ms",
+        all_job_max is not None and all_job_max <= 100.0,
+        all_job_max,
         100.0,
     )
 
@@ -496,8 +574,8 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
     if summary.get("eligible_count", 0) < 30:
         pending.append("30 eligible samples for this exact batch")
     if pending:
-        lines.extend(("", "## Pending external runs", ""))
-        lines.extend(f"- `pending_external_run`: {item}" for item in pending)
+        lines.extend(("", "## Pending manual validation", ""))
+        lines.extend(f"- `pending_manual_validation`: {item}" for item in pending)
     invalid = [run for run in summary.get("runs", []) if not run.get("eligible")]
     if invalid:
         lines.extend(("", "## Excluded runs", ""))
@@ -533,6 +611,11 @@ def collect(args: argparse.Namespace) -> int:
         raise ProfileError("collect requires a command after --")
     if args.samples < 1:
         raise ProfileError("samples must be positive")
+    if not args.confirm_dedicated_library:
+        raise ProfileError("refusing to benchmark without --confirm-dedicated-library")
+    benchmark_library = args.library.expanduser().resolve()
+    if not benchmark_library.is_dir():
+        raise ProfileError(f"benchmark library is not a directory: {benchmark_library}")
     controlled = args.cache_state != "cold" or bool(args.confirm_controlled_cold_cache)
     method = args.cache_eviction_method.strip() or "uncontrolled"
     if args.cache_state == "cold" and (not controlled or method == "uncontrolled"):
@@ -547,6 +630,7 @@ def collect(args: argparse.Namespace) -> int:
         profile_path = output_dir / f"run-{index:03d}.jsonl"
         stdout_path = output_dir / f"run-{index:03d}.stdout.log"
         stderr_path = output_dir / f"run-{index:03d}.stderr.log"
+        settings_path = output_dir / f"run-{index:03d}.settings.json"
         if profile_path.exists():
             raise ProfileError(f"refusing to overwrite {profile_path}")
         context = {
@@ -589,7 +673,13 @@ def collect(args: argparse.Namespace) -> int:
                 "IPHOTO_STARTUP_CACHE_EVICTION_METHOD": method,
                 "IPHOTO_STARTUP_SCENARIO": args.scenario,
                 "IPHOTO_STARTUP_BENCHMARK_AUTO_EXIT_MS": str(args.auto_exit_delay_ms),
+                "IPHOTO_STARTUP_BENCHMARK": "1",
+                "IPHOTO_SETTINGS_PATH": str(settings_path),
             }
+        )
+        settings_path.write_text(
+            json.dumps({"basic_library_path": str(benchmark_library)}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
         )
         if args.qt_backend != "default":
             environment["QT_QPA_PLATFORM"] = args.qt_backend
@@ -646,6 +736,8 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser = subparsers.add_parser("collect", help="launch and collect repeated runs")
     collect_parser.add_argument("--revision", required=True)
     collect_parser.add_argument("--scenario", required=True)
+    collect_parser.add_argument("--library", type=Path, required=True)
+    collect_parser.add_argument("--confirm-dedicated-library", action="store_true")
     collect_parser.add_argument("--runtime", choices=("source", "packaged"), required=True)
     collect_parser.add_argument("--qt-backend", default="default")
     collect_parser.add_argument("--graphics-backend", default="default")

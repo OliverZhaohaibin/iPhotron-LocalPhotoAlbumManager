@@ -17,7 +17,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
     from ..library.runtime_controller import LibraryRuntimeController
     from ..settings.manager import SettingsManager
-    from .library_probe import LibraryProbeRequest, PreparedLibrary
+    from .library_probe import LibraryProbeRequest, PreparedLibrary, ValidatedPreparedLibrary
     from .library_session import LibrarySession
 
 _logger = logging.getLogger(__name__)
@@ -234,13 +234,28 @@ class RuntimeContext:
 
     def commit_prepared_library(
         self,
-        prepared: "PreparedLibrary",
+        validated: "ValidatedPreparedLibrary",
         *,
         defer_scan: bool = True,
     ) -> "LibrarySession":
-        """Bind a library after its slow path and database were probed."""
+        """Compatibility name for the validated, single-use commit boundary."""
 
-        session = self.open_library(prepared.root, prepared=prepared)
+        return self.commit_validated_library(validated, defer_scan=defer_scan)
+
+    def commit_validated_library(
+        self,
+        validated: "ValidatedPreparedLibrary",
+        *,
+        defer_scan: bool = True,
+    ) -> "LibrarySession":
+        """Bind a library after helper preparation and identity revalidation."""
+
+        prepared = validated.prepared
+        session = self.open_library(
+            prepared.root,
+            prepared=prepared,
+            validated=validated,
+        )
         self._pending_basic_library_path = None
         if not prepared.scan_complete and not self.library.is_scanning_path(prepared.root):
             if defer_scan:
@@ -292,6 +307,7 @@ class RuntimeContext:
         root: Path,
         *,
         prepared: "PreparedLibrary | None" = None,
+        validated: "ValidatedPreparedLibrary | None" = None,
     ) -> "LibrarySession":
         """Bind *root* as the active library and rebuild library-scoped adapters."""
 
@@ -315,8 +331,10 @@ class RuntimeContext:
                 bind_asset_runtime=False,
             )
         else:
-            self.library_session = LibrarySession.from_prepared(
-                prepared,
+            if validated is None:
+                raise ValueError("GUI prepared library commit requires validation")
+            self.library_session = LibrarySession.from_validated(
+                validated,
                 asset_runtime=self.asset_runtime,
                 bind_asset_runtime=False,
             )
@@ -349,12 +367,6 @@ class RuntimeContext:
             )
             if callable(bind_album_metadata_service):
                 bind_album_metadata_service(self.library_session.album_metadata)
-            bind_location_service = getattr(self.library, "bind_location_service", None)
-            if callable(bind_location_service):
-                bind_location_service(self.library_session.locations)
-            bind_edit_service = getattr(self.library, "bind_edit_service", None)
-            if callable(bind_edit_service):
-                bind_edit_service(self.library_session.edit)
 
         try:
             bind_prepared_library = getattr(self.library, "bind_prepared_library", None)
@@ -388,22 +400,6 @@ class RuntimeContext:
             )
             if callable(bind_asset_operation_service):
                 bind_asset_operation_service(self.library_session.asset_operations)
-            bind_people_service = getattr(self.library, "bind_people_service", None)
-            if callable(bind_people_service):
-                bind_people_service(self.library_session.people)
-            bind_pet_service = getattr(self.library, "bind_pet_service", None)
-            if callable(bind_pet_service):
-                bind_pet_service(self.library_session.pets)
-            bind_map_runtime = getattr(self.library, "bind_map_runtime", None)
-            if callable(bind_map_runtime):
-                bind_map_runtime(self.library_session.maps)
-            bind_map_interaction_service = getattr(
-                self.library,
-                "bind_map_interaction_service",
-                None,
-            )
-            if callable(bind_map_interaction_service):
-                bind_map_interaction_service(self.library_session.map_interactions)
         return self.library_session
 
     def close_library(self) -> None:

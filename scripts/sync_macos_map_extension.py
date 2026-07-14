@@ -263,9 +263,10 @@ def repair_app_bundle_native_widget_qt_links(
 
     resolved_app = app_bundle.resolve()
     macos_root = resolved_app / "Contents" / "MacOS"
+    resources_maps_root = resolved_app / "Contents" / "Resources" / "maps"
+    bundled_maps_root = resources_maps_root if resources_maps_root.is_dir() else macos_root / "maps"
     native_widget = (
-        macos_root
-        / "maps"
+        bundled_maps_root
         / "tiles"
         / "extension"
         / "bin"

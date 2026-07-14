@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -12,7 +13,23 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+_HELPER_PROCESS = any(
+    argument in {"--startup-library-probe", "--stdin"} for argument in sys.argv[1:]
+)
+if _HELPER_PROCESS:
+    # The helper never constructs the Qt controller.  Lightweight placeholders
+    # let the protocol/worker module load without importing the GUI framework.
+    class QObject:  # pragma: no cover - helper-only compatibility base
+        pass
+
+    def Signal(*_args):  # pragma: no cover - helper-only class declaration
+        return None
+
+    QProcess = Any  # type: ignore[misc,assignment]
+    QTimer = Any  # type: ignore[misc,assignment]
+    QCoreApplication = Any  # type: ignore[misc,assignment]
+else:
+    from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, Signal
 
 from ..config import (
     ALBUM_MANIFEST_NAMES,
@@ -26,10 +43,12 @@ _RESERVED_NAMES = frozenset(
     name.casefold()
     for name in (*ALL_WORK_DIR_NAMES, RECENTLY_DELETED_DIR_NAME, EXPORT_DIR_NAME)
 )
-PROBE_PROTOCOL_VERSION = 1
+PROBE_PROTOCOL_VERSION = 2
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_STDERR_BYTES = 16 * 1024
 MAX_ALBUMS = 10_000
+MAX_REQUEST_BYTES = 256 * 1024
+ALBUM_SNAPSHOT_BUDGET_MS = 750.0
 
 _FAILURE_MESSAGES = {
     "db_locked": "The photo library index is currently in use. Please retry.",
@@ -75,6 +94,52 @@ class PreparedAlbum:
 
 
 @dataclass(frozen=True, slots=True)
+class StorageProfile:
+    """Cross-platform storage classification produced inside the helper."""
+
+    kind: str = "unknown"
+    latency_class: str = "normal"
+    basis: str = "fallback"
+    removable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class FileIdentity:
+    """Identity used to reject a replaced prepared database."""
+
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+    @classmethod
+    def capture(cls, path: Path) -> "FileIdentity":
+        stat = path.stat()
+        return cls(
+            device=int(stat.st_dev),
+            inode=int(stat.st_ino),
+            size=int(stat.st_size),
+            modified_ns=int(stat.st_mtime_ns),
+        )
+
+    def matches(self, path: Path) -> bool:
+        try:
+            current = self.capture(path)
+        except OSError:
+            return False
+        return (current.device, current.inode) == (self.device, self.inode)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedLibraryCredential:
+    root: Path
+    database_path: Path
+    schema_version: int
+    database_identity: FileIdentity
+    prepared_at_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedLibrary:
     request_id: str
     root: Path
@@ -84,6 +149,8 @@ class PreparedLibrary:
     storage_kind: str
     scan_complete: bool
     warnings: tuple[str, ...] = ()
+    storage_profile: StorageProfile = StorageProfile()
+    credential: PreparedLibraryCredential | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -91,10 +158,36 @@ class PreparedLibrary:
         payload["database_path"] = os.fspath(self.database_path)
         payload["albums"] = [asdict(album) for album in self.albums]
         payload["warnings"] = list(self.warnings)
+        payload["storage_profile"] = asdict(self.storage_profile)
+        if self.credential is not None:
+            payload["credential"] = asdict(self.credential)
+            payload["credential"]["root"] = os.fspath(self.credential.root)
+            payload["credential"]["database_path"] = os.fspath(
+                self.credential.database_path
+            )
         return payload
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> PreparedLibrary:
+        credential_payload = payload.get("credential")
+        credential = None
+        if isinstance(credential_payload, dict):
+            identity_payload = credential_payload.get("database_identity")
+            if not isinstance(identity_payload, dict):
+                raise ValueError("missing database identity")
+            credential = PreparedLibraryCredential(
+                root=Path(credential_payload["root"]),
+                database_path=Path(credential_payload["database_path"]),
+                schema_version=int(credential_payload["schema_version"]),
+                database_identity=FileIdentity(**identity_payload),
+                prepared_at_ns=int(credential_payload["prepared_at_ns"]),
+            )
+        profile_payload = payload.get("storage_profile")
+        storage_profile = (
+            StorageProfile(**profile_payload)
+            if isinstance(profile_payload, dict)
+            else StorageProfile(kind=str(payload.get("storage_kind") or "unknown"))
+        )
         return cls(
             request_id=str(payload["request_id"]),
             root=Path(payload["root"]),
@@ -104,7 +197,50 @@ class PreparedLibrary:
             storage_kind=str(payload.get("storage_kind") or "local"),
             scan_complete=bool(payload.get("scan_complete", False)),
             warnings=tuple(str(item) for item in payload.get("warnings", ())),
+            storage_profile=storage_profile,
+            credential=credential,
         )
+
+
+def _credential_matches(
+    credential: PreparedLibraryCredential,
+    prepared: PreparedLibrary,
+) -> bool:
+    return (
+        credential.root == prepared.root
+        and credential.database_path == prepared.database_path
+        and credential.schema_version == prepared.schema_version
+        and credential.database_identity.matches(credential.database_path)
+    )
+
+
+@dataclass(slots=True)
+class ValidatedPreparedLibrary:
+    """Freshly revalidated, single-use library commit capability."""
+
+    prepared: PreparedLibrary
+    validation_id: str
+    validated_at_ns: int
+    _consumed: bool = False
+
+    @classmethod
+    def create(cls, prepared: PreparedLibrary) -> "ValidatedPreparedLibrary":
+        credential = prepared.credential
+        if credential is None or not _credential_matches(credential, prepared):
+            raise ValueError("prepared library credential is stale")
+        return cls(prepared, uuid.uuid4().hex, time.time_ns())
+
+    def consume(self) -> PreparedLibrary:
+        if self._consumed:
+            raise RuntimeError("validated prepared library was already consumed")
+        credential = self.prepared.credential
+        if credential is None or not _credential_matches(credential, self.prepared):
+            raise RuntimeError("prepared library changed before commit")
+        self._consumed = True
+        return self.prepared
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.prepared, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,19 +327,76 @@ def _album_dirs(root: Path) -> list[Path]:
     )
 
 
-def _snapshot_albums(root: Path) -> tuple[PreparedAlbum, ...]:
+def _bounded_album_dirs(
+    root: Path,
+    *,
+    deadline_ns: int,
+    limit: int,
+) -> tuple[list[Path], str | None]:
+    """Enumerate album directories without overrunning the snapshot budget."""
+
+    result: list[Path] = []
+    iterator = root.iterdir()
+    while True:
+        if time.perf_counter_ns() >= deadline_ns:
+            return sorted(result, key=lambda item: item.name.casefold()), "time"
+        try:
+            entry = next(iterator)
+        except StopIteration:
+            return sorted(result, key=lambda item: item.name.casefold()), None
+        if time.perf_counter_ns() >= deadline_ns:
+            return sorted(result, key=lambda item: item.name.casefold()), "time"
+        if not entry.is_dir() or entry.name.casefold() in _RESERVED_NAMES:
+            continue
+        if len(result) >= limit:
+            return sorted(result, key=lambda item: item.name.casefold()), "count"
+        result.append(entry)
+
+
+def _snapshot_albums(root: Path) -> tuple[tuple[PreparedAlbum, ...], tuple[str, ...]]:
     result: list[PreparedAlbum] = []
-    for top_level in _album_dirs(root):
-        if len(result) >= MAX_ALBUMS:
-            raise RuntimeError("album_snapshot_limit")
+    warnings: list[str] = []
+    deadline_ns = time.perf_counter_ns() + int(ALBUM_SNAPSHOT_BUDGET_MS * 1_000_000)
+    top_levels, truncated = _bounded_album_dirs(
+        root,
+        deadline_ns=deadline_ns,
+        limit=MAX_ALBUMS,
+    )
+    for top_level in top_levels:
+        if time.perf_counter_ns() >= deadline_ns:
+            if "album_snapshot_truncated_time" not in warnings:
+                warnings.append("album_snapshot_truncated_time")
+            break
         title, has_manifest = _album_description(top_level)
         result.append(PreparedAlbum(str(top_level), 1, title, has_manifest))
-        for child in _album_dirs(top_level):
-            if len(result) >= MAX_ALBUMS:
-                raise RuntimeError("album_snapshot_limit")
+        remaining = MAX_ALBUMS - len(result)
+        if remaining <= 0:
+            if "album_snapshot_truncated_count" not in warnings:
+                warnings.append("album_snapshot_truncated_count")
+            break
+        children, child_truncated = _bounded_album_dirs(
+            top_level,
+            deadline_ns=deadline_ns,
+            limit=remaining,
+        )
+        if child_truncated is not None:
+            warning = f"album_snapshot_truncated_{child_truncated}"
+            if warning not in warnings:
+                warnings.append(warning)
+        for child in children:
+            if time.perf_counter_ns() >= deadline_ns:
+                if "album_snapshot_truncated_time" not in warnings:
+                    warnings.append("album_snapshot_truncated_time")
+                break
             title, has_manifest = _album_description(child)
             result.append(PreparedAlbum(str(child), 2, title, has_manifest))
-    return tuple(result)
+        if warnings:
+            break
+    if truncated is not None:
+        warning = f"album_snapshot_truncated_{truncated}"
+        if warning not in warnings:
+            warnings.append(warning)
+    return tuple(result), tuple(warnings)
 
 
 def _database_snapshot(root: Path) -> tuple[Path, int, bool, tuple[str, ...]]:
@@ -226,13 +419,105 @@ def _database_snapshot(root: Path) -> tuple[Path, int, bool, tuple[str, ...]]:
     return database_path, schema_version, row is not None, warnings
 
 
-def _storage_kind(path: Path, elapsed_ms: float) -> str:
+def _unix_mount_profile(path: Path) -> StorageProfile | None:
+    if sys.platform.startswith("linux"):
+        try:
+            lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        resolved = path.as_posix()
+        matches: list[tuple[int, str, str]] = []
+        for line in lines:
+            parts = line.split()
+            if "-" not in parts or len(parts) < 10:
+                continue
+            separator = parts.index("-")
+            mount_point = parts[4].replace("\\040", " ")
+            filesystem = parts[separator + 1]
+            if resolved == mount_point or resolved.startswith(mount_point.rstrip("/") + "/"):
+                matches.append((len(mount_point), mount_point, filesystem))
+        if not matches:
+            return None
+        _length, mount_point, filesystem = max(matches)
+        network_fs = {"nfs", "nfs4", "cifs", "smb3", "sshfs", "afpfs", "davfs"}
+        if filesystem.casefold() in network_fs:
+            return StorageProfile("network", "slow", f"mount:{filesystem}")
+        removable = mount_point.startswith(("/media/", "/run/media/", "/mnt/"))
+        return StorageProfile(
+            "removable" if removable else "local",
+            "normal",
+            f"mount:{filesystem}",
+            removable,
+        )
+    if sys.platform == "darwin":
+        try:
+            output = subprocess.run(
+                ["/sbin/mount"],
+                capture_output=True,
+                text=True,
+                timeout=0.25,
+                check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            output = ""
+        resolved = path.as_posix()
+        matches: list[tuple[int, str, str]] = []
+        for line in output.splitlines():
+            if " on " not in line or " (" not in line:
+                continue
+            _source, remainder = line.split(" on ", 1)
+            mount_point, options = remainder.split(" (", 1)
+            if resolved == mount_point or resolved.startswith(
+                mount_point.rstrip("/") + "/"
+            ):
+                filesystem = options.split(",", 1)[0].rstrip(")").casefold()
+                matches.append((len(mount_point), mount_point, filesystem))
+        if matches:
+            _length, mount_point, filesystem = max(matches)
+            if filesystem in {"smbfs", "nfs", "afpfs", "webdav"}:
+                return StorageProfile("network", "slow", f"mount:{filesystem}")
+            removable = mount_point.startswith("/Volumes/")
+            return StorageProfile(
+                "removable" if removable else "local",
+                "normal",
+                f"mount:{filesystem}",
+                removable,
+            )
+    return None
+
+
+def _windows_storage_profile(path: Path) -> StorageProfile | None:
+    if os.name != "nt":
+        return None
     raw = os.fspath(path)
-    if os.name == "nt" and raw.startswith(("\\\\", "//")):
-        return "network"
+    if raw.startswith(("\\\\", "//")):
+        return StorageProfile("network", "slow", "windows:unc")
+    try:
+        import ctypes
+
+        root = path.anchor or raw[:3]
+        drive_type = int(ctypes.windll.kernel32.GetDriveTypeW(root))
+    except (AttributeError, OSError, ValueError):
+        return None
+    if drive_type == 4:
+        return StorageProfile("network", "slow", "windows:drive_type")
+    if drive_type == 2:
+        return StorageProfile("removable", "normal", "windows:drive_type", True)
+    if drive_type == 3:
+        return StorageProfile("local", "normal", "windows:drive_type")
+    return StorageProfile("unknown", "normal", "windows:drive_type")
+
+
+def _storage_profile(path: Path, elapsed_ms: float) -> StorageProfile:
+    windows_profile = _windows_storage_profile(path)
+    if windows_profile is not None:
+        return windows_profile
+    mount_profile = _unix_mount_profile(path)
+    if mount_profile is not None:
+        return mount_profile
     if elapsed_ms >= 500:
-        return "slow"
-    return "local"
+        return StorageProfile("unknown", "slow", "elapsed")
+    return StorageProfile("local", "normal", "elapsed")
 
 
 def probe_library(request: LibraryProbeRequest) -> PreparedLibrary:
@@ -244,18 +529,28 @@ def probe_library(request: LibraryProbeRequest) -> PreparedLibrary:
     root = Path(request.path).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(f"Library path is not a directory: {request.path}")
-    albums = _snapshot_albums(root)
     database_path, schema_version, scan_complete, warnings = _database_snapshot(root)
+    albums, snapshot_warnings = _snapshot_albums(root)
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
+    storage_profile = _storage_profile(root, elapsed_ms)
+    credential = PreparedLibraryCredential(
+        root=root,
+        database_path=database_path,
+        schema_version=schema_version,
+        database_identity=FileIdentity.capture(database_path),
+        prepared_at_ns=time.time_ns(),
+    )
     return PreparedLibrary(
         request_id=request.request_id,
         root=root,
         database_path=database_path,
         schema_version=schema_version,
         albums=albums,
-        storage_kind=_storage_kind(root, elapsed_ms),
+        storage_kind=storage_profile.kind,
         scan_complete=scan_complete,
-        warnings=warnings,
+        warnings=tuple((*warnings, *snapshot_warnings)),
+        storage_profile=storage_profile,
+        credential=credential,
     )
 
 
@@ -288,11 +583,10 @@ class LibraryProbeController(QObject):
         self._stdout.clear()
         self._stderr.clear()
         payload = json.dumps(asdict(request), ensure_ascii=False)
-        if getattr(sys, "frozen", False) or "__compiled__" in globals():
-            arguments = ["--startup-library-probe", payload]
-        else:
-            arguments = ["-m", "iPhoto.bootstrap.library_probe", payload]
-        process.start(sys.executable, arguments)
+        program, arguments = _probe_process_command()
+        process.start(program, arguments)
+        process.write(payload.encode("utf-8"))
+        process.closeWriteChannel()
         self._timeout.start(request.timeout_ms)
 
     def cancel(self) -> None:
@@ -452,7 +746,12 @@ class LibraryProbeController(QObject):
         except Exception:  # noqa: BLE001 - child-process protocol boundary
             self.failed.emit(_failure(request.request_id, "invalid_protocol"))
             return
-        self.ready.emit(prepared)
+        try:
+            validated = ValidatedPreparedLibrary.create(prepared)
+        except ValueError:
+            self.failed.emit(_failure(request.request_id, "root_mismatch"))
+            return
+        self.ready.emit(validated)
 
     def _on_process_finished(
         self, exit_code: int, status: QProcess.ExitStatus
@@ -460,6 +759,24 @@ class LibraryProbeController(QObject):
         process = self.sender()
         if isinstance(process, QProcess):
             self._on_finished(process, exit_code, status)
+
+
+def _probe_process_command() -> tuple[str, list[str]]:
+    """Return a helper command that survives renamed packaged executables.
+
+    Nuitka does not guarantee that ``sys.executable`` names the executable in
+    the final application bundle.  Qt already knows the path used to launch
+    the current application, so packaged builds must use that value when they
+    start their helper copy.
+    """
+
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        application_path = os.fspath(QCoreApplication.applicationFilePath())
+        return application_path or sys.executable, [
+            "--startup-library-probe",
+            "--stdin",
+        ]
+    return sys.executable, ["-m", "iPhoto.bootstrap.library_probe", "--stdin"]
 
 
 def _exception_failure(request_id: str, exc: Exception) -> LibraryProbeFailure:
@@ -492,7 +809,13 @@ def _main(arguments: list[str]) -> int:
     request_id = "unknown"
     request_path = ""
     try:
-        payload = json.loads(arguments[0])
+        if arguments and arguments[0] == "--stdin":
+            raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+            if len(raw) > MAX_REQUEST_BYTES:
+                raise ValueError("probe request too large")
+            payload = json.loads(raw.decode("utf-8"))
+        else:
+            payload = json.loads(arguments[0])
         request = LibraryProbeRequest(**payload)
         request_id = request.request_id
         request_path = request.path
@@ -521,7 +844,10 @@ if __name__ == "__main__":  # pragma: no cover - exercised through QProcess
 
 
 __all__ = [
+    "ALBUM_SNAPSHOT_BUDGET_MS",
+    "FileIdentity",
     "MAX_ALBUMS",
+    "MAX_REQUEST_BYTES",
     "MAX_STDERR_BYTES",
     "MAX_STDOUT_BYTES",
     "PROBE_PROTOCOL_VERSION",
@@ -529,6 +855,9 @@ __all__ = [
     "LibraryProbeFailure",
     "LibraryProbeRequest",
     "PreparedAlbum",
+    "PreparedLibraryCredential",
     "PreparedLibrary",
+    "StorageProfile",
+    "ValidatedPreparedLibrary",
     "probe_library",
 ]

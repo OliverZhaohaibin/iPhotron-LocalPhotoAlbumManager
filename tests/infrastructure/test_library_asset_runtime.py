@@ -21,6 +21,8 @@ def test_unbound_runtime_does_not_create_home_repository(tmp_path, monkeypatch) 
 
     assert isinstance(runtime.repository, UnboundAssetRepository)
     assert not (tmp_path / ".iPhoto" / "global_index.db").exists()
+    assert not (tmp_path / ".iPhoto" / "cache").exists()
+    assert runtime.thumbnail_service._disk_cache_path is None
     runtime.shutdown()
 
 

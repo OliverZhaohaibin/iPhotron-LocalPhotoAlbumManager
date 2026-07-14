@@ -898,7 +898,7 @@ class TestVideoArea:
 
         va.load_video(Path("/fake/new.mov"))
 
-        mock_stop.assert_called_once_with()
+        mock_stop.assert_not_called()
         assert mock_set_source.call_count == 2
         assert mock_set_source.call_args_list[0].args[0].isEmpty()
         assert mock_set_source.call_args_list[1].args[0].toLocalFile() == "/fake/new.mov"
@@ -924,17 +924,85 @@ class TestVideoArea:
         va = VideoArea()
         mock_stop = mocker.patch.object(va._player, "stop")
         mock_set_source = mocker.patch.object(va._player, "setSource")
+        mock_set_output = mocker.patch.object(va._player, "setVideoOutput")
         mock_clear = mocker.patch.object(va._renderer, "clear_frame")
 
         va.stop()
 
-        mock_stop.assert_called_once()
+        mock_stop.assert_not_called()
         # Source should be cleared (empty QUrl)
         mock_set_source.assert_called_once()
         called_url = mock_set_source.call_args[0][0]
         assert called_url.isEmpty()
+        mock_set_output.assert_called_once_with(None)
         # Renderer frame should be cleared
         mock_clear.assert_called_once()
+
+    def test_stop_releases_frames_and_detaches_sink_before_source_clear(self, qapp, mocker):
+        """No backend teardown API may run while downstream frames are retained."""
+        va = VideoArea()
+        va._pending_video_frame = mocker.Mock()
+        va._last_presented_video_frame = mocker.Mock()
+        events: list[str] = []
+
+        mocker.patch.object(
+            va._renderer,
+            "clear_frame",
+            side_effect=lambda: events.append("renderer"),
+        )
+        mocker.patch.object(va._edit_viewer, "clear", side_effect=lambda: events.append("edit"))
+
+        def detach_output(output):
+            assert output is None
+            assert va._accept_video_frames is False
+            assert va._pending_video_frame is None
+            assert va._last_presented_video_frame is None
+            events.append("detach")
+
+        def clear_source(url):
+            assert url.isEmpty()
+            assert va._video_output_attached is False
+            events.append("source")
+
+        mocker.patch.object(va._player, "setVideoOutput", side_effect=detach_output)
+        mocker.patch.object(va._player, "setSource", side_effect=clear_source)
+        mock_stop = mocker.patch.object(va._player, "stop")
+
+        va.stop()
+
+        assert events[:4] == ["renderer", "edit", "detach", "source"]
+        mock_stop.assert_not_called()
+
+    def test_load_video_rebinds_sink_after_stop(self, qapp, mocker):
+        """A video loaded after a full unload should receive frames again."""
+        va = VideoArea()
+        mock_set_output = mocker.patch.object(va._player, "setVideoOutput")
+        mock_set_source = mocker.patch.object(va._player, "setSource")
+        mocker.patch.object(va._player, "setPosition")
+        mocker.patch.object(va._renderer, "set_container_rotation")
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
+            return_value=(0, 0, 0),
+        )
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.get_linux_180_prerotate_hint",
+            return_value=False,
+        )
+
+        va.stop()
+        stopped_generation = va._media_generation
+        va.load_video(Path("/fake/new.mp4"))
+
+        assert mock_set_output.call_args_list == [call(None), call(va._video_sink)]
+        assert mock_set_source.call_count == 2
+        assert mock_set_source.call_args_list[0].args[0].isEmpty()
+        assert (
+            mock_set_source.call_args_list[1].args[0].toLocalFile()
+            == "/fake/new.mp4"
+        )
+        assert va._media_generation == stopped_generation + 1
+        assert va._video_output_attached is True
+        assert va._accept_video_frames is True
 
     def test_adjusted_preview_uses_direct_video_frame_path(self, qapp, mocker):
         """Adjusted video preview should bypass QImage conversion."""
@@ -1262,6 +1330,7 @@ def test_video_area_coalesces_queued_frames_onto_gui_loop(qapp, mocker):
     """Queued video-sink frames should present only the latest frame once."""
 
     va = VideoArea()
+    va._accept_video_frames = True
     first = mocker.Mock()
     first.isValid.return_value = True
     second = mocker.Mock()
@@ -1285,6 +1354,46 @@ def test_video_area_coalesces_queued_frames_onto_gui_loop(qapp, mocker):
     mock_present.assert_called_once()
     assert mock_present.call_args[0][0] is second
     assert va._video_frame_dispatch_pending is False
+
+
+def test_video_area_drops_frames_from_an_old_generation(qapp, mocker):
+    """A queued sink delivery from an unloaded source must not enter pending state."""
+
+    va = VideoArea()
+    va._media_generation = 4
+    va._accept_video_frames = True
+    frame = mocker.Mock()
+    frame.isValid.return_value = True
+    mock_schedule = mocker.patch("iPhoto.gui.ui.widgets.video_area.QTimer.singleShot")
+
+    va._queue_video_frame(frame, generation=3)
+
+    assert va._pending_video_frame is None
+    assert va._video_frame_dispatch_pending is False
+    mock_schedule.assert_not_called()
+
+
+def test_old_flush_cannot_clear_new_generation_pending_frame(qapp, mocker):
+    """A delayed old callback must leave the new source's coalesced frame intact."""
+
+    va = VideoArea()
+    va._media_generation = 8
+    va._accept_video_frames = True
+    new_frame = mocker.Mock()
+    new_frame.isValid.return_value = True
+    va._pending_video_frame = new_frame
+    va._pending_video_frame_generation = 8
+    va._video_frame_dispatch_pending = True
+    va._video_frame_dispatch_generation = 8
+    mock_present = mocker.patch.object(va, "_present_video_frame")
+
+    va._flush_pending_video_frame(7)
+
+    assert va._pending_video_frame is new_frame
+    assert va._pending_video_frame_generation == 8
+    assert va._video_frame_dispatch_pending is True
+    assert va._video_frame_dispatch_generation == 8
+    mock_present.assert_not_called()
 
 
 def test_texture_manager_uses_qimage_fallback_for_linux_nv12_frames(qapp, mocker, monkeypatch):

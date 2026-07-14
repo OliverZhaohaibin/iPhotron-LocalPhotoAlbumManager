@@ -166,6 +166,7 @@ class PlaybackCoordinator(QObject):
         self._info_panel_metadata_attempted: set[str] = set()
         self._play_profile_started_at: float | None = None
         self._play_profile_row: int | None = None
+        self._requested_play_row: int | None = None
         self._manual_face_add_inflight = False
         self._manual_face_inflight_asset_id: str | None = None
         self._manual_face_pending_merge_target: str | None = None
@@ -467,6 +468,7 @@ class PlaybackCoordinator(QObject):
     def play_asset(self, row: int) -> None:
         if row < 0 or row >= self._asset_model.rowCount():
             return
+        self._requested_play_row = row
         self._play_profile_started_at = time.perf_counter()
         self._play_profile_row = row
         if not self._play_debounce.isActive() and self._pending_play_row is None:
@@ -493,6 +495,7 @@ class PlaybackCoordinator(QObject):
 
     def _clear_play_request_state(self) -> None:
         self._pending_play_row = None
+        self._requested_play_row = None
         self._clear_play_profile()
         play_debounce = getattr(self, "_play_debounce", None)
         if play_debounce is not None:
@@ -526,6 +529,8 @@ class PlaybackCoordinator(QObject):
         self._hide_face_name_overlay(clear_annotations=False)
 
     def _handle_presentation_changed(self, presentation: DetailPresentation) -> None:
+        if getattr(self, "_requested_play_row", None) == presentation.row:
+            self._requested_play_row = None
         if (
             getattr(self, "_play_profile_started_at", None) is not None
             and getattr(self, "_play_profile_row", None) == presentation.row
@@ -1225,10 +1230,34 @@ class PlaybackCoordinator(QObject):
         return getattr(library_manager, "edit_service", None)
 
     def select_next(self) -> None:
-        self._detail_vm.next()
+        self._request_relative_asset(1)
 
     def select_previous(self) -> None:
-        self._detail_vm.previous()
+        self._request_relative_asset(-1)
+
+    def _request_relative_asset(self, delta: int) -> None:
+        """Coalesce relative navigation without losing individual steps."""
+
+        row_count = self._asset_model.rowCount()
+        if row_count <= 0 or delta == 0:
+            return
+        pending_row = self._pending_play_row
+        requested_row = getattr(self, "_requested_play_row", None)
+        if pending_row is not None:
+            base_row = pending_row
+        elif requested_row is not None:
+            base_row = requested_row
+        else:
+            base_row = self.current_row()
+        if base_row < 0:
+            if delta < 0:
+                return
+            target_row = 0
+        else:
+            target_row = max(0, min(row_count - 1, base_row + int(delta)))
+        if target_row == base_row:
+            return
+        self.play_asset(target_row)
 
     def replay_live_photo(self) -> None:
         presentation = self._current_presentation

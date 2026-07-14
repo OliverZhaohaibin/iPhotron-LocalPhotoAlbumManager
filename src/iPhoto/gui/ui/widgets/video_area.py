@@ -159,8 +159,14 @@ class VideoArea(QWidget):
         self._end_hold_display_ms: int | None = None
         self._transparent_preview_enabled = False
         self._pending_video_frame: QVideoFrame | None = None
+        self._pending_video_frame_generation: int | None = None
         self._last_presented_video_frame: QVideoFrame | None = None
         self._video_frame_dispatch_pending = False
+        self._video_frame_dispatch_generation: int | None = None
+        self._media_generation = 0
+        self._accept_video_frames = False
+        self._video_output_attached = False
+        self._video_frame_handler = None
         self._diag_queued_frame_count = 0
         self._diag_presented_frame_count = 0
         self._profile_load_started_at: float | None = None
@@ -186,10 +192,8 @@ class VideoArea(QWidget):
         # Route decoded frames through QVideoSink → our custom renderer.
         self._video_sink = QVideoSink(self)
         self._player.setVideoOutput(self._video_sink)
-        self._video_sink.videoFrameChanged.connect(
-            self._queue_video_frame,
-            Qt.ConnectionType.QueuedConnection,
-        )
+        self._video_output_attached = True
+        self._bind_video_sink_generation(self._media_generation)
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
@@ -647,27 +651,26 @@ class VideoArea(QWidget):
         )
         prev_source = self._current_source
         prev_duration_ms = self._current_duration_ms
+        self._begin_media_generation()
+        self._detach_video_output()
         if sys.platform == "darwin" and prev_source is not None:
             # AVFoundation can keep the previous audio session alive unless
             # the source is cleared before loading another clip.
-            self._player.stop()
             self._player.setSource(QUrl())
+        self._bind_video_sink_generation(self._media_generation)
+        self._attach_video_output()
+        self._accept_video_frames = True
         self._profile_load_started_at = load_started
         self._profile_load_source = path
         self._profile_first_frame_logged = False
         self._current_source = path
         self._current_adjustments = dict(adjustments or {})
-        self._pending_video_frame = None
-        self._video_frame_dispatch_pending = False
-        self._last_presented_video_frame = None
         if adjusted_preview is not None:
             self.set_adjusted_preview_enabled(adjusted_preview)
         if self._adjusted_preview_enabled:
             self._adjusted_first_frame_pending = True
         self._edit_viewer.set_adjustments(self._current_adjustments)
         self._edit_viewer.set_video_source_rotation(0)
-        self._edit_viewer.clear()
-        self._renderer.clear_frame()
         native_rotate90_steps = 0
         if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
             native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
@@ -832,21 +835,30 @@ class VideoArea(QWidget):
         rendered video frame.
         """
         diag_enabled = _startup_hang_diag_enabled()
-        started_at = time.perf_counter() if diag_enabled else 0.0
+        started_at = time.perf_counter()
         if diag_enabled:
             _log.info("VideoArea.stop: begin source=%s", self._current_source)
-        self._player.stop()
+
+        phase_started = time.perf_counter()
+        self._begin_media_generation()
+        self._log_stop_phase("frame_quiesce", phase_started, diag_enabled)
+
+        phase_started = time.perf_counter()
+        self._detach_video_output()
+        self._log_stop_phase("sink_detach", phase_started, diag_enabled)
+
+        # A null source already stops playback and asks the backend to release
+        # all media I/O.  Calling player.stop() first is redundant and, on the
+        # Windows backend, can deadlock while Python still owns decoded frame
+        # wrappers.  All downstream frame references were dropped above.
+        phase_started = time.perf_counter()
         self._player.setSource(QUrl())
-        self._resize_refit_timer.stop()
-        self._resize_refit_pending = False
-        self._pending_video_frame = None
-        self._last_presented_video_frame = None
-        self._video_frame_dispatch_pending = False
-        self._renderer.clear_frame()
+        self._log_stop_phase("source_clear", phase_started, diag_enabled)
+
+        phase_started = time.perf_counter()
         self._renderer.set_user_rotate90_steps(0)
         self._renderer.set_container_rotation(0, 0, 0)
         self._renderer.set_linux_180_hint(False)
-        self._edit_viewer.clear()
         self._edit_viewer.set_adjustments({})
         self._edit_viewer.set_video_source_rotation(0)
         self._current_adjustments = {}
@@ -856,11 +868,6 @@ class VideoArea(QWidget):
         self._container_raw_w = 0
         self._container_raw_h = 0
         self._container_linux_180_hint = False
-        if diag_enabled:
-            _log.info(
-                "VideoArea.stop: end elapsed_ms=%.1f",
-                (time.perf_counter() - started_at) * 1000.0,
-            )
         self._adjusted_first_frame_pending = False
         self._profile_load_started_at = None
         self._profile_load_source = None
@@ -870,10 +877,79 @@ class VideoArea(QWidget):
         self._suppress_trim_pause = False
         self._restart_from_trim_in_on_play = False
         self._end_hold_display_ms = None
+        self._log_stop_phase("state_reset", phase_started, diag_enabled)
+        if diag_enabled:
+            _log.info(
+                "VideoArea.stop: end elapsed_ms=%.1f",
+                (time.perf_counter() - started_at) * 1000.0,
+            )
 
-    def _queue_video_frame(self, frame: "QVideoFrame") -> None:
+    def _begin_media_generation(self) -> int:
+        """Invalidate queued frames and release every downstream frame owner."""
+
+        self._media_generation += 1
+        self._accept_video_frames = False
+        self._resize_refit_timer.stop()
+        self._resize_refit_pending = False
+        self._pending_video_frame = None
+        self._pending_video_frame_generation = None
+        self._last_presented_video_frame = None
+        self._video_frame_dispatch_pending = False
+        self._video_frame_dispatch_generation = None
+        self._renderer.clear_frame()
+        self._edit_viewer.clear()
+        return self._media_generation
+
+    def _bind_video_sink_generation(self, generation: int) -> None:
+        """Bind sink delivery to one media generation so old queued calls expire."""
+
+        previous = self._video_frame_handler
+        if previous is not None:
+            try:
+                self._video_sink.videoFrameChanged.disconnect(previous)
+            except (RuntimeError, TypeError):
+                pass
+
+        def _handle_frame(frame, *, bound_generation: int = generation) -> None:
+            self._queue_video_frame(frame, generation=bound_generation)
+
+        self._video_frame_handler = _handle_frame
+        self._video_sink.videoFrameChanged.connect(
+            _handle_frame,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def _attach_video_output(self) -> None:
+        if self._video_output_attached:
+            return
+        self._player.setVideoOutput(self._video_sink)
+        self._video_output_attached = True
+
+    def _detach_video_output(self) -> None:
+        if not self._video_output_attached:
+            return
+        self._player.setVideoOutput(None)
+        self._video_output_attached = False
+
+    @staticmethod
+    def _log_stop_phase(name: str, started_at: float, diag_enabled: bool) -> None:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        if diag_enabled:
+            _log.info("VideoArea.stop: phase=%s elapsed_ms=%.1f", name, elapsed_ms)
+        if elapsed_ms > 100.0:
+            _log.warning("VideoArea.stop phase %s took %.1fms", name, elapsed_ms)
+
+    def _queue_video_frame(
+        self,
+        frame: "QVideoFrame",
+        *,
+        generation: int | None = None,
+    ) -> None:
         """Coalesce video-sink frames back onto the GUI event loop."""
 
+        frame_generation = self._media_generation if generation is None else generation
+        if not self._accept_video_frames or frame_generation != self._media_generation:
+            return
         if frame is None or not frame.isValid():
             return
         queued_frame = frame
@@ -893,21 +969,43 @@ class VideoArea(QWidget):
                 self._frame_summary(queued_frame),
             )
         self._pending_video_frame = queued_frame
-        if self._video_frame_dispatch_pending:
+        self._pending_video_frame_generation = frame_generation
+        if (
+            self._video_frame_dispatch_pending
+            and self._video_frame_dispatch_generation == frame_generation
+        ):
             return
         self._video_frame_dispatch_pending = True
+        self._video_frame_dispatch_generation = frame_generation
         # Keep latest-frame coalescing by deferring the flush to the next GUI
         # turn. The queued frame wrapper is copied above so Linux backends can
         # still retain short-lived zero-copy handles until presentation.
-        QTimer.singleShot(0, self._flush_pending_video_frame)
+        QTimer.singleShot(
+            0,
+            lambda generation=frame_generation: self._flush_pending_video_frame(generation),
+        )
 
-    def _flush_pending_video_frame(self) -> None:
+    def _flush_pending_video_frame(self, generation: int | None = None) -> None:
         """Present the latest queued frame on the active preview surface."""
 
+        frame_generation = self._media_generation if generation is None else generation
+        if (
+            frame_generation != self._media_generation
+            or not self._accept_video_frames
+            or self._video_frame_dispatch_generation != frame_generation
+        ):
+            return
         self._video_frame_dispatch_pending = False
+        self._video_frame_dispatch_generation = None
         frame = self._pending_video_frame
+        pending_generation = self._pending_video_frame_generation
         self._pending_video_frame = None
-        if frame is None or not frame.isValid():
+        self._pending_video_frame_generation = None
+        if (
+            pending_generation != frame_generation
+            or frame is None
+            or not frame.isValid()
+        ):
             return
         if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_queued_frame_count):
             _log.warning(

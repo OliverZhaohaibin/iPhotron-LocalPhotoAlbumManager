@@ -102,6 +102,104 @@ def test_execute_pending_play_flushes_row_and_restarts_cooldown() -> None:
     coordinator._play_debounce.start.assert_called_once_with()
 
 
+def test_relative_navigation_accumulates_from_pending_target() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=8))
+    coordinator._pending_play_row = 4
+    coordinator.current_row = Mock(return_value=2)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator.select_next(coordinator)
+
+    coordinator.play_asset.assert_called_once_with(5)
+    coordinator.current_row.assert_not_called()
+
+
+def test_rapid_relative_navigation_coalesces_to_the_accumulated_target() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=8))
+    coordinator._pending_play_row = None
+    coordinator.current_row = Mock(return_value=2)
+    coordinator._play_debounce = Mock(isActive=Mock(return_value=True), start=Mock())
+    coordinator._dispatch_play_row = Mock()
+    coordinator._play_profile_started_at = None
+    coordinator._play_profile_row = None
+
+    PlaybackCoordinator.select_next(coordinator)
+    PlaybackCoordinator.select_next(coordinator)
+    PlaybackCoordinator.select_previous(coordinator)
+
+    assert coordinator._pending_play_row == 3
+    coordinator._dispatch_play_row.assert_not_called()
+
+
+def test_relative_navigation_starts_at_first_row_without_a_current_selection() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator._pending_play_row = None
+    coordinator._requested_play_row = None
+    coordinator.current_row = Mock(return_value=-1)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator.select_next(coordinator)
+
+    coordinator.play_asset.assert_called_once_with(0)
+
+
+def test_rapid_navigation_accumulates_while_immediate_target_is_loading() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=8))
+    coordinator._pending_play_row = None
+    coordinator._requested_play_row = None
+    coordinator.current_row = Mock(return_value=2)
+    coordinator._play_debounce = Mock(
+        isActive=Mock(side_effect=[False, True, True]),
+        start=Mock(),
+    )
+    coordinator._dispatch_play_row = Mock()
+    coordinator._play_profile_started_at = None
+    coordinator._play_profile_row = None
+
+    PlaybackCoordinator.select_next(coordinator)
+    PlaybackCoordinator.select_next(coordinator)
+
+    coordinator._dispatch_play_row.assert_called_once_with(3, reason="immediate")
+    assert coordinator._pending_play_row == 4
+    assert coordinator._requested_play_row == 4
+
+
+@pytest.mark.parametrize(
+    ("current_row", "delta"),
+    [
+        (-1, -1),
+        (0, -1),
+        (4, 1),
+    ],
+)
+def test_relative_navigation_stops_at_model_boundaries(current_row: int, delta: int) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator._pending_play_row = None
+    coordinator.current_row = Mock(return_value=current_row)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator._request_relative_asset(coordinator, delta)
+
+    coordinator.play_asset.assert_not_called()
+
+
+def test_relative_navigation_preserves_single_step_behavior() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator._pending_play_row = None
+    coordinator.current_row = Mock(return_value=3)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator.select_previous(coordinator)
+
+    coordinator.play_asset.assert_called_once_with(2)
+
+
 def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._current_presentation = None

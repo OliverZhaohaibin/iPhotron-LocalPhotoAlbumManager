@@ -8,7 +8,16 @@ import weakref
 from ctypes import CFUNCTYPE, c_char_p, c_double, c_ulong, c_void_p, cast, cdll
 from typing import Any
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, QPointF, QRectF, Qt
+from PySide6.QtCore import (
+    QAbstractNativeEventFilter,
+    QEvent,
+    QObject,
+    QPointF,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QCursor, QInputDevice, QNativeGestureEvent, QPointingDevice
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -16,6 +25,8 @@ _MIN_GESTURE_ZOOM_FACTOR = 0.85
 _MAX_GESTURE_ZOOM_FACTOR = 1.18
 _MAC_GENERIC_NS_EVENT = b"mac_generic_NSEvent"
 _NS_EVENT_TYPE_MAGNIFY = 30
+_TRACKPAD_PAN_FRAME_INTERVAL_MS = 16
+_TRACKPAD_PAN_IDLE_TIMEOUT_MS = 150
 
 
 def _event_device_type(event: Any) -> tuple[object | None, bool]:
@@ -56,18 +67,32 @@ def is_trackpad_wheel_event(event: Any) -> bool:
 
 
 def pan_delta_from_wheel(event: Any) -> QPointF | None:
-    """Return the direct-manipulation pixel delta for a touchpad wheel event."""
+    """Return a direct-manipulation delta for a touchpad wheel event.
+
+    ``pixelDelta`` is preferred when the platform supplies it.  Qt guarantees
+    only ``angleDelta`` across platforms, so convert its eighths-of-a-degree
+    units to a modest logical-pixel fallback instead of swallowing the event.
+    """
 
     if not is_trackpad_wheel_event(event):
         return None
     pixel_delta_getter = getattr(event, "pixelDelta", None)
-    if not callable(pixel_delta_getter):
-        return QPointF()
-    try:
-        delta = pixel_delta_getter()
-        return QPointF(float(delta.x()), float(delta.y()))
-    except (RuntimeError, TypeError, AttributeError):
-        return QPointF()
+    if callable(pixel_delta_getter):
+        try:
+            delta = pixel_delta_getter()
+            if not delta.isNull():
+                return QPointF(float(delta.x()), float(delta.y()))
+        except (RuntimeError, TypeError, AttributeError):
+            pass
+
+    angle_delta_getter = getattr(event, "angleDelta", None)
+    if callable(angle_delta_getter):
+        try:
+            delta = angle_delta_getter()
+            return QPointF(float(delta.x()) / 8.0, float(delta.y()) / 8.0)
+        except (RuntimeError, TypeError, AttributeError):
+            pass
+    return QPointF()
 
 
 def is_scroll_end_event(event: Any) -> bool:
@@ -80,6 +105,83 @@ def is_scroll_end_event(event: Any) -> bool:
         return phase_getter() == Qt.ScrollPhase.ScrollEnd
     except RuntimeError:
         return False
+
+
+class TrackpadPanAccumulator(QObject):
+    """Batch high-frequency pan deltas and finish after an idle gap.
+
+    Qt currently reports phased wheel events only on macOS.  The idle timer is
+    therefore the portable end-of-scroll signal, while an explicit
+    ``ScrollEnd`` can still call :meth:`finish` immediately.
+    """
+
+    delta_ready = Signal(QPointF)
+    finished = Signal()
+
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        frame_interval_ms: int = _TRACKPAD_PAN_FRAME_INTERVAL_MS,
+        idle_timeout_ms: int = _TRACKPAD_PAN_IDLE_TIMEOUT_MS,
+    ) -> None:
+        super().__init__(parent)
+        self._pending_delta = QPointF()
+        self._active = False
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setSingleShot(True)
+        self._frame_timer.setInterval(max(0, int(frame_interval_ms)))
+        self._frame_timer.timeout.connect(self.flush)
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.setInterval(max(1, int(idle_timeout_ms)))
+        self._idle_timer.timeout.connect(self.finish)
+
+    def queue(self, delta: QPointF) -> None:
+        """Add a non-zero input delta and restart the idle deadline."""
+
+        candidate = QPointF(delta)
+        if candidate.isNull():
+            return
+        self._pending_delta += candidate
+        self._active = True
+        if not self._frame_timer.isActive():
+            self._frame_timer.start()
+        self._idle_timer.start()
+
+    def flush(self) -> None:
+        """Emit the accumulated delta without ending the current gesture."""
+
+        delta = QPointF(self._pending_delta)
+        self._pending_delta = QPointF()
+        if not delta.isNull():
+            self.delta_ready.emit(delta)
+
+    def finish(self) -> None:
+        """Flush pending motion and emit one completion for an active gesture."""
+
+        self._stop_timers()
+        self.flush()
+        if not self._active:
+            return
+        self._active = False
+        self.finished.emit()
+
+    def cancel(self, *, flush: bool = False) -> None:
+        """Stop timers during teardown without emitting gesture completion."""
+
+        self._stop_timers()
+        if flush:
+            self.flush()
+        else:
+            self._pending_delta = QPointF()
+        self._active = False
+
+    def _stop_timers(self) -> None:
+        if self._frame_timer.isActive():
+            self._frame_timer.stop()
+        if self._idle_timer.isActive():
+            self._idle_timer.stop()
 
 
 def event_position(event: Any) -> QPointF:
@@ -470,6 +572,7 @@ def zoom_factor_from_native_gesture(event: Any) -> float | None:
 
 
 __all__ = [
+    "TrackpadPanAccumulator",
     "event_global_position",
     "event_position",
     "gesture_global_position",

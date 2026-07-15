@@ -39,6 +39,7 @@ from maps.map_widget.drag_cursor import DragCursorManager
 from maps.map_widget.map_renderer import CityAnnotation
 from maps.tile_parser import TileLoadingError
 from maps.touchpad_input import (
+    TrackpadPanAccumulator,
     event_position,
     is_scroll_end_event,
     is_trackpad_wheel_event,
@@ -480,11 +481,9 @@ class NativeOsmAndWidget(QWidget):
         self._deferred_view_sync_timer.setSingleShot(True)
         self._deferred_view_sync_timer.setInterval(0)
         self._deferred_view_sync_timer.timeout.connect(self._emit_view_change)
-        self._pending_trackpad_pan = QPointF()
-        self._trackpad_pan_timer = QTimer(self)
-        self._trackpad_pan_timer.setSingleShot(True)
-        self._trackpad_pan_timer.setInterval(16)
-        self._trackpad_pan_timer.timeout.connect(self._flush_pending_trackpad_pan)
+        self._trackpad_pan = TrackpadPanAccumulator(self)
+        self._trackpad_pan.delta_ready.connect(self._apply_trackpad_pan)
+        self._trackpad_pan.finished.connect(self.panFinished.emit)
         self._sync_native_widget_geometry()
         self._emit_view_change()
 
@@ -555,9 +554,7 @@ class NativeOsmAndWidget(QWidget):
             self._state_timer.stop()
         if self._deferred_view_sync_timer.isActive():
             self._deferred_view_sync_timer.stop()
-        if self._trackpad_pan_timer.isActive():
-            self._trackpad_pan_timer.stop()
-        self._pending_trackpad_pan = QPointF()
+        self._trackpad_pan.cancel()
         self._reset_drag_cursor()
         self._bridge_dragging = False
         if hasattr(self, "_native_widget") and self._native_widget is not None:
@@ -664,11 +661,11 @@ class NativeOsmAndWidget(QWidget):
                     event.accept()
                     return True
             if event_type == QEvent.Type.Wheel and is_trackpad_wheel_event(event):
-                delta = pan_delta_from_wheel(event) or QPointF()
-                if not delta.isNull():
-                    self._queue_trackpad_pan(delta)
+                delta = pan_delta_from_wheel(event)
+                if delta is not None and not delta.isNull():
+                    self._trackpad_pan.queue(delta)
                 if is_scroll_end_event(event):
-                    self._finish_trackpad_pan()
+                    self._trackpad_pan.finish()
                 event.accept()
                 return True
             if event_type == QEvent.Type.NativeGesture:
@@ -706,22 +703,8 @@ class NativeOsmAndWidget(QWidget):
 
         return super().eventFilter(watched, event)
 
-    def _queue_trackpad_pan(self, delta: QPointF) -> None:
-        self._pending_trackpad_pan = self._pending_trackpad_pan + QPointF(delta)
-        if not self._trackpad_pan_timer.isActive():
-            self._trackpad_pan_timer.start()
-
-    def _flush_pending_trackpad_pan(self) -> None:
-        delta = QPointF(self._pending_trackpad_pan)
-        self._pending_trackpad_pan = QPointF()
-        if not delta.isNull():
-            self.pan_by_pixels(delta.x(), delta.y())
-
-    def _finish_trackpad_pan(self) -> None:
-        if self._trackpad_pan_timer.isActive():
-            self._trackpad_pan_timer.stop()
-        self._flush_pending_trackpad_pan()
-        self.panFinished.emit()
+    def _apply_trackpad_pan(self, delta: QPointF) -> None:
+        self.pan_by_pixels(delta.x(), delta.y())
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

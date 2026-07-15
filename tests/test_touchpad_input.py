@@ -3,10 +3,12 @@ from __future__ import annotations
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QInputDevice
+from PySide6.QtTest import QTest
 
 from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
 from maps.map_widget.input_handler import InputHandler
 from maps.touchpad_input import (
+    TrackpadPanAccumulator,
     event_position,
     is_scroll_end_event,
     is_trackpad_wheel_event,
@@ -132,6 +134,36 @@ def test_touchpad_detection_prefers_real_device_type() -> None:
     assert pan_delta_from_wheel(touchpad) == QPointF(8.0, -6.0)
 
 
+def test_touchpad_pan_uses_angle_delta_when_pixel_delta_is_unavailable() -> None:
+    event = _WheelEvent(
+        angle=QPoint(16, -120),
+        device_type=QInputDevice.DeviceType.TouchPad,
+    )
+
+    assert pan_delta_from_wheel(event) == QPointF(2.0, -15.0)
+
+
+def test_trackpad_pan_accumulator_finishes_after_idle(qapp) -> None:
+    accumulator = TrackpadPanAccumulator(
+        frame_interval_ms=1,
+        idle_timeout_ms=5,
+    )
+    deltas: list[QPointF] = []
+    finished: list[bool] = []
+    accumulator.delta_ready.connect(lambda delta: deltas.append(QPointF(delta)))
+    accumulator.finished.connect(lambda: finished.append(True))
+
+    accumulator.queue(QPointF(2.0, 3.0))
+    accumulator.queue(QPointF(4.0, -1.0))
+    QTest.qWait(20)
+
+    assert deltas == [QPointF(6.0, 2.0)]
+    assert finished == [True]
+
+    accumulator.finish()
+    assert finished == [True]
+
+
 def test_touchpad_phases_and_native_zoom_factor() -> None:
     end = _WheelEvent(
         phase=Qt.ScrollPhase.ScrollEnd,
@@ -178,6 +210,14 @@ def test_map_input_separates_touchpad_pan_mouse_wheel_and_pinch() -> None:
     )
     assert handler.handle_wheel_event(pan_event, 4.0)
     assert pans == [QPointF(7.0, -9.0)]
+    assert zooms == []
+
+    angle_only_pan = _WheelEvent(
+        angle=QPoint(0, 80),
+        device_type=QInputDevice.DeviceType.TouchPad,
+    )
+    assert handler.handle_wheel_event(angle_only_pan, 4.0)
+    assert pans[-1] == QPointF(0.0, 10.0)
     assert zooms == []
 
     end_event = _WheelEvent(

@@ -12,6 +12,7 @@ from PySide6.QtGui import QPainter
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 from maps.style_resolver import StyleLoadError, StyleResolver
 from maps.tile_backend import FallbackTileBackend, LegacyVectorBackend, OsmAndRasterBackend
+from maps.touchpad_input import TrackpadPanAccumulator
 
 from .drag_cursor import DragCursorManager
 from .input_handler import InputHandler
@@ -197,8 +198,6 @@ class MapWidgetController:
         self._input_handler.pan_requested.connect(self._on_pan_requested)
         self._input_handler.pan_requested.connect(self._notify_pan_delta)
         self._input_handler.pan_finished.connect(self._notify_pan_finished)
-        self._input_handler.trackpad_pan_requested.connect(self._queue_trackpad_pan)
-        self._input_handler.trackpad_pan_finished.connect(self._finish_trackpad_pan)
         self._input_handler.zoom_requested.connect(self._on_zoom_requested)
         self._input_handler.cursor_changed.connect(self._set_drag_cursor)
         self._input_handler.cursor_reset.connect(self._reset_drag_cursor)
@@ -208,11 +207,11 @@ class MapWidgetController:
         self._update_timer.setInterval(16)
         self._update_timer.timeout.connect(self._widget.update)
 
-        self._pending_trackpad_pan = QPointF()
-        self._trackpad_pan_timer = QTimer(self._widget)
-        self._trackpad_pan_timer.setSingleShot(True)
-        self._trackpad_pan_timer.setInterval(16)
-        self._trackpad_pan_timer.timeout.connect(self._flush_pending_trackpad_pan)
+        self._trackpad_pan = TrackpadPanAccumulator(self._widget)
+        self._input_handler.trackpad_pan_requested.connect(self._trackpad_pan.queue)
+        self._input_handler.trackpad_pan_finished.connect(self._trackpad_pan.finish)
+        self._trackpad_pan.delta_ready.connect(self._apply_trackpad_pan)
+        self._trackpad_pan.finished.connect(self._notify_pan_finished)
 
         self._center_x = 0.5
         self._center_y = 0.5
@@ -285,9 +284,7 @@ class MapWidgetController:
         """Stop the tile loader thread so the application can exit cleanly."""
 
         self._reset_drag_cursor()
-        if self._trackpad_pan_timer.isActive():
-            self._trackpad_pan_timer.stop()
-        self._flush_pending_trackpad_pan()
+        self._trackpad_pan.cancel(flush=True)
         self._tile_manager.shutdown()
 
     # ------------------------------------------------------------------
@@ -457,26 +454,11 @@ class MapWidgetController:
 
         self.pan_by_pixels(delta.x(), delta.y())
 
-    def _queue_trackpad_pan(self, delta: QPointF) -> None:
-        """Accumulate high-frequency touchpad deltas until the next GUI frame."""
+    def _apply_trackpad_pan(self, delta: QPointF) -> None:
+        """Apply one frame-coalesced touchpad delta and notify observers."""
 
-        self._pending_trackpad_pan += QPointF(delta)
-        if not self._trackpad_pan_timer.isActive():
-            self._trackpad_pan_timer.start()
-
-    def _flush_pending_trackpad_pan(self) -> None:
-        delta = QPointF(self._pending_trackpad_pan)
-        self._pending_trackpad_pan = QPointF()
-        if delta.isNull():
-            return
         self.pan_by_pixels(delta.x(), delta.y())
         self._notify_pan_delta(delta)
-
-    def _finish_trackpad_pan(self) -> None:
-        if self._trackpad_pan_timer.isActive():
-            self._trackpad_pan_timer.stop()
-        self._flush_pending_trackpad_pan()
-        self._notify_pan_finished()
 
     # ------------------------------------------------------------------
     def _notify_pan_delta(self, delta: QPointF) -> None:

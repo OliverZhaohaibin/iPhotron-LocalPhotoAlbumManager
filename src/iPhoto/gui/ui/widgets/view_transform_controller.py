@@ -393,8 +393,8 @@ class ViewTransformController:
             event.accept()
             return
         if self._touchpad_gestures_enabled and is_trackpad_wheel_event(event):
-            delta = pan_delta_from_wheel(event) or QPointF()
-            if not delta.isNull():
+            delta = pan_delta_from_wheel(event)
+            if delta is not None and not delta.isNull():
                 delta_device = self.viewport_delta_logical_to_device(delta)
                 self.set_pan_pixels(self._pan_px + QPointF(delta_device.x(), -delta_device.y()))
             event.accept()

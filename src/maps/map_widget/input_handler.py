@@ -90,8 +90,8 @@ class InputHandler(QObject):
             return True
 
         if is_trackpad_wheel_event(event):
-            delta = pan_delta_from_wheel(event) or QPointF()
-            if not delta.isNull():
+            delta = pan_delta_from_wheel(event)
+            if delta is not None and not delta.isNull():
                 self.trackpad_pan_requested.emit(delta)
             if is_scroll_end_event(event):
                 self.trackpad_pan_finished.emit()

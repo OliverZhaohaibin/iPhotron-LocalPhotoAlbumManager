@@ -70,6 +70,101 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
     assert len(confirm_calls) == 1
 
 
+def test_set_services_binds_people_and_pets_with_one_reload(
+    monkeypatch,
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    widget = PeopleDashboardWidget()
+    people_service = PeopleService(tmp_path)
+    pet_service = SimpleNamespace(library_root=lambda: tmp_path)
+    pinned_service = object()
+    reloads: list[bool] = []
+    monkeypatch.setattr(
+        widget,
+        "reload",
+        lambda *, preserve_content=False: reloads.append(bool(preserve_content)),
+    )
+
+    widget.set_services(people_service, pet_service, pinned_service)
+
+    assert widget._service is people_service
+    assert widget._pet_service is pet_service
+    assert widget._pinned_service is pinned_service
+    assert reloads == [False]
+
+
+def test_snapshot_advances_dashboard_index_version(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget.set_services(
+        PeopleService(tmp_path),
+        SimpleNamespace(library_root=lambda: tmp_path),
+        reload=False,
+    )
+
+    applied = widget.apply_snapshot(
+        library_root=tmp_path,
+        summaries=[],
+        groups=[],
+        pet_summaries=[],
+        pending=0,
+        pet_pending=0,
+        index_version=4,
+    )
+
+    assert applied is True
+    assert widget._index_version == 4
+    assert widget._loaded_index_version == 4
+
+
+def test_incremental_population_commits_first_viewport_before_remaining_cards(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary(
+            f"person-{index}",
+            f"Person {index}",
+            f"face-{index}",
+            1,
+            None,
+            f"2024-01-01T00:00:{index:02d}Z",
+        )
+        for index in range(20)
+    ]
+    monkeypatch.setattr(PeopleDashboardWidget, "_emit_first_viewport_ready", lambda self: None)
+    monkeypatch.setattr(people_dashboard_cards.PeopleCard, "load_cover_artwork", lambda self: None)
+
+    widget._begin_incremental_population()
+
+    assert len(widget._board.visible_cards()) == 12
+    assert len(widget._pending_card_specs) == 8
+    widget._build_next_card_batch()
+    assert len(widget._board.visible_cards()) == 20
+    assert widget._pending_card_specs == []
+
+
+def test_terminal_load_failure_still_commits_first_viewport(
+    qapp: QApplication,
+) -> None:
+    widget = PeopleDashboardWidget()
+    ready_generations: list[int] = []
+    widget.firstViewportReady.connect(ready_generations.append)
+
+    widget._on_load_failed(
+        widget._load_generation,
+        widget._index_version,
+        RuntimeError("broken people index"),
+        False,
+    )
+
+    assert ready_generations == [widget._card_build_generation]
+
+
 def test_drag_merge_removes_source_card_immediately(monkeypatch, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [

@@ -33,6 +33,8 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrame = None  # type: ignore[assignment, misc]
     QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
+from iPhoto.gui.detail_profile import log_detail_profile
+
 from ..gl_crop_controller import CropInteractionController
 from ..render_backend import is_opengl_api, qrhi_api_name, select_qrhi_widget_api
 from ..rhi_image_renderer import RhiImageRenderer
@@ -99,6 +101,9 @@ class GLImageViewer(QRhiWidget):
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
     """Emitted once after the first opaque frame has been rendered."""
+
+    stillFramePresented = Signal(object)
+    """Emitted after a newly uploaded full-resolution still has been drawn."""
 
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
@@ -1188,7 +1193,14 @@ class GLImageViewer(QRhiWidget):
             and not self._image.isNull()
             and self._texture_manager.needs_texture_upload()
         ):
+            upload_started = time.perf_counter()
             self._texture_manager.upload_texture_if_needed(self._image)
+            log_detail_profile(
+                "gl_viewer",
+                "still.gpu_upload",
+                (time.perf_counter() - upload_started) * 1000.0,
+                path=self._still_source_name(),
+            )
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
@@ -1289,6 +1301,7 @@ class GLImageViewer(QRhiWidget):
         cb.endPass()
         self._emit_first_frame_ready()
         if uploaded_new_still_texture:
+            self._emit_still_frame_presented()
             self._schedule_post_load_view_transform()
 
     def _render_rhi(self, cb) -> None:
@@ -1328,7 +1341,14 @@ class GLImageViewer(QRhiWidget):
             and not self._image.isNull()
             and self._texture_manager.needs_texture_upload()
         ):
+            upload_started = time.perf_counter()
             self._texture_manager.upload_texture_if_needed(self._image)
+            log_detail_profile(
+                "gl_viewer",
+                "still.gpu_upload",
+                (time.perf_counter() - upload_started) * 1000.0,
+                path=self._still_source_name(),
+            )
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
@@ -1393,7 +1413,17 @@ class GLImageViewer(QRhiWidget):
 
         self._emit_first_frame_ready()
         if uploaded_new_still_texture:
+            self._emit_still_frame_presented()
             self._schedule_post_load_view_transform()
+
+    def _still_source_name(self) -> str:
+        source = self._texture_manager.get_current_image_source()
+        return getattr(source, "name", str(source or ""))
+
+    def _emit_still_frame_presented(self) -> None:
+        source = self._texture_manager.get_current_image_source()
+        if source is not None:
+            self.stillFramePresented.emit(source)
 
     def _emit_first_frame_ready(self) -> None:
         """Notify listeners that the first opaque frame has been rendered."""

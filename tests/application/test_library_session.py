@@ -19,6 +19,8 @@ def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None
         state_repository=state,
     )
 
+    assert session.__dict__["edit"] is not None
+    runtime.bind_edit_service.assert_called_once_with(session.__dict__["edit"])
     runtime.bind_library_root.assert_called_once_with(tmp_path)
     assert session.assets is runtime.assets
     assert session.thumbnails is runtime.thumbnail_service

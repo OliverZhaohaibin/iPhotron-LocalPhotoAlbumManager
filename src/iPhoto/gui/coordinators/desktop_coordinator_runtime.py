@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
+import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -81,6 +83,7 @@ class DesktopCoordinatorRuntime(QObject):
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
         self._media_failure_cleanup_paths: set[str] = set()
+        self._people_module_warmup_started = False
         self._map_extension_download = MapExtensionDownloadController(
             window,
             context,
@@ -474,6 +477,14 @@ class DesktopCoordinatorRuntime(QObject):
             if self._playback:
                 self._playback.shutdown()
 
+            recognition = getattr(self, "_recognition", None)
+            if recognition is not None:
+                recognition.shutdown()
+            people_page = getattr(self._window.ui, "people_page", None)
+            shutdown_people = getattr(people_page, "shutdown", None)
+            if callable(shutdown_people):
+                shutdown_people()
+
             if self._edit:
                 self._edit.shutdown()
 
@@ -784,13 +795,21 @@ class DesktopCoordinatorRuntime(QObject):
             pet_callback=self._on_pet_activated,
             parent=self,
         )
-        root = self._library_root()
-        people_service = self._people_service(library_root=root)
-        pet_service = self._pet_service(library_root=root)
-        activate = getattr(self._context.library, "activate_recognition_services", None)
-        if callable(activate):
-            activate(people_service, pet_service)
         return self._recognition
+
+    def warm_people_dashboard(self) -> None:
+        """Warm cached recognition summaries after Gallery becomes usable."""
+
+        if not self._people_module_warmup_started:
+            self._people_module_warmup_started = True
+            threading.Thread(
+                target=lambda: importlib.import_module(
+                    "iPhoto.gui.ui.widgets.people_dashboard_widget"
+                ),
+                name="PeopleDashboardModuleWarmup",
+                daemon=True,
+            ).start()
+        self._ensure_recognition_coordinator().warm_dashboard_snapshot()
 
     def _ensure_preview_window(self):
         self._window.ui.ensure_feature("preview")

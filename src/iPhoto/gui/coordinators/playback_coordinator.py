@@ -1153,6 +1153,9 @@ class PlaybackCoordinator(QObject):
 
     def reset_for_gallery(self) -> None:
         self._clear_play_request_state()
+        cancel_stills = getattr(self._player_view, "cancel_pending_image_requests", None)
+        if callable(cancel_stills):
+            cancel_stills()
         self._reset_location_search_service(clear_cache=True)
         video_area = self._player_view.video_area
         has_video = False
@@ -1204,6 +1207,9 @@ class PlaybackCoordinator(QObject):
         if location_search_controller is not None:
             location_search_controller.shutdown()
         self._player_view.video_area.stop()
+        shutdown_player = getattr(self._player_view, "shutdown", None)
+        if callable(shutdown_player):
+            shutdown_player()
         self._hide_face_name_overlay(clear_annotations=True)
         self._is_playing = False
         self._current_presentation = None

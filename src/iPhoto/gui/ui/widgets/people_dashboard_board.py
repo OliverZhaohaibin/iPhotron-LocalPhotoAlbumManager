@@ -48,8 +48,15 @@ class PeopleBoard(QWidget):
 
     def set_cards(self, cards: list[PeopleCard]) -> None:
         self.clear_cards()
-        self.top_cards = list(cards)
-        for card in self.top_cards:
+        self.append_cards(cards)
+
+    def append_cards(self, cards: list[PeopleCard]) -> None:
+        """Append one presentation batch without rebuilding existing cards."""
+
+        if not cards:
+            return
+        self.top_cards.extend(cards)
+        for card in cards:
             card.setParent(self)
             card.show()
         self.update_positions()
@@ -221,8 +228,15 @@ class GroupBoard(QWidget):
 
     def set_cards(self, cards: list[GroupCard]) -> None:
         self.clear_cards()
-        self.top_cards = list(cards)
-        for card in self.top_cards:
+        self.append_cards(cards)
+
+    def append_cards(self, cards: list[GroupCard]) -> None:
+        """Append one presentation batch without rebuilding existing cards."""
+
+        if not cards:
+            return
+        self.top_cards.extend(cards)
+        for card in cards:
             card.setParent(self)
             card.show()
         self.update_positions()

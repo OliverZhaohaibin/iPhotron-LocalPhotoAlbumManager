@@ -580,6 +580,27 @@ def test_recognition_activation_binds_services_and_starts_finite_ai_scan(
     start_ai.assert_called_once_with(root, startup=True)
 
 
+def test_recognition_binding_does_not_start_ai_before_viewport_ready(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    people_service = Mock()
+    people_service.coordinator = None
+    pet_service = Mock()
+    pet_service.coordinator = None
+
+    with patch.object(manager, "_start_ai_scan_workers") as start_ai:
+        manager.bind_recognition_services(people_service, pet_service)
+        start_ai.assert_not_called()
+        manager.activate_recognition_scans()
+
+    start_ai.assert_called_once_with(root, startup=True)
+
+
 def test_map_activation_binds_location_runtime_and_interaction_services() -> None:
     manager = LibraryRuntimeController.__new__(LibraryRuntimeController)
     manager.bind_location_service = Mock()

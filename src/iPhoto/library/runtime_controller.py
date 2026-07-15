@@ -15,7 +15,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThreadPool, QMutex
+from PySide6.QtCore import (
+    QFileSystemWatcher,
+    QMutex,
+    QObject,
+    Qt,
+    QThread,
+    QThreadPool,
+    QTimer,
+    Signal,
+)
 
 from ..errors import LibraryUnavailableError
 from ..utils.logging import get_logger
@@ -115,7 +124,9 @@ class LibraryRuntimeController(
         self._current_face_scanner: Optional[FaceScanWorker] = None
         self._current_pet_scanner: Optional[PetScanWorker] = None
         self._cancelled_scanner_workers: set[int] = set()
-        self._scan_thread_pool = QThreadPool.globalInstance()
+        self._scan_thread_pool = QThreadPool(self)
+        self._scan_thread_pool.setMaxThreadCount(1)
+        self._scan_thread_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
         self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool]] = []
@@ -126,6 +137,8 @@ class LibraryRuntimeController(
         self._pet_scan_status_message: Optional[str] = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
         self._pet_index_coordinator: PetIndexCoordinator | None = None
+        self._recognition_services_root: Path | None = None
+        self._recognition_scans_root: Path | None = None
         self._library_session: "LibrarySession | None" = None
         self._owns_library_session = False
         self._scan_service: "LibraryScanService | None" = None
@@ -176,6 +189,8 @@ class LibraryRuntimeController(
 
         self._clear_watches_for_rebind()
         self.stop_scanning()
+        self._recognition_services_root = None
+        self._recognition_scans_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
         self._root = Path(prepared.root)
@@ -228,6 +243,8 @@ class LibraryRuntimeController(
         # Cancel any in-flight scan so we do not block UI interactions while
         # rebinding to a new library root.
         self.stop_scanning()
+        self._recognition_services_root = None
+        self._recognition_scans_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
         self._face_scan_status_message = None
@@ -310,7 +327,10 @@ class LibraryRuntimeController(
     def shutdown(self) -> None:
         """Stop background workers and watchers during application shutdown."""
 
+        had_scanner_worker = self._current_scanner_worker is not None
         self.stop_scanning(wait=True)
+        self._recognition_services_root = None
+        self._recognition_scans_root = None
         self._debounce.stop()
         if self._watcher.directories():
             self._watcher.removePaths(self._watcher.directories())
@@ -325,6 +345,9 @@ class LibraryRuntimeController(
         self._unbind_people_index_coordinator()
         self._unbind_pet_index_coordinator()
         self._watch_service.shutdown()
+        self._scan_thread_pool.clear()
+        if not had_scanner_worker:
+            self._scan_thread_pool.waitForDone(2000)
 
     def _on_background_watch_result(self, result: object) -> None:
         """Apply an immutable worker snapshot without traversing storage in GUI."""
@@ -556,19 +579,44 @@ class LibraryRuntimeController(
     def pet_service(self) -> "PetService | None":
         return self._pet_service
 
+    def bind_recognition_services(
+        self,
+        people_service: PeopleService | None,
+        pet_service: "PetService | None",
+    ) -> None:
+        """Bind People/Pets without starting model workers."""
+
+        self.bind_people_service(people_service)
+        self.bind_pet_service(pet_service)
+        root = self._root
+        self._recognition_services_root = root
+        if root != self._recognition_scans_root:
+            self._recognition_scans_root = None
+
+    def activate_recognition_scans(self) -> None:
+        """Start model workers after a recognition viewport is usable."""
+
+        root = self._root
+        if (
+            root is None
+            or root != self._recognition_services_root
+            or root == self._recognition_scans_root
+            or self._people_service is None
+            or self._pet_service is None
+        ):
+            return
+        self._recognition_scans_root = root
+        self._start_ai_scan_workers(root, startup=True)
+
     def activate_recognition_services(
         self,
         people_service: PeopleService | None,
         pet_service: "PetService | None",
     ) -> None:
-        """Bind and scan People/Pets only after a recognition surface is used."""
+        """Compatibility wrapper for non-GUI callers requiring eager scans."""
 
-        self.bind_people_service(people_service)
-        self.bind_pet_service(pet_service)
-        root = self._root
-        if root is None or people_service is None or pet_service is None:
-            return
-        self._start_ai_scan_workers(root, startup=True)
+        self.bind_recognition_services(people_service, pet_service)
+        self.activate_recognition_scans()
 
     def activate_map_services(
         self,

@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
@@ -135,6 +135,7 @@ class PeopleDashboardWidget(QWidget):
     clusterActivated = Signal(str)  # noqa: N815
     groupActivated = Signal(str)  # noqa: N815
     petActivated = Signal(str)  # noqa: N815
+    firstViewportReady = Signal(int)  # noqa: N815
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -161,7 +162,16 @@ class PeopleDashboardWidget(QWidget):
         self._load_signals = _PeopleDashboardLoaderSignals()
         self._load_signals.loaded.connect(self._on_load_completed)
         self._load_signals.failed.connect(self._on_load_failed)
-        self._load_pool = QThreadPool.globalInstance()
+        self._load_pool = QThreadPool(self)
+        self._load_pool.setMaxThreadCount(1)
+        self._load_pool.setThreadPriority(QThread.Priority.NormalPriority)
+        self._card_build_generation = 0
+        self._first_viewport_emitted_generation = -1
+        self._pending_card_specs: list[tuple[str, int, object]] = []
+        self._card_build_timer = QTimer(self)
+        self._card_build_timer.setSingleShot(True)
+        self._card_build_timer.setInterval(0)
+        self._card_build_timer.timeout.connect(self._build_next_card_batch)
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(500)
@@ -275,6 +285,61 @@ class PeopleDashboardWidget(QWidget):
         self._pet_service = service or PetService()
         self.reload(preserve_content=bool(self._summaries or self._pet_summaries or self._groups))
 
+    def set_services(
+        self,
+        people_service: PeopleService | None,
+        pet_service: PetService | None,
+        pinned_service: PinnedItemsService | None = None,
+        *,
+        reload: bool = True,
+    ) -> None:
+        """Atomically bind the dashboard domain and schedule at most one load."""
+
+        self._service = people_service or PeopleService()
+        self._pet_service = pet_service or PetService()
+        self._pinned_service = pinned_service
+        self._current_library_root = self._service.library_root()
+        configure_people_cover_cache(self._current_library_root)
+        if reload:
+            self.reload(
+                preserve_content=bool(
+                    self._summaries or self._pet_summaries or self._groups
+                )
+            )
+
+    def apply_snapshot(
+        self,
+        *,
+        library_root: Path | None,
+        summaries: list[PersonSummary],
+        groups: list[PeopleGroupSummary],
+        pet_summaries: list[PetSummary],
+        pending: int,
+        pet_pending: int,
+        status_message: str | None = None,
+        pet_status_message: str | None = None,
+        index_version: int = 0,
+    ) -> bool:
+        """Apply a generation-checked immutable dashboard warmup result."""
+
+        if library_root != self._current_library_root:
+            return False
+        self._load_generation += 1
+        self._index_version = max(self._index_version, int(index_version))
+        self._on_load_completed(
+            self._load_generation,
+            int(index_version),
+            library_root is not None,
+            list(summaries),
+            list(groups),
+            list(pet_summaries),
+            int(pending),
+            int(pet_pending),
+            status_message,
+            pet_status_message,
+        )
+        return True
+
     def set_library_root(self, library_root: Path | None) -> None:
         service_matches_root = self._service.library_root() == library_root
         service_has_asset_boundary = (
@@ -387,6 +452,9 @@ class PeopleDashboardWidget(QWidget):
     ) -> None:
         if generation != self._load_generation:
             return
+        self._card_build_generation += 1
+        self._card_build_timer.stop()
+        self._pending_card_specs.clear()
         self._loading = False
         if not is_bound:
             self._loaded_index_version = index_version
@@ -395,6 +463,7 @@ class PeopleDashboardWidget(QWidget):
             self._set_unbound_message()
             self._empty.show()
             self._scroll.hide()
+            self._emit_first_viewport_ready()
             return
 
         next_summaries = list(summaries)
@@ -420,8 +489,9 @@ class PeopleDashboardWidget(QWidget):
             self._empty.hide()
             self._scroll.show()
             if cards_changed:
-                self._populate_groups()
-                self._populate_cards()
+                self._begin_incremental_population()
+            else:
+                self._emit_first_viewport_ready()
             return
 
         if status_text or pet_status_text:
@@ -436,6 +506,7 @@ class PeopleDashboardWidget(QWidget):
         self._scroll.hide()
         self._clear_group_cards()
         self._clear_cards()
+        self._emit_first_viewport_ready()
 
         if self._loaded_index_version < self._index_version:
             self._schedule_visible_refresh()
@@ -465,6 +536,7 @@ class PeopleDashboardWidget(QWidget):
         if not self._summaries and not self._pet_summaries and not self._groups:
             self._empty.show()
             self._scroll.hide()
+        self._emit_first_viewport_ready()
 
     def _populate_groups(self) -> None:
         self._clear_group_cards()
@@ -515,6 +587,82 @@ class PeopleDashboardWidget(QWidget):
         self._board.set_cards(cards)
         for card in cards:
             card.load_cover_artwork()
+
+    def _begin_incremental_population(self) -> None:
+        """Build the visible card batch now and yield between later batches."""
+
+        self._card_build_timer.stop()
+        self._pending_card_specs.clear()
+        self._clear_group_cards()
+        self._clear_cards()
+        if self._groups:
+            self._groups_section.show()
+        else:
+            self._groups_section.hide()
+        self._pending_card_specs.extend(
+            ("group", index, summary) for index, summary in enumerate(self._groups)
+        )
+        self._pending_card_specs.extend(
+            ("person", index, summary) for index, summary in enumerate(self._summaries)
+        )
+        offset = len(self._summaries)
+        self._pending_card_specs.extend(
+            ("pet", offset + index, summary)
+            for index, summary in enumerate(self._pet_summaries)
+        )
+        self._build_next_card_batch()
+
+    def _build_next_card_batch(self) -> None:
+        batch = self._pending_card_specs[:12]
+        del self._pending_card_specs[:12]
+        group_cards: list[GroupCard] = []
+        people_cards: list[PeopleCard] = []
+        for kind, index, summary in batch:
+            if kind == "group":
+                card = GroupCard(
+                    board=self._groups_board,
+                    summary=summary,
+                    seed_index=index,
+                )
+                card.activated.connect(self.groupActivated.emit)
+                card.menuRequested.connect(self._show_group_menu)
+                self._group_cards[summary.group_id] = card
+                group_cards.append(card)
+            elif kind == "person":
+                card = PeopleCard(board=self._board, summary=summary, seed_index=index)
+                card.activated.connect(self.clusterActivated.emit)
+                card.menuRequested.connect(self._show_card_menu)
+                self._cards[summary.person_id] = card
+                people_cards.append(card)
+            else:
+                card = PetCard(board=self._board, summary=summary, seed_index=index)
+                card.activated.connect(self.petActivated.emit)
+                card.menuRequested.connect(self._show_card_menu)
+                self._pet_cards[summary.pet_id] = card
+                people_cards.append(card)
+        self._groups_board.append_cards(group_cards)
+        self._board.append_cards(people_cards)
+        for card in (*group_cards, *people_cards):
+            card.load_cover_artwork()
+        if batch:
+            self._emit_first_viewport_ready()
+        if self._pending_card_specs:
+            self._card_build_timer.start()
+
+    def _emit_first_viewport_ready(self) -> None:
+        generation = self._card_build_generation
+        if self._first_viewport_emitted_generation == generation:
+            return
+        self._first_viewport_emitted_generation = generation
+        self.firstViewportReady.emit(generation)
+
+    def shutdown(self) -> None:
+        self._refresh_timer.stop()
+        self._card_build_timer.stop()
+        self._load_generation += 1
+        self._pending_card_specs.clear()
+        self._load_pool.clear()
+        self._load_pool.waitForDone(1500)
 
     def _on_scroll_activity(self) -> None:
         if self._pending_index_refresh and self.isVisible():

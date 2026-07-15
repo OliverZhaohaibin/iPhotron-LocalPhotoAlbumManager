@@ -9,6 +9,7 @@ when switching to a QRhiWidget that has not yet rendered.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -18,8 +19,8 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required", e
 
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThreadPool, Signal
+from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
 
 from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
@@ -150,6 +151,23 @@ class TestInitCoverTracking:
         """Both render flags should start as False."""
         assert controller._image_viewer_rendered is False
         assert controller._video_renderer_rendered is False
+
+    def test_still_decode_uses_dedicated_bounded_pool(self, controller):
+        assert controller._pool is not QThreadPool.globalInstance()
+        assert controller._pool.maxThreadCount() == 1
+
+    def test_stale_decode_generation_is_not_applied(self, controller, mocker):
+        apply_ready = mocker.patch.object(controller, "_on_adjusted_image_ready")
+        controller._request_generation = 2
+
+        controller._on_scheduled_image_ready(
+            1,
+            Path("/tmp/stale.jpg"),
+            QImage(2, 2, QImage.Format.Format_RGBA8888),
+            {},
+        )
+
+        apply_ready.assert_not_called()
 
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""

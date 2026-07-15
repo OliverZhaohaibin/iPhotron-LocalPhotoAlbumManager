@@ -44,6 +44,32 @@ def test_render_task_emits_empty_image_when_renderer_returns_none(qapp: QApplica
     assert image.isNull()
 
 
+def test_render_task_decodes_disk_hit_off_gui_path(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    disk_file = tmp_path / "cover.png"
+    cached = QImage(20, 20, QImage.Format.Format_RGBA8888)
+    cached.fill(0xFF336699)
+    assert cached.save(str(disk_file), "PNG")
+    renderer_calls: list[bool] = []
+    captured: list[QImage] = []
+    signals = PeopleCoverWorkerSignals()
+    signals.result.connect(lambda _key, image: captured.append(image))
+
+    task = PeopleCoverRenderTask(
+        cache_key="cache-key",
+        disk_file=disk_file,
+        renderer=lambda: renderer_calls.append(True),
+        signals=signals,
+    )
+    task.run()
+
+    assert renderer_calls == []
+    assert len(captured) == 1
+    assert not captured[0].isNull()
+
+
 def test_get_rendered_cover_returns_empty_when_service_is_shutting_down(
     qapp: QApplication, tmp_path: Path
 ) -> None:

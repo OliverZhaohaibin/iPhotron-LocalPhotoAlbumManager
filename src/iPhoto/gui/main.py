@@ -684,6 +684,9 @@ def main(argv: list[str] | None = None) -> int:
             if not startup.is_current(generation):
                 return
             startup.transition(StartupPhase.GALLERY_READY)
+            people_warmup = getattr(coordinator_runtime, "warm_people_dashboard", None)
+            if callable(people_warmup):
+                people_warmup()
             starter = getattr(context, "schedule_idle_startup_jobs", None)
             if not callable(starter):
                 starter = getattr(context, "start_deferred_startup_scan", None)

@@ -60,7 +60,7 @@ class LibrarySession:
     bind_asset_runtime: bool = True
 
     _LAZY_SERVICE_NAMES = frozenset(
-        {"people", "pets", "maps", "map_interactions", "edit", "locations"}
+        {"people", "pets", "maps", "map_interactions", "locations"}
     )
 
     def __getattribute__(self, name: str):
@@ -108,8 +108,16 @@ class LibrarySession:
                 self.library_root,
                 lifecycle_service=self.asset_lifecycle,
             )
-        # People, Pets, Map, Edit and Location are feature-scoped.  Keep their
-        # dataclass fields untouched until the corresponding property is read.
+        # Detail playback consults edit sidecars for every still image.  Keep
+        # this lightweight service on the core Gallery/Detail path so the
+        # first image click never becomes a service-construction boundary.
+        if self.edit is None:
+            self.edit = LibraryEditService(self.library_root)
+        bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
+        if callable(bind_edit_service):
+            bind_edit_service(self.edit)
+
+        # People, Pets, Map and Location remain feature-scoped.
 
     def _create_lazy_service(self, name: str):
         if name == "people":
@@ -120,12 +128,6 @@ class LibrarySession:
             return SessionMapRuntimeService()
         if name == "map_interactions":
             return LibraryMapInteractionService()
-        if name == "edit":
-            service = LibraryEditService(self.library_root)
-            bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
-            if callable(bind_edit_service):
-                bind_edit_service(service)
-            return service
         if name == "locations":
             return LibraryLocationService(
                 self.library_root,

@@ -4,9 +4,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from iPhoto.gui.coordinators.recognition_coordinator import RecognitionCoordinator
+from iPhoto.gui.coordinators.recognition_coordinator import (
+    _DashboardSnapshot,
+    RecognitionCoordinator,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -98,6 +101,36 @@ def test_recognition_first_creation_uses_latest_library_session() -> None:
     detail.set_people_library_root.assert_called_once_with(Path("/library/new"))
 
 
+def test_recognition_rebinds_runtime_services_after_library_change() -> None:
+    roots = [Path("/library/first")]
+    people_services = {root: MagicMock() for root in roots}
+    pet_services = {root: MagicMock() for root in roots}
+    context = MagicMock()
+    coordinator = RecognitionCoordinator(
+        context=context,
+        detail=MagicMock(),
+        pinned_items_service=MagicMock(),
+        library_root_getter=lambda: roots[0],
+        people_service_getter=lambda *, library_root: people_services[library_root],
+        pet_service_getter=lambda *, library_root: pet_services[library_root],
+        cluster_callback=MagicMock(),
+        group_callback=MagicMock(),
+        pet_callback=MagicMock(),
+    )
+    context.library.bind_recognition_services.reset_mock()
+
+    next_root = Path("/library/second")
+    roots[0] = next_root
+    people_services[next_root] = MagicMock()
+    pet_services[next_root] = MagicMock()
+    coordinator.rebind_library()
+
+    context.library.bind_recognition_services.assert_called_once_with(
+        people_services[next_root],
+        pet_services[next_root],
+    )
+
+
 def test_recognition_applies_hidden_people_preference_when_page_is_created() -> None:
     context = MagicMock()
     context.settings.get.return_value = "true"
@@ -120,6 +153,104 @@ def test_recognition_applies_hidden_people_preference_when_page_is_created() -> 
 
     context.settings.get.assert_called_once_with("ui.show_hidden_people", False)
     people_page.set_show_hidden_people.assert_called_once_with(True)
+
+
+def test_recognition_binds_once_and_defers_ai_until_first_viewport() -> None:
+    context = MagicMock()
+    detail = MagicMock()
+    people_service = MagicMock()
+    pet_service = MagicMock()
+    people_page = MagicMock()
+    coordinator = RecognitionCoordinator(
+        context=context,
+        detail=detail,
+        pinned_items_service=MagicMock(),
+        library_root_getter=lambda: Path("/library"),
+        people_service_getter=lambda *, library_root: people_service,
+        pet_service_getter=lambda *, library_root: pet_service,
+        cluster_callback=MagicMock(),
+        group_callback=MagicMock(),
+        pet_callback=MagicMock(),
+    )
+
+    coordinator.bind_people_page(people_page)
+
+    context.library.bind_recognition_services.assert_called_once_with(
+        people_service,
+        pet_service,
+    )
+    people_page.set_services.assert_called_once()
+    people_page.set_people_service.assert_not_called()
+    people_page.set_pet_service.assert_not_called()
+    context.library.activate_recognition_scans.assert_not_called()
+    ready_callback = people_page.firstViewportReady.connect.call_args.args[0]
+    with patch(
+        "iPhoto.gui.coordinators.recognition_coordinator.QTimer.singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        ready_callback(1)
+
+    context.library.activate_recognition_scans.assert_called_once_with()
+
+
+def test_recognition_page_reuses_inflight_warmup_query() -> None:
+    context = MagicMock()
+    detail = MagicMock()
+    people_page = MagicMock()
+    root = Path("/library")
+    coordinator = RecognitionCoordinator(
+        context=context,
+        detail=detail,
+        pinned_items_service=MagicMock(),
+        library_root_getter=lambda: root,
+        people_service_getter=lambda *, library_root: MagicMock(),
+        pet_service_getter=lambda *, library_root: MagicMock(),
+        cluster_callback=MagicMock(),
+        group_callback=MagicMock(),
+        pet_callback=MagicMock(),
+    )
+    coordinator._warmup_root = root
+
+    coordinator.bind_people_page(people_page)
+
+    assert people_page.set_services.call_args.kwargs["reload"] is False
+    people_page.reload.assert_not_called()
+
+
+def test_recognition_shutdown_rejects_queued_warmup_result() -> None:
+    root = Path("/library")
+    context = MagicMock()
+    coordinator = RecognitionCoordinator(
+        context=context,
+        detail=MagicMock(),
+        pinned_items_service=MagicMock(),
+        library_root_getter=lambda: root,
+        people_service_getter=lambda *, library_root: MagicMock(),
+        pet_service_getter=lambda *, library_root: MagicMock(),
+        cluster_callback=MagicMock(),
+        group_callback=MagicMock(),
+        pet_callback=MagicMock(),
+    )
+    people_page = MagicMock()
+    coordinator._people_page = people_page
+    snapshot = _DashboardSnapshot(
+        root=root,
+        generation=coordinator._warmup_generation,
+        index_version=0,
+        include_hidden=False,
+        summaries=(),
+        groups=(),
+        pet_summaries=(),
+        pending=0,
+        pet_pending=0,
+        status_message=None,
+        pet_status_message=None,
+    )
+
+    coordinator.shutdown()
+    coordinator._on_dashboard_warmup_ready(snapshot)
+
+    people_page.apply_snapshot.assert_not_called()
 
 
 def test_main_coordinator_class_and_alias_are_removed() -> None:

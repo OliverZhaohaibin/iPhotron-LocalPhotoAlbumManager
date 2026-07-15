@@ -23,12 +23,13 @@ def test_adjusted_image_worker_skips_color_stats_without_sidecar() -> None:
     with patch(
         "iPhoto.gui.ui.controllers.player_view_controller.image_loader.load_qimage",
         return_value=image,
-    ), patch(
+    ) as load_qimage, patch(
         "iPhoto.gui.ui.controllers.player_view_controller.compute_color_statistics",
     ) as compute_stats:
         worker = _AdjustedImageWorker(source, signals, edit_service)
         worker.run()
 
+    load_qimage.assert_called_once_with(source, None)
     edit_service.describe_adjustments.assert_not_called()
     compute_stats.assert_not_called()
     signals.completed.emit.assert_called_once_with(source, image, {})

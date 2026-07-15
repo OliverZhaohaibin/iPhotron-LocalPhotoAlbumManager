@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
 
 from iPhoto.people.image_utils import create_cover_thumbnail, load_image_rgb
@@ -12,6 +12,7 @@ from iPhoto.people.image_utils import create_cover_thumbnail, load_image_rgb
 
 class PeopleCoverWorkerSignals(QObject):
     result = Signal(str, QImage)
+    resultWithGeneration = Signal(int, str, QImage)
 
 
 class PeopleCoverRenderTask(QRunnable):
@@ -21,20 +22,34 @@ class PeopleCoverRenderTask(QRunnable):
         cache_key: str,
         renderer: Callable[[], Optional[QImage]],
         signals: PeopleCoverWorkerSignals,
+        disk_file: Path | None = None,
+        generation: int = 0,
     ) -> None:
         super().__init__()
         self._cache_key = cache_key
+        self._disk_file = disk_file
         self._renderer = renderer
         self._signals = signals
+        self._generation = int(generation)
 
     def run(self) -> None:
         try:
-            image = self._renderer()
+            image = (
+                QImage(str(self._disk_file))
+                if self._disk_file is not None and self._disk_file.is_file()
+                else QImage()
+            )
+            if image.isNull():
+                image = self._renderer()
+                if image is not None and not image.isNull() and self._disk_file is not None:
+                    self._disk_file.parent.mkdir(parents=True, exist_ok=True)
+                    image.save(str(self._disk_file), "PNG")
         except Exception:
             image = None
         if image is None or image.isNull():
             image = QImage()
         self._signals.result.emit(self._cache_key, image)
+        self._signals.resultWithGeneration.emit(self._generation, self._cache_key, image)
 
 
 class PeopleCoverCacheService(QObject):
@@ -43,24 +58,29 @@ class PeopleCoverCacheService(QObject):
     def __init__(self, disk_cache_path: Path, memory_limit_items: int = 512) -> None:
         super().__init__()
         self._disk_cache_path = Path(disk_cache_path)
-        self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._memory_cache: dict[str, QPixmap] = {}
         self._pending_tasks: set[str] = set()
-        self._thread_pool = QThreadPool.globalInstance()
+        self._thread_pool = QThreadPool(self)
+        self._thread_pool.setMaxThreadCount(2)
+        self._thread_pool.setThreadPriority(QThread.Priority.NormalPriority)
         self._memory_limit_items = max(32, int(memory_limit_items))
         self._is_shutting_down = False
+        self._generation = 0
 
     def shutdown(self) -> None:
         self._is_shutting_down = True
+        self._generation += 1
         self._pending_tasks.clear()
         self._memory_cache.clear()
+        self._thread_pool.clear()
+        self._thread_pool.waitForDone(1500)
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
         next_path = Path(disk_cache_path)
         if self._disk_cache_path == next_path:
             return
         self._disk_cache_path = next_path
-        self._disk_cache_path.mkdir(parents=True, exist_ok=True)
+        self._generation += 1
         self._memory_cache.clear()
         self._pending_tasks.clear()
 
@@ -105,24 +125,31 @@ class PeopleCoverCacheService(QObject):
         if pixmap is not None:
             return pixmap
 
-        disk_file = self._disk_file(cache_key)
-        if disk_file.exists():
-            disk_pixmap = QPixmap(str(disk_file))
-            if not disk_pixmap.isNull():
-                self._remember(cache_key, disk_pixmap)
-                return disk_pixmap
-
         if cache_key not in self._pending_tasks:
             self._pending_tasks.add(cache_key)
             worker_signals = PeopleCoverWorkerSignals()
-            worker_signals.result.connect(self._handle_render_result)
+            worker_signals.resultWithGeneration.connect(
+                self._handle_render_result_for_generation
+            )
             worker = PeopleCoverRenderTask(
                 cache_key=cache_key,
+                disk_file=self._disk_file(cache_key),
                 renderer=renderer,
                 signals=worker_signals,
+                generation=self._generation,
             )
             self._thread_pool.start(worker)
         return None
+
+    def _handle_render_result_for_generation(
+        self,
+        generation: int,
+        cache_key: str,
+        image: QImage,
+    ) -> None:
+        if int(generation) != self._generation:
+            return
+        self._handle_render_result(cache_key, image)
 
     def _handle_render_result(self, cache_key: str, image: QImage) -> None:
         self._pending_tasks.discard(cache_key)
@@ -134,7 +161,6 @@ class PeopleCoverCacheService(QObject):
         if pixmap.isNull():
             return
         self._remember(cache_key, pixmap)
-        pixmap.save(str(self._disk_file(cache_key)), "PNG")
         self.coverReady.emit(cache_key)
 
     def _remember(self, cache_key: str, pixmap: QPixmap) -> None:

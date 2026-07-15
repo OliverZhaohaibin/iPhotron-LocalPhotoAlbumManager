@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, Set
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QLabel, QStackedWidget, QWidget
 
@@ -29,6 +29,9 @@ class _AdjustedImageSignals(QObject):
     failed = Signal(Path, str)
     """Emitted when loading or processing the image fails."""
 
+    finished = Signal(object)
+    """Emitted for success, failure and cooperative cancellation."""
+
 
 class _AdjustedImageWorker(QRunnable):
     """Load and tone-map an image on a background thread."""
@@ -44,15 +47,30 @@ class _AdjustedImageWorker(QRunnable):
         self._source = source
         self._signals = signals
         self._edit_service = edit_service
+        self._cancelled = False
+        self._submitted_at = time.perf_counter()
         # The worker always decodes the original frame at full fidelity.  The
         # GUI thread performs any downscaling so zooming and full-screen views
         # can leverage every available pixel.
+
+    def cancel(self) -> None:
+        """Suppress delivery when this request is no longer current."""
+
+        self._cancelled = True
 
     def run(self) -> None:  # pragma: no cover - executed on a worker thread
         """Perform the expensive image work outside the GUI thread."""
 
         started = time.perf_counter()
+        log_detail_profile(
+            "still_worker",
+            "queue_wait",
+            (started - self._submitted_at) * 1000.0,
+            path=self._source.name,
+        )
         try:
+            if self._cancelled:
+                return
             # Requesting ``None`` as the target size forces ``QImageReader`` to
             # decode the full-resolution frame.  The detail view later scales
             # the resulting pixmap to fit the viewport while maintaining the
@@ -66,11 +84,13 @@ class _AdjustedImageWorker(QRunnable):
                 path=self._source.name,
             )
         except Exception as exc:  # pragma: no cover - Qt loader errors are rare
-            self._signals.failed.emit(self._source, str(exc))
+            if not self._cancelled:
+                self._signals.failed.emit(self._source, str(exc))
             return
 
         if image is None or image.isNull():
-            self._signals.failed.emit(self._source, "Image decoder returned an empty frame")
+            if not self._cancelled:
+                self._signals.failed.emit(self._source, "Image decoder returned an empty frame")
             return
 
         try:
@@ -90,10 +110,10 @@ class _AdjustedImageWorker(QRunnable):
                 adjustments=len(adjustments),
             )
         except Exception as exc:  # pragma: no cover - filesystem errors are rare
-            self._signals.failed.emit(self._source, str(exc))
+            if not self._cancelled:
+                self._signals.failed.emit(self._source, str(exc))
             return
 
-        # Pass the raw image and adjustments to the main thread. The GL viewer
         # Pass the raw image and adjustments to the main thread. The GL viewer
         # will apply the adjustments on the GPU.
         log_detail_profile(
@@ -103,7 +123,29 @@ class _AdjustedImageWorker(QRunnable):
             path=self._source.name,
             has_adjustments=bool(adjustments),
         )
-        self._signals.completed.emit(self._source, image, adjustments or {})
+        if not self._cancelled:
+            self._signals.completed.emit(self._source, image, adjustments or {})
+
+
+class _ScheduledAdjustedImageWorker(_AdjustedImageWorker):
+    """Production runnable that always reports terminal completion."""
+
+    def run(self) -> None:  # pragma: no cover - executed on a worker thread
+        try:
+            super().run()
+        finally:
+            self._signals.finished.emit(self)
+
+
+class StillImageDecodeScheduler(QThreadPool):
+    """High-priority single-lane scheduler reserved for full-resolution stills."""
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        # One decoder may already be inside a native codec while one latest
+        # request waits. Queued superseded requests are removed with tryTake().
+        self.setMaxThreadCount(1)
+        self.setThreadPriority(QThread.Priority.HighPriority)
 
 
 class PlayerViewController(QObject):
@@ -114,6 +156,9 @@ class PlayerViewController(QObject):
 
     imageLoadingFailed = Signal(Path, str)
     """Emitted when a still image fails to load or post-process."""
+
+    stillFramePresented = Signal(object, int)
+    """Emitted after the requested full-resolution still texture is presented."""
 
     def __init__(
         self,
@@ -141,8 +186,12 @@ class PlayerViewController(QObject):
         self._edit_service_getter = edit_service_getter
         self._image_viewer_index = player_stack.indexOf(image_viewer)
         self._image_viewer.replayRequested.connect(self.liveReplayRequested)
-        self._pool = QThreadPool.globalInstance()
+        self._pool = StillImageDecodeScheduler(self)
         self._active_workers: Set[_AdjustedImageWorker] = set()
+        self._request_generation = 0
+        self._present_generation = 0
+        self._present_started_at: float | None = None
+        self._present_source: Path | None = None
         self._loading_source: Optional[Path] = None
         self._loading_started_at: float | None = None
         self._defer_still_updates = False
@@ -160,6 +209,9 @@ class PlayerViewController(QObject):
 
         self._image_viewer.firstFrameReady.connect(self._on_image_first_render)
         self._video_area.firstFrameReady.connect(self._on_video_first_render)
+        still_presented = getattr(self._image_viewer, "stillFramePresented", None)
+        if still_presented is not None:
+            still_presented.connect(self._on_still_frame_presented)
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -283,8 +335,11 @@ class PlayerViewController(QObject):
     # ------------------------------------------------------------------
     def display_image(self, source: Path, *, placeholder: Optional[QPixmap] = None) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
+        self._request_generation += 1
+        request_generation = self._request_generation
         self._loading_source = source
         self._loading_started_at = time.perf_counter()
+        self._cancel_stale_image_workers()
 
         # 1) 先切到 GL 视图，保证有有效的 GL 上下文
         self.show_image_surface()
@@ -297,25 +352,21 @@ class PlayerViewController(QObject):
 
         signals = _AdjustedImageSignals()
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
-        worker = _AdjustedImageWorker(source, signals, edit_service=edit_service)
+        worker = _ScheduledAdjustedImageWorker(source, signals, edit_service=edit_service)
         self._active_workers.add(worker)
 
-        signals.completed.connect(self._on_adjusted_image_ready)
-        signals.failed.connect(self._on_adjusted_image_failed)
-
-        def _finalize_on_completion(img_source: Path, img: QImage, adjustments: dict) -> None:
-            self._release_worker(worker)
-            signals.deleteLater()
-
-        def _finalize_on_failure(img_source: Path, message: str) -> None:
-            self._release_worker(worker)
-            signals.deleteLater()
-
-        signals.completed.connect(_finalize_on_completion)
-        signals.failed.connect(_finalize_on_failure)
+        signals.completed.connect(
+            lambda img_source, img, adjustments, generation=request_generation:
+            self._on_scheduled_image_ready(generation, img_source, img, adjustments)
+        )
+        signals.failed.connect(
+            lambda img_source, message, generation=request_generation:
+            self._on_scheduled_image_failed(generation, img_source, message)
+        )
+        signals.finished.connect(self._on_image_worker_finished)
 
         try:
-            self._pool.start(worker)
+            self._pool.start(worker, 1)
         except RuntimeError as exc:  # 线程池满极少见
             self._release_worker(worker)
             self._loading_source = None
@@ -323,6 +374,78 @@ class PlayerViewController(QObject):
             self.imageLoadingFailed.emit(source, str(exc))
             return False
         return True
+
+    def _cancel_stale_image_workers(self) -> None:
+        for worker in tuple(self._active_workers):
+            worker.cancel()
+            if self._pool.tryTake(worker):
+                self._release_worker(worker)
+
+    def _on_scheduled_image_ready(
+        self,
+        generation: int,
+        source: Path,
+        image: QImage,
+        adjustments: dict,
+    ) -> None:
+        if generation != self._request_generation:
+            return
+        self._present_generation = generation
+        self._present_started_at = self._loading_started_at
+        self._present_source = source
+        self._on_adjusted_image_ready(source, image, adjustments)
+
+    def _on_scheduled_image_failed(
+        self,
+        generation: int,
+        source: Path,
+        message: str,
+    ) -> None:
+        if generation == self._request_generation:
+            self._on_adjusted_image_failed(source, message)
+
+    def _on_image_worker_finished(self, worker: object) -> None:
+        if isinstance(worker, _AdjustedImageWorker):
+            self._release_worker(worker)
+            signals = getattr(worker, "_signals", None)
+            if signals is not None:
+                signals.deleteLater()
+
+    def _on_still_frame_presented(self, source: object) -> None:
+        if source != self._present_source:
+            return
+        generation = self._present_generation
+        started_at = self._present_started_at
+        if generation <= 0 or started_at is None:
+            return
+        log_detail_profile(
+            "player_view",
+            "still.presented",
+            (time.perf_counter() - started_at) * 1000.0,
+            path=Path(source).name if source is not None else "",
+            generation=generation,
+        )
+        self._present_started_at = None
+        self._present_source = None
+        self.stillFramePresented.emit(source, generation)
+
+    def shutdown(self, *, timeout_ms: int = 1500) -> None:
+        """Cancel queued decodes and wait briefly for active full-image reads."""
+
+        self.cancel_pending_image_requests()
+        self._pool.clear()
+        self._pool.waitForDone(max(0, int(timeout_ms)))
+
+    def cancel_pending_image_requests(self) -> None:
+        """Invalidate still work when Detail or the current library is left."""
+
+        self._request_generation += 1
+        self._cancel_stale_image_workers()
+        self._loading_source = None
+        self._loading_started_at = None
+        self._present_source = None
+        self._present_started_at = None
+        self._pending_still = None
 
     def defer_still_updates(self, enabled: bool) -> None:
         """Control whether still frames should be applied immediately."""

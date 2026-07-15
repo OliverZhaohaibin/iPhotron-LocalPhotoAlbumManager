@@ -126,6 +126,8 @@ class RecognitionCoordinator(QObject):
         self._warmup_pool.setMaxThreadCount(1)
         self._warmup_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._recognition_scans_requested = False
+        self._people_view_shown = False
+        self._first_viewport_ready = False
         self._is_shutting_down = False
         self._context.library.peopleIndexUpdated.connect(self._invalidate_dashboard_snapshot)
         self._context.library.petIndexUpdated.connect(self._invalidate_dashboard_snapshot)
@@ -150,6 +152,8 @@ class RecognitionCoordinator(QObject):
         if self._dashboard_snapshot is not None and self._dashboard_snapshot.root != root:
             self._dashboard_snapshot = None
         self._recognition_scans_requested = False
+        self._people_view_shown = False
+        self._first_viewport_ready = False
         self._detail.set_people_service(people_service)
         self._detail.set_pet_service(pet_service)
         self._detail.set_people_library_root(root)
@@ -170,7 +174,7 @@ class RecognitionCoordinator(QObject):
         self._apply_people_page_preferences(people_page)
         first_viewport_ready = getattr(people_page, "firstViewportReady", None)
         if first_viewport_ready is not None:
-            first_viewport_ready.connect(self._request_recognition_scans)
+            first_viewport_ready.connect(self._mark_first_viewport_ready)
         self._bind_services(
             people_page,
             root,
@@ -280,11 +284,25 @@ class RecognitionCoordinator(QObject):
             )
         )
 
-    def _request_recognition_scans(self, _generation: int = 0) -> None:
+    def _mark_first_viewport_ready(self, _generation: int = 0) -> None:
+        self._first_viewport_ready = True
+        self._request_recognition_scans()
+
+    def people_view_shown(self) -> None:
+        """Allow AI scans only after the user actually opens People."""
+
+        self._people_view_shown = True
+        self._request_recognition_scans()
+
+    def _request_recognition_scans(self) -> None:
         if self._is_shutting_down or self._recognition_scans_requested:
             return
+        if not self._people_view_shown or not self._first_viewport_ready:
+            return
         self._recognition_scans_requested = True
-        QTimer.singleShot(0, self._activate_recognition_scans)
+        # Give cover delivery and the first paint a quiet window before model
+        # inference starts competing for CPU and disk bandwidth.
+        QTimer.singleShot(350, self._activate_recognition_scans)
 
     def _activate_recognition_scans(self) -> None:
         if self._is_shutting_down:

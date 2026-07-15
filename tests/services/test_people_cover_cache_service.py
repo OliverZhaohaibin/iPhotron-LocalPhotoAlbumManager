@@ -99,3 +99,24 @@ def test_handle_render_result_skips_cache_write_during_shutdown(
 
     assert service.cached_pixmap("cache-key") is None
     assert not (tmp_path / "people-covers" / "cache-key.png").exists()
+
+
+def test_cover_signal_object_is_retained_until_queued_result(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    service = PeopleCoverCacheService(tmp_path / "people-covers")
+    service._thread_pool.start = lambda _worker: None
+
+    cache_key, pixmap = service.get_rendered_cover(
+        cache_id="person-1",
+        size=(20, 20),
+        signature="signature",
+        renderer=lambda: QImage(20, 20, QImage.Format.Format_RGBA8888),
+    )
+
+    assert pixmap is None
+    assert (service._generation, cache_key) in service._active_signals
+    image = QImage(20, 20, QImage.Format.Format_RGBA8888)
+    service._handle_render_result_for_generation(service._generation, cache_key, image)
+    assert (service._generation, cache_key) not in service._active_signals

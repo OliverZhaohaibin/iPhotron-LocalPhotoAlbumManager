@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
-import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -17,13 +15,14 @@ from PySide6.QtCore import (
     QObject,
     Qt,
     QThreadPool,
+    QTimer,
 )
 from PySide6.QtGui import QAction
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
+from iPhoto.bootstrap.startup_profile import mark
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.events.asset_events import AssetMetadataUpdated
-from iPhoto.bootstrap.startup_profile import mark
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.coordinators.view_router import ViewRouter
@@ -83,7 +82,8 @@ class DesktopCoordinatorRuntime(QObject):
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
         self._media_failure_cleanup_paths: set[str] = set()
-        self._people_module_warmup_started = False
+        self._people_feature_warmup_scheduled = False
+        self._people_view_activation_bound = False
         self._map_extension_download = MapExtensionDownloadController(
             window,
             context,
@@ -798,18 +798,31 @@ class DesktopCoordinatorRuntime(QObject):
         return self._recognition
 
     def warm_people_dashboard(self) -> None:
-        """Warm cached recognition summaries after Gallery becomes usable."""
+        """Warm cached recognition summaries and the hidden People surface."""
 
-        if not self._people_module_warmup_started:
-            self._people_module_warmup_started = True
-            threading.Thread(
-                target=lambda: importlib.import_module(
-                    "iPhoto.gui.ui.widgets.people_dashboard_widget"
-                ),
-                name="PeopleDashboardModuleWarmup",
-                daemon=True,
-            ).start()
         self._ensure_recognition_coordinator().warm_dashboard_snapshot()
+        if self._people_feature_warmup_scheduled:
+            return
+        self._people_feature_warmup_scheduled = True
+        # Qt/PySide modules and widgets must be imported/constructed on the GUI
+        # thread.  A short delay lets the first Gallery frame settle first while
+        # still paying the one-off People construction cost before normal use.
+        QTimer.singleShot(250, self._materialize_people_dashboard)
+
+    def _materialize_people_dashboard(self) -> None:
+        if self._is_shutting_down:
+            return
+        started_ns = time.perf_counter_ns()
+        ui = self._window.ui
+        if not hasattr(ui, "people_page"):
+            ui.ensure_feature("people")
+        mark(
+            "startup.people_dashboard.materialized",
+            duration_ms=round(
+                (time.perf_counter_ns() - started_ns) / 1_000_000.0,
+                3,
+            ),
+        )
 
     def _ensure_preview_window(self):
         self._window.ui.ensure_feature("preview")
@@ -822,7 +835,11 @@ class DesktopCoordinatorRuntime(QObject):
 
     def _bind_people_feature(self, people_page: object) -> None:
         """Attach the People dashboard only when the user first opens it."""
-        self._ensure_recognition_coordinator().bind_people_page(people_page)
+        recognition = self._ensure_recognition_coordinator()
+        recognition.bind_people_page(people_page)
+        if not self._people_view_activation_bound:
+            self._people_view_activation_bound = True
+            self._view_router.peopleViewShown.connect(recognition.people_view_shown)
 
     def _on_library_tree_updated(self) -> None:
         root = self._library_root()

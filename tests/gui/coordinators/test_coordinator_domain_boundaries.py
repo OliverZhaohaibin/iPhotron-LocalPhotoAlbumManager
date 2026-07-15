@@ -7,10 +7,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from iPhoto.gui.coordinators.recognition_coordinator import (
-    _DashboardSnapshot,
     RecognitionCoordinator,
+    _DashboardSnapshot,
 )
-
 
 ROOT = Path(__file__).resolve().parents[3]
 COORDINATORS = ROOT / "src" / "iPhoto" / "gui" / "coordinators"
@@ -71,6 +70,14 @@ raise SystemExit(1 if any(name in sys.modules for name in blocked) else 0)
     env["PYTHONPATH"] = str(ROOT / "src")
 
     subprocess.run([sys.executable, "-c", script], env=env, check=True)
+
+
+def test_people_qt_warmup_stays_on_gui_thread() -> None:
+    source = (COORDINATORS / "desktop_coordinator_runtime.py").read_text(encoding="utf-8")
+
+    assert "threading.Thread" not in source
+    assert "PeopleDashboardModuleWarmup" not in source
+    assert "QTimer.singleShot(250, self._materialize_people_dashboard)" in source
 
 
 def test_recognition_first_creation_uses_latest_library_session() -> None:
@@ -155,7 +162,7 @@ def test_recognition_applies_hidden_people_preference_when_page_is_created() -> 
     people_page.set_show_hidden_people.assert_called_once_with(True)
 
 
-def test_recognition_binds_once_and_defers_ai_until_first_viewport() -> None:
+def test_recognition_binds_once_and_defers_ai_until_visible_first_viewport() -> None:
     context = MagicMock()
     detail = MagicMock()
     people_service = MagicMock()
@@ -189,6 +196,8 @@ def test_recognition_binds_once_and_defers_ai_until_first_viewport() -> None:
         side_effect=lambda _delay, callback: callback(),
     ):
         ready_callback(1)
+        context.library.activate_recognition_scans.assert_not_called()
+        coordinator.people_view_shown()
 
     context.library.activate_recognition_scans.assert_called_once_with()
 

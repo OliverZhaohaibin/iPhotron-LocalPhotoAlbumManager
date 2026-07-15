@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtGui", reason="QtGui is required for GUI tests", exc_type=ImportError)
 
+from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
 
 from iPhoto.gui.ui.controllers.player_view_controller import _AdjustedImageWorker
@@ -58,3 +59,27 @@ def test_adjusted_image_worker_resolves_adjustments_when_sidecar_exists() -> Non
     compute_stats.assert_called_once_with(image)
     edit_service.describe_adjustments.assert_called_once_with(source, color_stats="stats")
     signals.completed.emit.assert_called_once_with(source, image, {"Exposure": 0.5})
+
+
+def test_adjusted_image_worker_presents_preview_before_full_decode() -> None:
+    source = Path("/tmp/photo.jpg")
+    signals = Mock()
+    preview = QImage(1200, 800, QImage.Format.Format_RGB32)
+    full = QImage(6000, 4000, QImage.Format.Format_RGB32)
+
+    with patch(
+        "iPhoto.gui.ui.controllers.player_view_controller.image_loader.load_qimage",
+        side_effect=[preview, full],
+    ) as load_qimage:
+        worker = _AdjustedImageWorker(
+            source,
+            signals,
+            preview_target=QSize(1600, 1200),
+        )
+        worker.run()
+
+    assert load_qimage.call_count == 2
+    load_qimage.assert_any_call(source, QSize(1600, 1200))
+    load_qimage.assert_any_call(source, None)
+    signals.previewCompleted.emit.assert_called_once_with(source, preview, {})
+    signals.completed.emit.assert_called_once_with(source, full, {})

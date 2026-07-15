@@ -10,13 +10,23 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QLocale, QThreadPool, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QPalette
+from PySide6.QtCore import (
+    QItemSelectionModel,
+    QLocale,
+    QModelIndex,
+    QObject,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import QAction, QColor, QImage, QPalette, QPixmap
 
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
-from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
@@ -25,25 +35,25 @@ from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 
 if TYPE_CHECKING:
-    from iPhoto.application.services.location_assignment_service import LocationAssignment
-    from iPhoto.gui.services.location_search_controller import LocationSearchController
-    from iPhoto.gui.services.location_file_write_queue import LocationFileWriteQueue
-    from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionIdentitySuggestion
-    from iPhoto.gui.ui.widgets.info_panel import InfoPanel
-    from iPhoto.library.runtime_controller import LibraryRuntimeController
-    from iPhoto.people.service import PeopleService
-    from iPhoto.pets.service import PetService
     from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
+    from iPhoto.application.services.location_assignment_service import LocationAssignment
+    from iPhoto.events.bus import EventBus
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.services.location_file_write_queue import LocationFileWriteQueue
+    from iPhoto.gui.services.location_search_controller import LocationSearchController
     from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
     from iPhoto.gui.ui.media import MediaAdjustmentCommitter
     from iPhoto.gui.ui.widgets.face_name_overlay import FaceNameOverlayWidget
     from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
+    from iPhoto.gui.ui.widgets.info_panel import InfoPanel
     from iPhoto.gui.ui.widgets.player_bar import PlayerBar
+    from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionIdentitySuggestion
     from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
-    from iPhoto.events.bus import EventBus
+    from iPhoto.library.runtime_controller import LibraryRuntimeController
+    from iPhoto.people.service import PeopleService
+    from iPhoto.pets.service import PetService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -676,7 +686,11 @@ class PlaybackCoordinator(QObject):
                 self._player_view.video_area.stop()
             self._player_view.show_image_surface()
             display_started = time.perf_counter()
-            self._player_view.display_image(source)
+            placeholder = self._playback_placeholder(presentation.row)
+            if placeholder is None:
+                self._player_view.display_image(source)
+            else:
+                self._player_view.display_image(source, placeholder=placeholder)
             log_detail_profile(
                 "playback",
                 "image.display_image",
@@ -715,6 +729,25 @@ class PlaybackCoordinator(QObject):
             is_video=presentation.is_video,
         )
         self._clear_play_profile(presentation.row)
+
+    def _playback_placeholder(self, row: int) -> QPixmap | None:
+        """Reuse the already-loaded Gallery tile while the still is decoded."""
+
+        model = getattr(self, "_asset_model", None)
+        if model is None:
+            return None
+        index = model.index(row, 0)
+        pixmap = model.data(index, Qt.ItemDataRole.DecorationRole)
+        if isinstance(pixmap, QPixmap) and not pixmap.isNull():
+            return pixmap
+        asset_getter = getattr(model, "asset_dto", None)
+        asset = asset_getter(row) if callable(asset_getter) else None
+        micro = getattr(asset, "micro_thumbnail", None)
+        if isinstance(micro, QImage) and not micro.isNull():
+            pixmap = QPixmap.fromImage(micro)
+            if not pixmap.isNull():
+                return pixmap
+        return None
 
     def _is_location_video_write_inflight(self, path: Path) -> bool:
         inflight = getattr(self, "_location_video_write_inflight_paths", set())

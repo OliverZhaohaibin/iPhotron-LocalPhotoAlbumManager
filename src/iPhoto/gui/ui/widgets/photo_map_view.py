@@ -6,44 +6,48 @@ from logging import getLogger
 from pathlib import Path
 from typing import Dict, Iterable, Optional, cast
 
-from PySide6.QtCore import QObject, QRectF, Qt, QEvent, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, Signal, Slot
 from PySide6.QtGui import (
     QColor,
     QFont,
     QMouseEvent,
-    QPaintEvent,
     QPainter,
     QPainterPath,
+    QPaintEvent,
+    QPalette,
     QPen,
     QPixmap,
-    QPalette,
 )
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
+from maps.map_widget.map_renderer import CityAnnotation
+from maps.touchpad_input import (
+    register_native_gesture_target,
+    unregister_native_gesture_target,
+    zoom_factor_from_gesture_event,
+)
+
 from ....application.ports import MapInteractionServicePort, MapRuntimePort
 from ....application.services.map_interaction_service import LibraryMapInteractionService
-from maps.map_widget.map_renderer import CityAnnotation
-
 from ....library.runtime_controller import GeotaggedAsset
 from ..tasks.thumbnail_loader import ThumbnailLoader
-from .marker_controller import MarkerController, _MarkerCluster
 from .custom_tooltip import FloatingToolTip, ToolTipEventFilter
-from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
 from .map_widget_factory import (
+    _MAPS_PACKAGE_ROOT,
     MapGLWidget,
     MapGLWindowWidget,
+    MapSourceSpec,
     MapWidget,
     MapWidgetBase,
-    MapSourceSpec,
     NativeOsmAndWidget,
-    _MAPS_PACKAGE_ROOT,
     check_opengl_support,
     choose_map_widget_backend,
     create_map_widget,
     format_map_runtime_diagnostics,
     resolve_map_package_root,
 )
-
+from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
+from .marker_controller import MarkerController, _MarkerCluster
 
 logger = getLogger(__name__)
 _MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[4] / "maps"
@@ -296,6 +300,7 @@ class PhotoMapView(QWidget):
         self._map_widget: MapWidgetBase
         self._map_event_target: QWidget | None = None
         self._event_bridge = MapEventSurfaceBridge(self)
+        self._native_gesture_router_registered = False
         self._overlay_attachment = MapOverlayAttachment()
         self._resolved_map_source: MapSourceSpec | None = None
         self._backend_kind = "unavailable"
@@ -419,10 +424,16 @@ class PhotoMapView(QWidget):
     def hideEvent(self, event) -> None:  # type: ignore[override]
         """Ensure the custom tooltip is dismissed when the view is hidden."""
 
+        self._set_native_gesture_router_registered(False)
         if self._last_tooltip_text:
             self._tooltip.hide_tooltip()
             self._last_tooltip_text = ""
         super().hideEvent(event)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._shutdown_complete and not self._map_widget_teardown_complete:
+            self._set_native_gesture_router_registered(True)
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
         """Clear hover feedback when the map relinquishes focus."""
@@ -500,6 +511,29 @@ class PhotoMapView(QWidget):
                         handle_pointer_release(mouse_event.position())
         return super().eventFilter(watched, event)
 
+    def _handle_routed_native_gesture(self, event: QEvent, anchor: QPointF) -> bool:
+        """Apply the pinch selected for this map by the shared router."""
+
+        factor = zoom_factor_from_gesture_event(event)
+        if factor is None:
+            return False
+        self._map_widget.zoom_by_factor_at(factor, anchor)
+        event.accept()
+        return True
+
+    def _set_native_gesture_router_registered(self, registered: bool) -> None:
+        target = bool(registered)
+        if target == self._native_gesture_router_registered:
+            return
+        if target:
+            self._native_gesture_router_registered = register_native_gesture_target(
+                self._map_widget,
+                self._handle_routed_native_gesture,
+            )
+            return
+        unregister_native_gesture_target(self._map_widget)
+        self._native_gesture_router_registered = False
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Ensure background workers shut down before the widget closes."""
 
@@ -511,6 +545,7 @@ class PhotoMapView(QWidget):
 
         if self._shutdown_complete or self._is_shutting_down:
             return
+        self._set_native_gesture_router_registered(False)
         self._is_shutting_down = True
         try:
             if self._last_tooltip_text:
@@ -618,10 +653,13 @@ class PhotoMapView(QWidget):
         self._marker_controller.thumbnailsInvalidated.connect(self._overlay.clear_pixmaps)
         if self._assets_library_root is not None:
             self._marker_controller.set_assets(self._assets, self._assets_library_root)
+        if self.isVisible():
+            self._set_native_gesture_router_registered(True)
 
     def _teardown_map_widget(self) -> None:
         if self._map_widget_teardown_complete or not hasattr(self, "_map_widget"):
             return
+        self._set_native_gesture_router_registered(False)
         self._event_bridge.unbind()
         self._map_event_target = None
         self._overlay_attachment.detach(self._map_widget)

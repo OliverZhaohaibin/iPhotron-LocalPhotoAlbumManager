@@ -86,6 +86,16 @@ __declspec(dllexport) void osmand_widget_set_zoom(void* widgetPointer, double zo
         widget->setZoomLevel(zoomLevel);
 }
 
+__declspec(dllexport) void osmand_widget_zoom_by_factor_at(
+    void* widgetPointer,
+    double factor,
+    double anchorX,
+    double anchorY)
+{
+    if (auto* widget = widgetFromPointer(widgetPointer))
+        widget->zoomByFactorAt(factor, anchorX, anchorY);
+}
+
 __declspec(dllexport) void osmand_widget_reset_view(void* widgetPointer)
 {
     if (auto* widget = widgetFromPointer(widgetPointer))

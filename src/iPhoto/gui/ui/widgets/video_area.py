@@ -130,6 +130,7 @@ class VideoArea(QWidget):
         # without requiring the user to click a non-interactive element.
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._edit_viewer = GLImageViewer(self._surface_stack)
+        self._edit_viewer.set_touchpad_gestures_enabled(False)
         self._edit_viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # In detail playback, crop framing is disabled but the crop region fills
         # the canvas (strength=1.0) so that crop-edited videos look the same as

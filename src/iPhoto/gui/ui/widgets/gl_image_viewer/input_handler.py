@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 
+from maps.touchpad_input import is_trackpad_wheel_event
+
 # Qt.LeftButton constant
-_LEFT_BUTTON = Qt.LeftButton if hasattr(Qt, 'LeftButton') else 1
+_LEFT_BUTTON = Qt.LeftButton if hasattr(Qt, "LeftButton") else 1
 
 if TYPE_CHECKING:
     from ..gl_crop_controller import CropInteractionController
@@ -22,12 +24,12 @@ if TYPE_CHECKING:
 
 class InputEventHandler:
     """Routes input events to appropriate controllers based on viewer state.
-    
+
     This handler follows a priority-based dispatch strategy:
     1. If crop mode is active, route events to crop controller
     2. If live replay is enabled, route left-click to replay
     3. Otherwise, route to transform controller
-    
+
     Parameters
     ----------
     crop_controller:
@@ -43,7 +45,7 @@ class InputEventHandler:
     on_cancel_auto_crop_lock:
         Callback to cancel auto-crop view locking
     """
-    
+
     def __init__(
         self,
         crop_controller: CropInteractionController,
@@ -61,14 +63,14 @@ class InputEventHandler:
         self._on_fullscreen_toggle = on_fullscreen_toggle
         self._on_cancel_auto_crop_lock = on_cancel_auto_crop_lock
         self._live_replay_enabled = False
-    
+
     def set_live_replay_enabled(self, enabled: bool) -> None:
         """Enable or disable live replay mode."""
         self._live_replay_enabled = bool(enabled)
-    
+
     def handle_mouse_press(self, event: QMouseEvent) -> bool:
         """Handle mouse press events.
-        
+
         Returns
         -------
         bool
@@ -78,19 +80,19 @@ class InputEventHandler:
         if self._crop_controller.is_active() and button == _LEFT_BUTTON:
             self._crop_controller.handle_mouse_press(event)
             return True
-        
+
         if button == _LEFT_BUTTON:
             if self._live_replay_enabled:
                 self._on_replay_requested()
             else:
                 self._on_cancel_auto_crop_lock()
                 self._transform_controller.handle_mouse_press(event)
-        
+
         return False
-    
+
     def handle_mouse_move(self, event: QMouseEvent) -> bool:
         """Handle mouse move events.
-        
+
         Returns
         -------
         bool
@@ -99,15 +101,15 @@ class InputEventHandler:
         if self._crop_controller.is_active():
             self._crop_controller.handle_mouse_move(event)
             return True
-        
+
         if not self._live_replay_enabled:
             self._transform_controller.handle_mouse_move(event)
-        
+
         return False
-    
+
     def handle_mouse_release(self, event: QMouseEvent) -> bool:
         """Handle mouse release events.
-        
+
         Returns
         -------
         bool
@@ -116,15 +118,15 @@ class InputEventHandler:
         if self._crop_controller.is_active() and event.button() == _LEFT_BUTTON:
             self._crop_controller.handle_mouse_release(event)
             return True
-        
+
         if not self._live_replay_enabled:
             self._transform_controller.handle_mouse_release(event)
-        
+
         return False
-    
+
     def handle_double_click(self, event: QMouseEvent) -> bool:
         """Handle mouse double-click events.
-        
+
         Returns
         -------
         bool
@@ -136,12 +138,10 @@ class InputEventHandler:
             # For now, return False to indicate this needs widget context
             return False
         return False
-    
-    def handle_double_click_with_window(
-        self, event: QMouseEvent, window
-    ) -> bool:
+
+    def handle_double_click_with_window(self, event: QMouseEvent, window) -> bool:
         """Handle double-click with window context for fullscreen detection.
-        
+
         Returns
         -------
         bool
@@ -154,12 +154,35 @@ class InputEventHandler:
                 self._on_fullscreen_toggle()
             return True
         return False
-    
+
     def handle_wheel(self, event: QWheelEvent) -> None:
         """Handle wheel events."""
+        if self._transform_controller.touchpad_gestures_enabled() and is_trackpad_wheel_event(
+            event
+        ):
+            self._on_cancel_auto_crop_lock()
+            self._transform_controller.handle_wheel(event)
+            return
+
         if self._crop_controller.is_active():
             self._crop_controller.handle_wheel(event)
             return
-        
+
         self._on_cancel_auto_crop_lock()
         self._transform_controller.handle_wheel(event)
+
+    def handle_native_gesture(
+        self,
+        event,
+        *,
+        anchor=None,
+    ) -> bool:
+        """Route supported native gestures directly to the image transform."""
+
+        handled = self._transform_controller.handle_native_gesture(
+            event,
+            anchor=anchor,
+        )
+        if handled:
+            self._on_cancel_auto_crop_lock()
+        return handled

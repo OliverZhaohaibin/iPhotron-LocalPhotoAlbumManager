@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, QPointF, Qt, Signal
 
+from maps.touchpad_input import (
+    event_position,
+    is_scroll_end_event,
+    is_trackpad_wheel_event,
+    pan_delta_from_wheel,
+    zoom_factor_from_gesture_event,
+    zoom_factor_from_touchpad_pinch_wheel,
+)
+
 
 class InputHandler(QObject):
     """Handle mouse interaction for :class:`~map_widget.map_widget.MapWidget`."""
@@ -15,6 +24,8 @@ class InputHandler(QObject):
     """Signal emitted once the active drag gesture completes."""
 
     zoom_requested = Signal(float, QPointF)
+    trackpad_pan_requested = Signal(QPointF)
+    trackpad_pan_finished = Signal()
     cursor_changed = Signal(Qt.CursorShape)
     cursor_reset = Signal()
 
@@ -64,19 +75,54 @@ class InputHandler(QObject):
             self.cursor_reset.emit()
 
     # ------------------------------------------------------------------
-    def handle_wheel_event(self, event, current_zoom: float) -> None:
+    def handle_wheel_event(self, event, current_zoom: float) -> bool:
         """Request a zoom change that keeps the cursor location stationary."""
+
+        pinch_factor = zoom_factor_from_touchpad_pinch_wheel(event)
+        if pinch_factor is not None:
+            new_zoom = max(
+                self._min_zoom,
+                min(self._max_zoom, current_zoom * pinch_factor),
+            )
+            if new_zoom != current_zoom:
+                self.zoom_requested.emit(new_zoom, event_position(event))
+            event.accept()
+            return True
+
+        if is_trackpad_wheel_event(event):
+            delta = pan_delta_from_wheel(event) or QPointF()
+            if not delta.isNull():
+                self.trackpad_pan_requested.emit(delta)
+            if is_scroll_end_event(event):
+                self.trackpad_pan_finished.emit()
+            event.accept()
+            return True
 
         delta = event.angleDelta().y()
         if delta == 0:
-            return
+            return False
 
         zoom_factor = 1.0 + delta / 1200.0
         new_zoom = max(self._min_zoom, min(self._max_zoom, current_zoom * zoom_factor))
         if new_zoom == current_zoom:
-            return
+            event.accept()
+            return True
 
         self.zoom_requested.emit(new_zoom, event.position())
+        event.accept()
+        return True
+
+    def handle_native_gesture_event(self, event, current_zoom: float) -> bool:
+        """Request anchored zoom for a native two-finger pinch."""
+
+        factor = zoom_factor_from_gesture_event(event)
+        if factor is None:
+            return False
+        new_zoom = max(self._min_zoom, min(self._max_zoom, current_zoom * factor))
+        if new_zoom != current_zoom:
+            self.zoom_requested.emit(new_zoom, event_position(event))
+        event.accept()
+        return True
 
 
 __all__ = ["InputHandler"]

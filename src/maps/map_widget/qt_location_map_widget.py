@@ -6,13 +6,21 @@ import math
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QObject, QPointF, QUrl, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QMouseEvent, QResizeEvent, QWheelEvent
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget
 
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
+from maps.touchpad_input import (
+    event_position,
+    is_scroll_end_event,
+    is_trackpad_wheel_event,
+    pan_delta_from_wheel,
+    zoom_factor_from_native_gesture,
+    zoom_factor_from_touchpad_pinch_wheel,
+)
 
 from .drag_cursor import DragCursorManager
 from .map_renderer import CityAnnotation
@@ -85,6 +93,11 @@ class QtLocationMapWidget(QQuickWidget):
         self._dragging = False
         self._last_mouse_pos = QPointF()
         self._drag_cursor = DragCursorManager()
+        self._pending_trackpad_pan = QPointF()
+        self._trackpad_pan_timer = QTimer(self)
+        self._trackpad_pan_timer.setSingleShot(True)
+        self._trackpad_pan_timer.setInterval(16)
+        self._trackpad_pan_timer.timeout.connect(self._flush_pending_trackpad_pan)
 
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         self.setMouseTracking(True)
@@ -139,12 +152,40 @@ class QtLocationMapWidget(QQuickWidget):
         self._sync_map_camera()
         self._emit_view_change()
 
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        """Scale the map while preserving the coordinate below ``anchor``."""
+
+        new_zoom = max(self._min_zoom, min(self._max_zoom, self._zoom * float(factor)))
+        if abs(new_zoom - self._zoom) <= 1e-6:
+            return
+
+        world_size = self._world_size()
+        top_left_x = self._center_x * world_size - self.width() / 2.0
+        top_left_y = self._center_y * world_size - self.height() / 2.0
+        anchor_world_x = (top_left_x + anchor.x()) / world_size
+        anchor_world_y = (top_left_y + anchor.y()) / world_size
+
+        self._zoom = new_zoom
+        new_world_size = self._world_size()
+        self._center_x = (
+            anchor_world_x * new_world_size - anchor.x() + self.width() / 2.0
+        ) / new_world_size
+        self._center_y = (
+            anchor_world_y * new_world_size - anchor.y() + self.height() / 2.0
+        ) / new_world_size
+        self._wrap_center()
+        self._sync_map_camera()
+        self._emit_view_change()
+
     def center_lonlat(self) -> tuple[float, float]:
         """Return the current viewport centre as ``(lon, lat)``."""
 
         return normalized_to_lonlat(self._center_x, self._center_y)
 
     def shutdown(self) -> None:
+        if self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.stop()
+        self._pending_trackpad_pan = QPointF()
         self._reset_drag_cursor()
 
     def map_backend_metadata(self) -> MapBackendMetadata:
@@ -244,6 +285,24 @@ class QtLocationMapWidget(QQuickWidget):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+        pinch_factor = zoom_factor_from_touchpad_pinch_wheel(event)
+        if pinch_factor is not None:
+            self.zoom_by_factor_at(pinch_factor, event_position(event))
+            event.accept()
+            return
+
+        if is_trackpad_wheel_event(event):
+            delta = pan_delta_from_wheel(event) or QPointF()
+            if not delta.isNull():
+                self._queue_trackpad_pan(delta)
+            if is_scroll_end_event(event):
+                if self._trackpad_pan_timer.isActive():
+                    self._trackpad_pan_timer.stop()
+                self._flush_pending_trackpad_pan()
+                self.panFinished.emit()
+            event.accept()
+            return
+
         delta = event.angleDelta().y()
         if delta == 0:
             super().wheelEvent(event)
@@ -275,6 +334,27 @@ class QtLocationMapWidget(QQuickWidget):
         self._sync_map_camera()
         self._emit_view_change()
         event.accept()
+
+    def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.NativeGesture:
+            factor = zoom_factor_from_native_gesture(event)
+            if factor is not None:
+                self.zoom_by_factor_at(factor, event_position(event))
+                event.accept()
+                return True
+        return super().event(event)
+
+    def _queue_trackpad_pan(self, delta: QPointF) -> None:
+        self._pending_trackpad_pan = self._pending_trackpad_pan + QPointF(delta)
+        if not self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.start()
+
+    def _flush_pending_trackpad_pan(self) -> None:
+        delta = QPointF(self._pending_trackpad_pan)
+        self._pending_trackpad_pan = QPointF()
+        if not delta.isNull():
+            self.pan_by_pixels(delta.x(), delta.y())
+            self.panned.emit(delta)
 
     def _emit_view_change(self) -> None:
         self.viewChanged.emit(float(self._center_x), float(self._center_y), float(self._zoom))

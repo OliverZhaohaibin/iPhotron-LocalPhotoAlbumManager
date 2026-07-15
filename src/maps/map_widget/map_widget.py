@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QPointF, Signal, Qt
-from PySide6.QtGui import QColor, QCloseEvent, QPainter, QPalette, QResizeEvent
+from PySide6.QtCore import QEvent, QPointF, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPalette, QResizeEvent
 from PySide6.QtWidgets import QWidget
+
+from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 from ._map_widget_base import MapWidgetController
 from .map_renderer import MAP_BACKGROUND_COLOR, CityAnnotation
-from maps.map_sources import MapBackendMetadata, MapSourceSpec
-
 
 _MAP_OPAQUE_BACKGROUND = "#88a8c2"
 
@@ -94,6 +94,9 @@ class MapWidget(QWidget):
         """Translate the camera by a fixed on-screen pixel delta."""
 
         self._controller.pan_by_pixels(delta_x, delta_y)
+
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        self._controller.zoom_by_factor_at(factor, anchor)
 
     # ------------------------------------------------------------------
     def center_lonlat(self) -> tuple[float, float]:
@@ -195,8 +198,14 @@ class MapWidget(QWidget):
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         """Forward wheel events to the shared interaction handler."""
 
-        self._controller.handle_wheel_event(event)
-        super().wheelEvent(event)
+        if not self._controller.handle_wheel_event(event):
+            super().wheelEvent(event)
+
+    def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.NativeGesture:
+            if self._controller.handle_native_gesture_event(event):
+                return True
+        return super().event(event)
 
     # ------------------------------------------------------------------
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]

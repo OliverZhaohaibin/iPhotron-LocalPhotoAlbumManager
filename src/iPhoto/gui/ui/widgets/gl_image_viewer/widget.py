@@ -14,7 +14,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -26,6 +26,11 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import QRhiWidget
+
+from maps.touchpad_input import (
+    register_native_gesture_target,
+    unregister_native_gesture_target,
+)
 
 try:  # pragma: no cover - optional Qt module
     from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
@@ -69,10 +74,12 @@ def _load_gl_renderer_class():
         GLRenderer = _GLRenderer
     return GLRenderer
 
+
 # 如果你的工程没有这个函数，可以改成固定背景色
 try:
     from ...palette import viewer_surface_color  # type: ignore
 except Exception:
+
     def viewer_surface_color(_):  # fallback
         return QColor(0, 0, 0)
 
@@ -103,6 +110,7 @@ class GLImageViewer(QRhiWidget):
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
+        self._native_gesture_router_registered = False
 
         # Use the same platform-selected QRhi backend as the video renderer.
         # macOS defaults to Metal; Windows/Linux keep the current OpenGL path.
@@ -332,10 +340,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_post_load_view_transform = False
 
         # Check if we can reuse the existing texture
-        if (
-            not force_texture_refresh
-            and self._texture_manager.should_reuse_texture(image_source)
-        ):
+        if not force_texture_refresh and self._texture_manager.should_reuse_texture(image_source):
             if image is not None and not image.isNull():
                 # Skip texture re-upload, only update adjustments. Preserve the
                 # current zoom/pan state so adjustment previews stay anchored
@@ -404,7 +409,9 @@ class GLImageViewer(QRhiWidget):
             snapshot = frame.toImage()
             if not snapshot.isNull():
                 self._pending_video_image = snapshot
-                self._pending_video_image_pre_rotated = self._is_image_snapshot_prerotated(frame, snapshot)
+                self._pending_video_image_pre_rotated = self._is_image_snapshot_prerotated(
+                    frame, snapshot
+                )
                 self._video_frame = None
         if adjustments is not None and adjustments != self._adjustments:
             self.set_adjustments(dict(adjustments))
@@ -415,7 +422,9 @@ class GLImageViewer(QRhiWidget):
         if reset_view:
             self._pending_video_reset_view = True
         self._diag_video_frame_set_count += 1
-        if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_frame_set_count):
+        if sys.platform.startswith("linux") and self._should_log_diag_frame(
+            self._diag_video_frame_set_count
+        ):
             _LOGGER.warning(
                 "[diag][gl_viewer] set_video_frame #%s reset_view=%s visible=%s dirty=%s pending_reset=%s widget=%sx%s rt=%sx%s frame=%s",
                 self._diag_video_frame_set_count,
@@ -668,6 +677,12 @@ class GLImageViewer(QRhiWidget):
     def set_wheel_action(self, action: str) -> None:
         self._transform_controller.set_wheel_action(action)
 
+    def set_touchpad_gestures_enabled(self, enabled: bool) -> None:
+        """Control native touchpad pan/pinch handling for this viewer."""
+
+        self._transform_controller.set_touchpad_gestures_enabled(enabled)
+        self._set_native_gesture_router_registered(bool(enabled and self.isVisible()))
+
     def image_to_viewport(
         self,
         x: float,
@@ -678,8 +693,12 @@ class GLImageViewer(QRhiWidget):
     ) -> QPointF:
         """Map original image-space coordinates into the current viewport."""
 
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
+        texture_width = float(
+            image_width if image_width is not None else self._texture_dimensions()[0]
+        )
+        texture_height = float(
+            image_height if image_height is not None else self._texture_dimensions()[1]
+        )
         if texture_width <= 0.0 or texture_height <= 0.0:
             return QPointF()
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
@@ -703,7 +722,9 @@ class GLImageViewer(QRhiWidget):
         """Map a viewport-space point back into original image coordinates."""
 
         logical_point = self._zoom_ctrl.viewport_to_image(point)
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
+        texture_width = float(
+            image_width if image_width is not None else self._texture_dimensions()[0]
+        )
         texture_height = float(
             image_height if image_height is not None else self._texture_dimensions()[1]
         )
@@ -732,8 +753,12 @@ class GLImageViewer(QRhiWidget):
     ) -> QRectF:
         """Map an original image-space rectangle into the current viewport."""
 
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
+        texture_width = float(
+            image_width if image_width is not None else self._texture_dimensions()[0]
+        )
+        texture_height = float(
+            image_height if image_height is not None else self._texture_dimensions()[1]
+        )
         if texture_width <= 0.0 or texture_height <= 0.0 or width <= 0.0 or height <= 0.0:
             return QRectF()
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
@@ -748,7 +773,9 @@ class GLImageViewer(QRhiWidget):
             flip_horizontal=flip_horizontal,
         )
         top_left = self._zoom_ctrl.image_to_viewport(logical_x, logical_y)
-        bottom_right = self._zoom_ctrl.image_to_viewport(logical_x + logical_w, logical_y + logical_h)
+        bottom_right = self._zoom_ctrl.image_to_viewport(
+            logical_x + logical_w, logical_y + logical_h
+        )
         left = min(top_left.x(), bottom_right.x())
         top = min(top_left.y(), bottom_right.y())
         right = max(top_left.x(), bottom_right.x())
@@ -997,7 +1024,9 @@ class GLImageViewer(QRhiWidget):
             try:
                 from .....core.image_filters import apply_adjustments
             except Exception:
-                _LOGGER.warning("render_offscreen_image: CPU adjustment fallback unavailable", exc_info=True)
+                _LOGGER.warning(
+                    "render_offscreen_image: CPU adjustment fallback unavailable", exc_info=True
+                )
                 return QImage()
             rendered = apply_adjustments(self._image, adjustments or self._adjustments)
             if rendered.isNull():
@@ -1152,7 +1181,9 @@ class GLImageViewer(QRhiWidget):
             and (self._video_frame is not None or self._pending_video_image is not None)
         ):
             self._diag_video_render_count += 1
-            if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+            if sys.platform.startswith("linux") and self._should_log_diag_frame(
+                self._diag_video_render_count
+            ):
                 _LOGGER.warning(
                     "[diag][gl_viewer] render #%s pre-upload rt=%sx%s widget=%sx%s pending_rot=%s source_rot=%s has_texture=%s frame=%s",
                     self._diag_video_render_count,
@@ -1167,7 +1198,9 @@ class GLImageViewer(QRhiWidget):
                 )
             try:
                 pre_rotated = self._upload_pending_video_source()
-                if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+                if sys.platform.startswith("linux") and self._should_log_diag_frame(
+                    self._diag_video_render_count
+                ):
                     logical_tex_w, logical_tex_h = self._display_texture_dimensions()
                     _LOGGER.warning(
                         "[diag][gl_viewer] render #%s post-upload pre_rotated=%s final_rot=%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f)",
@@ -1210,7 +1243,7 @@ class GLImageViewer(QRhiWidget):
         cover_scale = self._transform_controller.get_image_cover_scale()
 
         time_value = time.monotonic() - self._time_base
-        
+
         view_pan = self._transform_controller.get_pan_pixels()
 
         effective_adjustments: dict[str, float] | Mapping[str, float]
@@ -1236,7 +1269,6 @@ class GLImageViewer(QRhiWidget):
             effective_adjustments = dict(self._display_adjustments())
             logical_crop = geometry.logical_crop_mapping_from_texture(effective_adjustments)
             effective_adjustments.update(logical_crop)
-
 
         logical_tex_w, logical_tex_h = self._display_texture_dimensions()
         if (
@@ -1419,9 +1451,7 @@ class GLImageViewer(QRhiWidget):
         logical_tuple = geometry.normalised_crop_from_mapping(logical_map)
         rotate_steps = self._display_rotate_steps()
 
-        tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
-            logical_tuple, rotate_steps
-        )
+        tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(logical_tuple, rotate_steps)
         return {
             "Crop_CX": tex_cx,
             "Crop_CY": tex_cy,
@@ -1464,7 +1494,6 @@ class GLImageViewer(QRhiWidget):
     def _update_cover_scale(self, straighten_deg: float, rotate_steps: int) -> None:
         crop_viewport.update_cover_scale(self, straighten_deg, rotate_steps)
 
-
     # --------------------------- Viewport helpers ---------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -1499,6 +1528,33 @@ class GLImageViewer(QRhiWidget):
     def wheelEvent(self, event: QWheelEvent) -> None:
         self._input_handler.handle_wheel(event)
 
+    def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() in (QEvent.Type.NativeGesture, QEvent.Type.Gesture):
+            if self._input_handler.handle_native_gesture(event):
+                return True
+        return super().event(event)
+
+    def _handle_routed_native_gesture(self, event: QEvent, local_position: QPointF) -> bool:
+        """Handle a pinch selected for this viewer by the shared router."""
+
+        return self._input_handler.handle_native_gesture(
+            event,
+            anchor=local_position,
+        )
+
+    def _set_native_gesture_router_registered(self, registered: bool) -> None:
+        target = bool(registered)
+        if target == self._native_gesture_router_registered:
+            return
+        if target:
+            self._native_gesture_router_registered = register_native_gesture_target(
+                self,
+                self._handle_routed_native_gesture,
+            )
+            return
+        unregister_native_gesture_target(self)
+        self._native_gesture_router_registered = False
+
     # QRhiWidget does not have a resizeGL callback.  The viewport is set
     # dynamically at the start of each render() call using
     # ``self.renderTarget().pixelSize()``, which automatically accounts for
@@ -1527,9 +1583,15 @@ class GLImageViewer(QRhiWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        if self._transform_controller.touchpad_gestures_enabled():
+            self._set_native_gesture_router_registered(True)
         # Request a fresh render when the widget becomes visible again
         # (e.g. after switching back from the video surface).
         self.update()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._set_native_gesture_router_registered(False)
+        super().hideEvent(event)
 
     # --------------------------- Cursor management and helpers ---------------------------
 

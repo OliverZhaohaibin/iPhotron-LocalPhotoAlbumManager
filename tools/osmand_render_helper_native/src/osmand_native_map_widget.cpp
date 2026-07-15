@@ -428,6 +428,32 @@ void OsmAndNativeMapWidget::setZoomLevel(double zoomLevel)
     update();
 }
 
+void OsmAndNativeMapWidget::zoomByFactorAt(double factor, double anchorX, double anchorY)
+{
+    if (!std::isfinite(factor) || factor <= 0.0)
+        return;
+
+    const auto nextZoom = std::clamp(_zoomLevel * factor, _minZoomLevel, _maxZoomLevel);
+    if (std::abs(nextZoom - _zoomLevel) <= 1e-6)
+        return;
+
+    const auto oldWorldSize = worldSize();
+    const auto topLeftX = _centerX * oldWorldSize - width() / 2.0;
+    const auto topLeftY = _centerY * oldWorldSize - height() / 2.0;
+    const auto anchorWorldX = (topLeftX + anchorX) / oldWorldSize;
+    const auto anchorWorldY = (topLeftY + anchorY) / oldWorldSize;
+
+    _zoomLevel = nextZoom;
+    const auto newWorldSize = worldSize();
+    _centerX = (anchorWorldX * newWorldSize - anchorX + width() / 2.0) / newWorldSize;
+    _centerY = (anchorWorldY * newWorldSize - anchorY + height() / 2.0) / newWorldSize;
+    beginInteractiveRendering();
+    scheduleInteractiveRenderingFinish();
+    wrapCenter();
+    syncRendererCamera(false);
+    update();
+}
+
 void OsmAndNativeMapWidget::resetView()
 {
     finishInteractiveRendering();
@@ -617,34 +643,7 @@ void OsmAndNativeMapWidget::wheelEvent(QWheelEvent* event)
     }
 
     const auto zoomFactor = 1.0 + static_cast<double>(delta) / 1200.0;
-    const auto nextZoom = std::clamp(_zoomLevel * zoomFactor, _minZoomLevel, _maxZoomLevel);
-    if (std::abs(nextZoom - _zoomLevel) <= 1e-6)
-    {
-        event->accept();
-        return;
-    }
-
-    const auto oldWorldSize = worldSize();
-    const auto centerPixelX = _centerX * oldWorldSize;
-    const auto centerPixelY = _centerY * oldWorldSize;
-    const auto topLeftX = centerPixelX - width() / 2.0;
-    const auto topLeftY = centerPixelY - height() / 2.0;
-
-    const auto mouseWorldX = (topLeftX + event->position().x()) / oldWorldSize;
-    const auto mouseWorldY = (topLeftY + event->position().y()) / oldWorldSize;
-
-    _zoomLevel = nextZoom;
-    const auto newWorldSize = worldSize();
-    const auto newCenterPixelX = mouseWorldX * newWorldSize - event->position().x() + width() / 2.0;
-    const auto newCenterPixelY = mouseWorldY * newWorldSize - event->position().y() + height() / 2.0;
-
-    beginInteractiveRendering();
-    scheduleInteractiveRenderingFinish();
-    _centerX = newCenterPixelX / newWorldSize;
-    _centerY = newCenterPixelY / newWorldSize;
-    wrapCenter();
-    syncRendererCamera(false);
-    update();
+    zoomByFactorAt(zoomFactor, event->position().x(), event->position().y());
     event->accept();
 }
 

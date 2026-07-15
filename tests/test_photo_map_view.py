@@ -18,18 +18,29 @@ from PySide6.QtGui import (
     QHideEvent,
     QImage,
     QMouseEvent,
+    QNativeGestureEvent,
     QPixmap,
+    QPointingDevice,
     QResizeEvent,
     QShowEvent,
     QWheelEvent,
     QWindow,
 )
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGestureEvent,
+    QPinchGesture,
+    QStackedLayout,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from iPhoto.application.dtos import MapMarkerActivation
-from iPhoto.gui.ui.widgets import photo_map_view as photo_map_view_module
 from iPhoto.gui.ui.widgets import map_widget_factory as map_widget_factory_module
+from iPhoto.gui.ui.widgets import photo_map_view as photo_map_view_module
+from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.map_widget_factory import MapWidgetFactoryResult
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 from maps.map_widget import map_gl_widget as map_gl_widget_module
@@ -63,6 +74,7 @@ class _FakeNativeLibrary:
         self.zoom = 2.0
         self.center_lon = 0.0
         self.center_lat = 0.0
+        self.last_zoom_factor_anchor: tuple[float, float, float] | None = None
 
     def osmand_create_map_widget(self, *_args) -> int:
         return 1
@@ -78,6 +90,16 @@ class _FakeNativeLibrary:
 
     def osmand_widget_set_zoom(self, _pointer, zoom_level: float) -> None:
         self.zoom = float(zoom_level)
+
+    def osmand_widget_zoom_by_factor_at(
+        self, _pointer, factor: float, anchor_x: float, anchor_y: float
+    ) -> None:
+        self.zoom *= float(factor)
+        self.last_zoom_factor_anchor = (
+            float(factor),
+            float(anchor_x),
+            float(anchor_y),
+        )
 
     def osmand_widget_reset_view(self, _pointer) -> None:
         self.zoom = 2.0
@@ -230,6 +252,7 @@ class _FallbackMapWidget(QWidget):
         self._zoom = 2.0
         self._metadata = MapBackendMetadata(2.0, 19.0, True, "raster", "xyz")
         self._map_source = map_source
+        self.last_zoom_anchor: QPointF | None = None
 
     @property
     def zoom(self) -> float:
@@ -237,6 +260,10 @@ class _FallbackMapWidget(QWidget):
 
     def set_zoom(self, zoom: float) -> None:
         self._zoom = float(zoom)
+
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        self._zoom *= float(factor)
+        self.last_zoom_anchor = QPointF(anchor)
 
     def reset_view(self) -> None:
         self._zoom = 2.0
@@ -276,6 +303,20 @@ class _FallbackMapWidget(QWidget):
 
     def event_target(self) -> QWidget:
         return self
+
+
+def _native_zoom_event(global_anchor: QPointF, *, value: float = 0.1) -> QNativeGestureEvent:
+    return QNativeGestureEvent(
+        Qt.NativeGestureType.ZoomNativeGesture,
+        QPointingDevice.primaryPointingDevice(),
+        2,
+        global_anchor,
+        global_anchor,
+        global_anchor,
+        value,
+        QPointF(),
+        1,
+    )
 
 
 class _FakeMapInteractionService:
@@ -619,6 +660,132 @@ def test_marker_callout_background_is_opaque(qapp: QApplication, tmp_path) -> No
     assert sample.red() == 255
     assert sample.green() == 255
     assert sample.blue() == 255
+
+
+def test_photo_map_view_routes_host_window_native_pinch_to_active_backend(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = MapSourceSpec(
+        kind="legacy_pbf",
+        data_path=tmp_path / "tiles",
+        style_path=tmp_path / "style.json",
+    )
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "create_map_widget",
+        lambda *args, **kwargs: MapWidgetFactoryResult(
+            _FallbackMapWidget(args[0], map_source=source),
+            source,
+            "legacy_python",
+            False,
+        ),
+    )
+
+    view = photo_map_view_module.PhotoMapView(map_source=source)
+    view.resize(360, 240)
+    view.show()
+    qapp.processEvents()
+
+    try:
+        map_widget = cast(_FallbackMapWidget, view.map_widget())
+        anchor = QPoint(90, 70)
+        global_anchor = QPointF(map_widget.mapToGlobal(anchor))
+        event = _native_zoom_event(global_anchor)
+
+        assert view._native_gesture_router_registered
+        assert QApplication.sendEvent(view.windowHandle(), event)
+        assert event.isAccepted()
+        assert map_widget.zoom == pytest.approx(2.2)
+        assert map_widget.last_zoom_anchor == QPointF(anchor)
+
+        detached_receiver = QWindow()
+        detached_event = _native_zoom_event(global_anchor, value=0.05)
+        assert QApplication.sendEvent(detached_receiver, detached_event)
+        assert map_widget.zoom == pytest.approx(2.31)
+        assert map_widget.last_zoom_anchor == QPointF(anchor)
+
+        pinch = QPinchGesture()
+        pinch.setCenterPoint(global_anchor)
+        pinch.setScaleFactor(1.1)
+        pinch.setChangeFlags(QPinchGesture.ChangeFlag.ScaleFactorChanged)
+        gesture_event = QGestureEvent([pinch])
+        assert QApplication.sendEvent(map_widget, gesture_event)
+        assert map_widget.zoom == pytest.approx(2.541)
+        assert map_widget.last_zoom_anchor == QPointF(anchor)
+
+        view.hide()
+        qapp.processEvents()
+        hidden_event = _native_zoom_event(global_anchor)
+        QApplication.sendEvent(view.windowHandle(), hidden_event)
+        assert map_widget.zoom == pytest.approx(2.541)
+    finally:
+        view.close()
+        qapp.processEvents()
+
+    assert not view._native_gesture_router_registered
+
+
+def test_native_pinch_follows_visible_playback_or_map_page(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = MapSourceSpec(
+        kind="legacy_pbf",
+        data_path=tmp_path / "tiles",
+        style_path=tmp_path / "style.json",
+    )
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "create_map_widget",
+        lambda *args, **kwargs: MapWidgetFactoryResult(
+            _FallbackMapWidget(args[0], map_source=source),
+            source,
+            "legacy_python",
+            False,
+        ),
+    )
+
+    host = QWidget()
+    host.resize(420, 300)
+    layout = QVBoxLayout(host)
+    stack = QStackedWidget(host)
+    layout.addWidget(stack)
+    viewer = GLImageViewer()
+    map_view = photo_map_view_module.PhotoMapView(map_source=source)
+    stack.addWidget(viewer)
+    stack.addWidget(map_view)
+    stacked_layout = cast(QStackedLayout, stack.layout())
+    stacked_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
+    stack.setCurrentWidget(viewer)
+    host.show()
+    qapp.processEvents()
+
+    try:
+        map_widget = cast(_FallbackMapWidget, map_view.map_widget())
+        playback_anchor = QPointF(viewer.mapToGlobal(viewer.rect().center()))
+        playback_event = _native_zoom_event(playback_anchor)
+        assert QApplication.sendEvent(host.windowHandle(), playback_event)
+        assert viewer._transform_controller.get_zoom_factor() == pytest.approx(1.1)
+        assert map_widget.zoom == pytest.approx(2.0)
+
+        stack.setCurrentWidget(map_view)
+        qapp.processEvents()
+        map_anchor = QPoint(80, 60)
+        map_event = _native_zoom_event(QPointF(map_widget.mapToGlobal(map_anchor)))
+        assert QApplication.sendEvent(host.windowHandle(), map_event)
+        assert viewer._transform_controller.get_zoom_factor() == pytest.approx(1.1)
+        assert map_widget.zoom == pytest.approx(2.2)
+        assert map_widget.last_zoom_anchor == QPointF(map_anchor)
+    finally:
+        host.close()
+        qapp.processEvents()
 
 
 def test_photo_map_view_routes_marker_assets_through_interaction_service(
@@ -1250,12 +1417,15 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
         QApplication.sendEvent(event_target, wheel_event)
         qapp.processEvents()
 
+        widget.zoom_by_factor_at(1.05, QPointF(18.0, 27.0))
+
         projected = widget.project_lonlat(1.5, 2.5)
 
         assert panned_spy.count() >= 1
         assert pan_finished_spy.count() == 1
         assert view_changed_spy.count() > initial_view_change_count
-        assert math.isclose(fake_library.zoom, 2.2, rel_tol=1e-6)
+        assert math.isclose(fake_library.zoom, 2.31, rel_tol=1e-6)
+        assert fake_library.last_zoom_factor_anchor == (1.05, 18.0, 27.0)
         assert projected is not None
         assert math.isclose(projected.x(), 20.0, rel_tol=1e-6)
         assert math.isclose(projected.y(), 32.0, rel_tol=1e-6)

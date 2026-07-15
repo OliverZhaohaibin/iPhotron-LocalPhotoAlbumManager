@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QInputDevice
 
 # Ensure src is in path (handled by conftest usually, but adding for safety if run standalone)
 project_root = Path(__file__).parent.parent
@@ -42,12 +43,12 @@ class TestInputEventHandler:
     def test_routes_to_crop_when_active(self):
         """Events should route to crop controller when crop mode is active."""
         self.crop_controller.is_active.return_value = True
-        
+
         event = Mock()
         event.button.return_value = Qt.LeftButton
-        
+
         result = self.handler.handle_mouse_press(event)
-        
+
         assert result is True
         self.crop_controller.handle_mouse_press.assert_called_once_with(event)
         self.transform_controller.handle_mouse_press.assert_not_called()
@@ -55,12 +56,12 @@ class TestInputEventHandler:
     def test_routes_to_transform_when_crop_inactive(self):
         """Events should route to transform controller when crop is inactive."""
         self.crop_controller.is_active.return_value = False
-        
+
         event = Mock()
         event.button.return_value = Qt.LeftButton
-        
+
         result = self.handler.handle_mouse_press(event)
-        
+
         assert result is False
         self.on_cancel_crop_lock.assert_called_once()
         self.transform_controller.handle_mouse_press.assert_called_once_with(event)
@@ -69,22 +70,22 @@ class TestInputEventHandler:
         """Left click in replay mode should trigger replay callback."""
         self.crop_controller.is_active.return_value = False
         self.handler.set_live_replay_enabled(True)
-        
+
         event = Mock()
         event.button.return_value = Qt.LeftButton
-        
+
         self.handler.handle_mouse_press(event)
-        
+
         self.on_replay.assert_called_once()
         self.transform_controller.handle_mouse_press.assert_not_called()
 
     def test_mouse_move_routes_to_crop_when_active(self):
         """Mouse move should route to crop controller when active."""
         self.crop_controller.is_active.return_value = True
-        
+
         event = Mock()
         result = self.handler.handle_mouse_move(event)
-        
+
         assert result is True
         self.crop_controller.handle_mouse_move.assert_called_once_with(event)
 
@@ -92,30 +93,57 @@ class TestInputEventHandler:
         """Mouse move should route to transform controller when crop inactive."""
         self.crop_controller.is_active.return_value = False
         self.handler.set_live_replay_enabled(False)
-        
+
         event = Mock()
         result = self.handler.handle_mouse_move(event)
-        
+
         assert result is False
         self.transform_controller.handle_mouse_move.assert_called_once_with(event)
 
     def test_wheel_routes_to_crop_when_active(self):
         """Wheel events should route to crop controller when active."""
         self.crop_controller.is_active.return_value = True
-        
+
         event = Mock()
         self.handler.handle_wheel(event)
-        
+
         self.crop_controller.handle_wheel.assert_called_once_with(event)
         self.transform_controller.handle_wheel.assert_not_called()
+
+    def test_touchpad_wheel_bypasses_crop_mode(self):
+        self.crop_controller.is_active.return_value = True
+        self.transform_controller.touchpad_gestures_enabled.return_value = True
+        event = Mock()
+        event.device.return_value.type.return_value = QInputDevice.DeviceType.TouchPad
+        event.pixelDelta.return_value = QPoint(4, 6)
+
+        self.handler.handle_wheel(event)
+
+        self.transform_controller.handle_wheel.assert_called_once_with(event)
+        self.crop_controller.handle_wheel.assert_not_called()
+        self.on_cancel_crop_lock.assert_called_once()
+
+    def test_native_pinch_bypasses_crop_mode(self):
+        self.crop_controller.is_active.return_value = True
+        self.transform_controller.handle_native_gesture.return_value = True
+        event = Mock()
+        anchor = QPoint(15, 25)
+
+        assert self.handler.handle_native_gesture(event, anchor=anchor) is True
+        self.transform_controller.handle_native_gesture.assert_called_once_with(
+            event,
+            anchor=anchor,
+        )
+        self.crop_controller.handle_wheel.assert_not_called()
+        self.on_cancel_crop_lock.assert_called_once()
 
     def test_wheel_cancels_crop_lock_when_inactive(self):
         """Wheel events should cancel crop lock when crop inactive."""
         self.crop_controller.is_active.return_value = False
-        
+
         event = Mock()
         self.handler.handle_wheel(event)
-        
+
         self.on_cancel_crop_lock.assert_called_once()
         self.transform_controller.handle_wheel.assert_called_once_with(event)
 
@@ -123,12 +151,12 @@ class TestInputEventHandler:
         """Double-click should exit fullscreen when window is fullscreen."""
         event = Mock()
         event.button.return_value = Qt.LeftButton
-        
+
         window = Mock()
         window.isFullScreen.return_value = True
-        
+
         result = self.handler.handle_double_click_with_window(event, window)
-        
+
         assert result is True
         self.on_fullscreen_exit.assert_called_once()
 
@@ -136,11 +164,11 @@ class TestInputEventHandler:
         """Double-click should toggle fullscreen when window is normal."""
         event = Mock()
         event.button.return_value = Qt.LeftButton
-        
+
         window = Mock()
         window.isFullScreen.return_value = False
-        
+
         result = self.handler.handle_double_click_with_window(event, window)
-        
+
         assert result is True
         self.on_fullscreen_toggle.assert_called_once()

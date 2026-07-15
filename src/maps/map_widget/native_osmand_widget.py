@@ -16,8 +16,8 @@ import PySide6
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor,
     QCloseEvent,
+    QColor,
     QHideEvent,
     QImage,
     QOpenGLContext,
@@ -38,6 +38,14 @@ from maps.map_sources import (
 from maps.map_widget.drag_cursor import DragCursorManager
 from maps.map_widget.map_renderer import CityAnnotation
 from maps.tile_parser import TileLoadingError
+from maps.touchpad_input import (
+    event_position,
+    is_scroll_end_event,
+    is_trackpad_wheel_event,
+    pan_delta_from_wheel,
+    zoom_factor_from_native_gesture,
+    zoom_factor_from_touchpad_pinch_wheel,
+)
 
 MERCATOR_LAT_BOUND = 85.05112878
 _NATIVE_DLL_DIR_HANDLES: list[Any] = []
@@ -288,6 +296,13 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     library.osmand_widget_get_max_zoom.restype = ctypes.c_double
     library.osmand_widget_set_zoom.argtypes = [ctypes.c_void_p, ctypes.c_double]
     library.osmand_widget_set_zoom.restype = None
+    library.osmand_widget_zoom_by_factor_at.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+    ]
+    library.osmand_widget_zoom_by_factor_at.restype = None
     library.osmand_widget_reset_view.argtypes = [ctypes.c_void_p]
     library.osmand_widget_reset_view.restype = None
     cleanup = getattr(library, "osmand_widget_cleanup", None)
@@ -465,6 +480,11 @@ class NativeOsmAndWidget(QWidget):
         self._deferred_view_sync_timer.setSingleShot(True)
         self._deferred_view_sync_timer.setInterval(0)
         self._deferred_view_sync_timer.timeout.connect(self._emit_view_change)
+        self._pending_trackpad_pan = QPointF()
+        self._trackpad_pan_timer = QTimer(self)
+        self._trackpad_pan_timer.setSingleShot(True)
+        self._trackpad_pan_timer.setInterval(16)
+        self._trackpad_pan_timer.timeout.connect(self._flush_pending_trackpad_pan)
         self._sync_native_widget_geometry()
         self._emit_view_change()
 
@@ -478,6 +498,17 @@ class NativeOsmAndWidget(QWidget):
         if self._is_shutdown():
             return
         self._bridge.library.osmand_widget_set_zoom(self._native_pointer, float(zoom))
+        self._emit_view_change()
+
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        if self._is_shutdown():
+            return
+        self._bridge.library.osmand_widget_zoom_by_factor_at(
+            self._native_pointer,
+            float(factor),
+            float(anchor.x()),
+            float(anchor.y()),
+        )
         self._emit_view_change()
 
     def reset_view(self) -> None:
@@ -524,6 +555,9 @@ class NativeOsmAndWidget(QWidget):
             self._state_timer.stop()
         if self._deferred_view_sync_timer.isActive():
             self._deferred_view_sync_timer.stop()
+        if self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.stop()
+        self._pending_trackpad_pan = QPointF()
         self._reset_drag_cursor()
         self._bridge_dragging = False
         if hasattr(self, "_native_widget") and self._native_widget is not None:
@@ -623,6 +657,26 @@ class NativeOsmAndWidget(QWidget):
             return super().eventFilter(watched, event)
         if watched is self._native_event_target or watched is self._native_widget:
             event_type = event.type()
+            if event_type == QEvent.Type.Wheel:
+                pinch_factor = zoom_factor_from_touchpad_pinch_wheel(event)
+                if pinch_factor is not None:
+                    self.zoom_by_factor_at(pinch_factor, event_position(event))
+                    event.accept()
+                    return True
+            if event_type == QEvent.Type.Wheel and is_trackpad_wheel_event(event):
+                delta = pan_delta_from_wheel(event) or QPointF()
+                if not delta.isNull():
+                    self._queue_trackpad_pan(delta)
+                if is_scroll_end_event(event):
+                    self._finish_trackpad_pan()
+                event.accept()
+                return True
+            if event_type == QEvent.Type.NativeGesture:
+                factor = zoom_factor_from_native_gesture(event)
+                if factor is not None:
+                    self.zoom_by_factor_at(factor, event_position(event))
+                    event.accept()
+                    return True
             if event_type == QEvent.Type.MouseButtonPress:
                 mouse_event = event
                 if mouse_event.button() == Qt.MouseButton.LeftButton:
@@ -651,6 +705,23 @@ class NativeOsmAndWidget(QWidget):
                 self._schedule_deferred_view_sync()
 
         return super().eventFilter(watched, event)
+
+    def _queue_trackpad_pan(self, delta: QPointF) -> None:
+        self._pending_trackpad_pan = self._pending_trackpad_pan + QPointF(delta)
+        if not self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.start()
+
+    def _flush_pending_trackpad_pan(self) -> None:
+        delta = QPointF(self._pending_trackpad_pan)
+        self._pending_trackpad_pan = QPointF()
+        if not delta.isNull():
+            self.pan_by_pixels(delta.x(), delta.y())
+
+    def _finish_trackpad_pan(self) -> None:
+        if self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.stop()
+        self._flush_pending_trackpad_pan()
+        self.panFinished.emit()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

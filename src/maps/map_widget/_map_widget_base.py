@@ -70,6 +70,13 @@ class MapWidgetBase(Protocol):
     def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:  # pragma: no cover - interface definition only
         ...
 
+    def zoom_by_factor_at(
+        self,
+        factor: float,
+        anchor: QPointF,
+    ) -> None:  # pragma: no cover - interface definition only
+        ...
+
     def center_lonlat(self) -> tuple[float, float]:  # pragma: no cover - interface definition only
         ...
 
@@ -190,6 +197,8 @@ class MapWidgetController:
         self._input_handler.pan_requested.connect(self._on_pan_requested)
         self._input_handler.pan_requested.connect(self._notify_pan_delta)
         self._input_handler.pan_finished.connect(self._notify_pan_finished)
+        self._input_handler.trackpad_pan_requested.connect(self._queue_trackpad_pan)
+        self._input_handler.trackpad_pan_finished.connect(self._finish_trackpad_pan)
         self._input_handler.zoom_requested.connect(self._on_zoom_requested)
         self._input_handler.cursor_changed.connect(self._set_drag_cursor)
         self._input_handler.cursor_reset.connect(self._reset_drag_cursor)
@@ -198,6 +207,12 @@ class MapWidgetController:
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(16)
         self._update_timer.timeout.connect(self._widget.update)
+
+        self._pending_trackpad_pan = QPointF()
+        self._trackpad_pan_timer = QTimer(self._widget)
+        self._trackpad_pan_timer.setSingleShot(True)
+        self._trackpad_pan_timer.setInterval(16)
+        self._trackpad_pan_timer.timeout.connect(self._flush_pending_trackpad_pan)
 
         self._center_x = 0.5
         self._center_y = 0.5
@@ -254,6 +269,11 @@ class MapWidgetController:
         self._widget.update()
         self._notify_view_changed()
 
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        """Scale the map around a viewport anchor."""
+
+        self._on_zoom_requested(self._zoom * float(factor), QPointF(anchor))
+
     # ------------------------------------------------------------------
     def center_lonlat(self) -> tuple[float, float]:
         """Return the viewport centre as a ``(lon, lat)`` tuple."""
@@ -265,6 +285,9 @@ class MapWidgetController:
         """Stop the tile loader thread so the application can exit cleanly."""
 
         self._reset_drag_cursor()
+        if self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.stop()
+        self._flush_pending_trackpad_pan()
         self._tile_manager.shutdown()
 
     # ------------------------------------------------------------------
@@ -322,10 +345,15 @@ class MapWidgetController:
         self._input_handler.handle_mouse_release(event)
 
     # ------------------------------------------------------------------
-    def handle_wheel_event(self, event) -> None:
+    def handle_wheel_event(self, event) -> bool:
         """Delegate wheel events to the shared input handler."""
 
-        self._input_handler.handle_wheel_event(event, self._zoom)
+        return self._input_handler.handle_wheel_event(event, self._zoom)
+
+    def handle_native_gesture_event(self, event) -> bool:
+        """Delegate native gesture events to the shared input handler."""
+
+        return self._input_handler.handle_native_gesture_event(event, self._zoom)
 
     # ------------------------------------------------------------------
     def add_view_listener(self, callback: Callable[[float, float, float], None]) -> None:
@@ -428,6 +456,27 @@ class MapWidgetController:
         """Translate drag gestures from screen space to world space."""
 
         self.pan_by_pixels(delta.x(), delta.y())
+
+    def _queue_trackpad_pan(self, delta: QPointF) -> None:
+        """Accumulate high-frequency touchpad deltas until the next GUI frame."""
+
+        self._pending_trackpad_pan += QPointF(delta)
+        if not self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.start()
+
+    def _flush_pending_trackpad_pan(self) -> None:
+        delta = QPointF(self._pending_trackpad_pan)
+        self._pending_trackpad_pan = QPointF()
+        if delta.isNull():
+            return
+        self.pan_by_pixels(delta.x(), delta.y())
+        self._notify_pan_delta(delta)
+
+    def _finish_trackpad_pan(self) -> None:
+        if self._trackpad_pan_timer.isActive():
+            self._trackpad_pan_timer.stop()
+        self._flush_pending_trackpad_pan()
+        self._notify_pan_finished()
 
     # ------------------------------------------------------------------
     def _notify_pan_delta(self, delta: QPointF) -> None:

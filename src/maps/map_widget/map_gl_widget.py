@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from PySide6.QtCore import QPointF, QSize, QTimer, Signal, Qt
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QHideEvent,
@@ -23,10 +23,10 @@ from PySide6.QtOpenGL import QOpenGLWindow
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from ._map_widget_base import MapWidgetController
-from .map_renderer import CityAnnotation
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
+from ._map_widget_base import MapWidgetController
+from .map_renderer import CityAnnotation
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _MAP_GL_CLEAR_COLOR = (0.533, 0.659, 0.761, 1.0)
@@ -195,6 +195,9 @@ class MapGLWidget(QOpenGLWidget):
         """Translate the camera by a fixed on-screen pixel delta."""
 
         self._controller.pan_by_pixels(delta_x, delta_y)
+
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        self._controller.zoom_by_factor_at(factor, anchor)
 
     # ------------------------------------------------------------------
     def center_lonlat(self) -> tuple[float, float]:
@@ -426,8 +429,14 @@ class MapGLWidget(QOpenGLWidget):
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         """Forward wheel events to the shared interaction handler."""
 
-        self._controller.handle_wheel_event(event)
-        super().wheelEvent(event)
+        if not self._controller.handle_wheel_event(event):
+            super().wheelEvent(event)
+
+    def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.NativeGesture:
+            if self._controller.handle_native_gesture_event(event):
+                return True
+        return super().event(event)
 
     # ------------------------------------------------------------------
     def _emit_view_change(self, center_x: float, center_y: float, zoom: float) -> None:
@@ -513,6 +522,9 @@ class _MapOpenGLWindow(QOpenGLWindow):
     # ------------------------------------------------------------------
     def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
         self._controller.pan_by_pixels(delta_x, delta_y)
+
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        self._controller.zoom_by_factor_at(factor, anchor)
 
     # ------------------------------------------------------------------
     def center_lonlat(self) -> tuple[float, float]:
@@ -617,8 +629,14 @@ class _MapOpenGLWindow(QOpenGLWindow):
 
     # ------------------------------------------------------------------
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
-        self._controller.handle_wheel_event(event)
-        super().wheelEvent(event)
+        if not self._controller.handle_wheel_event(event):
+            super().wheelEvent(event)
+
+    def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.NativeGesture:
+            if self._controller.handle_native_gesture_event(event):
+                return True
+        return super().event(event)
 
     # ------------------------------------------------------------------
     def _log_gl_debug_once(self, stage: str, *, painter_started: bool | None = None) -> None:
@@ -726,6 +744,9 @@ class MapGLWindowWidget(QWidget):
     # ------------------------------------------------------------------
     def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
         self._window.pan_by_pixels(delta_x, delta_y)
+
+    def zoom_by_factor_at(self, factor: float, anchor: QPointF) -> None:
+        self._window.zoom_by_factor_at(factor, anchor)
 
     # ------------------------------------------------------------------
     def center_lonlat(self) -> tuple[float, float]:

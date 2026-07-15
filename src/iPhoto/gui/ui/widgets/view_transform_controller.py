@@ -11,6 +11,14 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
+from maps.touchpad_input import (
+    event_position,
+    is_trackpad_wheel_event,
+    pan_delta_from_wheel,
+    zoom_factor_from_gesture_event,
+    zoom_factor_from_touchpad_pinch_wheel,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -40,7 +48,7 @@ def compute_rotation_cover_scale(
     physical_texture_size: tuple[int, int] | None = None,
 ) -> float:
     """Return the scale multiplier that keeps rotated images free of black corners.
-    
+
     Args:
         texture_size: Logical (rotation-aware) dimensions used for frame calculation
         base_scale: Scale factor calculated from logical dimensions
@@ -55,20 +63,20 @@ def compute_rotation_cover_scale(
     tex_w, tex_h = texture_size
     if tex_w <= 0 or tex_h <= 0 or base_scale <= 0.0:
         return 1.0
-    
+
     # When physical_texture_size is provided, texture_size (logical) already accounts
     # for the 90° rotation, so we only apply straighten_degrees
     if physical_texture_size is not None:
         total_degrees = float(straighten_degrees)  # Only straighten, no 90° rotation
     else:
         total_degrees = float(straighten_degrees) + float(int(rotate_steps)) * -90.0
-        
+
     if abs(total_degrees) <= 1e-5:
         return 1.0
     theta = math.radians(total_degrees)
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
-    
+
     # Frame corners calculated in logical space (rotation-aware dimensions)
     half_frame_w = tex_w * base_scale * 0.5
     half_frame_h = tex_h * base_scale * 0.5
@@ -78,13 +86,13 @@ def compute_rotation_cover_scale(
         (half_frame_w, half_frame_h),
         (-half_frame_w, half_frame_h),
     ]
-    
+
     # Use physical dimensions for bounds checking (corners are rotated back to texture space)
     if physical_texture_size is not None:
         phys_w, phys_h = physical_texture_size
     else:
         phys_w, phys_h = tex_w, tex_h
-    
+
     scale = 1.0
     for xf, yf in corners:
         x_prime = xf * cos_t + yf * sin_t
@@ -133,6 +141,7 @@ class ViewTransformController:
         self._is_panning: bool = False
         self._pan_start_pos: QPointF = QPointF()
         self._wheel_action: str = "zoom"
+        self._touchpad_gestures_enabled: bool = True
         self._image_cover_scale: float = 1.0
         self._fill_viewport_enabled: bool = False
 
@@ -155,7 +164,7 @@ class ViewTransformController:
         vw = max(1.0, float(self._viewer.width()) * dpr)
         vh = max(1.0, float(self._viewer.height()) * dpr)
         return vw, vh
-    
+
     def _get_dpr(self) -> float:
         """Get device pixel ratio."""
         dpr = float(self._viewer.devicePixelRatioF())
@@ -272,6 +281,14 @@ class ViewTransformController:
 
         self._wheel_action = "zoom" if action == "zoom" else "navigate"
 
+    def set_touchpad_gestures_enabled(self, enabled: bool) -> None:
+        """Enable the direct-manipulation touchpad path for this viewer."""
+
+        self._touchpad_gestures_enabled = bool(enabled)
+
+    def touchpad_gestures_enabled(self) -> bool:
+        return self._touchpad_gestures_enabled
+
     def set_fill_viewport_enabled(self, enabled: bool) -> None:
         """Control whether framing helpers should cover the viewport instead of fitting."""
 
@@ -291,7 +308,11 @@ class ViewTransformController:
         if abs(clamped - self._zoom_factor) < 1e-6:
             return False
 
-        anchor_point = anchor or QPointF(self._viewer.width() / 2.0, self._viewer.height() / 2.0)
+        anchor_point = (
+            QPointF(anchor)
+            if anchor is not None
+            else QPointF(self._viewer.width() / 2.0, self._viewer.height() / 2.0)
+        )
         tex_w, tex_h = self._texture_size_provider()
         if (
             anchor_point is not None
@@ -327,7 +348,11 @@ class ViewTransformController:
     def reset_zoom(self) -> bool:
         """Restore the baseline zoom and recenter the texture."""
 
-        changed = abs(self._zoom_factor - 1.0) > 1e-6 or abs(self._pan_px.x()) > 1e-6 or abs(self._pan_px.y()) > 1e-6
+        changed = (
+            abs(self._zoom_factor - 1.0) > 1e-6
+            or abs(self._pan_px.x()) > 1e-6
+            or abs(self._pan_px.y()) > 1e-6
+        )
         self._zoom_factor = 1.0
         self._pan_px = QPointF(0.0, 0.0)
         self._viewer.update()
@@ -359,6 +384,22 @@ class ViewTransformController:
             self._viewer.unsetCursor()
 
     def handle_wheel(self, event: QWheelEvent) -> None:
+        pinch_factor = zoom_factor_from_touchpad_pinch_wheel(event)
+        if self._touchpad_gestures_enabled and pinch_factor is not None:
+            self.set_zoom(
+                self._zoom_factor * pinch_factor,
+                anchor=event_position(event),
+            )
+            event.accept()
+            return
+        if self._touchpad_gestures_enabled and is_trackpad_wheel_event(event):
+            delta = pan_delta_from_wheel(event) or QPointF()
+            if not delta.isNull():
+                delta_device = self.viewport_delta_logical_to_device(delta)
+                self.set_pan_pixels(self._pan_px + QPointF(delta_device.x(), -delta_device.y()))
+            event.accept()
+            return
+
         if self._wheel_action == "zoom":
             angle = event.angleDelta().y()
             if angle > 0:
@@ -373,6 +414,24 @@ class ViewTransformController:
             elif step > 0 and self._on_prev_item is not None:
                 self._on_prev_item()
         event.accept()
+
+    def handle_native_gesture(
+        self,
+        event,
+        *,
+        anchor: QPointF | None = None,
+    ) -> bool:
+        """Apply a native touchpad pinch independently of wheel preferences."""
+
+        if not self._touchpad_gestures_enabled:
+            return False
+        factor = zoom_factor_from_gesture_event(event)
+        if factor is None:
+            return False
+        anchor_point = QPointF(anchor) if anchor is not None else event_position(event)
+        self.set_zoom(self._zoom_factor * factor, anchor=anchor_point)
+        event.accept()
+        return True
 
     # ------------------------------------------------------------------
     # Coordinate transformation utilities
@@ -423,9 +482,7 @@ class ViewTransformController:
         base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
         return max(base_scale * self._image_cover_scale * self._zoom_factor, 1e-6)
 
-    def image_center_pixels(
-        self, texture_size: tuple[int, int], scale: float
-    ) -> QPointF:
+    def image_center_pixels(self, texture_size: tuple[int, int], scale: float) -> QPointF:
         """Return the image center in pixel coordinates based on current pan/zoom."""
         tex_w, tex_h = texture_size
         centre_x = (tex_w / 2.0) - (self._pan_px.x() / scale)
@@ -564,13 +621,13 @@ class ViewTransformController:
         vw, vh = self._get_view_dimensions_device_px()
         texture_size = self._texture_size_provider()
         return self.effective_scale(texture_size, vw, vh)
-    
+
     def get_image_center_pixels(self) -> QPointF:
         """Return the image center in pixel coordinates using current pan/zoom."""
         texture_size = self._texture_size_provider()
         scale = self.get_effective_scale()
         return self.image_center_pixels(texture_size, scale)
-    
+
     def apply_image_center_pixels(self, center: QPointF, scale: float | None = None) -> None:
         """Set the pan to center the image at the given pixel coordinate."""
         texture_size = self._texture_size_provider()
@@ -595,13 +652,13 @@ class ViewTransformController:
         """Return the scale multiplier currently applied to cover rotations."""
 
         return self._image_cover_scale
-    
+
     def convert_screen_to_world(self, screen_pt: QPointF) -> QPointF:
         """Map a Qt screen coordinate to GL view's centre-origin space."""
         view_width, view_height = self._get_view_dimensions_device_px()
         point = self.viewport_logical_to_device(screen_pt)
         return QPointF(point.x() - view_width * 0.5, view_height * 0.5 - point.y())
-    
+
     def convert_world_to_screen(self, world_vec: QPointF) -> QPointF:
         """Convert a GL centre-origin vector into a Qt screen coordinate."""
         view_width, view_height = self._get_view_dimensions_device_px()
@@ -610,7 +667,7 @@ class ViewTransformController:
             view_height * 0.5 - float(world_vec.y()),
         )
         return self.viewport_device_to_logical(point)
-    
+
     def convert_image_to_viewport(self, x: float, y: float) -> QPointF:
         """Convert image pixel coordinates to viewport coordinates."""
         texture_size = self._texture_size_provider()
@@ -623,7 +680,7 @@ class ViewTransformController:
             -(tex_vector_y * scale) + self._pan_px.y(),
         )
         return self.convert_world_to_screen(world_vector)
-    
+
     def convert_viewport_to_image(self, point: QPointF) -> QPointF:
         """Convert viewport coordinates to image pixel coordinates."""
         texture_size = self._texture_size_provider()

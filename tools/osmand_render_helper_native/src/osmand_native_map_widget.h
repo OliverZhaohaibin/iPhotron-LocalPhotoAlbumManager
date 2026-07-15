@@ -42,6 +42,7 @@ public:
     double minZoomLevel() const;
     double maxZoomLevel() const;
     void setZoomLevel(double zoomLevel);
+    void zoomByFactorAt(double factor, double anchorX, double anchorY);
     void resetView();
     void panByPixels(double deltaX, double deltaY);
     void setCenterLonLat(double longitude, double latitude);

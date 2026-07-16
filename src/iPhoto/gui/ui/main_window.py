@@ -118,8 +118,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_startup_recovery_panel"):
             return
         self._startup_retry_callback = retry_callback
+        translated_message = self.tr(message)
+        prefix = self.tr("The photo library could not be opened during startup: %1")
         self._startup_recovery_label.setText(
-            f"The photo library could not be opened during startup: {message}"
+            prefix.replace("%1", translated_message)
         )
         self._startup_recovery_details.setText(details or message)
         self._startup_recovery_details.hide()
@@ -136,7 +138,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_startup_recovery_panel"):
             return
         self._startup_retry_callback = None
-        self._startup_recovery_label.setText(message)
+        self._startup_recovery_label.setText(self.tr(message))
         self._startup_recovery_details.setText(details or message)
         self._startup_recovery_details.hide()
         self._startup_retry_button.hide()

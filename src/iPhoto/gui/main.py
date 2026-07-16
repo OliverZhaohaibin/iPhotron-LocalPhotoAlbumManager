@@ -775,10 +775,24 @@ def main(argv: list[str] | None = None) -> int:
 
         def _commit_validated_library() -> None:
             committer(validated, defer_scan=True)
-            if "migration_restored" in validated.warnings:
+            restored = "migration_restored" in validated.warnings
+            cleanup_pending = "migration_cleanup_pending" in validated.warnings
+            if restored and cleanup_pending:
+                window.show_startup_warning(
+                    "The photo library was recovered and opened, but temporary "
+                    "migration files could not be removed. They will be cleaned up later.",
+                    details="code=migration_restored,migration_cleanup_pending",
+                )
+            elif restored:
                 window.show_startup_warning(
                     "The photo library index was restored after an interrupted update.",
                     details="code=migration_restored",
+                )
+            elif cleanup_pending:
+                window.show_startup_warning(
+                    "The photo library opened, but temporary migration files could not "
+                    "be removed. They will be cleaned up on a later start.",
+                    details="code=migration_cleanup_pending",
                 )
             _continue_after_library_ready(generation)
 
@@ -811,6 +825,8 @@ def main(argv: list[str] | None = None) -> int:
                 recoverable=failure.recoverable,
                 code=failure.code,
                 suggested_action=failure.suggested_action,
+                operation=failure.operation,
+                native_code=failure.native_code,
             )
         )
 
@@ -950,6 +966,8 @@ def main(argv: list[str] | None = None) -> int:
             details=(
                 f"phase={failure.phase.value}; "
                 f"code={failure.code}; "
+                f"operation={failure.operation or 'unknown'}; "
+                f"native_code={failure.native_code or 'unknown'}; "
                 f"exception={failure.exception_type or 'unknown'}"
             ),
             retry_callback=_retry_startup,

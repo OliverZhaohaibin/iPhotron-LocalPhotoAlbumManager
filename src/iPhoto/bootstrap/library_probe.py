@@ -51,11 +51,39 @@ MAX_REQUEST_BYTES = 256 * 1024
 ALBUM_SNAPSHOT_BUDGET_MS = 750.0
 
 _FAILURE_MESSAGES = {
-    "db_locked": "The photo library index is currently in use. Please retry.",
-    "db_corrupt": "The photo library index is damaged and could not be recovered.",
-    "db_read_only": "The photo library cannot be updated because it is read-only.",
-    "disk_full": "There is not enough free space to prepare the photo library.",
-    "future_schema": "This photo library was opened by a newer app version.",
+    "db_locked": (
+        "The photo library database is in use by another process. "
+        "Close other iPhotron versions and retry."
+    ),
+    "migration_file_busy": (
+        "Windows or security software is temporarily using a migration file. "
+        "Close other programs or retry shortly."
+    ),
+    "db_corrupt": "The photo library database is damaged. The original file has been preserved.",
+    "db_read_only": (
+        "The photo library database is read-only. "
+        "Remove its read-only attribute or grant modify access."
+    ),
+    "workspace_unwritable": (
+        "The .iPhoto work folder cannot be updated. Check that folder's permissions."
+    ),
+    "disk_full": "There is not enough free disk space to prepare the photo library.",
+    "db_open_failed": (
+        "The photo library database could not be opened. "
+        "Check the path, drive, and security software."
+    ),
+    "migration_backup_failed": (
+        "A safety backup could not be created. Migration did not start and "
+        "the original database was preserved."
+    ),
+    "migration_failed": (
+        "The photo library database update failed. "
+        "The original database and backup were preserved."
+    ),
+    "future_schema": (
+        "This photo library was created by a newer app version. "
+        "Open it with the same or a newer version."
+    ),
     "migration_recovery_failed": "The interrupted index migration could not be recovered.",
     "process_failed_to_start": "The library helper could not be started.",
     "process_crashed": "The library helper stopped unexpectedly.",
@@ -252,6 +280,8 @@ class LibraryProbeFailure:
     recoverable: bool = True
     suggested_action: str = "retry"
     timed_out: bool = False
+    operation: str | None = None
+    native_code: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -272,6 +302,19 @@ class LibraryProbeFailure:
             or not exception_type.replace("_", "").replace(".", "").isalnum()
         ):
             exception_type = "RuntimeError"
+
+        def diagnostic_token(name: str) -> str | None:
+            value = payload.get(name)
+            if value is None:
+                return None
+            token = str(value)
+            if (
+                len(token) > 80
+                or not token.replace("_", "").replace(".", "").isalnum()
+            ):
+                return None
+            return token
+
         return cls(
             request_id=request_id,
             message=_FAILURE_MESSAGES.get(code, _FAILURE_MESSAGES["probe_failed"]),
@@ -280,6 +323,8 @@ class LibraryProbeFailure:
             recoverable=bool(payload.get("recoverable", True)),
             suggested_action=suggested_action,
             timed_out=bool(payload.get("timed_out", False)),
+            operation=diagnostic_token("operation"),
+            native_code=diagnostic_token("native_code"),
         )
 
 
@@ -291,6 +336,8 @@ def _failure(
     recoverable: bool = True,
     suggested_action: str = "retry",
     timed_out: bool = False,
+    operation: str | None = None,
+    native_code: str | None = None,
 ) -> LibraryProbeFailure:
     return LibraryProbeFailure(
         request_id=request_id,
@@ -300,6 +347,8 @@ def _failure(
         recoverable=recoverable,
         suggested_action=suggested_action,
         timed_out=timed_out,
+        operation=operation,
+        native_code=native_code,
     )
 
 
@@ -802,6 +851,8 @@ def _exception_failure(request_id: str, exc: Exception) -> LibraryProbeFailure:
         exception_type=type(exc).__name__,
         recoverable=recoverable,
         suggested_action=action,
+        operation=getattr(exc, "operation", None),
+        native_code=getattr(exc, "native_code", None),
     )
 
 

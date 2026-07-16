@@ -202,6 +202,106 @@ def _create_legacy_database(database: Path) -> None:
         connection.execute("PRAGMA user_version = 0")
 
 
+def _create_branch_base_database(database: Path) -> None:
+    """Create the complete, unversioned schema used at branch base 6ff592f7."""
+
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as connection:
+        SchemaMigrator.initialize_schema(connection)
+        connection.execute(
+            "INSERT INTO assets("
+            "rel, id, parent_album_path, dt, mime, media_type, live_role, "
+            "is_favorite, is_deleted, face_status, pet_status"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "album/photo.jpg",
+                "asset-1",
+                "album",
+                "2026-01-01T00:00:00",
+                "image/jpeg",
+                0,
+                0,
+                1,
+                0,
+                "completed",
+                "skipped",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO scan_jobs(job_id, root, scope, status) "
+            "VALUES ('scan-1', '/library', 'library', 'completed')"
+        )
+        connection.execute("PRAGMA user_version = 0")
+
+
+def test_prepare_database_adopts_complete_branch_base_schema_without_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO assets(rel, id, dt, mime, media_type, face_status, pet_status) "
+            "VALUES ('album/unprocessed.jpg', 'asset-2', '2026-01-02T00:00:00', "
+            "'image/jpeg', 0, NULL, NULL)"
+        )
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("complete unversioned schema entered migration path")
+
+    monkeypatch.setattr(migrations_module, "_online_backup", unexpected)
+    monkeypatch.setattr(migrations_module, "_atomic_write_state", unexpected)
+    monkeypatch.setattr(SchemaMigrator, "_migrate_to_v1", staticmethod(unexpected))
+
+    version, warnings = SchemaMigrator.prepare_database(database)
+
+    assert version == CURRENT_SCHEMA_VERSION
+    assert warnings == ()
+    assert not (database.parent / MIGRATION_STATE_NAME).exists()
+    assert list(database.parent.glob("*.migration-*.bak")) == []
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT is_favorite, is_deleted, face_status, pet_status "
+            "FROM assets WHERE rel = 'album/photo.jpg'"
+        ).fetchone()
+        assert row == (1, 0, "completed", "skipped")
+        repaired_statuses = connection.execute(
+            "SELECT face_status, pet_status FROM assets "
+            "WHERE rel = 'album/unprocessed.jpg'"
+        ).fetchone()
+        assert repaired_statuses == ("pending", "pending")
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_prepare_database_adopts_complete_schema_with_pending_state(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    migration_id = "branch-base-adopt"
+    backup = database.parent / f"global_index.db.migration-{migration_id}.bak"
+    backup.write_bytes(b"unused backup evidence")
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION,
+        migration_id=migration_id,
+        database_name=database.name,
+        backup_name=backup.name,
+        source_version=0,
+        target_version=CURRENT_SCHEMA_VERSION,
+        stage="migration_pending",
+        started_at_ms=1,
+    )
+    state_path = database.parent / MIGRATION_STATE_NAME
+    state_path.write_text(json.dumps(asdict(state)), encoding="utf-8")
+
+    version, warnings = SchemaMigrator.prepare_database(database)
+
+    assert version == CURRENT_SCHEMA_VERSION
+    assert warnings == ()
+    assert not state_path.exists()
+    assert not backup.exists()
+
+
 def test_prepare_database_migrates_legacy_database_transactionally(tmp_path: Path) -> None:
     database = tmp_path / ".iPhoto" / "global_index.db"
     _create_legacy_database(database)
@@ -351,7 +451,7 @@ def test_prepare_database_classifies_locked_database(tmp_path: Path) -> None:
     assert caught.value.code == "db_locked"
 
 
-def test_prepare_database_classifies_sqlite_cantopen_as_read_only(
+def test_prepare_database_classifies_sqlite_cantopen_as_open_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / ".iPhoto" / "global_index.db"
@@ -364,12 +464,17 @@ def test_prepare_database_classifies_sqlite_cantopen_as_read_only(
     with pytest.raises(SchemaPreparationError) as caught:
         SchemaMigrator.prepare_database(database)
 
-    assert caught.value.code == "db_read_only"
+    assert caught.value.code == "db_open_failed"
+    assert caught.value.operation == "database_open"
 
 
 @pytest.mark.parametrize(
     ("error_number", "expected_code"),
-    [(errno.EROFS, "db_read_only"), (errno.ENOSPC, "disk_full")],
+    [
+        (errno.EROFS, "db_read_only"),
+        (errno.ENOSPC, "disk_full"),
+        (errno.EACCES, "workspace_unwritable"),
+    ],
 )
 def test_prepare_database_classifies_state_write_failures(
     tmp_path: Path,
@@ -392,6 +497,78 @@ def test_prepare_database_classifies_state_write_failures(
         SchemaMigrator.prepare_database(database)
 
     assert caught.value.code == expected_code
+    assert caught.value.operation == "state_write"
+
+
+@pytest.mark.parametrize(
+    ("winerror", "expected_code"),
+    [(32, "migration_file_busy"), (33, "migration_file_busy")],
+)
+def test_windows_sharing_violations_are_not_reported_as_read_only(
+    winerror: int, expected_code: str
+) -> None:
+    error = PermissionError(errno.EACCES, "sharing violation")
+    error.winerror = winerror  # type: ignore[attr-defined]
+
+    assert (
+        migrations_module._classify_filesystem_error(
+            error, operation="backup_publish"
+        )
+        == expected_code
+    )
+
+
+@pytest.mark.parametrize(
+    ("native_code", "expected_code"),
+    [
+        ("SQLITE_BUSY", "db_locked"),
+        ("SQLITE_LOCKED_SHAREDCACHE", "db_locked"),
+        ("SQLITE_READONLY_DBMOVED", "db_read_only"),
+        ("SQLITE_FULL", "disk_full"),
+        ("SQLITE_CANTOPEN_ISDIR", "db_open_failed"),
+    ],
+)
+def test_sqlite_extended_codes_drive_failure_classification(
+    native_code: str, expected_code: str
+) -> None:
+    error = sqlite3.OperationalError("platform-dependent text")
+    error.sqlite_errorname = native_code  # type: ignore[attr-defined]
+
+    assert (
+        migrations_module._classify_sqlite_operational_error(
+            error, fallback="migration_failed"
+        )
+        == expected_code
+    )
+
+
+def test_managed_connection_explicitly_closes_database_handle(tmp_path: Path) -> None:
+    database = tmp_path / "connection.db"
+
+    with migrations_module._managed_connection(database) as connection:
+        connection.execute("CREATE TABLE sample(value INTEGER)")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
+
+
+def test_schema_failure_diagnostics_cross_probe_boundary() -> None:
+    error = SchemaPreparationError(
+        "migration_file_busy",
+        "busy",
+        operation="backup_publish",
+        native_code="WinError_32",
+    )
+
+    failure = probe_module._exception_failure("request-1", error)
+    round_trip = probe_module.LibraryProbeFailure.from_payload(
+        "request-1", failure.to_payload()
+    )
+
+    assert round_trip.code == "migration_file_busy"
+    assert round_trip.operation == "backup_publish"
+    assert round_trip.native_code == "WinError_32"
+    assert "read-only" not in round_trip.message
 
 
 def test_real_child_interruption_is_recovered_on_next_prepare(tmp_path: Path) -> None:

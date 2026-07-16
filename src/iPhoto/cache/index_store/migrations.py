@@ -10,6 +10,8 @@ import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -25,13 +27,88 @@ CURRENT_SCHEMA_VERSION = 1
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
 
+_ASSET_COLUMN_MIGRATIONS = {
+    "parent_album_path": "ALTER TABLE assets ADD COLUMN parent_album_path TEXT",
+    "ts": "ALTER TABLE assets ADD COLUMN ts INTEGER",
+    "sort_ts": "ALTER TABLE assets ADD COLUMN sort_ts INTEGER",
+    "bytes": "ALTER TABLE assets ADD COLUMN bytes INTEGER",
+    "make": "ALTER TABLE assets ADD COLUMN make TEXT",
+    "model": "ALTER TABLE assets ADD COLUMN model TEXT",
+    "lens": "ALTER TABLE assets ADD COLUMN lens TEXT",
+    "iso": "ALTER TABLE assets ADD COLUMN iso INTEGER",
+    "f_number": "ALTER TABLE assets ADD COLUMN f_number REAL",
+    "exposure_time": "ALTER TABLE assets ADD COLUMN exposure_time REAL",
+    "exposure_compensation": "ALTER TABLE assets ADD COLUMN exposure_compensation REAL",
+    "focal_length": "ALTER TABLE assets ADD COLUMN focal_length REAL",
+    "w": "ALTER TABLE assets ADD COLUMN w INTEGER",
+    "h": "ALTER TABLE assets ADD COLUMN h INTEGER",
+    "gps": "ALTER TABLE assets ADD COLUMN gps TEXT",
+    "content_id": "ALTER TABLE assets ADD COLUMN content_id TEXT",
+    "frame_rate": "ALTER TABLE assets ADD COLUMN frame_rate REAL",
+    "codec": "ALTER TABLE assets ADD COLUMN codec TEXT",
+    "still_image_time": "ALTER TABLE assets ADD COLUMN still_image_time REAL",
+    "dur": "ALTER TABLE assets ADD COLUMN dur REAL",
+    "original_rel_path": "ALTER TABLE assets ADD COLUMN original_rel_path TEXT",
+    "original_album_id": "ALTER TABLE assets ADD COLUMN original_album_id TEXT",
+    "original_album_subpath": "ALTER TABLE assets ADD COLUMN original_album_subpath TEXT",
+    "micro_thumbnail": "ALTER TABLE assets ADD COLUMN micro_thumbnail BLOB",
+    "live_role": "ALTER TABLE assets ADD COLUMN live_role INTEGER DEFAULT 0",
+    "live_partner_rel": "ALTER TABLE assets ADD COLUMN live_partner_rel TEXT",
+    "aspect_ratio": "ALTER TABLE assets ADD COLUMN aspect_ratio REAL",
+    "year": "ALTER TABLE assets ADD COLUMN year INTEGER",
+    "month": "ALTER TABLE assets ADD COLUMN month INTEGER",
+    "media_type": "ALTER TABLE assets ADD COLUMN media_type INTEGER",
+    "is_favorite": "ALTER TABLE assets ADD COLUMN is_favorite INTEGER DEFAULT 0",
+    "is_deleted": "ALTER TABLE assets ADD COLUMN is_deleted INTEGER DEFAULT 0",
+    "has_gps": "ALTER TABLE assets ADD COLUMN has_gps INTEGER DEFAULT 0",
+    "thumbnail_state": "ALTER TABLE assets ADD COLUMN thumbnail_state TEXT DEFAULT 'ready'",
+    "thumb_cache_key": "ALTER TABLE assets ADD COLUMN thumb_cache_key TEXT",
+    "thumb_updated_at": "ALTER TABLE assets ADD COLUMN thumb_updated_at INTEGER DEFAULT 0",
+    "thumb_error": "ALTER TABLE assets ADD COLUMN thumb_error TEXT",
+    "scan_job_id": "ALTER TABLE assets ADD COLUMN scan_job_id TEXT",
+    "index_revision": "ALTER TABLE assets ADD COLUMN index_revision INTEGER DEFAULT 0",
+    "index_updated_at_ms": "ALTER TABLE assets ADD COLUMN index_updated_at_ms INTEGER DEFAULT 0",
+    "location": "ALTER TABLE assets ADD COLUMN location TEXT",
+    "face_status": "ALTER TABLE assets ADD COLUMN face_status TEXT",
+    "pet_status": "ALTER TABLE assets ADD COLUMN pet_status TEXT",
+}
+_V1_REQUIRED_COLUMNS = {
+    "assets": frozenset({"rel", "id", "dt", "mime", *_ASSET_COLUMN_MIGRATIONS}),
+    "scan_jobs": frozenset(
+        {
+            "job_id", "root", "scope", "status", "stage", "found_count",
+            "processed_count", "visible_count", "failed_count", "started_at",
+            "updated_at", "finished_at",
+        }
+    ),
+    "scan_events": frozenset(
+        {"event_id", "job_id", "event_type", "payload_json", "created_at"}
+    ),
+    "metadata_write_jobs": frozenset(
+        {
+            "job_id", "asset_rel", "asset_path", "gps_json", "location",
+            "media_kind", "status", "attempts", "last_error", "created_at",
+            "updated_at",
+        }
+    ),
+}
+
 
 class SchemaPreparationError(RuntimeError):
     """Stable failure raised while preparing a library index."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        operation: str = "unknown",
+        native_code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.operation = operation
+        self.native_code = native_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,14 +153,44 @@ class MigrationState:
         return state
 
 
-def _raise_filesystem_error(exc: OSError, operation: str) -> None:
-    if getattr(exc, "errno", None) == 28:
-        code = "disk_full"
-    elif getattr(exc, "errno", None) in {1, 13, 30}:
-        code = "db_read_only"
-    else:
-        code = "migration_recovery_failed"
-    raise SchemaPreparationError(code, operation) from exc
+def _native_error_code(exc: BaseException) -> str | None:
+    sqlite_name = getattr(exc, "sqlite_errorname", None)
+    if isinstance(sqlite_name, str) and sqlite_name:
+        return sqlite_name
+    winerror = getattr(exc, "winerror", None)
+    if isinstance(winerror, int):
+        return f"WinError_{winerror}"
+    error_number = getattr(exc, "errno", None)
+    if isinstance(error_number, int):
+        return f"errno_{error_number}"
+    return None
+
+
+def _classify_filesystem_error(exc: OSError, *, operation: str) -> str:
+    error_number = getattr(exc, "errno", None)
+    winerror = getattr(exc, "winerror", None)
+    if error_number == 28:
+        return "disk_full"
+    if winerror in {32, 33}:
+        return "migration_file_busy"
+    if error_number == 30:
+        return "db_read_only"
+    if error_number in {1, 13}:
+        if operation in {"backup_publish", "restore_swap", "cleanup"} and winerror == 5:
+            return "migration_file_busy"
+        if operation in {"workdir_create", "state_write", "backup_create"}:
+            return "workspace_unwritable"
+        return "db_read_only"
+    return "migration_recovery_failed"
+
+
+def _raise_filesystem_error(exc: OSError, message: str, *, operation: str) -> None:
+    raise SchemaPreparationError(
+        _classify_filesystem_error(exc, operation=operation),
+        message,
+        operation=operation,
+        native_code=_native_error_code(exc),
+    ) from exc
 
 
 def _classify_sqlite_operational_error(
@@ -91,20 +198,68 @@ def _classify_sqlite_operational_error(
 ) -> str:
     """Map SQLite's platform-dependent operational messages to stable codes."""
 
+    native_code = _native_error_code(exc) or ""
+    if native_code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+        return "db_locked"
+    if native_code.startswith("SQLITE_READONLY"):
+        return "db_read_only"
+    if native_code.startswith("SQLITE_FULL"):
+        return "disk_full"
+    if native_code.startswith("SQLITE_CANTOPEN"):
+        return "db_open_failed"
     message = str(exc).casefold()
     if "locked" in message or "busy" in message:
         return "db_locked"
-    if (
-        "readonly" in message
-        or "read-only" in message
-        or "unable to open database file" in message
-    ):
-        # SQLite commonly reports EACCES/EROFS as SQLITE_CANTOPEN with only
-        # this generic text, especially when the database does not exist yet.
+    if "readonly" in message or "read-only" in message:
         return "db_read_only"
     if "full" in message:
         return "disk_full"
+    if "unable to open database file" in message:
+        return "db_open_failed"
     return fallback
+
+
+@contextmanager
+def _managed_connection(
+    database_path: Path, *, timeout: float = 0.5
+) -> Iterator[sqlite3.Connection]:
+    """Commit or roll back work and always release the OS file handle."""
+
+    connection = sqlite3.connect(database_path, timeout=timeout)
+    try:
+        yield connection
+    except BaseException:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    else:
+        if connection.in_transaction:
+            connection.commit()
+    finally:
+        connection.close()
+
+
+def _table_info(connection: sqlite3.Connection, table: str) -> list[tuple]:
+    cursor = connection.execute(f"PRAGMA table_info({table})")
+    try:
+        return list(cursor.fetchall())
+    finally:
+        cursor.close()
+
+
+def _schema_matches_v1(connection: sqlite3.Connection) -> bool:
+    for table, required_columns in _V1_REQUIRED_COLUMNS.items():
+        rows = _table_info(connection, table)
+        if not rows:
+            return False
+        columns = {str(row[1]) for row in rows}
+        if not required_columns.issubset(columns):
+            return False
+        if table == "assets":
+            rel_row = next((row for row in rows if str(row[1]) == "rel"), None)
+            if rel_row is None or int(rel_row[5]) != 1:
+                return False
+    return True
 
 
 def _atomic_write_state(path: Path, state: MigrationState) -> None:
@@ -117,7 +272,11 @@ def _atomic_write_state(path: Path, state: MigrationState) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     except OSError as exc:
-        _raise_filesystem_error(exc, "Could not record migration recovery state")
+        _raise_filesystem_error(
+            exc,
+            "Could not record migration recovery state",
+            operation="state_write",
+        )
 
 
 def _read_state(path: Path) -> MigrationState | None:
@@ -140,38 +299,45 @@ def _integrity_ok(database_path: Path) -> bool:
     if not database_path.is_file():
         return False
     try:
-        with sqlite3.connect(database_path, timeout=0.5) as connection:
+        with _managed_connection(database_path) as connection:
             row = connection.execute("PRAGMA integrity_check").fetchone()
         return bool(row and str(row[0]).casefold() == "ok")
     except sqlite3.OperationalError as exc:
-        message = str(exc).casefold()
-        if "locked" in message or "busy" in message:
-            raise SchemaPreparationError("db_locked", "Library index is currently in use") from exc
+        code = _classify_sqlite_operational_error(exc, fallback="db_corrupt")
+        if code != "db_corrupt":
+            raise SchemaPreparationError(
+                code,
+                "Library index integrity could not be checked",
+                operation="integrity_check",
+                native_code=_native_error_code(exc),
+            ) from exc
         return False
     except sqlite3.DatabaseError:
         return False
 
 
 def _online_backup(source_path: Path, destination_path: Path) -> None:
-    destination_path.unlink(missing_ok=True)
     try:
-        with sqlite3.connect(source_path, timeout=0.5) as source:
-            with sqlite3.connect(destination_path) as destination:
+        destination_path.unlink(missing_ok=True)
+        with _managed_connection(source_path) as source:
+            with _managed_connection(destination_path) as destination:
                 source.backup(destination)
     except sqlite3.OperationalError as exc:
-        message = str(exc).casefold()
-        if "locked" in message or "busy" in message:
-            code = "db_locked"
-        elif "readonly" in message or "read-only" in message:
-            code = "db_read_only"
-        elif "full" in message:
-            code = "disk_full"
-        else:
-            code = "migration_recovery_failed"
-        raise SchemaPreparationError(code, "Could not create a migration backup") from exc
+        code = _classify_sqlite_operational_error(
+            exc, fallback="migration_backup_failed"
+        )
+        raise SchemaPreparationError(
+            code,
+            "Could not create a migration backup",
+            operation="backup_create",
+            native_code=_native_error_code(exc),
+        ) from exc
     except OSError as exc:
-        code = "disk_full" if getattr(exc, "errno", None) == 28 else "db_read_only"
-        raise SchemaPreparationError(code, "Could not create a migration backup") from exc
+        _raise_filesystem_error(
+            exc,
+            "Could not create a migration backup",
+            operation="backup_create",
+        )
 
 
 def _remove_database_sidecars(database_path: Path) -> None:
@@ -187,19 +353,31 @@ def _restore_backup(database_path: Path, backup_path: Path) -> None:
         raise SchemaPreparationError(
             "migration_recovery_failed", "Migration backup could not be restored"
         )
-    _remove_database_sidecars(database_path)
     try:
+        _remove_database_sidecars(database_path)
         os.replace(restored, database_path)
     except OSError as exc:
-        _raise_filesystem_error(exc, "Could not restore the migration backup")
+        _raise_filesystem_error(
+            exc,
+            "Could not restore the migration backup",
+            operation="restore_swap",
+        )
 
 
-def _cleanup_migration(state_path: Path, backup_path: Path) -> None:
+def _cleanup_migration(state_path: Path, backup_path: Path) -> bool:
     # Keep the state file until cleanup is otherwise complete. If the process
     # stops between these operations, the next prepare can safely finish it.
-    backup_path.unlink(missing_ok=True)
-    backup_path.with_suffix(backup_path.suffix + ".tmp").unlink(missing_ok=True)
-    state_path.unlink(missing_ok=True)
+    try:
+        backup_path.unlink(missing_ok=True)
+        backup_path.with_suffix(backup_path.suffix + ".tmp").unlink(missing_ok=True)
+        state_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Migration cleanup remains pending (%s)",
+            _native_error_code(exc) or type(exc).__name__,
+        )
+        return False
+    return True
 
 
 class SchemaMigrator:
@@ -378,7 +556,11 @@ class SchemaMigrator:
         try:
             database_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            _raise_filesystem_error(exc, "Could not create the library work directory")
+            _raise_filesystem_error(
+                exc,
+                "Could not create the library work directory",
+                operation="workdir_create",
+            )
         state_path = database_path.parent / MIGRATION_STATE_NAME
         state = _read_state(state_path)
         warnings: list[str] = []
@@ -392,14 +574,15 @@ class SchemaMigrator:
             current_ok = _integrity_ok(database_path)
             current_version = -1
             if current_ok:
-                with sqlite3.connect(database_path, timeout=0.5) as connection:
+                with _managed_connection(database_path) as connection:
                     current_version = int(
                         connection.execute("PRAGMA user_version").fetchone()[0]
                     )
             if current_ok and current_version == state.target_version:
                 if state.stage == "restored_migration_pending":
                     warnings.append("migration_restored")
-                _cleanup_migration(state_path, backup_path)
+                if not _cleanup_migration(state_path, backup_path):
+                    warnings.append("migration_cleanup_pending")
                 return current_version, tuple(warnings)
             if not current_ok:
                 if not _integrity_ok(backup_path):
@@ -421,11 +604,17 @@ class SchemaMigrator:
 
         existed = database_path.is_file() and database_path.stat().st_size > 0
         try:
-            with sqlite3.connect(database_path, timeout=0.5) as connection:
+            with _managed_connection(database_path) as connection:
                 source_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                can_adopt_v1 = source_version == 0 and _schema_matches_v1(connection)
         except sqlite3.OperationalError as exc:
-            code = _classify_sqlite_operational_error(exc, fallback="db_corrupt")
-            raise SchemaPreparationError(code, "Library index could not be opened") from exc
+            code = _classify_sqlite_operational_error(exc, fallback="db_open_failed")
+            raise SchemaPreparationError(
+                code,
+                "Library index could not be opened",
+                operation="database_open",
+                native_code=_native_error_code(exc),
+            ) from exc
         except sqlite3.DatabaseError as exc:
             raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
 
@@ -433,6 +622,33 @@ class SchemaMigrator:
             raise SchemaPreparationError(
                 "future_schema", "Library index uses a newer schema version"
             )
+
+        if can_adopt_v1:
+            try:
+                with _managed_connection(database_path) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                    if version != 0 or not _schema_matches_v1(connection):
+                        connection.rollback()
+                        can_adopt_v1 = False
+                    else:
+                        SchemaMigrator._migrate_columns(connection)
+                        SchemaMigrator._create_indexes(connection)
+                        connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+            except sqlite3.OperationalError as exc:
+                code = _classify_sqlite_operational_error(
+                    exc, fallback="migration_failed"
+                )
+                raise SchemaPreparationError(
+                    code,
+                    "Library index schema could not be adopted",
+                    operation="schema_adopt",
+                    native_code=_native_error_code(exc),
+                ) from exc
+            if can_adopt_v1:
+                if state is not None and not _cleanup_migration(state_path, backup_path):
+                    warnings.append("migration_cleanup_pending")
+                return CURRENT_SCHEMA_VERSION, tuple(warnings)
         requires_integrity_validation = (
             state is not None or source_version < CURRENT_SCHEMA_VERSION
         )
@@ -463,22 +679,31 @@ class SchemaMigrator:
                 try:
                     os.replace(temporary_backup, backup_path)
                 except OSError as exc:
-                    _raise_filesystem_error(exc, "Could not publish the migration backup")
+                    _raise_filesystem_error(
+                        exc,
+                        "Could not publish the migration backup",
+                        operation="backup_publish",
+                    )
             if state.stage != "restored_migration_pending":
                 state = replace(state, stage="migration_pending")
             _atomic_write_state(state_path, state)
 
         try:
-            with sqlite3.connect(database_path, timeout=0.5) as connection:
+            with _managed_connection(database_path) as connection:
                 SchemaMigrator.initialize_schema(connection)
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         except SchemaPreparationError:
             raise
         except sqlite3.OperationalError as exc:
             code = _classify_sqlite_operational_error(
-                exc, fallback="migration_recovery_failed"
+                exc, fallback="migration_failed"
             )
-            raise SchemaPreparationError(code, "Library index migration failed") from exc
+            raise SchemaPreparationError(
+                code,
+                "Library index migration failed",
+                operation="migration_write",
+                native_code=_native_error_code(exc),
+            ) from exc
         except sqlite3.DatabaseError as exc:
             raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
 
@@ -486,10 +711,13 @@ class SchemaMigrator:
             requires_integrity_validation and not _integrity_ok(database_path)
         ):
             raise SchemaPreparationError(
-                "migration_recovery_failed", "Migrated library index failed validation"
+                "migration_failed",
+                "Migrated library index failed validation",
+                operation="migration_validate",
             )
         if state is not None:
-            _cleanup_migration(state_path, backup_path)
+            if not _cleanup_migration(state_path, backup_path):
+                warnings.append("migration_cleanup_pending")
         return version, tuple(warnings)
 
     @staticmethod
@@ -502,58 +730,11 @@ class SchemaMigrator:
         Args:
             conn: An active SQLite connection.
         """
-        cursor = conn.execute("PRAGMA table_info(assets)")
-        existing_columns: set[str] = {row[1] for row in cursor}
+        existing_columns = {str(row[1]) for row in _table_info(conn, "assets")}
 
         # Define all columns that should exist with their SQL definitions
-        required_columns = {
-            "parent_album_path": "ALTER TABLE assets ADD COLUMN parent_album_path TEXT",
-            "ts": "ALTER TABLE assets ADD COLUMN ts INTEGER",
-            "sort_ts": "ALTER TABLE assets ADD COLUMN sort_ts INTEGER",
-            "bytes": "ALTER TABLE assets ADD COLUMN bytes INTEGER",
-            "make": "ALTER TABLE assets ADD COLUMN make TEXT",
-            "model": "ALTER TABLE assets ADD COLUMN model TEXT",
-            "lens": "ALTER TABLE assets ADD COLUMN lens TEXT",
-            "iso": "ALTER TABLE assets ADD COLUMN iso INTEGER",
-            "f_number": "ALTER TABLE assets ADD COLUMN f_number REAL",
-            "exposure_time": "ALTER TABLE assets ADD COLUMN exposure_time REAL",
-            "exposure_compensation": "ALTER TABLE assets ADD COLUMN exposure_compensation REAL",
-            "focal_length": "ALTER TABLE assets ADD COLUMN focal_length REAL",
-            "w": "ALTER TABLE assets ADD COLUMN w INTEGER",
-            "h": "ALTER TABLE assets ADD COLUMN h INTEGER",
-            "gps": "ALTER TABLE assets ADD COLUMN gps TEXT",
-            "content_id": "ALTER TABLE assets ADD COLUMN content_id TEXT",
-            "frame_rate": "ALTER TABLE assets ADD COLUMN frame_rate REAL",
-            "codec": "ALTER TABLE assets ADD COLUMN codec TEXT",
-            "still_image_time": "ALTER TABLE assets ADD COLUMN still_image_time REAL",
-            "dur": "ALTER TABLE assets ADD COLUMN dur REAL",
-            "original_rel_path": "ALTER TABLE assets ADD COLUMN original_rel_path TEXT",
-            "original_album_id": "ALTER TABLE assets ADD COLUMN original_album_id TEXT",
-            "original_album_subpath": "ALTER TABLE assets ADD COLUMN original_album_subpath TEXT",
-            "micro_thumbnail": "ALTER TABLE assets ADD COLUMN micro_thumbnail BLOB",
-            "live_role": "ALTER TABLE assets ADD COLUMN live_role INTEGER DEFAULT 0",
-            "live_partner_rel": "ALTER TABLE assets ADD COLUMN live_partner_rel TEXT",
-            "aspect_ratio": "ALTER TABLE assets ADD COLUMN aspect_ratio REAL",
-            "year": "ALTER TABLE assets ADD COLUMN year INTEGER",
-            "month": "ALTER TABLE assets ADD COLUMN month INTEGER",
-            "media_type": "ALTER TABLE assets ADD COLUMN media_type INTEGER",
-            "is_favorite": "ALTER TABLE assets ADD COLUMN is_favorite INTEGER DEFAULT 0",
-            "is_deleted": "ALTER TABLE assets ADD COLUMN is_deleted INTEGER DEFAULT 0",
-            "has_gps": "ALTER TABLE assets ADD COLUMN has_gps INTEGER DEFAULT 0",
-            "thumbnail_state": "ALTER TABLE assets ADD COLUMN thumbnail_state TEXT DEFAULT 'ready'",
-            "thumb_cache_key": "ALTER TABLE assets ADD COLUMN thumb_cache_key TEXT",
-            "thumb_updated_at": "ALTER TABLE assets ADD COLUMN thumb_updated_at INTEGER DEFAULT 0",
-            "thumb_error": "ALTER TABLE assets ADD COLUMN thumb_error TEXT",
-            "scan_job_id": "ALTER TABLE assets ADD COLUMN scan_job_id TEXT",
-            "index_revision": "ALTER TABLE assets ADD COLUMN index_revision INTEGER DEFAULT 0",
-            "index_updated_at_ms": "ALTER TABLE assets ADD COLUMN index_updated_at_ms INTEGER DEFAULT 0",
-            "location": "ALTER TABLE assets ADD COLUMN location TEXT",
-            "face_status": "ALTER TABLE assets ADD COLUMN face_status TEXT",
-            "pet_status": "ALTER TABLE assets ADD COLUMN pet_status TEXT",
-        }
-
         # Add missing columns
-        for col_name, alter_sql in required_columns.items():
+        for col_name, alter_sql in _ASSET_COLUMN_MIGRATIONS.items():
             if col_name not in existing_columns:
                 logger.info("Adding missing column: %s", col_name)
                 conn.execute(alter_sql)

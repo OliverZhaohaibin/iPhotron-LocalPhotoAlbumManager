@@ -122,6 +122,16 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
     assert QCoreApplication.translate("MainCoordinator", "Moved", None) == "已移动"
     assert QCoreApplication.translate("InformationPopup", "Information", None) == "信息"
     assert QCoreApplication.translate("GalleryPage", "Return to Map", None) == "返回地图"
+    assert QCoreApplication.translate("MainWindow", "Dismiss", None) == "关闭"
+    assert (
+        QCoreApplication.translate(
+            "MainWindow",
+            "The photo library database is in use by another process. "
+            "Close other iPhotron versions and retry.",
+            None,
+        )
+        == "照片图库数据库正被其他进程使用。请关闭其他 iPhotron 版本后重试。"
+    )
 
     panel = InfoPanel()
     try:

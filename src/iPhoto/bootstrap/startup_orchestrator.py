@@ -50,6 +50,8 @@ class StartupFailure:
     recoverable: bool = True
     code: str = "startup_failed"
     suggested_action: str = "retry"
+    operation: str | None = None
+    native_code: str | None = None
 
 
 @dataclass(slots=True)

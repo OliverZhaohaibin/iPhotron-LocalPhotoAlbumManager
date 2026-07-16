@@ -49,13 +49,16 @@ done
 command -v "$APPIMAGETOOL" >/dev/null 2>&1 || { echo "error: appimagetool not found" >&2; exit 2; }
 
 ENTRYPOINT=""
-for candidate in main.bin main; do
+for candidate in entrypoint.bin entrypoint main.bin main; do
   if [[ -x "$STANDALONE_DIR/$candidate" ]]; then
     ENTRYPOINT="$candidate"
     break
   fi
 done
-[[ -n "$ENTRYPOINT" ]] || { echo "error: standalone entry point main.bin/main not found" >&2; exit 2; }
+[[ -n "$ENTRYPOINT" ]] || {
+  echo "error: standalone entry point entrypoint.bin/entrypoint/main.bin/main not found" >&2
+  exit 2
+}
 
 find "$STANDALONE_DIR" -type f -name '*.qsb' -print -quit | grep -q . || {
   echo "error: standalone bundle does not contain required QSB shaders" >&2

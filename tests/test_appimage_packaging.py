@@ -12,11 +12,11 @@ def _executable(path: Path, contents: str) -> None:
 
 def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    standalone = tmp_path / "main.dist"
+    standalone = tmp_path / "entrypoint.dist"
     (standalone / "iPhoto/gui/ui/widgets").mkdir(parents=True)
     (standalone / "maps/tiles/extension/bin").mkdir(parents=True)
     (standalone / "PySide6/Qt/plugins/platforms").mkdir(parents=True)
-    _executable(standalone / "main.bin", "#!/bin/sh\nexit 0\n")
+    _executable(standalone / "entrypoint.bin", "#!/bin/sh\nexit 0\n")
     (standalone / "iPhoto/gui/ui/widgets/image.qsb").write_bytes(b"qsb")
     _executable(
         standalone / "maps/tiles/extension/bin/osmand_render_helper",
@@ -59,6 +59,15 @@ def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path) -> None
     assert output.exists()
     appdir = tmp_path / "iPhotron.AppDir"
     assert (appdir / "AppRun").stat().st_mode & 0o111
-    assert (appdir / "usr/bin/main.bin").stat().st_mode & 0o111
+    assert (appdir / "usr/bin/entrypoint.bin").stat().st_mode & 0o111
     assert (appdir / "maps").exists() is False
     assert (appdir / "usr/bin/maps/tiles").is_dir()
+    launch = subprocess.run(
+        [str(appdir / "AppRun")],
+        cwd=appdir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert launch.returncode == 0, launch.stderr

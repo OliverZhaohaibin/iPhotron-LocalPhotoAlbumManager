@@ -107,6 +107,21 @@ def test_validated_prepared_library_is_single_use_and_revalidates_identity(
         stale.consume()
 
 
+def test_validated_prepared_library_rejects_in_place_database_changes(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    prepared = probe_library(LibraryProbeRequest.create(library))
+    validated = ValidatedPreparedLibrary.create(prepared)
+
+    with sqlite3.connect(prepared.database_path) as connection:
+        connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
+
+    with pytest.raises(RuntimeError, match="changed before commit"):
+        validated.consume()
+
+
 def test_album_snapshot_budget_returns_partial_result_with_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -785,6 +800,32 @@ def test_controller_rejects_invalid_json(qapp, tmp_path: Path) -> None:
     controller._process = process  # type: ignore[assignment]
 
     controller._on_finished(process, 2, QProcess.ExitStatus.NormalExit)  # type: ignore[arg-type]
+
+    assert failures[0].code == "invalid_protocol"
+
+
+def test_controller_rejects_result_for_another_request_id(qapp, tmp_path: Path) -> None:
+    request = LibraryProbeRequest.create(tmp_path)
+    prepared = probe_library(request)
+    payload = prepared.to_payload()
+    payload["request_id"] = "another-request"
+    process = _FakeProcess(
+        json.dumps(
+            {
+                "protocol_version": PROBE_PROTOCOL_VERSION,
+                "request_path": request.path,
+                "ok": True,
+                "prepared": payload,
+            }
+        ).encode()
+    )
+    controller = LibraryProbeController()
+    failures = []
+    controller.failed.connect(failures.append)
+    controller._request = request
+    controller._process = process  # type: ignore[assignment]
+
+    controller._on_finished(process, 0, QProcess.ExitStatus.NormalExit)  # type: ignore[arg-type]
 
     assert failures[0].code == "invalid_protocol"
 

@@ -136,12 +136,11 @@ def get_global_repository(library_root: Path) -> "AssetRepository":
         skip_initialization = False
         if credential is not None:
             expected_database = resolved_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
-            identity = getattr(credential, "database_identity", None)
-            matches = getattr(identity, "matches", None)
+            matches_current = getattr(credential, "matches_current", None)
             skip_initialization = (
                 getattr(credential, "database_path", None) == expected_database
-                and callable(matches)
-                and bool(matches(expected_database))
+                and callable(matches_current)
+                and bool(matches_current())
             )
             if not skip_initialization:
                 raise RuntimeError("prepared repository credential is stale")

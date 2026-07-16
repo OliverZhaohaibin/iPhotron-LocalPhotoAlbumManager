@@ -155,7 +155,19 @@ class FileIdentity:
             current = self.capture(path)
         except OSError:
             return False
-        return (current.device, current.inode) == (self.device, self.inode)
+        return current == self
+
+
+def _database_schema_version_matches(path: Path, expected_version: int) -> bool:
+    """Revalidate schema state, including changes that still live in SQLite WAL."""
+
+    try:
+        uri = f"{Path(path).resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=0.1) as connection:
+            row = connection.execute("PRAGMA user_version").fetchone()
+    except (OSError, sqlite3.Error, ValueError):
+        return False
+    return bool(row and int(row[0]) == int(expected_version))
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +177,14 @@ class PreparedLibraryCredential:
     schema_version: int
     database_identity: FileIdentity
     prepared_at_ns: int
+
+    def matches_current(self) -> bool:
+        return self.database_identity.matches(
+            self.database_path
+        ) and _database_schema_version_matches(
+            self.database_path,
+            self.schema_version,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +258,7 @@ def _credential_matches(
         credential.root == prepared.root
         and credential.database_path == prepared.database_path
         and credential.schema_version == prepared.schema_version
-        and credential.database_identity.matches(credential.database_path)
+        and credential.matches_current()
     )
 
 
@@ -765,7 +785,7 @@ class LibraryProbeController(QObject):
                 raise ValueError("successful response with non-zero exit")
             prepared = PreparedLibrary.from_payload(envelope["prepared"])
             if prepared.request_id != request.request_id:
-                return
+                raise ValueError("request id mismatch")
             root = prepared.root
             expected_database = root / WORK_DIR_NAME / "global_index.db"
             requested_root = Path(request.path).expanduser().absolute()

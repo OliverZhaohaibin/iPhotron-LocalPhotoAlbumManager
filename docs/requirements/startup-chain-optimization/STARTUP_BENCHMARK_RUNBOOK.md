@@ -67,7 +67,7 @@ standalone build:
 ```bash
 bash scripts/build_nuitka_fast.sh
 bash scripts/build_appimage.sh \
-  --standalone-dir dist/main.dist \
+  --standalone-dir dist/entrypoint.dist \
   --icon /absolute/path/to/iphoto.png \
   --output dist/iPhotron-x86_64.AppImage
 ```

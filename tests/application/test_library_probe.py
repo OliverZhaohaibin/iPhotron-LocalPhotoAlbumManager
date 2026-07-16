@@ -36,6 +36,8 @@ from iPhoto.cache.index_store.migrations import (
     SchemaMigrator,
     SchemaPreparationError,
 )
+from iPhoto.cache.index_store.repository import AssetRepository
+from iPhoto.domain.models.query import CollectionQuery
 
 
 def test_probe_returns_two_level_album_snapshot_without_creating_work_dir(
@@ -234,6 +236,13 @@ def _create_branch_base_database(database: Path) -> None:
         connection.execute("PRAGMA user_version = 0")
 
 
+def _downgrade_to_v1_without_video_columns(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE assets DROP COLUMN video_rotation_cw")
+        connection.execute("ALTER TABLE assets DROP COLUMN video_linux_180_hint")
+        connection.execute("PRAGMA user_version = 1")
+
+
 def test_prepare_database_adopts_complete_branch_base_schema_without_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -270,7 +279,7 @@ def test_prepare_database_adopts_complete_branch_base_schema_without_migration(
             "WHERE rel = 'album/unprocessed.jpg'"
         ).fetchone()
         assert repaired_statuses == ("pending", "pending")
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
 
 
 def test_prepare_database_adopts_complete_schema_with_pending_state(
@@ -316,6 +325,80 @@ def test_prepare_database_migrates_legacy_database_transactionally(tmp_path: Pat
         )
     assert not (database.parent / MIGRATION_STATE_NAME).exists()
     assert list(database.parent.glob("*.migration-*.bak")) == []
+
+
+def test_prepare_database_migrates_v1_gallery_projection_columns(tmp_path: Path) -> None:
+    """Existing libraries must gain columns selected by every Gallery window."""
+
+    library = tmp_path / "library"
+    library.mkdir()
+    repository = AssetRepository(library)
+    repository.write_rows(
+        [
+            {
+                "rel": "photo.jpg",
+                "id": "photo",
+                "media_type": 0,
+                "thumbnail_state": "ready",
+                "thumb_cache_key": "photo-thumb",
+            }
+        ]
+    )
+    database = repository.path
+    repository.close()
+
+    # Reproduce a database created before cached video rotation metadata was
+    # introduced, while retaining the rest of the v1 Gallery schema.
+    _downgrade_to_v1_without_video_columns(database)
+
+    reopened = AssetRepository(library)
+    try:
+        window = reopened.read_gallery_collection_window(CollectionQuery(), 0, 10)
+        assert [row["id"] for row in window.rows] == ["photo"]
+        assert window.rows[0]["video_rotation_cw"] is None
+        assert window.rows[0]["video_linux_180_hint"] is None
+        with sqlite3.connect(database) as connection:
+            assert (
+                connection.execute("PRAGMA user_version").fetchone()[0]
+                == CURRENT_SCHEMA_VERSION
+            )
+    finally:
+        reopened.close()
+
+
+def test_prepare_database_resumes_interrupted_multi_version_migration(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    _downgrade_to_v1_without_video_columns(database)
+    migration_id = "resume-at-v1"
+    backup = database.parent / f"global_index.db.migration-{migration_id}.bak"
+    with sqlite3.connect(database) as source, sqlite3.connect(backup) as target:
+        source.backup(target)
+        target.execute("PRAGMA user_version = 0")
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION,
+        migration_id=migration_id,
+        database_name=database.name,
+        backup_name=backup.name,
+        source_version=0,
+        target_version=CURRENT_SCHEMA_VERSION,
+        stage="migration_pending",
+        started_at_ms=1,
+    )
+    state_path = database.parent / MIGRATION_STATE_NAME
+    state_path.write_text(json.dumps(asdict(state)), encoding="utf-8")
+
+    version, warnings = SchemaMigrator.prepare_database(database)
+
+    assert version == CURRENT_SCHEMA_VERSION
+    assert warnings == ()
+    assert not state_path.exists()
+    assert not backup.exists()
+    with sqlite3.connect(database) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
+    assert {"video_rotation_cw", "video_linux_180_hint"} <= columns
 
 
 def test_prepare_database_rolls_back_failed_version_and_keeps_recovery_state(

@@ -20,10 +20,11 @@ from ...utils.logging import get_logger
 
 logger = get_logger()
 
-# Version 1 represents the complete schema and one-time data repairs below.
+# Version 1 represents the original complete schema and one-time data repairs below.
+# Version 2 adds cached video presentation metadata used by Gallery/Detail reads.
 # Opening an already migrated database must be O(1); in particular it must not
 # revisit every asset row on each desktop launch.
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
 
@@ -553,6 +554,15 @@ class SchemaMigrator:
         # The caller advances user_version in the same transaction.
 
     @staticmethod
+    def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+        """Add cached video presentation columns required by Gallery reads."""
+
+        existing_columns = {str(row[1]) for row in _table_info(conn, "assets")}
+        for column_name in ("video_rotation_cw", "video_linux_180_hint"):
+            if column_name not in existing_columns:
+                conn.execute(_ASSET_COLUMN_MIGRATIONS[column_name])
+
+    @staticmethod
     def prepare_database(database_path: Path) -> tuple[int, tuple[str, ...]]:
         """Recover an interrupted migration and synchronously prepare the schema."""
 
@@ -598,7 +608,9 @@ class SchemaMigrator:
                 warnings.append("migration_restored")
                 state = replace(state, stage="restored_migration_pending")
                 _atomic_write_state(state_path, state)
-            elif current_version != state.source_version:
+            elif not (
+                state.source_version <= current_version < state.target_version
+            ):
                 raise SchemaPreparationError(
                     "migration_recovery_failed",
                     "Interrupted migration state does not match the library index",

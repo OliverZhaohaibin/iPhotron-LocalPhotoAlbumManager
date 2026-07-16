@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..application.ports.pets import PetAssetRepositoryPort
 from ..cache.index_store import get_global_repository
-from ..pets.index_coordinator import (
-    PetIndexCoordinator,
-    get_pet_index_coordinator,
-)
 from ..pets.service import PetService
+
+if TYPE_CHECKING:
+    from ..pets.index_coordinator import PetIndexCoordinator
 
 
 class IndexStorePetAssetRepository:
@@ -83,18 +82,12 @@ def create_pet_service(
         root,
         repository_factory=repository_factory,
     )
-    if coordinator is None:
-        resolved_coordinator = get_pet_index_coordinator(
-            root,
-            asset_repository=repository,
-        )
-    else:
+    if coordinator is not None:
         coordinator.set_asset_repository(repository)
-        resolved_coordinator = coordinator
     return PetService(
         root,
         asset_repository=repository,
-        coordinator=resolved_coordinator,
+        coordinator=coordinator,
     )
 
 

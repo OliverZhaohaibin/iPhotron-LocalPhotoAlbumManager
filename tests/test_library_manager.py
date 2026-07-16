@@ -123,7 +123,7 @@ def test_bind_path_rebinds_people_snapshot_events_for_prebound_session(
     assert index_spy.count() == 1
 
 
-def test_bind_path_from_session_rebinds_people_snapshot_events(
+def test_bind_path_from_session_defers_snapshot_coordinator_until_scan_activation(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -136,11 +136,15 @@ def test_bind_path_from_session_rebinds_people_snapshot_events(
     manager.bind_path_from_session(root)
     qapp.processEvents()
 
+    assert manager._people_index_coordinator is None
+
+    manager.activate_recognition_scans()
+    qapp.processEvents()
+
     snapshot_spy = QSignalSpy(manager.peopleSnapshotCommitted)
     index_spy = QSignalSpy(manager.peopleIndexUpdated)
     coordinator = manager._people_index_coordinator
     assert coordinator is not None
-
     event = object()
     coordinator.snapshotCommitted.emit(event)
     qapp.processEvents()

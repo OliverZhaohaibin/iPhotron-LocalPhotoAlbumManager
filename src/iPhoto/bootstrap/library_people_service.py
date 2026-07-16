@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..application.ports import PeopleAssetRepositoryPort
 from ..cache.index_store import get_global_repository
-from ..people.index_coordinator import (
-    PeopleIndexCoordinator,
-    get_people_index_coordinator,
-)
 from ..people.service import PeopleService
+
+if TYPE_CHECKING:
+    from ..people.index_coordinator import PeopleIndexCoordinator
 
 
 class IndexStorePeopleAssetRepository:
@@ -83,18 +82,12 @@ def create_people_service(
         root,
         repository_factory=repository_factory,
     )
-    if coordinator is None:
-        resolved_coordinator = get_people_index_coordinator(
-            root,
-            asset_repository=repository,
-        )
-    else:
+    if coordinator is not None:
         coordinator.set_asset_repository(repository)
-        resolved_coordinator = coordinator
     return PeopleService(
         root,
         asset_repository=repository,
-        coordinator=resolved_coordinator,
+        coordinator=coordinator,
     )
 
 

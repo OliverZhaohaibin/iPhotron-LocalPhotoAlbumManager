@@ -4,6 +4,7 @@ import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -31,6 +32,7 @@ from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.people.service import PeopleService
 from iPhoto.pets.records import PetSummary
+from iPhoto.pets.service import PetService
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -766,29 +768,29 @@ def test_people_dashboard_retranslate_keeps_unbound_message_after_unbind(
     assert widget._empty.text() == "XX:People & Pets appear here after a library is bound and scanned."
 
 
-def test_set_library_root_uses_asset_aware_people_service_factory(
+def test_set_services_uses_injected_library_scoped_services(
     monkeypatch, qapp: QApplication, tmp_path: Path
 ) -> None:
     widget = PeopleDashboardWidget()
-    service = PeopleService(tmp_path)
+    service = PeopleService(tmp_path, asset_repository=object())
+    pet_service = PetService(tmp_path, asset_repository=object())
+    query_service = object()
     reloads: list[bool] = []
-    created_roots: list[Path] = []
-
-    def _fake_create_people_service(root: Path) -> PeopleService:
-        created_roots.append(root)
-        return service
-
-    monkeypatch.setattr(people_dashboard_widget, "create_people_service", _fake_create_people_service)
     monkeypatch.setattr(
         widget,
         "reload",
         lambda *, preserve_content=False: reloads.append(bool(preserve_content)),
     )
 
-    widget.set_library_root(tmp_path)
+    widget.set_services(
+        service,
+        pet_service,
+        query_service=query_service,
+    )
 
     assert widget._service is service
-    assert created_roots == [tmp_path]
+    assert widget._pet_service is pet_service
+    assert widget._query_service is query_service
     assert reloads == [False]
 
 
@@ -1009,6 +1011,37 @@ def test_merge_person_reuses_group_people_dialog(
     assert confirmed == [("person:person-a", "person:person-b")]
 
 
+def test_cross_identity_merge_invalidates_query_cache_before_reload(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    ]
+    widget._pet_summaries = [
+        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z")
+    ]
+    widget._query_service = Mock()
+    merge_result = SimpleNamespace(merged=True, group_redirects={})
+    monkeypatch.setattr(
+        widget._service,
+        "merge_identities",
+        Mock(return_value=merge_result),
+    )
+    monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(lambda *_args: True))
+    monkeypatch.setattr(widget, "_remap_pinned_identity", Mock())
+    monkeypatch.setattr(widget, "reload", Mock())
+
+    assert widget._confirm_merge("person:person-a", "pet:pet-a") is True
+
+    widget._service.merge_identities.assert_called_once_with(
+        "person:person-a",
+        "pet:pet-a",
+    )
+    widget._query_service.invalidate.assert_called_once_with()
+    widget.reload.assert_called_once_with(preserve_content=True)
+
+
 def test_merge_person_dialog_includes_same_hidden_people_and_pets(
     monkeypatch, qapp: QApplication
 ) -> None:
@@ -1103,6 +1136,7 @@ def test_toggle_person_hidden_updates_service_and_reloads(
     monkeypatch, qapp: QApplication
 ) -> None:
     widget = PeopleDashboardWidget()
+    widget._query_service = Mock()
     summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
 
     toggles: list[tuple[str, bool]] = []
@@ -1126,6 +1160,7 @@ def test_toggle_person_hidden_updates_service_and_reloads(
     widget._toggle_person_hidden(summary)
 
     assert toggles == [("person-a", True)]
+    widget._query_service.invalidate.assert_called_once_with()
     assert reloads == [False]
 
 

@@ -21,20 +21,19 @@ from ..infrastructure.repositories.library_state_repository import (
 )
 from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
 from ..infrastructure.services.map_runtime_service import SessionMapRuntimeService
-from ..people.service import PeopleService
-from ..pets.service import PetService
-from .library_asset_state_service import LibraryAssetStateService
 from .library_album_metadata_service import LibraryAlbumMetadataService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_asset_operation_service import LibraryAssetOperationService
 from .library_asset_query_service import LibraryAssetQueryService
+from .library_asset_state_service import LibraryAssetStateService
 from .library_edit_service import LibraryEditService
 from .library_location_service import LibraryLocationService
-from .library_people_service import create_people_service
-from .library_pet_service import create_pet_service
 from .library_scan_service import LibraryScanService
 
 if TYPE_CHECKING:
+    from ..application.services.recognition_query_service import RecognitionQueryService
+    from ..people.service import PeopleService
+    from ..pets.service import PetService
     from .library_probe import PreparedLibrary, ValidatedPreparedLibrary
 
 
@@ -53,6 +52,7 @@ class LibrarySession:
     asset_operations: LibraryAssetOperationService | None = None
     people: PeopleService | None = None
     pets: PetService | None = None
+    recognition_queries: RecognitionQueryService | None = None
     maps: MapRuntimePort | None = None
     map_interactions: MapInteractionServicePort | None = None
     edit: EditServicePort | None = None
@@ -60,7 +60,7 @@ class LibrarySession:
     bind_asset_runtime: bool = True
 
     _LAZY_SERVICE_NAMES = frozenset(
-        {"people", "pets", "maps", "map_interactions", "locations"}
+        {"people", "pets", "recognition_queries", "maps", "map_interactions", "locations"}
     )
 
     def __getattribute__(self, name: str):
@@ -121,9 +121,23 @@ class LibrarySession:
 
     def _create_lazy_service(self, name: str):
         if name == "people":
+            from .library_people_service import create_people_service
+
             return create_people_service(self.library_root)
         if name == "pets":
+            from .library_pet_service import create_pet_service
+
             return create_pet_service(self.library_root)
+        if name == "recognition_queries":
+            from ..application.services.recognition_query_service import (
+                RecognitionQueryService,
+            )
+
+            return RecognitionQueryService(
+                self.library_root,
+                people_service=self.people,
+                pet_service=self.pets,
+            )
         if name == "maps":
             return SessionMapRuntimeService()
         if name == "map_interactions":

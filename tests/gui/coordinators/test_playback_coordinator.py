@@ -508,6 +508,7 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
     assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
     player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
+    coordinator._refresh_face_name_overlay_for_presentation.assert_not_called()
 
 
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:
@@ -703,7 +704,7 @@ def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unb
     assert PlaybackCoordinator._map_runtime_package_root(coordinator) == Path("/fallback/maps")
 
 
-def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
+def test_refresh_face_name_overlay_schedules_only_after_still_is_presented() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     overlay = Mock()
     coordinator._face_name_overlay = overlay
@@ -712,21 +713,63 @@ def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
     coordinator._player_view = SimpleNamespace(
         video_area=SimpleNamespace(is_edit_mode_active=lambda: False),
     )
-    coordinator._load_face_name_annotations = Mock(return_value=[Mock(face_id="face-1")])
+    coordinator._presented_still_source = Path("/fake/photo.jpg")
+    coordinator._presented_still_generation = 17
+    coordinator._schedule_recognition_overlay = Mock()
+    presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
 
     PlaybackCoordinator._refresh_face_name_overlay_for_presentation(
+        coordinator,
+        presentation,
+    )
+
+    coordinator._schedule_recognition_overlay.assert_called_once_with(presentation, 17)
+    overlay.set_annotations.assert_not_called()
+
+
+def test_disabled_face_names_never_start_overlay_query() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._show_face_names = False
+    coordinator._active_live_motion = None
+    coordinator._face_name_overlay = Mock()
+    coordinator._recognition_query_service = Mock()
+    coordinator._overlay_pool = Mock()
+    coordinator._player_view = SimpleNamespace(
+        video_area=SimpleNamespace(is_edit_mode_active=lambda: False),
+    )
+
+    PlaybackCoordinator._schedule_recognition_overlay(
         coordinator,
         _make_presentation(
             path="/fake/photo.jpg",
             asset_id="asset-photo",
             is_video=False,
         ),
+        3,
     )
 
-    coordinator._load_face_name_annotations.assert_called_once_with("asset-photo")
-    overlay.set_identity_suggestions.assert_called_once_with([])
-    overlay.set_annotations.assert_called_once()
-    overlay.set_overlay_active.assert_called_once_with(True)
+    coordinator._overlay_pool.start.assert_not_called()
+    coordinator._recognition_query_service.load_overlay.assert_not_called()
+
+
+def test_stale_overlay_generation_is_not_applied() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._overlay_request_generation = 8
+    coordinator._show_face_names = True
+    coordinator._face_name_overlay = Mock()
+
+    PlaybackCoordinator._on_recognition_overlay_ready(
+        coordinator,
+        7,
+        4,
+        SimpleNamespace(),
+    )
+
+    coordinator._face_name_overlay.set_annotations.assert_not_called()
 
 
 def test_load_recognition_identity_suggestions_mixes_people_and_pets() -> None:
@@ -786,6 +829,7 @@ def test_refresh_face_name_overlay_hides_for_video() -> None:
 def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._people_service = Mock(rename_cluster=Mock())
+    coordinator._recognition_query_service = Mock()
     coordinator._current_presentation = _make_presentation(
         path="/fake/photo.jpg",
         asset_id="asset-photo",
@@ -801,6 +845,7 @@ def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> No
     )
 
     coordinator._people_service.rename_cluster.assert_called_once_with("person-a", "Alice")
+    coordinator._recognition_query_service.invalidate.assert_called_once_with(None)
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 

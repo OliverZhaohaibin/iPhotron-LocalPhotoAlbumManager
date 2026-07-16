@@ -28,32 +28,28 @@ from PySide6.QtCore import (
 
 from ..errors import LibraryUnavailableError
 from ..utils.logging import get_logger
-from .tree import AlbumNode
-
-# Re-export GeotaggedAsset for presentation widgets that need the map DTO.
-from .geo_aggregator import GeotaggedAsset  # noqa: F401
 
 # Mixin classes providing the extracted functionality
 from .album_operations import AlbumOperationsMixin
-from .scan_coordinator import ScanCoordinatorMixin
 from .filesystem_watcher import FileSystemWatcherMixin
-from .geo_aggregator import GeoAggregatorMixin
+
+# Re-export GeotaggedAsset for presentation widgets that need the map DTO.
+from .geo_aggregator import (
+    GeoAggregatorMixin,
+    GeotaggedAsset,  # noqa: F401
+)
+from .scan_coordinator import ScanCoordinatorMixin
 from .trash_manager import TrashManagerMixin
+from .tree import AlbumNode
 from .watch_service import LibraryWatchResult, LibraryWatchService
 
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..people.index_coordinator import PeopleIndexCoordinator
-    from ..people.service import PeopleService
-    from ..pets.index_coordinator import PetIndexCoordinator
-    from ..pets.service import PetService
-    from .workers.face_scan_worker import FaceScanWorker
-    from .workers.pet_scan_worker import PetScanWorker
-    from .workers.scanner_worker import ScannerWorker
     from ..application.ports import (
         AssetStateServicePort,
         EditServicePort,
+        LibraryStateRepositoryPort,
         LocationAssetServicePort,
         MapInteractionServicePort,
         MapRuntimePort,
@@ -62,10 +58,16 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
     from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
-    from ..bootstrap.library_session import LibrarySession
     from ..bootstrap.library_probe import PreparedLibrary
     from ..bootstrap.library_scan_service import LibraryScanService
-    from ..application.ports import LibraryStateRepositoryPort
+    from ..bootstrap.library_session import LibrarySession
+    from ..people.index_coordinator import PeopleIndexCoordinator
+    from ..people.service import PeopleService
+    from ..pets.index_coordinator import PetIndexCoordinator
+    from ..pets.service import PetService
+    from .workers.face_scan_worker import FaceScanWorker
+    from .workers.pet_scan_worker import PetScanWorker
+    from .workers.scanner_worker import ScannerWorker
 
 
 class LibraryRuntimeController(
@@ -266,8 +268,7 @@ class LibraryRuntimeController(
                 except OSError:
                     session_root = Path(session.library_root)
                 if session_root == normalized:
-                    self.bind_people_service(session.people)
-                    self.bind_pet_service(session.pets)
+                    self.bind_recognition_services(session.people, session.pets)
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)
@@ -586,8 +587,10 @@ class LibraryRuntimeController(
     ) -> None:
         """Bind People/Pets without starting model workers."""
 
-        self.bind_people_service(people_service)
-        self.bind_pet_service(pet_service)
+        # Read-only dashboard/overlay use must not import or construct the AI
+        # coordinators. They are attached only when scanning is activated.
+        self._people_service = people_service
+        self._pet_service = pet_service
         root = self._root
         self._recognition_services_root = root
         if root != self._recognition_scans_root:
@@ -605,6 +608,8 @@ class LibraryRuntimeController(
             or self._pet_service is None
         ):
             return
+        self.bind_people_service(self._people_service)
+        self.bind_pet_service(self._pet_service)
         self._recognition_scans_root = root
         self._start_ai_scan_workers(root, startup=True)
 

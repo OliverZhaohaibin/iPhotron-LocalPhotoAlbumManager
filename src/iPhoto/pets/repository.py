@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ class PetRepository:
     def __init__(self, db_path: Path, state_db_path: Path | None = None) -> None:
         self._db_path = Path(db_path)
         self._state_repo = PetStateRepository(state_db_path) if state_db_path is not None else None
+        self._initialized = False
+        self._initialize_lock = threading.Lock()
 
     @property
     def db_path(self) -> Path:
@@ -47,11 +50,17 @@ class PetRepository:
         return self._state_repo
 
     def initialize(self) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as conn:
-            self._create_schema(conn)
-        if self._state_repo is not None:
-            self._state_repo.initialize()
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(self._connect()) as conn:
+                self._create_schema(conn)
+            if self._state_repo is not None:
+                self._state_repo.initialize()
+            self._initialized = True
 
     def replace_all(
         self,
@@ -354,6 +363,35 @@ class PetRepository:
                 (pet_id,),
             ).fetchall()
         return [str(row["asset_id"]) for row in rows if row["asset_id"]]
+
+    def get_asset_ids_by_pets(
+        self,
+        pet_ids: Iterable[str],
+    ) -> dict[str, list[str]]:
+        """Return assets for all requested Pets using one SQLite connection."""
+
+        ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
+        result: dict[str, list[str]] = {pet_id: [] for pet_id in ids}
+        if not ids:
+            return result
+        self.initialize()
+        with closing(self._connect()) as conn:
+            for start in range(0, len(ids), 900):
+                chunk = ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT pet_id, asset_id
+                    FROM pet_detections
+                    WHERE pet_id IN ({placeholders})
+                    ORDER BY pet_id ASC, asset_id ASC
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    if row["pet_id"] and row["asset_id"]:
+                        result[str(row["pet_id"])].append(str(row["asset_id"]))
+        return result
 
     def list_asset_pet_annotations(self, asset_id: str) -> list[AssetPetAnnotation]:
         if not asset_id:

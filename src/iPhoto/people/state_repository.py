@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,16 +56,24 @@ class IdentityRedirectRecord:
 class FaceStateRepository:
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
+        self._initialized = False
+        self._initialize_lock = threading.Lock()
 
     @property
     def db_path(self) -> Path:
         return self._db_path
 
     def initialize(self) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as conn:
-            self._create_schema(conn)
-            conn.commit()
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(self._connect()) as conn:
+                self._create_schema(conn)
+                conn.commit()
+            self._initialized = True
 
     def get_profiles(self) -> list[PersonProfile]:
         self.initialize()

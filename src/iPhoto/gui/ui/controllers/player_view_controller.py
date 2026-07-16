@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional, Set
 
 from PySide6.QtCore import (
     QObject,
     QRunnable,
-    QSize,
-    Qt,
     QThread,
     QThreadPool,
-    QTimer,
     Signal,
 )
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QLabel, QStackedWidget, QWidget
 
 from ....application.ports import EditServicePort
@@ -39,9 +35,6 @@ class _AdjustedImageSignals(QObject):
     failed = Signal(Path, str)
     """Emitted when loading or processing the image fails."""
 
-    previewCompleted = Signal(Path, QImage, dict)
-    """Emitted once a viewport-sized frame is ready for immediate display."""
-
     finished = Signal(object)
     """Emitted for success, failure and cooperative cancellation."""
 
@@ -54,27 +47,19 @@ class _AdjustedImageWorker(QRunnable):
         source: Path,
         signals: _AdjustedImageSignals,
         edit_service: EditServicePort | None = None,
-        preview_target: QSize | None = None,
-        preview_gate: threading.Event | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
         self._source = source
         self._signals = signals
         self._edit_service = edit_service
-        self._preview_target = QSize(preview_target) if preview_target is not None else None
-        self._preview_gate = preview_gate
         self._cancelled = False
         self._submitted_at = time.perf_counter()
-        # Production first decodes a viewport frame, then upgrades to the full
-        # source after the GUI has had an event-loop turn to present it.
 
     def cancel(self) -> None:
         """Suppress delivery when this request is no longer current."""
 
         self._cancelled = True
-        if self._preview_gate is not None:
-            self._preview_gate.set()
 
     def run(self) -> None:  # pragma: no cover - executed on a worker thread
         """Perform the expensive image work outside the GUI thread."""
@@ -90,10 +75,10 @@ class _AdjustedImageWorker(QRunnable):
             if self._cancelled:
                 return
             decode_started = time.perf_counter()
-            image = image_loader.load_qimage(self._source, self._preview_target)
+            image = image_loader.load_qimage(self._source, None)
             log_detail_profile(
                 "still_worker",
-                "preview_decode" if self._preview_target is not None else "decode",
+                "decode",
                 (time.perf_counter() - decode_started) * 1000.0,
                 path=self._source.name,
             )
@@ -143,48 +128,6 @@ class _AdjustedImageWorker(QRunnable):
         )
         if self._cancelled:
             return
-
-        if self._preview_target is not None:
-            self._signals.previewCompleted.emit(self._source, image, adjustments or {})
-            if self._preview_gate is not None:
-                self._preview_gate.wait(timeout=1.0)
-            if self._cancelled:
-                return
-            full_decode_started = time.perf_counter()
-            try:
-                full_image = image_loader.load_qimage(self._source, None)
-            except Exception as exc:  # pragma: no cover - decoder boundary
-                if not self._cancelled:
-                    self._signals.failed.emit(self._source, str(exc))
-                return
-            log_detail_profile(
-                "still_worker",
-                "full_decode",
-                (time.perf_counter() - full_decode_started) * 1000.0,
-                path=self._source.name,
-            )
-            if full_image is None or full_image.isNull():
-                if not self._cancelled:
-                    self._signals.failed.emit(
-                        self._source,
-                        "Full-resolution decoder returned an empty frame",
-                    )
-                return
-            image = full_image
-            if has_sidecar and self._edit_service is not None:
-                full_adjustments_started = time.perf_counter()
-                stats = compute_color_statistics(image)
-                adjustments = self._edit_service.describe_adjustments(
-                    self._source,
-                    color_stats=stats,
-                ).resolved_adjustments
-                log_detail_profile(
-                    "still_worker",
-                    "full_adjustments",
-                    (time.perf_counter() - full_adjustments_started) * 1000.0,
-                    path=self._source.name,
-                    adjustments=len(adjustments),
-                )
 
         if not self._cancelled:
             self._signals.completed.emit(self._source, image, adjustments or {})
@@ -250,16 +193,15 @@ class PlayerViewController(QObject):
         self._image_viewer_index = player_stack.indexOf(image_viewer)
         self._image_viewer.replayRequested.connect(self.liveReplayRequested)
         self._pool = StillImageDecodeScheduler(self)
-        self._active_workers: Set[_AdjustedImageWorker] = set()
+        self._active_workers: set[_AdjustedImageWorker] = set()
         self._request_generation = 0
         self._present_generation = 0
         self._present_started_at: float | None = None
         self._present_source: Path | None = None
-        self._preview_presented_generation = 0
-        self._loading_source: Optional[Path] = None
+        self._loading_source: Path | None = None
         self._loading_started_at: float | None = None
         self._defer_still_updates = False
-        self._pending_still: Optional[tuple[Path, QImage, dict]] = None
+        self._pending_still: tuple[Path, QImage, dict] | None = None
 
         # Per-widget first-render tracking.  QRhiWidget backing textures are
         # uninitialised (transparent) until the first ``render()`` call fills
@@ -397,7 +339,7 @@ class PlayerViewController(QObject):
     # ------------------------------------------------------------------
     # Content helpers
     # ------------------------------------------------------------------
-    def display_image(self, source: Path, *, placeholder: Optional[QPixmap] = None) -> bool:
+    def display_image(self, source: Path) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         self._request_generation += 1
         request_generation = self._request_generation
@@ -408,41 +350,22 @@ class PlayerViewController(QObject):
         # 1) 先切到 GL 视图，保证有有效的 GL 上下文
         self.show_image_surface()
 
-        # 2) 若有占位图，先显示；否则仅清空，不上传空图像
-        if placeholder is not None and not placeholder.isNull():
-            self._image_viewer.set_pixmap(
-                placeholder,
-                image_source=source,
-                reset_view=True,
-            )
-        else:
-            self._image_viewer.set_image(None, {})
+        # Decode and upload one full-resolution frame. Gallery thumbnails and
+        # viewport previews stay out of the Detail presentation path.
+        self._image_viewer.set_image(None, {})
 
         signals = _AdjustedImageSignals()
-        preview_gate = threading.Event()
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
         worker = _ScheduledAdjustedImageWorker(
             source,
             signals,
             edit_service=edit_service,
-            preview_target=self._display_decode_target(),
-            preview_gate=preview_gate,
         )
         self._active_workers.add(worker)
 
         signals.completed.connect(
             lambda img_source, img, adjustments, generation=request_generation:
             self._on_scheduled_image_ready(generation, img_source, img, adjustments)
-        )
-        signals.previewCompleted.connect(
-            lambda img_source, img, adjustments, generation=request_generation:
-            self._deliver_scheduled_preview(
-                generation,
-                img_source,
-                img,
-                adjustments,
-                preview_gate,
-            )
         )
         signals.failed.connect(
             lambda img_source, message, generation=request_generation:
@@ -459,50 +382,6 @@ class PlayerViewController(QObject):
             self.imageLoadingFailed.emit(source, str(exc))
             return False
         return True
-
-    def _deliver_scheduled_preview(
-        self,
-        generation: int,
-        source: Path,
-        image: QImage,
-        adjustments: dict,
-        preview_gate: threading.Event,
-    ) -> None:
-        self._on_scheduled_preview_ready(generation, source, image, adjustments)
-        # Release the full decode on the next GUI turn, after set_image/update
-        # have had a chance to schedule the preview paint.
-        QTimer.singleShot(0, preview_gate.set)
-
-    def _display_decode_target(self) -> QSize:
-        """Return a physical-pixel target large enough for the current viewport."""
-
-        viewport = self._image_viewer.size()
-        ratio_getter = getattr(self._image_viewer, "devicePixelRatioF", None)
-        ratio = float(ratio_getter()) if callable(ratio_getter) else 1.0
-        width = max(1024, int(viewport.width() * ratio * 1.25))
-        height = max(768, int(viewport.height() * ratio * 1.25))
-        target = QSize(width, height)
-        if max(width, height) > 2560:
-            target.scale(2560, 2560, Qt.AspectRatioMode.KeepAspectRatio)
-        return target
-
-    def _on_scheduled_preview_ready(
-        self,
-        generation: int,
-        source: Path,
-        image: QImage,
-        adjustments: dict,
-    ) -> None:
-        if generation != self._request_generation or image.isNull():
-            return
-        self._preview_presented_generation = generation
-        self._present_generation = generation
-        self._present_started_at = self._loading_started_at
-        self._present_source = source
-        if self._defer_still_updates and self._player_stack.currentWidget() is self._video_area:
-            self._pending_still = (source, image, adjustments)
-        else:
-            self._apply_still_frame(source, image, adjustments, reset_view=True)
 
     def _cancel_stale_image_workers(self) -> None:
         for worker in tuple(self._active_workers):
@@ -531,12 +410,6 @@ class PlayerViewController(QObject):
         message: str,
     ) -> None:
         if generation != self._request_generation:
-            return
-        if self._preview_presented_generation == generation:
-            # A useful viewport frame is already visible.  A failed optional
-            # full-resolution upgrade must not blank it out.
-            self._loading_source = None
-            self._loading_started_at = None
             return
         self._on_adjusted_image_failed(source, message)
 
@@ -582,7 +455,6 @@ class PlayerViewController(QObject):
         self._present_source = None
         self._present_started_at = None
         self._pending_still = None
-        self._preview_presented_generation = 0
 
     def defer_still_updates(self, enabled: bool) -> None:
         """Control whether still frames should be applied immediately."""
@@ -690,13 +562,12 @@ class PlayerViewController(QObject):
                 source,
                 image,
                 adjustments,
-                reset_view=self._preview_presented_generation != self._request_generation,
+                reset_view=True,
             )
 
         if self._loading_source == source:
             self._loading_source = None
             self._loading_started_at = None
-        self._preview_presented_generation = 0
 
     def _on_adjusted_image_failed(self, source: Path, message: str) -> None:
         """Propagate worker failures while ensuring stale results are ignored."""

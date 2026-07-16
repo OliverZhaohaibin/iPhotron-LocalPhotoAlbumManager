@@ -5,23 +5,25 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import (
     QItemSelectionModel,
     QLocale,
     QModelIndex,
     QObject,
-    Qt,
+    QRunnable,
+    QThread,
     QThreadPool,
     QTimer,
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QColor, QImage, QPalette, QPixmap
+from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
@@ -91,6 +93,44 @@ def _location_video_write_placeholder() -> str:
     return tr("PlaybackCoordinator", _LOCATION_VIDEO_WRITE_PLACEHOLDER)
 
 
+class _RecognitionOverlaySignals(QObject):
+    ready = Signal(int, int, object)
+    failed = Signal(int, object)
+
+
+class _RecognitionOverlayWorker(QRunnable):
+    def __init__(
+        self,
+        *,
+        request_generation: int,
+        still_generation: int,
+        asset_id: str,
+        query_service: object,
+        signals: _RecognitionOverlaySignals,
+    ) -> None:
+        super().__init__()
+        self._request_generation = request_generation
+        self._still_generation = still_generation
+        self._asset_id = asset_id
+        self._query_service = query_service
+        self._signals = signals
+
+    def run(self) -> None:  # pragma: no cover - worker thread
+        try:
+            snapshot = self._query_service.load_overlay(
+                self._asset_id,
+                include_hidden=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - async optional-domain boundary
+            self._signals.failed.emit(self._request_generation, exc)
+            return
+        self._signals.ready.emit(
+            self._request_generation,
+            self._still_generation,
+            snapshot,
+        )
+
+
 class PlaybackCoordinator(QObject):
     """Bind detail widgets to the current presentation from DetailViewModel."""
 
@@ -153,6 +193,7 @@ class PlaybackCoordinator(QObject):
         self._face_name_overlay = face_name_overlay
         self._people_service = people_service
         self._pet_service = pet_service
+        self._recognition_query_service = None
         self._people_library_root = self._service_library_root(people_service)
         self._pet_library_root = self._service_library_root(pet_service)
         self._people_dashboard_refresh_callback = people_dashboard_refresh_callback
@@ -204,6 +245,15 @@ class PlaybackCoordinator(QObject):
 
         self._pending_play_row: int | None = None
         self._show_face_names = False
+        self._overlay_request_generation = 0
+        self._presented_still_generation = 0
+        self._presented_still_source: Path | None = None
+        self._overlay_signals = _RecognitionOverlaySignals(self)
+        self._overlay_signals.ready.connect(self._on_recognition_overlay_ready)
+        self._overlay_signals.failed.connect(self._on_recognition_overlay_failed)
+        self._overlay_pool = QThreadPool(self)
+        self._overlay_pool.setMaxThreadCount(1)
+        self._overlay_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._play_debounce = QTimer(self)
         self._play_debounce.setSingleShot(True)
         self._play_debounce.setInterval(PLAY_ASSET_DEBOUNCE_MS)
@@ -225,6 +275,10 @@ class PlaybackCoordinator(QObject):
         self._pet_service = service
         self._pet_library_root = self._service_library_root(service)
         self._refresh_face_name_overlay_for_current_presentation()
+
+    def set_recognition_query_service(self, service: object | None) -> None:
+        self._invalidate_overlay_requests(clear=True)
+        self._recognition_query_service = service
 
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
@@ -265,6 +319,7 @@ class PlaybackCoordinator(QObject):
             queue.writeFailed.connect(self._handle_location_file_write_failed)
 
     def set_people_library_root(self, library_root: Path | None) -> None:
+        self._invalidate_overlay_requests(clear=True)
         people_service = getattr(self, "_people_service", None)
         service_matches_root = self._service_library_root(people_service) == library_root
         if not service_matches_root:
@@ -338,6 +393,9 @@ class PlaybackCoordinator(QObject):
 
     def set_face_name_display_enabled(self, enabled: bool) -> None:
         self._show_face_names = bool(enabled)
+        if not self._show_face_names:
+            self._invalidate_overlay_requests(clear=True)
+            return
         self._refresh_face_name_overlay_for_current_presentation()
 
     def current_row(self) -> int:
@@ -377,6 +435,9 @@ class PlaybackCoordinator(QObject):
         self._player_bar.seekRequested.connect(self._on_seek)
 
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
+        still_presented = getattr(self._player_view, "stillFramePresented", None)
+        if still_presented is not None:
+            still_presented.connect(self._on_still_frame_presented)
         self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
         self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
         self._player_view.video_area.durationChanged.connect(self._on_video_duration_changed)
@@ -628,6 +689,9 @@ class PlaybackCoordinator(QObject):
 
     def _render_presentation(self, presentation: DetailPresentation) -> None:
         render_started = time.perf_counter()
+        self._invalidate_overlay_requests(clear=True)
+        self._presented_still_generation = 0
+        self._presented_still_source = None
         source = presentation.path
         self._active_live_motion = None
         self._active_live_still = None
@@ -686,11 +750,7 @@ class PlaybackCoordinator(QObject):
                 self._player_view.video_area.stop()
             self._player_view.show_image_surface()
             display_started = time.perf_counter()
-            placeholder = self._playback_placeholder(presentation.row)
-            if placeholder is None:
-                self._player_view.display_image(source)
-            else:
-                self._player_view.display_image(source, placeholder=placeholder)
+            self._player_view.display_image(source)
             log_detail_profile(
                 "playback",
                 "image.display_image",
@@ -710,7 +770,6 @@ class PlaybackCoordinator(QObject):
             else:
                 self._player_view.hide_live_badge()
                 self._player_view.set_live_replay_enabled(False)
-                self._refresh_face_name_overlay_for_presentation(presentation)
 
         self._is_playing = False
         self._player_bar.set_playback_state(False)
@@ -729,25 +788,6 @@ class PlaybackCoordinator(QObject):
             is_video=presentation.is_video,
         )
         self._clear_play_profile(presentation.row)
-
-    def _playback_placeholder(self, row: int) -> QPixmap | None:
-        """Reuse the already-loaded Gallery tile while the still is decoded."""
-
-        model = getattr(self, "_asset_model", None)
-        if model is None:
-            return None
-        index = model.index(row, 0)
-        pixmap = model.data(index, Qt.ItemDataRole.DecorationRole)
-        if isinstance(pixmap, QPixmap) and not pixmap.isNull():
-            return pixmap
-        asset_getter = getattr(model, "asset_dto", None)
-        asset = asset_getter(row) if callable(asset_getter) else None
-        micro = getattr(asset, "micro_thumbnail", None)
-        if isinstance(micro, QImage) and not micro.isNull():
-            pixmap = QPixmap.fromImage(micro)
-            if not pixmap.isNull():
-                return pixmap
-        return None
 
     def _is_location_video_write_inflight(self, path: Path) -> bool:
         inflight = getattr(self, "_location_video_write_inflight_paths", set())
@@ -826,6 +866,115 @@ class PlaybackCoordinator(QObject):
             overlay.clear_annotations()
         overlay.set_overlay_active(False)
 
+    def _invalidate_overlay_requests(self, *, clear: bool) -> None:
+        self._overlay_request_generation = int(
+            getattr(self, "_overlay_request_generation", 0)
+        ) + 1
+        pool = getattr(self, "_overlay_pool", None)
+        if pool is not None:
+            pool.clear()
+        if clear:
+            self._hide_face_name_overlay(clear_annotations=True)
+
+    @Slot(object, int)
+    def _on_still_frame_presented(self, source: object, generation: int) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or presentation.is_video:
+            return
+        try:
+            presented_source = Path(source)
+        except TypeError:
+            return
+        if presented_source != presentation.path:
+            return
+        self._presented_still_source = presented_source
+        self._presented_still_generation = int(generation)
+        self._schedule_recognition_overlay(presentation, int(generation))
+
+    def _schedule_recognition_overlay(
+        self,
+        presentation: DetailPresentation | None,
+        still_generation: int,
+    ) -> None:
+        if not self._should_show_face_name_overlay(presentation):
+            self._hide_face_name_overlay(clear_annotations=True)
+            return
+        query_service = getattr(self, "_recognition_query_service", None)
+        if query_service is None or presentation is None:
+            return
+        query_root = getattr(query_service, "library_root", None)
+        if query_root is not None and Path(query_root) != self._people_library_root:
+            return
+        self._overlay_request_generation += 1
+        request_generation = self._overlay_request_generation
+        self._overlay_pool.clear()
+        self._overlay_pool.start(
+            _RecognitionOverlayWorker(
+                request_generation=request_generation,
+                still_generation=still_generation,
+                asset_id=presentation.asset_id,
+                query_service=query_service,
+                signals=self._overlay_signals,
+            )
+        )
+
+    @Slot(int, int, object)
+    def _on_recognition_overlay_ready(
+        self,
+        request_generation: int,
+        still_generation: int,
+        snapshot: object,
+    ) -> None:
+        if request_generation != self._overlay_request_generation:
+            return
+        if not self._show_face_names:
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        if not self._should_show_face_name_overlay(presentation):
+            return
+        if presentation is None or snapshot.asset_id != presentation.asset_id:
+            return
+        if Path(snapshot.library_root) != self._people_library_root:
+            return
+        if still_generation != self._presented_still_generation:
+            return
+        if self._presented_still_source != presentation.path:
+            return
+
+        from iPhoto.gui.ui.widgets.recognition_annotations import (
+            RecognitionIdentitySuggestion,
+            pet_annotation_adapter,
+        )
+
+        annotations = list(snapshot.faces)
+        annotations.extend(pet_annotation_adapter(value) for value in snapshot.pets)
+        suggestions = [
+            RecognitionIdentitySuggestion(
+                identity_key=value.identity_key,
+                name=value.name,
+                thumbnail_path=value.thumbnail_path,
+                count=value.count,
+            )
+            for value in snapshot.candidates
+        ]
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is None:
+            return
+        setter = getattr(overlay, "set_identity_suggestions", None)
+        if callable(setter):
+            setter(suggestions)
+        overlay.set_annotations(annotations)
+        overlay.set_overlay_active(bool(annotations))
+
+    @Slot(int, object)
+    def _on_recognition_overlay_failed(
+        self,
+        request_generation: int,
+        error: object,
+    ) -> None:
+        if request_generation == self._overlay_request_generation:
+            LOGGER.warning("Recognition overlay query failed: %s", error)
+
     def _refresh_face_name_overlay_for_current_presentation(self) -> None:
         self._refresh_face_name_overlay_for_presentation(
             getattr(self, "_current_presentation", None)
@@ -833,13 +982,14 @@ class PlaybackCoordinator(QObject):
 
     @Slot(object)
     def handle_people_snapshot_committed(self, event: object) -> None:
+        changed_asset_ids = getattr(event, "changed_asset_ids", None)
+        self._invalidate_recognition_query_cache(changed_asset_ids)
         presentation = getattr(self, "_current_presentation", None)
         if presentation is None or not presentation.asset_id:
             return
         # Skip the refresh if the snapshot doesn't touch the current asset.
         # An absent or empty changed_asset_ids means "all assets potentially
         # changed" (e.g., a set_person_order event) — in that case always refresh.
-        changed_asset_ids = getattr(event, "changed_asset_ids", None)
         if changed_asset_ids and presentation.asset_id not in changed_asset_ids:
             return
         self._refresh_face_name_overlay_for_presentation(presentation)
@@ -855,10 +1005,14 @@ class PlaybackCoordinator(QObject):
         if not self._should_show_face_name_overlay(presentation):
             self._hide_face_name_overlay(clear_annotations=True)
             return
-        annotations = self._load_face_name_annotations(presentation.asset_id)
-        self._apply_recognition_identity_suggestions(overlay, include_hidden=False)
-        overlay.set_annotations(annotations)
-        overlay.set_overlay_active(bool(annotations))
+        if (
+            getattr(self, "_presented_still_source", None) == presentation.path
+            and getattr(self, "_presented_still_generation", 0) > 0
+        ):
+            self._schedule_recognition_overlay(
+                presentation,
+                self._presented_still_generation,
+            )
 
     def _should_show_face_name_overlay(
         self,
@@ -968,6 +1122,7 @@ class PlaybackCoordinator(QObject):
             set_name_suggestions(suggestions)
 
     def _refresh_recognition_views_after_mutation(self) -> None:
+        self._invalidate_recognition_query_cache()
         self._refresh_face_name_overlay_for_current_presentation()
         presentation = getattr(self, "_current_presentation", None)
         if presentation is not None and presentation.asset_id:
@@ -975,6 +1130,12 @@ class PlaybackCoordinator(QObject):
         refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
         if callable(refresh_callback):
             refresh_callback()
+
+    def _invalidate_recognition_query_cache(self, changed_asset_ids=None) -> None:
+        query_service = getattr(self, "_recognition_query_service", None)
+        invalidate = getattr(query_service, "invalidate", None)
+        if callable(invalidate):
+            invalidate(changed_asset_ids)
 
     @staticmethod
     def _entity_kind_and_id(entity_key: str | None) -> tuple[str, str]:
@@ -1185,6 +1346,9 @@ class PlaybackCoordinator(QObject):
         return color.name(QColor.NameFormat.HexArgb)
 
     def reset_for_gallery(self) -> None:
+        self._invalidate_overlay_requests(clear=False)
+        self._presented_still_generation = 0
+        self._presented_still_source = None
         self._clear_play_request_state()
         cancel_stills = getattr(self._player_view, "cancel_pending_image_requests", None)
         if callable(cancel_stills):
@@ -1235,6 +1399,8 @@ class PlaybackCoordinator(QObject):
         self._clear_confirmed_location_metadata()
 
     def shutdown(self) -> None:
+        self._invalidate_overlay_requests(clear=True)
+        self._overlay_pool.waitForDone(1500)
         self._clear_play_request_state()
         location_search_controller = getattr(self, "_location_search_controller", None)
         if location_search_controller is not None:
@@ -2216,13 +2382,7 @@ class PlaybackCoordinator(QObject):
                         overlay.show_manual_error(
                             "The face was saved, but could not be linked to that name."
                         )
-        presentation = getattr(self, "_current_presentation", None)
-        if presentation is not None and presentation.asset_id == submitted_asset_id:
-            self._refresh_face_name_overlay_for_current_presentation()
-            self._refresh_info_panel_faces(presentation.asset_id)
-        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
-        if callable(refresh_callback):
-            refresh_callback()
+        self._refresh_recognition_views_after_mutation()
 
     @Slot(str)
     def _handle_manual_face_error(self, message: str) -> None:

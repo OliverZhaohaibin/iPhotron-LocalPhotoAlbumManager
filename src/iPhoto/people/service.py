@@ -6,15 +6,14 @@ import os
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.repository import PetRepository
-from iPhoto.pets.service import pet_library_paths
 from iPhoto.utils.pathutils import ensure_work_dir
 
-from .index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
 from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
     AssetFaceAnnotation,
@@ -24,8 +23,11 @@ from .repository import (
     PeopleGroupSummary,
     PersonSummary,
 )
-from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 from .state_repository import FaceStateRepository
+from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
+
+if TYPE_CHECKING:
+    from .index_coordinator import PeopleIndexCoordinator
 
 
 def _default_shared_face_model_dir() -> Path:
@@ -104,6 +106,7 @@ class PeopleService:
         self._library_root = library_root
         self._asset_repository = asset_repository
         self._coordinator = coordinator
+        self._repository: FaceRepository | None = None
 
     def set_library_root(self, library_root: Path | None) -> None:
         if self._library_root == library_root:
@@ -111,6 +114,7 @@ class PeopleService:
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
+        self._repository = None
 
     def library_root(self) -> Path | None:
         return self._library_root
@@ -128,6 +132,8 @@ class PeopleService:
             return self._coordinator
         if self._library_root is None:
             return None
+        from .index_coordinator import get_people_index_coordinator
+
         self._coordinator = get_people_index_coordinator(
             self._library_root,
             asset_repository=self._asset_repository,
@@ -140,10 +146,13 @@ class PeopleService:
         return face_library_paths(self._library_root)
 
     def repository(self) -> FaceRepository | None:
+        if self._repository is not None:
+            return self._repository
         paths = self.paths()
         if paths is None:
             return None
-        return FaceRepository(paths.index_db_path, paths.state_db_path)
+        self._repository = FaceRepository(paths.index_db_path, paths.state_db_path)
+        return self._repository
 
     def list_clusters(self, *, include_hidden: bool = False) -> list[PersonSummary]:
         repository = self.repository()
@@ -165,6 +174,7 @@ class PeopleService:
         *,
         repository: FaceRepository | None = None,
         summaries: list[PersonSummary] | None = None,
+        pet_summaries: list[PetSummary] | None = None,
     ) -> list[PeopleGroupSummary]:
         if self._library_root is None:
             return []
@@ -179,7 +189,8 @@ class PeopleService:
         else:
             summary_list = summaries
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
-        pet_summaries_by_id = {summary.pet_id: summary for summary in self._list_pet_summaries()}
+        pet_summary_list = self._list_pet_summaries() if pet_summaries is None else pet_summaries
+        pet_summaries_by_id = {summary.pet_id: summary for summary in pet_summary_list}
         return self._build_group_summaries(
             repository,
             repository.list_groups(),
@@ -208,6 +219,7 @@ class PeopleService:
         self,
         *,
         include_hidden: bool = False,
+        pet_summaries: list[PetSummary] | None = None,
     ) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
         repository = self.repository()
         if repository is None:
@@ -221,7 +233,11 @@ class PeopleService:
             ],
             repository,
         )
-        groups = self.list_groups(repository=repository, summaries=summaries)
+        groups = self.list_groups(
+            repository=repository,
+            summaries=summaries,
+            pet_summaries=pet_summaries,
+        )
         counts = self.face_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
         return summaries, groups, pending
@@ -378,8 +394,11 @@ class PeopleService:
             summary.person_id: summary
             for summary in repository.get_person_summaries(include_hidden=True)
         }
-        pet_paths = pet_library_paths(self._library_root)
-        pet_repository = PetRepository(pet_paths.index_db_path, pet_paths.state_db_path)
+        pet_root = ensure_work_dir(self._library_root) / "pets"
+        pet_repository = PetRepository(
+            pet_root / "pet_index.db",
+            pet_root / "pet_state.db",
+        )
         pet_summaries = {
             summary.pet_id: summary
             for summary in pet_repository.get_pet_summaries(include_hidden=True)
@@ -712,18 +731,85 @@ class PeopleService:
     def _list_pet_summaries(self) -> list[PetSummary]:
         if self._library_root is None:
             return []
-        paths = pet_library_paths(self._library_root)
-        repository = PetRepository(paths.index_db_path, paths.state_db_path)
-        redirected_pets = self._redirected_source_ids("pet")
+        pet_root = ensure_work_dir(self._library_root) / "pets"
+        repository = PetRepository(
+            pet_root / "pet_index.db",
+            pet_root / "pet_state.db",
+        )
+        face_paths = self.paths()
+        redirects = (
+            FaceStateRepository(face_paths.state_db_path).get_identity_redirects()
+            if face_paths is not None
+            else []
+        )
+        redirected_pets = {
+            redirect.source_id
+            for redirect in redirects
+            if redirect.source_kind == "pet"
+        }
+        summaries = [
+            summary
+            for summary in repository.get_pet_summaries(include_hidden=True)
+            if summary.pet_id not in redirected_pets
+        ]
+        assets_by_pet = repository.get_asset_ids_by_pets(
+            summary.pet_id for summary in summaries
+        )
+        source_pet_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "pet"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        source_pet_assets = (
+            repository.get_asset_ids_by_pets(source_pet_ids) if source_pet_ids else {}
+        )
+        source_person_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "person"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        face_repository = self.repository()
+        source_person_assets = (
+            face_repository.get_asset_ids_by_people(source_person_ids)
+            if face_repository is not None and source_person_ids
+            else {}
+        )
+        for redirect in redirects:
+            if redirect.target_kind != "pet" or redirect.target_id not in assets_by_pet:
+                continue
+            source_assets = (
+                source_person_assets.get(redirect.source_id, ())
+                if redirect.source_kind == "person"
+                else source_pet_assets.get(redirect.source_id, ())
+            )
+            assets_by_pet[redirect.target_id] = list(
+                dict.fromkeys((*assets_by_pet[redirect.target_id], *source_assets))
+            )
+        all_asset_ids = list(
+            dict.fromkeys(
+                asset_id
+                for asset_ids in assets_by_pet.values()
+                for asset_id in asset_ids
+            )
+        )
+        valid_ids = set(self._valid_asset_ids(all_asset_ids))
         return [
             replace(
                 summary,
-                asset_count=len(
-                    self._valid_asset_ids(self._pet_asset_ids_with_redirects(summary.pet_id, repository))
+                asset_count=sum(
+                    asset_id in valid_ids
+                    for asset_id in assets_by_pet.get(summary.pet_id, ())
                 ),
             )
-            for summary in repository.get_pet_summaries(include_hidden=True)
-            if summary.pet_id not in redirected_pets
+            for summary in summaries
         ]
 
     def _valid_asset_ids(self, asset_ids: list[str]) -> list[str]:
@@ -742,13 +828,23 @@ class PeopleService:
     ) -> list[PersonSummary]:
         if self._library_root is None or not summaries:
             return summaries
+        assets_by_person = repository.get_asset_ids_by_people(
+            summary.person_id for summary in summaries
+        )
+        all_asset_ids = list(
+            dict.fromkeys(
+                asset_id
+                for asset_ids in assets_by_person.values()
+                for asset_id in asset_ids
+            )
+        )
+        valid_ids = set(self._valid_asset_ids(all_asset_ids))
         return [
             replace(
                 summary,
-                asset_count=len(
-                    self._valid_asset_ids(
-                        repository.get_asset_ids_by_person(summary.person_id)
-                    )
+                asset_count=sum(
+                    asset_id in valid_ids
+                    for asset_id in assets_by_person.get(summary.person_id, ())
                 ),
             )
             for summary in summaries
@@ -763,31 +859,6 @@ class PeopleService:
             for redirect in FaceStateRepository(paths.state_db_path).get_identity_redirects()
             if redirect.source_kind == kind
         }
-
-    def _pet_asset_ids_with_redirects(
-        self,
-        pet_id: str,
-        repository: PetRepository,
-    ) -> list[str]:
-        asset_dates: dict[str, str] = {
-            asset_id: ""
-            for asset_id in repository.get_asset_ids_by_pet(pet_id)
-        }
-        face_repository = self.repository()
-        paths = self.paths()
-        if face_repository is None or paths is None:
-            return list(asset_dates)
-        for redirect in FaceStateRepository(paths.state_db_path).get_identity_redirects():
-            if redirect.target_kind != "pet" or redirect.target_id != pet_id:
-                continue
-            source_ids = (
-                face_repository.get_asset_ids_by_person(redirect.source_id)
-                if redirect.source_kind == "person"
-                else repository.get_asset_ids_by_pet(redirect.source_id)
-            )
-            for asset_id in source_ids:
-                asset_dates.setdefault(asset_id, "")
-        return list(asset_dates)
 
     def _identity_hidden(
         self,

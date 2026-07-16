@@ -70,6 +70,9 @@ class DetailCoordinator(QObject):
     def set_pet_service(self, service: object | None) -> None:
         self._playback.set_pet_service(service)
 
+    def set_recognition_query_service(self, service: object | None) -> None:
+        self._playback.set_recognition_query_service(service)
+
     def set_people_library_root(self, root) -> None:
         self._playback.set_people_library_root(root)
 

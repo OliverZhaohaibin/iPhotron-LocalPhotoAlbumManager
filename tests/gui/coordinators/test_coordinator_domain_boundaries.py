@@ -72,12 +72,33 @@ raise SystemExit(1 if any(name in sys.modules for name in blocked) else 0)
     subprocess.run([sys.executable, "-c", script], env=env, check=True)
 
 
-def test_people_qt_warmup_stays_on_gui_thread() -> None:
+def test_people_warmup_does_not_materialize_hidden_qwidgets() -> None:
     source = (COORDINATORS / "desktop_coordinator_runtime.py").read_text(encoding="utf-8")
 
     assert "threading.Thread" not in source
     assert "PeopleDashboardModuleWarmup" not in source
-    assert "QTimer.singleShot(250, self._materialize_people_dashboard)" in source
+    assert "_materialize_people_dashboard" not in source
+    assert 'ui.ensure_feature("people")' not in source
+
+
+def test_recognition_read_surface_does_not_import_ai_pipelines() -> None:
+    script = """
+import sys
+import tempfile
+from pathlib import Path
+from iPhoto.bootstrap.library_session import LibrarySession
+with tempfile.TemporaryDirectory() as directory:
+    session = LibrarySession(Path(directory))
+    session.recognition_queries
+    blocked = ('iPhoto.people.pipeline', 'iPhoto.pets.pipeline')
+    if any(name in sys.modules for name in blocked):
+        raise SystemExit(1)
+    session.shutdown()
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src")
+
+    subprocess.run([sys.executable, "-c", script], env=env, check=True)
 
 
 def test_recognition_first_creation_uses_latest_library_session() -> None:

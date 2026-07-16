@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,7 +14,6 @@ from PySide6.QtCore import (
     QObject,
     Qt,
     QThreadPool,
-    QTimer,
 )
 from PySide6.QtGui import QAction
 
@@ -44,7 +42,6 @@ from iPhoto.gui.ui.controllers.share_controller import ShareController
 from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
 from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
-from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
@@ -82,7 +79,6 @@ class DesktopCoordinatorRuntime(QObject):
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
         self._media_failure_cleanup_paths: set[str] = set()
-        self._people_feature_warmup_scheduled = False
         self._people_view_activation_bound = False
         self._map_extension_download = MapExtensionDownloadController(
             window,
@@ -790,6 +786,7 @@ class DesktopCoordinatorRuntime(QObject):
             library_root_getter=self._library_root,
             people_service_getter=self._people_service,
             pet_service_getter=self._pet_service,
+            recognition_query_getter=self._recognition_query_service,
             cluster_callback=self._on_people_cluster_activated,
             group_callback=self._on_people_group_activated,
             pet_callback=self._on_pet_activated,
@@ -798,31 +795,9 @@ class DesktopCoordinatorRuntime(QObject):
         return self._recognition
 
     def warm_people_dashboard(self) -> None:
-        """Warm cached recognition summaries and the hidden People surface."""
+        """Warm recognition data without constructing the People QWidget."""
 
         self._ensure_recognition_coordinator().warm_dashboard_snapshot()
-        if self._people_feature_warmup_scheduled:
-            return
-        self._people_feature_warmup_scheduled = True
-        # Qt/PySide modules and widgets must be imported/constructed on the GUI
-        # thread.  A short delay lets the first Gallery frame settle first while
-        # still paying the one-off People construction cost before normal use.
-        QTimer.singleShot(250, self._materialize_people_dashboard)
-
-    def _materialize_people_dashboard(self) -> None:
-        if self._is_shutting_down:
-            return
-        started_ns = time.perf_counter_ns()
-        ui = self._window.ui
-        if not hasattr(ui, "people_page"):
-            ui.ensure_feature("people")
-        mark(
-            "startup.people_dashboard.materialized",
-            duration_ms=round(
-                (time.perf_counter_ns() - started_ns) / 1_000_000.0,
-                3,
-            ),
-        )
 
     def _ensure_preview_window(self):
         self._window.ui.ensure_feature("preview")
@@ -915,6 +890,13 @@ class DesktopCoordinatorRuntime(QObject):
             bound_root = getattr(service, "library_root", lambda: None)()
             if library_root is None or bound_root == library_root:
                 return service
+        return None
+
+    def _recognition_query_service(self, library_root: Path | None = None):
+        session = self._active_session()
+        session_root = getattr(session, "library_root", None) if session is not None else None
+        if session is not None and (library_root is None or session_root == library_root):
+            return getattr(session, "recognition_queries", None)
         return None
 
     def _map_runtime(self):

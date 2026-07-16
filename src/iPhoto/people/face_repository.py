@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -48,6 +49,8 @@ class FaceRepository:
     def __init__(self, db_path: Path, state_db_path: Path | None = None) -> None:
         self._db_path = Path(db_path)
         self._state_repo = FaceStateRepository(state_db_path) if state_db_path is not None else None
+        self._initialized = False
+        self._initialize_lock = threading.Lock()
 
     @property
     def db_path(self) -> Path:
@@ -58,11 +61,17 @@ class FaceRepository:
         return self._state_repo
 
     def initialize(self) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as conn:
-            self._create_schema(conn)
-        if self._state_repo is not None:
-            self._state_repo.initialize()
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(self._connect()) as conn:
+                self._create_schema(conn)
+            if self._state_repo is not None:
+                self._state_repo.initialize()
+            self._initialized = True
 
     def replace_all(
         self,
@@ -401,6 +410,82 @@ class FaceRepository:
         ordered = sorted(asset_dates.items(), key=lambda item: item[0])
         ordered = sorted(ordered, key=lambda item: item[1], reverse=True)
         return [asset_id for asset_id, _last_seen in ordered]
+
+    def get_asset_ids_by_people(
+        self,
+        person_ids: Iterable[str],
+    ) -> dict[str, list[str]]:
+        """Return identity assets with one face-index connection.
+
+        Redirect and manual-face assets are folded into their target identity.
+        This is the dashboard read path; keeping it batched prevents one schema
+        check and SQLite connection per card.
+        """
+
+        target_ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
+        if not target_ids:
+            return {}
+        redirects = self._state_repo.get_identity_redirects() if self._state_repo else []
+        source_people = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.target_kind == "person"
+                and redirect.target_id in target_ids
+                and redirect.source_kind == "person"
+            )
+        )
+        query_ids = tuple(dict.fromkeys((*target_ids, *source_people)))
+        rows_by_person: dict[str, dict[str, str]] = {
+            person_id: {} for person_id in query_ids
+        }
+        self.initialize()
+        with closing(self._connect()) as conn:
+            for start in range(0, len(query_ids), 900):
+                chunk = query_ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT person_id, asset_id, MAX(detected_at) AS last_detected_at
+                    FROM faces
+                    WHERE person_id IN ({placeholders})
+                    GROUP BY person_id, asset_id
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    if row["person_id"] and row["asset_id"]:
+                        rows_by_person[str(row["person_id"])][str(row["asset_id"])] = str(
+                            row["last_detected_at"] or ""
+                        )
+        if self._state_repo is not None:
+            for face in self._state_repo.get_manual_faces_for_persons(query_ids):
+                rows_by_person.setdefault(face.person_id, {})[face.asset_id] = face.created_at
+
+        source_pets = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.target_kind == "person"
+                and redirect.target_id in target_ids
+                and redirect.source_kind == "pet"
+            )
+        )
+        pet_rows = self._direct_pet_asset_rows_by_ids(source_pets)
+        for redirect in redirects:
+            if redirect.target_kind != "person" or redirect.target_id not in target_ids:
+                continue
+            source_rows = (
+                rows_by_person.get(redirect.source_id, {})
+                if redirect.source_kind == "person"
+                else pet_rows.get(redirect.source_id, {})
+            )
+            rows_by_person[redirect.target_id].update(source_rows)
+
+        return {
+            person_id: sorted(rows_by_person.get(person_id, {}))
+            for person_id in target_ids
+        }
 
     def get_person_ids_for_asset_ids(self, asset_ids: Iterable[str]) -> list[str]:
         ids = [str(asset_id) for asset_id in asset_ids if asset_id]
@@ -1117,6 +1202,37 @@ class FaceRepository:
             for row in rows
             if row["asset_id"]
         }
+
+    def _direct_pet_asset_rows_by_ids(
+        self,
+        pet_ids: Iterable[str],
+    ) -> dict[str, dict[str, str]]:
+        ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
+        result = {pet_id: {} for pet_id in ids}
+        pet_db_path = self._db_path.parent.parent / "pets" / "pet_index.db"
+        if not ids or not pet_db_path.exists():
+            return result
+        with closing(connect_sqlite(pet_db_path, check_same_thread=False)) as conn:
+            conn.row_factory = sqlite3.Row
+            configure_sqlite_connection(conn, pet_db_path, foreign_keys=True, wal=True)
+            for start in range(0, len(ids), 900):
+                chunk = ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT pet_id, asset_id, MAX(detected_at) AS last_detected_at
+                    FROM pet_detections
+                    WHERE pet_id IN ({placeholders})
+                    GROUP BY pet_id, asset_id
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    if row["pet_id"] and row["asset_id"]:
+                        result[str(row["pet_id"])][str(row["asset_id"])] = str(
+                            row["last_detected_at"] or ""
+                        )
+        return result
 
     def get_common_asset_ids_for_group(self, group_id: str) -> list[str]:
         if self._state_repo is None:

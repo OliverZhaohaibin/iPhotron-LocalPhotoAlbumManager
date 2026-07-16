@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QMouseEvent, QPalette
 from PySide6.QtWidgets import QAbstractItemView, QLabel, QListView
 
@@ -25,6 +25,7 @@ class GalleryGridView(AssetGrid):
     # errors or strict boundary checks. This accounts for frame borders and
     # potential internal margins.
     SAFETY_MARGIN = 10
+    detailPrefetchRequested = Signal(QModelIndex)
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -45,6 +46,8 @@ class GalleryGridView(AssetGrid):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setWordWrap(False)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.setSelectionRectVisible(False)
 
         # Ensure the viewport paints an opaque background so the gallery is not
@@ -66,6 +69,22 @@ class GalleryGridView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
         self._update_empty_state()
+        self._detail_prefetch_index = QModelIndex()
+        self._detail_prefetch_timer = QTimer(self)
+        self._detail_prefetch_timer.setSingleShot(True)
+        self._detail_prefetch_timer.setInterval(120)
+        self._detail_prefetch_timer.timeout.connect(self._emit_detail_prefetch)
+        self.entered.connect(self._schedule_detail_prefetch)
+
+    def _schedule_detail_prefetch(self, index: QModelIndex) -> None:
+        self._detail_prefetch_timer.stop()
+        self._detail_prefetch_index = QModelIndex(index)
+        if index.isValid() and not self._selection_mode_enabled:
+            self._detail_prefetch_timer.start()
+
+    def _emit_detail_prefetch(self) -> None:
+        if self._detail_prefetch_index.isValid() and not self._selection_mode_enabled:
+            self.detailPrefetchRequested.emit(self._detail_prefetch_index)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -233,6 +252,8 @@ class GalleryGridView(AssetGrid):
             # Check for favorite badge click
             index = self.indexAt(viewport_pos)
             if index.isValid():
+                self._detail_prefetch_timer.stop()
+                self.detailPrefetchRequested.emit(index)
                 if self._is_favorite_badge_click(index, viewport_pos):
                     self._toggle_favorite(index)
                     return  # Don't propagate (avoids selection/play)

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
+from pathlib import Path
+from threading import Lock
 
 LOGGER = logging.getLogger(__name__)
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_PROFILE_LOCK = Lock()
 
 
 def detail_profile_enabled() -> bool:
@@ -44,4 +49,32 @@ def log_detail_profile(
     )
 
 
-__all__ = ["detail_profile_enabled", "log_detail_profile"]
+def emit_detail_event(stage: str, *, generation: int, **details: object) -> None:
+    """Emit a privacy-safe structured Detail event and optional JSONL record."""
+
+    safe_details = {
+        key: value
+        for key, value in details.items()
+        if key not in {"path", "absolute_path", "source"}
+    }
+    log_detail_profile("open", stage, generation=generation, **safe_details)
+    profile_path = os.environ.get("IPHOTO_DETAIL_PROFILE_PATH", "").strip()
+    if not profile_path:
+        return
+    payload = {
+        "stage": stage,
+        "monotonic_ms": round(time.perf_counter() * 1000.0, 3),
+        "wall_time": time.time(),
+        "generation": int(generation),
+        "details": safe_details,
+    }
+    try:
+        target = Path(profile_path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with _PROFILE_LOCK, target.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        LOGGER.debug("Failed to append Detail profile event", exc_info=True)
+
+
+__all__ = ["detail_profile_enabled", "emit_detail_event", "log_detail_profile"]

@@ -71,6 +71,8 @@ _ASSET_COLUMN_MIGRATIONS = {
     "location": "ALTER TABLE assets ADD COLUMN location TEXT",
     "face_status": "ALTER TABLE assets ADD COLUMN face_status TEXT",
     "pet_status": "ALTER TABLE assets ADD COLUMN pet_status TEXT",
+    "video_rotation_cw": "ALTER TABLE assets ADD COLUMN video_rotation_cw INTEGER",
+    "video_linux_180_hint": "ALTER TABLE assets ADD COLUMN video_linux_180_hint INTEGER",
 }
 _V1_REQUIRED_COLUMNS = {
     "assets": frozenset({"rel", "id", "dt", "mime", *_ASSET_COLUMN_MIGRATIONS}),
@@ -494,7 +496,9 @@ class SchemaMigrator:
                 index_revision INTEGER DEFAULT 0,
                 index_updated_at_ms INTEGER DEFAULT 0,
                 face_status TEXT,
-                pet_status TEXT
+                pet_status TEXT,
+                video_rotation_cw INTEGER,
+                video_linux_180_hint INTEGER
             )
         """)
 

@@ -154,7 +154,7 @@ class TestInitCoverTracking:
 
     def test_still_decode_uses_dedicated_bounded_pool(self, controller):
         assert controller._pool is not QThreadPool.globalInstance()
-        assert controller._pool.maxThreadCount() == 1
+        assert controller._pool.maxThreadCount() == 2
 
     def test_stale_decode_generation_is_not_applied(self, controller, mocker):
         apply_ready = mocker.patch.object(controller, "_on_adjusted_image_ready")
@@ -168,6 +168,17 @@ class TestInitCoverTracking:
         )
 
         apply_ready.assert_not_called()
+
+    def test_oversized_full_decode_uses_safe_display_texture(self, controller, mocker):
+        image = QImage(9000, 10, QImage.Format.Format_RGBA8888)
+        controller._image_viewer.maximum_texture_size = lambda: 1024
+        set_image = mocker.patch.object(controller._image_viewer, "set_image")
+
+        controller._apply_still_frame(Path("/tmp/huge.jpg"), image, {})
+
+        display_image = set_image.call_args.args[0]
+        assert display_image.width() == 1024
+        assert controller.current_full_image().width() == 9000
 
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""

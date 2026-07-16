@@ -21,6 +21,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QOpenGLContext,
     QPixmap,
+    QRhi,
     QRhiCommandBuffer,
     QRhiDepthStencilClearValue,
     QWheelEvent,
@@ -105,6 +106,9 @@ class GLImageViewer(QRhiWidget):
     stillFramePresented = Signal(object)
     """Emitted after a newly uploaded full-resolution still has been drawn."""
 
+    videoFramePresented = Signal()
+    """Emitted after a newly uploaded video frame has been drawn."""
+
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
@@ -137,6 +141,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_image: QImage | None = None
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
+        self._video_frame_presentation_pending = False
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._reset_zoom_frames_crop = True
@@ -229,6 +234,20 @@ class GLImageViewer(QRhiWidget):
         """Return the active QRhi backend name for diagnostics/tests."""
 
         return qrhi_api_name(self._rhi_api)
+
+    def maximum_texture_size(self) -> int:
+        """Return the active backend texture limit with a safe cold fallback."""
+
+        rhi = self.rhi()
+        if rhi is None:
+            return 8192
+        try:
+            return max(
+                1,
+                int(rhi.resourceLimit(QRhi.ResourceLimit.TextureSizeMax)),
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 8192
 
     # ------------------------------------------------------------------
     # GL context helpers (replace QOpenGLWidget.makeCurrent/doneCurrent)
@@ -331,6 +350,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_image = None
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
+        self._video_frame_presentation_pending = False
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._pending_source_rotate90_steps = None
@@ -513,6 +533,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_source_rotate90_steps = None
         self._video_frame = None
         self._video_frame_dirty = False
+        self._video_frame_presentation_pending = True
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
         if self._pending_video_reset_view:
@@ -1303,6 +1324,9 @@ class GLImageViewer(QRhiWidget):
         if uploaded_new_still_texture:
             self._emit_still_frame_presented()
             self._schedule_post_load_view_transform()
+        if self._video_frame_presentation_pending:
+            self._video_frame_presentation_pending = False
+            self.videoFramePresented.emit()
 
     def _render_rhi(self, cb) -> None:
         """Render the current image through QRhi without raw OpenGL."""
@@ -1415,6 +1439,9 @@ class GLImageViewer(QRhiWidget):
         if uploaded_new_still_texture:
             self._emit_still_frame_presented()
             self._schedule_post_load_view_transform()
+        if self._video_frame_presentation_pending:
+            self._video_frame_presentation_pending = False
+            self.videoFramePresented.emit()
 
     def _still_source_name(self) -> str:
         source = self._texture_manager.get_current_image_source()

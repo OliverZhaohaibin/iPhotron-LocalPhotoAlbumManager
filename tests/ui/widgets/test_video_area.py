@@ -22,6 +22,7 @@ import iPhoto.gui.ui.widgets.gl_texture_manager as gl_texture_manager_module
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
 from iPhoto.gui.render_backend import selected_rhi_backend_name
+from iPhoto.gui.detail_pipeline import VideoPresentationState
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     _CS_BT601,
@@ -787,21 +788,25 @@ class TestVideoArea:
 
         mock_clear.assert_called_once()
 
-    def test_load_video_probes_and_sets_container_rotation(self, qapp, mocker):
-        """load_video should probe rotation and forward to the renderer."""
+    def test_begin_load_never_probes_on_gui_thread(self, qapp, mocker):
+        """begin_load sets source while rotation arrives through commit."""
         va = VideoArea()
         mocker.patch.object(va._player, "setSource")
         mocker.patch.object(va._player, "setPosition")
         mocker.patch.object(va._renderer, "clear_frame")
         mock_set_rot = mocker.patch.object(va._renderer, "set_container_rotation")
-        mocker.patch(
+        probe = mocker.patch(
             "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
             return_value=(90, 1920, 1440),
         )
 
-        va.load_video(Path("/fake/portrait.mov"))
+        va.begin_load(Path("/fake/portrait.mov"), 7)
+        va.commit_presentation(
+            VideoPresentationState(7, {}, None, False, 90, 1920, 1440, False)
+        )
 
-        mock_set_rot.assert_called_once_with(90, 1920, 1440)
+        probe.assert_not_called()
+        assert mock_set_rot.call_args_list[-1] == call(90, 1920, 1440)
 
     def test_load_video_handles_probe_failure(self, qapp, mocker):
         """load_video should still work when ffprobe returns no rotation."""
@@ -817,7 +822,7 @@ class TestVideoArea:
 
         va.load_video(Path("/fake/video.mp4"))
 
-        mock_set_rot.assert_called_once_with(0, 0, 0)
+        assert mock_set_rot.call_args_list[-1] == call(0, 0, 0)
 
     def _setup_load_video_mocks(self, va, mocker, player_duration: int = 0):
         """Helper: patch common load_video dependencies."""
@@ -1045,7 +1050,10 @@ class TestVideoArea:
             return_value=False,
         )
 
-        va.load_video(Path("/fake/IMG_3160.MOV"), adjusted_preview=True)
+        va.begin_load(Path("/fake/IMG_3160.MOV"), 8)
+        va.commit_presentation(
+            VideoPresentationState(8, {}, None, True, 90, 1920, 1440, False)
+        )
 
         frame = QVideoFrame(
             QVideoFrameFormat(
@@ -1542,6 +1550,7 @@ def test_gl_image_viewer_immediate_linux_upload_consumes_pending_frame(qapp, moc
     mock_reset_zoom.assert_not_called()
     assert viewer._video_frame is None
     assert viewer._video_frame_dirty is False
+    assert viewer._video_frame_presentation_pending is True
 
 
 def test_gl_image_viewer_set_video_frame_linux_attempts_immediate_upload(qapp, mocker):
@@ -1724,17 +1733,25 @@ def test_load_video_keeps_rotate_only_adjustments_on_native_renderer(qapp, mocke
         return_value=False,
     )
 
-    va.load_video(
-        Path("/fake/video.mp4"),
-        adjustments={"Crop_Rotate90": 3.0},
-        adjusted_preview=False,
+    va.begin_load(Path("/fake/video.mp4"), 9)
+    va.commit_presentation(
+        VideoPresentationState(
+            9,
+            {"Crop_Rotate90": 3.0},
+            None,
+            False,
+            0,
+            960,
+            540,
+            False,
+        )
     )
 
     assert va.adjusted_preview_enabled() is False
     mock_clear_frame.assert_called_once_with()
-    mock_set_container_rotation.assert_called_once_with(0, 960, 540)
-    mock_set_linux_hint.assert_called_once_with(False)
-    mock_set_user_rotate.assert_called_once_with(3)
+    assert mock_set_container_rotation.call_args_list[-1] == call(0, 960, 540)
+    assert mock_set_linux_hint.call_args_list[-1] == call(False)
+    assert mock_set_user_rotate.call_args_list[-1] == call(3)
     mock_set_source.assert_called_once()
     mock_set_position.assert_called_once_with(0)
 

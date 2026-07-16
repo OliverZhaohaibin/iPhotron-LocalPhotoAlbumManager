@@ -55,8 +55,12 @@ from ....config import (
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
 from ....core.adjustment_mapping import normalise_video_trim, video_requires_adjusted_preview
-from ....gui.detail_profile import log_detail_profile
-from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
+from ....gui.detail_pipeline import VideoPresentationState
+from ....gui.detail_profile import emit_detail_event, log_detail_profile
+from ....utils.ffmpeg import (  # noqa: F401 - V1 monkeypatch/test compatibility
+    get_linux_180_prerotate_hint,
+    probe_video_rotation,
+)
 from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
 from .player_bar import PlayerBar
@@ -99,6 +103,7 @@ class VideoArea(QWidget):
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
+    mediaFirstFrameReady = Signal(int)
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
@@ -164,6 +169,10 @@ class VideoArea(QWidget):
         self._video_frame_dispatch_pending = False
         self._video_frame_dispatch_generation: int | None = None
         self._media_generation = 0
+        self._detail_request_generation = 0
+        self._presentation_committed = False
+        self._awaiting_first_gpu_frame_generation: int | None = None
+        self._pending_previous_duration_ms = 0
         self._accept_video_frames = False
         self._video_output_attached = False
         self._video_frame_handler = None
@@ -230,6 +239,8 @@ class VideoArea(QWidget):
         self._wire_player_bar()
         self._wire_edit_viewer()
         self._renderer.nativeSizeChanged.connect(self.displaySizeChanged.emit)
+        self._renderer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
+        self._edit_viewer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
 
     # ------------------------------------------------------------------
     # Public API
@@ -632,25 +643,29 @@ class VideoArea(QWidget):
         trim_range_ms: tuple[int, int] | None = None,
         adjusted_preview: bool | None = None,
     ) -> None:
-        """Load a video file for playback."""
+        """Compatibility wrapper around the non-blocking two-phase API."""
+
+        generation = self._detail_request_generation + 1
+        self.begin_load(path, generation)
+        self.commit_presentation(
+            VideoPresentationState(
+                request_generation=generation,
+                adjustments=dict(adjustments or {}),
+                trim_range_ms=trim_range_ms,
+                adjusted_preview=bool(adjusted_preview),
+                rotation_cw=0,
+                raw_width=0,
+                raw_height=0,
+                linux_180_hint=False,
+            )
+        )
+
+    def begin_load(self, path: Path, request_generation: int) -> None:
+        """Set the source without probing or reading sidecars on the GUI thread."""
 
         load_started = time.perf_counter()
-        _log.debug(
-            "[trace][video_area] load_video:start %s",
-            {
-                "path": str(path),
-                "adjusted_preview_arg": adjusted_preview,
-                "adjustments_keys": sorted(dict(adjustments or {}).keys()),
-                "trim_range_ms": trim_range_ms,
-                "surface_before": self._diag_surface_name(),
-                "adjusted_preview_before": self._adjusted_preview_enabled,
-                "edit_mode_active": self._edit_mode_active,
-                "size": (self.width(), self.height()),
-                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
-            },
-        )
         prev_source = self._current_source
-        prev_duration_ms = self._current_duration_ms
+        previous_duration_ms = self._current_duration_ms
         self._begin_media_generation()
         self._detach_video_output()
         if sys.platform == "darwin" and prev_source is not None:
@@ -659,64 +674,29 @@ class VideoArea(QWidget):
             self._player.setSource(QUrl())
         self._bind_video_sink_generation(self._media_generation)
         self._attach_video_output()
-        self._accept_video_frames = True
+        # Do not accept a frame until rotation/trim/adjustment state is known.
+        self._accept_video_frames = False
+        self._presentation_committed = False
+        self._awaiting_first_gpu_frame_generation = None
+        self._detail_request_generation = int(request_generation)
         self._profile_load_started_at = load_started
         self._profile_load_source = path
         self._profile_first_frame_logged = False
         self._current_source = path
-        self._current_adjustments = dict(adjustments or {})
-        if adjusted_preview is not None:
-            self.set_adjusted_preview_enabled(adjusted_preview)
-        if self._adjusted_preview_enabled:
-            self._adjusted_first_frame_pending = True
-        self._edit_viewer.set_adjustments(self._current_adjustments)
+        self._pending_previous_duration_ms = (
+            previous_duration_ms if prev_source == path else 0
+        )
+        self._current_adjustments = {}
+        self.set_adjusted_preview_enabled(False)
+        self._edit_viewer.set_adjustments({})
         self._edit_viewer.set_video_source_rotation(0)
-        native_rotate90_steps = 0
-        if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
-            native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
-        self._renderer.set_user_rotate90_steps(native_rotate90_steps)
+        self._renderer.set_user_rotate90_steps(0)
+        self._renderer.set_container_rotation(0, 0, 0)
+        self._renderer.set_linux_180_hint(False)
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0
         self._end_hold_display_ms = None
-
-        # Probe the container-level display-matrix rotation from ffprobe
-        # *before* setting the source.  The renderer uses the probed value
-        # as the primary rotation source (more reliable across platforms
-        # than Qt's ``QVideoFrameFormat.rotation()``).
-        probe_started = time.perf_counter()
-        cw_deg, raw_w, raw_h = probe_video_rotation(path)
-        linux_180_hint = get_linux_180_prerotate_hint(path)
-        log_detail_profile(
-            "video_area",
-            "rotation_probe",
-            (time.perf_counter() - probe_started) * 1000.0,
-            path=path.name,
-            rotation_cw=cw_deg,
-            raw_width=raw_w,
-            raw_height=raw_h,
-            linux_180_hint=linux_180_hint,
-        )
-        self._container_rotation_cw = cw_deg
-        self._container_raw_w = raw_w
-        self._container_raw_h = raw_h
-        self._container_linux_180_hint = linux_180_hint
-        self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
-        self._renderer.set_linux_180_hint(linux_180_hint)
-        if cw_deg:
-            _log.debug(
-                "Container rotation for %s: %d° CW (raw %dx%d)",
-                path.name, cw_deg, raw_w, raw_h,
-            )
-
-        if raw_w > 0 and raw_h > 0:
-            if cw_deg in (90, 270):
-                display_width = raw_h
-                display_height = raw_w
-            else:
-                display_width = raw_w
-                display_height = raw_h
-            self.displaySizeChanged.emit(QSizeF(float(display_width), float(display_height)))
 
         set_source_started = time.perf_counter()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
@@ -726,53 +706,58 @@ class VideoArea(QWidget):
             (time.perf_counter() - set_source_started) * 1000.0,
             path=path.name,
         )
-        # Do not auto-play; let the coordinator decide.
-        # But ensure we are at start
-        if trim_range_ms is not None:
-            self.set_trim_range_ms(*trim_range_ms)
-        # Force-propagate the current duration so all observers (e.g.
-        # PlaybackCoordinator) receive a durationChanged event with the new
-        # trim range already applied.  This covers two failure modes:
-        #   (a) Qt does not re-emit durationChanged for same-source reloads
-        #       (common on macOS/AVFoundation when the file is cached).
-        #   (b) durationChanged fired synchronously inside setSource() above,
-        #       before set_trim_range_ms() had a chance to update _trim_in/out.
-        # For same-source reloads, prefer the previously confirmed full duration
-        # over the immediate post-setSource() value. Some backends momentarily
-        # return 0 or a slightly stale non-zero duration during reload, which
-        # would leave the progress bar a little longer than the actual
-        # seekable range. For a different source, the previous duration is
-        # unrelated and must not be reused.
-        # In all cases calling _on_duration_changed is safe and idempotent.
-        same_source_reload = path == prev_source
-        if same_source_reload and prev_duration_ms > 0:
-            effective_duration_ms = prev_duration_ms
-        else:
-            effective_duration_ms = self._player.duration()
-        if effective_duration_ms > 0:
-            self._on_duration_changed(effective_duration_ms)
+        emit_detail_event(
+            "video_source_set",
+            generation=self._detail_request_generation,
+            media_type="video",
+            suffix=path.suffix.lower(),
+        )
+
+    def commit_presentation(self, state: VideoPresentationState) -> bool:
+        """Apply prepared metadata and begin accepting current video frames."""
+
+        if int(state.request_generation) != self._detail_request_generation:
+            return False
+        self._current_adjustments = dict(state.adjustments or {})
+        adjusted_preview = bool(
+            state.adjusted_preview
+            or video_requires_adjusted_preview(self._current_adjustments)
+        )
+        self.set_adjusted_preview_enabled(adjusted_preview)
+        self._adjusted_first_frame_pending = adjusted_preview
+        self._edit_viewer.set_adjustments(self._current_adjustments)
+        native_rotate90_steps = 0
+        if not adjusted_preview:
+            native_rotate90_steps = int(
+                float(self._current_adjustments.get("Crop_Rotate90", 0.0))
+            ) % 4
+        self._renderer.set_user_rotate90_steps(native_rotate90_steps)
+        self._container_rotation_cw = int(state.rotation_cw) % 360
+        self._container_raw_w = int(state.raw_width)
+        self._container_raw_h = int(state.raw_height)
+        self._container_linux_180_hint = bool(state.linux_180_hint)
+        self._renderer.set_container_rotation(
+            self._container_rotation_cw,
+            self._container_raw_w,
+            self._container_raw_h,
+        )
+        self._renderer.set_linux_180_hint(self._container_linux_180_hint)
+        if self._container_raw_w > 0 and self._container_raw_h > 0:
+            width, height = self._container_raw_w, self._container_raw_h
+            if self._container_rotation_cw in (90, 270):
+                width, height = height, width
+            self.displaySizeChanged.emit(QSizeF(float(width), float(height)))
+        if state.trim_range_ms is not None:
+            self.set_trim_range_ms(*state.trim_range_ms)
+        duration_ms = self._pending_previous_duration_ms or self._player.duration()
+        self._pending_previous_duration_ms = 0
+        if duration_ms > 0:
+            self._on_duration_changed(duration_ms)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
-        _log.debug(
-            "[trace][video_area] load_video:end %s",
-            {
-                "path": str(path),
-                "surface_after": self._diag_surface_name(),
-                "adjusted_preview_after": self._adjusted_preview_enabled,
-                "native_rotate90_steps": native_rotate90_steps,
-                "container_rotation_cw": self._container_rotation_cw,
-                "container_raw_size": (self._container_raw_w, self._container_raw_h),
-                "trim_ms": (self._trim_in_ms, self._trim_out_ms),
-                "size": (self.width(), self.height()),
-                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
-            },
-        )
-        log_detail_profile(
-            "video_area",
-            "load_video.total",
-            (time.perf_counter() - load_started) * 1000.0,
-            path=path.name,
-            adjusted_preview=self._adjusted_preview_enabled,
-        )
+        self._accept_video_frames = True
+        self._presentation_committed = True
+        self._awaiting_first_gpu_frame_generation = self._detail_request_generation
+        return True
 
     def play(self) -> None:
         """Start or resume playback."""
@@ -872,6 +857,8 @@ class VideoArea(QWidget):
         self._profile_load_started_at = None
         self._profile_load_source = None
         self._profile_first_frame_logged = False
+        self._presentation_committed = False
+        self._awaiting_first_gpu_frame_generation = None
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._suppress_trim_pause = False
@@ -1094,6 +1081,20 @@ class VideoArea(QWidget):
             self.update()
         else:
             self._renderer.update_frame(frame)
+
+    def _on_gpu_video_frame_presented(self) -> None:
+        """Release loading UI only after the current frame completed QRhi draw."""
+
+        generation = self._awaiting_first_gpu_frame_generation
+        if generation is None or generation != self._detail_request_generation:
+            return
+        self._awaiting_first_gpu_frame_generation = None
+        emit_detail_event(
+            "video_first_frame_presented",
+            generation=generation,
+            media_type="video",
+        )
+        self.mediaFirstFrameReady.emit(generation)
 
     def _on_position_changed(self, position: int) -> None:
         if self._trim_out_ms > self._trim_in_ms and position >= self._trim_out_ms:

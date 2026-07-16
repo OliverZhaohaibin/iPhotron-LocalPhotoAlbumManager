@@ -86,6 +86,29 @@ def test_overlay_reuses_revision_candidates_and_invalidation_reloads() -> None:
     assert pet_service.load_dashboard.call_count == 2
 
 
+def test_asset_annotations_never_load_identity_dashboards() -> None:
+    pet_service = Mock()
+    pet_service.list_asset_pet_annotations.return_value = ["pet-box"]
+    people_service = Mock()
+    people_service.list_asset_face_annotations.return_value = ["face-box"]
+    service = RecognitionQueryService(
+        Path("/library"),
+        people_service=people_service,
+        pet_service=pet_service,
+    )
+
+    first = service.load_asset_annotations("asset-a")
+    second = service.load_asset_annotations("asset-a")
+
+    assert second is first
+    assert first.faces == ("face-box",)
+    assert first.pets == ("pet-box",)
+    people_service.load_dashboard.assert_not_called()
+    pet_service.load_dashboard.assert_not_called()
+    people_service.list_asset_face_annotations.assert_called_once_with("asset-a")
+    pet_service.list_asset_pet_annotations.assert_called_once_with("asset-a")
+
+
 def test_invalidation_does_not_wait_for_inflight_dashboard_read() -> None:
     first_read_started = threading.Event()
     release_first_read = threading.Event()

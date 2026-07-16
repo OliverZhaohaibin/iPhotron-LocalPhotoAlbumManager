@@ -120,6 +120,76 @@ def test_read_video_meta_enriches_quicktime_payload(monkeypatch: pytest.MonkeyPa
     assert info["still_image_time"] == pytest.approx(1.5, rel=1e-6)
 
 
+def test_read_video_meta_persists_rotation_and_linux_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sample_path = tmp_path / "rotated.mov"
+    monkeypatch.setattr(
+        metadata,
+        "probe_media",
+        lambda _path: {
+            "format": {"tags": {"major_brand": "qt"}},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "width": 1920,
+                    "height": 1080,
+                    "side_data_list": [
+                        {"side_data_type": "Display Matrix", "rotation": -180.0}
+                    ],
+                    "tags": {"handler_name": "Core Media Video"},
+                }
+            ],
+        },
+    )
+
+    info = metadata.read_video_meta(sample_path)
+
+    assert info["video_rotation_cw"] == 180
+    assert info["video_linux_180_hint"] is True
+
+
+def test_read_video_meta_keeps_primary_video_stream_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sample_path = tmp_path / "multi-stream.mov"
+    monkeypatch.setattr(
+        metadata,
+        "probe_media",
+        lambda _path: {
+            "format": {},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "width": 1920,
+                    "height": 1080,
+                    "side_data_list": [
+                        {"side_data_type": "Display Matrix", "rotation": -90.0}
+                    ],
+                },
+                {
+                    "codec_type": "video",
+                    "codec_name": "mjpeg",
+                    "width": 320,
+                    "height": 240,
+                    "side_data_list": [
+                        {"side_data_type": "Display Matrix", "rotation": 0.0}
+                    ],
+                },
+            ],
+        },
+    )
+
+    info = metadata.read_video_meta(sample_path)
+
+    assert info["codec"] == "hevc"
+    assert (info["w"], info["h"]) == (1920, 1080)
+    assert info["video_rotation_cw"] == 90
+
+
 def test_read_video_meta_extracts_content_id_from_flattened_exiftool_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -653,4 +723,3 @@ def test_read_video_meta_fujifilm_xt4_style(
     # B-level ExifIFD:LensInfo spec string.
     assert info["lens"] == "XF23mmF2 R WR"
     assert info["focal_length"] == pytest.approx(23.0)
-

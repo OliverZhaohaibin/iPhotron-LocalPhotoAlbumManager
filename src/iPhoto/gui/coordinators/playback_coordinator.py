@@ -28,13 +28,16 @@ from PySide6.QtGui import QAction, QColor, QPalette
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.gui.detail_profile import log_detail_profile
+from iPhoto.gui.detail_pipeline import VideoPresentationState, detail_pipeline_v2_enabled
+from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.icons import load_icon
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
+from iPhoto.utils.ffmpeg import probe_video_rotation_info
+from iPhoto.utils.geocoding import resolve_location_name
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -117,10 +120,7 @@ class _RecognitionOverlayWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - worker thread
         try:
-            snapshot = self._query_service.load_overlay(
-                self._asset_id,
-                include_hidden=False,
-            )
+            snapshot = self._query_service.load_asset_annotations(self._asset_id)
         except Exception as exc:  # noqa: BLE001 - async optional-domain boundary
             self._signals.failed.emit(self._request_generation, exc)
             return
@@ -129,6 +129,104 @@ class _RecognitionOverlayWorker(QRunnable):
             self._still_generation,
             snapshot,
         )
+
+
+class _VideoPreparationSignals(QObject):
+    ready = Signal(int, object)
+    failed = Signal(int, Path, object)
+
+
+class _VideoPreparationWorker(QRunnable):
+    """Read edit and rotation state without blocking the GUI thread."""
+
+    def __init__(
+        self,
+        *,
+        presentation: DetailPresentation,
+        edit_service_getter: Callable[[], EditServicePort | None] | None,
+        signals: _VideoPreparationSignals,
+    ) -> None:
+        super().__init__()
+        self._presentation = presentation
+        self._edit_service_getter = edit_service_getter
+        self._signals = signals
+
+    def run(self) -> None:  # pragma: no cover - worker thread
+        presentation = self._presentation
+        generation = int(presentation.request_generation)
+        try:
+            adjustments = dict(presentation.video_adjustments or {})
+            trim_range = presentation.video_trim_range_ms
+            adjusted_preview = bool(presentation.video_adjusted_preview)
+            edit_service = (
+                self._edit_service_getter()
+                if self._edit_service_getter is not None
+                else None
+            )
+            if edit_service is not None:
+                duration = (
+                    presentation.video_duration_hint
+                    if presentation.video_duration_hint is not None
+                    else presentation.info.get("dur")
+                )
+                try:
+                    duration_hint = float(duration) if duration else None
+                except (TypeError, ValueError):
+                    duration_hint = None
+                edit_state = edit_service.describe_adjustments(
+                    presentation.path,
+                    duration_hint=duration_hint,
+                )
+                adjusted_preview = bool(edit_state.adjusted_preview)
+                trim_range = edit_state.trim_range_ms
+                adjustments = dict(
+                    edit_state.resolved_adjustments
+                    if adjusted_preview
+                    else (edit_state.raw_adjustments or {})
+                )
+            cached_rotation = presentation.info.get("video_rotation_cw")
+            cached_linux_hint = presentation.info.get("video_linux_180_hint")
+            if cached_rotation is None or cached_linux_hint is None:
+                rotation, raw_w, raw_h, linux_hint = probe_video_rotation_info(
+                    presentation.path
+                )
+            else:
+                rotation = int(cached_rotation) % 360
+                raw_w = int(presentation.info.get("w") or 0)
+                raw_h = int(presentation.info.get("h") or 0)
+                linux_hint = bool(cached_linux_hint)
+            state = VideoPresentationState(
+                request_generation=generation,
+                adjustments=adjustments,
+                trim_range_ms=trim_range,
+                adjusted_preview=adjusted_preview,
+                rotation_cw=rotation,
+                raw_width=raw_w,
+                raw_height=raw_h,
+                linux_180_hint=linux_hint,
+            )
+        except Exception as exc:  # noqa: BLE001 - codec/sidecar boundary
+            self._signals.failed.emit(generation, presentation.path, exc)
+            return
+        self._signals.ready.emit(generation, state)
+
+
+class _DeferredLocationSignals(QObject):
+    ready = Signal(int, Path, str)
+
+
+class _DeferredLocationWorker(QRunnable):
+    def __init__(self, generation: int, path: Path, gps: dict, signals) -> None:
+        super().__init__()
+        self._generation = generation
+        self._path = path
+        self._gps = dict(gps)
+        self._signals = signals
+
+    def run(self) -> None:  # pragma: no cover - worker thread
+        location = resolve_location_name(self._gps)
+        if location:
+            self._signals.ready.emit(self._generation, self._path, location)
 
 
 class PlaybackCoordinator(QObject):
@@ -166,6 +264,7 @@ class PlaybackCoordinator(QObject):
         map_runtime: MapRuntimePort | None = None,
         event_bus: EventBus | None = None,
         location_write_queue: LocationFileWriteQueue | None = None,
+        edit_service_getter: Callable[[], EditServicePort | None] | None = None,
     ) -> None:
         super().__init__()
         self._player_bar = player_bar
@@ -202,6 +301,7 @@ class PlaybackCoordinator(QObject):
         self._map_runtime = map_runtime or getattr(library_manager, "map_runtime", None)
         self._event_bus = event_bus
         self._location_write_queue = location_write_queue
+        self._edit_service_getter = edit_service_getter
 
         self._is_playing = False
         self._navigation: NavigationCoordinator | None = None
@@ -218,6 +318,7 @@ class PlaybackCoordinator(QObject):
         self._play_profile_started_at: float | None = None
         self._play_profile_row: int | None = None
         self._requested_play_row: int | None = None
+        self._detail_request_generation = 0
         self._manual_face_add_inflight = False
         self._manual_face_inflight_asset_id: str | None = None
         self._manual_face_pending_merge_target: str | None = None
@@ -227,6 +328,7 @@ class PlaybackCoordinator(QObject):
         self._location_assign_inflight = False
         self._location_assign_path: Path | None = None
         self._confirmed_location_metadata: dict[Path, dict[str, Any]] = {}
+        self._deferred_locations: dict[Path, str] = {}
         self._location_released_video_path: Path | None = None
         self._location_released_video_was_playing = False
         self._location_released_video_position_ms: int | None = None
@@ -254,6 +356,16 @@ class PlaybackCoordinator(QObject):
         self._overlay_pool = QThreadPool(self)
         self._overlay_pool.setMaxThreadCount(1)
         self._overlay_pool.setThreadPriority(QThread.Priority.LowPriority)
+        self._video_prepare_signals = _VideoPreparationSignals(self)
+        self._video_prepare_signals.ready.connect(self._on_video_preparation_ready)
+        self._video_prepare_signals.failed.connect(self._on_video_preparation_failed)
+        self._video_prepare_pool = QThreadPool(self)
+        self._video_prepare_pool.setMaxThreadCount(2)
+        self._deferred_location_signals = _DeferredLocationSignals(self)
+        self._deferred_location_signals.ready.connect(self._on_deferred_location_ready)
+        self._deferred_location_pool = QThreadPool(self)
+        self._deferred_location_pool.setMaxThreadCount(1)
+        self._deferred_location_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._play_debounce = QTimer(self)
         self._play_debounce.setSingleShot(True)
         self._play_debounce.setInterval(PLAY_ASSET_DEBOUNCE_MS)
@@ -279,6 +391,21 @@ class PlaybackCoordinator(QObject):
     def set_recognition_query_service(self, service: object | None) -> None:
         self._invalidate_overlay_requests(clear=True)
         self._recognition_query_service = service
+
+    def rebind_library(self) -> None:
+        """Invalidate library-scoped media preparation and decoded-frame caches."""
+
+        self._invalidate_overlay_requests(clear=True)
+        for pool_name in ("_video_prepare_pool", "_deferred_location_pool"):
+            pool = getattr(self, pool_name, None)
+            if pool is not None:
+                pool.clear()
+        deferred_locations = getattr(self, "_deferred_locations", None)
+        if deferred_locations is not None:
+            deferred_locations.clear()
+        clear_frames = getattr(self._player_view, "clear_frame_cache", None)
+        if callable(clear_frames):
+            clear_frames()
 
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
@@ -442,6 +569,9 @@ class PlaybackCoordinator(QObject):
         self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
         self._player_view.video_area.durationChanged.connect(self._on_video_duration_changed)
         self._player_view.video_area.positionChanged.connect(self._on_video_position_changed)
+        first_media_frame = getattr(self._player_view.video_area, "mediaFirstFrameReady", None)
+        if first_media_frame is not None:
+            first_media_frame.connect(self._on_video_first_frame_presented)
 
         self._detail_vm.route_requested.connect(self._handle_route_requested)
         self._detail_vm.presentation_changed.connect(self._handle_presentation_changed)
@@ -550,6 +680,21 @@ class PlaybackCoordinator(QObject):
         if not self._play_debounce.isActive():
             self._play_debounce.start()
 
+    def prefetch_asset(self, row: int) -> bool:
+        """Warm one hovered/pressed full still without changing presentation."""
+
+        descriptor_getter = getattr(
+            self._asset_model,
+            "detail_prefetch_descriptor",
+            None,
+        )
+        if not callable(descriptor_getter):
+            return False
+        descriptor = descriptor_getter(int(row))
+        if descriptor is None or descriptor.is_video:
+            return False
+        return bool(self._player_view.prefetch_image(descriptor.path))
+
     def _execute_pending_play(self) -> None:
         row = self._pending_play_row
         self._pending_play_row = None
@@ -624,15 +769,27 @@ class PlaybackCoordinator(QObject):
                 presentation,
                 confirmed_metadata,
             )
+        deferred_location = getattr(self, "_deferred_locations", {}).get(
+            presentation.path
+        )
+        if deferred_location and not presentation.location:
+            info = dict(presentation.info)
+            info["location"] = deferred_location
+            presentation = replace(
+                presentation,
+                location=deferred_location,
+                info=info,
+            )
         if not self._router.is_detail_view_active():
             self._clear_play_profile(presentation.row)
             return
         self._current_presentation = presentation
+        previous_generation = getattr(self, "_detail_request_generation", 0)
+        self._detail_request_generation = int(presentation.request_generation)
         row = presentation.row
         self._asset_model.set_current_row(row)
         self.assetChanged.emit(row)
         self._update_header(presentation)
-        self._sync_filmstrip_selection(row)
         same_asset = (
             previous is not None
             and previous.row == presentation.row
@@ -648,6 +805,45 @@ class PlaybackCoordinator(QObject):
                 self._info_panel.close()
             self._clear_play_profile(presentation.row)
             return
+        # V1/diagnostic presentations do not carry a transaction generation.
+        # Keep their compatibility behaviour for one release.
+        if presentation.request_generation <= 0:
+            self._sync_filmstrip_selection(row)
+            self._render_presentation(presentation)
+            return
+        self._select_filmstrip_row(row)
+        if previous_generation > 0 and previous_generation != self._detail_request_generation:
+            emit_detail_event("cancelled", generation=previous_generation)
+        self._player_view.show_placeholder("")
+        QTimer.singleShot(
+            0,
+            lambda target_row=row, generation=self._detail_request_generation:
+            self._center_filmstrip_if_current(target_row, generation),
+        )
+        # Yield one full Qt event-loop turn so Detail's opaque loading surface
+        # paints before decoding, sidecar reads or media backend preparation.
+        QTimer.singleShot(
+            0,
+            lambda candidate=presentation, generation=self._detail_request_generation:
+            self._render_if_current(candidate, generation),
+        )
+
+    def _render_if_current(
+        self,
+        presentation: DetailPresentation,
+        generation: int,
+    ) -> None:
+        if generation != self._detail_request_generation:
+            return
+        current = self._current_presentation
+        if current is None or current.path != presentation.path:
+            return
+        emit_detail_event(
+            "route_visible",
+            generation=generation,
+            row=presentation.row,
+            media_type="video" if presentation.is_video else "image",
+        )
         self._render_presentation(presentation)
 
     def _preserve_live_presentation(
@@ -717,7 +913,6 @@ class PlaybackCoordinator(QObject):
                 self._zoom_handler.set_viewer(self._player_view.video_area)
                 self._zoom_widget.show()
             else:
-                self._player_view.show_video_surface(interactive=True)
                 trim_range_ms = presentation.video_trim_range_ms
                 if trim_range_ms is not None:
                     self._trim_in_ms, self._trim_out_ms = trim_range_ms
@@ -726,12 +921,26 @@ class PlaybackCoordinator(QObject):
                     self._trim_out_ms = 0
                 has_trim = trim_range_ms is not None
                 load_started = time.perf_counter()
-                self._player_view.video_area.load_video(
-                    source,
-                    adjustments=presentation.video_adjustments,
-                    trim_range_ms=trim_range_ms,
-                    adjusted_preview=presentation.video_adjusted_preview,
-                )
+                if (
+                    detail_pipeline_v2_enabled()
+                    and hasattr(self, "_video_prepare_pool")
+                    and presentation.request_generation > 0
+                ):
+                    self._player_view.video_area.begin_load(
+                        source,
+                        presentation.request_generation,
+                    )
+                    self._schedule_video_preparation(presentation)
+                else:
+                    self._player_view.video_area.load_video(
+                        source,
+                        adjustments=presentation.video_adjustments,
+                        trim_range_ms=trim_range_ms,
+                        adjusted_preview=presentation.video_adjusted_preview,
+                    )
+                    self._player_view.video_area.play()
+                # Keep transport chrome hidden over the pure loading surface.
+                self._player_view.show_video_surface(interactive=False)
                 log_detail_profile(
                     "playback",
                     "video.load_video",
@@ -740,7 +949,6 @@ class PlaybackCoordinator(QObject):
                     adjusted_preview=presentation.video_adjusted_preview,
                     has_trim=has_trim,
                 )
-                self._player_view.video_area.play()
                 self._player_bar.setEnabled(True)
                 self._zoom_handler.set_viewer(self._player_view.video_area)
                 self._player_view.video_area.reset_zoom()
@@ -748,9 +956,16 @@ class PlaybackCoordinator(QObject):
         else:
             if self._player_view.video_area.has_video():
                 self._player_view.video_area.stop()
-            self._player_view.show_image_surface()
+            if presentation.request_generation <= 0:
+                self._player_view.show_image_surface()
             display_started = time.perf_counter()
-            self._player_view.display_image(source)
+            if presentation.request_generation > 0:
+                self._player_view.display_image(
+                    source,
+                    request_generation=presentation.request_generation,
+                )
+            else:
+                self._player_view.display_image(source)
             log_detail_profile(
                 "playback",
                 "image.display_image",
@@ -788,6 +1003,105 @@ class PlaybackCoordinator(QObject):
             is_video=presentation.is_video,
         )
         self._clear_play_profile(presentation.row)
+        self._schedule_deferred_location(presentation)
+
+    def _schedule_deferred_location(self, presentation: DetailPresentation) -> None:
+        if (
+            presentation.location
+            or presentation.path in getattr(self, "_deferred_locations", {})
+        ):
+            return
+        gps = presentation.info.get("gps")
+        if not isinstance(gps, dict) or not hasattr(self, "_deferred_location_pool"):
+            return
+        self._deferred_location_pool.clear()
+        self._deferred_location_pool.start(
+            _DeferredLocationWorker(
+                presentation.request_generation,
+                presentation.path,
+                gps,
+                self._deferred_location_signals,
+            )
+        )
+
+    @Slot(int, Path, str)
+    def _on_deferred_location_ready(
+        self,
+        generation: int,
+        path: Path,
+        location: str,
+    ) -> None:
+        if generation != getattr(self, "_detail_request_generation", 0):
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or presentation.path != path:
+            return
+        if not hasattr(self, "_deferred_locations"):
+            self._deferred_locations = {}
+        self._deferred_locations[path] = location
+        info = dict(presentation.info)
+        info["location"] = location
+        presentation = replace(presentation, location=location, info=info)
+        self._current_presentation = presentation
+        self._update_header(presentation)
+
+    def _schedule_video_preparation(self, presentation: DetailPresentation) -> None:
+        self._video_prepare_pool.clear()
+        self._video_prepare_pool.start(
+            _VideoPreparationWorker(
+                presentation=presentation,
+                edit_service_getter=self._edit_service_getter,
+                signals=self._video_prepare_signals,
+            )
+        )
+
+    @Slot(int, object)
+    def _on_video_preparation_ready(
+        self,
+        generation: int,
+        state: object,
+    ) -> None:
+        if generation != getattr(self, "_detail_request_generation", 0):
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        is_live_motion = bool(getattr(self, "_active_live_motion", None))
+        if presentation is None or (not presentation.is_video and not is_live_motion):
+            return
+        if not isinstance(state, VideoPresentationState):
+            return
+        if not self._player_view.video_area.commit_presentation(state):
+            return
+        if state.trim_range_ms is not None:
+            self._trim_in_ms, self._trim_out_ms = state.trim_range_ms
+        else:
+            self._trim_in_ms = 0
+            self._trim_out_ms = 0
+        self._player_view.video_area.play()
+
+    @Slot(int, Path, object)
+    def _on_video_preparation_failed(
+        self,
+        generation: int,
+        source: Path,
+        error: object,
+    ) -> None:
+        if generation != getattr(self, "_detail_request_generation", 0):
+            return
+        self._player_view.video_area.stop()
+        self._player_view.show_placeholder(
+            tr("PlaybackCoordinator", "Unable to load this video.")
+        )
+        LOGGER.warning("Video preparation failed for %s: %s", source.name, error)
+
+    @Slot(int)
+    def _on_video_first_frame_presented(self, generation: int) -> None:
+        if generation != getattr(self, "_detail_request_generation", 0):
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or not presentation.is_video:
+            return
+        self._player_view.show_video_surface(interactive=True)
+        # Do not reclaim the user's scroll position when decoding completes.
 
     def _is_location_video_write_inflight(self, path: Path) -> bool:
         inflight = getattr(self, "_location_video_write_inflight_paths", set())
@@ -831,16 +1145,33 @@ class PlaybackCoordinator(QObject):
         self._active_live_still = presentation.path
         self._hide_face_name_overlay(clear_annotations=False)
         self._player_view.defer_still_updates(True)
-        self._player_view.show_video_surface(interactive=False)
         self._trim_in_ms = 0
         self._trim_out_ms = 0
-        self._player_view.video_area.load_video(
-            motion_path,
-            adjustments=None,
-            trim_range_ms=None,
-            adjusted_preview=False,
-        )
-        self._player_view.video_area.play()
+        if presentation.request_generation > 0 and hasattr(self, "_video_prepare_pool"):
+            self._player_view.video_area.begin_load(
+                motion_path,
+                presentation.request_generation,
+            )
+            self._schedule_video_preparation(
+                replace(
+                    presentation,
+                    path=motion_path,
+                    is_video=True,
+                    is_live=False,
+                    video_adjustments=None,
+                    video_trim_range_ms=None,
+                    video_adjusted_preview=False,
+                )
+            )
+        else:
+            self._player_view.video_area.load_video(
+                motion_path,
+                adjustments=None,
+                trim_range_ms=None,
+                adjusted_preview=False,
+            )
+            self._player_view.video_area.play()
+        self._player_view.show_video_surface(interactive=False)
         self._player_bar.setEnabled(False)
         self._is_playing = True
 
@@ -890,6 +1221,25 @@ class PlaybackCoordinator(QObject):
         self._presented_still_source = presented_source
         self._presented_still_generation = int(generation)
         self._schedule_recognition_overlay(presentation, int(generation))
+        if not getattr(self, "_active_live_motion", None):
+            self._prefetch_neighbor_stills(presentation.row)
+
+    def _prefetch_neighbor_stills(self, row: int) -> None:
+        descriptor_getter = getattr(
+            self._asset_model,
+            "detail_prefetch_descriptor",
+            None,
+        )
+        prefetch_many = getattr(self._player_view, "prefetch_images", None)
+        if not callable(descriptor_getter) or not callable(prefetch_many):
+            return
+        sources: list[Path] = []
+        for candidate_row in (row - 1, row + 1):
+            descriptor = descriptor_getter(candidate_row)
+            if descriptor is not None and not descriptor.is_video:
+                sources.append(descriptor.path)
+        if sources:
+            prefetch_many(sources)
 
     def _schedule_recognition_overlay(
         self,
@@ -955,7 +1305,7 @@ class PlaybackCoordinator(QObject):
                 thumbnail_path=value.thumbnail_path,
                 count=value.count,
             )
-            for value in snapshot.candidates
+            for value in getattr(snapshot, "candidates", ())
         ]
         overlay = getattr(self, "_face_name_overlay", None)
         if overlay is None:
@@ -965,6 +1315,12 @@ class PlaybackCoordinator(QObject):
             setter(suggestions)
         overlay.set_annotations(annotations)
         overlay.set_overlay_active(bool(annotations))
+        if annotations:
+            emit_detail_event(
+                "face_presented",
+                generation=getattr(self, "_detail_request_generation", 0),
+                annotation_count=len(annotations),
+            )
 
     @Slot(int, object)
     def _on_recognition_overlay_failed(
@@ -1321,6 +1677,13 @@ class PlaybackCoordinator(QObject):
         self._refresh_recognition_views_after_mutation()
 
     def _sync_filmstrip_selection(self, row: int) -> None:
+        idx = self._select_filmstrip_row(row)
+        if idx.isValid():
+            self._filmstrip_view.center_on_index(idx)
+
+    def _select_filmstrip_row(self, row: int) -> QModelIndex:
+        """Update the highlight without triggering a programmatic scroll."""
+
         idx = self._asset_model.index(row, 0)
         model = self._filmstrip_view.model()
         if hasattr(model, "mapFromSource"):
@@ -1329,6 +1692,21 @@ class PlaybackCoordinator(QObject):
             self._filmstrip_view.selectionModel().setCurrentIndex(
                 idx, QItemSelectionModel.ClearAndSelect
             )
+        return idx
+
+    def _center_filmstrip_if_current(self, row: int, generation: int) -> None:
+        """Center once after route paint, before slow media preparation."""
+
+        if generation != getattr(self, "_detail_request_generation", 0):
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or presentation.row != row:
+            return
+        idx = self._asset_model.index(row, 0)
+        model = self._filmstrip_view.model()
+        if hasattr(model, "mapFromSource"):
+            idx = model.mapFromSource(idx)
+        if idx.isValid():
             self._filmstrip_view.center_on_index(idx)
 
     def _update_favorite_icon(self, is_favorite: bool) -> None:
@@ -1347,6 +1725,10 @@ class PlaybackCoordinator(QObject):
 
     def reset_for_gallery(self) -> None:
         self._invalidate_overlay_requests(clear=False)
+        for pool_name in ("_video_prepare_pool", "_deferred_location_pool"):
+            pool = getattr(self, pool_name, None)
+            if pool is not None:
+                pool.clear()
         self._presented_still_generation = 0
         self._presented_still_source = None
         self._clear_play_request_state()
@@ -1401,6 +1783,11 @@ class PlaybackCoordinator(QObject):
     def shutdown(self) -> None:
         self._invalidate_overlay_requests(clear=True)
         self._overlay_pool.waitForDone(1500)
+        for pool_name in ("_video_prepare_pool", "_deferred_location_pool"):
+            pool = getattr(self, pool_name, None)
+            if pool is not None:
+                pool.clear()
+                pool.waitForDone(1500)
         self._clear_play_request_state()
         location_search_controller = getattr(self, "_location_search_controller", None)
         if location_search_controller is not None:

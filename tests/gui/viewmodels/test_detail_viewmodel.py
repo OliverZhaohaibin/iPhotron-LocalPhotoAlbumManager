@@ -319,7 +319,7 @@ def test_restore_after_adjustment_rebinds_current_path():
     assert received[0].reload_token == 1
 
 
-def test_show_row_builds_video_state_from_sidecar():
+def test_show_row_defers_video_state_sidecar_read():
     edit_service = Mock()
     edit_service.describe_adjustments.return_value = EditRenderingState(
         sidecar_exists=True,
@@ -338,12 +338,13 @@ def test_show_row_builds_video_state_from_sidecar():
     vm.show_row(0)
 
     presentation = vm.presentation.value
-    assert presentation.video_adjusted_preview is True
-    assert presentation.video_adjustments == {"Exposure": 0.3}
-    assert presentation.video_trim_range_ms == (1000, 4000)
+    assert presentation.video_adjusted_preview is False
+    assert presentation.video_adjustments is None
+    assert presentation.video_trim_range_ms is None
+    edit_service.describe_adjustments.assert_not_called()
 
 
-def test_restore_request_prefers_duration_hint_for_video_trim():
+def test_restore_request_keeps_video_sidecar_out_of_route_path():
     edit_service = Mock()
     edit_service.describe_adjustments.return_value = EditRenderingState(
         sidecar_exists=True,
@@ -370,8 +371,10 @@ def test_restore_request_prefers_duration_hint_for_video_trim():
     )
 
     presentation = vm.presentation.value
-    assert presentation.video_trim_range_ms == (2000, 7250)
+    assert presentation.video_trim_range_ms is None
     assert presentation.reload_token == 1
+    assert presentation.video_duration_hint == 7.25
+    edit_service.describe_adjustments.assert_not_called()
 
 
 def test_store_row_change_refreshes_current_presentation():

@@ -225,6 +225,7 @@ class DesktopCoordinatorRuntime(QObject):
             map_runtime=None,
             event_bus=self._event_bus,
             location_write_queue=None,
+            edit_service_getter=edit_service_getter,
         )
 
         # Inject optional dependencies into Playback
@@ -555,6 +556,10 @@ class DesktopCoordinatorRuntime(QObject):
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
         ui.grid_view.viewportStateChanged.connect(self._asset_list_vm.update_viewport)
+        if hasattr(ui.grid_view, "detailPrefetchRequested"):
+            ui.grid_view.detailPrefetchRequested.connect(
+                lambda index: self._playback.prefetch_asset(index.row())
+            )
 
         # Filmstrip clicks are now handled by PlaybackCoordinator
 
@@ -1127,7 +1132,8 @@ class DesktopCoordinatorRuntime(QObject):
         self._window.ui.grid_view.selectionModel().setCurrentIndex(
             idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows
         )
-        self._window.ui.grid_view.scrollTo(idx)
+        if self._view_router.is_gallery_view_active():
+            self._window.ui.grid_view.scrollTo(idx)
 
     def _handle_open_album_dialog(self):
         path = self._dialog.open_album_dialog()

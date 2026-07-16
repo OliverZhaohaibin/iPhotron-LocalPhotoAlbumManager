@@ -42,6 +42,15 @@ class RecognitionOverlaySnapshot:
     candidates: tuple[RecognitionIdentityCandidate, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RecognitionAssetAnnotations:
+    library_root: Path
+    revision: int
+    asset_id: str
+    faces: tuple[AssetFaceAnnotation, ...]
+    pets: tuple[AssetPetAnnotation, ...]
+
+
 class RecognitionQueryService:
     """Compose recognition reads and cache them by library revision.
 
@@ -63,6 +72,7 @@ class RecognitionQueryService:
         self._revision = 0
         self._dashboard_cache: dict[tuple[bool, int], RecognitionDashboardSnapshot] = {}
         self._candidate_cache: dict[tuple[bool, int], tuple[RecognitionIdentityCandidate, ...]] = {}
+        self._annotation_cache: dict[str, RecognitionAssetAnnotations] = {}
         self._lock = threading.RLock()
         self._cache_changed = threading.Condition(self._lock)
         self._dashboard_loads: set[tuple[bool, int]] = set()
@@ -115,7 +125,49 @@ class RecognitionQueryService:
         asset_id: str,
         include_hidden: bool = False,
     ) -> RecognitionOverlaySnapshot:
+        annotations = self.load_asset_annotations(asset_id)
+        candidates = self.load_identity_candidates(include_hidden=include_hidden)
+        return RecognitionOverlaySnapshot(
+            library_root=self._library_root,
+            revision=max(annotations.revision, self.revision),
+            asset_id=annotations.asset_id,
+            faces=annotations.faces,
+            pets=annotations.pets,
+            candidates=candidates,
+        )
+
+    def load_asset_annotations(self, asset_id: str) -> RecognitionAssetAnnotations:
+        """Read only face/pet boxes for one asset, without dashboard queries."""
+
         normalized_id = str(asset_id or "")
+        with self._lock:
+            cached = self._annotation_cache.get(normalized_id)
+            if cached is not None:
+                return cached
+            revision = self._revision
+        faces = tuple(self._people_service.list_asset_face_annotations(normalized_id))
+        pets = tuple(self._pet_service.list_asset_pet_annotations(normalized_id))
+        snapshot = RecognitionAssetAnnotations(
+            library_root=self._library_root,
+            revision=revision,
+            asset_id=normalized_id,
+            faces=faces,
+            pets=pets,
+        )
+        with self._lock:
+            # A targeted invalidation removes this key; do not resurrect a
+            # result that began before a global revision change.
+            if revision == self._revision:
+                self._annotation_cache[normalized_id] = snapshot
+                return snapshot
+        return self.load_asset_annotations(normalized_id)
+
+    def load_identity_candidates(
+        self,
+        include_hidden: bool = False,
+    ) -> tuple[RecognitionIdentityCandidate, ...]:
+        """Load naming candidates lazily for rename/manual annotation UI."""
+
         include_hidden = bool(include_hidden)
         while True:
             with self._lock:
@@ -132,26 +184,26 @@ class RecognitionQueryService:
                     candidates = self._candidate_cache.get(key)
                 if candidates is None:
                     continue
-            faces = tuple(self._people_service.list_asset_face_annotations(normalized_id))
-            pets = tuple(self._pet_service.list_asset_pet_annotations(normalized_id))
             with self._lock:
                 if revision != self._revision:
                     continue
-                return RecognitionOverlaySnapshot(
-                    library_root=self._library_root,
-                    revision=revision,
-                    asset_id=normalized_id,
-                    faces=faces,
-                    pets=pets,
-                    candidates=candidates,
-                )
+                return candidates
 
     def invalidate(self, changed_asset_ids=None) -> int:
-        del changed_asset_ids  # reserved for a future per-asset annotation cache
         with self._cache_changed:
             self._revision += 1
             self._dashboard_cache.clear()
             self._candidate_cache.clear()
+            normalized_ids = {
+                str(value)
+                for value in (changed_asset_ids or ())
+                if str(value)
+            }
+            if normalized_ids:
+                for asset_id in normalized_ids:
+                    self._annotation_cache.pop(asset_id, None)
+            else:
+                self._annotation_cache.clear()
             self._cache_changed.notify_all()
             return self._revision
 
@@ -216,6 +268,7 @@ class RecognitionQueryService:
 
 
 __all__ = [
+    "RecognitionAssetAnnotations",
     "RecognitionDashboardSnapshot",
     "RecognitionIdentityCandidate",
     "RecognitionOverlaySnapshot",

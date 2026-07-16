@@ -454,6 +454,7 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
 
     streams = ffprobe_meta.get("streams", []) if isinstance(ffprobe_meta, dict) else []
     if isinstance(streams, list):
+        primary_video_seen = False
         for stream in streams:
             if not isinstance(stream, dict):
                 continue
@@ -466,6 +467,9 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
 
             codec_type = stream.get("codec_type")
             if codec_type == "video":
+                if primary_video_seen:
+                    continue
+                primary_video_seen = True
                 codec = stream.get("codec_name")
                 if isinstance(codec, str) and codec:
                     info["codec"] = codec
@@ -477,6 +481,37 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
                 if isinstance(width, int) and isinstance(height, int):
                     info["w"] = width
                     info["h"] = height
+
+                rotation = 0.0
+                side_data = stream.get("side_data_list")
+                if isinstance(side_data, list):
+                    for value in side_data:
+                        if not isinstance(value, dict):
+                            continue
+                        if value.get("side_data_type") != "Display Matrix":
+                            continue
+                        try:
+                            rotation = float(value.get("rotation", 0.0))
+                        except (TypeError, ValueError):
+                            rotation = 0.0
+                        break
+                snapped = round(rotation / 90.0) * 90
+                rotation_cw = int(-snapped) % 360
+                info["video_rotation_cw"] = rotation_cw
+                linux_180_hint = False
+                if rotation_cw == 180:
+                    format_tags = fmt.get("tags", {}) if isinstance(fmt, dict) else {}
+                    major_brand = (
+                        str(format_tags.get("major_brand", "")).strip().lower()
+                        if isinstance(format_tags, dict)
+                        else ""
+                    )
+                    handler_name = str(tags.get("handler_name", "")).strip().lower()
+                    linux_180_hint = (
+                        major_brand == "qt"
+                        or "core media video" in handler_name
+                    )
+                info["video_linux_180_hint"] = linux_180_hint
 
                 frame_rate = _coerce_fractional(stream.get("avg_frame_rate"))
                 if frame_rate is None:

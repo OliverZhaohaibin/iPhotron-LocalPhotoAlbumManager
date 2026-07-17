@@ -258,10 +258,11 @@ output directory for import auditing. The executable icon defaults to
 `docs/picture/logo_new.ico`; pass `-IconPath <path-to.ico>` to override it.
 
 When `-PythonExe` is omitted, the script selects the first Python 3.12 or newer
-interpreter that also has Nuitka installed. It checks the repository `.venv`,
-the parent directory `.venv`, `py.exe -3.12`, and finally a real `python.exe`
-on `PATH`. The Microsoft Store `WindowsApps\python.exe` execution alias is
-rejected. To choose the interpreter explicitly, use:
+interpreter that has Nuitka, PyExifTool, `pillow_heif`, and `_pillow_heif`
+installed. It checks the repository `.venv`, the parent directory `.venv`,
+`py.exe -3.12`, and finally a real `python.exe` on `PATH`. The Microsoft Store
+`WindowsApps\python.exe` execution alias is rejected. To choose the interpreter
+explicitly, use:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 `
@@ -277,6 +278,11 @@ directory to the repository root before probing imports, preventing packages
 beside the virtual environment from shadowing `Lib\site-packages`. Running from
 an existing PowerShell window is still preferable for troubleshooting because
 the console remains open.
+
+The build explicitly freezes the `exiftool` Python package and Pillow-HEIF's
+Python/native modules because Nuitka cannot reliably infer these indirect and
+lazy imports. The script does not search for, validate, or copy an
+`exiftool.exe`; it includes the Python files installed by `PyExifTool`.
 
 With `-IncludeOptionalAssets`, the script performs these map-specific jobs
 before invoking Nuitka:
@@ -539,6 +545,7 @@ as `extension` so the install script lands the files in the correct location.
 |---|---|---|
 | Windows build exits with code `9009` or opens the Microsoft Store Python prompt | No usable repository/parent virtual environment was found and `python.exe` resolved to the Windows App Execution Alias | Install Nuitka into `.venv`, or pass `-PythonExe "D:\path\to\.venv\Scripts\python.exe"`; the maintained script rejects the Store alias before invoking Nuitka |
 | Nuitka reports `duplicate locals name` for `insightface.thirdparty.face3d` from both `.venv\insightface` and `.venv\Lib\site-packages\insightface` | An unpredictable launch working directory exposed a shadow InsightFace source tree, and the broad package inclusion traversed unused Face3D code | Use the maintained scripts, which build from the repository root and exclude the unused `insightface.thirdparty.face3d` package |
+| Packaged HEIC/HEIF files cannot be opened | The lazy `pillow_heif` import or its `_pillow_heif` native extension was omitted | Use the maintained Nuitka scripts, which explicitly include both modules, and install `pillow-heif` into the selected build interpreter |
 | `AOT compiled module not found` in logs | `_jit_compiled` extension missing from distribution | Re-run Step 1 and rebuild; verify the `.so`/`.pyd` file is in `iPhoto/core/filters/` |
 | `ImportError` referencing `numba` at runtime | A code path still has an unconditional numba import | All numba imports must use `try/except ImportError` guards |
 | Image adjustments produce no visible effect | Kernel not loaded — check logs for error messages | Ensure the AOT module matches the current Python version and platform |

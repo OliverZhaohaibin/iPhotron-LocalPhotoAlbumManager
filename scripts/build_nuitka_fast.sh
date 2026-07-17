@@ -27,6 +27,9 @@ python -m nuitka \
   --include-package=OpenGL \
   --include-package=OpenGL_accelerate \
   --include-package=insightface \
+  --include-package=exiftool \
+  --include-package=pillow_heif \
+  --include-module=_pillow_heif \
   --noinclude-data-files=torch/include \
   --include-data-dir=src/extension/models=extension/models \
   --include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n \

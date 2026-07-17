@@ -323,6 +323,8 @@ if [[ "$ICON_PATH" != *.icns ]]; then
   "$PYTHON_BIN" -c 'import imageio' >/dev/null 2>&1 || die \
     "imageio is required for Nuitka to convert the app icon; install it with: $PYTHON_BIN -m pip install imageio"
 fi
+"$PYTHON_BIN" -c 'import exiftool, pillow_heif, _pillow_heif' >/dev/null 2>&1 || die \
+  "PyExifTool, pillow-heif, and its native extension are required; install them with: $PYTHON_BIN -m pip install pyexiftool pillow-heif"
 
 if [[ "$RUN_AOT" -eq 1 ]]; then
   echo "Building AOT filter extension..."
@@ -401,6 +403,9 @@ nuitka_args=(
   "--include-package=cv2"
   "--include-package=reverse_geocoder"
   "--include-package=insightface"
+  "--include-package=exiftool"
+  "--include-package=pillow_heif"
+  "--include-module=_pillow_heif"
   "--noinclude-data-files=torch/include"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/resources/i18n=iPhoto/resources/i18n"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/schemas=iPhoto/schemas"

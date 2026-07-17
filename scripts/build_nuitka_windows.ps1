@@ -83,7 +83,7 @@ function Resolve-BuildPython {
     # Windows PowerShell 5.1 rebuilds the native command line before invoking
     # python.exe. Keep this probe on one line and use only Python single-quoted
     # strings so embedded double quotes cannot be stripped during that step.
-    $probeScript = "import importlib.util, sys; v=sys.version.split()[0]; ok=sys.version_info >= (3, 12) and importlib.util.find_spec('nuitka') is not None; print(sys.executable); print(v); raise SystemExit(0 if ok else 'Python 3.12+ with Nuitka installed is required')"
+    $probeScript = "import importlib.util, sys; v=sys.version.split()[0]; required=('nuitka','exiftool','pillow_heif','_pillow_heif'); missing=[name for name in required if importlib.util.find_spec(name) is None]; ok=sys.version_info >= (3, 12) and not missing; print(sys.executable); print(v); raise SystemExit(0 if ok else 'Python 3.12+ with Nuitka, PyExifTool, and pillow-heif installed is required; missing: '+','.join(missing))"
     $attempts = New-Object System.Collections.Generic.List[string]
 
     foreach ($candidate in $candidates) {
@@ -128,7 +128,7 @@ function Resolve-BuildPython {
 
     $attemptSummary = $attempts -join [Environment]::NewLine
     throw @"
-Unable to locate a usable Python 3.12+ interpreter with Nuitka installed.
+Unable to locate a usable Python 3.12+ interpreter with Nuitka, PyExifTool, and pillow-heif installed.
 $attemptSummary
 Create a virtual environment and install Nuitka, or pass an explicit interpreter, for example:
   powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -PythonExe "D:\python_code\iPhoto\.venv\Scripts\python.exe"
@@ -255,6 +255,12 @@ $arguments = @(
     '--include-package=cv2',
     '--include-package=reverse_geocoder',
     '--include-package=insightface',
+    # PyExifTool is imported indirectly; freeze its Python package explicitly.
+    '--include-package=exiftool',
+    # pillow-heif is registered through a lazy import, so include both its
+    # Python package and native extension explicitly.
+    '--include-package=pillow_heif',
+    '--include-module=_pillow_heif',
     '--noinclude-data-files=torch/include',
     "--output-dir=$OutputDir",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\resources\i18n')=iPhoto/resources/i18n",

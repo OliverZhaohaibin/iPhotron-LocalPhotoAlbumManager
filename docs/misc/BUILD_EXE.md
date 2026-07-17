@@ -254,7 +254,20 @@ roughly 45,000 files and the People/Pets model cache. Those resources are
 resolved from the per-user extension cache when their feature is used. Pass
 `-IncludeOptionalAssets` when a controlled deployment requires a completely
 offline bundle. Every build writes `nuitka-compilation-report.xml` below the
-output directory for import auditing.
+output directory for import auditing. The executable icon defaults to
+`docs/picture/logo_new.ico`; pass `-IconPath <path-to.ico>` to override it.
+
+When `-PythonExe` is omitted, the script selects the first Python 3.12 or newer
+interpreter that also has Nuitka installed. It checks the repository `.venv`,
+the parent directory `.venv`, `py.exe -3.12`, and finally a real `python.exe`
+on `PATH`. The Microsoft Store `WindowsApps\python.exe` execution alias is
+rejected. To choose the interpreter explicitly, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 `
+  -PythonExe "D:\python_code\iPhoto\.venv\Scripts\python.exe" `
+  -OutputDir build
+```
 
 With `-IncludeOptionalAssets`, the script performs these map-specific jobs
 before invoking Nuitka:
@@ -294,6 +307,10 @@ Useful flags:
   Control the Windows console mode.
 - `-Jobs <n>`
   Set the parallel build job count.
+- `-PythonExe <path>`
+  Use a specific Python 3.12+ interpreter with Nuitka installed.
+- `-IconPath <path-to.ico>`
+  Override the default `docs/picture/logo_new.ico` executable icon.
 
 If you built the runtime in the separate `PySide6-OsmAnd-SDK` checkout, either:
 
@@ -316,6 +333,12 @@ layout is bundled automatically. The Linux maps runtime is picked up from
 `src/maps/tiles/extension/bin`, and the native widget expects Qt's XCB desktop
 OpenGL path when it is selected at runtime.
 
+This remains a directory-based standalone build. Nuitka's Linux icon option is
+for onefile binaries, so the standalone ELF does not embed an application icon.
+Do not switch this build to onefile just to add an icon. AppImage packaging
+continues to receive its desktop icon separately through
+`scripts/build_appimage.sh --icon <path-to.png>`.
+
 ### Recommended macOS runtime sync
 
 Before building a macOS package, build the SDK runtime and sync it into the
@@ -324,7 +347,13 @@ iPhotron extension layout:
 ```bash
 QT_ROOT=/opt/homebrew/opt/qt bash ../PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/build_macos.sh
 python scripts/sync_macos_map_extension.py --sdk-root ../PySide6-OsmAnd-SDK
+bash scripts/build_nuitka_macos.sh
 ```
+
+The macOS build defaults to `docs/picture/logo_new.ico` and passes it directly
+to `--macos-app-icon`. Nuitka converts it to ICNS using `imageio`; install
+`imageio` in the selected build interpreter when the preflight reports it
+missing. Pass `--icon <path>` to override the default.
 
 The sync script copies `World_basemap_2.obf`, `search/geonames.sqlite3`, OsmAnd
 resources, `osmand_render_helper`, `osmand_native_widget.dylib`, recursively
@@ -499,6 +528,7 @@ as `extension` so the install script lands the files in the correct location.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| Windows build exits with code `9009` or opens the Microsoft Store Python prompt | No usable repository/parent virtual environment was found and `python.exe` resolved to the Windows App Execution Alias | Install Nuitka into `.venv`, or pass `-PythonExe "D:\path\to\.venv\Scripts\python.exe"`; the maintained script rejects the Store alias before invoking Nuitka |
 | `AOT compiled module not found` in logs | `_jit_compiled` extension missing from distribution | Re-run Step 1 and rebuild; verify the `.so`/`.pyd` file is in `iPhoto/core/filters/` |
 | `ImportError` referencing `numba` at runtime | A code path still has an unconditional numba import | All numba imports must use `try/except ImportError` guards |
 | Image adjustments produce no visible effect | Kernel not loaded — check logs for error messages | Ensure the AOT module matches the current Python version and platform |

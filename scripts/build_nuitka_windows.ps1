@@ -20,6 +20,118 @@ function Assert-Exists {
     }
 }
 
+function Resolve-ExecutablePath {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+
+    if (Test-Path -LiteralPath $Executable -PathType Leaf) {
+        return (Get-Item -LiteralPath $Executable).FullName
+    }
+
+    $command = Get-Command $Executable -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($command) {
+        return $command.Source
+    }
+
+    return $null
+}
+
+function Test-IsWindowsStorePythonAlias {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+
+    return $Executable -match '(?i)[\\/]Microsoft[\\/]WindowsApps[\\/]python(?:3)?(?:\.exe)?$'
+}
+
+function Resolve-BuildPython {
+    param(
+        [string]$RequestedPython,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    if ($RequestedPython) {
+        $candidates.Add([pscustomobject]@{
+            Label = '-PythonExe'
+            Executable = $RequestedPython
+            PrefixArgs = @()
+        }) | Out-Null
+    }
+    else {
+        $repositoryParent = Split-Path -Parent $RepositoryRoot
+        $candidates.Add([pscustomobject]@{
+            Label = 'repository virtual environment'
+            Executable = (Join-Path $RepositoryRoot '.venv\Scripts\python.exe')
+            PrefixArgs = @()
+        }) | Out-Null
+        $candidates.Add([pscustomobject]@{
+            Label = 'parent virtual environment'
+            Executable = (Join-Path $repositoryParent '.venv\Scripts\python.exe')
+            PrefixArgs = @()
+        }) | Out-Null
+        $candidates.Add([pscustomobject]@{
+            Label = 'Python launcher (3.12)'
+            Executable = 'py.exe'
+            PrefixArgs = @('-3.12')
+        }) | Out-Null
+        $candidates.Add([pscustomobject]@{
+            Label = 'PATH python.exe'
+            Executable = 'python.exe'
+            PrefixArgs = @()
+        }) | Out-Null
+    }
+
+    $probeScript = @'
+import importlib.util
+import sys
+
+if sys.version_info < (3, 12):
+    raise SystemExit(f"Python 3.12 or newer is required, found {sys.version.split()[0]}")
+if importlib.util.find_spec("nuitka") is None:
+    raise SystemExit("Nuitka is not installed in this Python environment")
+print(sys.executable)
+print(sys.version.split()[0])
+'@
+    $attempts = New-Object System.Collections.Generic.List[string]
+
+    foreach ($candidate in $candidates) {
+        $resolvedExecutable = Resolve-ExecutablePath -Executable $candidate.Executable
+        if (-not $resolvedExecutable) {
+            $attempts.Add("$($candidate.Label): executable not found") | Out-Null
+            continue
+        }
+        if (Test-IsWindowsStorePythonAlias -Executable $resolvedExecutable) {
+            $attempts.Add("$($candidate.Label): rejected Microsoft Store App Execution Alias $resolvedExecutable") | Out-Null
+            continue
+        }
+
+        [string[]]$prefixArgs = $candidate.PrefixArgs
+        $probeOutput = @(& $resolvedExecutable @prefixArgs -c $probeScript 2>&1)
+        $probeExitCode = $LASTEXITCODE
+        if ($probeExitCode -eq 0 -and $probeOutput.Count -ge 2) {
+            return [pscustomobject]@{
+                Executable = $resolvedExecutable
+                PrefixArgs = $prefixArgs
+                PythonPath = [string]$probeOutput[$probeOutput.Count - 2]
+                Version = [string]$probeOutput[$probeOutput.Count - 1]
+            }
+        }
+
+        $reason = ($probeOutput | ForEach-Object { $_.ToString() }) -join ' '
+        if (-not $reason) {
+            $reason = "probe exited with code $probeExitCode"
+        }
+        $attempts.Add("$($candidate.Label): $reason") | Out-Null
+    }
+
+    $attemptSummary = $attempts -join [Environment]::NewLine
+    throw @"
+Unable to locate a usable Python 3.12+ interpreter with Nuitka installed.
+$attemptSummary
+Create a virtual environment and install Nuitka, or pass an explicit interpreter, for example:
+  powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -PythonExe "D:\python_code\iPhoto\.venv\Scripts\python.exe"
+"@
+}
+
 function Sync-NativeRuntime {
     param(
         [Parameter(Mandatory = $true)][string]$SourceDir,
@@ -53,6 +165,7 @@ $nativeBuildScript = Join-Path $repoRoot 'tools\osmand_render_helper_native\buil
 $nativeDistDir = Join-Path $repoRoot 'tools\osmand_render_helper_native\dist-msvc'
 $extensionBinDir = Join-Path $srcRoot 'maps\tiles\extension\bin'
 $faceModelDir = Join-Path $srcRoot 'extension\models'
+$defaultIcon = Join-Path $repoRoot 'docs\picture\logo_new.ico'
 
 Assert-Exists $repoRoot
 Assert-Exists $srcRoot
@@ -62,22 +175,27 @@ if ($IncludeOptionalAssets) {
     Assert-Exists $faceModelDir
 }
 
-if (-not $PythonExe) {
-    $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
-    if (Test-Path $venvPython) {
-        $PythonExe = $venvPython
-    }
-    else {
-        $PythonExe = 'python'
-    }
+if (-not $IconPath) {
+    $IconPath = $defaultIcon
+}
+Assert-Exists $IconPath
+$IconPath = (Get-Item -LiteralPath $IconPath).FullName
+if ([IO.Path]::GetExtension($IconPath) -ine '.ico') {
+    throw "Windows Nuitka icon must be an .ico file: $IconPath"
 }
 
-if (-not $IconPath) {
-    $defaultIcon = Join-Path $repoRoot 'logo_new.ico'
-    if (Test-Path $defaultIcon) {
-        $IconPath = $defaultIcon
-    }
-}
+$pythonInvocation = Resolve-BuildPython -RequestedPython $PythonExe -RepositoryRoot $repoRoot
+$PythonExe = $pythonInvocation.Executable
+[string[]]$pythonPrefixArgs = $pythonInvocation.PrefixArgs
+
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+$OutputDir = (Get-Item -LiteralPath $OutputDir).FullName
+$compilationReport = Join-Path $OutputDir 'nuitka-compilation-report.xml'
+
+Write-Host "Python interpreter: $($pythonInvocation.PythonPath)"
+Write-Host "Python version: $($pythonInvocation.Version)"
+Write-Host "Nuitka output directory: $OutputDir"
+Write-Host "Application icon: $IconPath"
 
 if ($RebuildNativeRuntime) {
     & $nativeBuildScript -BuildType Release -Jobs $Jobs
@@ -104,7 +222,7 @@ $arguments = @(
     '--include-qt-plugins=qml,multimedia,platforms',
     "--windows-console-mode=$ConsoleMode",
     '--assume-yes-for-downloads',
-    "--report=$(Join-Path $OutputDir 'nuitka-compilation-report.xml')",
+    "--report=$compilationReport",
     '--nofollow-import-to=numba',
     '--nofollow-import-to=llvmlite',
     '--nofollow-import-to=albumentations',
@@ -153,14 +271,12 @@ if ($IncludeOptionalAssets) {
     $arguments += "--include-data-dir=$(Join-Path $srcRoot 'maps\tiles')=maps/tiles"
 }
 
-if ($IconPath) {
-    Assert-Exists $IconPath
-    $arguments += "--windows-icon-from-ico=$IconPath"
-}
+$arguments += "--windows-icon-from-ico=$IconPath"
 
 $arguments += $mainScript
 
-& $PythonExe @arguments
+$pythonArguments = @($pythonPrefixArgs) + $arguments
+& $PythonExe @pythonArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Nuitka build failed with exit code $LASTEXITCODE"
 }

@@ -914,7 +914,11 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -Outpu
 
 That script stages `src/maps/tiles/extension/bin` from the native runtime before
 invoking Nuitka, so it is the recommended packaging entry point whenever the
-OsmAnd helper/native widget runtime is part of the build.
+OsmAnd helper/native widget runtime is part of the build. It uses
+`docs/picture/logo_new.ico` by default and discovers Python from the repository
+`.venv`, the parent `.venv`, `py.exe -3.12`, or a real `python.exe` on `PATH`.
+Use `-PythonExe <path>` to override discovery; Microsoft Store execution aliases
+are rejected during preflight.
 
 For macOS packaging, run the SDK build and sync script first:
 
@@ -925,7 +929,10 @@ python scripts/sync_macos_map_extension.py --sdk-root ../PySide6-OsmAnd-SDK
 
 Then use the same AOT/Nuitka discipline: bundle `src/maps/tiles`, include the
 QRhi `.qsb` files, and verify the packaged app opens both media previews and
-the Location view from the frozen runtime.
+the Location view from the frozen runtime. `scripts/build_nuitka_macos.sh`
+passes the same default ICO to Nuitka, which requires `imageio` to convert it
+to the app bundle's ICNS resource. Linux remains a standalone build and gets
+its desktop icon only at the AppImage packaging stage.
 
 See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and manual flags.
 

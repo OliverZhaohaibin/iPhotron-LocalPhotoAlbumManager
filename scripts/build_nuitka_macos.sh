@@ -14,7 +14,7 @@ Options:
   --low-memory                  Use one compiler job, disable LTO, and enable Nuitka low-memory mode.
   --sdk-root DIR                PySide6-OsmAnd-SDK checkout. Defaults to ../PySide6-OsmAnd-SDK.
   --qt-root DIR                 Qt root passed to the SDK build. Defaults to /opt/homebrew/opt/qt.
-  --icon PATH                   Optional .icns file for the app bundle.
+  --icon PATH                   App icon (.icns or convertible image). Defaults to docs/picture/logo_new.ico.
   --skip-aot                    Skip Numba AOT filter compilation.
   --skip-sdk-runtime-build      Do not run the SDK macOS native runtime build.
   --skip-map-runtime-sync       Do not run scripts/sync_macos_map_extension.py.
@@ -198,7 +198,7 @@ DEFAULT_JOBS=$(( (DEFAULT_JOBS + 1) / 2 ))
 JOBS="${JOBS:-$DEFAULT_JOBS}"
 SDK_ROOT="${SDK_ROOT:-$ROOT_DIR/../PySide6-OsmAnd-SDK}"
 QT_ROOT="${QT_ROOT:-/opt/homebrew/opt/qt}"
-ICON_PATH="${ICON_PATH:-}"
+ICON_PATH="${ICON_PATH:-$ROOT_DIR/docs/picture/logo_new.ico}"
 RUN_AOT=1
 RUN_SDK_RUNTIME_BUILD=1
 RUN_MAP_RUNTIME_SYNC=1
@@ -318,8 +318,10 @@ for shader_file in "${SHADER_FILES[@]}"; do
   require_path "$ROOT_DIR/src/iPhoto/gui/ui/widgets/$shader_file"
 done
 
-if [[ -n "$ICON_PATH" ]]; then
-  require_path "$ICON_PATH"
+require_path "$ICON_PATH"
+if [[ "$ICON_PATH" != *.icns ]]; then
+  "$PYTHON_BIN" -c 'import imageio' >/dev/null 2>&1 || die \
+    "imageio is required for Nuitka to convert the app icon; install it with: $PYTHON_BIN -m pip install imageio"
 fi
 
 if [[ "$RUN_AOT" -eq 1 ]]; then
@@ -437,9 +439,7 @@ else
   warn "face model cache not found; continuing without bundled extension/models"
 fi
 
-if [[ -n "$ICON_PATH" ]]; then
-  nuitka_args+=("--macos-app-icon=$ICON_PATH")
-fi
+nuitka_args+=("--macos-app-icon=$ICON_PATH")
 
 nuitka_args+=("$ROOT_DIR/src/entrypoint.py")
 

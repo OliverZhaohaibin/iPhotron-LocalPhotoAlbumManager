@@ -272,8 +272,11 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 `
 Windows Explorer's **Run with PowerShell** action is also supported. Relative
 output and icon paths are resolved from the repository root, so the default
 output remains `<repository>\build` even when Explorer starts PowerShell with a
-different working directory. Running from an existing PowerShell window is
-still preferable for troubleshooting because the console remains open.
+different working directory. The script also switches the process working
+directory to the repository root before probing imports, preventing packages
+beside the virtual environment from shadowing `Lib\site-packages`. Running from
+an existing PowerShell window is still preferable for troubleshooting because
+the console remains open.
 
 With `-IncludeOptionalAssets`, the script performs these map-specific jobs
 before invoking Nuitka:
@@ -535,6 +538,7 @@ as `extension` so the install script lands the files in the correct location.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Windows build exits with code `9009` or opens the Microsoft Store Python prompt | No usable repository/parent virtual environment was found and `python.exe` resolved to the Windows App Execution Alias | Install Nuitka into `.venv`, or pass `-PythonExe "D:\path\to\.venv\Scripts\python.exe"`; the maintained script rejects the Store alias before invoking Nuitka |
+| Nuitka reports `duplicate locals name` for `insightface.thirdparty.face3d` from both `.venv\insightface` and `.venv\Lib\site-packages\insightface` | An unpredictable launch working directory exposed a shadow InsightFace source tree, and the broad package inclusion traversed unused Face3D code | Use the maintained scripts, which build from the repository root and exclude the unused `insightface.thirdparty.face3d` package |
 | `AOT compiled module not found` in logs | `_jit_compiled` extension missing from distribution | Re-run Step 1 and rebuild; verify the `.so`/`.pyd` file is in `iPhoto/core/filters/` |
 | `ImportError` referencing `numba` at runtime | A code path still has an unconditional numba import | All numba imports must use `try/except ImportError` guards |
 | Image adjustments produce no visible effect | Kernel not loaded — check logs for error messages | Ensure the AOT module matches the current Python version and platform |

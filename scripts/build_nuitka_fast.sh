@@ -19,7 +19,7 @@ python -m nuitka \
   --nofollow-import-to=pydantic \
   --nofollow-import-to=pydantic_core \
   --nofollow-import-to=typing_inspection \
-  --nofollow-import-to=insightface.thirdparty.face3d.mesh.cython.setup \
+  --nofollow-import-to=insightface.thirdparty.face3d \
   --nofollow-import-to=pytest \
   --nofollow-import-to=iPhoto.tests \
   --include-package=iPhoto \

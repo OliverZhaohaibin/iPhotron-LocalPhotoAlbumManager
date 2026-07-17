@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.records import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.state_repository import FaceStateRepository
+from iPhoto.pets import pipeline as pet_pipeline
 from iPhoto.pets.index_coordinator import reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
     _DINO_HUB_REPO,
@@ -25,6 +27,7 @@ from iPhoto.pets.pipeline import (
     _decode_yolox_predictions,
     _dedupe_supported_species_boxes,
     _DetectedPetBox,
+    _DinoV2Embedder,
     _map_yolox_box_to_source,
     _pet_box_overlaps_people_boxes,
     _preprocess_yolox,
@@ -1150,11 +1153,173 @@ def test_pet_detector_model_downloads_when_missing(tmp_path: Path, monkeypatch) 
     source.write_bytes(b"pet-detector")
     target = tmp_path / "models" / "pets" / "detector" / "yolox_nano_coco.onnx"
     monkeypatch.setenv("IPHOTO_PET_DETECTOR_MODEL_URL", source.as_uri())
+    real_temporary_directory = pet_pipeline.tempfile.TemporaryDirectory
+    temporary_directories: list[Path] = []
+
+    def recording_temporary_directory(*args, **kwargs):
+        assert Path(kwargs["dir"]) == target.parent
+        manager = real_temporary_directory(*args, **kwargs)
+        temporary_directories.append(Path(manager.name))
+        return manager
+
+    monkeypatch.setattr(
+        pet_pipeline.tempfile,
+        "TemporaryDirectory",
+        recording_temporary_directory,
+    )
 
     resolved = ensure_pet_detector_model(target, allow_model_download=True)
 
     assert resolved == target
     assert target.read_bytes() == b"pet-detector"
+    assert len(temporary_directories) == 1
+    assert not temporary_directories[0].exists()
+
+
+def test_dinov2_hub_load_only_suppresses_known_xformers_warnings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FakeModel:
+        def eval(self):
+            return self
+
+        def to(self, _device):
+            return self
+
+    class FakeHub:
+        @staticmethod
+        def load(*_args, **_kwargs):
+            warnings.warn_explicit(
+                "xFormers is not available (Attention)",
+                UserWarning,
+                filename="dinov2/layers/attention.py",
+                lineno=33,
+                module="dinov2.layers.attention",
+            )
+            warnings.warn_explicit(
+                "keep this DINO warning",
+                UserWarning,
+                filename="dinov2/models/vision_transformer.py",
+                lineno=1,
+                module="dinov2.models.vision_transformer",
+            )
+            warnings.warn_explicit(
+                "xFormers is not available (Attention)",
+                UserWarning,
+                filename="other/layers/attention.py",
+                lineno=1,
+                module="other.layers.attention",
+            )
+            return FakeModel()
+
+    embedder = _DinoV2Embedder.__new__(_DinoV2Embedder)
+    embedder._torch = SimpleNamespace(hub=FakeHub())
+    embedder._device = "cpu"
+    embedder._model_name = "dinov2_vits14"
+    monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
+    monkeypatch.setattr(embedder, "_cache_dinov2_torchscript", lambda *_args: None)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = embedder._download_dinov2_model(tmp_path / "dinov2_vits14.pt")
+
+    assert isinstance(model, FakeModel)
+    assert [str(item.message) for item in caught] == [
+        "keep this DINO warning",
+        "xFormers is not available (Attention)",
+    ]
+
+
+def test_dinov2_cache_uses_target_volume_and_only_suppresses_dinov2_tracer_warnings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FakeTracerWarning(UserWarning):
+        pass
+
+    class FakeTracedModel:
+        @staticmethod
+        def save(path: str) -> None:
+            Path(path).write_bytes(b"torchscript-model")
+
+    class FakeJit:
+        TracerWarning = FakeTracerWarning
+
+        @staticmethod
+        def trace(_model, _example, *, strict: bool):
+            assert strict is False
+            warnings.warn_explicit(
+                "known DINO trace warning",
+                FakeTracerWarning,
+                filename="dinov2/models/vision_transformer.py",
+                lineno=186,
+                module="dinov2.models.vision_transformer",
+            )
+            warnings.warn_explicit(
+                "keep this third-party trace warning",
+                FakeTracerWarning,
+                filename="other/model.py",
+                lineno=1,
+                module="other.model",
+            )
+            return FakeTracedModel()
+
+    class FakeTorch:
+        float32 = object()
+        jit = FakeJit()
+
+        @staticmethod
+        def zeros(shape, *, dtype):
+            assert shape == (1, 3, 224, 224)
+            assert dtype is FakeTorch.float32
+            return object()
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.moves: list[str] = []
+
+        @staticmethod
+        def parameters():
+            yield SimpleNamespace(device="original-device")
+
+        def cpu(self):
+            self.moves.append("cpu")
+            return self
+
+        def to(self, device):
+            self.moves.append(device)
+            return self
+
+    target = tmp_path / "models" / "embedding" / "dinov2_vits14.pt"
+    real_temporary_directory = pet_pipeline.tempfile.TemporaryDirectory
+    temporary_directories: list[Path] = []
+
+    def recording_temporary_directory(*args, **kwargs):
+        assert Path(kwargs["dir"]) == target.parent
+        manager = real_temporary_directory(*args, **kwargs)
+        temporary_directories.append(Path(manager.name))
+        return manager
+
+    monkeypatch.setattr(
+        pet_pipeline.tempfile,
+        "TemporaryDirectory",
+        recording_temporary_directory,
+    )
+    embedder = _DinoV2Embedder.__new__(_DinoV2Embedder)
+    embedder._torch = FakeTorch()
+    embedder._device = "fallback-device"
+    model = FakeModel()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        embedder._cache_dinov2_torchscript(model, target)
+
+    assert target.read_bytes() == b"torchscript-model"
+    assert model.moves == ["cpu", "original-device"]
+    assert [str(item.message) for item in caught] == ["keep this third-party trace warning"]
+    assert len(temporary_directories) == 1
+    assert not temporary_directories[0].exists()
 
 
 def test_pet_embedding_hub_source_is_pinned_to_commit() -> None:

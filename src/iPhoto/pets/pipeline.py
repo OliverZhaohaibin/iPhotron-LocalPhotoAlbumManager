@@ -8,6 +8,7 @@ import os
 import ssl
 import tempfile
 import uuid
+import warnings
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -979,19 +980,26 @@ class _DinoV2Embedder:
         torch = self._torch
         try:
             _install_certifi_environment()
-            try:
-                model = torch.hub.load(
-                    _DINO_HUB_REPO,
-                    self._model_name,
-                    pretrained=True,
-                    trust_repo=True,
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"xFormers is not available \(.*\)",
+                    category=UserWarning,
+                    module=r"dinov2\.layers(?:\..*)?",
                 )
-            except TypeError:
-                model = torch.hub.load(
-                    _DINO_HUB_REPO,
-                    self._model_name,
-                    pretrained=True,
-                )
+                try:
+                    model = torch.hub.load(
+                        _DINO_HUB_REPO,
+                        self._model_name,
+                        pretrained=True,
+                        trust_repo=True,
+                    )
+                except TypeError:
+                    model = torch.hub.load(
+                        _DINO_HUB_REPO,
+                        self._model_name,
+                        pretrained=True,
+                    )
         except Exception as exc:
             raise RuntimeError(
                 "Pet scanning unavailable: failed to download DINOv2 model "
@@ -1010,7 +1018,10 @@ class _DinoV2Embedder:
         previous_device = self._device
         try:
             model_path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="iphoto-pet-dinov2-") as tmp_dir:
+            with tempfile.TemporaryDirectory(
+                prefix="iphoto-pet-dinov2-",
+                dir=model_path.parent,
+            ) as tmp_dir:
                 tmp_path = Path(tmp_dir) / model_path.name
                 try:
                     previous_device = next(model.parameters()).device
@@ -1018,7 +1029,13 @@ class _DinoV2Embedder:
                     previous_device = self._device
                 model.cpu()
                 example = torch.zeros((1, 3, 224, 224), dtype=torch.float32)
-                traced = torch.jit.trace(model, example, strict=False)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        category=torch.jit.TracerWarning,
+                        module=r"dinov2(?:\..*)?",
+                    )
+                    traced = torch.jit.trace(model, example, strict=False)
                 traced.save(str(tmp_path))
                 tmp_path.replace(model_path)
         except Exception:  # noqa: BLE001
@@ -1345,7 +1362,10 @@ def _download_file(url: str, destination: Path, *, label: str) -> None:
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with tempfile.TemporaryDirectory(prefix="iphoto-pet-model-") as tmp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="iphoto-pet-model-",
+            dir=destination.parent,
+        ) as tmp_dir:
             tmp_path = Path(tmp_dir) / destination.name
             with request.urlopen(  # noqa: S310
                 url,

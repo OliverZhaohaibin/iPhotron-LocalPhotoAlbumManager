@@ -80,17 +80,10 @@ function Resolve-BuildPython {
         }) | Out-Null
     }
 
-    $probeScript = @'
-import importlib.util
-import sys
-
-if sys.version_info < (3, 12):
-    raise SystemExit(f"Python 3.12 or newer is required, found {sys.version.split()[0]}")
-if importlib.util.find_spec("nuitka") is None:
-    raise SystemExit("Nuitka is not installed in this Python environment")
-print(sys.executable)
-print(sys.version.split()[0])
-'@
+    # Windows PowerShell 5.1 rebuilds the native command line before invoking
+    # python.exe. Keep this probe on one line and use only Python single-quoted
+    # strings so embedded double quotes cannot be stripped during that step.
+    $probeScript = "import importlib.util, sys; v=sys.version.split()[0]; ok=sys.version_info >= (3, 12) and importlib.util.find_spec('nuitka') is not None; print(sys.executable); print(v); raise SystemExit(0 if ok else 'Python 3.12+ with Nuitka installed is required')"
     $attempts = New-Object System.Collections.Generic.List[string]
 
     foreach ($candidate in $candidates) {
@@ -105,8 +98,18 @@ print(sys.version.split()[0])
         }
 
         [string[]]$prefixArgs = $candidate.PrefixArgs
-        $probeOutput = @(& $resolvedExecutable @prefixArgs -c $probeScript 2>&1)
-        $probeExitCode = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # A rejected candidate is expected to write to stderr. Do not let
+            # Windows PowerShell convert that output into a terminating
+            # NativeCommandError; capture it and continue to the next candidate.
+            $ErrorActionPreference = 'Continue'
+            $probeOutput = @(& $resolvedExecutable @prefixArgs -c $probeScript 2>&1)
+            $probeExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($probeExitCode -eq 0 -and $probeOutput.Count -ge 2) {
             return [pscustomobject]@{
                 Executable = $resolvedExecutable
@@ -178,6 +181,9 @@ if ($IncludeOptionalAssets) {
 if (-not $IconPath) {
     $IconPath = $defaultIcon
 }
+elseif (-not [IO.Path]::IsPathRooted($IconPath)) {
+    $IconPath = Join-Path $repoRoot $IconPath
+}
 Assert-Exists $IconPath
 $IconPath = (Get-Item -LiteralPath $IconPath).FullName
 if ([IO.Path]::GetExtension($IconPath) -ine '.ico') {
@@ -188,6 +194,9 @@ $pythonInvocation = Resolve-BuildPython -RequestedPython $PythonExe -RepositoryR
 $PythonExe = $pythonInvocation.Executable
 [string[]]$pythonPrefixArgs = $pythonInvocation.PrefixArgs
 
+if (-not [IO.Path]::IsPathRooted($OutputDir)) {
+    $OutputDir = Join-Path $repoRoot $OutputDir
+}
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $OutputDir = (Get-Item -LiteralPath $OutputDir).FullName
 $compilationReport = Join-Path $OutputDir 'nuitka-compilation-report.xml'

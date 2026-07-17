@@ -269,6 +269,12 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 `
   -OutputDir build
 ```
 
+Windows Explorer's **Run with PowerShell** action is also supported. Relative
+output and icon paths are resolved from the repository root, so the default
+output remains `<repository>\build` even when Explorer starts PowerShell with a
+different working directory. Running from an existing PowerShell window is
+still preferable for troubleshooting because the console remains open.
+
 With `-IncludeOptionalAssets`, the script performs these map-specific jobs
 before invoking Nuitka:
 

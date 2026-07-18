@@ -1,6 +1,6 @@
 # Gallery → Detail GPU-first 打开链路重构
 
-> 状态：架构目标已冻结；Phase 1–2 已完成；Phase 3 代码与自动化完成、packaged 性能待验证，实际结果见各阶段 handoff
+> 状态：架构目标已冻结；Phase 1–4 代码与自动化已完成；packaged 性能待验证，实际结果见各阶段 handoff
 > 文档版本：1.0
 > 创建日期：2026-07-18
 > 适用范围：Gallery 点击静态照片至 Detail/Edit 最终呈现

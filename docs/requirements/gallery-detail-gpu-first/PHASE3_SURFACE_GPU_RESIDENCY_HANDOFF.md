@@ -4,7 +4,8 @@
 > Phase 3 状态：代码与自动化测试完成；三平台 packaged 性能采样未执行
 > 当前分支：`codex/gallery-detail-gpu-first-phase1`
 > 基线提交：`5d5a8d490a5110fb9dec850452bfdafdad88ef50`
-> 工作树状态：Phase 3 为基线之上的未提交变更；交付前无已知自动化失败
+> 最终交付提交：`0849d624f428bea730a9471324aee5673b4469f7`
+> 历史工作树状态：Phase 3 已包含在上述最终交付提交中；交付时工作树 clean
 
 本文只记录 Phase 3 的真实落地结果。Phase 1–2 历史分别见
 [`PHASE1_REQUEST_SCHEDULER_HANDOFF.md`](PHASE1_REQUEST_SCHEDULER_HANDOFF.md) 和

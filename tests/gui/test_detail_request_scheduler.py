@@ -17,7 +17,7 @@ from iPhoto.gui.detail_request_scheduler import DetailStillRequestScheduler
 
 class _WorkerSignals(QObject):
     started = Signal(object)
-    completed = Signal(object, dict)
+    completed = Signal(object)
     failed = Signal(Path, str)
     finished = Signal(object)
 
@@ -76,7 +76,7 @@ class _FakePool:
             decode_level=worker.request.decode_level or "full",
             backend="fake",
         )
-        worker.signals.completed.emit(surface, {})
+        worker.signals.completed.emit(surface)
         worker.signals.finished.emit(worker)
 
     def clear(self) -> None:
@@ -266,7 +266,7 @@ def test_neighbor_window_runs_one_speculative_decoder_at_a_time_and_warms_both(
     scheduler, pool, workers = _harness()
     warmed: list[tuple[str | None, Path]] = []
     scheduler.warmed.connect(
-        lambda request, surface, _adjustments: warmed.append(
+        lambda request, surface: warmed.append(
             (request.residency_slot, surface.decode_key.source)
         )
     )
@@ -303,7 +303,7 @@ def test_old_neighbor_window_result_is_not_published(tmp_path: Path) -> None:
     scheduler, pool, workers = _harness()
     warmed: list[Path] = []
     scheduler.warmed.connect(
-        lambda _request, surface, _adjustments: warmed.append(surface.decode_key.source)
+        lambda _request, surface: warmed.append(surface.decode_key.source)
     )
     old = _request(
         tmp_path / "old.jpg",

@@ -33,8 +33,8 @@ class DetailStillRequestScheduler(QObject):
     are allowed to finish without publishing into the active generation.
     """
 
-    ready = Signal(int, object, dict)
-    warmed = Signal(object, object, dict)
+    ready = Signal(int, object)
+    warmed = Signal(object, object)
     failed = Signal(int, Path, str)
     finished = Signal(object)
 
@@ -246,8 +246,7 @@ class DetailStillRequestScheduler(QObject):
         signals = worker.signals
         signals.started.connect(self._on_worker_started)
         signals.completed.connect(
-            lambda surface, adjustments, active=worker:
-            self._on_worker_completed(surface, adjustments, active)
+            lambda surface, active=worker: self._on_worker_completed(surface, active)
         )
         signals.failed.connect(
             lambda source, message, active=worker:
@@ -295,7 +294,6 @@ class DetailStillRequestScheduler(QObject):
     def _on_worker_completed(
         self,
         surface: DecodedSurface,
-        adjustments: dict,
         worker: object,
     ) -> None:
         entry = self._entry_by_worker_id.get(id(worker))
@@ -308,7 +306,7 @@ class DetailStillRequestScheduler(QObject):
                 request.residency_slot is not None
                 and request.window_generation == self._active_window_generation
             ):
-                self.warmed.emit(request, surface, dict(adjustments))
+                self.warmed.emit(request, surface)
             return
         if generation is None or generation != self._current_generation:
             emit_detail_event(
@@ -318,7 +316,7 @@ class DetailStillRequestScheduler(QObject):
                 suffix=entry.key.source.suffix.lower(),
             )
             return
-        self.ready.emit(generation, surface, dict(adjustments))
+        self.ready.emit(generation, surface)
 
     def _on_worker_failed(self, source: Path, message: str, worker: object) -> None:
         entry = self._entry_by_worker_id.get(id(worker))

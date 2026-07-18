@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColorSpace, QImage, QImageReader
 
+from iPhoto.core.color_resolver import ColorStats
 from iPhoto.core.raw_processor import is_raw_extension
 from iPhoto.gui.detail_pipeline import (
     DetailDecodeKey,
@@ -47,6 +48,7 @@ class DecodedSurface:
     decoded_size: tuple[int, int]
     decode_level: DetailDecodeLevel
     backend: str
+    color_stats: ColorStats = ColorStats()
     fallback: str | None = None
     pixel_format: str = "rgba8888"
     color_space: str = "srgb"

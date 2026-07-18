@@ -28,7 +28,7 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
 
 - cold decode：清空 Detail surface/GPU cache 后打开，必须出现 `surface_cache_miss` 和
   `backend_selected`。
-- hot disk/mapped surface：保留 `<library>/.iPhoto/cache/detail-surfaces/v1`，重启或清空内存层；
+- hot disk/mapped surface：保留 `<library>/.iPhoto/cache/detail-surfaces/v2`，重启或清空内存层；
   必须出现 tier=`disk`/`memory` 的 `surface_cache_hit`。
 - hot GPU：不离开当前图库并重访 current/previous/next；必须出现 `gpu_cache_hit`，同 key 不得新增
   `gpu_upload`。
@@ -39,6 +39,21 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
 `lod_upgrade_requested/presented` 和 `context_rebuild`。主动 zoom 用独立 generation 统计；LOD 替换前的旧层
 继续显示，但只有新纹理实际 draw 后才能记录 `lod_upgrade_presented`。`tools/detail_benchmark.py` schema 2
 兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
+
+Phase 4 增加共享 render session 采样。每张静态照片在已完成首次 Detail 呈现后，分别执行至少 30 次：
+
+- Detail → Edit → Detail Cancel：应出现 `render_session_acquired`、`edit_state_updated`、
+  `render_session_released(committed=false)`；区间内 `decode_started/backend_selected/gpu_upload` 增量均为 0。
+- Detail → Edit → Detail Done：写入 sidecar 后应出现 `render_session_released(committed=true)`，不得通过
+  `MediaRestoreRequest` 重放静态 Detail；同 source texture key 保持不变。
+- Edit fullscreen enter/exit：只允许 viewport/LOD 事件；不得出现同步 source load、CPU preview session 或
+  以 `Path` 为 key 的新 GPU upload。
+- Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
+  stale/failed upgrade 不得替换 current texture。
+
+同时保留 `render_session_created/acquired/released` 和 `edit_state_updated`。ColorStats 从 surface cache v2 header
+复用；同 source revision 跨 LOD 的统计计算次数必须为 1。packaged 日志只能证明实际运行结果，不能以
+session 单测或 shader compile 代替三平台数据。
 
 JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总表至少包含样本数、level 分布、backend
 分布、fallback 次数/比例、surface 尺寸和 click-to-present P50/P95。插件或系统能力不同导致的 backend

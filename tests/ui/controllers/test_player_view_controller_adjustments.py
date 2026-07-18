@@ -71,46 +71,28 @@ def test_path_only_prefetch_uses_the_display_image_fallback_identity() -> None:
     assert intent.reason == "prefetch"
 
 
-def test_adjusted_image_worker_skips_color_stats_without_adjustments() -> None:
+def test_adjusted_image_worker_publishes_empty_raw_state() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()
     request = _request(source)
     backend = Mock(decode=Mock(return_value=_surface(request)))
-    with patch(
-        "iPhoto.gui.ui.controllers.player_view_controller.compute_color_statistics",
-    ) as compute_stats:
-        worker = _AdjustedImageWorker(request, signals, backend)
-        worker.run()
+    worker = _AdjustedImageWorker(request, signals, backend)
+    worker.run()
 
     backend.decode.assert_called_once_with(request, worker)
-    compute_stats.assert_not_called()
-    signals.completed.emit.assert_called_once_with(backend.decode.return_value, {})
+    signals.completed.emit.assert_called_once_with(backend.decode.return_value)
 
 
-def test_adjusted_image_worker_resolves_prepared_adjustments() -> None:
+def test_adjusted_image_worker_publishes_raw_adjustments_without_resolving() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()
     request = _request(source, {"Exposure": 0.5})
     surface = _surface(request)
     backend = Mock(decode=Mock(return_value=surface))
-    with patch(
-        "iPhoto.gui.ui.controllers.player_view_controller.compute_color_statistics",
-        return_value="stats",
-    ) as compute_stats:
-        with patch(
-            "iPhoto.gui.ui.controllers.player_view_controller.resolve_adjustment_mapping",
-            return_value={"Exposure": 0.5},
-        ) as resolve:
-            worker = _AdjustedImageWorker(request, signals, backend)
-            worker.run()
+    worker = _AdjustedImageWorker(request, signals, backend)
+    worker.run()
 
-    compute_stats.assert_called_once_with(surface.image)
-    resolve.assert_called_once_with(
-        {"Exposure": 0.5},
-        stats="stats",
-        normalize_bw_for_render=True,
-    )
-    signals.completed.emit.assert_called_once_with(surface, {"Exposure": 0.5})
+    signals.completed.emit.assert_called_once_with(surface)
 
 
 def test_adjusted_image_worker_uses_viewport_backend_once() -> None:
@@ -124,7 +106,7 @@ def test_adjusted_image_worker_uses_viewport_backend_once() -> None:
 
     backend.decode.assert_called_once_with(request, worker)
     assert surface.decoded_size == (1600, 1200)
-    signals.completed.emit.assert_called_once_with(surface, {})
+    signals.completed.emit.assert_called_once_with(surface)
 
 
 def test_lod_upgrade_failure_preserves_the_presented_surface() -> None:

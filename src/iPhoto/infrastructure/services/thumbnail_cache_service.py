@@ -12,8 +12,6 @@ from typing import Deque, Dict, Literal, Optional, Set
 
 import numpy as np
 from PySide6.QtCore import (
-    QFile,
-    QIODevice,
     QObject,
     QRunnable,
     QSize,
@@ -49,6 +47,8 @@ from iPhoto.utils import image_loader
 
 _LOGGER = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_QIMAGE_READER_FILE_NOT_FOUND_ERROR = QImageReader.ImageReaderError.FileNotFoundError
+_QIMAGE_READER_DEVICE_ERROR = QImageReader.ImageReaderError.DeviceError
 
 
 def _startup_hang_diag_enabled() -> bool:
@@ -2715,37 +2715,28 @@ class ThumbnailCacheService(QObject):
         if cancellation is not None and cancellation.cancelled():
             outcome = "cancelled"
         else:
-            handle = QFile(str(disk_file))
-            if not handle.open(QIODevice.OpenModeFlag.ReadOnly):
-                open_finished = decode_finished = monotonic_ms()
-                error_text = handle.errorString().lower()
-                outcome = (
-                    "miss"
-                    if any(
-                        marker in error_text
-                        for marker in ("no such", "not found", "cannot find")
-                    )
-                    else "read_error"
-                )
+            # Give QImageReader the native filename instead of a PySide QFile
+            # wrapper. Image plugins may query a QIODevice's virtual methods
+            # while holding Qt's process-wide decoder lock; re-entering Python
+            # there can deadlock with another decoder thread that holds the GIL.
+            reader = QImageReader(str(disk_file))
+            reader.setAutoTransform(True)
+            if target_size is not None and target_size.isValid() and not target_size.isEmpty():
+                reader.setScaledSize(target_size)
+            open_finished = monotonic_ms()
+            image = reader.read()
+            decode_finished = monotonic_ms()
+            if image is not None and not image.isNull():
+                outcome = "hit"
             else:
-                open_finished = monotonic_ms()
-                try:
-                    if cancellation is not None and cancellation.cancelled():
-                        outcome = "cancelled"
-                    else:
-                        reader = QImageReader(handle)
-                        reader.setAutoTransform(True)
-                        if target_size is not None and target_size.isValid() and not target_size.isEmpty():
-                            reader.setScaledSize(target_size)
-                        image = reader.read()
-                        decode_finished = monotonic_ms()
-                        outcome = (
-                            "hit"
-                            if image is not None and not image.isNull()
-                            else "decode_error"
-                        )
-                finally:
-                    handle.close()
+                error = reader.error()
+                if error == _QIMAGE_READER_FILE_NOT_FOUND_ERROR:
+                    outcome = "miss"
+                elif error == _QIMAGE_READER_DEVICE_ERROR:
+                    outcome = "read_error"
+                else:
+                    outcome = "decode_error"
+                image = None
         if cancellation is not None and cancellation.cancelled():
             outcome = "cancelled"
             image = None

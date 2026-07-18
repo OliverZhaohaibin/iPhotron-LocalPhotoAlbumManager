@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,8 +20,6 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QLabel, QStackedWidget, QWidget
 
 from ....application.ports import EditServicePort
-from ....core.adjustment_mapping import resolve_adjustment_mapping
-from ....core.color_resolver import compute_color_statistics
 from ....gui.detail_decode_backend import (
     DecodeCancelledError,
     DecodedSurface,
@@ -42,6 +41,7 @@ from ....gui.detail_profile import (
     shutdown_detail_profile,
 )
 from ....gui.detail_request_scheduler import DetailStillRequestScheduler
+from ....gui.detail_render_session import EditRenderState, PhotoRenderSessionHandle
 from ....gui.detail_surface_cache import CachedStillDecodeBackend
 from ....gui.i18n import tr
 from ..widgets.gl_image_viewer import GLImageViewer
@@ -55,8 +55,8 @@ class _AdjustedImageSignals(QObject):
     started = Signal(object)
     """Emitted immediately before the runnable enters its decode path."""
 
-    completed = Signal(object, dict)
-    """Emitted with a detached DecodedSurface and shader adjustments."""
+    completed = Signal(object)
+    """Emitted with one detached neutral DecodedSurface."""
 
     failed = Signal(Path, str)
     """Emitted when loading or processing the image fails."""
@@ -133,20 +133,12 @@ class _AdjustedImageWorker(QRunnable):
             adjustments_started = time.perf_counter()
             active_request = self._request
             raw_adjustments = dict(active_request.raw_adjustments or {})
-            adjustments: dict = {}
-            if raw_adjustments:
-                stats = compute_color_statistics(surface.image)
-                adjustments = resolve_adjustment_mapping(
-                    raw_adjustments,
-                    stats=stats,
-                    normalize_bw_for_render=True,
-                )
             log_detail_profile(
                 "still_worker",
                 "adjustments",
                 (time.perf_counter() - adjustments_started) * 1000.0,
                 path=self._source.name,
-                adjustments=len(adjustments),
+                adjustments=len(raw_adjustments),
             )
         except Exception as exc:  # noqa: BLE001  # pragma: no cover - resolver-specific
             if not self._cancelled:
@@ -160,7 +152,7 @@ class _AdjustedImageWorker(QRunnable):
             "total",
             (time.perf_counter() - started) * 1000.0,
             path=self._source.name,
-            has_adjustments=bool(adjustments),
+            has_adjustments=bool(raw_adjustments),
         )
         if self._cancelled:
             return
@@ -188,7 +180,7 @@ class _AdjustedImageWorker(QRunnable):
             height=surface.decoded_size[1],
             decode_level=surface.decode_level,
         )
-        self._signals.completed.emit(surface, adjustments or {})
+        self._signals.completed.emit(surface)
 
 
 class _ScheduledAdjustedImageWorker(_AdjustedImageWorker):
@@ -361,6 +353,9 @@ class PlayerViewController(QObject):
         self._defer_still_updates = False
         self._pending_still: tuple[DecodedSurface, dict] | None = None
         self._current_full_image: QImage | None = None
+        self._render_sessions: OrderedDict[tuple, PhotoRenderSessionHandle] = OrderedDict()
+        self._current_render_session: PhotoRenderSessionHandle | None = None
+        self._next_render_session_id = 1
 
         # Per-widget first-render tracking.  QRhiWidget backing textures are
         # uninitialised (transparent) until the first ``render()`` call fills
@@ -726,10 +721,22 @@ class PlayerViewController(QObject):
         self._active_source_identity = request.source_identity
         self._active_adjustments = dict(adjustments)
         self._request_reason_by_generation[request.generation] = request.reason
+        session = self._session_for_request(request)
+        render_adjustments = dict(adjustments)
+        if session is not None:
+            if dict(session.baseline_state.raw_adjustments) != dict(adjustments):
+                state = EditRenderState.create(
+                    adjustments,
+                    color_stats=session.edit_state.color_stats,
+                    revision=("index", request.source_identity.index_revision),
+                )
+                session.edit_state = state
+                session.baseline_state = state
+            render_adjustments = dict(session.edit_state.shader_adjustments)
         activate_resident = getattr(self._image_viewer, "activate_resident_surface", None)
         if callable(activate_resident) and activate_resident(
             DetailDecodeKey.from_request(request),
-            adjustments,
+            render_adjustments,
             source_size=(request.source_identity.width, request.source_identity.height),
             reset_view=request.reason == "initial",
             generation=request.generation,
@@ -741,6 +748,10 @@ class PlayerViewController(QObject):
             self._loading_source = None
             self._loading_started_at = None
             self._current_decode_level = request.decode_level
+            if session is not None:
+                session.activate_surface(DetailDecodeKey.from_request(request))
+                self._current_render_session = session
+                self._touch_render_session(session)
             return True
         if request.reason in {"zoom", "resize"}:
             emit_detail_event(
@@ -849,11 +860,17 @@ class PlayerViewController(QObject):
         self,
         generation: int,
         surface: DecodedSurface,
-        adjustments: dict,
     ) -> None:
         if generation != self._request_generation:
             return
         source = surface.decode_key.source
+        raw_adjustments = dict(self._active_adjustments)
+        session = self._upsert_render_session(surface, raw_adjustments)
+        if session.edit_references > 0:
+            adjustments = dict(session.edit_state.shader_adjustments)
+        else:
+            adjustments = dict(session.baseline_state.shader_adjustments)
+        self._current_render_session = session
         self._current_decode_level = surface.decode_level
         self._present_generation = generation
         self._present_started_at = self._loading_started_at
@@ -869,15 +886,20 @@ class PlayerViewController(QObject):
         self,
         request: DetailRenderRequest,
         surface: DecodedSurface,
-        adjustments: dict,
     ) -> None:
         if request.window_generation != self._residency_window_generation:
             return
+        self._upsert_render_session(
+            surface,
+            dict(request.raw_adjustments or {}),
+            make_current=False,
+            source_identity=request.source_identity,
+        )
         warmer = getattr(self._image_viewer, "warm_still_surface", None)
         if callable(warmer):
             warmer(
                 surface,
-                adjustments,
+                {},
                 residency_slot=request.residency_slot,
                 window_generation=request.window_generation,
             )
@@ -954,6 +976,8 @@ class PlayerViewController(QObject):
         clear_residency = getattr(self._image_viewer, "clear_still_residency", None)
         if callable(clear_residency):
             clear_residency()
+        self._render_sessions.clear()
+        self._current_render_session = None
 
     def handle_memory_pressure(self) -> None:
         """Drop speculative GPU and mapped surfaces while preserving current draw state."""
@@ -962,6 +986,172 @@ class PlayerViewController(QObject):
         trim_residency = getattr(self._image_viewer, "trim_still_residency", None)
         if callable(trim_residency):
             trim_residency()
+        current = self._current_render_session
+        self._render_sessions.clear()
+        if current is not None:
+            self._render_sessions[self._render_session_key_for_surface(current.current_surface)] = current
+
+    def acquire_render_session(self, source: Path) -> PhotoRenderSessionHandle | None:
+        """Acquire the current still session without reading or decoding the source."""
+
+        session = self._current_render_session
+        if session is None or session.source != Path(source).expanduser().absolute():
+            return None
+        if self._image_viewer.current_image_source() != session.current_texture_key:
+            return None
+        session.edit_references += 1
+        self._touch_render_session(session)
+        emit_detail_event(
+            "render_session_acquired",
+            generation=self._request_generation,
+            asset_id=session.asset_id,
+            session_id=session.session_id,
+        )
+        return session
+
+    def update_render_session(
+        self,
+        handle: PhotoRenderSessionHandle,
+        raw_adjustments: dict,
+    ) -> EditRenderState:
+        """Replace one session's immutable edit state and update GPU uniforms."""
+
+        self._require_current_session(handle)
+        state = handle.next_state(raw_adjustments)
+        self._active_adjustments = dict(state.raw_adjustments)
+        self._image_viewer.set_adjustments(state.shader_adjustments)
+        emit_detail_event(
+            "edit_state_updated",
+            generation=self._request_generation,
+            asset_id=handle.asset_id,
+            session_id=handle.session_id,
+            revision=state.revision[1],
+        )
+        self._pending_zoom_factor = max(1.0, self._image_viewer.zoom_factor())
+        self._lod_timer.start()
+        return state
+
+    def finish_render_session(
+        self,
+        handle: PhotoRenderSessionHandle,
+        *,
+        committed: bool,
+    ) -> EditRenderState:
+        """Commit or discard live edits without replacing the resident texture."""
+
+        self._require_current_session(handle)
+        state = handle.commit_current_state() if committed else handle.restore_baseline()
+        handle.edit_references = max(0, handle.edit_references - 1)
+        self._active_adjustments = dict(state.raw_adjustments)
+        self._image_viewer.set_adjustments(state.shader_adjustments)
+        emit_detail_event(
+            "render_session_released",
+            generation=self._request_generation,
+            asset_id=handle.asset_id,
+            session_id=handle.session_id,
+            committed=bool(committed),
+        )
+        return state
+
+    def render_session_sidebar_input(
+        self,
+        handle: PhotoRenderSessionHandle,
+    ) -> tuple[QImage, object]:
+        """Return a shared neutral snapshot and its precomputed statistics."""
+
+        self._require_current_session(handle)
+        return QImage(handle.current_surface.image), handle.edit_state.color_stats
+
+    def _require_current_session(self, handle: PhotoRenderSessionHandle) -> None:
+        if handle is not self._current_render_session:
+            raise RuntimeError("Photo render session is no longer current")
+
+    @staticmethod
+    def _render_session_key_for_surface(surface: DecodedSurface) -> tuple:
+        key = surface.decode_key
+        return (key.asset_id, key.source, key.source_revision, key.orientation)
+
+    def _session_for_request(
+        self,
+        request: DetailRenderRequest,
+    ) -> PhotoRenderSessionHandle | None:
+        key = DetailDecodeKey.from_request(request)
+        session_key = (key.asset_id, key.source, key.source_revision, key.orientation)
+        return self._render_sessions.get(session_key)
+
+    def _upsert_render_session(
+        self,
+        surface: DecodedSurface,
+        raw_adjustments: dict,
+        *,
+        make_current: bool = True,
+        source_identity: AssetSourceIdentity | None = None,
+    ) -> PhotoRenderSessionHandle:
+        session_key = self._render_session_key_for_surface(surface)
+        session = self._render_sessions.get(session_key)
+        if session is None:
+            identity = source_identity or self._active_source_identity
+            if identity is None or identity.path != surface.decode_key.source:
+                identity = AssetSourceIdentity.create(
+                    surface.decode_key.source,
+                    size_bytes=surface.decode_key.source_revision[1],
+                    source_mtime_ns=(
+                        surface.decode_key.source_revision[2]
+                        if surface.decode_key.source_revision[0] == "mtime"
+                        else 0
+                    ),
+                    width=surface.source_size[0],
+                    height=surface.source_size[1],
+                    orientation=surface.decode_key.orientation,
+                )
+            state = EditRenderState.create(
+                raw_adjustments,
+                color_stats=surface.color_stats,
+                revision=("index", identity.index_revision),
+            )
+            session = PhotoRenderSessionHandle(
+                session_id=self._next_render_session_id,
+                asset_id=surface.decode_key.asset_id,
+                source_identity=identity,
+                current_surface=surface,
+                edit_state=state,
+                baseline_state=state,
+            )
+            self._next_render_session_id += 1
+            emit_detail_event(
+                "render_session_created",
+                generation=self._request_generation if make_current else 0,
+                asset_id=session.asset_id,
+                session_id=session.session_id,
+            )
+        else:
+            session.replace_surface(surface)
+            if session.edit_references == 0 and dict(session.baseline_state.raw_adjustments) != dict(raw_adjustments):
+                state = EditRenderState.create(
+                    raw_adjustments,
+                    color_stats=surface.color_stats,
+                    revision=("index", session.source_identity.index_revision),
+                )
+                session.edit_state = state
+                session.baseline_state = state
+        self._render_sessions.pop(session_key, None)
+        self._render_sessions[session_key] = session
+        while len(self._render_sessions) > 3:
+            oldest_key, oldest = next(iter(self._render_sessions.items()))
+            if oldest is self._current_render_session or oldest.edit_references > 0:
+                self._render_sessions.move_to_end(oldest_key)
+                if all(item.edit_references > 0 or item is self._current_render_session for item in self._render_sessions.values()):
+                    break
+                continue
+            self._render_sessions.pop(oldest_key)
+        if make_current:
+            self._current_render_session = session
+        return session
+
+    def _touch_render_session(self, session: PhotoRenderSessionHandle) -> None:
+        key = self._render_session_key_for_surface(session.current_surface)
+        if self._render_sessions.pop(key, None) is not None:
+            self._render_sessions[key] = session
 
     def current_full_image(self) -> QImage | None:
         """Return the retained viewport surface for compatibility consumers."""

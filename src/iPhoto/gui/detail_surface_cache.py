@@ -17,6 +17,7 @@ from typing import Final
 
 from PySide6.QtGui import QColorSpace, QImage
 
+from iPhoto.core.color_resolver import ColorStats, compute_color_statistics
 from iPhoto.gui.detail_decode_backend import (
     CancellationToken,
     DecodeCancelledError,
@@ -37,7 +38,7 @@ except ImportError:  # pragma: no cover - declared production dependency
 _MIB: Final = 1024 * 1024
 _GIB: Final = 1024 * _MIB
 _MAGIC: Final = b"IPHSURF\0"
-_SCHEMA: Final = 1
+_SCHEMA: Final = 2
 _HEADER_SIZE: Final = 4096
 _PREFIX = struct.Struct("<8sIIIQQ")
 
@@ -164,7 +165,7 @@ class NeutralSurfaceStore:
     def bind_library(self, library_root: Path | None) -> None:
         root = None
         if library_root is not None:
-            root = Path(library_root).expanduser().absolute() / ".iPhoto" / "cache" / "detail-surfaces" / "v1"
+            root = Path(library_root).expanduser().absolute() / ".iPhoto" / "cache" / "detail-surfaces" / "v2"
         with self._lock:
             self._root = root
 
@@ -227,6 +228,7 @@ class NeutralSurfaceStore:
                 raise SurfaceCacheCorruptError("surface cache QImage mapping failed")
             image.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
             source_size = tuple(int(v) for v in metadata.get("source_size", (width, height)))
+            color_stats = ColorStats.ensure(metadata.get("color_stats"))
             return DecodedSurface(
                 image=image,
                 decode_key=DetailDecodeKey.from_request(request),
@@ -234,6 +236,7 @@ class NeutralSurfaceStore:
                 decoded_size=(width, height),
                 decode_level=request.with_decode_level().decode_level or "full",
                 backend=str(metadata.get("backend") or "cache"),
+                color_stats=color_stats,
                 fallback=metadata.get("fallback") or None,
                 cache_tier="disk",
                 backing_owner=owner,
@@ -265,6 +268,17 @@ class NeutralSurfaceStore:
                 "source_size": list(surface.source_size),
                 "backend": surface.backend,
                 "fallback": surface.fallback,
+                "color_stats": {
+                    "saturation_mean": surface.color_stats.saturation_mean,
+                    "saturation_median": surface.color_stats.saturation_median,
+                    "highlight_ratio": surface.color_stats.highlight_ratio,
+                    "dark_ratio": surface.color_stats.dark_ratio,
+                    "skin_ratio": surface.color_stats.skin_ratio,
+                    "cast_magnitude": surface.color_stats.cast_magnitude,
+                    "white_balance_gain_r": surface.color_stats.white_balance_gain[0],
+                    "white_balance_gain_g": surface.color_stats.white_balance_gain[1],
+                    "white_balance_gain_b": surface.color_stats.white_balance_gain[2],
+                },
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -351,10 +365,40 @@ class CachedStillDecodeBackend:
         self._futures: set[Future] = set()
         self._lock = RLock()
         self._shutting_down = False
+        self._color_stats_by_source: OrderedDict[tuple, ColorStats] = OrderedDict()
 
     def bind_library(self, library_root: Path | None) -> None:
         self.memory_cache.clear()
+        with self._lock:
+            self._color_stats_by_source.clear()
         self.store.bind_library(library_root)
+
+    @staticmethod
+    def _source_stats_key(request: DetailRenderRequest) -> tuple:
+        identity = request.source_identity
+        return (identity.path, identity.revision, identity.orientation)
+
+    def _remember_color_stats(
+        self,
+        request: DetailRenderRequest,
+        stats: ColorStats,
+    ) -> ColorStats:
+        key = self._source_stats_key(request)
+        with self._lock:
+            existing = self._color_stats_by_source.pop(key, None)
+            resolved = existing or stats
+            self._color_stats_by_source[key] = resolved
+            while len(self._color_stats_by_source) > 16:
+                self._color_stats_by_source.popitem(last=False)
+            return resolved
+
+    def _cached_color_stats(self, request: DetailRenderRequest) -> ColorStats | None:
+        key = self._source_stats_key(request)
+        with self._lock:
+            stats = self._color_stats_by_source.pop(key, None)
+            if stats is not None:
+                self._color_stats_by_source[key] = stats
+            return stats
 
     def decode(self, request: DetailRenderRequest, cancellation: CancellationToken) -> DecodedSurface:
         prepared = request.with_decode_level()
@@ -363,6 +407,7 @@ class CachedStillDecodeBackend:
             raise DecodeCancelledError("Still-image decode cancelled")
         surface = self.memory_cache.get(key)
         if surface is not None:
+            self._remember_color_stats(prepared, surface.color_stats)
             emit_detail_event("surface_cache_hit", generation=prepared.generation, asset_id=key.asset_id, tier="memory")
             return surface
         try:
@@ -375,10 +420,16 @@ class CachedStillDecodeBackend:
             if cancellation.is_cancelled():
                 raise DecodeCancelledError("Still-image decode cancelled")
             self.memory_cache.put(surface)
+            self._remember_color_stats(prepared, surface.color_stats)
             emit_detail_event("surface_cache_hit", generation=prepared.generation, asset_id=key.asset_id, tier="disk")
             return surface
         emit_detail_event("surface_cache_miss", generation=prepared.generation, asset_id=key.asset_id)
         surface = self._delegate.decode(prepared, cancellation)
+        stats = self._cached_color_stats(prepared)
+        if stats is None:
+            stats = compute_color_statistics(surface.image)
+        stats = self._remember_color_stats(prepared, stats)
+        surface = replace(surface, color_stats=stats)
         self.memory_cache.put(surface)
         self._submit(self._write_surface, prepared, surface)
         return surface

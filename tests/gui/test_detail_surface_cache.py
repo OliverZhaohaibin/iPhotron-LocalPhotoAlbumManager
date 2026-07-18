@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
 from PySide6.QtGui import QImage
 
+from iPhoto.core.color_resolver import ColorStats
 from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_pipeline import (
     AssetSourceIdentity,
@@ -14,11 +16,17 @@ from iPhoto.gui.detail_pipeline import (
     DetailRenderRequest,
 )
 from iPhoto.gui.detail_surface_cache import (
+    CachedStillDecodeBackend,
     MappedSurfaceCache,
     NeutralSurfaceStore,
     SurfaceCacheCorruptError,
     surface_memory_budget_bytes,
 )
+
+
+class _Token:
+    def is_cancelled(self) -> bool:
+        return False
 
 
 def _request(source: Path, *, revision: int = 11, level: int = 1024) -> DetailRenderRequest:
@@ -51,6 +59,7 @@ def _surface(request: DetailRenderRequest, width: int = 8, height: int = 4) -> D
         decoded_size=(width, height),
         decode_level=request.decode_level or "full",
         backend="qt",
+        color_stats=ColorStats(saturation_mean=0.73, cast_magnitude=0.21),
     )
 
 
@@ -89,6 +98,7 @@ def test_disk_store_round_trip_returns_mmap_backed_rgba_surface(tmp_path: Path) 
     assert loaded.backing_owner is not None
     assert loaded.decode_key == original.decode_key
     assert loaded.decoded_size == original.decoded_size
+    assert loaded.color_stats == original.color_stats
     assert bytes(loaded.image.constBits()[:4]) == bytes(original.image.constBits()[:4])
 
 
@@ -128,3 +138,24 @@ def test_unbound_store_is_a_disabled_disk_tier(tmp_path: Path) -> None:
     assert store.entry_path(request) is None
     assert store.load(request) is None
     assert store.write(request, _surface(request)) is False
+
+
+def test_color_stats_are_computed_once_across_lod_decodes(tmp_path: Path) -> None:
+    first = _request(tmp_path / "photo.jpg", level=1024)
+    second = _request(tmp_path / "photo.jpg", level=2048)
+    delegate = Mock()
+    delegate.decode.side_effect = [_surface(first), _surface(second)]
+    backend = CachedStillDecodeBackend(delegate, store=NeutralSurfaceStore(None))
+    stats = ColorStats(saturation_mean=0.91)
+
+    with patch(
+        "iPhoto.gui.detail_surface_cache.compute_color_statistics",
+        return_value=stats,
+    ) as compute:
+        decoded_first = backend.decode(first, _Token())
+        decoded_second = backend.decode(second, _Token())
+
+    backend.shutdown()
+    assert compute.call_count == 1
+    assert decoded_first.color_stats is stats
+    assert decoded_second.color_stats is stats

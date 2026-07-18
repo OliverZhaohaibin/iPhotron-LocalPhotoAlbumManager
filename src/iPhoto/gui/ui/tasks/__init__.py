@@ -8,7 +8,6 @@ from typing import Any
 _EXPORTS = {
     "AssetLoaderWorker": ("asset_loader_worker", "AssetLoaderWorker"),
     "EditSidebarPreviewWorker": ("edit_sidebar_preview_worker", "EditSidebarPreviewWorker"),
-    "ImageLoadWorker": ("image_load_worker", "ImageLoadWorker"),
     "InfoPanelMetadataWorker": ("info_panel_metadata_worker", "InfoPanelMetadataWorker"),
     "ImportSignals": ("import_worker", "ImportSignals"),
     "ImportWorker": ("import_worker", "ImportWorker"),
@@ -16,8 +15,6 @@ _EXPORTS = {
     "IncrementalRefreshWorker": ("incremental_refresh_worker", "IncrementalRefreshWorker"),
     "MoveSignals": ("move_worker", "MoveSignals"),
     "MoveWorker": ("move_worker", "MoveWorker"),
-    "PreviewRenderSignals": ("preview_render_worker", "PreviewRenderSignals"),
-    "PreviewRenderWorker": ("preview_render_worker", "PreviewRenderWorker"),
     "ThumbnailGeneratorWorker": ("thumbnail_generator_worker", "ThumbnailGeneratorWorker"),
     "ThumbnailLoader": ("thumbnail_loader", "ThumbnailLoader"),
 }

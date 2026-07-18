@@ -17,8 +17,6 @@ pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_t
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required", exc_type=ImportError)
 
-from unittest.mock import MagicMock, patch
-
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThreadPool, Signal
 from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
@@ -113,10 +111,21 @@ class _FakeImageViewer(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._has_image_content = True
+        self._current_source = None
+        self._adjustments = {}
         self.setMouseTracking(True)
 
     def set_image(self, *args, **kwargs):
-        pass
+        self._current_source = kwargs.get("image_source")
+
+    def current_image_source(self):
+        return self._current_source
+
+    def set_adjustments(self, adjustments):
+        self._adjustments = dict(adjustments)
+
+    def zoom_factor(self):
+        return 1.0
 
     def set_live_replay_enabled(self, enabled):
         pass
@@ -238,7 +247,6 @@ class TestInitCoverTracking:
                 Path("/tmp/stale.jpg"),
                 QImage(2, 2, QImage.Format.Format_RGBA8888),
             ),
-            {},
         )
 
         apply_ready.assert_not_called()
@@ -254,6 +262,32 @@ class TestInitCoverTracking:
         assert display_image.width() == 1024
         assert controller.current_full_image().width() == 1024
         assert set_image.call_args.kwargs["image_source"] == surface.decode_key
+
+    def test_edit_session_updates_uniforms_without_replacing_texture(self, controller, mocker):
+        path = Path("/tmp/session.jpg")
+        image = QImage(1024, 768, QImage.Format.Format_RGBA8888)
+        surface = _surface(path, image)
+        controller._active_source_identity = AssetSourceIdentity.create(
+            path,
+            width=1024,
+            height=768,
+            source_mtime_ns=1,
+            index_revision=3,
+        )
+        handle = controller._upsert_render_session(surface, {"Exposure": 0.2})
+        controller._image_viewer._current_source = surface.decode_key
+        set_image = mocker.patch.object(controller._image_viewer, "set_image")
+
+        acquired = controller.acquire_render_session(path)
+        state = controller.update_render_session(acquired, {"Exposure": 0.7})
+        controller._lod_timer.stop()
+        restored = controller.finish_render_session(acquired, committed=False)
+
+        assert acquired is handle
+        assert handle.current_texture_key == surface.decode_key
+        assert state.raw_adjustments["Exposure"] == 0.7
+        assert restored.raw_adjustments["Exposure"] == 0.2
+        set_image.assert_not_called()
 
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""

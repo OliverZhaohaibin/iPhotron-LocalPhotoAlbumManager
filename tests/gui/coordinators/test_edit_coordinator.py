@@ -52,6 +52,40 @@ def test_handle_done_clicked_delegates_to_adjustment_committer() -> None:
     coordinator.leave_edit_mode.assert_called_once_with(restore_reason="edit_done")
 
 
+def test_handle_done_clicked_flushes_latest_values_to_render_session() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    session = SimpleNamespace(
+        set_values=Mock(),
+        values=Mock(return_value={"Exposure": 0.9, "Crop_W": 0.8}),
+    )
+    viewport = Mock(crop_values=Mock(return_value={"Crop_W": 0.8}))
+    render_state = SimpleNamespace(shader_adjustments={"Exposure": 0.9})
+    render_controller = Mock(
+        update_render_session=Mock(return_value=render_state),
+    )
+    throttler = Mock()
+    handle = object()
+    coordinator._session = session
+    coordinator._current_source = Path("/fake/photo.jpg")
+    coordinator._active_edit_viewport = Mock(return_value=viewport)
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator._render_session_controller = render_controller
+    coordinator._render_session_handle = handle
+    coordinator._update_throttler = throttler
+    coordinator._pending_session_values = {"Exposure": 0.9}
+    coordinator.leave_edit_mode = Mock()
+
+    EditCoordinator._handle_done_clicked(coordinator)
+
+    render_controller.update_render_session.assert_called_once_with(
+        handle,
+        {"Exposure": 0.9, "Crop_W": 0.8},
+    )
+    assert coordinator._active_adjustments == {"Exposure": 0.9}
+    assert coordinator._pending_session_values is None
+    throttler.stop.assert_called_once_with()
+
+
 def test_leave_edit_mode_requests_video_restore_with_probed_duration() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     source = Path("/fake/video.mp4")
@@ -107,7 +141,7 @@ def test_leave_edit_mode_requests_video_restore_with_probed_duration() -> None:
     coordinator._router.show_detail.assert_called_once_with()
 
 
-def test_leave_edit_mode_still_requests_restore_for_non_video_assets() -> None:
+def test_leave_edit_mode_still_does_not_request_detail_reload() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     source = Path("/fake/photo.jpg")
     viewport = Mock()
@@ -152,13 +186,7 @@ def test_leave_edit_mode_still_requests_restore_for_non_video_assets() -> None:
     ):
         EditCoordinator.leave_edit_mode(coordinator)
 
-    coordinator._media_session.request_restore.assert_called_once_with(
-        MediaRestoreRequest(
-            path=source,
-            reason="edit_exit",
-            duration_sec=None,
-        )
-    )
+    coordinator._media_session.request_restore.assert_not_called()
 
 
 def test_leave_edit_mode_can_emit_edit_done_restore_reason() -> None:

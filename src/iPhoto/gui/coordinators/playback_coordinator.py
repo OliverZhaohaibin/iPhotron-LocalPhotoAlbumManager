@@ -754,6 +754,14 @@ class PlaybackCoordinator(QObject):
     def _handle_edit_requested(self, _path: object) -> None:
         self._hide_face_name_overlay(clear_annotations=False)
 
+    def handle_still_edit_finished(self, path: Path, _reason: str) -> None:
+        """Restore Detail-only overlays without replaying the shared still session."""
+
+        presentation = self._current_presentation
+        if presentation is None or presentation.path != Path(path):
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+
     def _handle_presentation_changed(self, presentation: DetailPresentation) -> None:
         if getattr(self, "_requested_play_row", None) == presentation.row:
             self._requested_play_row = None

@@ -427,7 +427,9 @@ class DesktopCoordinatorRuntime(QObject):
             self._media_session,
             self._adjustment_committer,
             self._edit_service_getter,
+            self._player_view_controller,
         )
+        self._edit.stillEditFinished.connect(self._playback.handle_still_edit_finished)
         self._shortcut_manager.set_edit_coordinator(self._edit)
         return self._edit
 

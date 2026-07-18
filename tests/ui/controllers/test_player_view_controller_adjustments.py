@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -10,7 +11,20 @@ pytest.importorskip("PySide6.QtGui", reason="QtGui is required for GUI tests", e
 
 from PySide6.QtGui import QImage
 
-from iPhoto.gui.ui.controllers.player_view_controller import _AdjustedImageWorker
+from iPhoto.gui.ui.controllers.player_view_controller import (
+    PlayerViewController,
+    _AdjustedImageWorker,
+)
+
+
+def test_path_only_prefetch_uses_the_display_image_fallback_identity() -> None:
+    source = Path("/tmp/photo.jpg")
+    scheduler = Mock(prefetch=Mock(return_value=True))
+    controller = SimpleNamespace(_still_scheduler=scheduler)
+
+    assert PlayerViewController.prefetch_image(controller, source)
+
+    scheduler.prefetch.assert_called_once_with(asset_id="", source=source)
 
 
 def test_adjusted_image_worker_skips_color_stats_without_sidecar() -> None:

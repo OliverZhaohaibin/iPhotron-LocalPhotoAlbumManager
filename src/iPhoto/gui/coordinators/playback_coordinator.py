@@ -312,6 +312,7 @@ class PlaybackCoordinator(QObject):
         self._info_panel: InfoPanel | None = None
         self._active_live_motion: Path | None = None
         self._active_live_still: Path | None = None
+        self._active_live_asset_id: str = ""
         self._resume_after_transition = False
         self._trim_in_ms = 0
         self._trim_out_ms = 0
@@ -900,6 +901,7 @@ class PlaybackCoordinator(QObject):
         source = presentation.path
         self._active_live_motion = None
         self._active_live_still = None
+        self._active_live_asset_id = ""
 
         self._favorite_button.setEnabled(presentation.can_toggle_favorite)
         self._info_button.setEnabled(True)
@@ -1156,6 +1158,7 @@ class PlaybackCoordinator(QObject):
             return
         self._active_live_motion = motion_path
         self._active_live_still = presentation.path
+        self._active_live_asset_id = presentation.asset_id
         self._hide_face_name_overlay(clear_annotations=False)
         self._player_view.defer_still_updates(True)
         self._trim_in_ms = 0
@@ -1192,10 +1195,12 @@ class PlaybackCoordinator(QObject):
         if not self._active_live_motion or not self._active_live_still:
             return
         still = self._active_live_still
+        asset_id = self._active_live_asset_id
         self._active_live_motion = None
+        self._active_live_asset_id = ""
         self._player_view.defer_still_updates(False)
         if not self._player_view.apply_pending_still():
-            self._player_view.display_image(still)
+            self._player_view.display_image(still, asset_id=asset_id)
         self._player_bar.setEnabled(False)
         self._player_view.show_live_badge()
         self._player_view.set_live_replay_enabled(True)
@@ -1246,13 +1251,13 @@ class PlaybackCoordinator(QObject):
         prefetch_many = getattr(self._player_view, "prefetch_images", None)
         if not callable(descriptor_getter) or not callable(prefetch_many):
             return
-        sources: list[Path] = []
+        descriptors: list[DetailPrefetchDescriptor | Path] = []
         for candidate_row in (row - 1, row + 1):
             descriptor = descriptor_getter(candidate_row)
             if descriptor is not None and not descriptor.is_video:
-                sources.append(descriptor.path)
-        if sources:
-            prefetch_many(sources)
+                descriptors.append(descriptor)
+        if descriptors:
+            prefetch_many(descriptors)
 
     def _schedule_recognition_overlay(
         self,

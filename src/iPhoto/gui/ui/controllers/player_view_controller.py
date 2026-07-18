@@ -457,13 +457,16 @@ class PlayerViewController(QObject):
             source = descriptor.path
         else:
             source = Path(descriptor)
-            asset_id = str(source)
+            asset_id = ""
         return self._still_scheduler.prefetch(asset_id=asset_id, source=source)
 
-    def prefetch_images(self, sources: list[Path]) -> bool:
+    def prefetch_images(
+        self,
+        candidates: list[DetailPrefetchDescriptor | Path],
+    ) -> bool:
         """Compatibility helper; Phase 1 admits only the first candidate."""
 
-        return bool(sources) and self.prefetch_image(Path(sources[0]))
+        return bool(candidates) and self.prefetch_image(candidates[0])
 
     def _on_scheduled_image_ready(
         self,

@@ -187,9 +187,10 @@ class DetailStillRequestScheduler(QObject):
             if entry.state == "queued" and self._pool.tryTake(entry.worker):
                 self._retire_entry(entry, cancel=False)
         self._pool.clear()
-        self._pool.waitForDone(max(0, int(timeout_ms)))
-        for entry in tuple(self._inflight_by_key.values()):
-            self._retire_entry(entry, cancel=False)
+        completed = self._pool.waitForDone(max(0, int(timeout_ms)))
+        if completed:
+            for entry in tuple(self._inflight_by_key.values()):
+                self._retire_entry(entry, cancel=False)
 
     def _create_entry(
         self,

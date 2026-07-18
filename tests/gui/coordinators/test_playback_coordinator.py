@@ -12,12 +12,13 @@ pytest.importorskip("PySide6", reason="PySide6 is required for playback coordina
 from iPhoto.application.ports import LocationWriteJobRecord
 from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+from iPhoto.gui.detail_pipeline import DetailPrefetchDescriptor
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
-from iPhoto.people.service import ManualFaceAddResult, PeopleService
 from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.people.service import ManualFaceAddResult, PeopleService
 from maps.osmand_search import SearchSuggestion
 
 
@@ -512,6 +513,57 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
     )
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
     coordinator._refresh_face_name_overlay_for_presentation.assert_not_called()
+
+
+def test_live_photo_fallback_reuses_the_asset_identity() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    coordinator._active_live_motion = Path("/fake/photo.mov")
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = "asset-1"
+    coordinator._player_view = Mock(
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=False),
+        display_image=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+
+    coordinator._player_view.display_image.assert_called_once_with(
+        still,
+        asset_id="asset-1",
+    )
+    assert coordinator._active_live_asset_id == ""
+
+
+def test_neighbor_prefetch_preserves_asset_descriptors() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    previous = DetailPrefetchDescriptor(
+        row=1,
+        asset_id="asset-previous",
+        path=Path("/fake/previous.heic"),
+        is_video=False,
+    )
+    following = DetailPrefetchDescriptor(
+        row=3,
+        asset_id="asset-following",
+        path=Path("/fake/following.heic"),
+        is_video=False,
+    )
+    coordinator._asset_model = Mock(
+        detail_prefetch_descriptor=Mock(side_effect=[previous, following]),
+    )
+    coordinator._player_view = Mock(prefetch_images=Mock())
+
+    PlaybackCoordinator._prefetch_neighbor_stills(coordinator, 2)
+
+    coordinator._player_view.prefetch_images.assert_called_once_with(
+        [previous, following]
+    )
 
 
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:

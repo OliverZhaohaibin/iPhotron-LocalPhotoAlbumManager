@@ -37,6 +37,7 @@ class _FakePool:
         self.starts: list[tuple[_FakeWorker, int]] = []
         self.cleared = False
         self.wait_timeout: int | None = None
+        self.wait_result = True
 
     def start(self, worker: _FakeWorker, priority: int) -> None:
         self.starts.append((worker, priority))
@@ -65,7 +66,7 @@ class _FakePool:
 
     def waitForDone(self, timeout_ms: int) -> bool:
         self.wait_timeout = timeout_ms
-        return True
+        return self.wait_result
 
 
 def _harness() -> tuple[
@@ -173,3 +174,23 @@ def test_shutdown_cancels_and_releases_queued_workers(tmp_path: Path) -> None:
     assert scheduler.inflight_count == 0
     assert pool.cleared
     assert pool.wait_timeout == 25
+
+
+def test_shutdown_retains_worker_when_pool_wait_times_out(tmp_path: Path) -> None:
+    scheduler, pool, workers = _harness()
+    source = tmp_path / "slow.raw"
+    assert scheduler.request(asset_id="asset-1", source=source, generation=1)
+    worker = workers[0]
+    pool.mark_running(worker)
+    pool.wait_result = False
+
+    scheduler.shutdown(timeout_ms=25)
+
+    assert worker.cancelled
+    assert not worker.auto_delete
+    assert scheduler.inflight_count == 1
+
+    pool.complete(worker)
+
+    assert worker.auto_delete
+    assert scheduler.inflight_count == 0

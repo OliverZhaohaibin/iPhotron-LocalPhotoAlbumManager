@@ -506,7 +506,10 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
     PlaybackCoordinator._render_presentation(coordinator, presentation)
 
     assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
-    player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
+    player_view.display_image.assert_called_once_with(
+        Path("/fake/photo.heic"),
+        asset_id="asset-1",
+    )
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
     coordinator._refresh_face_name_overlay_for_presentation.assert_not_called()
 

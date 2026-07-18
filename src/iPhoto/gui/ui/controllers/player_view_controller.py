@@ -12,7 +12,6 @@ from PySide6.QtCore import (
     Qt,
     QThread,
     QThreadPool,
-    QTimer,
     Signal,
 )
 from PySide6.QtGui import QImage
@@ -23,9 +22,16 @@ from ....core.color_resolver import compute_color_statistics
 from ....gui.detail_pipeline import (
     DetailFrameCache,
     DetailFrameIdentity,
+    DetailPrefetchDescriptor,
     detail_pipeline_v2_enabled,
+    detail_scheduler_v3_enabled,
 )
-from ....gui.detail_profile import emit_detail_event, log_detail_profile
+from ....gui.detail_profile import (
+    emit_detail_event,
+    log_detail_profile,
+    shutdown_detail_profile,
+)
+from ....gui.detail_request_scheduler import DetailStillRequestScheduler
 from ....gui.i18n import tr
 from ....utils import image_loader
 from ..widgets.gl_image_viewer import GLImageViewer
@@ -35,6 +41,9 @@ from ..widgets.video_area import VideoArea
 
 class _AdjustedImageSignals(QObject):
     """Relay worker completion events back to the GUI thread."""
+
+    started = Signal(object)
+    """Emitted immediately before the runnable enters its decode path."""
 
     completed = Signal(Path, QImage, dict)
     """Emitted when the adjusted image finished loading successfully."""
@@ -67,6 +76,12 @@ class _AdjustedImageWorker(QRunnable):
         self._cancelled = False
         self._submitted_at = time.perf_counter()
 
+    @property
+    def signals(self) -> _AdjustedImageSignals:
+        """Expose the scheduler-owned lifecycle relay."""
+
+        return self._signals
+
     def cancel(self) -> None:
         """Suppress delivery when this request is no longer current."""
 
@@ -75,6 +90,7 @@ class _AdjustedImageWorker(QRunnable):
     def run(self) -> None:  # pragma: no cover - executed on a worker thread
         """Perform the expensive image work outside the GUI thread."""
 
+        self._signals.started.emit(self)
         started = time.perf_counter()
         log_detail_profile(
             "still_worker",
@@ -220,9 +236,14 @@ class PlayerViewController(QObject):
         self._image_viewer.replayRequested.connect(self.liveReplayRequested)
         self._pool = StillImageDecodeScheduler(self)
         self._frame_cache = DetailFrameCache()
-        self._active_workers: set[_AdjustedImageWorker] = set()
-        self._prefetch_worker: _AdjustedImageWorker | None = None
-        self._prefetch_queue: list[Path] = []
+        self._still_scheduler = DetailStillRequestScheduler(
+            pool=self._pool,
+            worker_factory=self._create_adjusted_image_worker,
+            reuse_enabled=detail_scheduler_v3_enabled(),
+            parent=self,
+        )
+        self._still_scheduler.ready.connect(self._on_scheduled_image_ready)
+        self._still_scheduler.failed.connect(self._on_scheduled_image_failed)
         self._request_generation = 0
         self._present_generation = 0
         self._present_started_at: float | None = None
@@ -373,6 +394,7 @@ class PlayerViewController(QObject):
         self,
         source: Path,
         *,
+        asset_id: str = "",
         request_generation: int | None = None,
     ) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
@@ -383,7 +405,6 @@ class PlayerViewController(QObject):
         request_generation = self._request_generation
         self._loading_source = source
         self._loading_started_at = time.perf_counter()
-        self._cancel_stale_image_workers()
 
         # V2 keeps the opaque placeholder visible until the full source image
         # has decoded and is ready for one atomic surface switch.
@@ -399,65 +420,22 @@ class PlayerViewController(QObject):
             suffix=source.suffix.lower(),
         )
 
-        signals = _AdjustedImageSignals()
-        edit_service = self._edit_service_getter() if self._edit_service_getter else None
-        worker = _ScheduledAdjustedImageWorker(
-            source,
-            signals,
-            edit_service=edit_service,
-            frame_cache=self._frame_cache,
+        scheduled = self._still_scheduler.request(
+            asset_id=asset_id,
+            source=source,
+            generation=request_generation,
         )
-        self._active_workers.add(worker)
-
-        signals.completed.connect(
-            lambda img_source, img, adjustments, generation=request_generation, active=worker:
-            self._on_scheduled_image_ready(
-                generation, img_source, img, adjustments, active.frame_identity
-            )
-        )
-        signals.failed.connect(
-            lambda img_source, message, generation=request_generation:
-            self._on_scheduled_image_failed(generation, img_source, message)
-        )
-        signals.finished.connect(self._on_image_worker_finished)
-
-        try:
-            self._pool.start(worker, 1)
-        except RuntimeError as exc:  # 线程池满极少见
-            self._release_worker(worker)
+        if not scheduled:
             self._loading_source = None
             self._loading_started_at = None
-            self.imageLoadingFailed.emit(source, str(exc))
-            return False
-        return True
+        return scheduled
 
     def _cancel_stale_image_workers(self) -> None:
-        self._prefetch_queue.clear()
-        for worker in tuple(self._active_workers):
-            worker.cancel()
-            if self._pool.tryTake(worker):
-                self._release_worker(worker)
+        """Compatibility wrapper for callers invalidating the active generation."""
 
-    def prefetch_image(self, source: Path) -> bool:
-        """Warm exactly one full-source candidate at low priority."""
+        self._still_scheduler.cancel_foreground()
 
-        return self.prefetch_images([source])
-
-    def prefetch_images(self, sources: list[Path]) -> bool:
-        """Warm unique full-source candidates sequentially at low priority."""
-
-        previous = self._prefetch_worker
-        if previous is not None:
-            previous.cancel()
-            if self._pool.tryTake(previous):
-                self._release_worker(previous)
-        self._prefetch_queue = list(dict.fromkeys(Path(value) for value in sources))
-        return self._start_next_prefetch()
-
-    def _start_next_prefetch(self) -> bool:
-        if self._prefetch_worker is not None or not self._prefetch_queue:
-            return False
-        source = self._prefetch_queue.pop(0)
+    def _create_adjusted_image_worker(self, source: Path) -> _ScheduledAdjustedImageWorker:
         signals = _AdjustedImageSignals()
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
         worker = _ScheduledAdjustedImageWorker(
@@ -466,15 +444,26 @@ class PlayerViewController(QObject):
             edit_service=edit_service,
             frame_cache=self._frame_cache,
         )
-        self._prefetch_worker = worker
-        self._active_workers.add(worker)
-        signals.finished.connect(self._on_image_worker_finished)
-        try:
-            self._pool.start(worker, -1)
-        except RuntimeError:
-            self._release_worker(worker)
-            return False
-        return True
+        return worker
+
+    def prefetch_image(
+        self,
+        descriptor: DetailPrefetchDescriptor | Path,
+    ) -> bool:
+        """Warm exactly one full-source candidate at low priority."""
+
+        if isinstance(descriptor, DetailPrefetchDescriptor):
+            asset_id = descriptor.asset_id
+            source = descriptor.path
+        else:
+            source = Path(descriptor)
+            asset_id = str(source)
+        return self._still_scheduler.prefetch(asset_id=asset_id, source=source)
+
+    def prefetch_images(self, sources: list[Path]) -> bool:
+        """Compatibility helper; Phase 1 admits only the first candidate."""
+
+        return bool(sources) and self.prefetch_image(Path(sources[0]))
 
     def _on_scheduled_image_ready(
         self,
@@ -506,16 +495,6 @@ class PlayerViewController(QObject):
             return
         self._on_adjusted_image_failed(source, message)
 
-    def _on_image_worker_finished(self, worker: object) -> None:
-        if isinstance(worker, _AdjustedImageWorker):
-            was_prefetch = worker is self._prefetch_worker
-            self._release_worker(worker)
-            signals = getattr(worker, "_signals", None)
-            if signals is not None:
-                signals.deleteLater()
-            if was_prefetch and self._prefetch_queue:
-                QTimer.singleShot(0, self._start_next_prefetch)
-
     def _on_still_frame_presented(self, source: object) -> None:
         presented_path = (
             source.path if isinstance(source, DetailFrameIdentity) else source
@@ -534,7 +513,7 @@ class PlayerViewController(QObject):
             generation=generation,
         )
         emit_detail_event(
-            "image_presented",
+            "presented",
             generation=generation,
             media_type="image",
         )
@@ -546,9 +525,9 @@ class PlayerViewController(QObject):
         """Cancel queued decodes and wait briefly for active full-image reads."""
 
         self.cancel_pending_image_requests()
-        self._pool.clear()
-        self._pool.waitForDone(max(0, int(timeout_ms)))
+        self._still_scheduler.shutdown(timeout_ms=timeout_ms)
         self._frame_cache.clear()
+        shutdown_detail_profile(timeout_ms=min(max(0, int(timeout_ms)), 1000))
 
     def clear_frame_cache(self) -> None:
         """Drop decoded frames after a library change or memory pressure."""
@@ -744,12 +723,3 @@ class PlayerViewController(QObject):
             path=source.name,
             has_adjustments=bool(adjustments),
         )
-
-    def _release_worker(self, worker: _AdjustedImageWorker) -> None:
-        """Drop completed workers so the thread pool can reclaim resources."""
-
-        if worker in self._active_workers:
-            self._active_workers.remove(worker)
-        if self._prefetch_worker is worker:
-            self._prefetch_worker = None
-        worker.setAutoDelete(True)

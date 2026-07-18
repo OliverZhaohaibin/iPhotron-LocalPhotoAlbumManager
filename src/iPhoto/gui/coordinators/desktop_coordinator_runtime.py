@@ -558,7 +558,7 @@ class DesktopCoordinatorRuntime(QObject):
         ui.grid_view.viewportStateChanged.connect(self._asset_list_vm.update_viewport)
         if hasattr(ui.grid_view, "detailPrefetchRequested"):
             ui.grid_view.detailPrefetchRequested.connect(
-                lambda index: self._playback.prefetch_asset(index.row())
+                self._playback.prefetch_descriptor
             )
 
         # Filmstrip clicks are now handled by PlaybackCoordinator

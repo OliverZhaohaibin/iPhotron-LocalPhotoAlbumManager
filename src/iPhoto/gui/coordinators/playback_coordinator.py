@@ -28,7 +28,11 @@ from PySide6.QtGui import QAction, QColor, QPalette
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.gui.detail_pipeline import VideoPresentationState, detail_pipeline_v2_enabled
+from iPhoto.gui.detail_pipeline import (
+    DetailPrefetchDescriptor,
+    VideoPresentationState,
+    detail_pipeline_v2_enabled,
+)
 from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
@@ -681,7 +685,7 @@ class PlaybackCoordinator(QObject):
             self._play_debounce.start()
 
     def prefetch_asset(self, row: int) -> bool:
-        """Warm one hovered/pressed full still without changing presentation."""
+        """Resolve and warm one hovered still without changing presentation."""
 
         descriptor_getter = getattr(
             self._asset_model,
@@ -691,9 +695,14 @@ class PlaybackCoordinator(QObject):
         if not callable(descriptor_getter):
             return False
         descriptor = descriptor_getter(int(row))
+        return self.prefetch_descriptor(descriptor)
+
+    def prefetch_descriptor(self, descriptor: DetailPrefetchDescriptor | None) -> bool:
+        """Submit the Gallery-owned identity directly to the still scheduler."""
+
         if descriptor is None or descriptor.is_video:
             return False
-        return bool(self._player_view.prefetch_image(descriptor.path))
+        return bool(self._player_view.prefetch_image(descriptor))
 
     def _execute_pending_play(self) -> None:
         row = self._pending_play_row
@@ -962,10 +971,14 @@ class PlaybackCoordinator(QObject):
             if presentation.request_generation > 0:
                 self._player_view.display_image(
                     source,
+                    asset_id=presentation.asset_id,
                     request_generation=presentation.request_generation,
                 )
             else:
-                self._player_view.display_image(source)
+                self._player_view.display_image(
+                    source,
+                    asset_id=presentation.asset_id,
+                )
             log_detail_profile(
                 "playback",
                 "image.display_image",

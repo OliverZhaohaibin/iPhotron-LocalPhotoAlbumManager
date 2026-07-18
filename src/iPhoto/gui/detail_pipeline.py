@@ -170,6 +170,13 @@ def detail_pipeline_v2_enabled() -> bool:
     return value not in {"0", "false", "no", "off"}
 
 
+def detail_scheduler_v3_enabled() -> bool:
+    """Return whether same-source Detail decoder reuse is enabled."""
+
+    value = os.environ.get("IPHOTO_DETAIL_SCHEDULER_V3", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def _normalized(path: Path) -> Path:
     try:
         return Path(path).expanduser().resolve()
@@ -201,4 +208,5 @@ __all__ = [
     "DetailPrefetchDescriptor",
     "VideoPresentationState",
     "detail_pipeline_v2_enabled",
+    "detail_scheduler_v3_enabled",
 ]

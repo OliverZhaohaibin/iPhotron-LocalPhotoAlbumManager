@@ -44,15 +44,18 @@ _RPC_E_CHANGED_MODE = -2147417850
 _GENERIC_READ = 0x80000000
 _WIC_DECODE_METADATA_ON_DEMAND = 0
 _WIC_INTERPOLATION_FANT = 3
+# HRESULT is a signed 32-bit value.  ``ctypes.wintypes`` deliberately does not
+# define it on every supported CPython build, so use the ABI type directly.
+_HRESULT = ctypes.c_int32
 
 
 def _failed(result: int) -> bool:
-    return ctypes.c_long(result).value < 0
+    return _HRESULT(result).value < 0
 
 
 def _check_hresult(result: int, operation: str) -> None:
     if _failed(result):
-        code = ctypes.c_ulong(result).value
+        code = ctypes.c_uint32(result).value
         raise OSError(code, f"{operation} failed with HRESULT 0x{code:08X}")
 
 
@@ -88,9 +91,9 @@ class _ComApartment:
     def enter(cls) -> _ComApartment:
         ole32 = ctypes.WinDLL("ole32", use_last_error=True)
         ole32.CoInitializeEx.argtypes = (ctypes.c_void_p, wintypes.DWORD)
-        ole32.CoInitializeEx.restype = wintypes.HRESULT
+        ole32.CoInitializeEx.restype = _HRESULT
         result = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
-        signed = ctypes.c_long(result).value
+        signed = _HRESULT(result).value
         if _failed(result) and signed != _RPC_E_CHANGED_MODE:
             _check_hresult(result, "CoInitializeEx")
         return cls(ole32=ole32, must_uninitialize=signed != _RPC_E_CHANGED_MODE)
@@ -109,7 +112,7 @@ def _create_factory(apartment: _ComApartment) -> ctypes.c_void_p:
         ctypes.POINTER(_GUID),
         ctypes.POINTER(ctypes.c_void_p),
     )
-    apartment.ole32.CoCreateInstance.restype = wintypes.HRESULT
+    apartment.ole32.CoCreateInstance.restype = _HRESULT
     result = apartment.ole32.CoCreateInstance(
         ctypes.byref(_CLSID_WIC_FACTORY),
         None,
@@ -129,7 +132,7 @@ def _create_decoder(
     create = _method(
         factory,
         3,
-        wintypes.HRESULT,
+        _HRESULT,
         wintypes.LPCWSTR,
         ctypes.POINTER(_GUID),
         wintypes.DWORD,
@@ -153,7 +156,7 @@ def _first_frame(decoder: ctypes.c_void_p) -> ctypes.c_void_p:
     get_frame = _method(
         decoder,
         13,
-        wintypes.HRESULT,
+        _HRESULT,
         wintypes.UINT,
         ctypes.POINTER(ctypes.c_void_p),
     )
@@ -167,7 +170,7 @@ def _source_size(source: ctypes.c_void_p) -> tuple[int, int]:
     get_size = _method(
         source,
         3,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.POINTER(wintypes.UINT),
         ctypes.POINTER(wintypes.UINT),
     )
@@ -200,14 +203,14 @@ def _apply_orientation(
     create = _method(
         factory,
         13,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.POINTER(ctypes.c_void_p),
     )
     _check_hresult(create(factory, ctypes.byref(rotator)), "IWICImagingFactory.CreateBitmapFlipRotator")
     initialize = _method(
         rotator,
         8,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.c_void_p,
         wintypes.DWORD,
     )
@@ -229,14 +232,14 @@ def _scale_source(
     create = _method(
         factory,
         11,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.POINTER(ctypes.c_void_p),
     )
     _check_hresult(create(factory, ctypes.byref(scaler)), "IWICImagingFactory.CreateBitmapScaler")
     initialize = _method(
         scaler,
         8,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.c_void_p,
         wintypes.UINT,
         wintypes.UINT,
@@ -258,14 +261,14 @@ def _convert_rgba(factory: ctypes.c_void_p, source: ctypes.c_void_p) -> ctypes.c
     create = _method(
         factory,
         10,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.POINTER(ctypes.c_void_p),
     )
     _check_hresult(create(factory, ctypes.byref(converter)), "IWICImagingFactory.CreateFormatConverter")
     initialize = _method(
         converter,
         8,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.c_void_p,
         ctypes.POINTER(_GUID),
         wintypes.DWORD,
@@ -299,7 +302,7 @@ def _copy_rgba(source: ctypes.c_void_p, width: int, height: int) -> QImage:
     copy_pixels = _method(
         source,
         7,
-        wintypes.HRESULT,
+        _HRESULT,
         ctypes.c_void_p,
         wintypes.UINT,
         wintypes.UINT,

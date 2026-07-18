@@ -169,6 +169,16 @@ def test_windows_wic_orientation_mapping_covers_exif_transforms() -> None:
     ]
 
 
+def test_windows_wic_hresult_is_a_fixed_signed_32_bit_value() -> None:
+    from ctypes import sizeof
+
+    from iPhoto.gui.detail_decode_windows import _HRESULT, _failed
+
+    assert sizeof(_HRESULT) == 4
+    assert not _failed(0)
+    assert _failed(0x80004005)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows WIC")
 def test_windows_wic_backend_decodes_detached_alpha_surface(tmp_path: Path) -> None:
     from iPhoto.gui.detail_decode_windows import create_windows_wic_backend

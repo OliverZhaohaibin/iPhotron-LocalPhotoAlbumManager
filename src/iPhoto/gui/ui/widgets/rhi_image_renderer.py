@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import struct
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -46,6 +47,7 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from ....core.selective_color_resolver import NUM_RANGES, SAT_GATE_HI, SAT_GATE_LO
+from ....gui.detail_profile import emit_detail_event
 
 from .perspective_math import build_perspective_matrix
 
@@ -164,6 +166,10 @@ class RhiImageRenderer:
         self._tex_uv_fmt: QRhiTexture.Format | None = None
 
         self._pending_rgba_image: QImage | None = None
+        self._pending_still: tuple[object, QImage, bool] | None = None
+        self._still_textures: OrderedDict[object, tuple[QRhiTexture, int]] = OrderedDict()
+        self._active_still_key: object | None = None
+        self._still_budget_bytes = 192 * 1024 * 1024
         self._pending_video_planes: dict[str, Any] | None = None
         self._pending_curve_lut: np.ndarray | None = None
         self._pending_levels_lut: np.ndarray | None = None
@@ -307,6 +313,7 @@ class RhiImageRenderer:
             self._placeholder_y_texture,
             self._placeholder_uv_texture,
             self._placeholder_lut_texture,
+            *(entry[0] for entry in self._still_textures.values()),
         ):
             if resource is None or id(resource) in seen:
                 continue
@@ -324,6 +331,8 @@ class RhiImageRenderer:
     def upload_texture(self, image: QImage) -> tuple[int, int, int]:
         if image.isNull():
             raise ValueError("Cannot upload a null QImage")
+        if self._still_textures:
+            self.clear_still_residency()
         qimage = _qimage_to_rgba(image)
         self._pending_rgba_image = qimage
         self._pending_video_planes = None
@@ -333,6 +342,70 @@ class RhiImageRenderer:
         self._texture_height = qimage.height()
         self._video_format = _VIDEO_FMT_NONE
         return 0, self._texture_width, self._texture_height
+
+    def upload_still_texture(self, key: object, image: QImage) -> tuple[int, int, int]:
+        if self.activate_still_texture(key):
+            return 0, self._texture_width, self._texture_height
+        if image.isNull():
+            raise ValueError("Cannot upload a null QImage")
+        qimage = _qimage_to_rgba(image)
+        self._pending_still = (key, qimage, True)
+        self._pending_rgba_image = None
+        self._pending_video_planes = None
+        self._has_rgba_texture = True
+        self._has_video_texture = False
+        self._texture_width = qimage.width()
+        self._texture_height = qimage.height()
+        return 0, self._texture_width, self._texture_height
+
+    def warm_still_texture(self, key: object, image: QImage) -> bool:
+        if key in self._still_textures:
+            return False
+        if image.isNull():
+            return False
+        self._pending_still = (key, _qimage_to_rgba(image), False)
+        return True
+
+    def activate_still_texture(self, key: object) -> bool:
+        entry = self._still_textures.pop(key, None)
+        if entry is None:
+            return False
+        self._still_textures[key] = entry
+        texture, _size = entry
+        self._tex_rgba = texture
+        self._active_still_key = key
+        size = texture.pixelSize()
+        self._texture_width, self._texture_height = size.width(), size.height()
+        self._has_rgba_texture = True
+        self._has_video_texture = False
+        if self._srb is not None:
+            self._rebuild_srb()
+        return True
+
+    def has_still_texture(self, key: object) -> bool:
+        return key in self._still_textures
+
+    def clear_still_residency(self) -> None:
+        for texture, _size in self._still_textures.values():
+            try:
+                texture.destroy()
+            except RuntimeError:
+                pass
+        self._still_textures.clear()
+        self._active_still_key = None
+        self._pending_still = None
+        self._tex_rgba = self._placeholder_texture
+        self._has_rgba_texture = False
+        if self._srb is not None:
+            self._rebuild_srb()
+
+    def trim_still_residency(self) -> None:
+        for key in tuple(self._still_textures):
+            if key == self._active_still_key:
+                continue
+            texture, size = self._still_textures.pop(key)
+            texture.destroy()
+            emit_detail_event("gpu_evict", generation=0, key=str(key), bytes=size, pressure=True)
 
     def upload_video_frame(self, frame: "QVideoFrame") -> tuple[int, int]:
         if QVideoFrame is None or QVideoFrameFormat is None:
@@ -404,6 +477,7 @@ class RhiImageRenderer:
         return self._last_video_upload_pre_rotated
 
     def delete_texture(self) -> None:
+        self.clear_still_residency()
         self._pending_rgba_image = None
         self._pending_video_planes = None
         self._has_rgba_texture = False
@@ -679,6 +753,62 @@ class RhiImageRenderer:
     def _flush_pending_texture_uploads(self, ru) -> None:
         if self._rhi is None:
             return
+        if self._pending_still is not None:
+            key, image, activate = self._pending_still
+            size = QSize(image.width(), image.height())
+            byte_count = max(0, int(image.bytesPerLine()) * int(image.height()))
+            resident_bytes = sum(entry[1] for entry in self._still_textures.values())
+            reusable_key = None
+            if len(self._still_textures) >= 3 or resident_bytes + byte_count > self._still_budget_bytes:
+                reusable_key = next(
+                    (
+                        candidate
+                        for candidate, entry in self._still_textures.items()
+                        if candidate != self._active_still_key and entry[0].pixelSize() == size
+                    ),
+                    None,
+                )
+            if reusable_key is not None:
+                texture, old_size = self._still_textures.pop(reusable_key)
+                emit_detail_event(
+                    "gpu_evict",
+                    generation=0,
+                    key=str(reusable_key),
+                    bytes=old_size,
+                    reused=True,
+                )
+            else:
+                texture = self._create_texture(QRhiTexture.Format.RGBA8, size, mipmapped=False)
+            ru.uploadTexture(
+                texture,
+                QRhiTextureUploadDescription(
+                    QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(image))
+                ),
+            )
+            self._still_textures[key] = (texture, byte_count)
+            if activate:
+                self._tex_rgba = texture
+                self._active_still_key = key
+                self._texture_width, self._texture_height = image.width(), image.height()
+                self._rebuild_srb()
+            total = sum(entry[1] for entry in self._still_textures.values())
+            while len(self._still_textures) > 3 or total > self._still_budget_bytes:
+                victim = next(
+                    (candidate for candidate in self._still_textures if candidate != self._active_still_key),
+                    None,
+                )
+                if victim is None:
+                    break
+                victim_texture, victim_size = self._still_textures.pop(victim)
+                victim_texture.destroy()
+                total -= victim_size
+                emit_detail_event(
+                    "gpu_evict",
+                    generation=0,
+                    key=str(victim),
+                    bytes=victim_size,
+                )
+            self._pending_still = None
         if self._pending_rgba_image is not None:
             image = self._pending_rgba_image
             size = QSize(image.width(), image.height())

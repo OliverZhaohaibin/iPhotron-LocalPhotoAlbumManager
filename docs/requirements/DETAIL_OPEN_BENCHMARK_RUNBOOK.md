@@ -24,6 +24,22 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
 - `surface_ready`：核对最终 detached surface 的宽高与 decode level。
 - `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。
 
+Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次：
+
+- cold decode：清空 Detail surface/GPU cache 后打开，必须出现 `surface_cache_miss` 和
+  `backend_selected`。
+- hot disk/mapped surface：保留 `<library>/.iPhoto/cache/detail-surfaces/v1`，重启或清空内存层；
+  必须出现 tier=`disk`/`memory` 的 `surface_cache_hit`。
+- hot GPU：不离开当前图库并重访 current/previous/next；必须出现 `gpu_cache_hit`，同 key 不得新增
+  `gpu_upload`。
+- sidecar-only：只修改 `.ipo` 后重访；source revision 不变时 `backend_selected` 增量为 0，已有 GPU
+  texture 的 `gpu_upload` 增量也为 0。
+
+同时保留 `surface_cache_write/corrupt`、`gpu_cache_miss/upload/evict`、
+`lod_upgrade_requested/presented` 和 `context_rebuild`。主动 zoom 用独立 generation 统计；LOD 替换前的旧层
+继续显示，但只有新纹理实际 draw 后才能记录 `lod_upgrade_presented`。`tools/detail_benchmark.py` schema 2
+兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
+
 JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总表至少包含样本数、level 分布、backend
 分布、fallback 次数/比例、surface 尺寸和 click-to-present P50/P95。插件或系统能力不同导致的 backend
 差异必须原样记录，不能用 source/offscreen 单测结果代替 packaged 数据。

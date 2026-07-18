@@ -146,6 +146,24 @@ class GLRenderer:
         """Upload *image* to the GPU and return ``(id, width, height)``."""
         return self._tex_mgr.upload_texture(image)
 
+    def upload_still_texture(self, key: object, image: QImage) -> tuple[int, int, int]:
+        return self._tex_mgr.upload_still_texture(key, image)
+
+    def activate_still_texture(self, key: object) -> bool:
+        return self._tex_mgr.activate_still_texture(key)
+
+    def warm_still_texture(self, key: object, image: QImage) -> bool:
+        return self._tex_mgr.warm_still_texture(key, image)
+
+    def has_still_texture(self, key: object) -> bool:
+        return self._tex_mgr.has_still_texture(key)
+
+    def clear_still_residency(self) -> None:
+        self._tex_mgr.clear_still_residency()
+
+    def trim_still_residency(self) -> None:
+        self._tex_mgr.trim_still_residency()
+
     def upload_video_frame(self, frame) -> tuple[int, int]:
         """Upload a decoded video frame directly as shader-readable textures."""
 

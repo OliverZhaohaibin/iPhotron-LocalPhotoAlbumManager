@@ -30,6 +30,8 @@ def _metric(values: list[float]) -> dict[str, Any]:
 
 def summarize(paths: list[Path]) -> dict[str, Any]:
     transactions: dict[tuple[str, int], dict[str, float]] = defaultdict(dict)
+    event_counts: dict[str, int] = defaultdict(int)
+    cache_tiers: dict[str, int] = defaultdict(int)
     for path in paths:
         with path.open("r", encoding="utf-8") as stream:
             for line in stream:
@@ -41,6 +43,10 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                     continue
                 transactions[(str(path), generation)][stage] = monotonic_ms
+                event_counts[stage] += 1
+                details = event.get("details")
+                if stage == "surface_cache_hit" and isinstance(details, dict):
+                    cache_tiers[str(details.get("tier") or "unknown")] += 1
 
     values: dict[str, list[float]] = defaultdict(list)
     cancelled = 0
@@ -51,7 +57,7 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
         if click is None:
             continue
         route = stages.get("route_visible")
-        image = stages.get("image_presented")
+        image = stages.get("image_presented", stages.get("presented"))
         video = stages.get("video_first_frame_presented")
         face = stages.get("face_presented")
         if route is not None:
@@ -66,11 +72,18 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
             values["image_to_face"].append(max(0.0, face - image))
 
     return {
-        "schema": 1,
+        "schema": 2,
         "input_files": len(paths),
         "transactions": len(transactions),
         "cancelled": cancelled,
         "metrics": {name: _metric(samples) for name, samples in sorted(values.items())},
+        "diagnostics": {
+            "event_counts": dict(sorted(event_counts.items())),
+            "surface_cache_hits": dict(sorted(cache_tiers.items())),
+            "decode_count": event_counts.get("backend_selected", 0),
+            "gpu_upload_count": event_counts.get("gpu_upload", 0),
+            "gpu_cache_hit_count": event_counts.get("gpu_cache_hit", 0),
+        },
     }
 
 
@@ -88,7 +101,7 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, An
                 improvement = round((old - new) / old * 100.0, 2)
             result[f"{key.removesuffix('_ms')}_improvement_percent"] = improvement
         comparisons[name] = result
-    return {"schema": 1, "comparisons": comparisons}
+    return {"schema": 2, "comparisons": comparisons}
 
 
 def _write(payload: dict[str, Any], output: Path | None) -> None:

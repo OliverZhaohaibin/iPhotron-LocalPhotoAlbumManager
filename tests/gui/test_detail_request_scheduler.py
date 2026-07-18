@@ -113,6 +113,8 @@ def _request(
     level: int = 1024,
     revision: int = 1,
     adjustments: dict | None = None,
+    residency_slot: str | None = None,
+    window_generation: int = 0,
 ) -> DetailRenderRequest:
     return DetailRenderRequest(
         generation=generation,
@@ -130,6 +132,8 @@ def _request(
         reason="prefetch" if generation == 0 else "initial",
         decode_level=level,
         raw_adjustments=adjustments,
+        residency_slot=residency_slot,  # type: ignore[arg-type]
+        window_generation=window_generation,
     )
 
 
@@ -254,6 +258,73 @@ def test_different_decode_levels_do_not_reuse_the_same_worker(tmp_path: Path) ->
     assert len(workers) == 2
     assert workers[0].request.decode_level == 1024
     assert workers[1].request.decode_level == 2048
+
+
+def test_neighbor_window_runs_one_speculative_decoder_at_a_time_and_warms_both(
+    tmp_path: Path,
+) -> None:
+    scheduler, pool, workers = _harness()
+    warmed: list[tuple[str | None, Path]] = []
+    scheduler.warmed.connect(
+        lambda request, surface, _adjustments: warmed.append(
+            (request.residency_slot, surface.decode_key.source)
+        )
+    )
+    previous = _request(
+        tmp_path / "previous.jpg",
+        asset_id="previous",
+        generation=0,
+        residency_slot="previous",
+        window_generation=4,
+    )
+    following = _request(
+        tmp_path / "next.jpg",
+        asset_id="next",
+        generation=0,
+        residency_slot="next",
+        window_generation=4,
+    )
+
+    assert scheduler.prefetch_window(previous, following)
+    assert len(workers) == 1
+    pool.mark_running(workers[0])
+    pool.complete(workers[0])
+    assert len(workers) == 2
+    pool.mark_running(workers[1])
+    pool.complete(workers[1])
+
+    assert warmed == [
+        ("previous", previous.source_identity.path),
+        ("next", following.source_identity.path),
+    ]
+
+
+def test_old_neighbor_window_result_is_not_published(tmp_path: Path) -> None:
+    scheduler, pool, workers = _harness()
+    warmed: list[Path] = []
+    scheduler.warmed.connect(
+        lambda _request, surface, _adjustments: warmed.append(surface.decode_key.source)
+    )
+    old = _request(
+        tmp_path / "old.jpg",
+        asset_id="old",
+        generation=0,
+        residency_slot="previous",
+        window_generation=1,
+    )
+    new = _request(
+        tmp_path / "new.jpg",
+        asset_id="new",
+        generation=0,
+        residency_slot="next",
+        window_generation=2,
+    )
+    assert scheduler.prefetch(old)
+    pool.mark_running(workers[0])
+    assert scheduler.prefetch(new)
+    pool.complete(workers[0])
+
+    assert warmed == []
 
 
 def test_shutdown_cancels_and_releases_queued_workers(tmp_path: Path) -> None:

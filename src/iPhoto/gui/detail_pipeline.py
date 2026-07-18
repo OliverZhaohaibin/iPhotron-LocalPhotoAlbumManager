@@ -110,6 +110,7 @@ class DetailGeometryState:
 
 
 DetailRequestReason = Literal["prefetch", "initial", "resize", "zoom"]
+DetailResidencySlot = Literal["previous", "next"]
 DetailDecodeLevel = int | Literal["full"]
 
 
@@ -125,6 +126,9 @@ class DetailRenderRequest:
     texture_limit: int = 8192
     raw_adjustments: Mapping[str, Any] | None = None
     decode_level: DetailDecodeLevel | None = None
+    zoom_factor: float = 1.0
+    residency_slot: DetailResidencySlot | None = None
+    window_generation: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -132,6 +136,8 @@ class DetailRenderRequest:
             "raw_adjustments",
             MappingProxyType(dict(self.raw_adjustments or {})),
         )
+        object.__setattr__(self, "zoom_factor", max(1.0, _finite_float(self.zoom_factor, 1.0)))
+        object.__setattr__(self, "window_generation", _non_negative_int(self.window_generation))
 
     def with_decode_level(self) -> DetailRenderRequest:
         if self.decode_level is not None:
@@ -147,6 +153,9 @@ class DetailRenderRequest:
             texture_limit=self.texture_limit,
             raw_adjustments=dict(self.raw_adjustments or {}),
             decode_level=select_detail_decode_level(self),
+            zoom_factor=self.zoom_factor,
+            residency_slot=self.residency_slot,
+            window_generation=max(0, int(self.window_generation)),
         )
 
 
@@ -155,6 +164,7 @@ class DetailDecodeKey:
     asset_id: str
     source: Path
     source_revision: tuple[str, int, int]
+    orientation: int
     decode_level: DetailDecodeLevel
 
     @classmethod
@@ -166,6 +176,7 @@ class DetailDecodeKey:
             asset_id=str(prepared.asset_id).strip() or identity.path.name,
             source=identity.path,
             source_revision=identity.revision,
+            orientation=identity.orientation,
             decode_level=decode_level,
         )
 
@@ -196,8 +207,13 @@ def select_detail_decode_level(request: DetailRenderRequest) -> DetailDecodeLeve
         abs(geometry.perspective_vertical),
         abs(geometry.perspective_horizontal),
     )
+    zoom_factor = max(1.0, _finite_float(request.zoom_factor, 1.0))
     required = math.ceil(
-        max(source_w, source_h) * fit_scale * straighten_scale * perspective_scale
+        max(source_w, source_h)
+        * fit_scale
+        * straighten_scale
+        * perspective_scale
+        * zoom_factor
     )
     source_longest = max(source_w, source_h)
     required = min(source_longest, max(1, required))
@@ -414,6 +430,14 @@ def _clamp_float(value: object, minimum: float, maximum: float, default: float) 
     return max(minimum, min(maximum, numeric))
 
 
+def _finite_float(value: object, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return numeric if math.isfinite(numeric) else default
+
+
 __all__ = [
     "DETAIL_DECODE_LEVELS",
     "AssetSourceIdentity",
@@ -426,6 +450,7 @@ __all__ = [
     "DetailOpenTrace",
     "DetailPrefetchDescriptor",
     "DetailRenderRequest",
+    "DetailResidencySlot",
     "VideoPresentationState",
     "detail_pipeline_v2_enabled",
     "detail_scheduler_v3_enabled",

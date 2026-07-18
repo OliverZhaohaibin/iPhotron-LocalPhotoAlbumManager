@@ -125,3 +125,37 @@ def test_adjusted_image_worker_uses_viewport_backend_once() -> None:
     backend.decode.assert_called_once_with(request, worker)
     assert surface.decoded_size == (1600, 1200)
     signals.completed.emit.assert_called_once_with(surface, {})
+
+
+def test_lod_upgrade_failure_preserves_the_presented_surface() -> None:
+    source = Path("/tmp/photo.jpg")
+    fail_current = Mock()
+    controller = SimpleNamespace(
+        _request_generation=7,
+        _request_reason_by_generation={7: "zoom"},
+        _loading_source=source,
+        _loading_started_at=1.0,
+        _active_asset_id="asset-1",
+        _on_adjusted_image_failed=fail_current,
+    )
+
+    with patch(
+        "iPhoto.gui.ui.controllers.player_view_controller.emit_detail_event"
+    ) as emit_event:
+        PlayerViewController._on_scheduled_image_failed(
+            controller,
+            7,
+            source,
+            "higher LOD failed",
+        )
+
+    fail_current.assert_not_called()
+    assert controller._loading_source is None
+    assert controller._loading_started_at is None
+    emit_event.assert_called_once_with(
+        "lod_upgrade_failed",
+        generation=7,
+        asset_id="asset-1",
+        reason="zoom",
+        message="higher LOD failed",
+    )

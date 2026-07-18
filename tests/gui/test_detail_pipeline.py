@@ -8,6 +8,7 @@ from PySide6.QtGui import QImage
 
 from iPhoto.gui.detail_pipeline import (
     AssetSourceIdentity,
+    DetailDecodeKey,
     DetailFrameCache,
     DetailFrameIdentity,
     DetailGeometryState,
@@ -22,6 +23,7 @@ def _request(
     viewport: tuple[int, int] = (1200, 800),
     geometry: DetailGeometryState = DetailGeometryState(),
     texture_limit: int = 8192,
+    zoom_factor: float = 1.0,
 ) -> DetailRenderRequest:
     return DetailRenderRequest(
         generation=1,
@@ -39,6 +41,7 @@ def _request(
         geometry=geometry,
         reason="initial",
         texture_limit=texture_limit,
+        zoom_factor=zoom_factor,
     )
 
 
@@ -70,8 +73,38 @@ def test_source_identity_creation_never_stats_on_the_calling_thread(tmp_path: Pa
     assert identity.revision == ("mtime", 100, 200)
 
 
+def test_decode_key_distinguishes_source_orientation(tmp_path: Path) -> None:
+    first = _request(tmp_path)
+    rotated_identity = AssetSourceIdentity.create(
+        first.source_identity.path,
+        size_bytes=first.source_identity.size_bytes,
+        source_mtime_ns=first.source_identity.source_mtime_ns,
+        width=first.source_identity.height,
+        height=first.source_identity.width,
+        orientation=6,
+    )
+    rotated = DetailRenderRequest(
+        generation=first.generation,
+        asset_id=first.asset_id,
+        source_identity=rotated_identity,
+        viewport_physical_size=first.viewport_physical_size,
+        device_pixel_ratio=first.device_pixel_ratio,
+        geometry=first.geometry,
+        reason=first.reason,
+        texture_limit=first.texture_limit,
+        zoom_factor=first.zoom_factor,
+    )
+
+    assert DetailDecodeKey.from_request(first) != DetailDecodeKey.from_request(rotated)
+
+
 def test_viewport_lod_uses_smallest_satisfying_tier(tmp_path: Path) -> None:
     assert select_detail_decode_level(_request(tmp_path)) == 2048
+
+
+def test_active_zoom_only_increases_selected_lod(tmp_path: Path) -> None:
+    assert select_detail_decode_level(_request(tmp_path, zoom_factor=2.0)) == 3072
+    assert select_detail_decode_level(_request(tmp_path, zoom_factor=0.25)) == 2048
 
 
 def test_rotation_crop_and_projection_increase_lod(tmp_path: Path) -> None:

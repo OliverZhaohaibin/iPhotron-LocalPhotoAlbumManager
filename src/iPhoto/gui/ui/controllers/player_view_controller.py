@@ -29,6 +29,7 @@ from ....gui.detail_decode_backend import (
 )
 from ....gui.detail_pipeline import (
     AssetSourceIdentity,
+    DetailDecodeKey,
     DetailGeometryState,
     DetailPrefetchDescriptor,
     DetailRenderRequest,
@@ -41,6 +42,7 @@ from ....gui.detail_profile import (
     shutdown_detail_profile,
 )
 from ....gui.detail_request_scheduler import DetailStillRequestScheduler
+from ....gui.detail_surface_cache import CachedStillDecodeBackend
 from ....gui.i18n import tr
 from ..widgets.gl_image_viewer import GLImageViewer
 from ..widgets.live_badge import LiveBadge
@@ -248,6 +250,9 @@ class _PreparedRequestIntent:
     source_identity: AssetSourceIdentity
     generation: int
     reason: str
+    residency_slot: str | None = None
+    window_generation: int = 0
+    zoom_factor: float = 1.0
 
 
 @dataclass(slots=True)
@@ -290,6 +295,7 @@ class PlayerViewController(QObject):
         placeholder: QWidget,
         live_badge: LiveBadge,
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
+        library_root_getter: Callable[[], Path | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         """Store references to the widgets composing the player area."""
@@ -308,10 +314,13 @@ class PlayerViewController(QObject):
         }
         self._live_badge = live_badge
         self._edit_service_getter = edit_service_getter
+        self._library_root_getter = library_root_getter
         self._image_viewer_index = player_stack.indexOf(image_viewer)
         self._image_viewer.replayRequested.connect(self.liveReplayRequested)
         self._pool = StillImageDecodeScheduler(self)
-        self._decode_backend = DefaultStillDecodeBackend()
+        self._decode_backend = CachedStillDecodeBackend(DefaultStillDecodeBackend())
+        if self._library_root_getter is not None:
+            self._decode_backend.bind_library(self._library_root_getter())
         self._still_scheduler = DetailStillRequestScheduler(
             pool=self._pool,
             worker_factory=self._create_adjusted_image_worker,
@@ -319,6 +328,7 @@ class PlayerViewController(QObject):
             parent=self,
         )
         self._still_scheduler.ready.connect(self._on_scheduled_image_ready)
+        self._still_scheduler.warmed.connect(self._on_scheduled_surface_warmed)
         self._still_scheduler.failed.connect(self._on_scheduled_image_failed)
         self._preparation_pool = QThreadPool(self)
         self._preparation_pool.setMaxThreadCount(1)
@@ -326,6 +336,23 @@ class PlayerViewController(QObject):
         self._preparation_entry_by_worker: dict[int, _PreparationEntry] = {}
         self._pending_layout_intent: tuple[_PreparedRequestIntent, dict] | None = None
         self._request_generation = 0
+        self._residency_window_generation = 0
+        self._active_asset_id = ""
+        self._active_source_identity: AssetSourceIdentity | None = None
+        self._active_adjustments: dict = {}
+        self._current_decode_level: int | str | None = None
+        self._request_reason_by_generation: dict[int, str] = {}
+        self._pending_zoom_factor = 1.0
+        self._lod_timer = QTimer(self)
+        self._lod_timer.setSingleShot(True)
+        self._lod_timer.setInterval(80)
+        self._lod_timer.timeout.connect(self._request_higher_lod)
+        zoom_changed = getattr(self._image_viewer, "zoomChanged", None)
+        if zoom_changed is not None:
+            zoom_changed.connect(self._on_viewer_zoom_changed)
+        viewport_changed = getattr(self._image_viewer, "viewportMetricsChanged", None)
+        if viewport_changed is not None:
+            viewport_changed.connect(self._on_viewport_metrics_changed)
         self._present_generation = 0
         self._present_started_at: float | None = None
         self._present_source: Path | None = None
@@ -405,8 +432,9 @@ class PlayerViewController(QObject):
             self._player_stack.setCurrentWidget(self._placeholder)
         if not self._player_stack.isVisible():
             self._player_stack.show()
-        # 不再上传“空图像”，而是显式清空纹理/图像
-        self._image_viewer.set_image(None, {})
+        # The placeholder is a separate stack page. Keep the bounded still
+        # residency window intact so a hot return can activate its texture
+        # without another upload.
 
     def show_image_surface(self) -> None:
         """Reveal the still-image viewer surface."""
@@ -487,6 +515,7 @@ class PlayerViewController(QObject):
         else:
             self._request_generation = int(request_generation)
         request_generation = self._request_generation
+        self._residency_window_generation += 1
         self._loading_source = source
         self._loading_started_at = time.perf_counter()
 
@@ -562,9 +591,29 @@ class PlayerViewController(QObject):
         self,
         candidates: list[DetailPrefetchDescriptor | Path],
     ) -> bool:
-        """Compatibility helper; Phase 1 admits only the first candidate."""
+        """Warm the previous/next window without occupying both decode lanes."""
 
-        return bool(candidates) and self.prefetch_image(candidates[0])
+        self._residency_window_generation += 1
+        window_generation = self._residency_window_generation
+        accepted = False
+        for slot, candidate in zip(("previous", "next"), candidates[:2], strict=False):
+            if isinstance(candidate, DetailPrefetchDescriptor):
+                identity = candidate.source_identity or AssetSourceIdentity.create(candidate.path)
+                asset_id = candidate.asset_id
+            else:
+                identity = AssetSourceIdentity.create(Path(candidate))
+                asset_id = ""
+            accepted = self._schedule_adjustment_preparation(
+                _PreparedRequestIntent(
+                    asset_id=str(asset_id),
+                    source_identity=identity,
+                    generation=0,
+                    reason="prefetch",
+                    residency_slot=slot,
+                    window_generation=window_generation,
+                )
+            ) or accepted
+        return accepted
 
     def _schedule_adjustment_preparation(self, intent: _PreparedRequestIntent) -> bool:
         identity = intent.source_identity
@@ -634,9 +683,16 @@ class PlayerViewController(QObject):
             viewport_physical_size=physical_size,
             device_pixel_ratio=dpr,
             geometry=DetailGeometryState.from_adjustments(adjustments),
-            reason="prefetch" if intent.reason == "prefetch" else "initial",
+            reason=(
+                intent.reason
+                if intent.reason in {"prefetch", "initial", "resize", "zoom"}
+                else "initial"
+            ),
             texture_limit=self._texture_limit(),
             raw_adjustments=dict(adjustments),
+            zoom_factor=intent.zoom_factor,
+            residency_slot=intent.residency_slot,
+            window_generation=intent.window_generation,
         ).with_decode_level()
         emit_detail_event(
             "level_selected",
@@ -661,7 +717,86 @@ class PlayerViewController(QObject):
             )
         if request.reason == "prefetch":
             return self._still_scheduler.prefetch(request)
+        if request.reason in {"zoom", "resize"} and not self._is_higher_level(
+            request.decode_level,
+            self._current_decode_level,
+        ):
+            return False
+        self._active_asset_id = request.asset_id
+        self._active_source_identity = request.source_identity
+        self._active_adjustments = dict(adjustments)
+        self._request_reason_by_generation[request.generation] = request.reason
+        activate_resident = getattr(self._image_viewer, "activate_resident_surface", None)
+        if callable(activate_resident) and activate_resident(
+            DetailDecodeKey.from_request(request),
+            adjustments,
+            source_size=(request.source_identity.width, request.source_identity.height),
+            reset_view=request.reason == "initial",
+            generation=request.generation,
+        ):
+            self._present_generation = request.generation
+            self._present_started_at = self._loading_started_at
+            self._present_source = request.source_identity.path
+            self.show_image_surface()
+            self._loading_source = None
+            self._loading_started_at = None
+            self._current_decode_level = request.decode_level
+            return True
+        if request.reason in {"zoom", "resize"}:
+            emit_detail_event(
+                "lod_upgrade_requested",
+                generation=request.generation,
+                asset_id=request.asset_id,
+                decode_level=request.decode_level,
+                reason=request.reason,
+            )
         return self._still_scheduler.request(request)
+
+    @staticmethod
+    def _is_higher_level(candidate: object, current: object) -> bool:
+        def rank(value: object) -> int:
+            if value == "full":
+                return 1 << 30
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                return 0
+
+        return rank(candidate) > rank(current)
+
+    def _on_viewer_zoom_changed(self, factor: float) -> None:
+        self._pending_zoom_factor = max(1.0, float(factor))
+        if self._active_source_identity is not None:
+            self._lod_timer.start()
+
+    def _on_viewport_metrics_changed(self) -> None:
+        if self._active_source_identity is None:
+            return
+        zoom_getter = getattr(self._image_viewer, "zoom_factor", None)
+        self._pending_zoom_factor = max(
+            1.0,
+            float(zoom_getter()) if callable(zoom_getter) else self._pending_zoom_factor,
+        )
+        self._lod_timer.start()
+
+    def _request_higher_lod(self) -> None:
+        identity = self._active_source_identity
+        if identity is None or self._loading_source is not None:
+            return
+        self._request_generation += 1
+        generation = self._request_generation
+        self._loading_source = identity.path
+        self._loading_started_at = time.perf_counter()
+        intent = _PreparedRequestIntent(
+            asset_id=self._active_asset_id,
+            source_identity=identity,
+            generation=generation,
+            reason="zoom",
+            zoom_factor=self._pending_zoom_factor,
+        )
+        if not self._dispatch_prepared_intent(intent, dict(self._active_adjustments)):
+            self._loading_source = None
+            self._loading_started_at = None
 
     def _retry_pending_layout_intent(self) -> None:
         pending = self._pending_layout_intent
@@ -719,6 +854,7 @@ class PlayerViewController(QObject):
         if generation != self._request_generation:
             return
         source = surface.decode_key.source
+        self._current_decode_level = surface.decode_level
         self._present_generation = generation
         self._present_started_at = self._loading_started_at
         self._present_source = source
@@ -726,7 +862,25 @@ class PlayerViewController(QObject):
             source,
             surface,
             adjustments,
+            reset_view=self._request_reason_by_generation.get(generation) not in {"zoom", "resize"},
         )
+
+    def _on_scheduled_surface_warmed(
+        self,
+        request: DetailRenderRequest,
+        surface: DecodedSurface,
+        adjustments: dict,
+    ) -> None:
+        if request.window_generation != self._residency_window_generation:
+            return
+        warmer = getattr(self._image_viewer, "warm_still_surface", None)
+        if callable(warmer):
+            warmer(
+                surface,
+                adjustments,
+                residency_slot=request.residency_slot,
+                window_generation=request.window_generation,
+            )
 
     def _on_scheduled_image_failed(
         self,
@@ -735,6 +889,19 @@ class PlayerViewController(QObject):
         message: str,
     ) -> None:
         if generation != self._request_generation:
+            return
+        reason = self._request_reason_by_generation.get(generation)
+        if reason in {"zoom", "resize"}:
+            if self._loading_source == source:
+                self._loading_source = None
+                self._loading_started_at = None
+            emit_detail_event(
+                "lod_upgrade_failed",
+                generation=generation,
+                asset_id=self._active_asset_id,
+                reason=reason,
+                message=str(message),
+            )
             return
         self._on_adjusted_image_failed(source, message)
 
@@ -758,6 +925,13 @@ class PlayerViewController(QObject):
             generation=generation,
             media_type="image",
         )
+        if self._request_reason_by_generation.get(generation) in {"zoom", "resize"}:
+            emit_detail_event(
+                "lod_upgrade_presented",
+                generation=generation,
+                media_type="image",
+                decode_level=self._current_decode_level,
+            )
         self._present_started_at = None
         self._present_source = None
         self.stillFramePresented.emit(presented_path, generation)
@@ -769,10 +943,25 @@ class PlayerViewController(QObject):
         self._preparation_pool.clear()
         self._preparation_pool.waitForDone(max(0, int(timeout_ms)))
         self._still_scheduler.shutdown(timeout_ms=timeout_ms)
+        self._decode_backend.shutdown(timeout_ms=min(max(0, int(timeout_ms)), 1000))
         shutdown_detail_profile(timeout_ms=min(max(0, int(timeout_ms)), 1000))
 
     def clear_frame_cache(self) -> None:
-        """Compatibility no-op until the Phase-3 neutral surface cache exists."""
+        """Clear library-scoped mapped surfaces and GPU still resources."""
+
+        root = self._library_root_getter() if self._library_root_getter is not None else None
+        self._decode_backend.bind_library(root)
+        clear_residency = getattr(self._image_viewer, "clear_still_residency", None)
+        if callable(clear_residency):
+            clear_residency()
+
+    def handle_memory_pressure(self) -> None:
+        """Drop speculative GPU and mapped surfaces while preserving current draw state."""
+
+        self._decode_backend.memory_cache.clear()
+        trim_residency = getattr(self._image_viewer, "trim_still_residency", None)
+        if callable(trim_residency):
+            trim_residency()
 
     def current_full_image(self) -> QImage | None:
         """Return the retained viewport surface for compatibility consumers."""
@@ -784,6 +973,8 @@ class PlayerViewController(QObject):
         """Invalidate still work when Detail or the current library is left."""
 
         self._request_generation += 1
+        self._residency_window_generation += 1
+        self._lod_timer.stop()
         self._cancel_stale_image_workers()
         self._loading_source = None
         self._loading_started_at = None
@@ -792,6 +983,11 @@ class PlayerViewController(QObject):
         self._pending_still = None
         self._pending_layout_intent = None
         self._current_full_image = None
+        self._active_asset_id = ""
+        self._active_source_identity = None
+        self._active_adjustments = {}
+        self._current_decode_level = None
+        self._request_reason_by_generation.clear()
         for entry in tuple(self._preparation_entries.values()):
             entry.intents.clear()
             entry.worker.cancel()
@@ -881,6 +1077,8 @@ class PlayerViewController(QObject):
         source: Path,
         surface: DecodedSurface,
         adjustments: dict,
+        *,
+        reset_view: bool = True,
     ) -> None:
         """Render a neutral surface when the matching worker completes."""
         if self._loading_source != source:
@@ -911,7 +1109,7 @@ class PlayerViewController(QObject):
             self._apply_still_frame(
                 surface,
                 adjustments,
-                reset_view=True,
+                reset_view=reset_view,
             )
 
         if self._loading_source == source:
@@ -943,13 +1141,17 @@ class PlayerViewController(QObject):
         image = surface.image
         self.show_image_surface()
         self._current_full_image = QImage(image)
-        self._image_viewer.set_image(
-            image,
-            adjustments,
-            image_source=surface.decode_key,
-            source_size=surface.source_size,
-            reset_view=reset_view,
-        )
+        set_still_surface = getattr(self._image_viewer, "set_still_surface", None)
+        if callable(set_still_surface):
+            set_still_surface(surface, adjustments, reset_view=reset_view)
+        else:
+            self._image_viewer.set_image(
+                image,
+                adjustments,
+                image_source=surface.decode_key,
+                source_size=surface.source_size,
+                reset_view=reset_view,
+            )
         self._image_viewer.update()
         log_detail_profile(
             "player_view",

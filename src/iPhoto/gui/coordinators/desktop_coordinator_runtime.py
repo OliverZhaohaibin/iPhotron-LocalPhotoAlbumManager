@@ -190,6 +190,7 @@ class DesktopCoordinatorRuntime(QObject):
             window.ui.player_placeholder,
             window.ui.live_badge,
             edit_service_getter=edit_service_getter,
+            library_root_getter=self._library_root,
         )
         self._header_controller = HeaderController(
             window.ui.location_label,

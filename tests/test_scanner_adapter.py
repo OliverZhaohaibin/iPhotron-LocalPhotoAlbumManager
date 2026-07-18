@@ -72,6 +72,22 @@ def test_metadata_provider_indexes_raw_geometry_and_orientation(tmp_path: Path) 
     assert row["media_type"] == 0
 
 
+def test_metadata_provider_recovers_orientation_from_pillow_fallback(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "rotated.jpg"
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (40, 20), "red").save(asset, format="JPEG", exif=exif)
+
+    row = ExifToolMetadataProvider().normalize_metadata(root, asset, {})
+
+    assert (row["w"], row["h"]) == (20, 40)
+    assert row["image_orientation"] == 6
+
+
 def test_scan_album_reextracts_cached_raw_with_missing_geometry(
     tmp_path: Path,
     monkeypatch,

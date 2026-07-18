@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColorSpace, QImage, QImageReader
@@ -17,6 +17,8 @@ from iPhoto.gui.detail_pipeline import (
     DetailRenderRequest,
 )
 from iPhoto.utils.deps import load_pillow
+
+_MAX_DETAIL_SURFACE_BYTES = 192 * 1024 * 1024
 
 
 class DecodeCancelledError(RuntimeError):
@@ -49,6 +51,8 @@ class DecodedSurface:
     pixel_format: str = "rgba8888"
     color_space: str = "srgb"
     orientation_applied: bool = True
+    cache_tier: Literal["decode", "memory", "disk"] = "decode"
+    backing_owner: object | None = None
 
 
 def _check_cancelled(token: CancellationToken) -> None:
@@ -73,8 +77,17 @@ def _target_size(request: DetailRenderRequest) -> QSize:
     height = max(1, identity.height)
     longest = _target_longest_edge(request)
     if width >= height:
-        return QSize(longest, max(1, round(longest * height / width)))
-    return QSize(max(1, round(longest * width / height)), longest)
+        target = QSize(longest, max(1, round(longest * height / width)))
+    else:
+        target = QSize(max(1, round(longest * width / height)), longest)
+    estimated_bytes = target.width() * target.height() * 4
+    if estimated_bytes > _MAX_DETAIL_SURFACE_BYTES:
+        scale = (_MAX_DETAIL_SURFACE_BYTES / float(estimated_bytes)) ** 0.5
+        target = QSize(
+            max(1, int(target.width() * scale)),
+            max(1, int(target.height() * scale)),
+        )
+    return target
 
 
 def _normalise_surface(image: QImage, target: QSize) -> QImage:

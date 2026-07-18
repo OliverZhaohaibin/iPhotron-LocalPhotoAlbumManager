@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from PySide6.QtGui import QImage
+
+from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager, gl
+
+
+def _image(width: int = 8, height: int = 8) -> QImage:
+    image = QImage(width, height, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    return image
+
+
+def _mock_gl_uploads(mocker):
+    ids = iter(range(1, 20))
+    mocker.patch.object(gl, "glGenTextures", side_effect=lambda _count: next(ids))
+    for name in (
+        "glBindTexture",
+        "glTexImage2D",
+        "glTexParameteri",
+        "glPixelStorei",
+        "glTexSubImage2D",
+        "glDeleteTextures",
+        "glGenerateMipmap",
+    ):
+        mocker.patch.object(gl, name)
+
+
+def test_still_upload_does_not_allocate_or_generate_mipmaps(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+
+    manager.upload_still_texture("current", _image())
+
+    assert manager.has_still_texture("current")
+    assert manager._texture_uses_mipmaps is False
+    gl.glGenerateMipmap.assert_not_called()
+    min_filter_calls = [
+        call for call in gl.glTexParameteri.call_args_list
+        if call.args[1] == gl.GL_TEXTURE_MIN_FILTER
+    ]
+    assert min_filter_calls[-1].args[2] == gl.GL_LINEAR
+
+
+def test_still_residency_keeps_three_entries_and_reuses_activation_without_upload(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    image = _image()
+    for key in ("previous", "current", "next"):
+        manager.upload_still_texture(key, image)
+    upload_count = gl.glTexSubImage2D.call_count
+
+    assert manager.activate_still_texture("current")
+    assert gl.glTexSubImage2D.call_count == upload_count
+    manager.upload_still_texture("fourth", image)
+
+    assert len(manager._still_textures) == 3
+    assert manager.has_still_texture("fourth")
+    assert not manager.has_still_texture("previous")
+
+
+def test_still_residency_honours_byte_budget_without_evicting_active(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    manager._still_budget_bytes = _image().sizeInBytes() * 2
+
+    manager.upload_still_texture("one", _image())
+    manager.upload_still_texture("two", _image())
+    manager.upload_still_texture("current", _image())
+
+    assert manager.has_still_texture("current")
+    assert sum(entry[3] for entry in manager._still_textures.values()) <= manager._still_budget_bytes

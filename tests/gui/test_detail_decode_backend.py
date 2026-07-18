@@ -74,6 +74,32 @@ def test_qt_backend_returns_scaled_detached_rgba_surface(tmp_path: Path) -> None
     assert surface.backend == "qt"
 
 
+def test_target_surface_is_capped_to_gpu_residency_budget(tmp_path: Path) -> None:
+    source = tmp_path / "large-square.png"
+    request = DetailRenderRequest(
+        generation=1,
+        asset_id="large",
+        source_identity=AssetSourceIdentity.create(
+            source,
+            size_bytes=100,
+            source_mtime_ns=1,
+            width=9000,
+            height=9000,
+        ),
+        viewport_physical_size=(8000, 8000),
+        device_pixel_ratio=1.0,
+        geometry=DetailGeometryState(),
+        reason="zoom",
+        decode_level="full",
+        texture_limit=8192,
+    )
+    from iPhoto.gui.detail_decode_backend import _target_size
+
+    target = _target_size(request)
+
+    assert target.width() * target.height() * 4 <= 192 * 1024 * 1024
+
+
 def test_qt_backend_checks_cancellation_before_decode(tmp_path: Path) -> None:
     source = tmp_path / "photo.png"
     QImage(10, 10, QImage.Format.Format_RGBA8888).save(str(source), "PNG")

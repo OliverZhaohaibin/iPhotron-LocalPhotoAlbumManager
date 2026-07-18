@@ -529,13 +529,25 @@ vec3 apply_levels(vec3 color) {
     return vec3(r, g, b);
 }
 
+vec3 sample_definition_blur(vec2 uv, float radius) {
+    if (uSourceKind == 1) {
+        return sample_source_rgb_lod(uv, log2(max(radius, 1.0)));
+    }
+    vec2 texel = radius / max(uTexSize, vec2(1.0));
+    return (
+        textureLod(uTex, uv + vec2(texel.x, 0.0), 0.0).rgb +
+        textureLod(uTex, uv - vec2(texel.x, 0.0), 0.0).rgb +
+        textureLod(uTex, uv + vec2(0.0, texel.y), 0.0).rgb +
+        textureLod(uTex, uv - vec2(0.0, texel.y), 0.0).rgb
+    ) * 0.25;
+}
+
 vec3 apply_definition(vec3 color, vec2 uv) {
-    // Mipmap-based local contrast enhancement (Definition / Clarity).
-    // Samples the original texture at LOD 3, 5, 7 to compute a local mean,
-    // then re-injects the high-frequency detail with midtone protection.
-    vec3 blur1 = sample_source_rgb_lod(uv, 3.0);
-    vec3 blur2 = sample_source_rgb_lod(uv, 5.0);
-    vec3 blur3 = sample_source_rgb_lod(uv, 7.0);
+    // Still surfaces deliberately have no mip chain. Approximate the historic
+    // LOD 3/5/7 clarity mean from the base level; video keeps its mip path.
+    vec3 blur1 = sample_definition_blur(uv, 8.0);
+    vec3 blur2 = sample_definition_blur(uv, 32.0);
+    vec3 blur3 = sample_definition_blur(uv, 128.0);
     vec3 localMean = (blur1 + blur2 + blur3) / 3.0;
     vec3 detail = color - localMean;
 

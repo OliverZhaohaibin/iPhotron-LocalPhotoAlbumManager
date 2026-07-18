@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
@@ -34,7 +35,8 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrame = None  # type: ignore[assignment, misc]
     QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
-from iPhoto.gui.detail_profile import log_detail_profile
+from iPhoto.gui.detail_decode_backend import DecodedSurface
+from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
 
 from ..gl_crop_controller import CropInteractionController
 from ..render_backend import is_opengl_api, qrhi_api_name, select_qrhi_widget_api
@@ -92,6 +94,7 @@ class GLImageViewer(QRhiWidget):
     replayRequested = Signal()
     zoomChanged = Signal(float)
     viewTransformChanged = Signal()
+    viewportMetricsChanged = Signal()
     nextItemRequested = Signal()
     prevItemRequested = Signal()
     fullscreenExitRequested = Signal()
@@ -137,6 +140,10 @@ class GLImageViewer(QRhiWidget):
 
         # 状态
         self._image: QImage | None = None
+        self._still_surface_refs: OrderedDict[object, DecodedSurface] = OrderedDict()
+        self._pending_warm_surfaces: list[DecodedSurface] = []
+        self._pending_resident_activation: object | None = None
+        self._still_presentation_pending = False
         self._source_image_dimensions: tuple[int, int] | None = None
         self._video_frame = None
         self._pending_video_image: QImage | None = None
@@ -387,6 +394,8 @@ class GLImageViewer(QRhiWidget):
             force_upload=force_texture_refresh,
         )
         self._image = image
+        if image is not None and not image.isNull() and image_source is not None:
+            self._still_presentation_pending = True
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
         self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
@@ -410,6 +419,93 @@ class GLImageViewer(QRhiWidget):
             # exposes.  ``reset_view`` lets callers preserve the zoom when the
             # user toggles between detail and edit modes.
             self.reset_zoom()
+
+    def set_still_surface(
+        self,
+        surface: DecodedSurface,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        reset_view: bool = True,
+    ) -> None:
+        """Queue one neutral surface as the atomically presented current still."""
+
+        self._remember_still_surface(surface)
+        self.set_image(
+            surface.image,
+            adjustments,
+            image_source=surface.decode_key,
+            source_size=surface.source_size,
+            reset_view=reset_view,
+        )
+
+    def warm_still_surface(
+        self,
+        surface: DecodedSurface,
+        _adjustments: Mapping[str, float] | None = None,
+        *,
+        residency_slot: str | None = None,
+        window_generation: int = 0,
+    ) -> None:
+        """Queue a previous/next texture upload without changing presentation."""
+
+        del residency_slot, window_generation
+        self._remember_still_surface(surface)
+        if not self._texture_manager.has_resident_texture(surface.decode_key):
+            self._pending_warm_surfaces = [
+                pending for pending in self._pending_warm_surfaces
+                if pending.decode_key != surface.decode_key
+            ]
+            self._pending_warm_surfaces.append(surface)
+            self._pending_warm_surfaces = self._pending_warm_surfaces[-2:]
+            self.update()
+
+    def activate_resident_surface(
+        self,
+        key: object,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        source_size: tuple[int, int] | None = None,
+        reset_view: bool = True,
+        generation: int = 0,
+    ) -> bool:
+        """Queue a render-thread activation when *key* is already on the GPU."""
+
+        surface = self._still_surface_refs.get(key)
+        if surface is None or not self._texture_manager.has_resident_texture(key):
+            emit_detail_event("gpu_cache_miss", generation=generation, key=str(key))
+            return False
+        self._pending_resident_activation = key
+        self._image = surface.image
+        self._source_image_dimensions = source_size or surface.source_size
+        self._adjustments = dict(adjustments or {})
+        self._update_crop_perspective_state()
+        self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
+        self._still_presentation_pending = True
+        if reset_view:
+            self.reset_zoom()
+        emit_detail_event("gpu_cache_hit", generation=generation, key=str(key))
+        self.update()
+        return True
+
+    def clear_still_residency(self) -> None:
+        self._pending_warm_surfaces.clear()
+        self._pending_resident_activation = None
+        self._still_surface_refs.clear()
+        self._texture_manager.clear_still_residency()
+
+    def trim_still_residency(self) -> None:
+        self._pending_warm_surfaces.clear()
+        self._texture_manager.trim_still_residency()
+
+    def zoom_factor(self) -> float:
+        return float(self._transform_controller.get_zoom_factor())
+
+    def _remember_still_surface(self, surface: DecodedSurface) -> None:
+        self._still_surface_refs.pop(surface.decode_key, None)
+        self._still_surface_refs[surface.decode_key] = surface
+        while len(self._still_surface_refs) > 3:
+            self._still_surface_refs.popitem(last=False)
 
     def set_video_frame(
         self,
@@ -1155,6 +1251,8 @@ class GLImageViewer(QRhiWidget):
                 # issuing raw GL deletes in GLRenderer.destroy_resources().
                 rhi.makeThreadLocalNativeContextCurrent()
             self._renderer.destroy_resources()
+        self._texture_manager.mark_texture_lost()
+        emit_detail_event("context_rebuild", generation=0, state="released")
 
     def render(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: render the current image/video frame."""
@@ -1222,6 +1320,11 @@ class GLImageViewer(QRhiWidget):
         gf.glClear(gl_module.GL_COLOR_BUFFER_BIT)
 
         uploaded_new_still_texture = False
+        if self._pending_resident_activation is not None:
+            key = self._pending_resident_activation
+            self._pending_resident_activation = None
+            if not self._texture_manager.activate_resident_texture(key):
+                self._texture_manager.mark_texture_lost()
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
@@ -1275,6 +1378,13 @@ class GLImageViewer(QRhiWidget):
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
+            emit_detail_event("gpu_upload", generation=0, key=str(self.current_image_source()))
+        elif self._pending_warm_surfaces:
+            warm = self._pending_warm_surfaces.pop(0)
+            if self._texture_manager.warm_still_texture(warm.decode_key, warm.image):
+                emit_detail_event("gpu_upload", generation=0, key=str(warm.decode_key), warm=True)
+            if self._pending_warm_surfaces:
+                self.update()
         if not self._renderer.has_texture():
             if sys.platform.startswith("linux") and self._using_video_frame_source:
                 _LOGGER.warning(
@@ -1371,8 +1481,10 @@ class GLImageViewer(QRhiWidget):
         cb.endExternal()
         cb.endPass()
         self._emit_first_frame_ready()
-        if uploaded_new_still_texture:
+        if self._still_presentation_pending:
+            self._still_presentation_pending = False
             self._emit_still_frame_presented()
+        if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
         if self._video_frame_presentation_pending:
             self._video_frame_presentation_pending = False
@@ -1400,6 +1512,11 @@ class GLImageViewer(QRhiWidget):
         vh = max(1, output_size.height())
 
         uploaded_new_still_texture = False
+        if self._pending_resident_activation is not None:
+            key = self._pending_resident_activation
+            self._pending_resident_activation = None
+            if not self._texture_manager.activate_resident_texture(key):
+                self._texture_manager.mark_texture_lost()
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
@@ -1426,6 +1543,13 @@ class GLImageViewer(QRhiWidget):
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
+            emit_detail_event("gpu_upload", generation=0, key=str(self.current_image_source()))
+        elif self._pending_warm_surfaces:
+            warm = self._pending_warm_surfaces.pop(0)
+            if self._texture_manager.warm_still_texture(warm.decode_key, warm.image):
+                emit_detail_event("gpu_upload", generation=0, key=str(warm.decode_key), warm=True)
+            if self._pending_warm_surfaces:
+                self.update()
 
         if not self._renderer.has_texture():
             cb.beginPass(
@@ -1486,8 +1610,10 @@ class GLImageViewer(QRhiWidget):
         )
 
         self._emit_first_frame_ready()
-        if uploaded_new_still_texture:
+        if self._still_presentation_pending:
+            self._still_presentation_pending = False
             self._emit_still_frame_presented()
+        if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
         if self._video_frame_presentation_pending:
             self._video_frame_presentation_pending = False
@@ -1621,6 +1747,7 @@ class GLImageViewer(QRhiWidget):
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
         self.viewTransformChanged.emit()
+        self.viewportMetricsChanged.emit()
         if sys.platform.startswith("linux"):
             _LOGGER.warning(
                 "[diag][gl_viewer] resize widget=%sx%s rt=%sx%s using_video=%s dirty=%s",

@@ -34,6 +34,7 @@ class DetailStillRequestScheduler(QObject):
     """
 
     ready = Signal(int, object, dict)
+    warmed = Signal(object, object, dict)
     failed = Signal(int, Path, str)
     finished = Signal(object)
 
@@ -52,6 +53,8 @@ class DetailStillRequestScheduler(QObject):
         self._inflight_by_key: dict[DetailDecodeKey, _InflightDecode] = {}
         self._entry_by_worker_id: dict[int, _InflightDecode] = {}
         self._current_generation = 0
+        self._active_window_generation = 0
+        self._prefetch_queue: list[DetailRenderRequest] = []
         self._shutting_down = False
 
     @property
@@ -68,6 +71,15 @@ class DetailStillRequestScheduler(QObject):
         if key in self._inflight_by_key:
             return False
 
+        if prepared.window_generation > self._active_window_generation:
+            self._active_window_generation = prepared.window_generation
+            self._prefetch_queue.clear()
+        elif (
+            prepared.window_generation > 0
+            and prepared.window_generation < self._active_window_generation
+        ):
+            return False
+
         # Keep speculative work bounded.  A running prefetch may be promoted by
         # a click, but moving the pointer must not fill both decoder lanes with
         # obsolete speculative work.
@@ -75,6 +87,13 @@ class DetailStillRequestScheduler(QObject):
             entry.foreground_generation is None
             for entry in self._inflight_by_key.values()
         ):
+            if prepared.residency_slot is not None:
+                if all(
+                    DetailDecodeKey.from_request(queued) != key
+                    for queued in self._prefetch_queue
+                ):
+                    self._prefetch_queue.append(prepared)
+                    return True
             return False
 
         entry = self._create_entry(prepared, generation=None, priority=-1)
@@ -87,6 +106,23 @@ class DetailStillRequestScheduler(QObject):
         )
         return self._submit(entry)
 
+    def prefetch_window(self, *requests: DetailRenderRequest) -> bool:
+        """Replace the bounded previous/next speculative window."""
+
+        prepared = [request.with_decode_level() for request in requests]
+        if not prepared:
+            self._prefetch_queue.clear()
+            self._active_window_generation += 1
+            return False
+        newest = max(request.window_generation for request in prepared)
+        if newest >= self._active_window_generation:
+            self._active_window_generation = newest
+            self._prefetch_queue.clear()
+        accepted = False
+        for request in prepared[:2]:
+            accepted = self.prefetch(request) or accepted
+        return accepted
+
     def request(self, request: DetailRenderRequest) -> bool:
         """Submit or attach the active foreground generation."""
 
@@ -95,6 +131,8 @@ class DetailStillRequestScheduler(QObject):
         prepared = request.with_decode_level()
         numeric_generation = int(prepared.generation)
         self._current_generation = numeric_generation
+        self._prefetch_queue.clear()
+        self._active_window_generation += 1
         key = DetailDecodeKey.from_request(prepared)
         self._discard_queued_other_keys(key)
         self._detach_running_other_keys(key)
@@ -158,6 +196,8 @@ class DetailStillRequestScheduler(QObject):
         """Invalidate foreground delivery and remove work not yet running."""
 
         self._current_generation += 1
+        self._prefetch_queue.clear()
+        self._active_window_generation += 1
         for entry in tuple(self._inflight_by_key.values()):
             entry.foreground_generation = None
             if entry.state == "queued" and self._pool.tryTake(entry.worker):
@@ -170,6 +210,7 @@ class DetailStillRequestScheduler(QObject):
             return
         self._shutting_down = True
         self._current_generation += 1
+        self._prefetch_queue.clear()
         for entry in tuple(self._inflight_by_key.values()):
             entry.foreground_generation = None
             cancel = getattr(entry.worker, "cancel", None)
@@ -261,6 +302,14 @@ class DetailStillRequestScheduler(QObject):
         if entry is None:
             return
         generation = entry.foreground_generation
+        if generation is None:
+            request = entry.request
+            if (
+                request.residency_slot is not None
+                and request.window_generation == self._active_window_generation
+            ):
+                self.warmed.emit(request, surface, dict(adjustments))
+            return
         if generation is None or generation != self._current_generation:
             emit_detail_event(
                 "stale",
@@ -292,6 +341,17 @@ class DetailStillRequestScheduler(QObject):
         )
         self.finished.emit(entry.key)
         self._retire_entry(entry, cancel=False)
+        self._start_next_prefetch()
+
+    def _start_next_prefetch(self) -> None:
+        if self._shutting_down:
+            return
+        while self._prefetch_queue:
+            request = self._prefetch_queue.pop(0)
+            if request.window_generation != self._active_window_generation:
+                continue
+            if self.prefetch(request):
+                return
 
     def _retire_entry(self, entry: _InflightDecode, *, cancel: bool) -> None:
         if cancel:

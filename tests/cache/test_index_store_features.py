@@ -836,6 +836,8 @@ def test_gallery_collection_window_uses_light_projection_with_micro(store: Index
                 "thumb_cache_key": "thumb-ready",
                 "video_rotation_cw": 90,
                 "video_linux_180_hint": True,
+                "source_mtime_ns": 123456789,
+                "image_orientation": 6,
                 "metadata": {"camera": "wide-column"},
             }
         ]
@@ -847,6 +849,8 @@ def test_gallery_collection_window_uses_light_projection_with_micro(store: Index
     assert rows[0]["micro_thumbnail"] == b"thumb"
     assert rows[0]["video_rotation_cw"] == 90
     assert rows[0]["video_linux_180_hint"] == 1
+    assert rows[0]["source_mtime_ns"] == 123456789
+    assert rows[0]["image_orientation"] == 6
     assert "metadata" not in rows[0]
 
 

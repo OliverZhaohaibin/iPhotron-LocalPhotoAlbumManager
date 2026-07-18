@@ -1114,6 +1114,7 @@ class AssetRepository:
             "live_partner_rel", "aspect_ratio", "media_type", "is_favorite", "is_deleted",
             "has_gps", "thumbnail_state", "location", "micro_thumbnail", "thumb_cache_key",
             "face_status", "video_rotation_cw", "video_linux_180_hint",
+            "source_mtime_ns", "image_orientation",
         )
         select_clause = f"SELECT {', '.join(columns)}"
         first = max(0, int(first))

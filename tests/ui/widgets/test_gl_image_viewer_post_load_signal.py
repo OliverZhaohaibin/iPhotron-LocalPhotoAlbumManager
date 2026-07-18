@@ -13,6 +13,7 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
+from iPhoto.gui.ui.widgets.gl_image_viewer.widget import _crop_preview_adjustments
 
 
 @pytest.fixture(scope="module")
@@ -143,6 +144,27 @@ def test_rhi_render_without_pending_upload_has_defined_presentation_flags() -> N
 
     viewer._renderer.render.assert_called_once()
     viewer.videoFramePresented.emit.assert_not_called()
+
+
+def test_crop_preview_disables_persisted_crop_mask() -> None:
+    """The yellow overlay, not a hidden unit-square mask, owns Crop preview bounds."""
+
+    persisted = {
+        "Crop_CX": 0.3,
+        "Crop_CY": 0.4,
+        "Crop_W": 0.5,
+        "Crop_H": 0.6,
+        "Straighten": 22.0,
+    }
+
+    preview = _crop_preview_adjustments(persisted)
+
+    assert preview["Crop_CX"] == 0.5
+    assert preview["Crop_CY"] == 0.5
+    assert preview["Crop_W"] > 1.0
+    assert preview["Crop_H"] > 1.0
+    assert preview["Straighten"] == 22.0
+    assert persisted["Crop_W"] == 0.5
 
 
 def test_rhi_render_presents_video_uploaded_before_render() -> None:

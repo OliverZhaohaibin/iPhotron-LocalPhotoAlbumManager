@@ -53,8 +53,29 @@ from .utils import normalise_colour
 from .zoom_controller import ZoomController
 
 _LOGGER = logging.getLogger(__name__)
+
+# Crop preview must not reuse the persisted [0, 1] crop mask.  Straightened or
+# perspective-corrected source pixels can project outside that logical square;
+# a deliberately oversized mask leaves the yellow overlay as the only crop
+# boundary while the shader still rejects samples outside the real texture.
+_CROP_PREVIEW_MASK_SIZE = 4.0
 gl: Any | None = None
 GLRenderer: Any | None = None
+
+
+def _crop_preview_adjustments(adjustments: Mapping[str, float]) -> dict[str, float]:
+    """Return adjustments that expose the full transformed source in Crop mode."""
+
+    preview = dict(adjustments)
+    preview.update(
+        {
+            "Crop_CX": 0.5,
+            "Crop_CY": 0.5,
+            "Crop_W": _CROP_PREVIEW_MASK_SIZE,
+            "Crop_H": _CROP_PREVIEW_MASK_SIZE,
+        }
+    )
+    return preview
 
 
 def _load_gl_module():
@@ -1410,19 +1431,13 @@ class GLImageViewer(QRhiWidget):
 
         effective_adjustments: dict[str, float] | Mapping[str, float]
         if self._crop_controller.is_active():
-            effective_adjustments = dict(self._display_adjustments())
             # During crop interactions we want to preview the entire photo with
             # a translucent overlay.  The fragment shader drives the crop
             # window entirely from the ``Crop_*`` uniforms, therefore we
             # override those values on-the-fly instead of mutating
             # ``self._adjustments`` (which stores the persisted edit state).
-            effective_adjustments.update(
-                {
-                    "Crop_CX": 0.5,
-                    "Crop_CY": 0.5,
-                    "Crop_W": 1.0,
-                    "Crop_H": 1.0,
-                }
+            effective_adjustments = _crop_preview_adjustments(
+                self._display_adjustments()
             )
         else:
             # Convert texture-space crop to logical-space for shader
@@ -1569,14 +1584,8 @@ class GLImageViewer(QRhiWidget):
         view_pan = self._transform_controller.get_pan_pixels()
 
         if self._crop_controller.is_active():
-            effective_adjustments = dict(self._display_adjustments())
-            effective_adjustments.update(
-                {
-                    "Crop_CX": 0.5,
-                    "Crop_CY": 0.5,
-                    "Crop_W": 1.0,
-                    "Crop_H": 1.0,
-                }
+            effective_adjustments = _crop_preview_adjustments(
+                self._display_adjustments()
             )
         else:
             effective_adjustments = dict(self._display_adjustments())

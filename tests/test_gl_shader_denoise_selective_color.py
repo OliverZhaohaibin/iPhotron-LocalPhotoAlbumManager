@@ -77,3 +77,18 @@ def test_definition_uses_explicit_mipmap_availability() -> None:
         blur_end = shader.index("vec3 apply_definition")
         definition_blur = shader[blur_start:blur_end]
         assert "if (uSourceKind == 1)" not in _normalise(definition_blur)
+
+
+def test_transformed_source_is_not_clipped_before_inverse_mapping() -> None:
+    """Straightened corners survive until they can be mapped to source pixels."""
+
+    for shader in (_shader_source(), _rhi_shader_source()):
+        main = shader[shader.index("void main() {") :]
+        inverse_mapping = main.index(
+            "vec2 uv_perspective = apply_inverse_perspective(uv_corrected);"
+        )
+        before_inverse = main[:inverse_mapping]
+        after_inverse = main[inverse_mapping:]
+
+        assert "uv.x < 0.0 || uv.x > 1.0" not in before_inverse
+        assert "uv_perspective.x < 0.0 || uv_perspective.x > 1.0" in after_inverse

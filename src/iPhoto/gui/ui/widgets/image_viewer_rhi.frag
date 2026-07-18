@@ -710,11 +710,12 @@ void main() {
     vec2 texPx = texVector + (uTexSize * 0.5);
     vec2 uv = texPx / uTexSize;
 
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        discard;
-    }
-
     vec2 uv_corrected = uv;
+
+    // Do not clip against the untransformed logical image rectangle here.
+    // Straighten/perspective can map logical positions outside [0, 1] back to
+    // valid source pixels.  The crop mask below owns user-authored clipping,
+    // and the post-transform bounds check owns the physical texture boundary.
 
     // Perform crop test in Logical/Screen space.
     // The crop box is defined by the user on the screen (post-perspective/straighten),

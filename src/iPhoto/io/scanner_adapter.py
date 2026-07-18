@@ -13,7 +13,6 @@ import mimetypes
 import time
 from PIL import Image
 
-from ..application.interfaces import IMetadataProvider, IThumbnailGenerator
 from ..core.raw_processor import is_raw_extension
 from ..domain.models.query import ThumbnailReadyResult, ThumbnailState
 from ..infrastructure.services.metadata_provider import ExifToolMetadataProvider
@@ -41,6 +40,8 @@ _thumbnail_generator = PillowThumbnailGenerator()
 _IMAGE_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_IMAGE_EXTENSIONS", ()))
 _VIDEO_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_VIDEO_EXTENSIONS", ()))
 LOGGER = logging.getLogger(__name__)
+_SCAN_THUMBNAIL_REPLACE_ATTEMPTS = 5
+_SCAN_THUMBNAIL_REPLACE_BACKOFF_SEC = 0.025
 
 
 def ensure_scan_thumbnail(
@@ -156,13 +157,35 @@ def _write_scan_thumbnail_cache(
         if not _cache_file_is_ready(tmp_file):
             tmp_file.unlink(missing_ok=True)
             return None
-        os.replace(tmp_file, cache_file)
+        if not _replace_scan_thumbnail_cache(tmp_file, cache_file):
+            return key if _cache_file_is_ready(cache_file) else None
     finally:
         try:
             tmp_file.unlink(missing_ok=True)
         except OSError:
             pass
     return key
+
+
+def _replace_scan_thumbnail_cache(tmp_file: Path, cache_file: Path) -> bool:
+    """Replace a thumbnail cache file despite transient Windows file locks."""
+
+    for attempt in range(_SCAN_THUMBNAIL_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp_file, cache_file)
+            return True
+        except PermissionError:
+            if attempt == _SCAN_THUMBNAIL_REPLACE_ATTEMPTS - 1:
+                break
+            time.sleep(_SCAN_THUMBNAIL_REPLACE_BACKOFF_SEC * (attempt + 1))
+    if _cache_file_is_ready(cache_file):
+        LOGGER.debug(
+            "Keeping existing scan thumbnail cache because replace was denied: %s",
+            cache_file,
+        )
+        return False
+    os.replace(tmp_file, cache_file)
+    return True
 
 
 def _compose_square_thumbnail(image: Any, size: tuple[int, int]) -> Any:

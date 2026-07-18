@@ -373,6 +373,73 @@ def test_process_media_paths_overwrites_existing_full_thumbnail_for_rescanned_fi
     assert blue < 80
 
 
+def test_scan_thumbnail_cache_replace_retries_transient_permission_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    asset = tmp_path / "ready.jpg"
+    asset.write_bytes(b"jpeg-data")
+    cache_dir = tmp_path / ".iPhoto" / "cache" / "thumbs"
+    calls = {"replace": 0}
+    real_replace = scanner_adapter.os.replace
+
+    def flaky_replace(src, dst):
+        calls["replace"] += 1
+        if calls["replace"] == 1:
+            raise PermissionError("locked briefly")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(scanner_adapter.os, "replace", flaky_replace)
+    monkeypatch.setattr(scanner_adapter.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        scanner_adapter._thumbnail_generator,
+        "generate",
+        lambda _path, _size: Image.new("RGB", (32, 32), "red"),
+    )
+
+    key = scanner_adapter._write_scan_thumbnail_cache(asset, cache_dir, refresh=True)
+
+    assert key
+    assert calls["replace"] == 2
+    assert scanner_adapter.thumbnail_cache_file_for_key(cache_dir, key).is_file()
+
+
+def test_scan_thumbnail_cache_keeps_existing_cache_when_replace_is_locked(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    asset = tmp_path / "ready.jpg"
+    asset.write_bytes(b"jpeg-data")
+    cache_dir = tmp_path / ".iPhoto" / "cache" / "thumbs"
+    key = scanner_adapter.thumbnail_cache_key(
+        asset,
+        scanner_adapter.DEFAULT_THUMBNAIL_SIZE,
+    )
+    cache_file = scanner_adapter.thumbnail_cache_file_for_key(cache_dir, key)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), "green").save(cache_file, format="JPEG")
+
+    monkeypatch.setattr(
+        scanner_adapter.os,
+        "replace",
+        lambda _src, _dst: (_ for _ in ()).throw(PermissionError("locked by sync")),
+    )
+    monkeypatch.setattr(scanner_adapter.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        scanner_adapter._thumbnail_generator,
+        "generate",
+        lambda _path, _size: Image.new("RGB", (32, 32), "red"),
+    )
+
+    result = scanner_adapter._write_scan_thumbnail_cache(asset, cache_dir, refresh=True)
+
+    assert result == key
+    red, green, blue = Image.open(cache_file).getpixel((0, 0))
+    assert green > 100
+    assert red < 100
+    assert blue < 100
+
+
 def test_scan_album_refreshes_cached_row_missing_full_thumbnail(
     tmp_path: Path,
     monkeypatch,

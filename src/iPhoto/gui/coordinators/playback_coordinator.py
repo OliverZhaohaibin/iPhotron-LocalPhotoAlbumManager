@@ -1141,7 +1141,7 @@ class PlaybackCoordinator(QObject):
             return
         if not self._render_transaction_coordinator().mark_presented(generation):
             return
-        self._player_view.show_video_surface(interactive=True)
+        self._player_view.show_video_surface(interactive=not is_live_motion)
         # Do not reclaim the user's scroll position when decoding completes.
 
     def _is_location_video_write_inflight(self, path: Path) -> bool:

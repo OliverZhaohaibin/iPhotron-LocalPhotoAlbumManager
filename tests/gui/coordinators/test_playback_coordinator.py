@@ -682,6 +682,21 @@ def test_live_motion_first_frame_completes_current_transaction() -> None:
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
 
     render_coordinator.mark_presented.assert_called_once_with(7)
+    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=False)
+
+
+def test_regular_video_first_frame_enables_interactive_controls() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    render_coordinator = Mock(mark_presented=Mock(return_value=True))
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = None
+    coordinator._current_presentation = _make_presentation(request_generation=7)
+    coordinator._player_view = Mock(show_video_surface=Mock())
+
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+
+    render_coordinator.mark_presented.assert_called_once_with(7)
     coordinator._player_view.show_video_surface.assert_called_once_with(interactive=True)
 
 

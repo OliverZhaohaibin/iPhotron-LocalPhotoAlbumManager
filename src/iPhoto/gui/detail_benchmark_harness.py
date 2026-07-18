@@ -38,6 +38,7 @@ class PackagedDetailBenchmarkHarness(QObject):
         self._metadata_path = metadata_path
         self._queue: list[_BenchmarkItem] = []
         self._active: _BenchmarkItem | None = None
+        self._active_final_transaction: tuple[Path, int] | None = None
         self._attempts = 0
         self._completed = 0
         self._failed = 0
@@ -139,28 +140,43 @@ class PackagedDetailBenchmarkHarness(QObject):
             return
         self._attempts = 0
         self._active = item
+        self._active_final_transaction = None
         try:
             self._prepare_cache_group(item)
         except OSError as exc:
             self._finish(f"cache_prepare_failed:{exc}", exit_code=2)
             return
         self._timeout.start(self._timeout_ms)
-        self._open_benchmark_path(item.path, item.category)
+        self._open_benchmark_path(
+            item.path,
+            item.category,
+            is_final=not item.switch_paths,
+        )
         for index, switch_path in enumerate(item.switch_paths, start=1):
             QTimer.singleShot(
                 index,
-                lambda path=switch_path: self._open_benchmark_path(path, item.category),
+                lambda path=switch_path, is_final=index == len(item.switch_paths):
+                self._open_benchmark_path(path, item.category, is_final=is_final),
             )
 
-    def _open_benchmark_path(self, path: Path, category: str) -> None:
+    def _open_benchmark_path(
+        self,
+        path: Path,
+        category: str,
+        *,
+        is_final: bool,
+    ) -> None:
         row = self._runtime._gallery_store.row_for_path(path)
         if row is None or int(row) < 0:
             self._finish(f"asset_not_indexed:{path.name}", exit_code=2)
             return
         self._runtime._gallery_vm.open_row(int(row))
+        generation = int(self._runtime._detail_vm._request_generation)
+        if is_final:
+            self._active_final_transaction = (path, generation)
         emit_detail_event(
             "benchmark_sample_started",
-            generation=int(self._runtime._detail_vm._request_generation),
+            generation=generation,
             category=category,
         )
 
@@ -189,12 +205,32 @@ class PackagedDetailBenchmarkHarness(QObject):
                 raise OSError(f"sidecar-only sample has no .ipo: {item.path.name}")
             os.utime(sidecar, None)
 
-    def _on_presented(self, _snapshot: object) -> None:
-        if self._active is None:
+    def _on_presented(self, snapshot: object) -> None:
+        if not self._is_active_final_transaction(snapshot):
             return
         self._timeout.stop()
         delay = self._run_post_present_scenario(self._active)
         QTimer.singleShot(delay, self._complete_active)
+
+    def _is_active_final_transaction(self, snapshot: object) -> bool:
+        """Return whether a terminal signal belongs to the sample's final open."""
+
+        expected = self._active_final_transaction
+        if self._active is None or expected is None:
+            return False
+        transaction = getattr(snapshot, "transaction", None)
+        identity = getattr(transaction, "source_identity", None)
+        source = getattr(identity, "path", None)
+        generation = getattr(transaction, "generation", None)
+        if source is None:
+            return False
+        try:
+            return (
+                Path(source).expanduser().absolute() == expected[0]
+                and int(generation) == expected[1]
+            )
+        except (TypeError, ValueError):
+            return False
 
     def _run_post_present_scenario(self, item: _BenchmarkItem) -> int:
         scenario = item.scenario
@@ -243,14 +279,16 @@ class PackagedDetailBenchmarkHarness(QObject):
         )
         self._completed += 1
         self._active = None
+        self._active_final_transaction = None
         QTimer.singleShot(self._interval_ms, self._dispatch_next)
 
-    def _on_failed(self, _snapshot: object) -> None:
-        if self._active is None:
+    def _on_failed(self, snapshot: object) -> None:
+        if not self._is_active_final_transaction(snapshot):
             return
         self._timeout.stop()
         self._failed += 1
         self._active = None
+        self._active_final_transaction = None
         QTimer.singleShot(self._interval_ms, self._dispatch_next)
 
     def _on_cancelled(self, _snapshot: object) -> None:

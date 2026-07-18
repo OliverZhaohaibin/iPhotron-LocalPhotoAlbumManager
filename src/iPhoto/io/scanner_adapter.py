@@ -198,6 +198,13 @@ def _has_indexed_geometry(row: Dict[str, Any]) -> bool:
         return False
 
 
+def _has_indexed_orientation(row: Dict[str, Any]) -> bool:
+    try:
+        return 1 <= int(row.get("image_orientation") or 0) <= 8
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _default_thumbnail_cache_dir(root: Path) -> Path:
     return ensure_work_dir(root) / "cache" / "thumbs"
 
@@ -411,10 +418,13 @@ def scan_album(
                             is_raw_extension(p.suffix)
                             and not _has_indexed_geometry(cached)
                         )
+                        and not (
+                            p.suffix.lower() in _IMAGE_EXTENSIONS
+                            and not _has_indexed_orientation(cached)
+                        )
                     ):
                         cached = dict(cached)
                         cached["source_mtime_ns"] = int(stat.st_mtime_ns)
-                        cached.setdefault("image_orientation", 1)
                         if _cached_thumbnail_ready(
                             p,
                             cached,

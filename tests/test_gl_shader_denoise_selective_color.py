@@ -63,3 +63,17 @@ def test_texture_origin_y_flip_is_backend_controlled() -> None:
             "vec2 worldVector = vec2(fragPx.x - viewCentre.x, viewCentre.y - fragPx.y);"
             in normalised
         ), "Crop math must use the same world-up convention as ViewTransformController"
+
+
+def test_definition_uses_explicit_mipmap_availability() -> None:
+    """RGBA video fallbacks keep LOD Definition while still surfaces use base-level taps."""
+
+    for shader in (_shader_source(), _rhi_shader_source()):
+        normalised = _normalise(shader)
+
+        assert "uTextureHasMipmaps" in shader
+        assert "if (uTextureHasMipmaps != 0)" in normalised
+        blur_start = shader.index("vec3 sample_definition_blur")
+        blur_end = shader.index("vec3 apply_definition")
+        definition_blur = shader[blur_start:blur_end]
+        assert "if (uSourceKind == 1)" not in _normalise(definition_blur)

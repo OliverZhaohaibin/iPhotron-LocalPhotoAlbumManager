@@ -103,6 +103,7 @@ def test_scan_album_reextracts_cached_raw_with_missing_geometry(
             "id": "as_cached_raw",
             "bytes": stat.st_size,
             "ts": int(stat.st_mtime * 1_000_000),
+            "image_orientation": 1,
             "thumbnail_state": "ready",
             "thumb_cache_key": "old-key",
         }
@@ -132,7 +133,11 @@ def test_scan_album_reextracts_cached_raw_with_missing_geometry(
             "face_status": "pending",
         }
 
-    monkeypatch.setattr(scanner_adapter._metadata_provider, "normalize_metadata", normalize)
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider,
+        "normalize_metadata",
+        normalize,
+    )
     monkeypatch.setattr(
         scanner_adapter._thumbnail_generator,
         "generate_micro_thumbnail",
@@ -155,6 +160,69 @@ def test_scan_album_reextracts_cached_raw_with_missing_geometry(
 
     assert normalized_paths == [asset]
     assert (rows[0]["w"], rows[0]["h"]) == (6000, 4000)
+
+
+def test_scan_album_reextracts_cached_photo_with_unknown_orientation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "rotated.jpg"
+    image = Image.new("RGB", (100, 50), "red")
+    exif = image.getexif()
+    exif[0x0112] = 6
+    image.save(asset, exif=exif)
+    stat = asset.stat()
+    existing = {
+        "rotated.jpg": {
+            "rel": "rotated.jpg",
+            "id": "as_rotated",
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "w": 50,
+            "h": 100,
+            "image_orientation": 0,
+            "thumbnail_state": "ready",
+            "thumb_cache_key": "old-key",
+        }
+    }
+    normalized_paths: list[Path] = []
+    real_normalize = scanner_adapter._metadata_provider.normalize_metadata
+
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider,
+        "get_metadata_batch",
+        lambda _paths: [],
+    )
+
+    def normalize(library_root: Path, path: Path, raw: dict) -> dict:
+        normalized_paths.append(path)
+        return real_normalize(library_root, path, raw)
+
+    monkeypatch.setattr(scanner_adapter._metadata_provider, "normalize_metadata", normalize)
+    monkeypatch.setattr(
+        scanner_adapter._thumbnail_generator,
+        "generate_micro_thumbnail",
+        lambda _path: b"micro",
+    )
+    monkeypatch.setattr(
+        scanner_adapter._thumbnail_generator,
+        "generate",
+        lambda _path, _size: Image.new("RGB", (32, 24), "red"),
+    )
+
+    rows = list(
+        scanner_adapter.scan_album(
+            root,
+            ["*.jpg"],
+            [],
+            existing_index=existing,
+        )
+    )
+
+    assert normalized_paths == [asset]
+    assert rows[0]["image_orientation"] == 6
 
 
 def test_process_media_paths_keeps_row_when_thumbnail_generation_fails(
@@ -320,6 +388,7 @@ def test_scan_album_refreshes_cached_row_missing_full_thumbnail(
             "id": "as_cached",
             "bytes": stat.st_size,
             "ts": int(stat.st_mtime * 1_000_000),
+            "image_orientation": 1,
             "thumbnail_state": "ready",
             "micro_thumbnail": b"old-micro",
         }

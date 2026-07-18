@@ -64,6 +64,7 @@ layout(std140, binding = 0) uniform ImageViewBuf {
     vec4 uSCRange0[6];
     vec4 uSCRange1[6];
     int uTextureOriginTopLeft;
+    int uTextureHasMipmaps;
 };
 
 const int VIDEO_FMT_NONE = 0;
@@ -530,7 +531,7 @@ vec3 apply_levels(vec3 color) {
 }
 
 vec3 sample_definition_blur(vec2 uv, float radius) {
-    if (uSourceKind == 1) {
+    if (uTextureHasMipmaps != 0) {
         return sample_source_rgb_lod(uv, log2(max(radius, 1.0)));
     }
     vec2 texel = radius / max(uTexSize, vec2(1.0));

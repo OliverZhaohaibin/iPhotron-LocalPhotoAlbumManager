@@ -4,6 +4,7 @@ out vec4 FragColor;
 
 uniform sampler2D uTex;
 uniform int   uSourceKind;      // 0 = RGBA image texture, 1 = YUV video planes
+uniform int   uTextureHasMipmaps;
 uniform sampler2D uVideoYTex;
 uniform sampler2D uVideoUVTex;
 uniform int   uVideoFormat;     // 0 = none/RGBA fallback, 1 = NV12, 2 = P010
@@ -534,7 +535,7 @@ vec3 apply_levels(vec3 color) {
 }
 
 vec3 sample_definition_blur(vec2 uv, float radius) {
-    if (uSourceKind == 1) {
+    if (uTextureHasMipmaps != 0) {
         return sample_source_rgb_lod(uv, log2(max(radius, 1.0)));
     }
     vec2 texel = radius / max(uTexSize, vec2(1.0));

@@ -733,9 +733,26 @@ class PlayerViewController(QObject):
                 session.edit_state = state
                 session.baseline_state = state
             render_adjustments = dict(session.edit_state.shader_adjustments)
+        decode_key = DetailDecodeKey.from_request(request)
+        defer_presentation = bool(
+            self._defer_still_updates
+            and self._player_stack.currentWidget() is self._video_area
+        )
+        if defer_presentation and session is not None and session.activate_surface(decode_key):
+            self._current_render_session = session
+            self._touch_render_session(session)
+            self._current_decode_level = request.decode_level
+            self._present_generation = request.generation
+            self._present_started_at = self._loading_started_at
+            self._present_source = request.source_identity.path
+            self._pending_still = (session.current_surface, render_adjustments)
+            self._loading_source = None
+            self._loading_started_at = None
+            return True
+
         activate_resident = getattr(self._image_viewer, "activate_resident_surface", None)
-        if callable(activate_resident) and activate_resident(
-            DetailDecodeKey.from_request(request),
+        if not defer_presentation and callable(activate_resident) and activate_resident(
+            decode_key,
             render_adjustments,
             source_size=(request.source_identity.width, request.source_identity.height),
             reset_view=request.reason == "initial",
@@ -749,7 +766,7 @@ class PlayerViewController(QObject):
             self._loading_started_at = None
             self._current_decode_level = request.decode_level
             if session is not None:
-                session.activate_surface(DetailDecodeKey.from_request(request))
+                session.activate_surface(decode_key)
                 self._current_render_session = session
                 self._touch_render_session(session)
             return True
@@ -1187,8 +1204,6 @@ class PlayerViewController(QObject):
     def defer_still_updates(self, enabled: bool) -> None:
         """Control whether still frames should be applied immediately."""
         self._defer_still_updates = bool(enabled)
-        if not self._defer_still_updates:
-            self.apply_pending_still()
 
     def apply_pending_still(self) -> bool:
         """Apply any deferred still frame if available."""

@@ -95,6 +95,11 @@ class TextureResourceManager:
         self._texture_dirty = False
         return True
 
+    def touch_resident_texture(self, source: object) -> bool:
+        renderer = self._renderer_provider()
+        touch = getattr(renderer, "touch_still_texture", None)
+        return bool(callable(touch) and touch(source))
+
     def warm_still_texture(self, source: object, image: QImage) -> bool:
         renderer = self._renderer_provider()
         warmer = getattr(renderer, "warm_still_texture", None)

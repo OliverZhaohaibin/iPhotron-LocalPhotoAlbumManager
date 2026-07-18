@@ -152,11 +152,17 @@ class GLRenderer:
     def activate_still_texture(self, key: object) -> bool:
         return self._tex_mgr.activate_still_texture(key)
 
+    def touch_still_texture(self, key: object) -> bool:
+        return self._tex_mgr.touch_still_texture(key)
+
     def warm_still_texture(self, key: object, image: QImage) -> bool:
         return self._tex_mgr.warm_still_texture(key, image)
 
     def has_still_texture(self, key: object) -> bool:
         return self._tex_mgr.has_still_texture(key)
+
+    def texture_uses_mipmaps(self) -> bool:
+        return self._tex_mgr.texture_uses_mipmaps()
 
     def clear_still_residency(self) -> None:
         self._tex_mgr.clear_still_residency()
@@ -303,6 +309,10 @@ class GLRenderer:
             self._set_uniform1i("uTex", 0)
             has_video_texture = self._tex_mgr.has_video_texture()
             self._set_uniform1i("uSourceKind", 1 if has_video_texture else 0)
+            self._set_uniform1i(
+                "uTextureHasMipmaps",
+                1 if self._tex_mgr.texture_uses_mipmaps() else 0,
+            )
 
             if has_video_texture:
                 video_y_tex, video_uv_tex = self._tex_mgr.video_texture_ids()

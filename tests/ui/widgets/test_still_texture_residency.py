@@ -24,6 +24,7 @@ def _mock_gl_uploads(mocker):
         "glGenerateMipmap",
     ):
         mocker.patch.object(gl, name)
+    mocker.patch.object(gl, "glGetError", return_value=gl.GL_NO_ERROR)
 
 
 def test_still_upload_does_not_allocate_or_generate_mipmaps(mocker) -> None:
@@ -70,3 +71,29 @@ def test_still_residency_honours_byte_budget_without_evicting_active(mocker) -> 
 
     assert manager.has_still_texture("current")
     assert sum(entry[3] for entry in manager._still_textures.values()) <= manager._still_budget_bytes
+
+
+def test_warming_a_resident_neighbor_refreshes_its_lru_position(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    image = _image()
+    for key in ("stale", "previous", "current"):
+        manager.upload_still_texture(key, image)
+
+    assert manager.warm_still_texture("previous", image) is False
+    manager.upload_still_texture("next", image)
+
+    assert manager.has_still_texture("previous")
+    assert manager.has_still_texture("next")
+    assert not manager.has_still_texture("stale")
+
+
+def test_rgba_video_uploads_keep_mipmaps_while_still_surfaces_do_not(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+
+    manager.upload_still_texture("still", _image())
+    assert manager.texture_uses_mipmaps() is False
+
+    manager.upload_texture(_image())
+    assert manager.texture_uses_mipmaps() is True

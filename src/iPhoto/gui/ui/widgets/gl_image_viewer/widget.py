@@ -450,7 +450,9 @@ class GLImageViewer(QRhiWidget):
 
         del residency_slot, window_generation
         self._remember_still_surface(surface)
-        if not self._texture_manager.has_resident_texture(surface.decode_key):
+        if self._texture_manager.has_resident_texture(surface.decode_key):
+            self._texture_manager.touch_resident_texture(surface.decode_key)
+        else:
             self._pending_warm_surfaces = [
                 pending for pending in self._pending_warm_surfaces
                 if pending.decode_key != surface.decode_key

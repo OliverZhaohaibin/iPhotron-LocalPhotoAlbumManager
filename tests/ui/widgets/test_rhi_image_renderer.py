@@ -9,9 +9,15 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for QRhi renderer tests")
 
 from PySide6.QtCore import QPointF, QSize
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage
 
 from iPhoto.gui.ui.widgets.rhi_image_renderer import RhiImageRenderer
+
+
+def _image(width: int = 8, height: int = 8) -> QImage:
+    image = QImage(width, height, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    return image
 
 
 class _FakeBuffer:
@@ -89,6 +95,28 @@ class _FakeCommandBuffer:
 
     def endPass(self):  # noqa: N802
         self.calls.append(("endPass", ()))
+
+
+def test_warming_a_resident_rhi_texture_refreshes_its_lru_position() -> None:
+    renderer = RhiImageRenderer()
+    renderer._still_textures["stale"] = (object(), 1)
+    renderer._still_textures["previous"] = (object(), 1)
+    renderer._still_textures["current"] = (object(), 1)
+
+    assert renderer.warm_still_texture("previous", _image()) is False
+
+    assert tuple(renderer._still_textures) == ("stale", "current", "previous")
+
+
+def test_rhi_tracks_mipmap_availability_per_texture_source() -> None:
+    renderer = RhiImageRenderer()
+
+    renderer.upload_still_texture("still", _image())
+    assert renderer._texture_uses_mipmaps is False
+
+    renderer._still_textures.clear()
+    renderer.upload_texture(_image())
+    assert renderer._texture_uses_mipmaps is True
 
 
 def test_overlay_buffer_creation_failure_leaves_no_stale_buffer() -> None:

@@ -157,6 +157,7 @@ class RhiImageRenderer:
         self._texture_height = 0
         self._has_rgba_texture = False
         self._has_video_texture = False
+        self._texture_uses_mipmaps = False
         self._last_video_upload_pre_rotated = False
         self._video_format = _VIDEO_FMT_NONE
         self._video_colorspace = _CS_BT709
@@ -338,6 +339,7 @@ class RhiImageRenderer:
         self._pending_video_planes = None
         self._has_rgba_texture = True
         self._has_video_texture = False
+        self._texture_uses_mipmaps = True
         self._texture_width = qimage.width()
         self._texture_height = qimage.height()
         self._video_format = _VIDEO_FMT_NONE
@@ -354,12 +356,13 @@ class RhiImageRenderer:
         self._pending_video_planes = None
         self._has_rgba_texture = True
         self._has_video_texture = False
+        self._texture_uses_mipmaps = False
         self._texture_width = qimage.width()
         self._texture_height = qimage.height()
         return 0, self._texture_width, self._texture_height
 
     def warm_still_texture(self, key: object, image: QImage) -> bool:
-        if key in self._still_textures:
+        if self.touch_still_texture(key):
             return False
         if image.isNull():
             return False
@@ -378,8 +381,16 @@ class RhiImageRenderer:
         self._texture_width, self._texture_height = size.width(), size.height()
         self._has_rgba_texture = True
         self._has_video_texture = False
+        self._texture_uses_mipmaps = False
         if self._srb is not None:
             self._rebuild_srb()
+        return True
+
+    def touch_still_texture(self, key: object) -> bool:
+        entry = self._still_textures.pop(key, None)
+        if entry is None:
+            return False
+        self._still_textures[key] = entry
         return True
 
     def has_still_texture(self, key: object) -> bool:
@@ -396,6 +407,7 @@ class RhiImageRenderer:
         self._pending_still = None
         self._tex_rgba = self._placeholder_texture
         self._has_rgba_texture = False
+        self._texture_uses_mipmaps = False
         if self._srb is not None:
             self._rebuild_srb()
 
@@ -465,6 +477,7 @@ class RhiImageRenderer:
         self._pending_rgba_image = None
         self._has_rgba_texture = False
         self._has_video_texture = True
+        self._texture_uses_mipmaps = True
         self._texture_width = width
         self._texture_height = height
         self._video_format = pixel_fmt
@@ -482,6 +495,7 @@ class RhiImageRenderer:
         self._pending_video_planes = None
         self._has_rgba_texture = False
         self._has_video_texture = False
+        self._texture_uses_mipmaps = False
         self._texture_width = 0
         self._texture_height = 0
         self._video_format = _VIDEO_FMT_NONE
@@ -1057,6 +1071,7 @@ class RhiImageRenderer:
             struct.pack_into("4f", data, 272 + idx * 16, *selective_color_u0[idx])
             struct.pack_into("4f", data, 368 + idx * 16, *selective_color_u1[idx])
         struct.pack_into("i", data, 464, 1)
+        struct.pack_into("i", data, 468, 1 if self._texture_uses_mipmaps else 0)
 
         ru.updateDynamicBuffer(self._ubuf, 0, len(data), bytes(data))
 

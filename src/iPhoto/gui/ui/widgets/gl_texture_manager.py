@@ -248,8 +248,15 @@ class TextureManager:
         self._texture_uses_mipmaps = False
         return True
 
+    def touch_still_texture(self, key: object) -> bool:
+        entry = self._still_textures.pop(key, None)
+        if entry is None:
+            return False
+        self._still_textures[key] = entry
+        return True
+
     def warm_still_texture(self, key: object, image: QImage) -> bool:
-        if key in self._still_textures:
+        if self.touch_still_texture(key):
             return False
         active = self._active_still_key
         self.upload_still_texture(key, image)
@@ -259,6 +266,9 @@ class TextureManager:
 
     def has_still_texture(self, key: object) -> bool:
         return key in self._still_textures
+
+    def texture_uses_mipmaps(self) -> bool:
+        return self._texture_uses_mipmaps
 
     def _trim_still_textures(self) -> None:
         total = sum(entry[3] for entry in self._still_textures.values())
@@ -409,6 +419,7 @@ class TextureManager:
 
         self._video_width = width
         self._video_height = height
+        self._texture_uses_mipmaps = True
         self._video_format = pixel_fmt
         self._video_colorspace = color_space
         self._video_transfer = transfer

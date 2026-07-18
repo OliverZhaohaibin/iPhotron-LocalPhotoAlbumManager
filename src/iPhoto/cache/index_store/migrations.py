@@ -75,7 +75,7 @@ _ASSET_COLUMN_MIGRATIONS = {
     "video_rotation_cw": "ALTER TABLE assets ADD COLUMN video_rotation_cw INTEGER",
     "video_linux_180_hint": "ALTER TABLE assets ADD COLUMN video_linux_180_hint INTEGER",
     "source_mtime_ns": "ALTER TABLE assets ADD COLUMN source_mtime_ns INTEGER DEFAULT 0",
-    "image_orientation": "ALTER TABLE assets ADD COLUMN image_orientation INTEGER DEFAULT 1",
+    "image_orientation": "ALTER TABLE assets ADD COLUMN image_orientation INTEGER DEFAULT 0",
 }
 _V1_REQUIRED_COLUMNS = {
     "assets": frozenset({"rel", "id", "dt", "mime", *_ASSET_COLUMN_MIGRATIONS}),
@@ -503,7 +503,7 @@ class SchemaMigrator:
                 video_rotation_cw INTEGER,
                 video_linux_180_hint INTEGER,
                 source_mtime_ns INTEGER DEFAULT 0,
-                image_orientation INTEGER DEFAULT 1
+                image_orientation INTEGER DEFAULT 0
             )
         """)
 

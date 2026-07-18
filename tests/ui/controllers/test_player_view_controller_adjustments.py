@@ -21,6 +21,7 @@ from iPhoto.gui.detail_pipeline import (
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
     _AdjustedImageWorker,
+    _PreparedRequestIntent,
 )
 
 
@@ -141,3 +142,54 @@ def test_lod_upgrade_failure_preserves_the_presented_surface() -> None:
         reason="zoom",
         message="higher LOD failed",
     )
+
+
+def test_resident_live_photo_still_is_deferred_while_motion_is_visible() -> None:
+    source = Path("/tmp/live-photo.heic")
+    request = _request(source)
+    surface = _surface(request)
+    session = SimpleNamespace(
+        baseline_state=SimpleNamespace(raw_adjustments={}),
+        edit_state=SimpleNamespace(
+            color_stats=surface.color_stats,
+            shader_adjustments={"Exposure": 0.25},
+        ),
+        current_surface=surface,
+        activate_surface=Mock(return_value=True),
+    )
+    video_area = object()
+    image_viewer = SimpleNamespace(activate_resident_surface=Mock(return_value=True))
+    scheduler = SimpleNamespace(request=Mock(return_value=True))
+    controller = SimpleNamespace(
+        _viewport_metrics=Mock(return_value=((1200, 900), 1.0)),
+        _texture_limit=Mock(return_value=8192),
+        _current_decode_level=None,
+        _active_asset_id="",
+        _active_source_identity=None,
+        _active_adjustments={},
+        _request_reason_by_generation={},
+        _session_for_request=Mock(return_value=session),
+        _defer_still_updates=True,
+        _player_stack=SimpleNamespace(currentWidget=Mock(return_value=video_area)),
+        _video_area=video_area,
+        _image_viewer=image_viewer,
+        _still_scheduler=scheduler,
+        _loading_started_at=1.0,
+        _loading_source=source,
+        _pending_still=None,
+        _touch_render_session=Mock(),
+        show_image_surface=Mock(),
+    )
+    intent = _PreparedRequestIntent(
+        asset_id="asset-1",
+        source_identity=request.source_identity,
+        generation=2,
+        reason="initial",
+    )
+
+    assert PlayerViewController._dispatch_prepared_intent(controller, intent, {})
+
+    assert controller._pending_still == (surface, {"Exposure": 0.25})
+    image_viewer.activate_resident_surface.assert_not_called()
+    controller.show_image_surface.assert_not_called()
+    scheduler.request.assert_not_called()

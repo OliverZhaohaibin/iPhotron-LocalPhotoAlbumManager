@@ -72,6 +72,48 @@ def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None
     assert image_point.y() == pytest.approx(160.0)
 
 
+def test_gl_image_viewer_maps_full_resolution_face_box_onto_viewport_surface(qapp) -> None:
+    """Face annotations stay anchored when Detail displays a lower-resolution LOD."""
+
+    viewer = GLImageViewer()
+    viewer.resize(600, 400)
+    surface = QImage(600, 400, QImage.Format.Format_RGBA8888)
+    surface.fill(0xFF000000)
+
+    viewer.set_image(
+        surface,
+        {},
+        image_source="viewport-surface",
+        source_size=(6000, 4000),
+    )
+    qapp.processEvents()
+
+    rect = viewer.image_rect_to_viewport(
+        1000,
+        800,
+        1200,
+        900,
+        image_width=6000,
+        image_height=4000,
+    )
+    assert rect.left() == pytest.approx(100.0)
+    assert rect.top() == pytest.approx(80.0)
+    assert rect.width() == pytest.approx(120.0)
+    assert rect.height() == pytest.approx(90.0)
+
+    image_point = viewer.viewport_to_image(
+        QPointF(220.0, 170.0),
+        image_width=6000,
+        image_height=4000,
+    )
+    assert image_point.x() == pytest.approx(2200.0)
+    assert image_point.y() == pytest.approx(1700.0)
+
+    implicit_source_point = viewer.viewport_to_image(QPointF(220.0, 170.0))
+    assert implicit_source_point.x() == pytest.approx(2200.0)
+    assert implicit_source_point.y() == pytest.approx(1700.0)
+
+
 def test_rhi_render_without_pending_upload_has_defined_presentation_flags() -> None:
     """Regression: an idle Metal render must not read an unbound local."""
 

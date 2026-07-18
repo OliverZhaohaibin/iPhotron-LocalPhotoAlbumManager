@@ -14,6 +14,20 @@ IPHOTO_DETAIL_PROFILE_PATH=benchmark-output/macos-metal/candidate/hot/events.jso
 
 依次点击固定媒体矩阵。冷 Detail cache 组每次重启应用；系统冷缓存只能在平台允许且不会影响其他用户任务时单独执行。日志不包含绝对媒体路径，只含媒体类型、后缀、generation 与时间。
 
+Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generation` 关联：
+
+- `level_selected`：检查 `suffix`、`decode_level`、物理 viewport、请求原因；`full` 必须有可解释的
+  极端 crop、未知旧库尺寸或 texture-limit 原因。
+- `backend_selected`：记录格式实际使用 `qt` 或 `rawpy`，不得从扩展名推断 backend。
+- `decode_fallback`：统计 `pillow`、`qt_full_scale`、`half`、`full`、`full_level`；没有 fallback
+  的样本也要计入分母。
+- `surface_ready`：核对最终 detached surface 的宽高与 decode level。
+- `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。
+
+JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总表至少包含样本数、level 分布、backend
+分布、fallback 次数/比例、surface 尺寸和 click-to-present P50/P95。插件或系统能力不同导致的 backend
+差异必须原样记录，不能用 source/offscreen 单测结果代替 packaged 数据。
+
 ## 汇总与对比
 
 ```bash

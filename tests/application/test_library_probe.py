@@ -40,6 +40,21 @@ from iPhoto.cache.index_store.repository import AssetRepository
 from iPhoto.domain.models.query import CollectionQuery
 
 
+def test_schema_v3_migrates_source_revision_columns() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE assets (rel TEXT PRIMARY KEY)")
+    connection.execute("PRAGMA user_version = 2")
+
+    SchemaMigrator.initialize_schema(connection)
+
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(assets)")
+    }
+    assert {"source_mtime_ns", "image_orientation"}.issubset(columns)
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    connection.close()
+
+
 def test_probe_returns_two_level_album_snapshot_without_creating_work_dir(
     tmp_path: Path,
 ) -> None:

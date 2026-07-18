@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
 from iPhoto.io import scanner_adapter
 
 
@@ -38,11 +39,106 @@ def test_process_media_paths_falls_back_to_minimal_row_when_metadata_fails(
     row = rows[0]
     assert row["rel"] == "broken.jpg"
     assert row["bytes"] == len(b"jpeg-data")
+    assert row["source_mtime_ns"] == asset.stat().st_mtime_ns
+    assert row["image_orientation"] == 1
     assert row["media_type"] == 0
     assert row["face_status"] == "pending"
     assert row["id"].startswith("as_")
     assert row["thumbnail_state"] == "failed"
     assert row["thumb_error"] == "thumbnail_unavailable"
+
+
+def test_metadata_provider_indexes_raw_geometry_and_orientation(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "photo.nef"
+    asset.write_bytes(b"raw-data")
+
+    row = ExifToolMetadataProvider().normalize_metadata(
+        root,
+        asset,
+        {
+            "File": {
+                "ImageWidth": 6000,
+                "ImageHeight": 4000,
+                "MIMEType": "image/x-nikon-nef",
+            },
+            "IFD0": {"Orientation": 6},
+        },
+    )
+
+    assert (row["w"], row["h"]) == (4000, 6000)
+    assert row["image_orientation"] == 6
+    assert row["media_type"] == 0
+
+
+def test_scan_album_reextracts_cached_raw_with_missing_geometry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "cached.nef"
+    asset.write_bytes(b"raw-data")
+    stat = asset.stat()
+    existing = {
+        "cached.nef": {
+            "rel": "cached.nef",
+            "id": "as_cached_raw",
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "thumbnail_state": "ready",
+            "thumb_cache_key": "old-key",
+        }
+    }
+    normalized_paths: list[Path] = []
+
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider,
+        "get_metadata_batch",
+        lambda _paths: [],
+    )
+
+    def normalize(_root: Path, path: Path, _raw: dict) -> dict:
+        normalized_paths.append(path)
+        return {
+            "rel": "cached.nef",
+            "id": "as_cached_raw",
+            "bytes": stat.st_size,
+            "dt": "2024-01-01T00:00:00Z",
+            "ts": int(stat.st_mtime * 1_000_000),
+            "mime": "image/x-nikon-nef",
+            "media_type": 0,
+            "w": 6000,
+            "h": 4000,
+            "image_orientation": 1,
+            "source_mtime_ns": stat.st_mtime_ns,
+            "face_status": "pending",
+        }
+
+    monkeypatch.setattr(scanner_adapter._metadata_provider, "normalize_metadata", normalize)
+    monkeypatch.setattr(
+        scanner_adapter._thumbnail_generator,
+        "generate_micro_thumbnail",
+        lambda _path: b"raw-micro",
+    )
+    monkeypatch.setattr(
+        scanner_adapter._thumbnail_generator,
+        "generate",
+        lambda _path, _size: Image.new("RGB", (32, 24), "red"),
+    )
+
+    rows = list(
+        scanner_adapter.scan_album(
+            root,
+            ["*.nef"],
+            [],
+            existing_index=existing,
+        )
+    )
+
+    assert normalized_paths == [asset]
+    assert (rows[0]["w"], rows[0]["h"]) == (6000, 4000)
 
 
 def test_process_media_paths_keeps_row_when_thumbnail_generation_fails(

@@ -23,10 +23,46 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThreadPool, Signal
 from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
 
-from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+from iPhoto.gui.detail_decode_backend import DecodedSurface
+from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailDecodeKey,
+    DetailGeometryState,
+    DetailRenderRequest,
+)
+from iPhoto.gui.ui.controllers.player_view_controller import (
+    PlayerViewController,
+    _PreparedRequestIntent,
+)
 from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.people.repository import AssetFaceAnnotation
+
+
+def _surface(path: Path, image: QImage, *, level: int = 1024) -> DecodedSurface:
+    request = DetailRenderRequest(
+        generation=1,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(
+            path,
+            width=image.width(),
+            height=image.height(),
+            source_mtime_ns=1,
+        ),
+        viewport_physical_size=(800, 600),
+        device_pixel_ratio=1.0,
+        geometry=DetailGeometryState(),
+        reason="initial",
+        decode_level=level,
+    )
+    return DecodedSurface(
+        image=image,
+        decode_key=DetailDecodeKey.from_request(request),
+        source_size=(image.width(), image.height()),
+        decoded_size=(image.width(), image.height()),
+        decode_level=level,
+        backend="fake",
+    )
 
 
 def _assert_ibeam_cursor() -> None:
@@ -156,29 +192,68 @@ class TestInitCoverTracking:
         assert controller._pool is not QThreadPool.globalInstance()
         assert controller._pool.maxThreadCount() == 2
 
+    def test_hover_adjustment_preparation_is_promoted_for_click(self, controller):
+        class _Pool:
+            def __init__(self):
+                self.queued = []
+                self.starts = []
+
+            def start(self, worker, priority):
+                self.queued.append(worker)
+                self.starts.append((worker, priority))
+
+            def tryTake(self, worker):
+                if worker not in self.queued:
+                    return False
+                self.queued.remove(worker)
+                return True
+
+        pool = _Pool()
+        controller._preparation_pool = pool
+        identity = AssetSourceIdentity.create(
+            Path("/tmp/photo.jpg"),
+            width=4000,
+            height=3000,
+            source_mtime_ns=1,
+        )
+        assert controller._schedule_adjustment_preparation(
+            _PreparedRequestIntent("asset-1", identity, 0, "prefetch")
+        )
+        assert controller._schedule_adjustment_preparation(
+            _PreparedRequestIntent("asset-1", identity, 7, "initial")
+        )
+
+        assert len(controller._preparation_entries) == 1
+        entry = next(iter(controller._preparation_entries.values()))
+        assert [intent.generation for intent in entry.intents] == [0, 7]
+        assert [priority for _, priority in pool.starts] == [-1, 1]
+
     def test_stale_decode_generation_is_not_applied(self, controller, mocker):
         apply_ready = mocker.patch.object(controller, "_on_adjusted_image_ready")
         controller._request_generation = 2
 
         controller._on_scheduled_image_ready(
             1,
-            Path("/tmp/stale.jpg"),
-            QImage(2, 2, QImage.Format.Format_RGBA8888),
+            _surface(
+                Path("/tmp/stale.jpg"),
+                QImage(2, 2, QImage.Format.Format_RGBA8888),
+            ),
             {},
         )
 
         apply_ready.assert_not_called()
 
-    def test_oversized_full_decode_uses_safe_display_texture(self, controller, mocker):
-        image = QImage(9000, 10, QImage.Format.Format_RGBA8888)
-        controller._image_viewer.maximum_texture_size = lambda: 1024
+    def test_normalized_surface_is_uploaded_without_gui_scaling(self, controller, mocker):
+        image = QImage(1024, 10, QImage.Format.Format_RGBA8888)
         set_image = mocker.patch.object(controller._image_viewer, "set_image")
 
-        controller._apply_still_frame(Path("/tmp/huge.jpg"), image, {})
+        surface = _surface(Path("/tmp/huge.jpg"), image)
+        controller._apply_still_frame(surface, {})
 
         display_image = set_image.call_args.args[0]
         assert display_image.width() == 1024
-        assert controller.current_full_image().width() == 9000
+        assert controller.current_full_image().width() == 1024
+        assert set_image.call_args.kwargs["image_source"] == surface.decode_key
 
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""

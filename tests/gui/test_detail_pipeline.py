@@ -2,10 +2,121 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtGui import QImage
 
-from iPhoto.gui.detail_pipeline import DetailFrameCache, DetailFrameIdentity
+from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailFrameCache,
+    DetailFrameIdentity,
+    DetailGeometryState,
+    DetailRenderRequest,
+    select_detail_decode_level,
+)
+
+
+def _request(
+    tmp_path: Path,
+    *,
+    viewport: tuple[int, int] = (1200, 800),
+    geometry: DetailGeometryState = DetailGeometryState(),
+    texture_limit: int = 8192,
+) -> DetailRenderRequest:
+    return DetailRenderRequest(
+        generation=1,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(
+            tmp_path / "photo.jpg",
+            size_bytes=10,
+            source_mtime_ns=20,
+            index_revision=30,
+            width=6000,
+            height=4000,
+        ),
+        viewport_physical_size=viewport,
+        device_pixel_ratio=2.0,
+        geometry=geometry,
+        reason="initial",
+        texture_limit=texture_limit,
+    )
+
+
+def test_source_identity_prefers_mtime_and_falls_back_to_index(tmp_path: Path) -> None:
+    identity = AssetSourceIdentity.create(
+        tmp_path / "photo.jpg",
+        size_bytes=100,
+        source_mtime_ns=200,
+        index_revision=300,
+    )
+    assert identity.revision == ("mtime", 100, 200)
+    legacy = AssetSourceIdentity.create(
+        tmp_path / "photo.jpg",
+        size_bytes=100,
+        index_revision=300,
+    )
+    assert legacy.revision == ("index", 100, 300)
+
+
+def test_source_identity_creation_never_stats_on_the_calling_thread(tmp_path: Path) -> None:
+    with patch.object(Path, "stat", side_effect=AssertionError("unexpected stat")):
+        identity = AssetSourceIdentity.create(
+            tmp_path / "photo.jpg",
+            size_bytes=100,
+            source_mtime_ns=200,
+            width=4000,
+            height=3000,
+        )
+    assert identity.revision == ("mtime", 100, 200)
+
+
+def test_viewport_lod_uses_smallest_satisfying_tier(tmp_path: Path) -> None:
+    assert select_detail_decode_level(_request(tmp_path)) == 2048
+
+
+def test_rotation_crop_and_projection_increase_lod(tmp_path: Path) -> None:
+    cropped = DetailGeometryState(
+        crop_width=0.2,
+        crop_height=0.2,
+        rotate90=1,
+        straighten=20.0,
+        perspective_vertical=0.5,
+    )
+    assert select_detail_decode_level(_request(tmp_path, geometry=cropped)) == "full"
+
+
+def test_source_smaller_than_tier_is_not_upscaled(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    small_identity = AssetSourceIdentity.create(
+        tmp_path / "small.png",
+        width=640,
+        height=480,
+        source_mtime_ns=1,
+    )
+    small = DetailRenderRequest(
+        generation=request.generation,
+        asset_id=request.asset_id,
+        source_identity=small_identity,
+        viewport_physical_size=request.viewport_physical_size,
+        device_pixel_ratio=request.device_pixel_ratio,
+        geometry=request.geometry,
+        reason=request.reason,
+    )
+    assert select_detail_decode_level(small) == 640
+
+
+def test_missing_indexed_dimensions_uses_full_compatibility_level(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    unknown = DetailRenderRequest(
+        generation=1,
+        asset_id="legacy",
+        source_identity=AssetSourceIdentity.create(tmp_path / "legacy.jpg"),
+        viewport_physical_size=request.viewport_physical_size,
+        device_pixel_ratio=1.0,
+        geometry=DetailGeometryState(),
+        reason="initial",
+    )
+    assert select_detail_decode_level(unknown) == "full"
 
 
 def test_frame_identity_tracks_source_and_sidecar_versions(tmp_path: Path) -> None:

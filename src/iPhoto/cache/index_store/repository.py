@@ -714,7 +714,7 @@ class AssetRepository:
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
             "face_status", "thumbnail_state", "thumb_cache_key",
-            "index_revision", "micro_thumbnail"
+            "index_revision", "micro_thumbnail", "source_mtime_ns", "image_orientation"
         ]
 
         logger.debug(

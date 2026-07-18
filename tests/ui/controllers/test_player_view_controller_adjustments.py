@@ -11,80 +11,117 @@ pytest.importorskip("PySide6.QtGui", reason="QtGui is required for GUI tests", e
 
 from PySide6.QtGui import QImage
 
+from iPhoto.gui.detail_decode_backend import DecodedSurface
+from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailDecodeKey,
+    DetailGeometryState,
+    DetailRenderRequest,
+)
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
     _AdjustedImageWorker,
 )
 
 
+def _request(source: Path, adjustments: dict | None = None) -> DetailRenderRequest:
+    return DetailRenderRequest(
+        generation=2,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(
+            source,
+            width=4000,
+            height=3000,
+            source_mtime_ns=1,
+        ),
+        viewport_physical_size=(1200, 900),
+        device_pixel_ratio=1.0,
+        geometry=DetailGeometryState.from_adjustments(adjustments),
+        reason="initial",
+        raw_adjustments=adjustments or {},
+        decode_level=2048,
+    )
+
+
+def _surface(request: DetailRenderRequest) -> DecodedSurface:
+    image = QImage(1600, 1200, QImage.Format.Format_RGBA8888)
+    return DecodedSurface(
+        image=image,
+        decode_key=DetailDecodeKey.from_request(request),
+        source_size=(4000, 3000),
+        decoded_size=(1600, 1200),
+        decode_level=2048,
+        backend="fake",
+    )
+
+
 def test_path_only_prefetch_uses_the_display_image_fallback_identity() -> None:
     source = Path("/tmp/photo.jpg")
-    scheduler = Mock(prefetch=Mock(return_value=True))
-    controller = SimpleNamespace(_still_scheduler=scheduler)
+    prepare = Mock(return_value=True)
+    controller = SimpleNamespace(
+        _viewport_metrics=Mock(return_value=((800, 600), 1.0)),
+        _schedule_adjustment_preparation=prepare,
+    )
 
     assert PlayerViewController.prefetch_image(controller, source)
 
-    scheduler.prefetch.assert_called_once_with(asset_id="", source=source)
+    intent = prepare.call_args.args[0]
+    assert intent.asset_id == ""
+    assert intent.source_identity.path == source.absolute()
+    assert intent.reason == "prefetch"
 
 
-def test_adjusted_image_worker_skips_color_stats_without_sidecar() -> None:
+def test_adjusted_image_worker_skips_color_stats_without_adjustments() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()
-    edit_service = Mock()
-    edit_service.sidecar_exists.return_value = False
-    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
-
+    request = _request(source)
+    backend = Mock(decode=Mock(return_value=_surface(request)))
     with patch(
-        "iPhoto.gui.ui.controllers.player_view_controller.image_loader.load_qimage",
-        return_value=image,
-    ) as load_qimage, patch(
         "iPhoto.gui.ui.controllers.player_view_controller.compute_color_statistics",
     ) as compute_stats:
-        worker = _AdjustedImageWorker(source, signals, edit_service)
+        worker = _AdjustedImageWorker(request, signals, backend)
         worker.run()
 
-    load_qimage.assert_called_once_with(source, None)
-    edit_service.describe_adjustments.assert_not_called()
+    backend.decode.assert_called_once_with(request, worker)
     compute_stats.assert_not_called()
-    signals.completed.emit.assert_called_once_with(source, image, {})
+    signals.completed.emit.assert_called_once_with(backend.decode.return_value, {})
 
 
-def test_adjusted_image_worker_resolves_adjustments_when_sidecar_exists() -> None:
+def test_adjusted_image_worker_resolves_prepared_adjustments() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()
-    edit_service = Mock()
-    edit_service.sidecar_exists.return_value = True
-    edit_service.describe_adjustments.return_value = Mock(
-        resolved_adjustments={"Exposure": 0.5},
-    )
-    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
-
+    request = _request(source, {"Exposure": 0.5})
+    surface = _surface(request)
+    backend = Mock(decode=Mock(return_value=surface))
     with patch(
-        "iPhoto.gui.ui.controllers.player_view_controller.image_loader.load_qimage",
-        return_value=image,
-    ), patch(
         "iPhoto.gui.ui.controllers.player_view_controller.compute_color_statistics",
         return_value="stats",
     ) as compute_stats:
-        worker = _AdjustedImageWorker(source, signals, edit_service)
-        worker.run()
+        with patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.resolve_adjustment_mapping",
+            return_value={"Exposure": 0.5},
+        ) as resolve:
+            worker = _AdjustedImageWorker(request, signals, backend)
+            worker.run()
 
-    compute_stats.assert_called_once_with(image)
-    edit_service.describe_adjustments.assert_called_once_with(source, color_stats="stats")
-    signals.completed.emit.assert_called_once_with(source, image, {"Exposure": 0.5})
+    compute_stats.assert_called_once_with(surface.image)
+    resolve.assert_called_once_with(
+        {"Exposure": 0.5},
+        stats="stats",
+        normalize_bw_for_render=True,
+    )
+    signals.completed.emit.assert_called_once_with(surface, {"Exposure": 0.5})
 
 
-def test_adjusted_image_worker_decodes_full_image_once() -> None:
+def test_adjusted_image_worker_uses_viewport_backend_once() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()
-    full = QImage(6000, 4000, QImage.Format.Format_RGB32)
+    request = _request(source)
+    surface = _surface(request)
+    backend = Mock(decode=Mock(return_value=surface))
+    worker = _AdjustedImageWorker(request, signals, backend)
+    worker.run()
 
-    with patch(
-        "iPhoto.gui.ui.controllers.player_view_controller.image_loader.load_qimage",
-        return_value=full,
-    ) as load_qimage:
-        worker = _AdjustedImageWorker(source, signals)
-        worker.run()
-
-    load_qimage.assert_called_once_with(source, None)
-    signals.completed.emit.assert_called_once_with(source, full, {})
+    backend.decode.assert_called_once_with(request, worker)
+    assert surface.decoded_size == (1600, 1200)
+    signals.completed.emit.assert_called_once_with(surface, {})

@@ -8,33 +8,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 from PySide6.QtCore import QObject, QThreadPool, Signal
-from PySide6.QtGui import QImage
 
+from iPhoto.gui.detail_decode_backend import DecodedSurface
+from iPhoto.gui.detail_pipeline import DetailDecodeKey, DetailRenderRequest
 from iPhoto.gui.detail_profile import emit_detail_event
-
-
-@dataclass(frozen=True, slots=True)
-class DetailDecodeKey:
-    """Phase-1 identity for one source decode.
-
-    Source revisions and viewport decode levels intentionally arrive in Phase 2.
-    Phase 1 uses the already indexed asset id and absolute path so creating a key
-    performs no filesystem work on the GUI thread.
-    """
-
-    asset_id: str
-    source: Path
-
-    @classmethod
-    def create(cls, asset_id: str, source: Path) -> DetailDecodeKey:
-        path = Path(source).absolute()
-        stable_asset_id = str(asset_id).strip() or path.name
-        return cls(asset_id=stable_asset_id, source=path)
 
 
 @dataclass(slots=True)
 class _InflightDecode:
     key: DetailDecodeKey
+    request: DetailRenderRequest
     worker: Any
     state: Literal["queued", "running"]
     foreground_generation: int | None
@@ -50,7 +33,7 @@ class DetailStillRequestScheduler(QObject):
     are allowed to finish without publishing into the active generation.
     """
 
-    ready = Signal(int, Path, QImage, dict, object)
+    ready = Signal(int, object, dict)
     failed = Signal(int, Path, str)
     finished = Signal(object)
 
@@ -58,7 +41,7 @@ class DetailStillRequestScheduler(QObject):
         self,
         *,
         pool: QThreadPool,
-        worker_factory: Callable[[Path], Any],
+        worker_factory: Callable[[DetailRenderRequest], Any],
         reuse_enabled: bool = True,
         parent: QObject | None = None,
     ) -> None:
@@ -75,12 +58,13 @@ class DetailStillRequestScheduler(QObject):
     def inflight_count(self) -> int:
         return len(self._inflight_by_key)
 
-    def prefetch(self, *, asset_id: str, source: Path) -> bool:
+    def prefetch(self, request: DetailRenderRequest) -> bool:
         """Submit one speculative source unless it is already in flight."""
 
         if self._shutting_down:
             return False
-        key = DetailDecodeKey.create(asset_id, source)
+        prepared = request.with_decode_level()
+        key = DetailDecodeKey.from_request(prepared)
         if key in self._inflight_by_key:
             return False
 
@@ -93,23 +77,25 @@ class DetailStillRequestScheduler(QObject):
         ):
             return False
 
-        entry = self._create_entry(key, generation=None, priority=-1)
+        entry = self._create_entry(prepared, generation=None, priority=-1)
         emit_detail_event(
             "scheduled",
             generation=0,
             asset_id=key.asset_id,
             suffix=key.source.suffix.lower(),
+            decode_level=key.decode_level,
         )
         return self._submit(entry)
 
-    def request(self, *, asset_id: str, source: Path, generation: int) -> bool:
+    def request(self, request: DetailRenderRequest) -> bool:
         """Submit or attach the active foreground generation."""
 
         if self._shutting_down:
             return False
-        numeric_generation = int(generation)
+        prepared = request.with_decode_level()
+        numeric_generation = int(prepared.generation)
         self._current_generation = numeric_generation
-        key = DetailDecodeKey.create(asset_id, source)
+        key = DetailDecodeKey.from_request(prepared)
         self._discard_queued_other_keys(key)
         self._detach_running_other_keys(key)
 
@@ -117,6 +103,10 @@ class DetailStillRequestScheduler(QObject):
         if existing is not None and self._reuse_enabled:
             was_prefetch = existing.foreground_generation is None
             existing.foreground_generation = numeric_generation
+            existing.request = prepared
+            update_request = getattr(existing.worker, "update_request", None)
+            if callable(update_request):
+                update_request(prepared)
             emit_detail_event(
                 "reused",
                 generation=numeric_generation,
@@ -154,12 +144,13 @@ class DetailStillRequestScheduler(QObject):
                     cancel_worker()
                 self._inflight_by_key.pop(existing.key, None)
 
-        entry = self._create_entry(key, generation=numeric_generation, priority=1)
+        entry = self._create_entry(prepared, generation=numeric_generation, priority=1)
         emit_detail_event(
             "scheduled",
             generation=numeric_generation,
             asset_id=key.asset_id,
             suffix=key.source.suffix.lower(),
+            decode_level=key.decode_level,
         )
         return self._submit(entry)
 
@@ -194,14 +185,16 @@ class DetailStillRequestScheduler(QObject):
 
     def _create_entry(
         self,
-        key: DetailDecodeKey,
+        request: DetailRenderRequest,
         *,
         generation: int | None,
         priority: int,
     ) -> _InflightDecode:
-        worker = self._worker_factory(key.source)
+        key = DetailDecodeKey.from_request(request)
+        worker = self._worker_factory(request)
         entry = _InflightDecode(
             key=key,
+            request=request,
             worker=worker,
             state="queued",
             foreground_generation=generation,
@@ -212,8 +205,8 @@ class DetailStillRequestScheduler(QObject):
         signals = worker.signals
         signals.started.connect(self._on_worker_started)
         signals.completed.connect(
-            lambda source, image, adjustments, active=worker:
-            self._on_worker_completed(source, image, adjustments, active)
+            lambda surface, adjustments, active=worker:
+            self._on_worker_completed(surface, adjustments, active)
         )
         signals.failed.connect(
             lambda source, message, active=worker:
@@ -260,8 +253,7 @@ class DetailStillRequestScheduler(QObject):
 
     def _on_worker_completed(
         self,
-        source: Path,
-        image: QImage,
+        surface: DecodedSurface,
         adjustments: dict,
         worker: object,
     ) -> None:
@@ -277,13 +269,7 @@ class DetailStillRequestScheduler(QObject):
                 suffix=entry.key.source.suffix.lower(),
             )
             return
-        self.ready.emit(
-            generation,
-            Path(source),
-            image,
-            dict(adjustments),
-            getattr(worker, "frame_identity", None),
-        )
+        self.ready.emit(generation, surface, dict(adjustments))
 
     def _on_worker_failed(self, source: Path, message: str, worker: object) -> None:
         entry = self._entry_by_worker_id.get(id(worker))

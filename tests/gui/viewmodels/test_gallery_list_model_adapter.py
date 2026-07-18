@@ -128,6 +128,30 @@ def _make_dto(**overrides) -> AssetDTO:
     return AssetDTO(**defaults)
 
 
+def test_detail_prefetch_descriptor_carries_indexed_source_identity(
+    adapter,
+    mock_store,
+) -> None:
+    asset = _make_dto(
+        abs_path=Path("/library/photo.jpg"),
+        width=6000,
+        height=4000,
+        size_bytes=123,
+        metadata={"source_mtime_ns": 456, "index_revision": 7},
+    )
+    mock_store.asset_at.return_value = asset
+
+    descriptor = adapter.detail_prefetch_descriptor(3)
+
+    assert descriptor is not None
+    assert descriptor.source_identity is not None
+    assert descriptor.source_identity.revision == ("mtime", 123, 456)
+    assert (descriptor.source_identity.width, descriptor.source_identity.height) == (
+        6000,
+        4000,
+    )
+
+
 def test_adapter_init(adapter):
     assert adapter.rowCount() == 0
 

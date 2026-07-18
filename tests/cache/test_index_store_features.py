@@ -77,7 +77,14 @@ def test_read_geometry_only(store: IndexStore) -> None:
     """Test lightweight fetching with columns and filtering."""
     rows = [
         {"rel": "video.mov", "media_type": 1, "is_favorite": 0, "dt": "2023-01-01"},
-        {"rel": "photo.jpg", "media_type": 0, "is_favorite": 1, "dt": "2023-01-02"},
+        {
+            "rel": "photo.jpg",
+            "media_type": 0,
+            "is_favorite": 1,
+            "dt": "2023-01-02",
+            "source_mtime_ns": 123456,
+            "image_orientation": 6,
+        },
         {"rel": "live.jpg", "media_type": 0, "is_favorite": 0, "live_partner_rel": "live.mov", "dt": "2023-01-03"},
     ]
     store.write_rows(rows)
@@ -89,6 +96,9 @@ def test_read_geometry_only(store: IndexStore) -> None:
     assert "aspect_ratio" in results[0]
     assert "year" in results[0]
     assert "mime" in results[0]
+    photo = next(row for row in results if row["rel"] == "photo.jpg")
+    assert photo["source_mtime_ns"] == 123456
+    assert photo["image_orientation"] == 6
     # Verify sorting (dt DESC)
     assert results[0]["rel"] == "live.jpg"
     assert results[1]["rel"] == "photo.jpg"

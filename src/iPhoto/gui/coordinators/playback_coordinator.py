@@ -970,16 +970,23 @@ class PlaybackCoordinator(QObject):
             if presentation.request_generation <= 0:
                 self._player_view.show_image_surface()
             display_started = time.perf_counter()
+            identity_kwargs = (
+                {"source_identity": presentation.source_identity}
+                if presentation.source_identity is not None
+                else {}
+            )
             if presentation.request_generation > 0:
                 self._player_view.display_image(
                     source,
                     asset_id=presentation.asset_id,
                     request_generation=presentation.request_generation,
+                    **identity_kwargs,
                 )
             else:
                 self._player_view.display_image(
                     source,
                     asset_id=presentation.asset_id,
+                    **identity_kwargs,
                 )
             log_detail_profile(
                 "playback",
@@ -1200,7 +1207,11 @@ class PlaybackCoordinator(QObject):
         self._active_live_asset_id = ""
         self._player_view.defer_still_updates(False)
         if not self._player_view.apply_pending_still():
-            self._player_view.display_image(still, asset_id=asset_id)
+            presentation = getattr(self, "_current_presentation", None)
+            kwargs = {}
+            if presentation is not None and presentation.path == still:
+                kwargs["source_identity"] = presentation.source_identity
+            self._player_view.display_image(still, asset_id=asset_id, **kwargs)
         self._player_bar.setEnabled(False)
         self._player_view.show_live_badge()
         self._player_view.set_live_replay_enabled(True)
@@ -1834,10 +1845,16 @@ class PlaybackCoordinator(QObject):
         self._header_controller.update_from_values(presentation.location, presentation.timestamp)
 
     def _edit_service(self) -> EditServicePort | None:
+        getter = getattr(self, "_edit_service_getter", None)
+        if callable(getter):
+            return getter()
         library_manager = getattr(self, "_library_manager", None)
         if library_manager is None:
             return None
-        return getattr(library_manager, "edit_service", None)
+        service = getattr(library_manager, "edit_service", None)
+        if callable(getattr(service, "read_adjustments", None)):
+            return service
+        return service() if callable(service) else service
 
     def select_next(self) -> None:
         self._request_relative_asset(1)

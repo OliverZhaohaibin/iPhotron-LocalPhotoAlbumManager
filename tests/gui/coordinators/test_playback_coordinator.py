@@ -367,6 +367,7 @@ def test_preserve_live_presentation_keeps_existing_motion_during_same_asset_refr
 
 def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._edit_service_getter = None
     coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
     coordinator._library_manager = SimpleNamespace(
         edit_service=Mock(read_adjustments=Mock(return_value={"Exposure": 0.2}))
@@ -384,6 +385,31 @@ def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> N
     )
     coordinator._adjustment_committer.commit.assert_called_once_with(
         Path("/fake/video.mp4"),
+        {"Exposure": 0.2, "Crop_Rotate90": 3.0},
+        reason="rotate",
+    )
+
+
+def test_handle_rotate_requested_uses_injected_edit_service_for_still() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    edit_service = Mock(read_adjustments=Mock(return_value={"Exposure": 0.2}))
+    coordinator._edit_service_getter = Mock(return_value=edit_service)
+    coordinator._library_manager = None
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator._player_view = SimpleNamespace(
+        video_area=Mock(rotate_image_ccw=Mock()),
+        image_viewer=Mock(
+            rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})
+        ),
+    )
+    source = Path("/fake/photo.jpg")
+
+    PlaybackCoordinator._handle_rotate_requested(coordinator, source, False)
+
+    coordinator._edit_service_getter.assert_called_once_with()
+    edit_service.read_adjustments.assert_called_once_with(source)
+    coordinator._adjustment_committer.commit.assert_called_once_with(
+        source,
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},
         reason="rotate",
     )

@@ -137,6 +137,7 @@ class GLImageViewer(QRhiWidget):
 
         # 状态
         self._image: QImage | None = None
+        self._source_image_dimensions: tuple[int, int] | None = None
         self._video_frame = None
         self._pending_video_image: QImage | None = None
         self._pending_video_image_pre_rotated = False
@@ -325,6 +326,7 @@ class GLImageViewer(QRhiWidget):
         adjustments: Mapping[str, float] | None = None,
         *,
         image_source: object | None = None,
+        source_size: tuple[int, int] | None = None,
         reset_view: bool = True,
         force_texture_refresh: bool = False,
     ) -> None:
@@ -341,6 +343,10 @@ class GLImageViewer(QRhiWidget):
             identifier matches the one from the previous call the viewer keeps
             the existing GPU texture, avoiding redundant uploads during view
             transitions.
+        source_size:
+            Original oriented-pixel dimensions represented by a downsampled
+            viewport surface. Coordinate mapping defaults to this size while
+            rendering and uploads continue to use the actual texture size.
         reset_view:
             ``True`` preserves the historic behaviour of resetting the zoom and
             pan state.  Passing ``False`` keeps the current transform so edit
@@ -355,6 +361,12 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_reset_view = False
         self._pending_source_rotate90_steps = None
         self._pending_post_load_view_transform = False
+        if image is None or image.isNull():
+            self._source_image_dimensions = None
+        elif source_size is not None and min(source_size) > 0:
+            self._source_image_dimensions = (int(source_size[0]), int(source_size[1]))
+        elif not self._texture_manager.should_reuse_texture(image_source):
+            self._source_image_dimensions = (int(image.width()), int(image.height()))
 
         # Check if we can reuse the existing texture
         if (
@@ -414,6 +426,7 @@ class GLImageViewer(QRhiWidget):
         starting_video_source = not self._using_video_frame_source
         if starting_video_source:
             self._texture_manager.clear_image()
+            self._source_image_dimensions = None
         self._using_video_frame_source = True
         self._image = None
         self._video_frame = frame
@@ -574,7 +587,12 @@ class GLImageViewer(QRhiWidget):
         """Display *pixmap* without changing the tracked image source."""
 
         if pixmap and not pixmap.isNull():
-            self.set_image(pixmap.toImage(), {}, image_source=self.current_image_source())
+            self.set_image(
+                pixmap.toImage(),
+                {},
+                image_source=self.current_image_source(),
+                source_size=self._source_image_dimensions,
+            )
         else:
             self.set_image(None, {}, image_source=None)
 
@@ -704,14 +722,23 @@ class GLImageViewer(QRhiWidget):
     ) -> QPointF:
         """Map original image-space coordinates into the current viewport."""
 
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
-        if texture_width <= 0.0 or texture_height <= 0.0:
+        actual_width, actual_height = self._texture_dimensions()
+        texture_width = float(actual_width)
+        texture_height = float(actual_height)
+        source_width, source_height = self._source_image_dimensions or (
+            actual_width,
+            actual_height,
+        )
+        coordinate_width = float(image_width if image_width is not None else source_width)
+        coordinate_height = float(image_height if image_height is not None else source_height)
+        if min(texture_width, texture_height, coordinate_width, coordinate_height) <= 0.0:
             return QPointF()
+        texture_x = x * texture_width / coordinate_width
+        texture_y = y * texture_height / coordinate_height
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
         logical_x, logical_y = geometry.texture_point_to_logical(
-            x,
-            y,
+            texture_x,
+            texture_y,
             texture_width=texture_width,
             texture_height=texture_height,
             rotate_steps=rotate_steps,
@@ -729,11 +756,16 @@ class GLImageViewer(QRhiWidget):
         """Map a viewport-space point back into original image coordinates."""
 
         logical_point = self._zoom_ctrl.viewport_to_image(point)
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(
-            image_height if image_height is not None else self._texture_dimensions()[1]
+        actual_width, actual_height = self._texture_dimensions()
+        texture_width = float(actual_width)
+        texture_height = float(actual_height)
+        source_width, source_height = self._source_image_dimensions or (
+            actual_width,
+            actual_height,
         )
-        if texture_width <= 0.0 or texture_height <= 0.0:
+        coordinate_width = float(image_width if image_width is not None else source_width)
+        coordinate_height = float(image_height if image_height is not None else source_height)
+        if min(texture_width, texture_height, coordinate_width, coordinate_height) <= 0.0:
             return QPointF()
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
         image_x, image_y = geometry.logical_point_to_texture(
@@ -744,7 +776,10 @@ class GLImageViewer(QRhiWidget):
             rotate_steps=rotate_steps,
             flip_horizontal=flip_horizontal,
         )
-        return QPointF(image_x, image_y)
+        return QPointF(
+            image_x * coordinate_width / texture_width,
+            image_y * coordinate_height / texture_height,
+        )
 
     def image_rect_to_viewport(
         self,
@@ -758,16 +793,31 @@ class GLImageViewer(QRhiWidget):
     ) -> QRectF:
         """Map an original image-space rectangle into the current viewport."""
 
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
-        if texture_width <= 0.0 or texture_height <= 0.0 or width <= 0.0 or height <= 0.0:
+        actual_width, actual_height = self._texture_dimensions()
+        texture_width = float(actual_width)
+        texture_height = float(actual_height)
+        source_width, source_height = self._source_image_dimensions or (
+            actual_width,
+            actual_height,
+        )
+        coordinate_width = float(image_width if image_width is not None else source_width)
+        coordinate_height = float(image_height if image_height is not None else source_height)
+        if (
+            min(texture_width, texture_height, coordinate_width, coordinate_height) <= 0.0
+            or width <= 0.0
+            or height <= 0.0
+        ):
             return QRectF()
+        texture_x = x * texture_width / coordinate_width
+        texture_y = y * texture_height / coordinate_height
+        texture_rect_width = width * texture_width / coordinate_width
+        texture_rect_height = height * texture_height / coordinate_height
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
         logical_x, logical_y, logical_w, logical_h = geometry.texture_rect_to_logical(
-            x,
-            y,
-            width,
-            height,
+            texture_x,
+            texture_y,
+            texture_rect_width,
+            texture_rect_height,
             texture_width=texture_width,
             texture_height=texture_height,
             rotate_steps=rotate_steps,

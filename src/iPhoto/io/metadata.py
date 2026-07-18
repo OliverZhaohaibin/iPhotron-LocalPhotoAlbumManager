@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from iPhoto.core.raw_processor import is_raw_extension
+
 from ..errors import ExternalToolError
 from ..utils.deps import load_pillow
 from ..utils.exiftool import get_metadata_batch
@@ -99,6 +101,7 @@ def read_image_meta_with_exiftool(
         # Orientation flags 5-8 indicate 90 or 270 degree rotation
         if orientation in (5, 6, 7, 8) and info["w"] and info["h"]:
             info["w"], info["h"] = info["h"], info["w"]
+        info["image_orientation"] = orientation if orientation in range(1, 9) else 1
 
         gps_payload = _extract_gps_from_exiftool(metadata)
         if gps_payload is not None:
@@ -219,7 +222,13 @@ def read_image_meta_with_exiftool(
     geometry_missing = info["w"] is None or info["h"] is None
     need_dt_fallback = info["dt"] is None
 
-    if (geometry_missing or need_dt_fallback) and Image is not None and UnidentifiedImageError is not None and path.exists():
+    if (
+        (geometry_missing or need_dt_fallback)
+        and not is_raw_extension(path.suffix)
+        and Image is not None
+        and UnidentifiedImageError is not None
+        and path.exists()
+    ):
         LOGGER.debug("Opening %s with Pillow to backfill metadata", path)
         try:
             with Image.open(path) as img:

@@ -65,6 +65,24 @@ def test_show_row_builds_presentation_and_requests_detail_route():
     assert received[0].is_favorite is True
 
 
+def test_presentation_carries_indexed_source_identity() -> None:
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    dto.width = 6000
+    dto.height = 4000
+    dto.size_bytes = 123
+    dto.metadata.update({"source_mtime_ns": 456, "index_revision": 9})
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+
+    identity = vm.presentation.value.source_identity
+    assert identity is not None
+    assert identity.revision == ("mtime", 123, 456)
+    assert (identity.width, identity.height) == (6000, 4000)
+
+
 def test_next_and_previous_delegate_to_session():
     vm, store, session, _ = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")

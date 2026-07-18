@@ -14,6 +14,7 @@ import time
 from PIL import Image
 
 from ..application.interfaces import IMetadataProvider, IThumbnailGenerator
+from ..core.raw_processor import is_raw_extension
 from ..domain.models.query import ThumbnailReadyResult, ThumbnailState
 from ..infrastructure.services.metadata_provider import ExifToolMetadataProvider
 from ..infrastructure.services.thumbnail_cache_keys import (
@@ -190,6 +191,13 @@ def _cache_file_is_ready(path: Path) -> bool:
         return False
 
 
+def _has_indexed_geometry(row: Dict[str, Any]) -> bool:
+    try:
+        return int(row.get("w") or 0) > 0 and int(row.get("h") or 0) > 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _default_thumbnail_cache_dir(root: Path) -> Path:
     return ensure_work_dir(root) / "cache" / "thumbs"
 
@@ -262,6 +270,8 @@ def _fallback_row_for_path(root: Path, path: Path) -> Dict[str, Any]:
     row: Dict[str, Any] = {
         "rel": path.relative_to(root).as_posix(),
         "bytes": stat.st_size,
+        "source_mtime_ns": int(stat.st_mtime_ns),
+        "image_orientation": 1,
         "dt": dt_obj.isoformat().replace("+00:00", "Z"),
         "ts": int(stat.st_mtime * 1_000_000),
         "id": f"as_{compute_file_id(path)}",
@@ -397,7 +407,14 @@ def scan_album(
                     if (
                         cached.get("bytes") == stat.st_size
                         and abs((cached_ts or 0) - current_ts) <= 1_000_000
+                        and not (
+                            is_raw_extension(p.suffix)
+                            and not _has_indexed_geometry(cached)
+                        )
                     ):
+                        cached = dict(cached)
+                        cached["source_mtime_ns"] = int(stat.st_mtime_ns)
+                        cached.setdefault("image_orientation", 1)
                         if _cached_thumbnail_ready(
                             p,
                             cached,

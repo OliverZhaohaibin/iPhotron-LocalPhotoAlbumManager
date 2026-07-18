@@ -4,25 +4,34 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import (
     QObject,
     QRunnable,
-    Qt,
     QThread,
     QThreadPool,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QLabel, QStackedWidget, QWidget
 
 from ....application.ports import EditServicePort
+from ....core.adjustment_mapping import resolve_adjustment_mapping
 from ....core.color_resolver import compute_color_statistics
+from ....gui.detail_decode_backend import (
+    DecodeCancelledError,
+    DecodedSurface,
+    DefaultStillDecodeBackend,
+    StillDecodeBackend,
+)
 from ....gui.detail_pipeline import (
-    DetailFrameCache,
-    DetailFrameIdentity,
+    AssetSourceIdentity,
+    DetailGeometryState,
     DetailPrefetchDescriptor,
+    DetailRenderRequest,
     detail_pipeline_v2_enabled,
     detail_scheduler_v3_enabled,
 )
@@ -33,20 +42,19 @@ from ....gui.detail_profile import (
 )
 from ....gui.detail_request_scheduler import DetailStillRequestScheduler
 from ....gui.i18n import tr
-from ....utils import image_loader
 from ..widgets.gl_image_viewer import GLImageViewer
 from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
 
 
 class _AdjustedImageSignals(QObject):
-    """Relay worker completion events back to the GUI thread."""
+    """Relay neutral-surface completion events back to the GUI thread."""
 
     started = Signal(object)
     """Emitted immediately before the runnable enters its decode path."""
 
-    completed = Signal(Path, QImage, dict)
-    """Emitted when the adjusted image finished loading successfully."""
+    completed = Signal(object, dict)
+    """Emitted with a detached DecodedSurface and shader adjustments."""
 
     failed = Signal(Path, str)
     """Emitted when loading or processing the image fails."""
@@ -56,23 +64,20 @@ class _AdjustedImageSignals(QObject):
 
 
 class _AdjustedImageWorker(QRunnable):
-    """Load and tone-map an image on a background thread."""
+    """Decode one viewport-aware neutral surface on a background thread."""
 
     def __init__(
         self,
-        source: Path,
+        request: DetailRenderRequest,
         signals: _AdjustedImageSignals,
-        edit_service: EditServicePort | None = None,
-        frame_cache: DetailFrameCache | None = None,
+        backend: StillDecodeBackend | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
-        self._source = source
+        self._request = request.with_decode_level()
+        self._source = self._request.source_identity.path
         self._signals = signals
-        self._edit_service = edit_service
-        self._frame_cache = frame_cache
-        self.frame_identity: DetailFrameIdentity | None = None
-        self.cache_hit = False
+        self._backend = backend or DefaultStillDecodeBackend()
         self._cancelled = False
         self._submitted_at = time.perf_counter()
 
@@ -87,6 +92,14 @@ class _AdjustedImageWorker(QRunnable):
 
         self._cancelled = True
 
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def update_request(self, request: DetailRenderRequest) -> None:
+        """Adopt the newest same-surface render state during promotion/reuse."""
+
+        self._request = request.with_decode_level()
+
     def run(self) -> None:  # pragma: no cover - executed on a worker thread
         """Perform the expensive image work outside the GUI thread."""
 
@@ -99,51 +112,33 @@ class _AdjustedImageWorker(QRunnable):
             path=self._source.name,
         )
         try:
-            if self._cancelled:
-                return
-            self.frame_identity = DetailFrameIdentity.from_path(self._source)
-            cached = (
-                self._frame_cache.get(self.frame_identity)
-                if self._frame_cache is not None and self.frame_identity is not None
-                else None
-            )
-            if cached is not None:
-                self.cache_hit = True
-                image, adjustments = cached
-                if not self._cancelled:
-                    self._signals.completed.emit(self._source, image, adjustments)
-                return
             decode_started = time.perf_counter()
-            image = image_loader.load_qimage(self._source, None)
+            surface = self._backend.decode(self._request, self)
             log_detail_profile(
                 "still_worker",
                 "decode",
                 (time.perf_counter() - decode_started) * 1000.0,
                 path=self._source.name,
             )
-        except Exception as exc:  # pragma: no cover - Qt loader errors are rare
+        except DecodeCancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - codec-specific
             if not self._cancelled:
                 self._signals.failed.emit(self._source, str(exc))
             return
 
-        if image is None or image.isNull():
-            if not self._cancelled:
-                self._signals.failed.emit(self._source, "Image decoder returned an empty frame")
-            return
-
         try:
             adjustments_started = time.perf_counter()
-            adjustments = {}
-            has_sidecar = (
-                self._edit_service is not None
-                and self._edit_service.sidecar_exists(self._source)
-            )
-            if has_sidecar and self._edit_service is not None:
-                stats = compute_color_statistics(image)
-                adjustments = self._edit_service.describe_adjustments(
-                    self._source,
-                    color_stats=stats,
-                ).resolved_adjustments
+            active_request = self._request
+            raw_adjustments = dict(active_request.raw_adjustments or {})
+            adjustments: dict = {}
+            if raw_adjustments:
+                stats = compute_color_statistics(surface.image)
+                adjustments = resolve_adjustment_mapping(
+                    raw_adjustments,
+                    stats=stats,
+                    normalize_bw_for_render=True,
+                )
             log_detail_profile(
                 "still_worker",
                 "adjustments",
@@ -151,7 +146,7 @@ class _AdjustedImageWorker(QRunnable):
                 path=self._source.name,
                 adjustments=len(adjustments),
             )
-        except Exception as exc:  # pragma: no cover - filesystem errors are rare
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - resolver-specific
             if not self._cancelled:
                 self._signals.failed.emit(self._source, str(exc))
             return
@@ -167,11 +162,31 @@ class _AdjustedImageWorker(QRunnable):
         )
         if self._cancelled:
             return
-
-        if not self._cancelled:
-            if self._frame_cache is not None and self.frame_identity is not None:
-                self._frame_cache.put(self.frame_identity, image, adjustments or {})
-            self._signals.completed.emit(self._source, image, adjustments or {})
+        emit_detail_event(
+            "backend_selected",
+            generation=active_request.generation,
+            asset_id=active_request.asset_id,
+            suffix=self._source.suffix.lower(),
+            backend=surface.backend,
+            decode_level=surface.decode_level,
+        )
+        if surface.fallback:
+            emit_detail_event(
+                "decode_fallback",
+                generation=active_request.generation,
+                asset_id=active_request.asset_id,
+                suffix=self._source.suffix.lower(),
+                fallback=surface.fallback,
+            )
+        emit_detail_event(
+            "surface_ready",
+            generation=active_request.generation,
+            asset_id=active_request.asset_id,
+            width=surface.decoded_size[0],
+            height=surface.decoded_size[1],
+            decode_level=surface.decode_level,
+        )
+        self._signals.completed.emit(surface, adjustments or {})
 
 
 class _ScheduledAdjustedImageWorker(_AdjustedImageWorker):
@@ -182,6 +197,65 @@ class _ScheduledAdjustedImageWorker(_AdjustedImageWorker):
             super().run()
         finally:
             self._signals.finished.emit(self)
+
+
+class _AdjustmentPreparationSignals(QObject):
+    ready = Signal(object, dict)
+    failed = Signal(object, str)
+    finished = Signal(object)
+
+
+class _AdjustmentPreparationWorker(QRunnable):
+    """Read raw sidecar state without touching the GUI or decode lanes."""
+
+    def __init__(
+        self,
+        key: object,
+        source: Path,
+        signals: _AdjustmentPreparationSignals,
+        edit_service: EditServicePort | None,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(False)
+        self.key = key
+        self.source = source
+        self.signals = signals
+        self._edit_service = edit_service
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:  # pragma: no cover - worker-thread filesystem boundary
+        try:
+            adjustments = (
+                dict(self._edit_service.read_adjustments(self.source) or {})
+                if self._edit_service is not None
+                else {}
+            )
+            if not self._cancelled:
+                self.signals.ready.emit(self.key, adjustments)
+        except Exception as exc:  # noqa: BLE001 - edit providers have varied I/O failures
+            if not self._cancelled:
+                self.signals.failed.emit(self.key, str(exc))
+        finally:
+            self.signals.finished.emit(self)
+
+
+@dataclass(slots=True)
+class _PreparedRequestIntent:
+    asset_id: str
+    source_identity: AssetSourceIdentity
+    generation: int
+    reason: str
+
+
+@dataclass(slots=True)
+class _PreparationEntry:
+    worker: _AdjustmentPreparationWorker
+    intents: list[_PreparedRequestIntent]
+    priority: int
+    result: dict | None = None
 
 
 class StillImageDecodeScheduler(QThreadPool):
@@ -206,7 +280,7 @@ class PlayerViewController(QObject):
     """Emitted when a still image fails to load or post-process."""
 
     stillFramePresented = Signal(object, int)
-    """Emitted after the requested full-resolution still texture is presented."""
+    """Emitted after the requested viewport surface is presented."""
 
     def __init__(
         self,
@@ -225,7 +299,9 @@ class PlayerViewController(QObject):
         self._image_viewer = image_viewer
         self._video_area = video_area
         self._placeholder = placeholder
-        self._placeholder_default_text = placeholder.text() if isinstance(placeholder, QLabel) else None
+        self._placeholder_default_text = (
+            placeholder.text() if isinstance(placeholder, QLabel) else None
+        )
         self._uses_standard_placeholder = self._placeholder_default_text in {
             "Select a photo or video to preview.",
             tr("DetailPage", "Select a photo or video to preview."),
@@ -235,7 +311,7 @@ class PlayerViewController(QObject):
         self._image_viewer_index = player_stack.indexOf(image_viewer)
         self._image_viewer.replayRequested.connect(self.liveReplayRequested)
         self._pool = StillImageDecodeScheduler(self)
-        self._frame_cache = DetailFrameCache()
+        self._decode_backend = DefaultStillDecodeBackend()
         self._still_scheduler = DetailStillRequestScheduler(
             pool=self._pool,
             worker_factory=self._create_adjusted_image_worker,
@@ -244,6 +320,11 @@ class PlayerViewController(QObject):
         )
         self._still_scheduler.ready.connect(self._on_scheduled_image_ready)
         self._still_scheduler.failed.connect(self._on_scheduled_image_failed)
+        self._preparation_pool = QThreadPool(self)
+        self._preparation_pool.setMaxThreadCount(1)
+        self._preparation_entries: dict[object, _PreparationEntry] = {}
+        self._preparation_entry_by_worker: dict[int, _PreparationEntry] = {}
+        self._pending_layout_intent: tuple[_PreparedRequestIntent, dict] | None = None
         self._request_generation = 0
         self._present_generation = 0
         self._present_started_at: float | None = None
@@ -251,7 +332,7 @@ class PlayerViewController(QObject):
         self._loading_source: Path | None = None
         self._loading_started_at: float | None = None
         self._defer_still_updates = False
-        self._pending_still: tuple[Path, QImage, dict] | None = None
+        self._pending_still: tuple[DecodedSurface, dict] | None = None
         self._current_full_image: QImage | None = None
 
         # Per-widget first-render tracking.  QRhiWidget backing textures are
@@ -396,8 +477,11 @@ class PlayerViewController(QObject):
         *,
         asset_id: str = "",
         request_generation: int | None = None,
+        source_identity: AssetSourceIdentity | None = None,
     ) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
+        identity = source_identity or AssetSourceIdentity.create(source)
+        source = identity.path
         if request_generation is None:
             self._request_generation += 1
         else:
@@ -419,11 +503,13 @@ class PlayerViewController(QObject):
             media_type="image",
             suffix=source.suffix.lower(),
         )
-
-        scheduled = self._still_scheduler.request(
-            asset_id=asset_id,
-            source=source,
-            generation=request_generation,
+        scheduled = self._schedule_adjustment_preparation(
+            _PreparedRequestIntent(
+                asset_id=str(asset_id),
+                source_identity=identity,
+                generation=request_generation,
+                reason="initial",
+            )
         )
         if not scheduled:
             self._loading_source = None
@@ -435,14 +521,15 @@ class PlayerViewController(QObject):
 
         self._still_scheduler.cancel_foreground()
 
-    def _create_adjusted_image_worker(self, source: Path) -> _ScheduledAdjustedImageWorker:
+    def _create_adjusted_image_worker(
+        self,
+        request: DetailRenderRequest,
+    ) -> _ScheduledAdjustedImageWorker:
         signals = _AdjustedImageSignals()
-        edit_service = self._edit_service_getter() if self._edit_service_getter else None
         worker = _ScheduledAdjustedImageWorker(
-            source,
+            request,
             signals,
-            edit_service=edit_service,
-            frame_cache=self._frame_cache,
+            backend=self._decode_backend,
         )
         return worker
 
@@ -450,15 +537,26 @@ class PlayerViewController(QObject):
         self,
         descriptor: DetailPrefetchDescriptor | Path,
     ) -> bool:
-        """Warm exactly one full-source candidate at low priority."""
+        """Warm exactly one viewport-surface candidate at low priority."""
 
         if isinstance(descriptor, DetailPrefetchDescriptor):
             asset_id = descriptor.asset_id
             source = descriptor.path
+            identity = descriptor.source_identity or AssetSourceIdentity.create(source)
         else:
             source = Path(descriptor)
             asset_id = ""
-        return self._still_scheduler.prefetch(asset_id=asset_id, source=source)
+            identity = AssetSourceIdentity.create(source)
+        if self._viewport_metrics() is None:
+            return False
+        return self._schedule_adjustment_preparation(
+            _PreparedRequestIntent(
+                asset_id=str(asset_id),
+                source_identity=identity,
+                generation=0,
+                reason="prefetch",
+            )
+        )
 
     def prefetch_images(
         self,
@@ -468,24 +566,166 @@ class PlayerViewController(QObject):
 
         return bool(candidates) and self.prefetch_image(candidates[0])
 
+    def _schedule_adjustment_preparation(self, intent: _PreparedRequestIntent) -> bool:
+        identity = intent.source_identity
+        key = (intent.asset_id, identity.path, identity.revision)
+        existing = self._preparation_entries.get(key)
+        priority = 1 if intent.reason != "prefetch" else -1
+        if existing is not None:
+            if existing.result is not None:
+                return self._dispatch_prepared_intent(intent, dict(existing.result))
+            existing.intents.append(intent)
+            if priority > existing.priority and self._preparation_pool.tryTake(existing.worker):
+                existing.priority = priority
+                self._preparation_pool.start(existing.worker, priority)
+            return True
+
+        if priority > 0:
+            for other_key, entry in tuple(self._preparation_entries.items()):
+                if other_key == key:
+                    continue
+                if self._preparation_pool.tryTake(entry.worker):
+                    entry.worker.cancel()
+                    self._retire_preparation_entry(entry)
+                else:
+                    entry.intents.clear()
+
+        signals = _AdjustmentPreparationSignals()
+        edit_service = self._edit_service_getter() if self._edit_service_getter else None
+        worker = _AdjustmentPreparationWorker(key, identity.path, signals, edit_service)
+        entry = _PreparationEntry(worker=worker, intents=[intent], priority=priority)
+        self._preparation_entries[key] = entry
+        self._preparation_entry_by_worker[id(worker)] = entry
+        signals.ready.connect(self._on_adjustment_prepared)
+        signals.failed.connect(self._on_adjustment_preparation_failed)
+        signals.finished.connect(self._on_adjustment_preparation_finished)
+        try:
+            self._preparation_pool.start(worker, priority)
+        except RuntimeError:
+            self._retire_preparation_entry(entry)
+            return False
+        return True
+
+    def _on_adjustment_prepared(self, key: object, adjustments: dict) -> None:
+        entry = self._preparation_entries.get(key)
+        if entry is None:
+            return
+        entry.result = dict(adjustments)
+        for intent in tuple(entry.intents):
+            self._dispatch_prepared_intent(intent, dict(adjustments))
+
+    def _dispatch_prepared_intent(
+        self,
+        intent: _PreparedRequestIntent,
+        adjustments: dict,
+    ) -> bool:
+        metrics = self._viewport_metrics()
+        if metrics is None:
+            if intent.reason != "prefetch" and intent.generation == self._request_generation:
+                self._pending_layout_intent = (intent, dict(adjustments))
+                QTimer.singleShot(0, self._retry_pending_layout_intent)
+                return True
+            return False
+        physical_size, dpr = metrics
+        request = DetailRenderRequest(
+            generation=int(intent.generation),
+            asset_id=intent.asset_id,
+            source_identity=intent.source_identity,
+            viewport_physical_size=physical_size,
+            device_pixel_ratio=dpr,
+            geometry=DetailGeometryState.from_adjustments(adjustments),
+            reason="prefetch" if intent.reason == "prefetch" else "initial",
+            texture_limit=self._texture_limit(),
+            raw_adjustments=dict(adjustments),
+        ).with_decode_level()
+        emit_detail_event(
+            "level_selected",
+            generation=request.generation,
+            asset_id=request.asset_id,
+            suffix=request.source_identity.path.suffix.lower(),
+            decode_level=request.decode_level,
+            viewport_width=physical_size[0],
+            viewport_height=physical_size[1],
+            reason=request.reason,
+        )
+        if request.decode_level == "full" and max(
+            request.source_identity.width,
+            request.source_identity.height,
+        ) > 4096:
+            emit_detail_event(
+                "decode_fallback",
+                generation=request.generation,
+                asset_id=request.asset_id,
+                suffix=request.source_identity.path.suffix.lower(),
+                fallback="full_level",
+            )
+        if request.reason == "prefetch":
+            return self._still_scheduler.prefetch(request)
+        return self._still_scheduler.request(request)
+
+    def _retry_pending_layout_intent(self) -> None:
+        pending = self._pending_layout_intent
+        if pending is None:
+            return
+        intent, adjustments = pending
+        if intent.generation != self._request_generation:
+            self._pending_layout_intent = None
+            return
+        if self._viewport_metrics() is None:
+            QTimer.singleShot(16, self._retry_pending_layout_intent)
+            return
+        self._pending_layout_intent = None
+        self._dispatch_prepared_intent(intent, adjustments)
+
+    def _viewport_metrics(self) -> tuple[tuple[int, int], float] | None:
+        width = int(self._image_viewer.width())
+        height = int(self._image_viewer.height())
+        if width <= 0 or height <= 0:
+            return None
+        dpr = max(1.0, float(self._image_viewer.devicePixelRatioF()))
+        return ((max(1, round(width * dpr)), max(1, round(height * dpr))), dpr)
+
+    def _texture_limit(self) -> int:
+        getter = getattr(self._image_viewer, "maximum_texture_size", None)
+        return max(1, int(getter())) if callable(getter) else 8192
+
+    def _on_adjustment_preparation_failed(self, key: object, message: str) -> None:
+        entry = self._preparation_entries.get(key)
+        if entry is None:
+            return
+        for intent in tuple(entry.intents):
+            if intent.reason != "prefetch" and intent.generation == self._request_generation:
+                self._on_adjusted_image_failed(intent.source_identity.path, message)
+
+    def _on_adjustment_preparation_finished(self, worker: object) -> None:
+        entry = self._preparation_entry_by_worker.get(id(worker))
+        if entry is not None:
+            self._retire_preparation_entry(entry)
+
+    def _retire_preparation_entry(self, entry: _PreparationEntry) -> None:
+        key = entry.worker.key
+        if self._preparation_entries.get(key) is entry:
+            self._preparation_entries.pop(key, None)
+        self._preparation_entry_by_worker.pop(id(entry.worker), None)
+        entry.worker.signals.deleteLater()
+        entry.worker.setAutoDelete(True)
+
     def _on_scheduled_image_ready(
         self,
         generation: int,
-        source: Path,
-        image: QImage,
+        surface: DecodedSurface,
         adjustments: dict,
-        frame_identity: DetailFrameIdentity | None = None,
     ) -> None:
         if generation != self._request_generation:
             return
+        source = surface.decode_key.source
         self._present_generation = generation
         self._present_started_at = self._loading_started_at
         self._present_source = source
         self._on_adjusted_image_ready(
             source,
-            image,
+            surface,
             adjustments,
-            frame_identity=frame_identity,
         )
 
     def _on_scheduled_image_failed(
@@ -499,9 +739,7 @@ class PlayerViewController(QObject):
         self._on_adjusted_image_failed(source, message)
 
     def _on_still_frame_presented(self, source: object) -> None:
-        presented_path = (
-            source.path if isinstance(source, DetailFrameIdentity) else source
-        )
+        presented_path = getattr(source, "source", source)
         if presented_path != self._present_source:
             return
         generation = self._present_generation
@@ -525,20 +763,19 @@ class PlayerViewController(QObject):
         self.stillFramePresented.emit(presented_path, generation)
 
     def shutdown(self, *, timeout_ms: int = 1500) -> None:
-        """Cancel queued decodes and wait briefly for active full-image reads."""
+        """Cancel queued preparation/decode work and flush profiling."""
 
         self.cancel_pending_image_requests()
+        self._preparation_pool.clear()
+        self._preparation_pool.waitForDone(max(0, int(timeout_ms)))
         self._still_scheduler.shutdown(timeout_ms=timeout_ms)
-        self._frame_cache.clear()
         shutdown_detail_profile(timeout_ms=min(max(0, int(timeout_ms)), 1000))
 
     def clear_frame_cache(self) -> None:
-        """Drop decoded frames after a library change or memory pressure."""
-
-        self._frame_cache.clear()
+        """Compatibility no-op until the Phase-3 neutral surface cache exists."""
 
     def current_full_image(self) -> QImage | None:
-        """Return the retained original decode for edit/re-sampling consumers."""
+        """Return the retained viewport surface for compatibility consumers."""
 
         image = self._current_full_image
         return QImage(image) if image is not None and not image.isNull() else None
@@ -553,7 +790,13 @@ class PlayerViewController(QObject):
         self._present_source = None
         self._present_started_at = None
         self._pending_still = None
+        self._pending_layout_intent = None
         self._current_full_image = None
+        for entry in tuple(self._preparation_entries.values()):
+            entry.intents.clear()
+            entry.worker.cancel()
+            if self._preparation_pool.tryTake(entry.worker):
+                self._retire_preparation_entry(entry)
 
     def defer_still_updates(self, enabled: bool) -> None:
         """Control whether still frames should be applied immediately."""
@@ -565,9 +808,9 @@ class PlayerViewController(QObject):
         """Apply any deferred still frame if available."""
         if self._pending_still is None:
             return False
-        source, image, adjustments = self._pending_still
+        surface, adjustments = self._pending_still
         self._pending_still = None
-        self._apply_still_frame(source, image, adjustments)
+        self._apply_still_frame(surface, adjustments)
         return True
 
     def clear_image(self) -> None:
@@ -636,14 +879,14 @@ class PlayerViewController(QObject):
     def _on_adjusted_image_ready(
         self,
         source: Path,
-        image: QImage,
+        surface: DecodedSurface,
         adjustments: dict,
-        *,
-        frame_identity: DetailFrameIdentity | None = None,
     ) -> None:
-        """Render *image* when the matching worker completes successfully."""
+        """Render a neutral surface when the matching worker completes."""
         if self._loading_source != source:
             return
+
+        image = surface.image
 
         if self._loading_started_at is not None:
             log_detail_profile(
@@ -663,14 +906,12 @@ class PlayerViewController(QObject):
             return
 
         if self._defer_still_updates and self._player_stack.currentWidget() is self._video_area:
-            self._pending_still = (source, image, adjustments)
+            self._pending_still = (surface, adjustments)
         else:
             self._apply_still_frame(
-                source,
-                image,
+                surface,
                 adjustments,
                 reset_view=True,
-                frame_identity=frame_identity,
             )
 
         if self._loading_source == source:
@@ -691,31 +932,22 @@ class PlayerViewController(QObject):
 
     def _apply_still_frame(
         self,
-        source: Path,
-        image: QImage,
+        surface: DecodedSurface,
         adjustments: dict,
         *,
         reset_view: bool = True,
-        frame_identity: DetailFrameIdentity | None = None,
     ) -> None:
-        """Render the still image on the GL viewer."""
+        """Render the already-normalised still surface on the GL viewer."""
         apply_started = time.perf_counter()
+        source = surface.decode_key.source
+        image = surface.image
         self.show_image_surface()
         self._current_full_image = QImage(image)
-        display_image = image
-        texture_limit_getter = getattr(self._image_viewer, "maximum_texture_size", None)
-        texture_limit = int(texture_limit_getter()) if callable(texture_limit_getter) else 8192
-        if image.width() > texture_limit or image.height() > texture_limit:
-            display_image = image.scaled(
-                texture_limit,
-                texture_limit,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
         self._image_viewer.set_image(
-            display_image,
+            image,
             adjustments,
-            image_source=frame_identity or source,
+            image_source=surface.decode_key,
+            source_size=surface.source_size,
             reset_view=reset_view,
         )
         self._image_viewer.update()

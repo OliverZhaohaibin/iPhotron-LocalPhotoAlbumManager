@@ -12,7 +12,7 @@ from iPhoto.application.ports import (
     EditRenderingState,
     EditServicePort,
 )
-from iPhoto.gui.detail_pipeline import detail_pipeline_v2_enabled
+from iPhoto.gui.detail_pipeline import AssetSourceIdentity, detail_pipeline_v2_enabled
 from iPhoto.gui.detail_profile import emit_detail_event
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.utils.geocoding import resolve_location_name
@@ -59,6 +59,7 @@ class DetailPresentation:
     reload_token: int
     request_generation: int = 0
     video_duration_hint: float | None = None
+    source_identity: AssetSourceIdentity | None = None
 
 
 class DetailViewModel(BaseViewModel):
@@ -376,6 +377,7 @@ class DetailViewModel(BaseViewModel):
                 else int(request_generation)
             ),
             video_duration_hint=video_duration_hint,
+            source_identity=AssetSourceIdentity.from_info(dto.abs_path, info),
         )
 
     @staticmethod

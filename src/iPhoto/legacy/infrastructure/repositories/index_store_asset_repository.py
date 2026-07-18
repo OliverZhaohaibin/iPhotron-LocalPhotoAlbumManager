@@ -340,7 +340,15 @@ class IndexStoreAssetRepositoryAdapter(IAssetRepository):
         if gps is not None:
             metadata["gps"] = gps
 
-        for key in ("location", "micro_thumbnail", "live_role", "live_partner_rel"):
+        for key in (
+            "location",
+            "micro_thumbnail",
+            "live_role",
+            "live_partner_rel",
+            "source_mtime_ns",
+            "image_orientation",
+            "index_revision",
+        ):
             if row.get(key) is not None:
                 metadata[key] = row[key]
         return metadata

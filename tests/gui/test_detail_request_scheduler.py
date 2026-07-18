@@ -5,19 +5,27 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
 
+from iPhoto.gui.detail_decode_backend import DecodedSurface
+from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailDecodeKey,
+    DetailGeometryState,
+    DetailRenderRequest,
+)
 from iPhoto.gui.detail_request_scheduler import DetailStillRequestScheduler
 
 
 class _WorkerSignals(QObject):
     started = Signal(object)
-    completed = Signal(Path, QImage, dict)
+    completed = Signal(object, dict)
     failed = Signal(Path, str)
     finished = Signal(object)
 
 
 class _FakeWorker:
-    def __init__(self, source: Path) -> None:
-        self.source = source
+    def __init__(self, request: DetailRenderRequest) -> None:
+        self.request = request.with_decode_level()
+        self.source = request.source_identity.path
         self.signals = _WorkerSignals()
         self.frame_identity = None
         self.cache_hit = False
@@ -26,6 +34,9 @@ class _FakeWorker:
 
     def cancel(self) -> None:
         self.cancelled = True
+
+    def update_request(self, request: DetailRenderRequest) -> None:
+        self.request = request.with_decode_level()
 
     def setAutoDelete(self, enabled: bool) -> None:
         self.auto_delete = bool(enabled)
@@ -57,7 +68,15 @@ class _FakePool:
     def complete(self, worker: _FakeWorker) -> None:
         image = QImage(8, 8, QImage.Format.Format_RGBA8888)
         image.fill(0xFF112233)
-        worker.signals.completed.emit(worker.source, image, {})
+        surface = DecodedSurface(
+            image=image,
+            decode_key=DetailDecodeKey.from_request(worker.request),
+            source_size=(8, 8),
+            decoded_size=(8, 8),
+            decode_level=worker.request.decode_level or "full",
+            backend="fake",
+        )
+        worker.signals.completed.emit(surface, {})
         worker.signals.finished.emit(worker)
 
     def clear(self) -> None:
@@ -77,13 +96,41 @@ def _harness() -> tuple[
     pool = _FakePool()
     workers: list[_FakeWorker] = []
 
-    def factory(source: Path) -> _FakeWorker:
-        worker = _FakeWorker(source)
+    def factory(request: DetailRenderRequest) -> _FakeWorker:
+        worker = _FakeWorker(request)
         workers.append(worker)
         return worker
 
     scheduler = DetailStillRequestScheduler(pool=pool, worker_factory=factory)
     return scheduler, pool, workers
+
+
+def _request(
+    source: Path,
+    *,
+    asset_id: str,
+    generation: int,
+    level: int = 1024,
+    revision: int = 1,
+    adjustments: dict | None = None,
+) -> DetailRenderRequest:
+    return DetailRenderRequest(
+        generation=generation,
+        asset_id=asset_id,
+        source_identity=AssetSourceIdentity.create(
+            source,
+            size_bytes=100,
+            source_mtime_ns=revision,
+            width=4000,
+            height=3000,
+        ),
+        viewport_physical_size=(800, 600),
+        device_pixel_ratio=1.0,
+        geometry=DetailGeometryState(),
+        reason="prefetch" if generation == 0 else "initial",
+        decode_level=level,
+        raw_adjustments=adjustments,
+    )
 
 
 def test_queued_prefetch_is_promoted_without_creating_a_second_worker(
@@ -92,8 +139,8 @@ def test_queued_prefetch_is_promoted_without_creating_a_second_worker(
     scheduler, pool, workers = _harness()
     source = tmp_path / "photo.jpg"
 
-    assert scheduler.prefetch(asset_id="asset-1", source=source)
-    assert scheduler.request(asset_id="asset-1", source=source, generation=7)
+    assert scheduler.prefetch(_request(source, asset_id="asset-1", generation=0))
+    assert scheduler.request(_request(source, asset_id="asset-1", generation=7))
 
     assert len(workers) == 1
     assert [priority for _, priority in pool.starts] == [-1, 1]
@@ -105,16 +152,44 @@ def test_running_prefetch_is_reused_and_decodes_once(tmp_path: Path) -> None:
     source = tmp_path / "photo.heic"
     presented: list[tuple[int, Path]] = []
     scheduler.ready.connect(
-        lambda generation, path, *_args: presented.append((generation, path))
+        lambda generation, surface, *_args: presented.append(
+            (generation, surface.decode_key.source)
+        )
     )
 
-    assert scheduler.prefetch(asset_id="asset-1", source=source)
+    assert scheduler.prefetch(_request(source, asset_id="asset-1", generation=0))
     pool.mark_running(workers[0])
-    assert scheduler.request(asset_id="asset-1", source=source, generation=3)
+    assert scheduler.request(_request(source, asset_id="asset-1", generation=3))
     pool.complete(workers[0])
 
     assert len(workers) == 1
     assert presented == [(3, source)]
+
+
+def test_reused_surface_worker_adopts_latest_adjustments(tmp_path: Path) -> None:
+    scheduler, pool, workers = _harness()
+    source = tmp_path / "photo.jpg"
+
+    assert scheduler.prefetch(
+        _request(
+            source,
+            asset_id="asset-1",
+            generation=0,
+            adjustments={"Crop_W": 1.0},
+        )
+    )
+    pool.mark_running(workers[0])
+    assert scheduler.request(
+        _request(
+            source,
+            asset_id="asset-1",
+            generation=3,
+            adjustments={"Crop_W": 0.75},
+        )
+    )
+
+    assert len(workers) == 1
+    assert dict(workers[0].request.raw_adjustments or {}) == {"Crop_W": 0.75}
 
 
 def test_new_asset_bypasses_running_stale_decoder_and_stale_never_presents(
@@ -125,13 +200,15 @@ def test_new_asset_bypasses_running_stale_decoder_and_stale_never_presents(
     source_b = tmp_path / "b.jpg"
     presented: list[tuple[int, Path]] = []
     scheduler.ready.connect(
-        lambda generation, path, *_args: presented.append((generation, path))
+        lambda generation, surface, *_args: presented.append(
+            (generation, surface.decode_key.source)
+        )
     )
 
-    assert scheduler.request(asset_id="A", source=source_a, generation=1)
+    assert scheduler.request(_request(source_a, asset_id="A", generation=1))
     worker_a = workers[0]
     pool.mark_running(worker_a)
-    assert scheduler.request(asset_id="B", source=source_b, generation=2)
+    assert scheduler.request(_request(source_b, asset_id="B", generation=2))
     worker_b = workers[1]
     pool.mark_running(worker_b)
 
@@ -153,19 +230,36 @@ def test_repeated_click_updates_generation_without_parallel_same_key_decoder(
         lambda generation, *_args: presented.append(generation)
     )
 
-    assert scheduler.request(asset_id="asset-1", source=source, generation=1)
+    assert scheduler.request(_request(source, asset_id="asset-1", generation=1))
     pool.mark_running(workers[0])
-    assert scheduler.request(asset_id="asset-1", source=source, generation=2)
+    assert scheduler.request(_request(source, asset_id="asset-1", generation=2))
     pool.complete(workers[0])
 
     assert len(workers) == 1
     assert presented == [2]
 
 
+def test_different_decode_levels_do_not_reuse_the_same_worker(tmp_path: Path) -> None:
+    scheduler, pool, workers = _harness()
+    source = tmp_path / "photo.jpg"
+    assert scheduler.request(
+        _request(source, asset_id="asset-1", generation=1, level=1024)
+    )
+    pool.mark_running(workers[0])
+
+    assert scheduler.request(
+        _request(source, asset_id="asset-1", generation=2, level=2048)
+    )
+
+    assert len(workers) == 2
+    assert workers[0].request.decode_level == 1024
+    assert workers[1].request.decode_level == 2048
+
+
 def test_shutdown_cancels_and_releases_queued_workers(tmp_path: Path) -> None:
     scheduler, pool, workers = _harness()
     source = tmp_path / "photo.jpg"
-    assert scheduler.request(asset_id="asset-1", source=source, generation=1)
+    assert scheduler.request(_request(source, asset_id="asset-1", generation=1))
 
     scheduler.shutdown(timeout_ms=25)
 
@@ -179,7 +273,7 @@ def test_shutdown_cancels_and_releases_queued_workers(tmp_path: Path) -> None:
 def test_shutdown_retains_worker_when_pool_wait_times_out(tmp_path: Path) -> None:
     scheduler, pool, workers = _harness()
     source = tmp_path / "slow.raw"
-    assert scheduler.request(asset_id="asset-1", source=source, generation=1)
+    assert scheduler.request(_request(source, asset_id="asset-1", generation=1))
     worker = workers[0]
     pool.mark_running(worker)
     pool.wait_result = False

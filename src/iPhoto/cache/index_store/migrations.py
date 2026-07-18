@@ -24,7 +24,7 @@ logger = get_logger()
 # Version 2 adds cached video presentation metadata used by Gallery/Detail reads.
 # Opening an already migrated database must be O(1); in particular it must not
 # revisit every asset row on each desktop launch.
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
 
@@ -74,6 +74,8 @@ _ASSET_COLUMN_MIGRATIONS = {
     "pet_status": "ALTER TABLE assets ADD COLUMN pet_status TEXT",
     "video_rotation_cw": "ALTER TABLE assets ADD COLUMN video_rotation_cw INTEGER",
     "video_linux_180_hint": "ALTER TABLE assets ADD COLUMN video_linux_180_hint INTEGER",
+    "source_mtime_ns": "ALTER TABLE assets ADD COLUMN source_mtime_ns INTEGER DEFAULT 0",
+    "image_orientation": "ALTER TABLE assets ADD COLUMN image_orientation INTEGER DEFAULT 1",
 }
 _V1_REQUIRED_COLUMNS = {
     "assets": frozenset({"rel", "id", "dt", "mime", *_ASSET_COLUMN_MIGRATIONS}),
@@ -499,7 +501,9 @@ class SchemaMigrator:
                 face_status TEXT,
                 pet_status TEXT,
                 video_rotation_cw INTEGER,
-                video_linux_180_hint INTEGER
+                video_linux_180_hint INTEGER,
+                source_mtime_ns INTEGER DEFAULT 0,
+                image_orientation INTEGER DEFAULT 1
             )
         """)
 
@@ -559,6 +563,15 @@ class SchemaMigrator:
 
         existing_columns = {str(row[1]) for row in _table_info(conn, "assets")}
         for column_name in ("video_rotation_cw", "video_linux_180_hint"):
+            if column_name not in existing_columns:
+                conn.execute(_ASSET_COLUMN_MIGRATIONS[column_name])
+
+    @staticmethod
+    def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+        """Add stable source-pixel revision and orientation columns."""
+
+        existing_columns = {str(row[1]) for row in _table_info(conn, "assets")}
+        for column_name in ("source_mtime_ns", "image_orientation"):
             if column_name not in existing_columns:
                 conn.execute(_ASSET_COLUMN_MIGRATIONS[column_name])
 

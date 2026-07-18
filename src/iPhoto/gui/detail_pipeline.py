@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from types import MappingProxyType
 from typing import Any, Literal
 
 from PySide6.QtGui import QImage
@@ -17,6 +20,194 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
 from iPhoto.io.sidecar import sidecar_path_for_asset
 
 _MIB = 1024 * 1024
+DETAIL_DECODE_LEVELS = (1024, 2048, 3072, 4096)
+
+
+@dataclass(frozen=True, slots=True)
+class AssetSourceIdentity:
+    """Indexed identity for neutral source pixels without GUI-thread stat I/O."""
+
+    path: Path
+    size_bytes: int = 0
+    source_mtime_ns: int = 0
+    index_revision: int = 0
+    width: int = 0
+    height: int = 0
+    orientation: int = 1
+
+    @classmethod
+    def create(
+        cls,
+        path: Path,
+        *,
+        size_bytes: object = 0,
+        source_mtime_ns: object = 0,
+        index_revision: object = 0,
+        width: object = 0,
+        height: object = 0,
+        orientation: object = 1,
+    ) -> AssetSourceIdentity:
+        return cls(
+            path=Path(path).expanduser().absolute(),
+            size_bytes=_non_negative_int(size_bytes),
+            source_mtime_ns=_non_negative_int(source_mtime_ns),
+            index_revision=_non_negative_int(index_revision),
+            width=_non_negative_int(width),
+            height=_non_negative_int(height),
+            orientation=_orientation_value(orientation),
+        )
+
+    @classmethod
+    def from_info(cls, path: Path, info: Mapping[str, Any] | None) -> AssetSourceIdentity:
+        values = info or {}
+        return cls.create(
+            path,
+            size_bytes=values.get("bytes", values.get("size_bytes", 0)),
+            source_mtime_ns=values.get("source_mtime_ns", 0),
+            index_revision=values.get("index_revision", 0),
+            width=values.get("w", values.get("width", 0)),
+            height=values.get("h", values.get("height", 0)),
+            orientation=values.get("orientation", values.get("image_orientation", 1)),
+        )
+
+    @property
+    def revision(self) -> tuple[str, int, int]:
+        if self.source_mtime_ns > 0:
+            return ("mtime", self.size_bytes, self.source_mtime_ns)
+        if self.index_revision > 0:
+            return ("index", self.size_bytes, self.index_revision)
+        return ("legacy", self.size_bytes, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class DetailGeometryState:
+    crop_cx: float = 0.5
+    crop_cy: float = 0.5
+    crop_width: float = 1.0
+    crop_height: float = 1.0
+    rotate90: int = 0
+    straighten: float = 0.0
+    perspective_vertical: float = 0.0
+    perspective_horizontal: float = 0.0
+
+    @classmethod
+    def from_adjustments(cls, values: Mapping[str, Any] | None) -> DetailGeometryState:
+        source = values or {}
+        return cls(
+            crop_cx=_clamp_float(source.get("Crop_CX", 0.5), 0.0, 1.0, 0.5),
+            crop_cy=_clamp_float(source.get("Crop_CY", 0.5), 0.0, 1.0, 0.5),
+            crop_width=_clamp_float(source.get("Crop_W", 1.0), 0.0001, 1.0, 1.0),
+            crop_height=_clamp_float(source.get("Crop_H", 1.0), 0.0001, 1.0, 1.0),
+            rotate90=_non_negative_int(source.get("Crop_Rotate90", 0)) % 4,
+            straighten=_clamp_float(source.get("Crop_Straighten", 0.0), -45.0, 45.0, 0.0),
+            perspective_vertical=_clamp_float(
+                source.get("Perspective_Vertical", 0.0), -1.0, 1.0, 0.0
+            ),
+            perspective_horizontal=_clamp_float(
+                source.get("Perspective_Horizontal", 0.0), -1.0, 1.0, 0.0
+            ),
+        )
+
+
+DetailRequestReason = Literal["prefetch", "initial", "resize", "zoom"]
+DetailDecodeLevel = int | Literal["full"]
+
+
+@dataclass(frozen=True, slots=True)
+class DetailRenderRequest:
+    generation: int
+    asset_id: str
+    source_identity: AssetSourceIdentity
+    viewport_physical_size: tuple[int, int]
+    device_pixel_ratio: float
+    geometry: DetailGeometryState
+    reason: DetailRequestReason
+    texture_limit: int = 8192
+    raw_adjustments: Mapping[str, Any] | None = None
+    decode_level: DetailDecodeLevel | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "raw_adjustments",
+            MappingProxyType(dict(self.raw_adjustments or {})),
+        )
+
+    def with_decode_level(self) -> DetailRenderRequest:
+        if self.decode_level is not None:
+            return self
+        return DetailRenderRequest(
+            generation=self.generation,
+            asset_id=self.asset_id,
+            source_identity=self.source_identity,
+            viewport_physical_size=self.viewport_physical_size,
+            device_pixel_ratio=self.device_pixel_ratio,
+            geometry=self.geometry,
+            reason=self.reason,
+            texture_limit=self.texture_limit,
+            raw_adjustments=dict(self.raw_adjustments or {}),
+            decode_level=select_detail_decode_level(self),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DetailDecodeKey:
+    asset_id: str
+    source: Path
+    source_revision: tuple[str, int, int]
+    decode_level: DetailDecodeLevel
+
+    @classmethod
+    def from_request(cls, request: DetailRenderRequest) -> DetailDecodeKey:
+        prepared = request.with_decode_level()
+        decode_level = prepared.decode_level or "full"
+        identity = prepared.source_identity
+        return cls(
+            asset_id=str(prepared.asset_id).strip() or identity.path.name,
+            source=identity.path,
+            source_revision=identity.revision,
+            decode_level=decode_level,
+        )
+
+
+def select_detail_decode_level(request: DetailRenderRequest) -> DetailDecodeLevel:
+    """Choose the smallest neutral-surface tier satisfying the visible viewport."""
+
+    identity = request.source_identity
+    if identity.width <= 0 or identity.height <= 0:
+        return "full"
+    source_w = max(1, identity.width)
+    source_h = max(1, identity.height)
+    viewport_w = max(1, int(request.viewport_physical_size[0]))
+    viewport_h = max(1, int(request.viewport_physical_size[1]))
+    geometry = request.geometry
+
+    crop_pixel_w = max(1.0, source_w * geometry.crop_width)
+    crop_pixel_h = max(1.0, source_h * geometry.crop_height)
+    if geometry.rotate90 % 2:
+        visible_w, visible_h = crop_pixel_h, crop_pixel_w
+    else:
+        visible_w, visible_h = crop_pixel_w, crop_pixel_h
+    fit_scale = min(viewport_w / visible_w, viewport_h / visible_h)
+
+    angle = math.radians(abs(geometry.straighten))
+    straighten_scale = max(1.0, abs(math.cos(angle)) + abs(math.sin(angle)))
+    perspective_scale = 1.0 + 0.5 * max(
+        abs(geometry.perspective_vertical),
+        abs(geometry.perspective_horizontal),
+    )
+    required = math.ceil(
+        max(source_w, source_h) * fit_scale * straighten_scale * perspective_scale
+    )
+    source_longest = max(source_w, source_h)
+    required = min(source_longest, max(1, required))
+    effective_limit = max(1, min(source_longest, int(request.texture_limit or 8192)))
+    if required > DETAIL_DECODE_LEVELS[-1]:
+        return "full"
+    for level in DETAIL_DECODE_LEVELS:
+        if required <= level:
+            return min(level, effective_limit, source_longest)
+    return "full"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +275,7 @@ class DetailPrefetchDescriptor:
     asset_id: str
     path: Path
     is_video: bool
+    source_identity: AssetSourceIdentity | None = None
 
 
 class DetailFrameCache:
@@ -200,13 +392,42 @@ def _image_bytes(image: QImage) -> int:
     return max(0, int(image.bytesPerLine()) * int(image.height()))
 
 
+def _non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _orientation_value(value: object) -> int:
+    numeric = _non_negative_int(value)
+    return numeric if 1 <= numeric <= 8 else 1
+
+
+def _clamp_float(value: object, minimum: float, maximum: float, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(numeric):
+        return default
+    return max(minimum, min(maximum, numeric))
+
+
 __all__ = [
+    "DETAIL_DECODE_LEVELS",
+    "AssetSourceIdentity",
+    "DetailDecodeKey",
+    "DetailDecodeLevel",
     "DetailFrameCache",
     "DetailFrameIdentity",
+    "DetailGeometryState",
     "DetailMediaPreparation",
     "DetailOpenTrace",
     "DetailPrefetchDescriptor",
+    "DetailRenderRequest",
     "VideoPresentationState",
     "detail_pipeline_v2_enabled",
     "detail_scheduler_v3_enabled",
+    "select_detail_decode_level",
 ]

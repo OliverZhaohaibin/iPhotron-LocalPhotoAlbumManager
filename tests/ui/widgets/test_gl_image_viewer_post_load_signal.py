@@ -5,6 +5,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GL image viewer tests")
 
 import os
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from PySide6.QtCore import QPointF, QSize
@@ -71,6 +72,21 @@ def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None
     )
     assert image_point.x() == pytest.approx(210.0)
     assert image_point.y() == pytest.approx(160.0)
+
+
+def test_still_surface_retains_transaction_generation_until_gpu_upload(qapp) -> None:
+    viewer = GLImageViewer()
+    image = QImage(32, 24, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    surface = SimpleNamespace(
+        image=image,
+        decode_key="asset-7-lod-1024",
+        source_size=(3200, 2400),
+    )
+
+    viewer.set_still_surface(surface, {}, generation=7)
+
+    assert viewer._still_generation_by_key[surface.decode_key] == 7
 
 
 def test_gl_image_viewer_maps_full_resolution_face_box_onto_viewport_surface(qapp) -> None:

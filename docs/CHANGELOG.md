@@ -4,6 +4,16 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — Gallery Detail GPU-first Phase 5 Candidate
+
+- Unified still and video Detail presentation under one immutable render transaction and terminal-state coordinator.
+- Removed the legacy Detail v2/frame-cache flags and the synchronous video compatibility entry point.
+- Added macOS ImageIO and Windows WIC backend integrations, platform-to-Qt fallback routing, generation-safe GPU
+  profiling, and a packaged benchmark harness covering cache/Edit/fullscreen/LOD/rapid-switch scenarios with absolute
+  and baseline-relative SLO validation.
+- The refactor remains a release candidate until macOS, Windows, and Linux real-GPU packaged matrices pass; no overall
+  performance-closure claim is made by source/offscreen tests.
+
 ## Unreleased — People & Pets Recognition
 
 🐾 *Adds a library-scoped Pets bounded context and composes pet identities with

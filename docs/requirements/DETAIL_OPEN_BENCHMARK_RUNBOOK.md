@@ -4,6 +4,40 @@
 
 ## 采集
 
+### 自动 packaged harness（Phase 5）
+
+先复制示例 manifest，并为每个平台补齐专用 JPEG/PNG/HEIC/RAW、MP4/MOV/MKV、H.264/H.265、4K/HDR
+样本。manifest 只保存相对路径与非隐私 category；驱动会把列出的媒体和同名 `.ipo` 复制到临时图库，退出后
+删除临时副本，不修改源测试图库。
+
+```bash
+.venv/bin/python tools/run_detail_packaged_benchmark.py \
+  --app dist/main.app \
+  --library tools/testbase \
+  --manifest docs/requirements/gallery-detail-gpu-first/DETAIL_BENCHMARK_MANIFEST.example.json \
+  --output-dir benchmark-output/macos-metal/candidate/cold \
+  --baseline-summary benchmark-output/macos-metal/baseline/cold/summary.json \
+  --commit <candidate-commit> \
+  --build-label candidate \
+  --repetitions 30
+```
+
+packaged 应用通过私有 `IPHOTO_DETAIL_BENCHMARK_PLAN` 启动 harness，并沿真实
+`GalleryViewModel.open_row()` 路径发出事务。`runtime.json` 必须显示目标 QRhi backend；`offscreen`、`minimal`、
+software/null renderer 会让本次运行直接无效。退出码非 0 或 `validation.json passed=false` 均不得进入正式汇总。
+传入 `--baseline-summary` 时还会生成 `comparison.json` 与 `comparison_validation.json`；后者逐 category 强制
+P50 改善至少 40%、P95 改善至少 25%。
+
+manifest 的 `cache_group` 支持 `cold`、`disk`、`memory`、`gpu`、`preserve`；`scenario` 支持 `open`、
+`sidecar-only`、`fullscreen`、`lod`、`memory-pressure`、`edit-cancel`、`edit-done`、`rapid-switch`。快速切换使用
+`switch_paths` 描述 B→A，所有附加媒体同样只复制到临时图库。cold 会在每次样本前清除临时图库的 Detail
+surface 与 GPU residency；sidecar/edit-done 也只修改临时副本。
+`runtime.json` 记录 app/version、显式 `--commit`、baseline/candidate 标签、OS/Qt、实际 graphics backend 及
+去路径化样本 category/suffix；`summary.json` 记录 backend 与 fallback 分布。
+
+baseline 必须在只加入同一 benchmark instrumentation、尚未实施 Phase 5 render/backend 清理的提交构建；candidate
+使用最终代码。两者必须使用相同机器、packaged 配置、manifest、重复次数和缓存场景。
+
 启动应用前指定结构化输出文件：
 
 ```bash
@@ -70,6 +104,11 @@ JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总�
   --baseline benchmark-output/macos-metal/baseline/hot/summary.json \
   --candidate benchmark-output/macos-metal/candidate/hot/summary.json \
   --output benchmark-output/macos-metal/comparison-hot.json
+
+.venv/bin/python tools/detail_benchmark.py validate \
+  benchmark-output/macos-metal/candidate/hot/summary.json \
+  --minimum-samples 30 \
+  --output benchmark-output/macos-metal/candidate/hot/validation.json
 ```
 
 正式检查 `click_to_image`、`click_to_video_first_frame` 与合并的 `click_to_final_media`。P95 使用 nearest-rank。取消事务单独计数，不混入完成延迟；快速切换场景必须同时检查旧 generation 未产生最终呈现事件。
@@ -82,3 +121,6 @@ JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总�
 - JPEG/PNG/HEIC/RAW，MP4/MOV/MKV，H.264/H.265，4K/HDR、旋转、trim、adjusted video 与 Live Photo。
 
 source/offscreen 数据只作回归趋势，不作为正式性能证据。门槛采用实施计划中的普通/重型媒体绝对 P95，并要求 P50 至少改善 40%、P95 至少改善 25%。
+
+任何失败组必须保留原 events/summary/validation，按 queue、surface cache、decode、GPU upload、draw 定位；修正后
+先重跑失败组，再完整重跑该平台矩阵。不得用删除失败样本、合并取消事务或降低重复次数的方式通过门槛。

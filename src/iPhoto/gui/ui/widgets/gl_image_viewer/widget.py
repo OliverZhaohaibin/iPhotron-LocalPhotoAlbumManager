@@ -163,6 +163,7 @@ class GLImageViewer(QRhiWidget):
         self._image: QImage | None = None
         self._still_surface_refs: OrderedDict[object, DecodedSurface] = OrderedDict()
         self._pending_warm_surfaces: list[DecodedSurface] = []
+        self._still_generation_by_key: dict[object, int] = {}
         self._pending_resident_activation: object | None = None
         self._still_presentation_pending = False
         self._source_image_dimensions: tuple[int, int] | None = None
@@ -263,6 +264,23 @@ class GLImageViewer(QRhiWidget):
         """Return the active QRhi backend name for diagnostics/tests."""
 
         return qrhi_api_name(self._rhi_api)
+
+    def render_device_name(self) -> str:
+        """Return the QRhi adapter name used to reject software benchmark runs."""
+
+        rhi = self.rhi()
+        if rhi is None:
+            return "unknown"
+        try:
+            value = rhi.driverInfo().deviceName()
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            data = getattr(value, "data", None)
+            if callable(data):
+                return bytes(data()).decode("utf-8", errors="replace")
+            return str(value)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return "unknown"
 
     def maximum_texture_size(self) -> int:
         """Return the active backend texture limit with a safe cold fallback."""
@@ -447,10 +465,12 @@ class GLImageViewer(QRhiWidget):
         adjustments: Mapping[str, float] | None = None,
         *,
         reset_view: bool = True,
+        generation: int = 0,
     ) -> None:
         """Queue one neutral surface as the atomically presented current still."""
 
         self._remember_still_surface(surface)
+        self._still_generation_by_key[surface.decode_key] = max(0, int(generation))
         self.set_image(
             surface.image,
             adjustments,
@@ -469,8 +489,9 @@ class GLImageViewer(QRhiWidget):
     ) -> None:
         """Queue a previous/next texture upload without changing presentation."""
 
-        del residency_slot, window_generation
+        del residency_slot
         self._remember_still_surface(surface)
+        self._still_generation_by_key[surface.decode_key] = max(0, int(window_generation))
         if self._texture_manager.has_resident_texture(surface.decode_key):
             self._texture_manager.touch_resident_texture(surface.decode_key)
         else:
@@ -498,6 +519,7 @@ class GLImageViewer(QRhiWidget):
             emit_detail_event("gpu_cache_miss", generation=generation, key=str(key))
             return False
         self._pending_resident_activation = key
+        self._still_generation_by_key[key] = max(0, int(generation))
         self._image = surface.image
         self._source_image_dimensions = source_size or surface.source_size
         self._adjustments = dict(adjustments or {})
@@ -515,6 +537,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_warm_surfaces.clear()
         self._pending_resident_activation = None
         self._still_surface_refs.clear()
+        self._still_generation_by_key.clear()
         self._texture_manager.clear_still_residency()
 
     def trim_still_residency(self) -> None:
@@ -1401,11 +1424,21 @@ class GLImageViewer(QRhiWidget):
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
-            emit_detail_event("gpu_upload", generation=0, key=str(self.current_image_source()))
+            current_key = self.current_image_source()
+            emit_detail_event(
+                "gpu_upload",
+                generation=self._still_generation_by_key.get(current_key, 0),
+                key=str(current_key),
+            )
         elif self._pending_warm_surfaces:
             warm = self._pending_warm_surfaces.pop(0)
             if self._texture_manager.warm_still_texture(warm.decode_key, warm.image):
-                emit_detail_event("gpu_upload", generation=0, key=str(warm.decode_key), warm=True)
+                emit_detail_event(
+                    "gpu_upload",
+                    generation=self._still_generation_by_key.get(warm.decode_key, 0),
+                    key=str(warm.decode_key),
+                    warm=True,
+                )
             if self._pending_warm_surfaces:
                 self.update()
         if not self._renderer.has_texture():
@@ -1560,11 +1593,21 @@ class GLImageViewer(QRhiWidget):
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
-            emit_detail_event("gpu_upload", generation=0, key=str(self.current_image_source()))
+            current_key = self.current_image_source()
+            emit_detail_event(
+                "gpu_upload",
+                generation=self._still_generation_by_key.get(current_key, 0),
+                key=str(current_key),
+            )
         elif self._pending_warm_surfaces:
             warm = self._pending_warm_surfaces.pop(0)
             if self._texture_manager.warm_still_texture(warm.decode_key, warm.image):
-                emit_detail_event("gpu_upload", generation=0, key=str(warm.decode_key), warm=True)
+                emit_detail_event(
+                    "gpu_upload",
+                    generation=self._still_generation_by_key.get(warm.decode_key, 0),
+                    key=str(warm.decode_key),
+                    warm=True,
+                )
             if self._pending_warm_surfaces:
                 self.update()
 

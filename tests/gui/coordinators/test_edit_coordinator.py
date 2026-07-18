@@ -457,7 +457,7 @@ def test_start_video_edit_load_sets_trim_before_queueing_thumbnails() -> None:
 
     EditCoordinator._start_video_edit_load(coordinator, Path("/fake/video.mp4"))
 
-    video_area.load_video.assert_called_once_with(
+    video_area.present_video.assert_called_once_with(
         Path("/fake/video.mp4"),
         adjustments={},
         trim_range_ms=(1000, 4000),

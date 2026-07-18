@@ -20,7 +20,7 @@ from iPhoto.gui.detail_pipeline import (
 )
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
-    _AdjustedImageWorker,
+    _StillSurfaceDecodeWorker,
     _PreparedRequestIntent,
 )
 
@@ -77,7 +77,7 @@ def test_adjusted_image_worker_publishes_empty_raw_state() -> None:
     signals = Mock()
     request = _request(source)
     backend = Mock(decode=Mock(return_value=_surface(request)))
-    worker = _AdjustedImageWorker(request, signals, backend)
+    worker = _StillSurfaceDecodeWorker(request, signals, backend)
     worker.run()
 
     backend.decode.assert_called_once_with(request, worker)
@@ -90,7 +90,7 @@ def test_adjusted_image_worker_publishes_raw_adjustments_without_resolving() -> 
     request = _request(source, {"Exposure": 0.5})
     surface = _surface(request)
     backend = Mock(decode=Mock(return_value=surface))
-    worker = _AdjustedImageWorker(request, signals, backend)
+    worker = _StillSurfaceDecodeWorker(request, signals, backend)
     worker.run()
 
     signals.completed.emit.assert_called_once_with(surface)
@@ -102,7 +102,7 @@ def test_adjusted_image_worker_uses_viewport_backend_once() -> None:
     request = _request(source)
     surface = _surface(request)
     backend = Mock(decode=Mock(return_value=surface))
-    worker = _AdjustedImageWorker(request, signals, backend)
+    worker = _StillSurfaceDecodeWorker(request, signals, backend)
     worker.run()
 
     backend.decode.assert_called_once_with(request, worker)

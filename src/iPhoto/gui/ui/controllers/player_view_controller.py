@@ -32,8 +32,7 @@ from ....gui.detail_pipeline import (
     DetailGeometryState,
     DetailPrefetchDescriptor,
     DetailRenderRequest,
-    detail_pipeline_v2_enabled,
-    detail_scheduler_v3_enabled,
+    DetailRenderTransaction,
 )
 from ....gui.detail_profile import (
     emit_detail_event,
@@ -49,7 +48,7 @@ from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
 
 
-class _AdjustedImageSignals(QObject):
+class _StillSurfaceDecodeSignals(QObject):
     """Relay neutral-surface completion events back to the GUI thread."""
 
     started = Signal(object)
@@ -65,13 +64,13 @@ class _AdjustedImageSignals(QObject):
     """Emitted for success, failure and cooperative cancellation."""
 
 
-class _AdjustedImageWorker(QRunnable):
+class _StillSurfaceDecodeWorker(QRunnable):
     """Decode one viewport-aware neutral surface on a background thread."""
 
     def __init__(
         self,
         request: DetailRenderRequest,
-        signals: _AdjustedImageSignals,
+        signals: _StillSurfaceDecodeSignals,
         backend: StillDecodeBackend | None = None,
     ) -> None:
         super().__init__()
@@ -84,7 +83,7 @@ class _AdjustedImageWorker(QRunnable):
         self._submitted_at = time.perf_counter()
 
     @property
-    def signals(self) -> _AdjustedImageSignals:
+    def signals(self) -> _StillSurfaceDecodeSignals:
         """Expose the scheduler-owned lifecycle relay."""
 
         return self._signals
@@ -183,7 +182,7 @@ class _AdjustedImageWorker(QRunnable):
         self._signals.completed.emit(surface)
 
 
-class _ScheduledAdjustedImageWorker(_AdjustedImageWorker):
+class _ScheduledStillSurfaceDecodeWorker(_StillSurfaceDecodeWorker):
     """Production runnable that always reports terminal completion."""
 
     def run(self) -> None:  # pragma: no cover - executed on a worker thread
@@ -315,8 +314,8 @@ class PlayerViewController(QObject):
             self._decode_backend.bind_library(self._library_root_getter())
         self._still_scheduler = DetailStillRequestScheduler(
             pool=self._pool,
-            worker_factory=self._create_adjusted_image_worker,
-            reuse_enabled=detail_scheduler_v3_enabled(),
+            worker_factory=self._create_still_surface_decode_worker,
+            reuse_enabled=True,
             parent=self,
         )
         self._still_scheduler.ready.connect(self._on_scheduled_image_ready)
@@ -328,6 +327,7 @@ class PlayerViewController(QObject):
         self._preparation_entry_by_worker: dict[int, _PreparationEntry] = {}
         self._pending_layout_intent: tuple[_PreparedRequestIntent, dict] | None = None
         self._request_generation = 0
+        self._active_transaction: DetailRenderTransaction | None = None
         self._residency_window_generation = 0
         self._active_asset_id = ""
         self._active_source_identity: AssetSourceIdentity | None = None
@@ -507,26 +507,37 @@ class PlayerViewController(QObject):
         asset_id: str = "",
         request_generation: int | None = None,
         source_identity: AssetSourceIdentity | None = None,
+        transaction: DetailRenderTransaction | None = None,
     ) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         identity = source_identity or AssetSourceIdentity.create(source)
         source = identity.path
+        if transaction is not None:
+            request_generation = transaction.generation
+            asset_id = transaction.asset_id
+            identity = transaction.source_identity
+            source = identity.path
         if request_generation is None:
             self._request_generation += 1
         else:
             self._request_generation = int(request_generation)
         request_generation = self._request_generation
+        metrics = self._viewport_metrics()
+        if transaction is None:
+            transaction = DetailRenderTransaction(
+                generation=request_generation,
+                asset_id=str(asset_id),
+                media_kind="image",
+                source_identity=identity,
+                viewport_physical_size=metrics[0] if metrics is not None else (0, 0),
+                device_pixel_ratio=metrics[1] if metrics is not None else 1.0,
+            )
+        self._active_transaction = transaction
         self._residency_window_generation += 1
         self._loading_source = source
         self._loading_started_at = time.perf_counter()
 
-        # V2 keeps the opaque placeholder visible until the full source image
-        # has decoded and is ready for one atomic surface switch.
-        if detail_pipeline_v2_enabled():
-            self.show_placeholder("")
-        else:
-            self.show_image_surface()
-            self._image_viewer.set_image(None, {})
+        self.show_placeholder("")
         emit_detail_event(
             "decode_started",
             generation=request_generation,
@@ -551,12 +562,12 @@ class PlayerViewController(QObject):
 
         self._still_scheduler.cancel_foreground()
 
-    def _create_adjusted_image_worker(
+    def _create_still_surface_decode_worker(
         self,
         request: DetailRenderRequest,
-    ) -> _ScheduledAdjustedImageWorker:
-        signals = _AdjustedImageSignals()
-        worker = _ScheduledAdjustedImageWorker(
+    ) -> _ScheduledStillSurfaceDecodeWorker:
+        signals = _StillSurfaceDecodeSignals()
+        worker = _ScheduledStillSurfaceDecodeWorker(
             request,
             signals,
             backend=self._decode_backend,
@@ -677,24 +688,44 @@ class PlayerViewController(QObject):
                 return True
             return False
         physical_size, dpr = metrics
-        request = DetailRenderRequest(
-            generation=int(intent.generation),
-            asset_id=intent.asset_id,
-            source_identity=intent.source_identity,
-            viewport_physical_size=physical_size,
-            device_pixel_ratio=dpr,
-            geometry=DetailGeometryState.from_adjustments(adjustments),
-            reason=(
-                intent.reason
-                if intent.reason in {"prefetch", "initial", "resize", "zoom"}
-                else "initial"
-            ),
-            texture_limit=self._texture_limit(),
-            raw_adjustments=dict(adjustments),
-            zoom_factor=intent.zoom_factor,
-            residency_slot=intent.residency_slot,
-            window_generation=intent.window_generation,
-        ).with_decode_level()
+        reason = (
+            intent.reason
+            if intent.reason in {"prefetch", "initial", "resize", "zoom"}
+            else "initial"
+        )
+        transaction = getattr(self, "_active_transaction", None)
+        if (
+            reason != "prefetch"
+            and transaction is not None
+            and transaction.generation == int(intent.generation)
+        ):
+            transaction = transaction.with_viewport(physical_size, dpr)
+            self._active_transaction = transaction
+            request = DetailRenderRequest.from_transaction(
+                transaction,
+                geometry=DetailGeometryState.from_adjustments(adjustments),
+                reason=reason,
+                texture_limit=self._texture_limit(),
+                raw_adjustments=dict(adjustments),
+                zoom_factor=intent.zoom_factor,
+                residency_slot=intent.residency_slot,
+                window_generation=intent.window_generation,
+            ).with_decode_level()
+        else:
+            request = DetailRenderRequest(
+                generation=int(intent.generation),
+                asset_id=intent.asset_id,
+                source_identity=intent.source_identity,
+                viewport_physical_size=physical_size,
+                device_pixel_ratio=dpr,
+                geometry=DetailGeometryState.from_adjustments(adjustments),
+                reason=reason,
+                texture_limit=self._texture_limit(),
+                raw_adjustments=dict(adjustments),
+                zoom_factor=intent.zoom_factor,
+                residency_slot=intent.residency_slot,
+                window_generation=intent.window_generation,
+            ).with_decode_level()
         emit_detail_event(
             "level_selected",
             generation=request.generation,
@@ -988,11 +1019,6 @@ class PlayerViewController(QObject):
             (time.perf_counter() - started_at) * 1000.0,
             path=Path(presented_path).name if presented_path is not None else "",
             generation=generation,
-        )
-        emit_detail_event(
-            "presented",
-            generation=generation,
-            media_type="image",
         )
         if self._request_reason_by_generation.get(generation) in {"zoom", "resize"}:
             emit_detail_event(
@@ -1465,7 +1491,12 @@ class PlayerViewController(QObject):
         self._current_full_image = QImage(image)
         set_still_surface = getattr(self._image_viewer, "set_still_surface", None)
         if callable(set_still_surface):
-            set_still_surface(surface, adjustments, reset_view=reset_view)
+            set_still_surface(
+                surface,
+                adjustments,
+                reset_view=reset_view,
+                generation=self._present_generation,
+            )
         else:
             self._image_viewer.set_image(
                 image,

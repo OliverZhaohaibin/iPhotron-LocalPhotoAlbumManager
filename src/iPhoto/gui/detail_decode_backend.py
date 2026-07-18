@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import sys
 from typing import Any, Literal, Protocol
 
 from PySide6.QtCore import QSize, Qt
@@ -38,6 +39,89 @@ class StillDecodeBackend(Protocol):
     ) -> DecodedSurface: ...
 
 
+class StillDecodeBackendRegistry:
+    """Select native-capable platform decoders without coupling the scheduler."""
+
+    def __init__(
+        self,
+        *,
+        platform: str | None = None,
+        macos_backend: StillDecodeBackend | None = None,
+        windows_backend: StillDecodeBackend | None = None,
+        qt_backend: StillDecodeBackend | None = None,
+        raw_backend: StillDecodeBackend | None = None,
+    ) -> None:
+        self._platform = sys.platform if platform is None else platform
+        self._qt = qt_backend or QtStillDecodeBackend()
+        self._raw = raw_backend or RawStillDecodeBackend()
+        self._macos = macos_backend or (
+            _load_macos_imageio_backend() if self._platform == "darwin" else None
+        )
+        self._windows = windows_backend or (
+            _load_windows_wic_backend() if self._platform == "win32" else None
+        )
+
+    def backend_for(self, request: DetailRenderRequest) -> StillDecodeBackend:
+        if is_raw_extension(request.source_identity.path.suffix):
+            return self._raw
+        if self._platform == "darwin" and self._macos is not None:
+            return FallbackStillDecodeBackend(
+                self._macos,
+                self._qt,
+                fallback_name="imageio_to_qt",
+            )
+        if self._platform == "win32" and self._windows is not None:
+            return FallbackStillDecodeBackend(
+                self._windows,
+                self._qt,
+                fallback_name="wic_to_qt",
+            )
+        return self._qt
+
+
+class FallbackStillDecodeBackend:
+    """Try one platform backend and fall back to Qt inside the worker lane."""
+
+    def __init__(
+        self,
+        primary: StillDecodeBackend,
+        fallback: StillDecodeBackend,
+        *,
+        fallback_name: str,
+    ) -> None:
+        self._primary = primary
+        self._fallback = fallback
+        self._fallback_name = fallback_name
+
+    def decode(
+        self,
+        request: DetailRenderRequest,
+        cancellation: CancellationToken,
+    ) -> DecodedSurface:
+        try:
+            return self._primary.decode(request, cancellation)
+        except DecodeCancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - platform codecs have backend-specific failures
+            _check_cancelled(cancellation)
+            surface = self._fallback.decode(request, cancellation)
+            return DecodedSurface(
+                image=surface.image,
+                decode_key=surface.decode_key,
+                source_size=surface.source_size,
+                decoded_size=surface.decoded_size,
+                decode_level=surface.decode_level,
+                backend=surface.backend,
+                color_stats=surface.color_stats,
+                fallback=self._fallback_name,
+                pixel_format=surface.pixel_format,
+                color_space=surface.color_space,
+                orientation_applied=surface.orientation_applied,
+                cache_tier=surface.cache_tier,
+                backing_owner=surface.backing_owner,
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class DecodedSurface:
     """Detached neutral upload surface owned by one scheduler delivery."""
@@ -60,6 +144,22 @@ class DecodedSurface:
 def _check_cancelled(token: CancellationToken) -> None:
     if token.is_cancelled():
         raise DecodeCancelledError("Still-image decode cancelled")
+
+
+def _load_macos_imageio_backend() -> StillDecodeBackend | None:
+    try:
+        from iPhoto.gui.detail_decode_macos import create_macos_imageio_backend
+    except ImportError:
+        return None
+    return create_macos_imageio_backend()
+
+
+def _load_windows_wic_backend() -> StillDecodeBackend | None:
+    try:
+        from iPhoto.gui.detail_decode_windows import create_windows_wic_backend
+    except ImportError:
+        return None
+    return create_windows_wic_backend()
 
 
 def _target_longest_edge(request: DetailRenderRequest) -> int:
@@ -227,18 +327,15 @@ class RawStillDecodeBackend:
 class DefaultStillDecodeBackend:
     """Route RAW formats to rawpy and all other stills to Qt."""
 
-    def __init__(self) -> None:
-        self._qt = QtStillDecodeBackend()
-        self._raw = RawStillDecodeBackend()
+    def __init__(self, registry: StillDecodeBackendRegistry | None = None) -> None:
+        self._registry = registry or StillDecodeBackendRegistry()
 
     def decode(
         self,
         request: DetailRenderRequest,
         cancellation: CancellationToken,
     ) -> DecodedSurface:
-        if is_raw_extension(request.source_identity.path.suffix):
-            return self._raw.decode(request, cancellation)
-        return self._qt.decode(request, cancellation)
+        return self._registry.backend_for(request).decode(request, cancellation)
 
 
 def _load_with_pillow(source: Path, target: QSize) -> QImage:
@@ -318,4 +415,5 @@ __all__ = [
     "QtStillDecodeBackend",
     "RawStillDecodeBackend",
     "StillDecodeBackend",
+    "StillDecodeBackendRegistry",
 ]

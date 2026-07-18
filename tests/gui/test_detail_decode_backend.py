@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,8 +13,10 @@ from PySide6.QtGui import QImage
 
 from iPhoto.gui.detail_decode_backend import (
     DecodeCancelledError,
+    DefaultStillDecodeBackend,
     QtStillDecodeBackend,
     RawStillDecodeBackend,
+    StillDecodeBackendRegistry,
 )
 from iPhoto.gui.detail_pipeline import (
     AssetSourceIdentity,
@@ -109,6 +112,80 @@ def test_qt_backend_checks_cancellation_before_decode(tmp_path: Path) -> None:
         pass
     else:  # pragma: no cover - explicit failure branch
         raise AssertionError("cancelled decode should not enter QImageReader")
+
+
+def test_platform_registry_prefers_macos_backend_and_falls_back_to_qt(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "photo.png"
+    image = QImage(64, 32, QImage.Format.Format_RGBA8888)
+    assert image.save(str(source), "PNG")
+
+    class _FailingImageIO:
+        def decode(self, request, cancellation):
+            del request, cancellation
+            raise RuntimeError("native decoder unavailable")
+
+    registry = StillDecodeBackendRegistry(
+        platform="darwin",
+        macos_backend=_FailingImageIO(),
+    )
+    surface = DefaultStillDecodeBackend(registry).decode(_request(source), _Token())
+
+    assert surface.backend == "qt"
+    assert surface.fallback == "imageio_to_qt"
+
+
+def test_platform_registry_keeps_cancellation_terminal() -> None:
+    class _CancelledNative:
+        def decode(self, request, cancellation):
+            del request, cancellation
+            raise DecodeCancelledError("cancelled")
+
+    registry = StillDecodeBackendRegistry(
+        platform="win32",
+        windows_backend=_CancelledNative(),
+    )
+
+    with pytest.raises(DecodeCancelledError):
+        DefaultStillDecodeBackend(registry).decode(
+            _request(Path("photo.jpg")),
+            _Token(),
+        )
+
+
+def test_windows_wic_orientation_mapping_covers_exif_transforms() -> None:
+    from iPhoto.gui.detail_decode_windows import _orientation_transform
+
+    assert [_orientation_transform(value) for value in range(1, 9)] == [
+        0,
+        8,
+        2,
+        10,
+        9,
+        1,
+        11,
+        3,
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows WIC")
+def test_windows_wic_backend_decodes_detached_alpha_surface(tmp_path: Path) -> None:
+    from iPhoto.gui.detail_decode_windows import create_windows_wic_backend
+
+    source = tmp_path / "alpha.png"
+    image = QImage(64, 32, QImage.Format.Format_RGBA8888)
+    image.fill(0x80112233)
+    assert image.save(str(source), "PNG")
+    backend = create_windows_wic_backend()
+    assert backend is not None
+
+    surface = backend.decode(_request(source, level=64), _Token())
+
+    assert surface.backend == "wic"
+    assert surface.decoded_size == (64, 32)
+    assert surface.image.format() == QImage.Format.Format_RGBA8888
+    assert surface.image.hasAlphaChannel()
 
 
 def test_qt_backend_uses_pillow_fallback_after_plugin_failure(tmp_path: Path) -> None:

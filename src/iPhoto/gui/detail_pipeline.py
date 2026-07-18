@@ -3,24 +3,22 @@
 from __future__ import annotations
 
 import math
-import os
-from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
 from types import MappingProxyType
 from typing import Any, Literal
 
-from PySide6.QtGui import QImage
-
-from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
-    resolve_physical_memory_bytes,
-)
-from iPhoto.io.sidecar import sidecar_path_for_asset
-
-_MIB = 1024 * 1024
 DETAIL_DECODE_LEVELS = (1024, 2048, 3072, 4096)
+
+DetailMediaKind = Literal["image", "video", "live_motion"]
+DetailTransactionReason = Literal[
+    "click",
+    "prefetch",
+    "resize",
+    "zoom",
+    "live_replay",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +78,53 @@ class AssetSourceIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class DetailRenderTransaction:
+    """Immutable identity shared by still and video Detail render work."""
+
+    generation: int
+    asset_id: str
+    media_kind: DetailMediaKind
+    source_identity: AssetSourceIdentity
+    viewport_physical_size: tuple[int, int] = (0, 0)
+    device_pixel_ratio: float = 1.0
+    reason: DetailTransactionReason = "click"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "generation", _non_negative_int(self.generation))
+        object.__setattr__(self, "asset_id", str(self.asset_id).strip())
+        object.__setattr__(
+            self,
+            "viewport_physical_size",
+            (
+                _non_negative_int(self.viewport_physical_size[0]),
+                _non_negative_int(self.viewport_physical_size[1]),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "device_pixel_ratio",
+            max(0.1, _finite_float(self.device_pixel_ratio, 1.0)),
+        )
+
+    def with_viewport(
+        self,
+        viewport_physical_size: tuple[int, int],
+        device_pixel_ratio: float,
+    ) -> DetailRenderTransaction:
+        """Return the same transaction identity with current render metrics."""
+
+        return DetailRenderTransaction(
+            generation=self.generation,
+            asset_id=self.asset_id,
+            media_kind=self.media_kind,
+            source_identity=self.source_identity,
+            viewport_physical_size=viewport_physical_size,
+            device_pixel_ratio=device_pixel_ratio,
+            reason=self.reason,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DetailGeometryState:
     crop_cx: float = 0.5
     crop_cy: float = 0.5
@@ -129,6 +174,38 @@ class DetailRenderRequest:
     zoom_factor: float = 1.0
     residency_slot: DetailResidencySlot | None = None
     window_generation: int = 0
+
+    @classmethod
+    def from_transaction(
+        cls,
+        transaction: DetailRenderTransaction,
+        *,
+        geometry: DetailGeometryState,
+        reason: DetailRequestReason,
+        texture_limit: int = 8192,
+        raw_adjustments: Mapping[str, Any] | None = None,
+        decode_level: DetailDecodeLevel | None = None,
+        zoom_factor: float = 1.0,
+        residency_slot: DetailResidencySlot | None = None,
+        window_generation: int = 0,
+    ) -> DetailRenderRequest:
+        if transaction.media_kind == "video":
+            raise ValueError("Video transactions cannot create still decode requests")
+        return cls(
+            generation=transaction.generation,
+            asset_id=transaction.asset_id,
+            source_identity=transaction.source_identity,
+            viewport_physical_size=transaction.viewport_physical_size,
+            device_pixel_ratio=transaction.device_pixel_ratio,
+            geometry=geometry,
+            reason=reason,
+            texture_limit=texture_limit,
+            raw_adjustments=raw_adjustments,
+            decode_level=decode_level,
+            zoom_factor=zoom_factor,
+            residency_slot=residency_slot,
+            window_generation=window_generation,
+        )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -227,32 +304,6 @@ def select_detail_decode_level(request: DetailRenderRequest) -> DetailDecodeLeve
 
 
 @dataclass(frozen=True, slots=True)
-class DetailFrameIdentity:
-    """Versioned identity for one fully decoded still frame."""
-
-    path: Path
-    size: int
-    mtime_ns: int
-    sidecar_size: int
-    sidecar_mtime_ns: int
-    quality: Literal["full"] = "full"
-
-    @classmethod
-    def from_path(cls, path: Path) -> DetailFrameIdentity:
-        normalized = _normalized(path)
-        size, mtime_ns = _stat_identity(normalized)
-        sidecar = sidecar_path_for_asset(normalized)
-        sidecar_size, sidecar_mtime_ns = _stat_identity(sidecar)
-        return cls(
-            path=normalized,
-            size=size,
-            mtime_ns=mtime_ns,
-            sidecar_size=sidecar_size,
-            sidecar_mtime_ns=sidecar_mtime_ns,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class DetailMediaPreparation:
     request_generation: int
     path: Path
@@ -275,6 +326,13 @@ class VideoPresentationState:
     raw_width: int
     raw_height: int
     linux_180_hint: bool
+    transaction: DetailRenderTransaction | None = None
+
+    @property
+    def generation(self) -> int:
+        if self.transaction is not None:
+            return self.transaction.generation
+        return self.request_generation
 
 
 @dataclass(slots=True)
@@ -292,120 +350,6 @@ class DetailPrefetchDescriptor:
     path: Path
     is_video: bool
     source_identity: AssetSourceIdentity | None = None
-
-
-class DetailFrameCache:
-    """Thread-safe byte-budgeted LRU for full-resolution QImages."""
-
-    def __init__(self, budget_bytes: int | None = None, *, max_entries: int = 3) -> None:
-        physical = resolve_physical_memory_bytes()
-        derived = max(64 * _MIB, min(256 * _MIB, int(physical * 0.01)))
-        self._budget_bytes = max(_MIB, int(budget_bytes or derived))
-        self._max_entries = max(1, int(max_entries))
-        self._entries: OrderedDict[
-            DetailFrameIdentity, tuple[QImage, dict[str, Any], int]
-        ] = OrderedDict()
-        self._bytes = 0
-        self._lock = RLock()
-
-    @property
-    def budget_bytes(self) -> int:
-        return self._budget_bytes
-
-    @property
-    def used_bytes(self) -> int:
-        with self._lock:
-            return self._bytes
-
-    def get(
-        self,
-        identity: DetailFrameIdentity,
-    ) -> tuple[QImage, dict[str, Any]] | None:
-        with self._lock:
-            cached = self._entries.pop(identity, None)
-            if cached is None:
-                return None
-            self._entries[identity] = cached
-            image, adjustments, _image_bytes = cached
-            return QImage(image), dict(adjustments)
-
-    def put(
-        self,
-        identity: DetailFrameIdentity,
-        image: QImage,
-        adjustments: dict[str, Any],
-    ) -> bool:
-        if image.isNull():
-            return False
-        image_bytes = _image_bytes(image)
-        # Oversized current frames remain owned by the viewer but are not kept
-        # in this revisit cache.
-        if image_bytes > self._budget_bytes:
-            return False
-        with self._lock:
-            previous = self._entries.pop(identity, None)
-            if previous is not None:
-                self._bytes -= previous[2]
-            self._entries[identity] = (QImage(image), dict(adjustments), image_bytes)
-            self._bytes += image_bytes
-            self._trim_locked()
-        return True
-
-    def invalidate_path(self, path: Path) -> None:
-        normalized = _normalized(path)
-        with self._lock:
-            for identity in tuple(self._entries):
-                if identity.path == normalized:
-                    _image, _adjustments, image_bytes = self._entries.pop(identity)
-                    self._bytes -= image_bytes
-
-    def clear(self) -> None:
-        with self._lock:
-            self._entries.clear()
-            self._bytes = 0
-
-    def _trim_locked(self) -> None:
-        while (
-            len(self._entries) > self._max_entries
-            or self._bytes > self._budget_bytes
-        ):
-            _identity, (_image, _adjustments, image_bytes) = self._entries.popitem(last=False)
-            self._bytes -= image_bytes
-
-
-def detail_pipeline_v2_enabled() -> bool:
-    value = os.environ.get("IPHOTO_DETAIL_PIPELINE_V2", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
-
-
-def detail_scheduler_v3_enabled() -> bool:
-    """Return whether same-source Detail decoder reuse is enabled."""
-
-    value = os.environ.get("IPHOTO_DETAIL_SCHEDULER_V3", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
-
-
-def _normalized(path: Path) -> Path:
-    try:
-        return Path(path).expanduser().resolve()
-    except OSError:
-        return Path(path).expanduser()
-
-
-def _stat_identity(path: Path) -> tuple[int, int]:
-    try:
-        stat = path.stat()
-    except OSError:
-        return (0, 0)
-    mtime_ns = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
-    return (int(stat.st_size), int(mtime_ns))
-
-
-def _image_bytes(image: QImage) -> int:
-    size_in_bytes = getattr(image, "sizeInBytes", None)
-    if callable(size_in_bytes):
-        return max(0, int(size_in_bytes()))
-    return max(0, int(image.bytesPerLine()) * int(image.height()))
 
 
 def _non_negative_int(value: object) -> int:
@@ -443,16 +387,13 @@ __all__ = [
     "AssetSourceIdentity",
     "DetailDecodeKey",
     "DetailDecodeLevel",
-    "DetailFrameCache",
-    "DetailFrameIdentity",
     "DetailGeometryState",
     "DetailMediaPreparation",
     "DetailOpenTrace",
     "DetailPrefetchDescriptor",
+    "DetailRenderTransaction",
     "DetailRenderRequest",
     "DetailResidencySlot",
     "VideoPresentationState",
-    "detail_pipeline_v2_enabled",
-    "detail_scheduler_v3_enabled",
     "select_detail_decode_level",
 ]

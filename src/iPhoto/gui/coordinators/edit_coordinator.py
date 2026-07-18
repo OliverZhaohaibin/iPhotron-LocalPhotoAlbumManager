@@ -467,7 +467,7 @@ class EditCoordinator(QObject):
                 self._pending_video_duration_sec,
             )
             self._session.set_values(canonical, emit_individual=False)
-        self._ui.video_area.load_video(
+        self._ui.video_area.present_video(
             source,
             adjustments=self._resolve_session_adjustments(),
             trim_range_ms=(int(round(trim_in * 1000.0)), int(round(trim_out * 1000.0))),

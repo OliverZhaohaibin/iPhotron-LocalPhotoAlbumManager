@@ -4,7 +4,8 @@
 > Phase 4 状态：代码与自动化测试完成；三平台 packaged 性能采样未执行
 > 当前分支：`codex/gallery-detail-gpu-first-phase1`
 > 基线提交：`0849d624f428bea730a9471324aee5673b4469f7`
-> 工作树状态：Phase 4 为基线之上的未提交变更；交付前无已知自动化失败
+> Phase 5 接手基线：`da427c6bffd844bab0ee395fefc1475f4e542d97`
+> 历史工作树状态：Phase 4 代码及后续修正均已提交；Phase 5 接手时工作树 clean
 
 本文记录 Phase 4 的真实落地结果。总体边界以
 [`GALLERY_DETAIL_GPU_FIRST_REARCHITECTURE.md`](GALLERY_DETAIL_GPU_FIRST_REARCHITECTURE.md) 为准；
@@ -63,17 +64,14 @@ Phase 1–4 定向组合：
 200 passed in 3.32s
 ```
 
-完整仓库最终覆盖拆为两个独立进程：
+Phase 5 接手前重新执行单进程完整仓库：
 
 ```text
-2731 passed, 11 skipped, 12 warnings in 37.68s
-27 passed in 0.40s  # tests/test_aspect_ratio_constraint.py
+2791 passed, 11 skipped, 12 warnings in 41.38s
 ```
 
-单进程全仓命令在 39% 的既有 `icons.py -> EditPerspectiveControls` Qt 原生构造中重复发生段错误；该文件
-单独运行 27/27 通过，其余仓库 2731/2731 通过，Phase 4 定向组合 200/200 通过。warnings 为既有 pytest
-collection、compatibility import、Torch/Qt deprecation。该原生进程稳定性问题不是 packaged 性能证据，
-Phase 5/工程关闭前仍需处理。
+早期 handoff 记录的 `icons.py -> EditPerspectiveControls` Qt 原生构造段错误在接手基线已不再复现；现状以
+上述单进程结果为准。warnings 仍为既有 pytest collection、compatibility import、Torch/Qt deprecation。
 
 修改文件 Ruff `F,E9`、`compileall` 与 `git diff --check` 必须在 handoff 最终编辑后再次执行；最终结果以
 交付消息为准。

@@ -345,7 +345,7 @@ class _RhiPreviewPopup(QWidget):
         # on the GL/adjusted surface; unedited videos still pass empty
         # adjustments and no trim.
         internal_adjusted_preview = bool(adjusted_preview or sys.platform == "darwin")
-        self._video_area.load_video(
+        self._video_area.present_video(
             source,
             adjustments=adjustments,
             trim_range_ms=trim_range_ms,

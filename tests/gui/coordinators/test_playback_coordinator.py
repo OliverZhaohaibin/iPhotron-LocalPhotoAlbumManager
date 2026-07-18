@@ -31,6 +31,7 @@ def _make_presentation(
     is_favorite: bool = False,
     info_panel_visible: bool = False,
     reload_token: int = 0,
+    request_generation: int = 1,
 ):
     return DetailPresentation(
         row=0,
@@ -53,6 +54,7 @@ def _make_presentation(
         video_trim_range_ms=(1000, 3000) if is_video else None,
         video_adjusted_preview=is_video,
         reload_token=reload_token,
+        request_generation=request_generation,
     )
 
 
@@ -209,17 +211,24 @@ def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
 
     presentation = _make_presentation()
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._asset_model.set_current_row.assert_called_once_with(0)
     coordinator.assetChanged.emit.assert_called_once_with(0)
     coordinator._update_header.assert_called_once_with(presentation)
-    coordinator._sync_filmstrip_selection.assert_called_once_with(0)
+    coordinator._select_filmstrip_row.assert_called_once_with(0)
     coordinator._render_presentation.assert_called_once_with(presentation)
 
 
@@ -233,7 +242,9 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._clear_play_profile = Mock()
@@ -243,6 +254,66 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
 
     coordinator._render_presentation.assert_not_called()
     coordinator._update_favorite_icon.assert_called_once_with(True)
+
+
+def test_handle_presentation_changed_rerenders_same_asset_for_new_generation() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    previous = _make_presentation(request_generation=1)
+    presentation = _make_presentation(request_generation=2)
+    coordinator._current_presentation = previous
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(set_current_row=Mock())
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = None
+
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    coordinator._render_presentation.assert_called_once_with(presentation)
+    coordinator._update_favorite_icon.assert_not_called()
+
+
+def test_handle_presentation_changed_marks_live_photo_transaction_as_motion() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = replace(
+        _make_presentation(
+            path="/fake/photo.heic",
+            is_video=False,
+            is_live=True,
+            request_generation=3,
+        ),
+        live_motion_abs=Path("/fake/photo.mov"),
+    )
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(set_current_row=Mock())
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._clear_play_profile = Mock()
+
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    assert coordinator._detail_render_transaction.media_kind == "live_motion"
 
 
 def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_changes() -> None:
@@ -260,13 +331,20 @@ def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_chan
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._clear_play_profile = Mock()
     coordinator._info_panel = None
 
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._render_presentation.assert_called_once_with(presentation)
     coordinator._update_favorite_icon.assert_not_called()
@@ -281,19 +359,26 @@ def test_handle_presentation_changed_skips_hidden_detail_updates() -> None:
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
 
     presentation = _make_presentation()
 
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     assert coordinator._current_presentation is None
     coordinator._asset_model.set_current_row.assert_not_called()
     coordinator.assetChanged.emit.assert_not_called()
     coordinator._update_header.assert_not_called()
-    coordinator._sync_filmstrip_selection.assert_not_called()
+    coordinator._select_filmstrip_row.assert_not_called()
     coordinator._render_presentation.assert_not_called()
     coordinator._clear_play_profile.assert_called_once_with(presentation.row)
 
@@ -322,17 +407,29 @@ def test_hidden_presentation_then_explicit_open_of_same_asset_still_renders() ->
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
     coordinator._info_panel = None
 
     presentation = _make_presentation()
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._render_presentation.assert_not_called()
     coordinator._router.is_detail_view_active.return_value = True
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._render_presentation.assert_called_once_with(presentation)
 
@@ -417,7 +514,7 @@ def test_handle_rotate_requested_uses_injected_edit_service_for_still() -> None:
 
 def test_render_presentation_uses_viewmodel_video_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    video_area = Mock(load_video=Mock(), play=Mock(), reset_zoom=Mock())
+    video_area = Mock(begin_load=Mock(), play=Mock(), reset_zoom=Mock())
     coordinator._player_view = Mock(
         show_video_surface=Mock(),
         video_area=video_area,
@@ -434,17 +531,14 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
     coordinator._zoom_widget = Mock(show=Mock())
     coordinator._info_panel = None
     coordinator._clear_play_profile = Mock()
+    coordinator._schedule_video_preparation = Mock()
 
     presentation = _make_presentation()
 
     PlaybackCoordinator._render_presentation(coordinator, presentation)
 
-    video_area.load_video.assert_called_once_with(
-        Path("/fake/video.mp4"),
-        adjustments={"Exposure": 0.2},
-        trim_range_ms=(1000, 3000),
-        adjusted_preview=True,
-    )
+    video_area.begin_load.assert_called_once_with(Path("/fake/video.mp4"), 1)
+    coordinator._schedule_video_preparation.assert_called_once_with(presentation)
     assert coordinator._trim_in_ms == 1000
     assert coordinator._trim_out_ms == 3000
 
@@ -454,7 +548,7 @@ def test_render_presentation_defers_video_load_during_location_file_write() -> N
     video_area = Mock(
         has_video=Mock(return_value=True),
         stop=Mock(),
-        load_video=Mock(),
+        present_video=Mock(),
         play=Mock(),
     )
     coordinator._player_view = Mock(
@@ -492,7 +586,7 @@ def test_render_presentation_defers_video_load_during_location_file_write() -> N
         call.stop(),
     ]
     coordinator._player_view.show_video_surface.assert_not_called()
-    video_area.load_video.assert_not_called()
+    video_area.present_video.assert_not_called()
     video_area.play.assert_not_called()
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
 
@@ -532,10 +626,12 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
 
     PlaybackCoordinator._render_presentation(coordinator, presentation)
 
-    assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
+    assert parent.mock_calls == [call.stop()]
     player_view.display_image.assert_called_once_with(
         Path("/fake/photo.heic"),
         asset_id="asset-1",
+        request_generation=1,
+        transaction=None,
     )
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
     coordinator._refresh_face_name_overlay_for_presentation.assert_not_called()
@@ -564,6 +660,47 @@ def test_live_photo_fallback_reuses_the_asset_identity() -> None:
         asset_id="asset-1",
     )
     assert coordinator._active_live_asset_id == ""
+
+
+def test_live_motion_first_frame_completes_current_transaction() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    render_coordinator = Mock(mark_presented=Mock(return_value=True))
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = Path("/fake/photo.mov")
+    coordinator._current_presentation = replace(
+        _make_presentation(
+            path="/fake/photo.heic",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=Path("/fake/photo.mov"),
+    )
+    coordinator._player_view = Mock(show_video_surface=Mock())
+
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+
+    render_coordinator.mark_presented.assert_called_once_with(7)
+    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=True)
+
+
+def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    render_coordinator = Mock(mark_presented=Mock(return_value=True))
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    still = Path("/fake/photo.heic")
+    coordinator._active_live_motion = Path("/fake/photo.mov")
+    coordinator._current_presentation = _make_presentation(
+        path=str(still),
+        is_video=False,
+        is_live=True,
+        request_generation=7,
+    )
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    render_coordinator.mark_presented.assert_not_called()
 
 
 def test_neighbor_prefetch_preserves_asset_descriptors() -> None:
@@ -1657,7 +1794,9 @@ def test_confirmed_location_protects_repeated_stale_presentations_for_detail_ses
     coordinator._asset_model = Mock(set_current_row=Mock())
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._clear_play_profile = Mock()
@@ -1670,8 +1809,13 @@ def test_confirmed_location_protects_repeated_stale_presentations_for_detail_ses
         _make_presentation(path=str(asset_path), is_video=True),
         location="Paris",
     )
-    PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
-    PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
+        PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
 
     assert coordinator._current_presentation.location == "Munich"
     assert coordinator._current_presentation.info["location"] == "Munich"
@@ -1685,7 +1829,9 @@ def test_confirmed_location_does_not_apply_to_another_asset() -> None:
     coordinator._asset_model = Mock(set_current_row=Mock())
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
     coordinator._confirmed_location_metadata = {
@@ -1696,7 +1842,12 @@ def test_confirmed_location_does_not_apply_to_another_asset() -> None:
         location=None,
     )
 
-    PlaybackCoordinator._handle_presentation_changed(coordinator, other_presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, other_presentation)
 
     assert coordinator._current_presentation.location is None
     assert "location" not in coordinator._current_presentation.info

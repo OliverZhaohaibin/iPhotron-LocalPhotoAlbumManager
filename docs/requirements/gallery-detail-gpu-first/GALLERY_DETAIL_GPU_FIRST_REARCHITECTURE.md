@@ -1,6 +1,6 @@
 # Gallery → Detail GPU-first 打开链路重构
 
-> 状态：架构目标已冻结；Phase 1–4 代码与自动化已完成；packaged 性能待验证，实际结果见各阶段 handoff
+> 状态：Phase 5 代码收口候选实施中；三平台 packaged 性能与视觉矩阵待验证，尚未关闭
 > 文档版本：1.0
 > 创建日期：2026-07-18
 > 适用范围：Gallery 点击静态照片至 Detail/Edit 最终呈现
@@ -306,14 +306,14 @@ GPU texture cache：
 - **输入架构**：Phase 1–4 跨平台稳定的 GPU-first still pipeline 和完整 profiler 事件。
 - **生产代码产物**：可插拔 ImageIO/CoreGraphics、WIC backend；视频接入同一 render transaction；
   packaged benchmark 自动化；删除 Detail v2、旧 full-frame cache 耦合和诊断 fallback。
-- **内部 API 变化**：backend registry 按平台/格式选择，公共 coordinator 只认 render transaction；
-  `IPHOTO_DETAIL_RENDER_V3` 在达标后转为默认并最终移除旧分支。
+- **内部 API 变化**：backend registry 按平台/格式选择，公共 coordinator 只认 render transaction；Detail
+  渲染保持单一生产链路，不再保留版本 flag 或旧实现分支。
 - **自动化测试**：macOS Metal、Windows/Linux OpenGL QRhi 全矩阵；backend parity；视频取消/切换；
   packaged 冷/热缓存重复 >=30 次；升级/回退兼容。
 - **性能/正确性门槛**：普通格式 P95 <=150ms，重型格式 P95 <=300ms，热重访 P95 <=80ms，
   route <=32ms，GUI task <=24ms，stale presented=0。
-- **已知降级路径**：平台硬解失败可回退通用 backend；观察期内可关闭总 v3 flag，观察期结束后删除
-  双实现以避免长期维护分叉。
+- **已知降级路径**：平台 decoder 失败只允许在 worker 内回退 Qt 通用 backend；不恢复旧 ViewModel、
+  full-frame cache 或视频兼容双链路。
 - **handoff 完成条件**：三平台 packaged 证据齐全、SLO 和正确性矩阵全部通过、旧实现删除、运行手册和
   发布说明更新，本总体契约的完成定义全部关闭。
 

@@ -1299,7 +1299,11 @@ def test_old_thumbnail_hint_request_id_with_matching_selection_is_merged(
     assert any(candidate.path == Path("/library/late.jpg") for candidate in candidates)
 
 
-def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter, mock_store):
+def test_invalidate_thumbnail_queues_refresh_and_emits_tile_roles(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
     path = Path("/videos/clip.mp4")
     adapter._duration_cache[path] = 8.0
     mock_store.row_for_path.return_value = 0
@@ -1312,6 +1316,13 @@ def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter,
         adapter.invalidate_thumbnail(str(path))
 
     assert path not in adapter._duration_cache
+    mock_thumb_service.get_thumbnail.assert_called_once_with(
+        path,
+        adapter._thumb_size,
+        priority="high",
+    )
+    assert Qt.DecorationRole in emitted_roles
+    assert Roles.TILE_SNAPSHOT in emitted_roles
     assert Roles.SIZE in emitted_roles
 
 

@@ -45,3 +45,19 @@ def test_translate_pixels_moves_state():
 
     assert state.cx == pytest.approx(0.6)
     assert state.cy == pytest.approx(0.7)
+
+
+def test_translate_pixels_accepts_projected_bounds_outside_unit_square():
+    state = CropBoxState()
+    state.width = 0.2
+    state.height = 0.2
+    state.cx = 0.5
+    state.cy = 0.9
+
+    state.translate_pixels(
+        QPointF(0.0, 200.0),
+        (1000, 1000),
+        (-0.3, 0.2, 1.3, 1.6),
+    )
+
+    assert state.cy == pytest.approx(1.1)

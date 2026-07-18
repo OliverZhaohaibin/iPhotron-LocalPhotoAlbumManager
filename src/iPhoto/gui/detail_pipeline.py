@@ -94,10 +94,10 @@ class DetailGeometryState:
     def from_adjustments(cls, values: Mapping[str, Any] | None) -> DetailGeometryState:
         source = values or {}
         return cls(
-            crop_cx=_clamp_float(source.get("Crop_CX", 0.5), 0.0, 1.0, 0.5),
-            crop_cy=_clamp_float(source.get("Crop_CY", 0.5), 0.0, 1.0, 0.5),
-            crop_width=_clamp_float(source.get("Crop_W", 1.0), 0.0001, 1.0, 1.0),
-            crop_height=_clamp_float(source.get("Crop_H", 1.0), 0.0001, 1.0, 1.0),
+            crop_cx=_finite_float(source.get("Crop_CX", 0.5), 0.5),
+            crop_cy=_finite_float(source.get("Crop_CY", 0.5), 0.5),
+            crop_width=max(0.0001, _finite_float(source.get("Crop_W", 1.0), 1.0)),
+            crop_height=max(0.0001, _finite_float(source.get("Crop_H", 1.0), 1.0)),
             rotate90=_non_negative_int(source.get("Crop_Rotate90", 0)) % 4,
             straighten=_clamp_float(source.get("Crop_Straighten", 0.0), -45.0, 45.0, 0.0),
             perspective_vertical=_clamp_float(

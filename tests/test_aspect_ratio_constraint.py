@@ -2,6 +2,7 @@
 
 import pytest
 from unittest.mock import MagicMock
+from PySide6.QtCore import QPointF
 
 from iPhoto.gui.ui.widgets.gl_crop.controller import (
     CropInteractionController,
@@ -253,6 +254,59 @@ class TestEnforceAspect:
         assert crop["left"] >= bounds["left"]
         assert crop["top"] <= bounds["top"]
         assert crop["bottom"] >= bounds["bottom"]
+
+
+def test_resize_can_cross_unit_boundary_inside_perspective_quad():
+    """A visible transformed region beyond y=1 remains available to the yellow frame."""
+
+    model = CropSessionModel()
+    model.update_perspective(1.0, 0.0, aspect_ratio=1.5)
+    state = model.get_crop_state()
+    state.cx = 0.5
+    state.cy = 0.65
+    state.width = 0.2
+    state.height = 0.5
+    changed = MagicMock()
+    strategy = ResizeStrategy(
+        handle=CropHandle.BOTTOM,
+        model=model,
+        texture_size_provider=lambda: (300, 200),
+        get_effective_scale=lambda: 1.0,
+        get_dpr=lambda: 1.0,
+        on_crop_changed=changed,
+        apply_edge_push_zoom=MagicMock(),
+        locked_aspect=0.0,
+    )
+
+    strategy.on_drag(QPointF(0.0, 40.0))
+
+    assert state.bounds_normalised()[3] == pytest.approx(1.1)
+    assert model.is_crop_inside_quad()
+    changed.assert_called_once_with()
+
+
+def test_aspect_fit_reverts_when_minimum_size_still_exceeds_perspective_quad():
+    model = CropSessionModel()
+    model.update_perspective(0.0, -0.7, aspect_ratio=1.5)
+    state = model.get_crop_state()
+    state.cx = 0.31282668272247327
+    state.cy = 0.08812358506507939
+    state.width = 0.025
+    state.height = 0.025
+    assert model.is_crop_inside_quad()
+    snapshot = model.create_snapshot()
+
+    _fit_crop_aspect(
+        state,
+        0.5,
+        1500,
+        1000,
+        model.get_crop_bounds(),
+    )
+
+    assert not model.ensure_valid_or_revert(snapshot, allow_shrink=True)
+    assert model.create_snapshot() == pytest.approx(snapshot)
+    assert model.is_crop_inside_quad()
 
 
 # ---------------------------------------------------------------------------

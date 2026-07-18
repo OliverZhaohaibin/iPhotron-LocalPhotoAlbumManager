@@ -358,6 +358,10 @@ class PlayerViewController(QObject):
         self._next_render_session_id = 1
         self._render_session_interaction_depth: dict[int, int] = {}
         self._render_session_lod_pending: set[int] = set()
+        self._render_session_pending_surfaces: dict[
+            int,
+            tuple[int, DecodedSurface],
+        ] = {}
 
         # Per-widget first-render tracking.  QRhiWidget backing textures are
         # uninitialised (transparent) until the first ``render()`` call fills
@@ -884,6 +888,28 @@ class PlayerViewController(QObject):
     ) -> None:
         if generation != self._request_generation:
             return
+        session = self._current_render_session
+        if (
+            session is not None
+            and session.source == surface.decode_key.source
+            and self._render_session_interaction_depth.get(session.session_id, 0) > 0
+        ):
+            self._render_session_pending_surfaces[session.session_id] = (
+                generation,
+                surface,
+            )
+            return
+        self._present_scheduled_image(generation, surface)
+
+    def _present_scheduled_image(
+        self,
+        generation: int,
+        surface: DecodedSurface,
+    ) -> None:
+        """Install and present one current-generation decoded surface."""
+
+        if generation != self._request_generation:
+            return
         source = surface.decode_key.source
         raw_adjustments = dict(self._active_adjustments)
         session = self._upsert_render_session(surface, raw_adjustments)
@@ -1001,6 +1027,7 @@ class PlayerViewController(QObject):
         self._current_render_session = None
         self._render_session_interaction_depth.clear()
         self._render_session_lod_pending.clear()
+        self._render_session_pending_surfaces.clear()
 
     def handle_memory_pressure(self) -> None:
         """Drop speculative GPU and mapped surfaces while preserving current draw state."""
@@ -1086,6 +1113,10 @@ class PlayerViewController(QObject):
             self._render_session_interaction_depth[session_id] = depth - 1
             return
         self._render_session_interaction_depth.pop(session_id, None)
+        pending_surface = self._render_session_pending_surfaces.pop(session_id, None)
+        if pending_surface is not None:
+            generation, surface = pending_surface
+            self._present_scheduled_image(generation, surface)
         if session_id in self._render_session_lod_pending:
             self._render_session_lod_pending.discard(session_id)
             self._schedule_render_session_lod()
@@ -1129,6 +1160,10 @@ class PlayerViewController(QObject):
 
         self._require_current_session(handle)
         lod_pending = handle.session_id in self._render_session_lod_pending
+        pending_surface = self._render_session_pending_surfaces.pop(
+            handle.session_id,
+            None,
+        )
         self._render_session_interaction_depth.pop(handle.session_id, None)
         self._render_session_lod_pending.discard(handle.session_id)
         state = handle.commit_current_state() if committed else handle.restore_baseline()
@@ -1142,6 +1177,9 @@ class PlayerViewController(QObject):
             session_id=handle.session_id,
             committed=bool(committed),
         )
+        if pending_surface is not None:
+            generation, surface = pending_surface
+            self._present_scheduled_image(generation, surface)
         if lod_pending:
             self._schedule_render_session_lod()
         return state
@@ -1273,6 +1311,7 @@ class PlayerViewController(QObject):
         self._request_reason_by_generation.clear()
         self._render_session_interaction_depth.clear()
         self._render_session_lod_pending.clear()
+        self._render_session_pending_surfaces.clear()
         for entry in tuple(self._preparation_entries.values()):
             entry.intents.clear()
             entry.worker.cancel()

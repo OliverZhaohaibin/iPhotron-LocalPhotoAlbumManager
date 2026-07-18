@@ -41,6 +41,7 @@ class TestHasValidCrop:
         assert has_valid_crop(0.9, 0.9)
         assert has_valid_crop(0.5, 0.8)
         assert has_valid_crop(0.8, 0.5)
+        assert has_valid_crop(1.2, 0.8)
 
     def test_near_full_not_valid(self):
         """Values very close to 1.0 should not be considered a crop."""
@@ -91,12 +92,10 @@ class TestComputeCropRectPixels:
         # Center: 150, 50
         # Width: 80px, Height: 120px
         # Half width: 40, Half height: 60
-        # Expected: x=110, y=0 (clamped), w=80, h=110 (clamped to bottom)
+        # Logical crop framing preserves the transformed extent outside [0, 1].
         assert result.x() == pytest.approx(110.0)
-        
-        # Y should be clamped to stay within bounds
-        # Center 50 - half height 60 = -10, clamped to 0
-        assert result.y() == 0.0
+        assert result.y() == pytest.approx(-10.0)
+        assert result.height() == pytest.approx(120.0)
 
     def test_crop_at_edge(self):
         """Test crop that extends to image edge."""
@@ -106,12 +105,10 @@ class TestComputeCropRectPixels:
         
         # Center: 90, 50
         # Width: 50px, Height: 50px
-        # Right edge: 90 + 25 = 115, clamped to 100
-        # Actual width: 100 - 65 = 35
+        # Right edge remains at 115 in the transformed logical image plane.
         assert result.x() == pytest.approx(65.0)
         assert result.y() == 25.0
-        # Width gets clamped
-        assert result.width() >= 1.0
+        assert result.width() == pytest.approx(50.0)
 
     def test_minimum_rect_size(self):
         """Test that rectangles have minimum size of 1 pixel."""

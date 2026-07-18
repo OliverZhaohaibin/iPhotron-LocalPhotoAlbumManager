@@ -535,9 +535,17 @@ class GalleryListModelAdapter(QAbstractListModel):
         row = self._store.row_for_path(path)
         if row is None:
             return
+        # Decoration lookups are intentionally memory-only, so invalidation
+        # alone would leave the filmstrip showing its micro thumbnail until a
+        # later viewport-demand refresh.  Queue the edited asset immediately.
+        self._thumbnails.get_thumbnail(path, self._thumb_size, priority="high")
         idx = self.index(row, 0)
         if idx.isValid():
-            self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.SIZE])
+            self.dataChanged.emit(
+                idx,
+                idx,
+                [Qt.DecorationRole, Roles.TILE_SNAPSHOT, Roles.SIZE],
+            )
 
     def update_favorite(self, row: int, is_favorite: bool) -> None:
         self._store.update_favorite_status(row, is_favorite)

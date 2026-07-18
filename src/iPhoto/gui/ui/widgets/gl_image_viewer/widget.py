@@ -58,7 +58,7 @@ _LOGGER = logging.getLogger(__name__)
 # perspective-corrected source pixels can project outside that logical square;
 # a deliberately oversized mask leaves the yellow overlay as the only crop
 # boundary while the shader still rejects samples outside the real texture.
-_CROP_PREVIEW_MASK_SIZE = 4.0
+_CROP_PREVIEW_MASK_SIZE = 1_000_000.0
 gl: Any | None = None
 GLRenderer: Any | None = None
 

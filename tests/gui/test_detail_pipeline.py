@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from PySide6.QtGui import QImage
 
 from iPhoto.gui.detail_pipeline import (
@@ -116,6 +117,16 @@ def test_rotation_crop_and_projection_increase_lod(tmp_path: Path) -> None:
         perspective_vertical=0.5,
     )
     assert select_detail_decode_level(_request(tmp_path, geometry=cropped)) == "full"
+
+
+def test_geometry_state_preserves_extended_perspective_crop() -> None:
+    geometry = DetailGeometryState.from_adjustments(
+        {"Crop_CX": -0.1, "Crop_CY": 1.2, "Crop_W": 1.3, "Crop_H": 0.7}
+    )
+
+    assert geometry.crop_cx == pytest.approx(-0.1)
+    assert geometry.crop_cy == pytest.approx(1.2)
+    assert geometry.crop_width == pytest.approx(1.3)
 
 
 def test_source_smaller_than_tier_is_not_upscaled(tmp_path: Path) -> None:

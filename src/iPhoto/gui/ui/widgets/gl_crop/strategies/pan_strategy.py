@@ -78,6 +78,7 @@ class PanStrategy(InteractionStrategy):
         crop_state.translate_pixels(
             QPointF(-delta_device_x / view_scale, -delta_device_y / view_scale),
             (tex_w, tex_h),
+            self._model.get_crop_bounds(),
         )
         if not self._model.ensure_valid_or_revert(snapshot, allow_shrink=False):
             return

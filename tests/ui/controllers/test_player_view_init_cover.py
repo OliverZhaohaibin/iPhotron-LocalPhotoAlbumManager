@@ -318,6 +318,49 @@ class TestInitCoverTracking:
         controller._lod_timer.stop()
         controller.finish_render_session(acquired, committed=False)
 
+    def test_crop_interaction_defers_in_flight_lod_presentation(
+        self,
+        controller,
+        mocker,
+    ):
+        path = Path("/tmp/in-flight-crop-session.jpg")
+        initial = _surface(
+            path,
+            QImage(1024, 768, QImage.Format.Format_RGBA8888),
+            level=1024,
+        )
+        upgraded = _surface(
+            path,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=2048,
+        )
+        controller._active_source_identity = AssetSourceIdentity.create(
+            path,
+            width=2048,
+            height=1536,
+            source_mtime_ns=1,
+            index_revision=3,
+        )
+        handle = controller._upsert_render_session(initial, {"Crop_W": 1.0})
+        controller._image_viewer._current_source = initial.decode_key
+        acquired = controller.acquire_render_session(path)
+        present = mocker.patch.object(controller, "_on_adjusted_image_ready")
+        controller._request_generation = 7
+
+        controller.begin_render_session_interaction(acquired)
+        controller._on_scheduled_image_ready(7, upgraded)
+
+        assert handle.current_surface is initial
+        assert handle.session_id in controller._render_session_pending_surfaces
+        present.assert_not_called()
+
+        controller.end_render_session_interaction(acquired)
+
+        assert handle.current_surface is upgraded
+        assert handle.session_id not in controller._render_session_pending_surfaces
+        present.assert_called_once()
+        controller.finish_render_session(acquired, committed=False)
+
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""
         controller._on_image_first_render()

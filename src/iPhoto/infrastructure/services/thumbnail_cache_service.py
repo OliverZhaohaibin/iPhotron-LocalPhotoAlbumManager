@@ -316,6 +316,7 @@ class ThumbnailCacheService(QObject):
         self._pending_tasks: Set[str] = set()
         self._pending_generations: Dict[str, int] = {}
         self._queued_tasks: Dict[str, ThumbnailRequest] = {}
+        self._visible_active_tokens: Dict[str, _CancellationToken] = {}
         self._visible_queue: Deque[str] = deque()
         self._visible_queued_at: Dict[str, float] = {}
         self._active_tasks = 0
@@ -353,6 +354,10 @@ class ThumbnailCacheService(QObject):
         self._failure_until: Dict[str, float] = {}
         self._is_shutting_down = False
         self._current_generation = 0
+        # Serialise the final cache-file replacement with invalidation.  A
+        # cancelled worker may finish rendering after an edit has been saved;
+        # without this lock it could recreate the just-deleted stale JPEG.
+        self._disk_write_lock = threading.Lock()
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(self._max_active_jobs)
         self._prefetch_thread_pool = QThreadPool(self)
@@ -395,6 +400,8 @@ class ThumbnailCacheService(QObject):
     def shutdown(self):
         """Prevents new tasks from being submitted and clears pending logic."""
         self._is_shutting_down = True
+        for token in self._visible_active_tokens.values():
+            token.cancel("shutdown")
         self._pending_tasks.clear()
         self._pending_generations.clear()
         self._queued_tasks.clear()
@@ -421,6 +428,7 @@ class ThumbnailCacheService(QObject):
         self._far_active_tasks = 0
         self._active_decode_reservations.clear()
         self._active_decode_kinds.clear()
+        self._visible_active_tokens.clear()
         self._staging_used_bytes = 0
         self._release_all_l1_slots("shutdown")
         self._eviction_timer.stop()
@@ -1824,6 +1832,9 @@ class ThumbnailCacheService(QObject):
             return False
         self._active_decode_reservations[key] = reservation
         self._active_decode_kinds[key] = kind
+        if kind is ThumbnailRequestKind.VISIBLE:
+            cancellation = cancellation or _CancellationToken()
+            self._visible_active_tokens[key] = cancellation
         worker_signals = ThumbnailWorkerSignals()
         worker_signals.result.connect(self._handle_generation_result)
         worker_signals.failed.connect(self._handle_generation_failure)
@@ -1870,8 +1881,22 @@ class ThumbnailCacheService(QObject):
         if kind is not ThumbnailRequestKind.VISIBLE:
             self._handle_prefetch_result(path, size, image, generation, kind)
             return
+        key = self._cache_key(path, size)
+        active_token = self._visible_active_tokens.get(key)
+        if active_token is not None and active_token.cancelled():
+            # The worker may have emitted success immediately before the GUI
+            # thread invalidated it.  Treat that queued signal as cancellation
+            # so the stale image cannot enter the publish queue.
+            self._handle_generation_failure(
+                path,
+                size,
+                "cancelled",
+                generation,
+                kind,
+            )
+            return
         if not image.isNull():
-            key = self._cache_key(path, size)
+            self._visible_active_tokens.pop(key, None)
             self._pending_tasks.discard(key)
             desired_generation = self._pending_generations.pop(key, generation)
             self._failure_until.pop(key, None)
@@ -1914,6 +1939,7 @@ class ThumbnailCacheService(QObject):
             self._handle_prefetch_failure(path, size, reason, generation, kind)
             return
         key = self._cache_key(path, size)
+        self._visible_active_tokens.pop(key, None)
         self._active_decode_reservations.pop(key, None)
         self._active_decode_kinds.pop(key, None)
         self._pending_tasks.discard(key)
@@ -2096,8 +2122,9 @@ class ThumbnailCacheService(QObject):
             size = QSize(512, 512)
         key = self._cache_key(path, size)
         disk_key = self._disk_cache_key(path)
+        key_prefix = f"{disk_key}:"
         memory_keys = [
-            candidate for candidate in self._memory_cache if candidate.startswith(f"{disk_key}:")
+            candidate for candidate in self._memory_cache if candidate.startswith(key_prefix)
         ]
 
         for memory_key in memory_keys:
@@ -2106,21 +2133,88 @@ class ThumbnailCacheService(QObject):
                 0,
                 self._memory_used_bytes - self._memory_bytes.pop(memory_key, 0),
             )
-        self._failure_until.pop(key, None)
-        self._prefetch_l2_miss_until.pop(key, None)
-        self._pending_tasks.discard(key)
-        self._pending_generations.pop(key, None)
-        self._queued_tasks.pop(key, None)
-        self._visible_queued_at.pop(key, None)
-        self._pinned_keys.discard(key)
-        self._cancel_prefetch_key(key)
+        # A staged result is already detached from its worker and would
+        # otherwise be promoted straight back into L1 on the next request.
+        self._discard_staged_path(path)
+
+        affected_keys = {
+            candidate
+            for candidates in (
+                self._pending_tasks,
+                self._queued_tasks,
+                self._visible_active_tokens,
+                self._prefetch_pending,
+                self._prefetch_queued,
+                self._prefetch_active_tokens,
+                self._prefetch_generations,
+                self._prefetch_kinds,
+                self._failure_until,
+                self._prefetch_l2_miss_until,
+                self._pinned_keys,
+            )
+            for candidate in candidates
+            if candidate.startswith(key_prefix)
+        }
+        affected_keys.add(key)
+        for affected_key in affected_keys:
+            self._failure_until.pop(affected_key, None)
+            self._prefetch_l2_miss_until.pop(affected_key, None)
+            self._pinned_keys.discard(affected_key)
+            self._cancel_prefetch_key(affected_key)
+
+            active_token = self._visible_active_tokens.get(affected_key)
+            if active_token is not None:
+                active_token.cancel("invalidated")
+                # Keep the active task registered until its cancelled result
+                # arrives, then make the failure path schedule a fresh render.
+                self._pending_generations[affected_key] = max(
+                    self._pending_generations.get(
+                        affected_key,
+                        self._current_generation,
+                    ),
+                    self._current_generation,
+                ) + 1
+                continue
+            if affected_key in self._queued_tasks:
+                # It has not read the source or sidecar yet, so the queued task
+                # is safe to execute against the newly saved edit state.
+                continue
+            self._pending_tasks.discard(affected_key)
+            self._pending_generations.pop(affected_key, None)
+            self._visible_queued_at.pop(affected_key, None)
 
         disk_file = thumbnail_cache_file_for_key(self._disk_cache_path, disk_key)
-        if disk_file.exists():
-            try:
-                disk_file.unlink()
-            except OSError:
-                pass
+        with self._disk_write_lock:
+            if disk_file.exists():
+                try:
+                    disk_file.unlink()
+                except OSError:
+                    pass
+
+    def _discard_staged_path(self, path: Path) -> None:
+        """Drop publish-queue images rendered before an asset invalidation."""
+
+        disk_key = self._disk_cache_key(Path(path))
+        self._publish_visible = deque(
+            result
+            for result in self._publish_visible
+            if self._disk_cache_key(result.path) != disk_key
+        )
+        self._publish_guard = deque(
+            result
+            for result in self._publish_guard
+            if self._disk_cache_key(result.path) != disk_key
+        )
+        self._publish_prefetch = deque(
+            result
+            for result in self._publish_prefetch
+            if self._disk_cache_key(result.path) != disk_key
+        )
+        self._publish_keys = {
+            self._cache_key(result.path, result.size)
+            for result in (*self._publish_visible, *self._publish_guard, *self._publish_prefetch)
+        }
+        self._recompute_staging_bytes()
 
     def remap_album_paths(
         self,
@@ -2762,7 +2856,8 @@ class ThumbnailCacheService(QObject):
     ) -> Optional[QImage]:
         """Load L2 or render/write a replacement entirely on a worker thread."""
 
-        del cancellation
+        if cancellation is not None and cancellation.cancelled():
+            return None
         disk_file = thumbnail_cache_file_for_key(
             self._disk_cache_path,
             self._disk_cache_key(path, l2_cache_key),
@@ -2774,6 +2869,8 @@ class ThumbnailCacheService(QObject):
             tier="L2",
             target_size=size,
         )
+        if cancellation is not None and cancellation.cancelled():
+            return None
         if outcome == "hit":
             return image
 
@@ -2781,11 +2878,27 @@ class ThumbnailCacheService(QObject):
         storage_image = self._render_thumbnail(path, storage_size)
         if storage_image is None or storage_image.isNull():
             return None
+        if cancellation is not None and cancellation.cancelled():
+            return None
+        temporary_file = disk_file.with_name(
+            f".{disk_file.name}.{threading.get_ident()}.{time.monotonic_ns()}.tmp"
+        )
         try:
             disk_file.parent.mkdir(parents=True, exist_ok=True)
-            storage_image.save(str(disk_file), "JPEG")
+            saved = storage_image.save(str(temporary_file), "JPEG")
+            if saved:
+                with self._disk_write_lock:
+                    if cancellation is None or not cancellation.cancelled():
+                        temporary_file.replace(disk_file)
         except OSError:
             pass
+        finally:
+            try:
+                temporary_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if cancellation is not None and cancellation.cancelled():
+            return None
         if size == storage_size:
             return storage_image
         return storage_image.scaled(

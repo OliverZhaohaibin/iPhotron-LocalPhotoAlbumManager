@@ -221,6 +221,85 @@ def test_worker_loads_l2_hit_without_rendering_source(tmp_path: Path) -> None:
     render.assert_not_called()
 
 
+def test_invalidation_prevents_old_worker_from_restoring_stale_disk_thumbnail(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "thumbs"
+    service = ThumbnailCacheService(cache_dir)
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"image")
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    disk_file = thumbnail_cache_file(cache_dir, path, (512, 512))
+    token = _CancellationToken()
+    render_started = threading.Event()
+    allow_render_to_finish = threading.Event()
+    stale_image = QImage(512, 512, QImage.Format.Format_RGB32)
+    stale_image.fill(QColor("blue"))
+    result: list[QImage | None] = []
+
+    def render_stale(_path: Path, _size: QSize) -> QImage:
+        render_started.set()
+        assert allow_render_to_finish.wait(timeout=2.0)
+        return stale_image
+
+    service._visible_active_tokens[key] = token
+    service._pending_tasks.add(key)
+    service._pending_generations[key] = 1
+    service._active_tasks = 1
+    with patch.object(service, "_render_thumbnail", side_effect=render_stale):
+        worker = threading.Thread(
+            target=lambda: result.append(
+                service._load_or_render_thumbnail(path, size, token)
+            )
+        )
+        worker.start()
+        assert render_started.wait(timeout=2.0)
+        service.invalidate(path, size=size)
+        allow_render_to_finish.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    assert not disk_file.exists()
+
+    # Also cover a success signal that was queued immediately before the
+    # invalidation reached the worker thread.
+    service._handle_generation_result(path, size, stale_image, generation=1)
+    assert service._queued_tasks[key].generation == 2
+    assert not service._publish_visible
+
+    edited_image = QImage(512, 512, QImage.Format.Format_RGB32)
+    edited_image.fill(QColor("red"))
+    with patch.object(service, "_render_thumbnail", return_value=edited_image):
+        assert service._load_or_render_thumbnail(path, size) is not None
+
+    restarted = ThumbnailCacheService(cache_dir)
+    with patch.object(restarted, "_render_thumbnail") as render_after_restart:
+        cached = restarted._load_or_render_thumbnail(path, size)
+
+    assert cached is not None
+    assert cached.pixelColor(256, 256).red() > cached.pixelColor(256, 256).blue()
+    render_after_restart.assert_not_called()
+
+
+def test_invalidation_discards_staged_thumbnail_for_same_asset(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(256, 256)
+    image = QImage(8, 8, QImage.Format.Format_RGB32)
+    service._stage_result(
+        ThumbnailLoadResult(path, size, image, 1, ThumbnailRequestKind.VISIBLE)
+    )
+
+    service.invalidate(path, size=size)
+
+    assert not service._publish_visible
+    assert service._cache_key(path, size) not in service._publish_keys
+    assert service._staging_used_bytes == 0
+
+
 def test_peek_full_thumbnail_never_touches_disk(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
 

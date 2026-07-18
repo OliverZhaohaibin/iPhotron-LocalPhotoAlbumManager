@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -84,6 +84,40 @@ def test_handle_done_clicked_flushes_latest_values_to_render_session() -> None:
     assert coordinator._active_adjustments == {"Exposure": 0.9}
     assert coordinator._pending_session_values is None
     throttler.stop.assert_called_once_with()
+
+
+def test_crop_interaction_flushes_final_state_before_ending_render_interaction() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    final_values = {
+        "Crop_CX": 0.4,
+        "Crop_CY": 0.6,
+        "Crop_W": 0.7,
+        "Crop_H": 0.5,
+    }
+    handle = object()
+    render_state = SimpleNamespace(shader_adjustments=dict(final_values))
+    render_controller = Mock()
+    render_controller.update_render_session.return_value = render_state
+    coordinator._session = SimpleNamespace(values=Mock(return_value=final_values))
+    coordinator._current_source = Path("/fake/photo.jpg")
+    coordinator._compare_active = False
+    coordinator._render_session_controller = render_controller
+    coordinator._render_session_handle = handle
+    coordinator._history_manager = Mock()
+    coordinator._update_throttler = Mock()
+    coordinator._pending_session_values = dict(final_values)
+
+    EditCoordinator._handle_crop_interaction_started(coordinator)
+    EditCoordinator._handle_crop_interaction_finished(coordinator)
+
+    coordinator._history_manager.push_undo_state.assert_called_once_with()
+    assert render_controller.method_calls == [
+        call.begin_render_session_interaction(handle),
+        call.update_render_session(handle, final_values),
+        call.end_render_session_interaction(handle),
+    ]
+    coordinator._update_throttler.stop.assert_called_once_with()
+    assert coordinator._pending_session_values is None
 
 
 def test_leave_edit_mode_requests_video_restore_with_probed_duration() -> None:

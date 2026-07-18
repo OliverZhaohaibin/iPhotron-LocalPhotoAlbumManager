@@ -194,6 +194,10 @@ class CropInteractionController:
         """Return True if crop mode is currently active."""
         return self._active
 
+    def is_interacting(self) -> bool:
+        """Return whether a crop handle is currently being dragged."""
+        return self._crop_dragging
+
     def set_locked_aspect_ratio(self, ratio: float) -> None:
         """Set the aspect ratio constraint for crop resizing.
 
@@ -327,7 +331,18 @@ class CropInteractionController:
     def set_active(self, enabled: bool, values: Mapping[str, float] | None = None) -> None:
         """Enable or disable crop mode with optional initial crop values."""
         if enabled == self._active:
-            if enabled and values is not None:
+            # ``set_adjustments()`` feeds the persisted crop values back into
+            # this controller.  During a drag the model is already the source
+            # of those values, so applying them again would also clamp and
+            # rewrite the image centre that the active strategy is using.
+            # Ignore that feedback, and avoid the same transform mutation when
+            # the external values already match the local model.
+            if (
+                enabled
+                and values is not None
+                and not self._crop_dragging
+                and not self._crop_values_match(values)
+            ):
                 self._apply_crop_values(values)
             return
 
@@ -386,6 +401,8 @@ class CropInteractionController:
                 texture_size_provider=self._texture_size_provider,
                 get_effective_scale=self._transform_controller.get_effective_scale,
                 get_dpr=self._transform_controller._get_dpr,
+                get_pan_pixels=self._transform_controller.get_pan_pixels,
+                set_pan_pixels=self._transform_controller.set_pan_pixels,
                 get_viewport_device_scale=self._transform_controller.get_viewport_device_scale,
                 on_crop_changed=self._emit_crop_changed,
             )

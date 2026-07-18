@@ -1,8 +1,11 @@
 from unittest.mock import MagicMock
 
+import pytest
 from PySide6.QtCore import QPointF
 
 from iPhoto.gui.ui.widgets.gl_crop.controller import CropInteractionController
+from iPhoto.gui.ui.widgets.gl_crop.model import CropSessionModel
+from iPhoto.gui.ui.widgets.gl_crop.strategies.pan_strategy import PanStrategy
 
 
 def create_controller():
@@ -90,6 +93,50 @@ def test_update_perspective_applies_new_crop_if_inactive():
     assert state.width == 0.1
 
 
+def test_active_crop_feedback_with_same_values_does_not_reapply_transform():
+    controller = create_controller()
+    values = {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.8, "Crop_H": 0.7}
+    controller.set_active(True, values)
+    controller._transform_controller.apply_image_center_pixels.reset_mock()
+
+    controller.set_active(True, dict(values))
+
+    controller._transform_controller.apply_image_center_pixels.assert_not_called()
+
+
+def test_active_drag_ignores_external_crop_feedback():
+    controller = create_controller()
+    initial = {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.8, "Crop_H": 0.7}
+    controller.set_active(True, initial)
+    controller._crop_dragging = True
+    controller._transform_controller.apply_image_center_pixels.reset_mock()
+
+    controller.set_active(
+        True,
+        {"Crop_CX": 0.2, "Crop_CY": 0.3, "Crop_W": 0.4, "Crop_H": 0.5},
+    )
+
+    assert controller.is_interacting()
+    assert controller.get_crop_state().as_mapping() == initial
+    controller._transform_controller.apply_image_center_pixels.assert_not_called()
+
+
+def test_active_crop_applies_external_restore_when_not_dragging():
+    controller = create_controller()
+    controller.set_active(
+        True,
+        {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.8, "Crop_H": 0.7},
+    )
+    restored = {"Crop_CX": 0.4, "Crop_CY": 0.6, "Crop_W": 0.5, "Crop_H": 0.4}
+    controller._transform_controller.apply_image_center_pixels.reset_mock()
+
+    controller.set_active(True, restored)
+
+    assert not controller.is_interacting()
+    assert controller.get_crop_state().as_mapping() == restored
+    controller._transform_controller.apply_image_center_pixels.assert_called_once()
+
+
 def test_animation_frame_ignores_invalid_transform_geometry():
     controller = create_controller()
     controller._on_request_update.reset_mock()
@@ -116,3 +163,36 @@ def test_current_crop_rect_pixels_maps_viewport_logical_to_device_pixels():
         "right": 300.0,
         "bottom": 200.0,
     }
+
+
+def test_inside_pan_moves_image_while_crop_frame_stays_stationary():
+    model = CropSessionModel()
+    state = model.get_crop_state()
+    state.width = 0.6
+    state.height = 0.6
+    pan = [QPointF(10.0, 20.0)]
+    set_pan = MagicMock(side_effect=lambda value: pan.__setitem__(0, QPointF(value)))
+    on_crop_changed = MagicMock()
+    strategy = PanStrategy(
+        model=model,
+        texture_size_provider=lambda: (300, 200),
+        get_effective_scale=lambda: 2.0,
+        get_dpr=lambda: 1.0,
+        get_pan_pixels=lambda: QPointF(pan[0]),
+        set_pan_pixels=set_pan,
+        get_viewport_device_scale=lambda: (1.0, 1.0),
+        on_crop_changed=on_crop_changed,
+    )
+    old_left_screen = (state.cx - state.width * 0.5) * 300.0 * 2.0 + pan[0].x()
+    old_top_screen = (state.cy - state.height * 0.5) * 200.0 * 2.0 - pan[0].y()
+
+    strategy.on_drag(QPointF(20.0, 10.0))
+
+    assert state.cx == pytest.approx(0.5 - 10.0 / 300.0)
+    assert state.cy == pytest.approx(0.5 - 5.0 / 200.0)
+    assert pan[0] == QPointF(30.0, 10.0)
+    new_left_screen = (state.cx - state.width * 0.5) * 300.0 * 2.0 + pan[0].x()
+    new_top_screen = (state.cy - state.height * 0.5) * 200.0 * 2.0 - pan[0].y()
+    assert new_left_screen == pytest.approx(old_left_screen)
+    assert new_top_screen == pytest.approx(old_top_screen)
+    on_crop_changed.assert_called_once_with()

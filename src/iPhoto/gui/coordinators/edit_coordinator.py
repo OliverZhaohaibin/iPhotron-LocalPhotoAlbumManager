@@ -256,10 +256,20 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.aspectRatioChanged.connect(
             lambda ratio: self._active_edit_viewport().set_crop_aspect_ratio(ratio)
         )
-        self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
+        self._ui.edit_image_viewer.cropInteractionStarted.connect(
+            self._handle_crop_interaction_started
+        )
+        self._ui.edit_image_viewer.cropInteractionFinished.connect(
+            self._handle_crop_interaction_finished
+        )
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
         self._ui.edit_image_viewer.colorPicked.connect(self._handle_color_picked)
-        self._ui.video_area.cropInteractionStarted.connect(self.push_undo_state)
+        self._ui.video_area.cropInteractionStarted.connect(
+            self._handle_crop_interaction_started
+        )
+        self._ui.video_area.cropInteractionFinished.connect(
+            self._handle_crop_interaction_finished
+        )
         self._ui.video_area.cropChanged.connect(self._handle_crop_changed)
         self._ui.video_area.colorPicked.connect(self._handle_color_picked)
         self._ui.video_area.durationChanged.connect(self._handle_video_duration_changed)
@@ -1201,6 +1211,34 @@ class EditCoordinator(QObject):
                 "Crop_CX": float(cx), "Crop_CY": float(cy),
                 "Crop_W": float(w), "Crop_H": float(h)
             }, emit_individual=False)
+
+    def _handle_crop_interaction_started(self) -> None:
+        """Snapshot undo state and defer still-image LOD replacement."""
+
+        self.push_undo_state()
+        handle = self._render_session_handle
+        begin = getattr(
+            self._render_session_controller,
+            "begin_render_session_interaction",
+            None,
+        )
+        if handle is not None and callable(begin):
+            begin(handle)
+
+    def _handle_crop_interaction_finished(self) -> None:
+        """Publish the final crop state before allowing one LOD reevaluation."""
+
+        if self._session is not None:
+            self._perform_deferred_update()
+        self._update_throttler.stop()
+        handle = self._render_session_handle
+        end = getattr(
+            self._render_session_controller,
+            "end_render_session_interaction",
+            None,
+        )
+        if handle is not None and callable(end):
+            end(handle)
 
     def _handle_bw_params_previewed(self, params) -> None:
         """Apply transient Black & White previews without mutating session state."""

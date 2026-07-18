@@ -356,6 +356,8 @@ class PlayerViewController(QObject):
         self._render_sessions: OrderedDict[tuple, PhotoRenderSessionHandle] = OrderedDict()
         self._current_render_session: PhotoRenderSessionHandle | None = None
         self._next_render_session_id = 1
+        self._render_session_interaction_depth: dict[int, int] = {}
+        self._render_session_lod_pending: set[int] = set()
 
         # Per-widget first-render tracking.  QRhiWidget backing textures are
         # uninitialised (transparent) until the first ``render()`` call fills
@@ -795,7 +797,8 @@ class PlayerViewController(QObject):
     def _on_viewer_zoom_changed(self, factor: float) -> None:
         self._pending_zoom_factor = max(1.0, float(factor))
         if self._active_source_identity is not None:
-            self._lod_timer.start()
+            if not self._defer_lod_for_active_render_interaction():
+                self._lod_timer.start()
 
     def _on_viewport_metrics_changed(self) -> None:
         if self._active_source_identity is None:
@@ -805,7 +808,8 @@ class PlayerViewController(QObject):
             1.0,
             float(zoom_getter()) if callable(zoom_getter) else self._pending_zoom_factor,
         )
-        self._lod_timer.start()
+        if not self._defer_lod_for_active_render_interaction():
+            self._lod_timer.start()
 
     def _request_higher_lod(self) -> None:
         identity = self._active_source_identity
@@ -995,6 +999,8 @@ class PlayerViewController(QObject):
             clear_residency()
         self._render_sessions.clear()
         self._current_render_session = None
+        self._render_session_interaction_depth.clear()
+        self._render_session_lod_pending.clear()
 
     def handle_memory_pressure(self) -> None:
         """Drop speculative GPU and mapped surfaces while preserving current draw state."""
@@ -1034,6 +1040,9 @@ class PlayerViewController(QObject):
         """Replace one session's immutable edit state and update GPU uniforms."""
 
         self._require_current_session(handle)
+        previous_geometry = DetailGeometryState.from_adjustments(
+            handle.edit_state.raw_adjustments
+        )
         state = handle.next_state(raw_adjustments)
         self._active_adjustments = dict(state.raw_adjustments)
         self._image_viewer.set_adjustments(state.shader_adjustments)
@@ -1044,9 +1053,71 @@ class PlayerViewController(QObject):
             session_id=handle.session_id,
             revision=state.revision[1],
         )
+        current_geometry = DetailGeometryState.from_adjustments(state.raw_adjustments)
+        if current_geometry != previous_geometry:
+            self._queue_render_session_lod(handle)
+        return state
+
+    def begin_render_session_interaction(
+        self,
+        handle: PhotoRenderSessionHandle,
+    ) -> None:
+        """Defer LOD replacement while an edit gesture is in progress."""
+
+        self._require_current_session(handle)
+        session_id = handle.session_id
+        depth = self._render_session_interaction_depth.get(session_id, 0)
+        self._render_session_interaction_depth[session_id] = depth + 1
+        if depth == 0:
+            if self._lod_timer.isActive():
+                self._render_session_lod_pending.add(session_id)
+            self._lod_timer.stop()
+
+    def end_render_session_interaction(
+        self,
+        handle: PhotoRenderSessionHandle,
+    ) -> None:
+        """Finish an edit gesture and evaluate its final geometry once."""
+
+        self._require_current_session(handle)
+        session_id = handle.session_id
+        depth = self._render_session_interaction_depth.get(session_id, 0)
+        if depth > 1:
+            self._render_session_interaction_depth[session_id] = depth - 1
+            return
+        self._render_session_interaction_depth.pop(session_id, None)
+        if session_id in self._render_session_lod_pending:
+            self._render_session_lod_pending.discard(session_id)
+            self._schedule_render_session_lod()
+
+    def _queue_render_session_lod(self, handle: PhotoRenderSessionHandle) -> None:
+        """Schedule or defer a geometry-driven LOD reevaluation."""
+
+        session_id = handle.session_id
+        if self._render_session_interaction_depth.get(session_id, 0) > 0:
+            self._render_session_lod_pending.add(session_id)
+            self._lod_timer.stop()
+            return
+        self._schedule_render_session_lod()
+
+    def _schedule_render_session_lod(self) -> None:
+        """Debounce one render-session LOD reevaluation."""
+
         self._pending_zoom_factor = max(1.0, self._image_viewer.zoom_factor())
         self._lod_timer.start()
-        return state
+
+    def _defer_lod_for_active_render_interaction(self) -> bool:
+        """Record a pending LOD check when the current session is interactive."""
+
+        handle = self._current_render_session
+        if handle is None:
+            return False
+        session_id = handle.session_id
+        if self._render_session_interaction_depth.get(session_id, 0) <= 0:
+            return False
+        self._render_session_lod_pending.add(session_id)
+        self._lod_timer.stop()
+        return True
 
     def finish_render_session(
         self,
@@ -1057,6 +1128,9 @@ class PlayerViewController(QObject):
         """Commit or discard live edits without replacing the resident texture."""
 
         self._require_current_session(handle)
+        lod_pending = handle.session_id in self._render_session_lod_pending
+        self._render_session_interaction_depth.pop(handle.session_id, None)
+        self._render_session_lod_pending.discard(handle.session_id)
         state = handle.commit_current_state() if committed else handle.restore_baseline()
         handle.edit_references = max(0, handle.edit_references - 1)
         self._active_adjustments = dict(state.raw_adjustments)
@@ -1068,6 +1142,8 @@ class PlayerViewController(QObject):
             session_id=handle.session_id,
             committed=bool(committed),
         )
+        if lod_pending:
+            self._schedule_render_session_lod()
         return state
 
     def render_session_sidebar_input(
@@ -1195,6 +1271,8 @@ class PlayerViewController(QObject):
         self._active_adjustments = {}
         self._current_decode_level = None
         self._request_reason_by_generation.clear()
+        self._render_session_interaction_depth.clear()
+        self._render_session_lod_pending.clear()
         for entry in tuple(self._preparation_entries.values()):
             entry.intents.clear()
             entry.worker.cancel()

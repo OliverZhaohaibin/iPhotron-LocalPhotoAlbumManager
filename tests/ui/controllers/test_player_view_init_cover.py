@@ -280,7 +280,7 @@ class TestInitCoverTracking:
 
         acquired = controller.acquire_render_session(path)
         state = controller.update_render_session(acquired, {"Exposure": 0.7})
-        controller._lod_timer.stop()
+        assert not controller._lod_timer.isActive()
         restored = controller.finish_render_session(acquired, committed=False)
 
         assert acquired is handle
@@ -288,6 +288,35 @@ class TestInitCoverTracking:
         assert state.raw_adjustments["Exposure"] == 0.7
         assert restored.raw_adjustments["Exposure"] == 0.2
         set_image.assert_not_called()
+
+    def test_crop_interaction_defers_lod_until_final_geometry(self, controller):
+        path = Path("/tmp/crop-session.jpg")
+        image = QImage(1024, 768, QImage.Format.Format_RGBA8888)
+        surface = _surface(path, image)
+        controller._active_source_identity = AssetSourceIdentity.create(
+            path,
+            width=1024,
+            height=768,
+            source_mtime_ns=1,
+            index_revision=3,
+        )
+        controller._upsert_render_session(surface, {"Crop_W": 1.0})
+        controller._image_viewer._current_source = surface.decode_key
+        acquired = controller.acquire_render_session(path)
+
+        controller.begin_render_session_interaction(acquired)
+        state = controller.update_render_session(acquired, {"Crop_W": 0.7})
+
+        assert state.raw_adjustments["Crop_W"] == 0.7
+        assert not controller._lod_timer.isActive()
+        assert acquired.session_id in controller._render_session_lod_pending
+
+        controller.end_render_session_interaction(acquired)
+
+        assert controller._lod_timer.isActive()
+        assert acquired.session_id not in controller._render_session_lod_pending
+        controller._lod_timer.stop()
+        controller.finish_render_session(acquired, committed=False)
 
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""

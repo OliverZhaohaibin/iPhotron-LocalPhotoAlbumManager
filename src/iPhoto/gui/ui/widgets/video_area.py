@@ -396,6 +396,28 @@ class VideoArea(QWidget):
         self._current_adjustments = dict(adjustments or {})
         self._edit_viewer.set_adjustments(self._current_adjustments)
 
+    def apply_committed_adjustments(
+        self,
+        adjustments: Mapping[str, object] | None = None,
+    ) -> None:
+        """Update the current video adjustment state without restarting playback."""
+
+        self._current_adjustments = dict(adjustments or {})
+        adjusted_preview = video_requires_adjusted_preview(self._current_adjustments)
+        self.set_adjusted_preview_enabled(adjusted_preview)
+        self._edit_viewer.set_adjustments(self._current_adjustments)
+        rotate90_steps = 0
+        if not adjusted_preview:
+            rotate90_steps = int(
+                float(self._current_adjustments.get("Crop_Rotate90", 0.0))
+            ) % 4
+        self._renderer.set_user_rotate90_steps(rotate90_steps)
+        frame = self._last_presented_video_frame
+        if adjusted_preview and frame is not None and frame.isValid():
+            self._present_video_frame(frame)
+        self._renderer.update()
+        self.update()
+
     def set_trim_range_ms(self, trim_in_ms: int, trim_out_ms: int) -> None:
         """Update the active in/out points in milliseconds."""
 

@@ -18,10 +18,11 @@ from iPhoto.gui.detail_pipeline import (
     DetailGeometryState,
     DetailRenderRequest,
 )
+from iPhoto.gui.detail_render_session import EditRenderState, PhotoRenderSessionHandle
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
-    _StillSurfaceDecodeWorker,
     _PreparedRequestIntent,
+    _StillSurfaceDecodeWorker,
 )
 
 
@@ -220,3 +221,85 @@ def test_resident_live_photo_still_is_deferred_while_motion_is_visible() -> None
     image_viewer.activate_resident_surface.assert_not_called()
     controller.show_image_surface.assert_not_called()
     scheduler.request.assert_not_called()
+
+
+def test_committed_rotation_updates_current_session_without_reload() -> None:
+    source = Path("/tmp/photo.jpg")
+    request = _request(source)
+    surface = _surface(request)
+    state = EditRenderState.create(
+        {},
+        color_stats=surface.color_stats,
+        revision=("index", 1),
+    )
+    session = PhotoRenderSessionHandle(
+        session_id=3,
+        asset_id="asset-1",
+        source_identity=request.source_identity,
+        current_surface=surface,
+        edit_state=state,
+        baseline_state=state,
+    )
+    controller = SimpleNamespace(
+        _current_render_session=session,
+        _active_adjustments={},
+        _image_viewer=SimpleNamespace(set_adjustments=Mock()),
+        _video_area=SimpleNamespace(current_source=Mock(return_value=None)),
+        _request_generation=2,
+        _queue_render_session_lod=Mock(),
+    )
+
+    assert PlayerViewController.apply_committed_adjustments(
+        controller,
+        source,
+        {"Crop_Rotate90": 3.0},
+        "rotate",
+    )
+
+    assert session.edit_state is session.baseline_state
+    assert session.edit_state.revision[0] == "commit"
+    assert session.edit_state.raw_adjustments["Crop_Rotate90"] == 3.0
+    controller._image_viewer.set_adjustments.assert_called_once()
+    controller._queue_render_session_lod.assert_called_once_with(session)
+
+
+def test_gpu_allocation_failure_retries_initial_surface_at_lower_lod() -> None:
+    source = Path("/tmp/photo.jpg")
+    identity = AssetSourceIdentity.create(source, width=4000, height=3000)
+    failed_key = DetailDecodeKey(
+        asset_id="asset-1",
+        source=source.absolute(),
+        source_revision=identity.revision,
+        orientation=1,
+        decode_level=3072,
+    )
+    scheduler = SimpleNamespace(request=Mock(return_value=True))
+    controller = SimpleNamespace(
+        _request_generation=7,
+        _request_reason_by_generation={7: "initial"},
+        _last_presented_decode_key=None,
+        _render_sessions={},
+        _image_viewer=SimpleNamespace(),
+        _active_asset_id="asset-1",
+        _active_source_identity=identity,
+        _active_adjustments={},
+        _viewport_metrics=Mock(return_value=((1200, 900), 1.0)),
+        _texture_limit=Mock(return_value=8192),
+        _still_scheduler=scheduler,
+        _loading_source=None,
+        _loading_started_at=None,
+        imageLoadingFailed=Mock(),
+    )
+
+    PlayerViewController._on_still_texture_allocation_failed(
+        controller,
+        failed_key,
+        7,
+        "create_failed",
+    )
+
+    fallback = scheduler.request.call_args.args[0]
+    assert fallback.decode_level == 2048
+    assert fallback.generation == 7
+    assert controller._loading_source == source.absolute()
+    controller.imageLoadingFailed.emit.assert_not_called()

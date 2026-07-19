@@ -130,6 +130,9 @@ class GLImageViewer(QRhiWidget):
     stillFramePresented = Signal(object)
     """Emitted after a newly uploaded full-resolution still has been drawn."""
 
+    stillTextureAllocationFailed = Signal(object, int, str)
+    """Emitted when a queued foreground still cannot become resident."""
+
     videoFramePresented = Signal()
     """Emitted after a newly uploaded video frame has been drawn."""
 
@@ -1527,6 +1530,9 @@ class GLImageViewer(QRhiWidget):
                     faded=self._crop_controller.is_faded_out(),
                 )
 
+        if self._consume_still_upload_result():
+            uploaded_new_still_texture = False
+
         # --- End raw OpenGL block ---
         cb.endExternal()
         cb.endPass()
@@ -1663,6 +1669,9 @@ class GLImageViewer(QRhiWidget):
             crop_faded=crop_faded,
         )
 
+        if self._consume_still_upload_result():
+            uploaded_new_still_texture = False
+
         self._emit_first_frame_ready()
         if self._still_presentation_pending:
             self._still_presentation_pending = False
@@ -1681,6 +1690,29 @@ class GLImageViewer(QRhiWidget):
         source = self._texture_manager.get_current_image_source()
         if source is not None:
             self.stillFramePresented.emit(source)
+
+    def _consume_still_upload_result(self) -> bool:
+        """Publish a foreground allocation failure and suppress false presentation."""
+
+        take_result = getattr(self._renderer, "take_still_upload_result", None)
+        if not callable(take_result):
+            return False
+        result = take_result()
+        failed = bool(
+            result is not None
+            and result.get("activate")
+            and not result.get("success")
+        )
+        if not failed:
+            return False
+        self._still_presentation_pending = False
+        failed_key = result.get("key")
+        self.stillTextureAllocationFailed.emit(
+            failed_key,
+            self._still_generation_by_key.get(failed_key, 0),
+            str(result.get("reason", "allocation_failed")),
+        )
+        return True
 
     def _emit_first_frame_ready(self) -> None:
         """Notify listeners that the first opaque frame has been rendered."""

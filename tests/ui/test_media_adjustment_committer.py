@@ -45,6 +45,33 @@ def test_commit_persists_adjustments_and_emits_signal() -> None:
     assert emitted == [(source, "edit_done")]
 
 
+def test_commit_invalidates_prepared_adjustments_before_emitting_signal() -> None:
+    asset_vm = Mock()
+    edit_service = Mock()
+    edit_service.write_adjustments.return_value = SimpleNamespace(
+        thumbnail_revision="revision-2"
+    )
+    committer = MediaAdjustmentCommitter(
+        asset_vm=asset_vm,
+        edit_service_getter=lambda: edit_service,
+    )
+    source = Path("/fake/photo.jpg")
+    calls: list[object] = []
+    committer.set_adjustment_preparation_invalidator(
+        lambda path: calls.append(("invalidate", path))
+    )
+    committer.adjustmentsCommitted.connect(
+        lambda path, reason: calls.append(("emit", path, reason))
+    )
+
+    assert committer.commit(source, {"Exposure": 0.2}, reason="rotate")
+
+    assert calls == [
+        ("invalidate", source),
+        ("emit", source, "rotate"),
+    ]
+
+
 def test_commit_resumes_watcher_and_skips_signal_on_failure() -> None:
     asset_vm = Mock()
     pause = Mock()

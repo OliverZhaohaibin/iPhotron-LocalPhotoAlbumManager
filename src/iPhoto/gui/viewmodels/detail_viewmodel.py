@@ -271,7 +271,7 @@ class DetailViewModel(BaseViewModel):
         )
 
     def _handle_adjustments_committed(self, path: object, reason: str) -> None:
-        if not isinstance(path, Path) or reason == "edit_done":
+        if not isinstance(path, Path) or reason in {"edit_done", "rotate"}:
             return
         self.restore_after_adjustment(path, reason)
 

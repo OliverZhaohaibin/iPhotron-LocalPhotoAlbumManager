@@ -279,6 +279,13 @@ class PlaybackCoordinator(QObject):
         self._asset_model = asset_model
         self._detail_vm = detail_vm
         self._adjustment_committer = adjustment_committer
+        set_preparation_invalidator = getattr(
+            adjustment_committer,
+            "set_adjustment_preparation_invalidator",
+            None,
+        )
+        if callable(set_preparation_invalidator):
+            set_preparation_invalidator(player_view.invalidate_adjustment_preparation)
 
         self._zoom_slider = zoom_slider
         self._zoom_in = zoom_in_button
@@ -1918,17 +1925,40 @@ class PlaybackCoordinator(QObject):
         if not isinstance(path, Path):
             return
         is_video_value = bool(is_video)
-        if is_video_value:
-            updates = self._player_view.video_area.rotate_image_ccw()
-        else:
-            updates = self._player_view.image_viewer.rotate_image_ccw()
         try:
             edit_service = self._edit_service()
             if edit_service is None:
                 raise RuntimeError("Edit service is unavailable")
-            current_adjustments = edit_service.read_adjustments(path)
-            current_adjustments.update(updates)
-            self._adjustment_committer.commit(path, current_adjustments, reason="rotate")
+            previous_adjustments = dict(edit_service.read_adjustments(path) or {})
+            if is_video_value:
+                updates = self._player_view.video_area.rotate_image_ccw()
+            else:
+                updates = self._player_view.image_viewer.rotate_image_ccw()
+            committed_adjustments = {**previous_adjustments, **updates}
+            if not self._adjustment_committer.commit(
+                path,
+                committed_adjustments,
+                reason="rotate",
+            ):
+                restored = self._player_view.apply_committed_adjustments(
+                    path,
+                    previous_adjustments,
+                    "rotate_rollback",
+                )
+                if not restored and is_video_value:
+                    self._player_view.video_area.apply_committed_adjustments(
+                        previous_adjustments
+                    )
+                elif not restored:
+                    self._player_view.image_viewer.set_adjustments(
+                        previous_adjustments
+                    )
+                return
+            self._player_view.apply_committed_adjustments(
+                path,
+                committed_adjustments,
+                "rotate",
+            )
         except Exception:
             LOGGER.exception("Failed to rotate %s", path)
 

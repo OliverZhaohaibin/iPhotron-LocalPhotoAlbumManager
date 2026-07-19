@@ -113,3 +113,28 @@ def test_session_lod_replacement_preserves_edit_state(tmp_path: Path) -> None:
     assert handle.edit_state is state
     assert handle.activate_surface(first.decode_key)
     assert handle.current_texture_key == first.decode_key
+
+
+def test_session_retains_lod_without_committing_current_surface(tmp_path: Path) -> None:
+    identity, first = _surface(tmp_path / "photo.jpg", level=1024)
+    _identity, second = _surface(tmp_path / "photo.jpg", level=2048)
+    state = EditRenderState.create(
+        {},
+        color_stats=first.color_stats,
+        revision=("index", identity.index_revision),
+    )
+    handle = PhotoRenderSessionHandle(
+        session_id=1,
+        asset_id="asset-1",
+        source_identity=identity,
+        current_surface=first,
+        edit_state=state,
+        baseline_state=state,
+    )
+
+    handle.retain_surface(second)
+
+    assert handle.current_texture_key == first.decode_key
+    assert handle.surface_for_key(second.decode_key) is second
+    assert handle.activate_surface(second.decode_key)
+    assert handle.current_texture_key == second.decode_key

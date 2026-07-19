@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import Mock
 
-from iPhoto.application.ports import EditRenderingState
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
+from iPhoto.application.ports import EditRenderingState
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.signal import Signal
 
@@ -335,6 +335,19 @@ def test_restore_after_adjustment_rebinds_current_path():
     session.set_current_by_path.assert_called_once_with(dto.abs_path)
     assert received[0].path == dto.abs_path
     assert received[0].reload_token == 1
+
+
+def test_rotate_commit_does_not_reload_current_detail() -> None:
+    vm = DetailViewModel.__new__(DetailViewModel)
+    vm.restore_after_adjustment = Mock()
+
+    DetailViewModel._handle_adjustments_committed(
+        vm,
+        Path("/fake/photo.jpg"),
+        "rotate",
+    )
+
+    vm.restore_after_adjustment.assert_not_called()
 
 
 def test_show_row_defers_video_state_sidecar_read():

@@ -116,3 +116,40 @@ def test_rgba_video_uploads_keep_mipmaps_while_still_surfaces_do_not(mocker) -> 
 
     manager.upload_texture(_image())
     assert manager.texture_uses_mipmaps() is True
+
+
+def test_failed_gl_allocation_preserves_active_texture_and_recovers(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    manager.upload_still_texture("current", _image(8, 8))
+    active_texture = manager._texture_id
+    gl.glGenTextures.side_effect = [0, 42]
+
+    manager.upload_still_texture("failed", _image(9, 8))
+
+    failure = manager.take_still_upload_result()
+    assert failure is not None and failure["success"] is False
+    assert manager._active_still_key == "current"
+    assert manager._texture_id == active_texture
+    assert not manager.has_still_texture("failed")
+
+    manager.upload_still_texture("recovered", _image(10, 8))
+
+    assert manager.has_still_texture("recovered")
+    assert manager._active_still_key == "recovered"
+
+
+def test_gl_prefetch_never_evicts_visible_texture_for_budget(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    current = _image(8, 8)
+    manager.upload_still_texture("current", current)
+    active_texture = manager._texture_id
+    manager._still_budget_bytes = current.sizeInBytes()
+
+    assert manager.warm_still_texture("next", _image(9, 8)) is False
+
+    assert manager._active_still_key == "current"
+    assert manager._texture_id == active_texture
+    assert manager.has_still_texture("current")
+    assert not manager.has_still_texture("next")

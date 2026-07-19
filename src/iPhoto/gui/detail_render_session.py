@@ -93,6 +93,11 @@ class PhotoRenderSessionHandle:
 
     def replace_surface(self, surface: DecodedSurface) -> None:
         self.current_surface = surface
+        self.retain_surface(surface)
+
+    def retain_surface(self, surface: DecodedSurface) -> None:
+        """Retain a decoded LOD without making it the presented surface."""
+
         self._surfaces_by_key[surface.decode_key] = surface
         self.available_lods.add(surface.decode_level)
 
@@ -102,6 +107,11 @@ class PhotoRenderSessionHandle:
             return False
         self.current_surface = surface
         return True
+
+    def surface_for_key(self, key: DetailDecodeKey) -> DecodedSurface | None:
+        """Return a retained LOD surface without changing session state."""
+
+        return self._surfaces_by_key.get(key)
 
     def next_state(
         self,

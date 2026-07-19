@@ -168,6 +168,7 @@ class RhiImageRenderer:
 
         self._pending_rgba_image: QImage | None = None
         self._pending_still: tuple[object, QImage, bool] | None = None
+        self._last_still_upload_result: dict[str, object] | None = None
         self._still_textures: OrderedDict[object, tuple[QRhiTexture, int]] = OrderedDict()
         self._active_still_key: object | None = None
         self._still_budget_bytes = 192 * 1024 * 1024
@@ -366,8 +367,18 @@ class RhiImageRenderer:
             return False
         if image.isNull():
             return False
+        if self._pending_still is not None and self._pending_still[2]:
+            emit_detail_event("gpu_prefetch_dropped", generation=0, reason="foreground_pending")
+            return False
         self._pending_still = (key, _qimage_to_rgba(image), False)
         return True
+
+    def take_still_upload_result(self) -> dict[str, object] | None:
+        """Return and clear the most recent render-thread still upload result."""
+
+        result = self._last_still_upload_result
+        self._last_still_upload_result = None
+        return result
 
     def activate_still_texture(self, key: object) -> bool:
         entry = self._still_textures.pop(key, None)
@@ -664,7 +675,12 @@ class RhiImageRenderer:
                 texture = self._rhi.newTexture(fmt, size)
         else:
             texture = self._rhi.newTexture(fmt, size)
-        texture.create()
+        if texture.create() is False:
+            try:
+                texture.destroy()
+            except RuntimeError:
+                pass
+            raise RuntimeError("QRhi texture allocation failed")
         return texture
 
     def _upload_placeholder_textures(self, ru) -> None:
@@ -768,65 +784,7 @@ class RhiImageRenderer:
         if self._rhi is None:
             return
         if self._pending_still is not None:
-            key, image, activate = self._pending_still
-            size = QSize(image.width(), image.height())
-            byte_count = max(0, int(image.bytesPerLine()) * int(image.height()))
-            resident_bytes = sum(entry[1] for entry in self._still_textures.values())
-            reusable_key = None
-            if len(self._still_textures) >= 3 or resident_bytes + byte_count > self._still_budget_bytes:
-                reusable_key = next(
-                    (
-                        candidate
-                        for candidate, entry in self._still_textures.items()
-                        if candidate != self._active_still_key and entry[0].pixelSize() == size
-                    ),
-                    None,
-                )
-            if reusable_key is not None:
-                texture, old_size = self._still_textures.pop(reusable_key)
-                emit_detail_event(
-                    "gpu_evict",
-                    generation=0,
-                    key=str(reusable_key),
-                    bytes=old_size,
-                    reused=True,
-                )
-            else:
-                self._evict_before_still_allocation(
-                    incoming_bytes=byte_count,
-                    resident_bytes=resident_bytes,
-                )
-                texture = self._create_texture(QRhiTexture.Format.RGBA8, size, mipmapped=False)
-            ru.uploadTexture(
-                texture,
-                QRhiTextureUploadDescription(
-                    QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(image))
-                ),
-            )
-            self._still_textures[key] = (texture, byte_count)
-            if activate:
-                self._tex_rgba = texture
-                self._active_still_key = key
-                self._texture_width, self._texture_height = image.width(), image.height()
-                self._rebuild_srb()
-            total = sum(entry[1] for entry in self._still_textures.values())
-            while len(self._still_textures) > 3 or total > self._still_budget_bytes:
-                victim = next(
-                    (candidate for candidate in self._still_textures if candidate != self._active_still_key),
-                    None,
-                )
-                if victim is None:
-                    break
-                victim_texture, victim_size = self._still_textures.pop(victim)
-                victim_texture.destroy()
-                total -= victim_size
-                emit_detail_event(
-                    "gpu_evict",
-                    generation=0,
-                    key=str(victim),
-                    bytes=victim_size,
-                )
-            self._pending_still = None
+            self._flush_pending_still_texture(ru)
         if self._pending_rgba_image is not None:
             image = self._pending_rgba_image
             size = QSize(image.width(), image.height())
@@ -935,6 +893,160 @@ class RhiImageRenderer:
                 bytes=size,
                 before_allocate=True,
             )
+
+    def _flush_pending_still_texture(self, ru) -> None:
+        """Upload one still while keeping the current texture valid on failure."""
+
+        pending = self._pending_still
+        self._pending_still = None
+        if pending is None:
+            return
+        key, image, activate = pending
+        size = QSize(image.width(), image.height())
+        byte_count = max(0, int(image.bytesPerLine()) * int(image.height()))
+        resident_bytes = sum(entry[1] for entry in self._still_textures.values())
+        replacement_required = bool(
+            len(self._still_textures) >= 3
+            or resident_bytes + byte_count > self._still_budget_bytes
+        )
+        reusable_key = None
+        if replacement_required:
+            reusable_key = next(
+                (
+                    candidate
+                    for candidate, entry in self._still_textures.items()
+                    if candidate != self._active_still_key
+                    and entry[0].pixelSize() == size
+                ),
+                None,
+            )
+        if activate and replacement_required and reusable_key is None:
+            active_entry = self._still_textures.get(self._active_still_key)
+            if active_entry is not None and active_entry[0].pixelSize() == size:
+                reusable_key = self._active_still_key
+
+        texture = None
+        old_entry: tuple[QRhiTexture, int] | None = None
+        created = False
+        if reusable_key is not None:
+            old_entry = self._still_textures.pop(reusable_key)
+            texture = old_entry[0]
+        else:
+            self._evict_before_still_allocation(
+                incoming_bytes=byte_count,
+                resident_bytes=resident_bytes,
+            )
+            resident_bytes = sum(entry[1] for entry in self._still_textures.values())
+            over_budget = resident_bytes + byte_count > self._still_budget_bytes
+            over_count = len(self._still_textures) >= 3
+            if over_budget or over_count:
+                event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
+                emit_detail_event(
+                    event,
+                    generation=0,
+                    width=size.width(),
+                    height=size.height(),
+                    bytes=byte_count,
+                    reason="residency_budget",
+                )
+                self._last_still_upload_result = {
+                    "key": key,
+                    "activate": bool(activate),
+                    "success": False,
+                    "reason": "residency_budget",
+                }
+                self._has_rgba_texture = self._active_still_key in self._still_textures
+                return
+            try:
+                texture = self._create_texture(
+                    QRhiTexture.Format.RGBA8,
+                    size,
+                    mipmapped=False,
+                )
+                created = True
+            except (MemoryError, RuntimeError):
+                event = (
+                    "gpu_texture_allocation_failed"
+                    if activate
+                    else "gpu_prefetch_dropped"
+                )
+                emit_detail_event(
+                    event,
+                    generation=0,
+                    width=size.width(),
+                    height=size.height(),
+                    bytes=byte_count,
+                    foreground=bool(activate),
+                    reason="create_failed",
+                )
+                self._last_still_upload_result = {
+                    "key": key,
+                    "activate": bool(activate),
+                    "success": False,
+                    "reason": "create_failed",
+                }
+                self._has_rgba_texture = self._active_still_key in self._still_textures
+                return
+
+        try:
+            ru.uploadTexture(
+                texture,
+                QRhiTextureUploadDescription(
+                    QRhiTextureUploadEntry(
+                        0,
+                        0,
+                        QRhiTextureSubresourceUploadDescription(image),
+                    )
+                ),
+            )
+        except (MemoryError, RuntimeError):
+            if created and texture is not None:
+                texture.destroy()
+            elif reusable_key is not None and old_entry is not None:
+                self._still_textures[reusable_key] = old_entry
+            event = (
+                "gpu_texture_allocation_failed"
+                if activate
+                else "gpu_prefetch_dropped"
+            )
+            emit_detail_event(
+                event,
+                generation=0,
+                width=size.width(),
+                height=size.height(),
+                bytes=byte_count,
+                foreground=bool(activate),
+                reason="upload_failed",
+            )
+            self._last_still_upload_result = {
+                "key": key,
+                "activate": bool(activate),
+                "success": False,
+                "reason": "upload_failed",
+            }
+            self._has_rgba_texture = self._active_still_key in self._still_textures
+            return
+
+        if reusable_key is not None:
+            emit_detail_event(
+                "gpu_evict",
+                generation=0,
+                bytes=old_entry[1] if old_entry is not None else 0,
+                reused=True,
+            )
+        self._still_textures[key] = (texture, byte_count)
+        if activate:
+            self._tex_rgba = texture
+            self._active_still_key = key
+            self._texture_width, self._texture_height = image.width(), image.height()
+            self._has_rgba_texture = True
+            self._rebuild_srb()
+        self._last_still_upload_result = {
+            "key": key,
+            "activate": bool(activate),
+            "success": True,
+            "reason": "uploaded",
+        }
 
     def _upload_lut_texture(self, ru, current: QRhiTexture | None, lut: np.ndarray) -> QRhiTexture:
         lut_format = _texture_format("RGBA32F", QRhiTexture.Format.RGBA8)

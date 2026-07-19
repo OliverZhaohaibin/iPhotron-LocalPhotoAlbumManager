@@ -30,6 +30,7 @@ from ....gui.detail_decode_backend import (
     probe_raw_source_identity,
 )
 from ....gui.detail_pipeline import (
+    DETAIL_DECODE_LEVELS,
     AssetSourceIdentity,
     DetailDecodeKey,
     DetailGeometryState,
@@ -412,6 +413,7 @@ class PlayerViewController(QObject):
         self._present_generation = 0
         self._present_started_at: float | None = None
         self._present_source: Path | None = None
+        self._last_presented_decode_key: DetailDecodeKey | None = None
         self._loading_source: Path | None = None
         self._loading_started_at: float | None = None
         self._defer_still_updates = False
@@ -426,6 +428,11 @@ class PlayerViewController(QObject):
             int,
             tuple[int, DecodedSurface],
         ] = {}
+        self._pending_present_session: tuple[
+            int,
+            PhotoRenderSessionHandle,
+            DetailDecodeKey,
+        ] | None = None
 
         # Per-widget first-render tracking.  QRhiWidget backing textures are
         # uninitialised (transparent) until the first ``render()`` call fills
@@ -442,6 +449,13 @@ class PlayerViewController(QObject):
         still_presented = getattr(self._image_viewer, "stillFramePresented", None)
         if still_presented is not None:
             still_presented.connect(self._on_still_frame_presented)
+        texture_failed = getattr(
+            self._image_viewer,
+            "stillTextureAllocationFailed",
+            None,
+        )
+        if texture_failed is not None:
+            texture_failed.connect(self._on_still_texture_allocation_failed)
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -876,14 +890,18 @@ class PlayerViewController(QObject):
             self._defer_still_updates
             and self._player_stack.currentWidget() is self._video_area
         )
-        if defer_presentation and session is not None and session.activate_surface(decode_key):
-            self._current_render_session = session
-            self._touch_render_session(session)
-            self._current_decode_level = request.decode_level
+        deferred_surface = None
+        if session is not None:
+            surface_for_key = getattr(session, "surface_for_key", None)
+            if callable(surface_for_key):
+                deferred_surface = surface_for_key(decode_key)
+            elif getattr(session.current_surface, "decode_key", None) == decode_key:
+                deferred_surface = session.current_surface
+        if defer_presentation and session is not None and deferred_surface is not None:
             self._present_generation = request.generation
             self._present_started_at = self._loading_started_at
             self._present_source = request.source_identity.path
-            self._pending_still = (session.current_surface, render_adjustments)
+            self._pending_still = (deferred_surface, render_adjustments)
             self._loading_source = None
             self._loading_started_at = None
             return True
@@ -902,11 +920,12 @@ class PlayerViewController(QObject):
             self.show_image_surface()
             self._loading_source = None
             self._loading_started_at = None
-            self._current_decode_level = request.decode_level
             if session is not None:
-                session.activate_surface(decode_key)
-                self._current_render_session = session
-                self._touch_render_session(session)
+                self._pending_present_session = (
+                    request.generation,
+                    session,
+                    decode_key,
+                )
             return True
         if request.reason in {"zoom", "resize"}:
             emit_detail_event(
@@ -1043,13 +1062,16 @@ class PlayerViewController(QObject):
             return
         source = surface.decode_key.source
         raw_adjustments = dict(self._active_adjustments)
-        session = self._upsert_render_session(surface, raw_adjustments)
+        session = self._upsert_render_session(
+            surface,
+            raw_adjustments,
+            make_current=False,
+            activate_surface=False,
+        )
         if session.edit_references > 0:
             adjustments = dict(session.edit_state.shader_adjustments)
         else:
             adjustments = dict(session.baseline_state.shader_adjustments)
-        self._current_render_session = session
-        self._current_decode_level = surface.decode_level
         self._present_generation = generation
         self._present_started_at = self._loading_started_at
         self._present_source = source
@@ -1071,6 +1093,7 @@ class PlayerViewController(QObject):
             surface,
             dict(request.raw_adjustments or {}),
             make_current=False,
+            activate_surface=False,
             source_identity=request.source_identity,
         )
         warmer = getattr(self._image_viewer, "warm_still_surface", None)
@@ -1106,6 +1129,16 @@ class PlayerViewController(QObject):
         self._on_adjusted_image_failed(source, message)
 
     def _on_still_frame_presented(self, source: object) -> None:
+        if isinstance(source, DetailDecodeKey):
+            pending_session = self._pending_present_session
+            if pending_session is not None and pending_session[2] == source:
+                _generation, session, _key = pending_session
+                session.activate_surface(source)
+                self._current_render_session = session
+                self._current_decode_level = source.decode_level
+                self._touch_render_session(session)
+                self._pending_present_session = None
+            self._last_presented_decode_key = source
         presented_path = getattr(source, "source", source)
         if presented_path != self._present_source:
             return
@@ -1130,6 +1163,109 @@ class PlayerViewController(QObject):
         self._present_started_at = None
         self._present_source = None
         self.stillFramePresented.emit(presented_path, generation)
+
+    def _on_still_texture_allocation_failed(
+        self,
+        key: object,
+        generation: int,
+        reason: str,
+    ) -> None:
+        """Restore the last valid texture and retry initial display at a lower LOD."""
+
+        if generation != self._request_generation or not isinstance(key, DetailDecodeKey):
+            return
+        pending_session = getattr(self, "_pending_present_session", None)
+        if pending_session is not None and pending_session[2] == key:
+            self._pending_present_session = None
+        request_reason = self._request_reason_by_generation.get(generation)
+        previous_key = self._last_presented_decode_key
+        if previous_key is not None:
+            for candidate_session in self._render_sessions.values():
+                previous_surface = candidate_session.surface_for_key(previous_key)
+                if previous_surface is None:
+                    continue
+                adjustments = dict(candidate_session.baseline_state.shader_adjustments)
+                activate = getattr(self._image_viewer, "activate_resident_surface", None)
+                if callable(activate) and activate(
+                    previous_key,
+                    adjustments,
+                    source_size=previous_surface.source_size,
+                    reset_view=False,
+                    generation=generation,
+                ):
+                    if candidate_session is self._current_render_session:
+                        candidate_session.activate_surface(previous_key)
+                    self._current_full_image = QImage(previous_surface.image)
+                break
+
+        if request_reason != "initial":
+            emit_detail_event(
+                "lod_upgrade_failed",
+                generation=generation,
+                asset_id=self._active_asset_id,
+                reason=request_reason or "gpu_upload",
+                message=str(reason),
+            )
+            return
+
+        failed_rank = (
+            max(DETAIL_DECODE_LEVELS) + 1
+            if key.decode_level == "full"
+            else max(0, int(key.decode_level))
+        )
+        fallback_level = next(
+            (
+                level
+                for level in reversed(DETAIL_DECODE_LEVELS)
+                if level < failed_rank
+            ),
+            None,
+        )
+        if fallback_level is None:
+            emit_detail_event(
+                "lod_fallback_exhausted",
+                generation=generation,
+                asset_id=self._active_asset_id,
+                failed_level=key.decode_level,
+            )
+            self.imageLoadingFailed.emit(
+                key.source,
+                "GPU texture allocation failed at the minimum detail level",
+            )
+            return
+
+        identity = self._active_source_identity
+        if identity is None or identity.path != key.source:
+            return
+        metrics = self._viewport_metrics()
+        if metrics is None:
+            return
+        physical_size, dpr = metrics
+        request = DetailRenderRequest(
+            generation=generation,
+            asset_id=self._active_asset_id,
+            source_identity=identity,
+            viewport_physical_size=physical_size,
+            device_pixel_ratio=dpr,
+            geometry=DetailGeometryState.from_adjustments(self._active_adjustments),
+            reason="initial",
+            texture_limit=self._texture_limit(),
+            raw_adjustments=dict(self._active_adjustments),
+            decode_level=fallback_level,
+        )
+        self._loading_source = key.source
+        self._loading_started_at = time.perf_counter()
+        emit_detail_event(
+            "lod_fallback",
+            generation=generation,
+            asset_id=self._active_asset_id,
+            failed_level=key.decode_level,
+            fallback_level=fallback_level,
+            reason=str(reason),
+        )
+        if not self._still_scheduler.request(request):
+            self._loading_source = None
+            self._loading_started_at = None
 
     def shutdown(self, *, timeout_ms: int = 1500) -> None:
         """Cancel queued preparation/decode work and flush profiling."""
@@ -1162,6 +1298,7 @@ class PlayerViewController(QObject):
         self._render_session_interaction_depth.clear()
         self._render_session_lod_pending.clear()
         self._render_session_pending_surfaces.clear()
+        self._pending_present_session = None
 
     def handle_memory_pressure(self) -> None:
         """Drop speculative GPU and mapped surfaces while preserving current draw state."""
@@ -1218,6 +1355,64 @@ class PlayerViewController(QObject):
         if current_geometry != previous_geometry:
             self._queue_render_session_lod(handle)
         return state
+
+    def apply_committed_adjustments(
+        self,
+        source: Path,
+        adjustments: Mapping[str, object],
+        reason: str,
+    ) -> bool:
+        """Apply persisted adjustments without replacing the active media pipeline."""
+
+        normalized_source = Path(source).expanduser().absolute()
+        session = self._current_render_session
+        if session is not None and session.source == normalized_source:
+            previous_geometry = DetailGeometryState.from_adjustments(
+                session.edit_state.raw_adjustments
+            )
+            state = session.next_state(adjustments, kind="commit")
+            session.baseline_state = state
+            self._active_adjustments = dict(state.raw_adjustments)
+            self._image_viewer.set_adjustments(state.shader_adjustments)
+            emit_detail_event(
+                "edit_state_committed",
+                generation=self._request_generation,
+                asset_id=session.asset_id,
+                session_id=session.session_id,
+                reason=str(reason),
+                revision=state.revision[1],
+            )
+            if DetailGeometryState.from_adjustments(state.raw_adjustments) != previous_geometry:
+                self._queue_render_session_lod(session)
+            return True
+
+        current_video_source = self._video_area.current_source()
+        if current_video_source is not None and current_video_source == normalized_source:
+            apply_video_adjustments = getattr(
+                self._video_area,
+                "apply_committed_adjustments",
+                self._video_area.set_adjustments,
+            )
+            apply_video_adjustments(adjustments)
+            return True
+        return False
+
+    def invalidate_adjustment_preparation(self, source: Path) -> None:
+        """Discard prepared sidecar snapshots for one source path."""
+
+        normalized_source = Path(source).expanduser().absolute()
+        for key, entry in tuple(self._preparation_entries.items()):
+            if not isinstance(key, tuple) or len(key) < 2 or key[1] != normalized_source:
+                continue
+            self._preparation_entries.pop(key, None)
+            entry.result = None
+            entry.intents.clear()
+            entry.worker.cancel()
+            if self._preparation_pool.tryTake(entry.worker):
+                self._retire_preparation_entry(entry)
+        pending = self._pending_layout_intent
+        if pending is not None and pending[0].source_identity.path == normalized_source:
+            self._pending_layout_intent = None
 
     def begin_render_session_interaction(
         self,
@@ -1350,6 +1545,7 @@ class PlayerViewController(QObject):
         raw_adjustments: dict,
         *,
         make_current: bool = True,
+        activate_surface: bool = True,
         source_identity: AssetSourceIdentity | None = None,
     ) -> PhotoRenderSessionHandle:
         session_key = self._render_session_key_for_surface(surface)
@@ -1390,7 +1586,10 @@ class PlayerViewController(QObject):
                 session_id=session.session_id,
             )
         else:
-            session.replace_surface(surface)
+            if activate_surface:
+                session.replace_surface(surface)
+            else:
+                session.retain_surface(surface)
             if session.edit_references == 0 and dict(session.baseline_state.raw_adjustments) != dict(raw_adjustments):
                 state = EditRenderState.create(
                     raw_adjustments,
@@ -1446,6 +1645,7 @@ class PlayerViewController(QObject):
         self._render_session_interaction_depth.clear()
         self._render_session_lod_pending.clear()
         self._render_session_pending_surfaces.clear()
+        self._pending_present_session = None
         for entry in tuple(self._preparation_entries.values()):
             entry.intents.clear()
             entry.worker.cancel()
@@ -1597,6 +1797,14 @@ class PlayerViewController(QObject):
         image = surface.image
         self.show_image_surface()
         self._current_full_image = QImage(image)
+        session_key = self._render_session_key_for_surface(surface)
+        session = self._render_sessions.get(session_key)
+        if session is not None:
+            self._pending_present_session = (
+                self._present_generation,
+                session,
+                surface.decode_key,
+            )
         set_still_surface = getattr(self._image_viewer, "set_still_surface", None)
         if callable(set_still_surface):
             set_still_surface(

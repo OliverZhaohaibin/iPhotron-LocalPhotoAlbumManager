@@ -158,6 +158,9 @@ class GLRenderer:
     def warm_still_texture(self, key: object, image: QImage) -> bool:
         return self._tex_mgr.warm_still_texture(key, image)
 
+    def take_still_upload_result(self) -> dict[str, object] | None:
+        return self._tex_mgr.take_still_upload_result()
+
     def has_still_texture(self, key: object) -> bool:
         return self._tex_mgr.has_still_texture(key)
 

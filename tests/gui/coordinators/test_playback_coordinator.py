@@ -472,6 +472,7 @@ def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> N
     coordinator._player_view = SimpleNamespace(
         video_area=Mock(rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})),
         image_viewer=Mock(rotate_image_ccw=Mock()),
+        apply_committed_adjustments=Mock(return_value=True),
     )
 
     PlaybackCoordinator._handle_rotate_requested(coordinator, Path("/fake/video.mp4"), True)
@@ -484,6 +485,11 @@ def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> N
         Path("/fake/video.mp4"),
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},
         reason="rotate",
+    )
+    coordinator._player_view.apply_committed_adjustments.assert_called_once_with(
+        Path("/fake/video.mp4"),
+        {"Exposure": 0.2, "Crop_Rotate90": 3.0},
+        "rotate",
     )
 
 
@@ -498,6 +504,7 @@ def test_handle_rotate_requested_uses_injected_edit_service_for_still() -> None:
         image_viewer=Mock(
             rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})
         ),
+        apply_committed_adjustments=Mock(return_value=True),
     )
     source = Path("/fake/photo.jpg")
 
@@ -510,6 +517,86 @@ def test_handle_rotate_requested_uses_injected_edit_service_for_still() -> None:
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},
         reason="rotate",
     )
+    coordinator._player_view.apply_committed_adjustments.assert_called_once_with(
+        source,
+        {"Exposure": 0.2, "Crop_Rotate90": 3.0},
+        "rotate",
+    )
+
+
+def test_handle_rotate_requested_rolls_back_still_when_commit_fails() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    source = Path("/fake/photo.jpg")
+    previous = {
+        "Crop_Rotate90": 1.0,
+        "Perspective_Vertical": 0.2,
+        "Perspective_Horizontal": -0.1,
+    }
+    coordinator._edit_service_getter = Mock(
+        return_value=Mock(read_adjustments=Mock(return_value=previous))
+    )
+    coordinator._library_manager = None
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=False))
+    coordinator._player_view = SimpleNamespace(
+        video_area=Mock(),
+        image_viewer=Mock(
+            rotate_image_ccw=Mock(
+                return_value={
+                    "Crop_Rotate90": 0.0,
+                    "Perspective_Vertical": -0.1,
+                    "Perspective_Horizontal": -0.2,
+                }
+            )
+        ),
+        apply_committed_adjustments=Mock(return_value=True),
+    )
+
+    PlaybackCoordinator._handle_rotate_requested(coordinator, source, False)
+
+    coordinator._player_view.apply_committed_adjustments.assert_called_once_with(
+        source,
+        previous,
+        "rotate_rollback",
+    )
+    coordinator._player_view.image_viewer.set_adjustments.assert_not_called()
+
+
+def test_twenty_rapid_rotations_accumulate_modulo_four_without_reload() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    source = Path("/fake/photo.jpg")
+    persisted = {"Crop_Rotate90": 0.0}
+    edit_service = Mock(
+        read_adjustments=Mock(side_effect=lambda _path: dict(persisted))
+    )
+
+    def rotate() -> dict[str, float]:
+        return {
+            "Crop_Rotate90": float(
+                (int(float(persisted.get("Crop_Rotate90", 0.0))) - 1) % 4
+            )
+        }
+
+    def commit(_path, adjustments, *, reason):
+        assert reason == "rotate"
+        persisted.clear()
+        persisted.update(adjustments)
+        return True
+
+    coordinator._edit_service_getter = Mock(return_value=edit_service)
+    coordinator._library_manager = None
+    coordinator._adjustment_committer = Mock(commit=Mock(side_effect=commit))
+    coordinator._player_view = SimpleNamespace(
+        video_area=Mock(),
+        image_viewer=Mock(rotate_image_ccw=Mock(side_effect=rotate)),
+        apply_committed_adjustments=Mock(return_value=True),
+    )
+
+    for _click in range(20):
+        PlaybackCoordinator._handle_rotate_requested(coordinator, source, False)
+
+    assert persisted["Crop_Rotate90"] == 0.0
+    assert coordinator._adjustment_committer.commit.call_count == 20
+    assert coordinator._player_view.apply_committed_adjustments.call_count == 20
 
 
 def test_render_presentation_uses_viewmodel_video_state() -> None:

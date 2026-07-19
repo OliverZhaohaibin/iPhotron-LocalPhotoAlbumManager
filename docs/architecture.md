@@ -14,8 +14,8 @@ For completed migration records and verification history, see
 The vNext architecture cleanup is complete for production source code.
 
 - Production runtime code no longer imports `iPhoto.legacy` or `iPhoto.models.*`.
-- Compatibility and old domain-repository code is quarantined under
-  `src/iPhoto/legacy/` for explicit historical behavior tests only.
+- The compatibility application tree and old domain-repository implementation
+  under `src/iPhoto/legacy/` have been removed.
 - `RuntimeContext -> LibrarySession` is the active library entry path.
 - Application ports and services define the boundary used by GUI, CLI, workers,
   People, Maps, Edit, thumbnails, and lifecycle operations.
@@ -584,22 +584,19 @@ and image decoding stay off the GUI thread; only bounded `QPixmap` publication
 runs there. Thumbnail infrastructure may apply edit state, but edit persistence
 remains behind session/edit sidecar services.
 
-## Legacy Quarantine And Removal Policy
+## Removed Legacy Application Tree
 
-`src/iPhoto/legacy/` contains quarantined compatibility modules, including old
-root compatibility paths such as `legacy/app.py` and `legacy/appctx.py`, old
-bootstrap factory shims, old domain-repository use cases, old repository
-adapters, and old model shims.
+The former `src/iPhoto/legacy/` compatibility tree, including app/appctx
+wrappers, bootstrap shims, domain-repository use cases, repository adapters,
+and model shims, has been removed.
 
 Rules:
 
 - Production runtime must not import `iPhoto.legacy`.
 - Production runtime must not import `iPhoto.models.*`.
-- No new functionality goes into quarantine modules.
-- Tests that cover historical behavior must import quarantine modules
-  explicitly.
-- The whole quarantine subtree is planned for deletion in the next major
-  release.
+- Do not restore compatibility modules or tests that target removed interfaces.
+- Historical behavior that remains a product requirement must be covered
+  through current application, session, domain, or infrastructure surfaces.
 
 ## Architecture Guardrails
 

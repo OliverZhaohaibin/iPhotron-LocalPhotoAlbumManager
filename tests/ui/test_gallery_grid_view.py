@@ -52,14 +52,27 @@ def patch_delegate_icons(monkeypatch):
     except (ImportError, AttributeError) as e:
         print(f"patch_delegate_icons: Could not patch load_icon: {e}")
 
-@pytest.fixture(scope="module")
+
+@pytest.fixture
 def qapp_instance():
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    yield app
+    existing_widgets = tuple(app.topLevelWidgets())
+    try:
+        yield app
+    finally:
+        for widget in app.topLevelWidgets():
+            if any(widget is existing for existing in existing_widgets):
+                continue
+            if isinstance(widget, GalleryGridView):
+                widget.setModel(None)
+            widget.close()
+            widget.deleteLater()
+        app.processEvents()
+
 
 def test_gallery_responsive_layout(qapp_instance, monkeypatch):
     patch_delegate_icons(monkeypatch)

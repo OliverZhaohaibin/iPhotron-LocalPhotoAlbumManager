@@ -2,22 +2,15 @@
 
 from __future__ import annotations
 
-import logging
-from pathlib import Path
-from typing import Mapping, Optional
+from typing import Optional
 
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget
 
 from typing import TYPE_CHECKING
-from ....utils import image_loader
-from .edit_preview_manager import EditPreviewManager
 
 if TYPE_CHECKING:
     from ..ui_main_window import Ui_MainWindow
-
-_LOGGER = logging.getLogger(__name__)
-
 
 class EditFullscreenManager(QObject):
     """Handle immersive full screen transitions for the edit image viewer."""
@@ -26,13 +19,11 @@ class EditFullscreenManager(QObject):
         self,
         ui: Ui_MainWindow,
         window: Optional[QObject],
-        preview_manager: EditPreviewManager,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
         self._ui = ui
         self._window: Optional[QObject] = window
-        self._preview_manager = preview_manager
 
         # Track whether the immersive layout is currently active so callers can
         # avoid re-entering the workflow while a session is already running.
@@ -58,56 +49,12 @@ class EditFullscreenManager(QObject):
 
         return self._fullscreen_active
 
-    def enter_fullscreen_preview(
-        self,
-        source: Path,
-        adjustments: Mapping[str, float],
-    ) -> bool:
-        """Expand the edit viewer to fill the window using *adjustments*.
-
-        Parameters
-        ----------
-        source:
-            The asset currently being edited.  The manager loads this path at
-            full resolution to ensure the immersive preview looks crisp.
-        adjustments:
-            The latest non-destructive adjustment mapping emitted by the edit
-            session.  This is forwarded to :class:`EditPreviewManager` so the
-            full resolution preview matches the edit view state.
-
-        Returns
-        -------
-        bool
-            ``True`` when the transition succeeds and the viewer now occupies
-            the entire window.  ``False`` indicates the workflow was aborted
-            (for example because the image failed to load).
-        """
+    def enter_fullscreen_preview(self) -> bool:
+        """Expand the resident shared viewer without reading or replacing its source."""
 
         if self._fullscreen_active:
             return False
         if not isinstance(self._window, QWidget):
-            return False
-
-        full_res_image = image_loader.load_qimage(source)
-        if full_res_image is None or full_res_image.isNull():
-            _LOGGER.warning("Failed to load full resolution image for %s", source)
-            return False
-
-        try:
-            # Prime the preview backend so full resolution adjustments remain responsive while the
-            # viewer owns the entire window.  The returned pixmap is intentionally ignored because
-            # the shared GL viewer now consumes the decoded image directly instead of relying on a
-            # QWidget-backed surface.
-            _ = self._preview_manager.start_session(
-                full_res_image,
-                adjustments,
-                scale_for_viewport=False,
-            )
-        except Exception:  # pragma: no cover - safety net mirrors legacy guard
-            _LOGGER.warning(
-                "Failed to initialise full screen preview session for %s",
-                source,
-            )
             return False
 
         edit_sidebar = self._ui.edit_sidebar
@@ -179,47 +126,18 @@ class EditFullscreenManager(QObject):
 
         self._fullscreen_active = True
 
-        self._ui.edit_image_viewer.set_image(
-            full_res_image,
-            adjustments,
-            image_source=source,
-            reset_view=True,
-        )
         self._ui.edit_image_viewer.reset_zoom()
 
         return True
 
-    def exit_fullscreen_preview(
-        self,
-        source: Optional[Path],
-        adjustments: Optional[Mapping[str, float]],
-    ) -> bool:
-        """Restore the standard edit chrome and preview session.
-
-        Parameters
-        ----------
-        source:
-            The asset that should back the restored preview session.  ``None``
-            indicates the controller no longer has an active edit.
-        adjustments:
-            The latest adjustment mapping to reapply when recreating the
-            standard preview session.  ``None`` mirrors the scenario where the
-            edit session has already been torn down.
-
-        Returns
-        -------
-        bool
-            ``True`` when the immersive layout has been dismantled.  The return
-            value does not guarantee that a new preview session could be
-            created; callers should continue to handle fallbacks in that case.
-        """
+    def exit_fullscreen_preview(self) -> bool:
+        """Restore standard chrome while retaining the shared viewer texture."""
 
         if not self._fullscreen_active:
             return False
         if not isinstance(self._window, QWidget):
             return False
 
-        self._preview_manager.cancel_pending_updates()
         self._window.showNormal()
 
         for widget, was_visible in self._fullscreen_hidden_widgets:
@@ -248,44 +166,6 @@ class EditFullscreenManager(QObject):
         self._fullscreen_splitter_sizes = None
 
         self._fullscreen_active = False
-
-        if source is None or adjustments is None:
-            self._preview_manager.stop_session()
-            return True
-
-        source_image = self._preview_manager.get_base_image()
-        if source_image is None or source_image.isNull():
-            source_image = image_loader.load_qimage(source)
-
-        if source_image is None or source_image.isNull():
-            self._preview_manager.stop_session()
-            self._ui.edit_image_viewer.clear()
-            return True
-
-        try:
-            # Keep the preview backend warm so the edit sidebar and histogram continue to refresh
-            # while the immersive layout is active.  The GL viewer already owns the correct texture,
-            # therefore the pixmap result is intentionally discarded.
-            _ = self._preview_manager.start_session(
-                source_image,
-                adjustments,
-                scale_for_viewport=True,
-            )
-        except Exception:  # pragma: no cover - defensive logging mirrors legacy
-            _LOGGER.warning(
-                "Failed to restore standard preview session for %s",
-                source,
-            )
-            self._preview_manager.stop_session()
-            return True
-
-        self._ui.edit_image_viewer.set_image(
-            source_image,
-            adjustments,
-            image_source=source,
-            reset_view=True,
-        )
-        self._ui.edit_image_viewer.reset_zoom()
 
         return True
 
@@ -353,4 +233,3 @@ class EditFullscreenManager(QObject):
             scaled[-1] += delta
 
         return scaled
-

@@ -112,10 +112,20 @@ class LibrarySession:
         # this lightweight service on the core Gallery/Detail path so the
         # first image click never becomes a service-construction boundary.
         if self.edit is None:
-            self.edit = LibraryEditService(self.library_root)
+            self.edit = LibraryEditService(
+                self.library_root,
+                thumbnail_state_service=self.asset_queries,
+            )
         bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
         if callable(bind_edit_service):
             bind_edit_service(self.edit)
+        bind_thumbnail_state = getattr(
+            self.asset_runtime,
+            "bind_thumbnail_state_service",
+            None,
+        )
+        if callable(bind_thumbnail_state):
+            bind_thumbnail_state(self.asset_queries)
 
         # People, Pets, Map and Location remain feature-scoped.
 
@@ -169,6 +179,13 @@ class LibrarySession:
         bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
         if callable(bind_edit_service):
             bind_edit_service(None)
+        bind_thumbnail_state = getattr(
+            self.asset_runtime,
+            "bind_thumbnail_state_service",
+            None,
+        )
+        if callable(bind_thumbnail_state):
+            bind_thumbnail_state(None)
         self.asset_runtime.shutdown()
 
     @classmethod

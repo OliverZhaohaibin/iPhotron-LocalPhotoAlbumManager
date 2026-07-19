@@ -9,9 +9,15 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for QRhi renderer tests")
 
 from PySide6.QtCore import QPointF, QSize
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage
 
 from iPhoto.gui.ui.widgets.rhi_image_renderer import RhiImageRenderer
+
+
+def _image(width: int = 8, height: int = 8) -> QImage:
+    image = QImage(width, height, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    return image
 
 
 class _FakeBuffer:
@@ -23,6 +29,14 @@ class _FakeBuffer:
     def create(self) -> bool | None:
         self.create_calls += 1
         return self.create_result
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+class _FakeTexture:
+    def __init__(self) -> None:
+        self.destroyed = False
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -89,6 +103,49 @@ class _FakeCommandBuffer:
 
     def endPass(self):  # noqa: N802
         self.calls.append(("endPass", ()))
+
+
+def test_warming_a_resident_rhi_texture_refreshes_its_lru_position() -> None:
+    renderer = RhiImageRenderer()
+    renderer._still_textures["stale"] = (object(), 1)
+    renderer._still_textures["previous"] = (object(), 1)
+    renderer._still_textures["current"] = (object(), 1)
+
+    assert renderer.warm_still_texture("previous", _image()) is False
+
+    assert tuple(renderer._still_textures) == ("stale", "current", "previous")
+
+
+def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
+    renderer = RhiImageRenderer()
+    stale = _FakeTexture()
+    previous = _FakeTexture()
+    current = _FakeTexture()
+    renderer._still_textures["stale"] = (stale, 64)
+    renderer._still_textures["previous"] = (previous, 64)
+    renderer._still_textures["current"] = (current, 64)
+    renderer._active_still_key = "current"
+
+    renderer._evict_before_still_allocation(
+        incoming_bytes=64,
+        resident_bytes=192,
+    )
+
+    assert stale.destroyed is True
+    assert previous.destroyed is False
+    assert current.destroyed is False
+    assert tuple(renderer._still_textures) == ("previous", "current")
+
+
+def test_rhi_tracks_mipmap_availability_per_texture_source() -> None:
+    renderer = RhiImageRenderer()
+
+    renderer.upload_still_texture("still", _image())
+    assert renderer._texture_uses_mipmaps is False
+
+    renderer._still_textures.clear()
+    renderer.upload_texture(_image())
+    assert renderer._texture_uses_mipmaps is True
 
 
 def test_overlay_buffer_creation_failure_leaves_no_stale_buffer() -> None:

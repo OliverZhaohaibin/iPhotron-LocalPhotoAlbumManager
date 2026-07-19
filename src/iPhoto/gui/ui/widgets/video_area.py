@@ -55,7 +55,11 @@ from ....config import (
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
 from ....core.adjustment_mapping import normalise_video_trim, video_requires_adjusted_preview
-from ....gui.detail_pipeline import VideoPresentationState
+from ....gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailRenderTransaction,
+    VideoPresentationState,
+)
 from ....gui.detail_profile import emit_detail_event, log_detail_profile
 from ....utils.ffmpeg import (  # noqa: F401 - V1 monkeypatch/test compatibility
     get_linux_180_prerotate_hint,
@@ -635,7 +639,7 @@ class VideoArea(QWidget):
         """Return the currently loaded video source, if any."""
         return self._current_source
 
-    def load_video(
+    def present_video(
         self,
         path: Path,
         *,
@@ -643,9 +647,15 @@ class VideoArea(QWidget):
         trim_range_ms: tuple[int, int] | None = None,
         adjusted_preview: bool | None = None,
     ) -> None:
-        """Compatibility wrapper around the non-blocking two-phase API."""
+        """Present a non-Detail video through the shared transaction contract."""
 
         generation = self._detail_request_generation + 1
+        transaction = DetailRenderTransaction(
+            generation=generation,
+            asset_id=path.name,
+            media_kind="video",
+            source_identity=AssetSourceIdentity.create(path),
+        )
         self.begin_load(path, generation)
         self.commit_presentation(
             VideoPresentationState(
@@ -657,6 +667,7 @@ class VideoArea(QWidget):
                 raw_width=0,
                 raw_height=0,
                 linux_180_hint=False,
+                transaction=transaction,
             )
         )
 
@@ -716,7 +727,7 @@ class VideoArea(QWidget):
     def commit_presentation(self, state: VideoPresentationState) -> bool:
         """Apply prepared metadata and begin accepting current video frames."""
 
-        if int(state.request_generation) != self._detail_request_generation:
+        if int(state.generation) != self._detail_request_generation:
             return False
         self._current_adjustments = dict(state.adjustments or {})
         adjusted_preview = bool(
@@ -1089,11 +1100,6 @@ class VideoArea(QWidget):
         if generation is None or generation != self._detail_request_generation:
             return
         self._awaiting_first_gpu_frame_generation = None
-        emit_detail_event(
-            "video_first_frame_presented",
-            generation=generation,
-            media_type="video",
-        )
         self.mediaFirstFrameReady.emit(generation)
 
     def _on_position_changed(self, position: int) -> None:

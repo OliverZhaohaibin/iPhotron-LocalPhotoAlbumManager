@@ -108,6 +108,13 @@ class EditRenderingState:
     effective_duration_sec: float | None
 
 
+@dataclass(frozen=True)
+class EditCommitResult:
+    """Durable sidecar commit and the thumbnail revision it selects."""
+
+    thumbnail_revision: str
+
+
 class EditServicePort(Protocol):
     """Library-scoped edit sidecar and render-state surface."""
 
@@ -117,8 +124,12 @@ class EditServicePort(Protocol):
     def read_adjustments(self, path: Path) -> dict[str, Any]:
         """Read persisted edit adjustments."""
 
-    def write_adjustments(self, path: Path, adjustments: dict[str, Any]) -> None:
-        """Persist edit adjustments atomically."""
+    def write_adjustments(
+        self,
+        path: Path,
+        adjustments: dict[str, Any],
+    ) -> EditCommitResult:
+        """Persist edits and return the selected thumbnail render revision."""
 
     def default_adjustments(self) -> dict[str, Any]:
         """Return the canonical default edit-session values."""

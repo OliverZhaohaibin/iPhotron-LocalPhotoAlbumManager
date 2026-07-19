@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
 
@@ -14,8 +15,8 @@ import pytest
 from PySide6.QtCore import QProcess
 from PySide6.QtTest import QTest
 
-import iPhoto.cache.index_store.migrations as migrations_module
 import iPhoto.bootstrap.library_probe as probe_module
+import iPhoto.cache.index_store.migrations as migrations_module
 from iPhoto.bootstrap.library_probe import (
     MAX_STDERR_BYTES,
     MAX_STDOUT_BYTES,
@@ -38,6 +39,32 @@ from iPhoto.cache.index_store.migrations import (
 )
 from iPhoto.cache.index_store.repository import AssetRepository
 from iPhoto.domain.models.query import CollectionQuery
+
+
+def test_schema_migrates_source_and_thumbnail_revision_columns() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE assets (rel TEXT PRIMARY KEY)")
+    connection.execute("INSERT INTO assets(rel) VALUES ('legacy.jpg')")
+    connection.commit()
+    connection.execute("PRAGMA user_version = 2")
+
+    SchemaMigrator.initialize_schema(connection)
+
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(assets)")
+    }
+    assert {"source_mtime_ns", "image_orientation", "thumb_revision"}.issubset(
+        columns
+    )
+    orientation = connection.execute(
+        "SELECT image_orientation FROM assets WHERE rel = 'legacy.jpg'"
+    ).fetchone()[0]
+    assert orientation == 0
+    assert (
+        connection.execute("PRAGMA user_version").fetchone()[0]
+        == CURRENT_SCHEMA_VERSION
+    )
+    connection.close()
 
 
 def test_probe_returns_two_level_album_snapshot_without_creating_work_dir(
@@ -67,7 +94,7 @@ def test_probe_reads_schema_and_completed_scan_without_writing(tmp_path: Path) -
     work_dir = library / ".iPhoto"
     work_dir.mkdir(parents=True)
     database = work_dir / "global_index.db"
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
         connection.execute(
             "CREATE TABLE scan_jobs (status TEXT NOT NULL, scope TEXT NOT NULL, root TEXT)"
@@ -115,7 +142,7 @@ def test_validated_prepared_library_rejects_in_place_database_changes(
     prepared = probe_library(LibraryProbeRequest.create(library))
     validated = ValidatedPreparedLibrary.create(prepared)
 
-    with sqlite3.connect(prepared.database_path) as connection:
+    with closing(sqlite3.connect(prepared.database_path)) as connection, connection:
         connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
 
     with pytest.raises(RuntimeError, match="changed before commit"):
@@ -206,7 +233,7 @@ def test_probe_broken_symlink_is_recoverable_error(tmp_path: Path) -> None:
 
 def _create_legacy_database(database: Path) -> None:
     database.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             "CREATE TABLE assets ("
             "rel TEXT PRIMARY KEY, parent_album_path TEXT, mime TEXT, "
@@ -223,7 +250,7 @@ def _create_branch_base_database(database: Path) -> None:
     """Create the complete, unversioned schema used at branch base 6ff592f7."""
 
     database.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         SchemaMigrator.initialize_schema(connection)
         connection.execute(
             "INSERT INTO assets("
@@ -252,7 +279,7 @@ def _create_branch_base_database(database: Path) -> None:
 
 
 def _downgrade_to_v1_without_video_columns(database: Path) -> None:
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("ALTER TABLE assets DROP COLUMN video_rotation_cw")
         connection.execute("ALTER TABLE assets DROP COLUMN video_linux_180_hint")
         connection.execute("PRAGMA user_version = 1")
@@ -263,7 +290,7 @@ def test_prepare_database_adopts_complete_branch_base_schema_without_migration(
 ) -> None:
     database = tmp_path / ".iPhoto" / "global_index.db"
     _create_branch_base_database(database)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             "INSERT INTO assets(rel, id, dt, mime, media_type, face_status, pet_status) "
             "VALUES ('album/unprocessed.jpg', 'asset-2', '2026-01-02T00:00:00', "
@@ -283,7 +310,7 @@ def test_prepare_database_adopts_complete_branch_base_schema_without_migration(
     assert warnings == ()
     assert not (database.parent / MIGRATION_STATE_NAME).exists()
     assert list(database.parent.glob("*.migration-*.bak")) == []
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         row = connection.execute(
             "SELECT is_favorite, is_deleted, face_status, pet_status "
             "FROM assets WHERE rel = 'album/photo.jpg'"
@@ -334,7 +361,7 @@ def test_prepare_database_migrates_legacy_database_transactionally(tmp_path: Pat
 
     assert version == CURRENT_SCHEMA_VERSION
     assert warnings == ()
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         assert connection.execute("SELECT rel FROM assets").fetchone() == (
             "album/photo.jpg",
         )
@@ -372,7 +399,7 @@ def test_prepare_database_migrates_v1_gallery_projection_columns(tmp_path: Path)
         assert [row["id"] for row in window.rows] == ["photo"]
         assert window.rows[0]["video_rotation_cw"] is None
         assert window.rows[0]["video_linux_180_hint"] is None
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection, connection:
             assert (
                 connection.execute("PRAGMA user_version").fetchone()[0]
                 == CURRENT_SCHEMA_VERSION
@@ -389,7 +416,12 @@ def test_prepare_database_resumes_interrupted_multi_version_migration(
     _downgrade_to_v1_without_video_columns(database)
     migration_id = "resume-at-v1"
     backup = database.parent / f"global_index.db.migration-{migration_id}.bak"
-    with sqlite3.connect(database) as source, sqlite3.connect(backup) as target:
+    with (
+        closing(sqlite3.connect(database)) as source,
+        closing(sqlite3.connect(backup)) as target,
+        source,
+        target,
+    ):
         source.backup(target)
         target.execute("PRAGMA user_version = 0")
     state = MigrationState(
@@ -411,7 +443,7 @@ def test_prepare_database_resumes_interrupted_multi_version_migration(
     assert warnings == ()
     assert not state_path.exists()
     assert not backup.exists()
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
     assert {"video_rotation_cw", "video_linux_180_hint"} <= columns
 
@@ -431,7 +463,7 @@ def test_prepare_database_rolls_back_failed_version_and_keeps_recovery_state(
     with pytest.raises(RuntimeError, match="injected migration failure"):
         SchemaMigrator.prepare_database(database)
 
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
         columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
     assert "should_rollback" not in columns
@@ -446,7 +478,12 @@ def test_prepare_database_restores_valid_backup_after_interrupted_corruption(
     _create_legacy_database(database)
     migration_id = "test-recovery"
     backup = database.parent / f"global_index.db.migration-{migration_id}.bak"
-    with sqlite3.connect(database) as source, sqlite3.connect(backup) as target:
+    with (
+        closing(sqlite3.connect(database)) as source,
+        closing(sqlite3.connect(backup)) as target,
+        source,
+        target,
+    ):
         source.backup(target)
     state = MigrationState(
         protocol_version=MIGRATION_PROTOCOL_VERSION,
@@ -467,7 +504,7 @@ def test_prepare_database_restores_valid_backup_after_interrupted_corruption(
 
     assert version == CURRENT_SCHEMA_VERSION
     assert warnings == ("migration_restored",)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         assert connection.execute("SELECT rel FROM assets").fetchone() == (
             "album/photo.jpg",
         )
@@ -507,7 +544,7 @@ def test_prepare_database_keeps_evidence_when_database_and_backup_are_corrupt(
 def test_prepare_database_rejects_future_schema(tmp_path: Path) -> None:
     database = tmp_path / ".iPhoto" / "global_index.db"
     database.parent.mkdir(parents=True)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
 
     with pytest.raises(SchemaPreparationError) as caught:
@@ -692,7 +729,7 @@ def test_real_child_interruption_is_recovered_on_next_prepare(tmp_path: Path) ->
     version, warnings = SchemaMigrator.prepare_database(database)
     assert version == CURRENT_SCHEMA_VERSION
     assert warnings == ()
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
         assert connection.execute("SELECT rel FROM assets").fetchone() == (
             "album/photo.jpg",

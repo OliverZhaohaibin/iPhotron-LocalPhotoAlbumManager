@@ -44,8 +44,15 @@ class MediaAdjustmentCommitter(QObject):
             )
             if edit_service is None:
                 raise RuntimeError("Edit service is unavailable")
-            edit_service.write_adjustments(source, adjustments)
-            self._asset_vm.invalidate_thumbnail(str(source))
+            commit_result = edit_service.write_adjustments(source, adjustments)
+            desired_revision = getattr(commit_result, "thumbnail_revision", None)
+            if isinstance(desired_revision, str) and desired_revision:
+                self._asset_vm.invalidate_thumbnail(
+                    str(source),
+                    desired_revision=desired_revision,
+                )
+            else:
+                self._asset_vm.invalidate_thumbnail(str(source))
         except Exception:
             LOGGER.exception("Failed to commit adjustments for %s", source)
             return False

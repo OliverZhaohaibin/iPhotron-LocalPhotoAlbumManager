@@ -7,15 +7,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.application.ports import (
-    AssetStateServicePort,
-    EditRenderingState,
-    EditServicePort,
-)
-from iPhoto.gui.detail_pipeline import detail_pipeline_v2_enabled
+from iPhoto.application.ports import AssetStateServicePort, EditServicePort
+from iPhoto.gui.detail_pipeline import AssetSourceIdentity
 from iPhoto.gui.detail_profile import emit_detail_event
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
-from iPhoto.utils.geocoding import resolve_location_name
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -59,6 +54,7 @@ class DetailPresentation:
     reload_token: int
     request_generation: int = 0
     video_duration_hint: float | None = None
+    source_identity: AssetSourceIdentity | None = None
 
 
 class DetailViewModel(BaseViewModel):
@@ -78,11 +74,10 @@ class DetailViewModel(BaseViewModel):
         self._media_session = media_session
         self._asset_state_service = asset_state_service
         self._adjustment_commit_port = adjustment_commit_port
-        self._edit_service_getter = edit_service_getter
+        del edit_service_getter
         self._info_panel_visible = False
         self._presentation_reload_token = 0
         self._pending_restore_requests: dict[Path, MediaRestoreRequest] = {}
-        self._video_presentation_cache: dict | None = None
         self._pending_show_row: int | None = None
         self._request_generation = 0
         self._store.data_changed.connect(self._handle_store_changed)
@@ -300,16 +295,12 @@ class DetailViewModel(BaseViewModel):
                 "bytes": dto.size_bytes,
             }
         )
-        location = (
-            self._resolve_stored_location(dto)
-            if detail_pipeline_v2_enabled()
-            else self._resolve_location(dto)
-        )
+        location = self._resolve_stored_location(dto)
         if isinstance(location, str) and location.strip():
             info["location"] = location.strip()
         live_motion_rel, live_motion_abs = self._resolve_live_motion(
             dto,
-            allow_fallback_scan=not detail_pipeline_v2_enabled(),
+            allow_fallback_scan=False,
         )
         video_adjustments: dict[str, Any] | None = None
         video_trim_range_ms: tuple[int, int] | None = None
@@ -320,35 +311,6 @@ class DetailViewModel(BaseViewModel):
             if dto.is_video
             else None
         )
-        if dto.is_video and not detail_pipeline_v2_enabled():
-            cache = self._video_presentation_cache
-            if (
-                isinstance(cache, dict)
-                and cache.get("path") == dto.abs_path
-                and cache.get("reload_token") == self._presentation_reload_token
-            ):
-                video_adjustments = cache.get("video_adjustments")
-                video_trim_range_ms = cache.get("video_trim_range_ms")
-                video_adjusted_preview = bool(cache.get("video_adjusted_preview", False))
-            else:
-                edit_state = self._describe_adjustments(
-                    dto.abs_path,
-                    duration_hint=video_duration_hint,
-                )
-                video_adjusted_preview = edit_state.adjusted_preview
-                video_trim_range_ms = edit_state.trim_range_ms
-                video_adjustments = (
-                    edit_state.resolved_adjustments
-                    if video_adjusted_preview
-                    else (edit_state.raw_adjustments or None)
-                )
-                self._video_presentation_cache = {
-                    "path": dto.abs_path,
-                    "reload_token": self._presentation_reload_token,
-                    "video_adjustments": video_adjustments,
-                    "video_trim_range_ms": video_trim_range_ms,
-                    "video_adjusted_preview": video_adjusted_preview,
-                }
         return DetailPresentation(
             row=row,
             asset_id=dto.id,
@@ -376,6 +338,7 @@ class DetailViewModel(BaseViewModel):
                 else int(request_generation)
             ),
             video_duration_hint=video_duration_hint,
+            source_identity=AssetSourceIdentity.from_info(dto.abs_path, info),
         )
 
     @staticmethod
@@ -405,43 +368,6 @@ class DetailViewModel(BaseViewModel):
         if duration_sec <= 0.0:
             return None
         return duration_sec
-
-    def _describe_adjustments(
-        self,
-        path: Path,
-        *,
-        duration_hint: float | None = None,
-    ) -> EditRenderingState:
-        edit_service = self._edit_service_getter() if self._edit_service_getter else None
-        if edit_service is None:
-            return EditRenderingState(
-                sidecar_exists=False,
-                raw_adjustments={},
-                resolved_adjustments={},
-                adjusted_preview=False,
-                has_visible_edits=False,
-                trim_range_ms=None,
-                effective_duration_sec=duration_hint,
-            )
-        return edit_service.describe_adjustments(
-            path,
-            duration_hint=duration_hint,
-        )
-
-    def _resolve_location(self, dto: AssetDTO) -> Optional[str]:
-        metadata = dto.metadata or {}
-        location = metadata.get("location") or metadata.get("place")
-        if isinstance(location, str) and location.strip():
-            return location.strip()
-        gps = metadata.get("gps")
-        if isinstance(gps, dict):
-            resolved = resolve_location_name(gps)
-            if resolved:
-                metadata["location"] = resolved
-                return resolved
-        components = [metadata.get("city"), metadata.get("state"), metadata.get("country")]
-        normalized = [str(item).strip() for item in components if item]
-        return ", ".join(normalized) if normalized else None
 
     def _resolve_live_motion(
         self,

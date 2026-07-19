@@ -132,23 +132,23 @@ def texture_crop_to_logical(
         # Step 1: 90° CW (270° CCW) - texture TOP becomes visual RIGHT
         # Transformation: (x', y') = (1-y, x)
         return (
-            clamp_unit(1.0 - tcy),
-            clamp_unit(tcx),
-            clamp_unit(th),
-            clamp_unit(tw),
+            1.0 - tcy,
+            tcx,
+            th,
+            tw,
         )
     if rotate_steps == 2:
         return (
-            clamp_unit(1.0 - tcx),
-            clamp_unit(1.0 - tcy),
-            clamp_unit(tw),
-            clamp_unit(th),
+            1.0 - tcx,
+            1.0 - tcy,
+            tw,
+            th,
         )
     # Step 3: 90° CCW (270° CW) - texture TOP becomes visual LEFT
     # Transformation: (x', y') = (y, 1-x)
     return (
-        clamp_unit(tcy),
-        clamp_unit(1.0 - tcx),
-        clamp_unit(th),
-        clamp_unit(tw),
+        tcy,
+        1.0 - tcx,
+        th,
+        tw,
     )

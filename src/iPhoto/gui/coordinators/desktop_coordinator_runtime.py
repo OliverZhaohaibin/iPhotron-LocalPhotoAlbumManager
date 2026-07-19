@@ -190,6 +190,7 @@ class DesktopCoordinatorRuntime(QObject):
             window.ui.player_placeholder,
             window.ui.live_badge,
             edit_service_getter=edit_service_getter,
+            library_root_getter=self._library_root,
         )
         self._header_controller = HeaderController(
             window.ui.location_label,
@@ -426,7 +427,10 @@ class DesktopCoordinatorRuntime(QObject):
             self._media_session,
             self._adjustment_committer,
             self._edit_service_getter,
+            self._player_view_controller,
+            zoom_handler=self._playback.zoom_handler,
         )
+        self._edit.stillEditFinished.connect(self._playback.handle_still_edit_finished)
         self._shortcut_manager.set_edit_coordinator(self._edit)
         return self._edit
 
@@ -558,7 +562,7 @@ class DesktopCoordinatorRuntime(QObject):
         ui.grid_view.viewportStateChanged.connect(self._asset_list_vm.update_viewport)
         if hasattr(ui.grid_view, "detailPrefetchRequested"):
             ui.grid_view.detailPrefetchRequested.connect(
-                lambda index: self._playback.prefetch_asset(index.row())
+                self._playback.prefetch_descriptor
             )
 
         # Filmstrip clicks are now handled by PlaybackCoordinator

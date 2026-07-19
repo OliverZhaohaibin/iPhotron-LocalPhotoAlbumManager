@@ -53,6 +53,7 @@ class TextureResourceManager:
         self._current_image: QImage | None = None
         self._current_cache_key: int | None = None
         self._texture_dirty = False
+        self._force_upload = False
     
     def get_current_image_source(self) -> object | None:
         """Return the identifier of the currently loaded image source."""
@@ -79,6 +80,69 @@ class TextureResourceManager:
             new_source is not None
             and new_source == self._current_image_source
         )
+
+    def has_resident_texture(self, source: object | None) -> bool:
+        renderer = self._renderer_provider()
+        checker = getattr(renderer, "has_still_texture", None)
+        return bool(source is not None and callable(checker) and checker(source))
+
+    def activate_resident_texture(self, source: object) -> bool:
+        renderer = self._renderer_provider()
+        activate = getattr(renderer, "activate_still_texture", None)
+        if not callable(activate) or not activate(source):
+            return False
+        self._current_image_source = source
+        self._texture_dirty = False
+        return True
+
+    def touch_resident_texture(self, source: object) -> bool:
+        renderer = self._renderer_provider()
+        touch = getattr(renderer, "touch_still_texture", None)
+        return bool(callable(touch) and touch(source))
+
+    def warm_still_texture(self, source: object, image: QImage) -> bool:
+        renderer = self._renderer_provider()
+        warmer = getattr(renderer, "warm_still_texture", None)
+        if callable(warmer):
+            return bool(warmer(source, image))
+        uploader = getattr(renderer, "upload_still_texture", None)
+        if callable(uploader):
+            uploader(source, image)
+            return True
+        return False
+
+    def clear_still_residency(self) -> None:
+        renderer = self._renderer_provider()
+        clear = getattr(renderer, "clear_still_residency", None)
+        if callable(clear):
+            context = self._context_provider()
+            if context is not None:
+                self._make_current()
+                try:
+                    clear()
+                finally:
+                    self._done_current()
+            else:
+                clear()
+        self._current_image_source = None
+        self._current_image = None
+        self._current_cache_key = None
+        self._force_upload = False
+        self._texture_dirty = False
+
+    def trim_still_residency(self) -> None:
+        renderer = self._renderer_provider()
+        trim = getattr(renderer, "trim_still_residency", None)
+        if callable(trim):
+            context = self._context_provider()
+            if context is not None:
+                self._make_current()
+                try:
+                    trim()
+                finally:
+                    self._done_current()
+            else:
+                trim()
     
     def set_image(
         self,
@@ -109,6 +173,7 @@ class TextureResourceManager:
         self._current_image_source = image_source
         self._current_image = image
         self._current_cache_key = None
+        self._force_upload = bool(force_upload)
         
         # Return whether we need a new upload
         if image is None or image.isNull():
@@ -187,8 +252,23 @@ class TextureResourceManager:
             return False
         if not self._texture_dirty and renderer.has_texture():
             return False
-        renderer.upload_texture(image)
+        upload_still = getattr(renderer, "upload_still_texture", None)
+        if self._current_image_source is not None and callable(upload_still):
+            if self._force_upload:
+                clear = getattr(renderer, "clear_still_residency", None)
+                if callable(clear):
+                    clear()
+            try:
+                upload_still(self._current_image_source, image)
+            except (MemoryError, RuntimeError):
+                trim = getattr(renderer, "trim_still_residency", None)
+                if callable(trim):
+                    trim()
+                upload_still(self._current_image_source, image)
+        else:
+            renderer.upload_texture(image)
         self._texture_dirty = False
+        self._force_upload = False
         return True
     
     def needs_texture_upload(self) -> bool:
@@ -207,3 +287,6 @@ class TextureResourceManager:
             return False
         
         return self._texture_dirty or not renderer.has_texture()
+
+    def mark_texture_lost(self) -> None:
+        self._texture_dirty = self._current_image is not None and not self._current_image.isNull()

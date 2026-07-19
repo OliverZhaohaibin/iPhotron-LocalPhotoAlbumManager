@@ -382,26 +382,61 @@ class _SimpleQtBot:
                 delete_later()
 
 
-@pytest.fixture()
-def qapp():
+_TEST_QAPPLICATION = None
+
+
+def _test_qapplication():
+    """Return one strongly-held QApplication for the entire pytest process.
+
+    PySide may destroy the C++ application when the last Python wrapper is
+    collected.  GUI modules retain QIcon/QPixmap objects across function-scoped
+    fixtures, so recreating QApplication later in the same process can leave
+    those native resources attached to a dead application and crash in QtSvg.
+    """
+
+    global _TEST_QAPPLICATION
+
     from PySide6.QtWidgets import QApplication
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    _TEST_QAPPLICATION = app
+    return app
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _keep_test_qapplication_alive():
+    """Keep one QApplication alive for the complete pytest process.
+
+    A number of older GUI test modules still provide local ``qapp`` fixtures.
+    Without an application created at session start, the first such fixture can
+    create Qt's application and then release its final Python reference at
+    module teardown.  Recreating QApplication later leaves cached QIcon and
+    QPixmap instances tied to the destroyed native application and can crash
+    QtSvg on Linux.  Starting the shared application here makes every local
+    fixture reuse the same process-lifetime instance.
+    """
+
+    if not HAS_PYSIDE6 or not HAS_QTWIDGETS:
+        yield
+        return
+
+    _test_qapplication()
+    yield
+
+
+@pytest.fixture()
+def qapp():
+    app = _test_qapplication()
     yield app
     app.processEvents()
 
 
 @pytest.fixture()
 def qtbot():
-    from PySide6.QtWidgets import QApplication
-
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
+    app = _test_qapplication()
     helper = _SimpleQtBot()
     try:
         yield helper

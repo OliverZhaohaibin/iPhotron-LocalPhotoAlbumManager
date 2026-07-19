@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -163,7 +164,7 @@ def _database_schema_version_matches(path: Path, expected_version: int) -> bool:
 
     try:
         uri = f"{Path(path).resolve().as_uri()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=0.1) as connection:
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as connection:
             row = connection.execute("PRAGMA user_version").fetchone()
     except (OSError, sqlite3.Error, ValueError):
         return False
@@ -476,7 +477,7 @@ def _database_snapshot(root: Path) -> tuple[Path, int, bool, tuple[str, ...]]:
     from ..cache.index_store.migrations import SchemaMigrator
 
     schema_version, warnings = SchemaMigrator.prepare_database(database_path)
-    with sqlite3.connect(database_path, timeout=0.5) as connection:
+    with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
         try:
             row = connection.execute(
                 "SELECT 1 FROM scan_jobs WHERE status = 'completed' "

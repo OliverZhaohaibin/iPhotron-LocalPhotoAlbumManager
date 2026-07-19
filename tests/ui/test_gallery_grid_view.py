@@ -1,13 +1,41 @@
+from pathlib import Path
+
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap, QStandardItem, QStandardItemModel
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.detail_pipeline import DetailPrefetchDescriptor
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.ui.widgets.asset_grid import AssetGrid
 from iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
+
+
+class _PrefetchModel(QStandardItemModel):
+    def detail_prefetch_descriptor(self, row: int) -> DetailPrefetchDescriptor | None:
+        if row < 0 or row >= self.rowCount():
+            return None
+        return DetailPrefetchDescriptor(
+            row=row,
+            asset_id=f"asset-{row}",
+            path=Path(f"/virtual/photo-{row}.jpg"),
+            is_video=False,
+        )
+
+
+def _single_item_prefetch_view(qapp_instance) -> tuple[GalleryGridView, _PrefetchModel]:
+    view = GalleryGridView()
+    model = _PrefetchModel()
+    model.appendRow(QStandardItem("photo"))
+    view.setModel(model)
+    view.resize(400, 400)
+    view.show()
+    qapp_instance.processEvents()
+    view.doItemsLayout()
+    qapp_instance.processEvents()
+    return view, model
 
 
 # Attempt to patch load_icon in asset_delegate if it exists
@@ -24,14 +52,27 @@ def patch_delegate_icons(monkeypatch):
     except (ImportError, AttributeError) as e:
         print(f"patch_delegate_icons: Could not patch load_icon: {e}")
 
-@pytest.fixture(scope="module")
+
+@pytest.fixture
 def qapp_instance():
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    yield app
+    existing_widgets = tuple(app.topLevelWidgets())
+    try:
+        yield app
+    finally:
+        for widget in app.topLevelWidgets():
+            if any(widget is existing for existing in existing_widgets):
+                continue
+            if isinstance(widget, GalleryGridView):
+                widget.setModel(None)
+            widget.close()
+            widget.deleteLater()
+        app.processEvents()
+
 
 def test_gallery_responsive_layout(qapp_instance, monkeypatch):
     patch_delegate_icons(monkeypatch)
@@ -254,3 +295,54 @@ def test_favorite_badge_click_uses_viewport_coordinates(qapp_instance, monkeypat
 
     assert spy.count() == 1
     assert spy.at(0)[0].row() == 0
+
+
+def test_mouse_press_does_not_emit_detail_prefetch(qapp_instance):
+    view, model = _single_item_prefetch_view(qapp_instance)
+    spy = QSignalSpy(view.detailPrefetchRequested)
+    index = model.index(0, 0)
+
+    QTest.mouseClick(
+        view.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        view.visualRect(index).center(),
+    )
+    qapp_instance.processEvents()
+
+    assert spy.count() == 0
+    view.close()
+
+
+def test_hover_dwell_emits_one_full_descriptor_after_150ms(qapp_instance):
+    view, model = _single_item_prefetch_view(qapp_instance)
+    spy = QSignalSpy(view.detailPrefetchRequested)
+
+    assert view._detail_prefetch_timer.interval() == 150
+    view._schedule_detail_prefetch(model.index(0, 0))
+    QTest.qWait(175)
+    qapp_instance.processEvents()
+    QTest.qWait(50)
+
+    assert spy.count() == 1
+    descriptor = spy.at(0)[0]
+    assert descriptor.asset_id == "asset-0"
+    assert descriptor.path == Path("/virtual/photo-0.jpg")
+    view.close()
+
+
+def test_selection_mode_and_model_reset_cancel_pending_hover_prefetch(qapp_instance):
+    view, model = _single_item_prefetch_view(qapp_instance)
+    spy = QSignalSpy(view.detailPrefetchRequested)
+
+    view._schedule_detail_prefetch(model.index(0, 0))
+    view.set_selection_mode_enabled(True)
+    QTest.qWait(175)
+    assert spy.count() == 0
+
+    view.set_selection_mode_enabled(False)
+    view._schedule_detail_prefetch(model.index(0, 0))
+    model.clear()
+    QTest.qWait(175)
+    assert spy.count() == 0
+    view.close()

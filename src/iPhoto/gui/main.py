@@ -659,6 +659,7 @@ def main(argv: list[str] | None = None) -> int:
 
     coordinator_runtime = None
     coordinator_started = False
+    detail_benchmark_harness = None
 
     def _enqueue_startup_job(
         name: str,
@@ -883,11 +884,18 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     def _start_coordinator() -> None:
-        nonlocal coordinator_started
+        nonlocal coordinator_started, detail_benchmark_harness
         if coordinator_runtime is None or coordinator_started:
             return
         coordinator_runtime.start()
         coordinator_started = True
+        if os.environ.get("IPHOTO_DETAIL_BENCHMARK_PLAN", "").strip():
+            from iPhoto.gui.detail_benchmark_harness import maybe_start_detail_benchmark
+
+            detail_benchmark_harness = maybe_start_detail_benchmark(
+                app,
+                coordinator_runtime,
+            )
         mark("desktop_coordinator_runtime.started")
 
     def _initialize_features_after_show(generation: int) -> None:
@@ -994,7 +1002,14 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
     mark("main_window.show_called")
 
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        # The event loop can return before startup reaches a terminal phase
+        # (for example, when an embedded host or a test double exits
+        # immediately).  Cancel the attempt so its watchdog and registered
+        # resources cannot fire against an already torn-down window.
+        startup.cancel()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual launch

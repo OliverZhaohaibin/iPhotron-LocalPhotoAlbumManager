@@ -152,7 +152,7 @@ def test_rhi_popup_forces_single_adjusted_surface_on_macos() -> None:
         )
 
     popup._video_area.stop.assert_called_once_with()
-    popup._video_area.load_video.assert_called_once_with(
+    popup._video_area.present_video.assert_called_once_with(
         source,
         adjustments=None,
         trim_range_ms=None,
@@ -179,7 +179,7 @@ def test_rhi_popup_rebuilds_from_edited_to_raw_profile_on_macos() -> None:
     popup._rebuild_video_area.assert_called_once_with()
     assert popup._active_render_profile == _RhiPreviewPopup._PROFILE_RAW
     popup._video_area.stop.assert_not_called()
-    popup._video_area.load_video.assert_called_once_with(
+    popup._video_area.present_video.assert_called_once_with(
         source,
         adjustments=None,
         trim_range_ms=None,
@@ -206,7 +206,7 @@ def test_rhi_popup_rebuilds_from_raw_to_edited_profile_on_macos() -> None:
     popup._rebuild_video_area.assert_called_once_with()
     assert popup._active_render_profile == _RhiPreviewPopup._PROFILE_EDITED
     popup._video_area.stop.assert_not_called()
-    popup._video_area.load_video.assert_called_once_with(
+    popup._video_area.present_video.assert_called_once_with(
         source,
         adjustments=adjustments,
         trim_range_ms=None,
@@ -231,7 +231,7 @@ def test_rhi_popup_reuses_same_profile_on_macos() -> None:
 
     popup._rebuild_video_area.assert_not_called()
     popup._video_area.stop.assert_called_once_with()
-    popup._video_area.load_video.assert_called_once_with(
+    popup._video_area.present_video.assert_called_once_with(
         source,
         adjustments=None,
         trim_range_ms=None,
@@ -252,7 +252,7 @@ def test_rhi_popup_keeps_plain_surface_off_macos_for_unedited_preview() -> None:
             adjusted_preview=False,
         )
 
-    popup._video_area.load_video.assert_called_once_with(
+    popup._video_area.present_video.assert_called_once_with(
         source,
         adjustments=None,
         trim_range_ms=None,

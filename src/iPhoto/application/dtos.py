@@ -34,6 +34,8 @@ class AssetDTO:
     # For UI
     micro_thumbnail: Optional[Any] = None
     thumb_cache_key: Optional[str] = None
+    thumbnail_state: str = "ready"
+    thumb_revision: Optional[str] = None
 
     @property
     def is_video(self) -> bool:

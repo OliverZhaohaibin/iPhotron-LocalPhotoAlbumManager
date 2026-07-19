@@ -243,6 +243,22 @@ def test_ready_thumbnail_collection_queries_use_visible_indexes(tmp_path: Path) 
     repository = get_global_repository(tmp_path)
     repository.write_rows(_ready_collection_row(index) for index in range(250))
 
+    with repository.transaction() as connection:
+        visible_indexes = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index'
+                AND (name LIKE 'idx_assets_visible_%' OR name = 'idx_assets_gps')
+            """
+        ).fetchall()
+    assert visible_indexes
+    assert all(
+        "thumbnail_state IN ('ready', 'stale')" in str(row[0])
+        and "thumb_cache_key" in str(row[0])
+        for row in visible_indexes
+    )
+
     queries = [
         CollectionQuery(collection_type=CollectionType.ALL_PHOTOS),
         CollectionQuery(collection_type=CollectionType.ALBUM, album_path="Album"),
@@ -255,9 +271,9 @@ def test_ready_thumbnail_collection_queries_use_visible_indexes(tmp_path: Path) 
         sql, params = QueryBuilder.build_collection_query(query, limit=100)
         plan = _collection_query_plan(repository, query)
 
-        assert "thumbnail_state = ?" in sql
-        assert params[params.index("ready")] == "ready"
-        assert "USING INDEX idx_assets_visible" in plan or "USING INDEX idx_assets_gps" in plan
+        assert "thumbnail_state IN ('ready', 'stale')" in sql
+        assert "thumb_cache_key" in sql
+        assert "USING INDEX idx_assets_" in plan
         assert "USE TEMP B-TREE" not in plan
 
 

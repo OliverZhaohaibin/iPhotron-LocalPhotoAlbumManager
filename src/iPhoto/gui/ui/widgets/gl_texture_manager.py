@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections import OrderedDict
 
 import numpy as np
 from OpenGL import GL as gl
 from PySide6.QtGui import QImage
+
+from iPhoto.gui.detail_profile import emit_detail_event
 
 try:
     from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
@@ -122,6 +125,9 @@ class TextureManager:
         self._video_range: int = _RANGE_LIMITED
         self._curve_lut_texture_id: int = 0
         self._levels_lut_texture_id: int = 0
+        self._still_textures: OrderedDict[object, tuple[int, int, int, int]] = OrderedDict()
+        self._active_still_key: object | None = None
+        self._still_budget_bytes = 192 * 1024 * 1024
 
     # ------------------------------------------------------------------
     # Main texture
@@ -131,6 +137,8 @@ class TextureManager:
 
         if image.isNull():
             raise ValueError("Cannot upload a null QImage")
+        if self._still_textures:
+            self.clear_still_residency()
         self._delete_video_textures()
 
         if image.format() == QImage.Format.Format_RGBA8888:
@@ -170,6 +178,163 @@ class TextureManager:
             _LOGGER.warning("OpenGL error after texture upload: 0x%04X", int(error))
 
         return self._texture_id, self._texture_width, self._texture_height
+
+    def upload_still_texture(self, key: object, image: QImage) -> tuple[int, int, int]:
+        """Upload or activate one non-mipmapped resident still texture."""
+
+        if self.activate_still_texture(key):
+            return self._texture_id, self._texture_width, self._texture_height
+        if image.isNull():
+            raise ValueError("Cannot upload a null QImage")
+        self._delete_video_textures()
+        qimage = QImage(image) if image.format() == QImage.Format.Format_RGBA8888 else image.convertToFormat(QImage.Format.Format_RGBA8888)
+        width, height = qimage.width(), qimage.height()
+        byte_count = max(0, int(qimage.bytesPerLine()) * height)
+        resident_bytes = sum(entry[3] for entry in self._still_textures.values())
+        reusable_key = None
+        if len(self._still_textures) >= 3 or resident_bytes + byte_count > self._still_budget_bytes:
+            reusable_key = next(
+                (
+                    candidate
+                    for candidate, entry in self._still_textures.items()
+                    if candidate != self._active_still_key
+                    and entry[1] == width
+                    and entry[2] == height
+                ),
+                None,
+            )
+        if reusable_key is not None:
+            texture_id, _old_width, _old_height, old_size = self._still_textures.pop(reusable_key)
+            emit_detail_event("gpu_evict", generation=0, key=str(reusable_key), bytes=old_size, reused=True)
+            allocate_storage = False
+        else:
+            self._evict_before_still_allocation(
+                incoming_bytes=byte_count,
+                resident_bytes=resident_bytes,
+            )
+            created = gl.glGenTextures(1)
+            if isinstance(created, (tuple, list)):
+                created = created[0]
+            texture_id = int(created)
+            allocate_storage = True
+        gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+        if allocate_storage:
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, width, height, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, None)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        buffer = qimage.constBits()
+        if hasattr(buffer, "setsize"):
+            buffer.setsize(qimage.sizeInBytes())
+        else:
+            buffer = buffer[:qimage.sizeInBytes()]
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, qimage.bytesPerLine() // 4)
+        gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, buffer)
+        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
+        self._still_textures[key] = (texture_id, width, height, byte_count)
+        self._active_still_key = key
+        self._texture_id, self._texture_width, self._texture_height = texture_id, width, height
+        self._texture_uses_mipmaps = False
+        self._trim_still_textures()
+        return texture_id, width, height
+
+    def _evict_before_still_allocation(
+        self,
+        *,
+        incoming_bytes: int,
+        resident_bytes: int,
+    ) -> None:
+        """Free non-active storage before allocating a differently-sized texture."""
+
+        while (
+            len(self._still_textures) >= 3
+            or resident_bytes + incoming_bytes > self._still_budget_bytes
+        ):
+            victim = next(
+                (
+                    candidate
+                    for candidate in self._still_textures
+                    if candidate != self._active_still_key
+                ),
+                None,
+            )
+            if victim is None:
+                break
+            texture_id, _width, _height, size = self._still_textures.pop(victim)
+            gl.glDeleteTextures(1, np.array([int(texture_id)], dtype=np.uint32))
+            resident_bytes -= size
+            emit_detail_event(
+                "gpu_evict",
+                generation=0,
+                key=str(victim),
+                bytes=size,
+                before_allocate=True,
+            )
+
+    def activate_still_texture(self, key: object) -> bool:
+        entry = self._still_textures.pop(key, None)
+        if entry is None:
+            return False
+        self._still_textures[key] = entry
+        texture_id, width, height, _size = entry
+        self._active_still_key = key
+        self._texture_id, self._texture_width, self._texture_height = texture_id, width, height
+        self._texture_uses_mipmaps = False
+        return True
+
+    def touch_still_texture(self, key: object) -> bool:
+        entry = self._still_textures.pop(key, None)
+        if entry is None:
+            return False
+        self._still_textures[key] = entry
+        return True
+
+    def warm_still_texture(self, key: object, image: QImage) -> bool:
+        if self.touch_still_texture(key):
+            return False
+        active = self._active_still_key
+        self.upload_still_texture(key, image)
+        if active is not None:
+            self.activate_still_texture(active)
+        return True
+
+    def has_still_texture(self, key: object) -> bool:
+        return key in self._still_textures
+
+    def texture_uses_mipmaps(self) -> bool:
+        return self._texture_uses_mipmaps
+
+    def _trim_still_textures(self) -> None:
+        total = sum(entry[3] for entry in self._still_textures.values())
+        while len(self._still_textures) > 3 or total > self._still_budget_bytes:
+            victim = next((candidate for candidate in self._still_textures if candidate != self._active_still_key), None)
+            if victim is None:
+                break
+            texture_id, _width, _height, size = self._still_textures.pop(victim)
+            gl.glDeleteTextures(1, np.array([int(texture_id)], dtype=np.uint32))
+            total -= size
+            emit_detail_event("gpu_evict", generation=0, key=str(victim), bytes=size)
+
+    def clear_still_residency(self) -> None:
+        ids = [entry[0] for entry in self._still_textures.values()]
+        if ids:
+            gl.glDeleteTextures(len(ids), np.array(ids, dtype=np.uint32))
+        self._still_textures.clear()
+        self._active_still_key = None
+        self._texture_id = 0
+        self._texture_width = 0
+        self._texture_height = 0
+
+    def trim_still_residency(self) -> None:
+        for key in tuple(self._still_textures):
+            if key == self._active_still_key:
+                continue
+            texture_id, _width, _height, size = self._still_textures.pop(key)
+            gl.glDeleteTextures(1, np.array([int(texture_id)], dtype=np.uint32))
+            emit_detail_event("gpu_evict", generation=0, key=str(key), bytes=size, pressure=True)
 
     def upload_video_frame(self, frame: "QVideoFrame") -> tuple[int, int]:
         """Upload *frame* directly as shader-readable textures."""
@@ -291,6 +456,7 @@ class TextureManager:
 
         self._video_width = width
         self._video_height = height
+        self._texture_uses_mipmaps = True
         self._video_format = pixel_fmt
         self._video_colorspace = color_space
         self._video_transfer = transfer
@@ -323,6 +489,9 @@ class TextureManager:
         self._delete_video_textures()
 
     def _delete_image_texture(self) -> None:
+        if self._still_textures:
+            self.clear_still_residency()
+            return
         if not self._texture_id:
             return
         gl.glDeleteTextures(1, np.array([int(self._texture_id)], dtype=np.uint32))

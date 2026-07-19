@@ -15,7 +15,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
-from PySide6.QtWidgets import QApplication, QRhiWidget
+from PySide6.QtWidgets import QApplication
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 import iPhoto.gui.ui.widgets.gl_texture_manager as gl_texture_manager_module
@@ -784,7 +784,7 @@ class TestVideoArea:
             return_value=(0, 0, 0),
         )
 
-        va.load_video(Path("/fake/video.mp4"))
+        va.present_video(Path("/fake/video.mp4"))
 
         mock_clear.assert_called_once()
 
@@ -820,7 +820,7 @@ class TestVideoArea:
             return_value=(0, 0, 0),
         )
 
-        va.load_video(Path("/fake/video.mp4"))
+        va.present_video(Path("/fake/video.mp4"))
 
         assert mock_set_rot.call_args_list[-1] == call(0, 0, 0)
 
@@ -854,7 +854,7 @@ class TestVideoArea:
         self._setup_load_video_mocks(va, mocker, player_duration=0)
         mock_on_dur = mocker.patch.object(va, "_on_duration_changed")
 
-        va.load_video(path)
+        va.present_video(path)
 
         # The fallback to the previous duration must fire.
         mock_on_dur.assert_called_once_with(5000)
@@ -871,7 +871,7 @@ class TestVideoArea:
         self._setup_load_video_mocks(va, mocker, player_duration=5234)
         mock_on_dur = mocker.patch.object(va, "_on_duration_changed")
 
-        va.load_video(path)
+        va.present_video(path)
 
         mock_on_dur.assert_called_once_with(5000)
 
@@ -886,7 +886,7 @@ class TestVideoArea:
         self._setup_load_video_mocks(va, mocker, player_duration=0)
         mock_on_dur = mocker.patch.object(va, "_on_duration_changed")
 
-        va.load_video(Path("/fake/new.mp4"))
+        va.present_video(Path("/fake/new.mp4"))
 
         # No fallback for a different source.
         mock_on_dur.assert_not_called()
@@ -901,7 +901,7 @@ class TestVideoArea:
         mock_stop = mocker.patch.object(va._player, "stop")
         mocker.patch("iPhoto.gui.ui.widgets.video_area.sys.platform", "darwin")
 
-        va.load_video(Path("/fake/new.mov"))
+        va.present_video(Path("/fake/new.mov"))
 
         mock_stop.assert_not_called()
         assert mock_set_source.call_count == 2
@@ -918,7 +918,7 @@ class TestVideoArea:
         mock_stop = mocker.patch.object(va._player, "stop")
         mocker.patch("iPhoto.gui.ui.widgets.video_area.sys.platform", "linux")
 
-        va.load_video(Path("/fake/new.mp4"))
+        va.present_video(Path("/fake/new.mp4"))
 
         mock_stop.assert_not_called()
         mock_set_source.assert_called_once()
@@ -996,7 +996,7 @@ class TestVideoArea:
 
         va.stop()
         stopped_generation = va._media_generation
-        va.load_video(Path("/fake/new.mp4"))
+        va.present_video(Path("/fake/new.mp4"))
 
         assert mock_set_output.call_args_list == [call(None), call(va._video_sink)]
         assert mock_set_source.call_count == 2

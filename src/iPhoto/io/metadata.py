@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from iPhoto.core.raw_processor import is_raw_extension
+
 from ..errors import ExternalToolError
 from ..utils.deps import load_pillow
 from ..utils.exiftool import get_metadata_batch
@@ -44,6 +46,7 @@ def read_image_meta_with_exiftool(
 
     info = _empty_media_info()
     exif_payload: Optional[Any] = None
+    orientation: int | None = None
 
     if isinstance(metadata, dict):
         exif_group = _extract_group(metadata, "EXIF") or {}
@@ -74,7 +77,6 @@ def read_image_meta_with_exiftool(
                 info["mime"] = mime or None
 
         # Check for orientation-based dimension swapping
-        orientation = None
         # Try finding Orientation in common groups
         for group in (ifd0_group, exif_group, exif_ifd_group, quicktime_group):
             val = group.get("Orientation")
@@ -99,6 +101,8 @@ def read_image_meta_with_exiftool(
         # Orientation flags 5-8 indicate 90 or 270 degree rotation
         if orientation in (5, 6, 7, 8) and info["w"] and info["h"]:
             info["w"], info["h"] = info["h"], info["w"]
+        if orientation in range(1, 9):
+            info["image_orientation"] = orientation
 
         gps_payload = _extract_gps_from_exiftool(metadata)
         if gps_payload is not None:
@@ -218,8 +222,15 @@ def read_image_meta_with_exiftool(
 
     geometry_missing = info["w"] is None or info["h"] is None
     need_dt_fallback = info["dt"] is None
+    need_orientation_fallback = orientation is None
 
-    if (geometry_missing or need_dt_fallback) and Image is not None and UnidentifiedImageError is not None and path.exists():
+    if (
+        (geometry_missing or need_dt_fallback or need_orientation_fallback)
+        and not is_raw_extension(path.suffix)
+        and Image is not None
+        and UnidentifiedImageError is not None
+        and path.exists()
+    ):
         LOGGER.debug("Opening %s with Pillow to backfill metadata", path)
         try:
             with Image.open(path) as img:
@@ -228,12 +239,23 @@ def read_image_meta_with_exiftool(
                     info["h"] = img.height
                     if info["mime"] is None:
                         info["mime"] = Image.MIME.get(img.format, None)
-                if need_dt_fallback:
+                if need_dt_fallback or need_orientation_fallback:
                     exif_payload = img.getexif() if hasattr(img, "getexif") else None
         except UnidentifiedImageError as exc:
             raise ExternalToolError(f"Unable to read image metadata for {path}") from exc
         except OSError as exc:
             raise ExternalToolError(f"OS error while reading {path}: {exc}") from exc
+
+    if orientation is None and exif_payload:
+        raw_orientation = exif_payload.get(274)
+        try:
+            orientation = int(raw_orientation)
+        except (TypeError, ValueError):
+            orientation = None
+        if orientation in (5, 6, 7, 8) and info["w"] and info["h"]:
+            info["w"], info["h"] = info["h"], info["w"]
+
+    info["image_orientation"] = orientation if orientation in range(1, 9) else 1
 
     if info["dt"] is None and exif_payload:
         fallback_dt = exif_payload.get(36867) or exif_payload.get(306)

@@ -20,11 +20,12 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...config import WORK_DIR_NAME
+from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
     emit_perf_event,
@@ -211,7 +212,7 @@ class AssetRepository:
         """Initialize the database schema."""
         try:
             # Use a transient connection for initialization
-            with sqlite3.connect(self.path, timeout=10.0) as conn:
+            with closing(sqlite3.connect(self.path, timeout=10.0)) as conn, conn:
                 SchemaMigrator.initialize_schema(conn)
         except sqlite3.DatabaseError as exc:
             logger.warning("Detected index.db corruption at %s: %s", self.path, exc)
@@ -713,8 +714,8 @@ class AssetRepository:
             "dur", "year", "month", "dt", "ts", "sort_ts", "content_id", "bytes",
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
-            "face_status", "thumbnail_state", "thumb_cache_key",
-            "index_revision", "micro_thumbnail"
+            "face_status", "thumbnail_state", "thumb_cache_key", "thumb_revision",
+            "index_revision", "micro_thumbnail", "source_mtime_ns", "image_orientation"
         ]
 
         logger.debug(
@@ -1114,6 +1115,7 @@ class AssetRepository:
             "live_partner_rel", "aspect_ratio", "media_type", "is_favorite", "is_deleted",
             "has_gps", "thumbnail_state", "location", "micro_thumbnail", "thumb_cache_key",
             "face_status", "video_rotation_cw", "video_linux_180_hint",
+            "source_mtime_ns", "image_orientation", "thumb_revision",
         )
         select_clause = f"SELECT {', '.join(columns)}"
         first = max(0, int(first))
@@ -1166,7 +1168,7 @@ class AssetRepository:
         should_close = conn != self._db_manager._conn
         try:
             conn.row_factory = sqlite3.Row
-            select_clause = "SELECT rel, thumb_cache_key"
+            select_clause = "SELECT rel, thumb_cache_key, thumbnail_state, thumb_revision"
             if first > _DEEP_OFFSET_LIMIT:
                 sql, params = self._build_deep_collection_window_query(
                     conn,
@@ -1469,39 +1471,104 @@ class AssetRepository:
         micro_thumbnail: bytes | None = None,
         thumb_cache_key: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Update thumbnail readiness for a single asset row."""
+        expected_revision: str | None = None,
+    ) -> bool:
+        """Publish readiness only for the currently desired render revision."""
 
         normalized_rel = unicodedata.normalize("NFC", str(rel))
+        revision_guard = (
+            " AND (thumb_revision = ? OR thumb_revision IS NULL)"
+            if expected_revision is not None
+            else ""
+        )
+        revision_params = (
+            [str(expected_revision)] if expected_revision is not None else []
+        )
         if error:
-            self._db_manager.execute_in_transaction(
-                """
+            error_text = str(error)
+            changed = self._db_manager.execute_in_transaction(
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'failed',
                     thumb_error = ?,
+                    thumb_revision = COALESCE(?, thumb_revision),
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{revision_guard}
+                    AND (
+                        thumbnail_state != 'failed'
+                        OR COALESCE(thumb_error, '') != ?
+                    )
                 """,
-                [str(error), _utc_ms(), normalized_rel],
+                [error_text, expected_revision, _utc_ms(), normalized_rel]
+                + revision_params
+                + [error_text],
             )
         else:
             if not str(thumb_cache_key or "").strip():
                 raise ValueError("ready thumbnails require thumb_cache_key")
-            self._db_manager.execute_in_transaction(
-                """
+            change_guards = ["thumbnail_state != 'ready'", "thumb_error IS NOT NULL"]
+            change_params: list[Any] = []
+            if micro_thumbnail is not None:
+                change_guards.append("micro_thumbnail IS NOT ?")
+                change_params.append(micro_thumbnail)
+            if thumb_cache_key is not None:
+                change_guards.append("COALESCE(thumb_cache_key, '') != ?")
+                change_params.append(thumb_cache_key)
+            changed = self._db_manager.execute_in_transaction(
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'ready',
                     micro_thumbnail = COALESCE(?, micro_thumbnail),
                     thumb_cache_key = COALESCE(?, thumb_cache_key),
+                    thumb_revision = COALESCE(?, thumb_revision),
                     thumb_error = NULL,
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{revision_guard}
+                    AND ({' OR '.join(change_guards)})
                 """,
-                [micro_thumbnail, thumb_cache_key, _utc_ms(), normalized_rel],
+                [
+                    micro_thumbnail,
+                    thumb_cache_key,
+                    expected_revision,
+                    _utc_ms(),
+                    normalized_rel,
+                ]
+                + revision_params
+                + change_params,
             )
-        self._clear_collection_anchor_cache()
+        if changed:
+            self._clear_collection_anchor_cache()
+        return bool(changed)
+
+    def mark_thumbnail_stale(self, rel: str, *, desired_revision: str) -> bool:
+        """Select a desired revision without deleting the last complete artifact."""
+
+        normalized_rel = unicodedata.normalize("NFC", str(rel))
+        revision = str(desired_revision).strip()
+        if not revision:
+            raise ValueError("stale thumbnails require a desired revision")
+        changed = self._db_manager.execute_in_transaction(
+            """
+            UPDATE assets
+            SET thumbnail_state = 'stale',
+                micro_thumbnail = NULL,
+                thumb_revision = ?,
+                thumb_error = NULL,
+                thumb_updated_at = ?,
+                index_revision = COALESCE(index_revision, 0) + 1
+            WHERE rel = ?
+                AND (
+                    thumbnail_state != 'stale'
+                    OR COALESCE(thumb_revision, '') != ?
+                )
+            """,
+            [revision, _utc_ms(), normalized_rel, revision],
+        )
+        if changed:
+            self._clear_collection_anchor_cache()
+        return bool(changed)
 
     def _cursor_for_collection_offset(
         self,

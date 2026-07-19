@@ -72,6 +72,33 @@ def test_path_only_prefetch_uses_the_display_image_fallback_identity() -> None:
     assert intent.reason == "prefetch"
 
 
+def test_clear_frame_cache_invalidates_old_library_requests_before_rebind() -> None:
+    calls: list[object] = []
+    controller = SimpleNamespace(
+        cancel_pending_image_requests=Mock(
+            side_effect=lambda: calls.append("cancel")
+        ),
+        _library_root_getter=Mock(return_value=Path("/library/new")),
+        _decode_backend=SimpleNamespace(
+            bind_library=Mock(side_effect=lambda root: calls.append(("bind", root)))
+        ),
+        _image_viewer=SimpleNamespace(
+            clear_still_residency=Mock(side_effect=lambda: calls.append("clear_gpu"))
+        ),
+        _render_sessions={"old": object()},
+        _current_render_session=object(),
+        _render_session_interaction_depth={1: 1},
+        _render_session_lod_pending={1},
+        _render_session_pending_surfaces={1: object()},
+    )
+
+    PlayerViewController.clear_frame_cache(controller)
+
+    assert calls == ["cancel", ("bind", Path("/library/new")), "clear_gpu"]
+    assert controller._render_sessions == {}
+    assert controller._current_render_session is None
+
+
 def test_adjusted_image_worker_publishes_empty_raw_state() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()

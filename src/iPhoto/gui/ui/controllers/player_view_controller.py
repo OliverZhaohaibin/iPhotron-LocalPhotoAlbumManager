@@ -1044,6 +1044,11 @@ class PlayerViewController(QObject):
     def clear_frame_cache(self) -> None:
         """Clear library-scoped mapped surfaces and GPU still resources."""
 
+        # A library rebind can race both adjustment preparation and native
+        # decoding.  Invalidate their foreground generation before rebinding
+        # the cache so an old-library completion cannot repopulate memory or
+        # publish a stale frame into the newly active library.
+        self.cancel_pending_image_requests()
         root = self._library_root_getter() if self._library_root_getter is not None else None
         self._decode_backend.bind_library(root)
         clear_residency = getattr(self._image_viewer, "clear_still_residency", None)

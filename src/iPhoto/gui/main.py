@@ -1002,7 +1002,14 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
     mark("main_window.show_called")
 
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        # The event loop can return before startup reaches a terminal phase
+        # (for example, when an embedded host or a test double exits
+        # immediately).  Cancel the attempt so its watchdog and registered
+        # resources cannot fire against an already torn-down window.
+        startup.cancel()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual launch

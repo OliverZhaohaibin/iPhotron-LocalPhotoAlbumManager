@@ -403,6 +403,11 @@ def test_main_creates_required_features_in_platform_safe_order(
             return None
 
         def exec(self) -> int:
+            # Model the event loop processing delayed startup work before it
+            # exits.  main() now cancels any still-pending startup attempt when
+            # exec() returns, matching the real application lifecycle.
+            for callback in list(delayed_callbacks):
+                callback()
             return 0
 
     class _FakeSignal:

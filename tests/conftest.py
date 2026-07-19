@@ -423,14 +423,8 @@ def _keep_test_qapplication_alive():
         yield
         return
 
-    app = _test_qapplication()
-    try:
-        yield
-    finally:
-        try:
-            app.processEvents()
-        except RuntimeError:
-            pass
+    _test_qapplication()
+    yield
 
 
 @pytest.fixture()

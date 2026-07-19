@@ -153,3 +153,49 @@ def test_gl_prefetch_never_evicts_visible_texture_for_budget(mocker) -> None:
     assert manager._texture_id == active_texture
     assert manager.has_still_texture("current")
     assert not manager.has_still_texture("next")
+
+
+def test_gl_foreground_never_overwrites_same_size_visible_texture(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    current = _image(8, 8)
+    manager.upload_still_texture("current", current)
+    active_texture = manager._texture_id
+    manager._still_budget_bytes = current.sizeInBytes()
+    upload_count = gl.glTexSubImage2D.call_count
+
+    manager.upload_still_texture("replacement", _image(8, 8))
+
+    assert gl.glTexSubImage2D.call_count == upload_count
+    assert manager._active_still_key == "current"
+    assert manager._texture_id == active_texture
+    assert manager.has_still_texture("current")
+    assert not manager.has_still_texture("replacement")
+    result = manager.take_still_upload_result()
+    assert result is not None and result["reason"] == "residency_budget"
+
+
+def test_gl_failed_reused_neighbor_is_removed_from_residency(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    image = _image(8, 8)
+    manager._still_budget_bytes = image.sizeInBytes() * 2
+    manager.upload_still_texture("current", image)
+    manager.upload_still_texture("neighbor", image)
+    manager.activate_still_texture("current")
+    active_texture = manager._texture_id
+    neighbor_texture = manager._still_textures["neighbor"][0]
+    gl.glGetError.reset_mock()
+    gl.glGetError.side_effect = [gl.GL_NO_ERROR, gl.GL_OUT_OF_MEMORY]
+
+    manager.upload_still_texture("replacement", image)
+
+    assert tuple(manager._still_textures) == ("current",)
+    assert manager._active_still_key == "current"
+    assert manager._texture_id == active_texture
+    assert not manager.has_still_texture("neighbor")
+    assert not manager.has_still_texture("replacement")
+    deleted_ids = [int(call.args[1][0]) for call in gl.glDeleteTextures.call_args_list]
+    assert neighbor_texture in deleted_ids
+    result = manager.take_still_upload_result()
+    assert result is not None and result["reason"] == "upload_failed"

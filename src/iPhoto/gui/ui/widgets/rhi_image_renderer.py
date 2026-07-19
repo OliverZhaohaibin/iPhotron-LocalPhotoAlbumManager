@@ -920,11 +920,6 @@ class RhiImageRenderer:
                 ),
                 None,
             )
-        if activate and replacement_required and reusable_key is None:
-            active_entry = self._still_textures.get(self._active_still_key)
-            if active_entry is not None and active_entry[0].pixelSize() == size:
-                reusable_key = self._active_still_key
-
         texture = None
         old_entry: tuple[QRhiTexture, int] | None = None
         created = False
@@ -1003,7 +998,9 @@ class RhiImageRenderer:
             if created and texture is not None:
                 texture.destroy()
             elif reusable_key is not None and old_entry is not None:
-                self._still_textures[reusable_key] = old_entry
+                # Do not return potentially modified reused storage to the
+                # residency map after a failed upload submission.
+                old_entry[0].destroy()
             event = (
                 "gpu_texture_allocation_failed"
                 if activate

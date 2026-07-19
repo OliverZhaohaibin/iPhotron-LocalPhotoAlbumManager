@@ -474,20 +474,6 @@ class GLImageViewer(QRhiWidget):
 
         self._remember_still_surface(surface)
         self._still_generation_by_key[surface.decode_key] = max(0, int(generation))
-        _LOGGER.warning(
-            "[detail-diag] viewer_surface_queued generation=%s source=%s "
-            "decode_level=%s size=%sx%s backend=%s",
-            generation,
-            getattr(
-                getattr(surface.decode_key, "source", surface.decode_key),
-                "name",
-                str(surface.decode_key),
-            ),
-            getattr(surface, "decode_level", None),
-            surface.image.width(),
-            surface.image.height(),
-            self.render_backend_name(),
-        )
         self.set_image(
             surface.image,
             adjustments,
@@ -1336,11 +1322,6 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._emit_first_frame_ready()
-            if self._still_presentation_pending:
-                _LOGGER.warning(
-                    "[detail-diag] frame_skipped reason=gl_not_initialized backend=%s",
-                    self.render_backend_name(),
-                )
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
@@ -1351,23 +1332,10 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._emit_first_frame_ready()
-            if self._still_presentation_pending:
-                _LOGGER.warning(
-                    "[detail-diag] frame_skipped reason=renderer_unavailable backend=%s",
-                    self.render_backend_name(),
-                )
             return
 
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
-            if self._still_presentation_pending:
-                _LOGGER.warning(
-                    "[detail-diag] frame_skipped reason=empty_render_target "
-                    "widget=%sx%s backend=%s",
-                    self.width(),
-                    self.height(),
-                    self.render_backend_name(),
-                )
             if sys.platform.startswith("linux"):
                 _LOGGER.warning(
                     "[diag][gl_viewer] render skipped empty target using_video=%s dirty=%s widget=%sx%s",
@@ -1484,12 +1452,6 @@ class GLImageViewer(QRhiWidget):
         if self._consume_still_upload_result():
             uploaded_new_still_texture = False
         if not self._renderer.has_texture():
-            if self._still_presentation_pending:
-                _LOGGER.warning(
-                    "[detail-diag] frame_skipped reason=no_texture backend=%s source=%s",
-                    self.render_backend_name(),
-                    self._still_source_name(),
-                )
             if sys.platform.startswith("linux") and self._using_video_frame_source:
                 _LOGGER.warning(
                     "[diag][gl_viewer] render no-texture rt=%sx%s dirty=%s pending_reset=%s",
@@ -1599,23 +1561,10 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._emit_first_frame_ready()
-            if self._still_presentation_pending:
-                _LOGGER.warning(
-                    "[detail-diag] frame_skipped reason=rhi_not_initialized backend=%s",
-                    self.render_backend_name(),
-                )
             return
 
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
-            if self._still_presentation_pending:
-                _LOGGER.warning(
-                    "[detail-diag] frame_skipped reason=empty_render_target "
-                    "widget=%sx%s backend=%s",
-                    self.width(),
-                    self.height(),
-                    self.render_backend_name(),
-                )
             return
         self._last_render_target_size = QSize(output_size)
 
@@ -1675,12 +1624,6 @@ class GLImageViewer(QRhiWidget):
         if self._consume_still_upload_result():
             uploaded_new_still_texture = False
         if not self._renderer.has_texture():
-            if self._still_presentation_pending:
-                _LOGGER.warning(
-                    "[detail-diag] frame_skipped reason=no_texture backend=%s source=%s",
-                    self.render_backend_name(),
-                    self._still_source_name(),
-                )
             cb.beginPass(
                 self.renderTarget(),
                 self._pass_clear_color(),
@@ -1749,20 +1692,6 @@ class GLImageViewer(QRhiWidget):
     def _emit_still_frame_presented(self) -> None:
         source = self._texture_manager.get_current_image_source()
         if source is not None:
-            _LOGGER.warning(
-                "[detail-diag] frame_emitted generation=%s source_type=%s source=%s "
-                "renderer=%s",
-                self._still_generation_by_key.get(source, 0),
-                type(source).__name__,
-                getattr(getattr(source, "source", source), "name", ""),
-                type(self._renderer).__name__,
-            )
-            emit_detail_event(
-                "still_frame_presented_emitted",
-                generation=self._still_generation_by_key.get(source, 0),
-                source_type=type(source).__name__,
-                renderer_type=type(self._renderer).__name__,
-            )
             self.stillFramePresented.emit(source)
 
     def _consume_still_upload_result(self) -> bool:
@@ -1772,26 +1701,6 @@ class GLImageViewer(QRhiWidget):
         if not callable(take_result):
             return False
         result = take_result()
-        if result is not None:
-            result_key = result.get("key")
-            _LOGGER.warning(
-                "[detail-diag] texture_upload_result generation=%s source=%s "
-                "success=%s foreground=%s reason=%s renderer=%s",
-                self._still_generation_by_key.get(result_key, 0),
-                getattr(getattr(result_key, "source", result_key), "name", ""),
-                bool(result.get("success")),
-                bool(result.get("activate")),
-                str(result.get("reason", "unknown")),
-                type(self._renderer).__name__,
-            )
-            emit_detail_event(
-                "gpu_still_upload_result",
-                generation=self._still_generation_by_key.get(result_key, 0),
-                success=bool(result.get("success")),
-                foreground=bool(result.get("activate")),
-                reason=str(result.get("reason", "unknown")),
-                renderer_type=type(self._renderer).__name__,
-            )
         failed = bool(
             result is not None
             and result.get("activate")

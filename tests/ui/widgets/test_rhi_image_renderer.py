@@ -77,6 +77,11 @@ class _FakeResourceUpdateBatch:
         self.texture_uploads.append((texture, description))
 
 
+class _FailingResourceUpdateBatch(_FakeResourceUpdateBatch):
+    def uploadTexture(self, texture, description):  # noqa: N802
+        raise RuntimeError("simulated upload failure")
+
+
 class _FakeTextureRhi:
     def __init__(self, *, create_result: bool | None = True) -> None:
         self.create_result = create_result
@@ -216,7 +221,7 @@ def test_rhi_prefetch_drops_when_only_visible_texture_blocks_budget() -> None:
     assert active.destroyed is False
 
 
-def test_rhi_foreground_reuses_same_size_active_storage() -> None:
+def test_rhi_foreground_never_overwrites_same_size_active_storage() -> None:
     renderer = RhiImageRenderer()
     active = _FakeTexture(QSize(8, 8))
     fake_rhi = _FakeTextureRhi()
@@ -225,14 +230,42 @@ def test_rhi_foreground_reuses_same_size_active_storage() -> None:
     renderer._still_budget_bytes = 256
     renderer._still_textures["current"] = (active, 256)
     renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
     renderer.upload_still_texture("replacement", _image(8, 8))
 
     renderer._flush_pending_texture_uploads(updates)
 
     assert fake_rhi.new_texture_calls == 0
-    assert updates.texture_uploads[0][0] is active
-    assert tuple(renderer._still_textures) == ("replacement",)
-    assert renderer._active_still_key == "replacement"
+    assert updates.texture_uploads == []
+    assert tuple(renderer._still_textures) == ("current",)
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert active.destroyed is False
+    result = renderer.take_still_upload_result()
+    assert result is not None and result["reason"] == "residency_budget"
+
+
+def test_rhi_failed_reused_neighbor_is_removed_from_residency() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    neighbor = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi()  # type: ignore[assignment]
+    renderer._still_budget_bytes = 512
+    renderer._still_textures["current"] = (active, 256)
+    renderer._still_textures["neighbor"] = (neighbor, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+    renderer.upload_still_texture("replacement", _image(8, 8))
+
+    renderer._flush_pending_texture_uploads(_FailingResourceUpdateBatch())
+
+    assert tuple(renderer._still_textures) == ("current",)
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert active.destroyed is False
+    assert neighbor.destroyed is True
+    result = renderer.take_still_upload_result()
+    assert result is not None and result["reason"] == "upload_failed"
 
 
 def test_overlay_buffer_creation_failure_leaves_no_stale_buffer() -> None:

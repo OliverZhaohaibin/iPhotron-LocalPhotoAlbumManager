@@ -222,14 +222,6 @@ class TextureManager:
                 ),
                 None,
             )
-        if activate and replacement_required and reusable_key is None:
-            active_entry = self._still_textures.get(self._active_still_key)
-            if (
-                active_entry is not None
-                and active_entry[1] == width
-                and active_entry[2] == height
-            ):
-                reusable_key = self._active_still_key
         old_entry = None
         if reusable_key is not None:
             old_entry = self._still_textures.pop(reusable_key)
@@ -327,7 +319,12 @@ class TextureManager:
             if allocate_storage:
                 gl.glDeleteTextures(1, np.array([int(texture_id)], dtype=np.uint32))
             elif reusable_key is not None and old_entry is not None:
-                self._still_textures[reusable_key] = old_entry
+                # A failed sub-image upload may have partially modified the
+                # reused storage.  It is no longer a trustworthy resident copy.
+                gl.glDeleteTextures(
+                    1,
+                    np.array([int(texture_id)], dtype=np.uint32),
+                )
             self._record_still_upload_failure(
                 key,
                 activate=activate,
@@ -372,20 +369,6 @@ class TextureManager:
         byte_count: int,
         reason: str,
     ) -> None:
-        _LOGGER.warning(
-            "[detail-diag] gl_texture_upload_failed source_type=%s foreground=%s "
-            "reason=%s size=%sx%s bytes=%s resident_count=%s resident_bytes=%s "
-            "has_active=%s",
-            type(key).__name__,
-            activate,
-            reason,
-            width,
-            height,
-            byte_count,
-            len(self._still_textures),
-            sum(entry[3] for entry in self._still_textures.values()),
-            self._active_still_key is not None,
-        )
         event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
         emit_detail_event(
             event,

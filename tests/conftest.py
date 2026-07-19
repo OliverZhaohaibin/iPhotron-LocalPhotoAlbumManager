@@ -406,6 +406,33 @@ def _test_qapplication():
     return app
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _keep_test_qapplication_alive():
+    """Keep one QApplication alive for the complete pytest process.
+
+    A number of older GUI test modules still provide local ``qapp`` fixtures.
+    Without an application created at session start, the first such fixture can
+    create Qt's application and then release its final Python reference at
+    module teardown.  Recreating QApplication later leaves cached QIcon and
+    QPixmap instances tied to the destroyed native application and can crash
+    QtSvg on Linux.  Starting the shared application here makes every local
+    fixture reuse the same process-lifetime instance.
+    """
+
+    if not HAS_PYSIDE6 or not HAS_QTWIDGETS:
+        yield
+        return
+
+    app = _test_qapplication()
+    try:
+        yield
+    finally:
+        try:
+            app.processEvents()
+        except RuntimeError:
+            pass
+
+
 @pytest.fixture()
 def qapp():
     app = _test_qapplication()

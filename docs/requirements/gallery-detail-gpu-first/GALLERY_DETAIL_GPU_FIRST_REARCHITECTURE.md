@@ -165,7 +165,8 @@ CPU 或平台原生库完成；decoder 输出一次规范化的上传表面，�
 `StillDecodeBackend`
 
 - `decode(request, cancellation) -> DecodedSurface`。
-- 默认实现使用 Qt 缩放解码；RAW backend 优先 embedded preview/half-size。
+- 默认实现使用 Qt 缩放解码；RAW backend 先探测几何和候选尺寸，再在 embedded preview、half-size、
+  full 中只解码一个满足当前 LOD 的候选。numpy RGB 直接复制为 QImage，不经过 PNG 编解码中转。
 
 `DetailStillRequestScheduler`
 

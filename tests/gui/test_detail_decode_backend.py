@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
+import gc
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,9 @@ from iPhoto.gui.detail_decode_backend import (
     QtStillDecodeBackend,
     RawStillDecodeBackend,
     StillDecodeBackendRegistry,
+    _qimage_from_array,
+    _qimage_from_raw_thumb,
+    probe_raw_source_identity,
 )
 from iPhoto.gui.detail_pipeline import (
     AssetSourceIdentity,
@@ -369,6 +373,139 @@ def test_raw_backend_prefers_adequate_embedded_preview(tmp_path: Path) -> None:
     raw.postprocess.assert_not_called()
 
 
+def test_raw_embedded_jpeg_is_scaled_during_decode(tmp_path: Path) -> None:
+    source = tmp_path / "photo.nef"
+    source.write_bytes(b"raw")
+    raw = MagicMock()
+    raw.__enter__.return_value = raw
+    raw.__exit__.return_value = False
+    raw.extract_thumb.return_value = SimpleNamespace(
+        format="jpeg",
+        data=b"embedded-jpeg",
+    )
+    rawpy = SimpleNamespace(
+        ThumbFormat=SimpleNamespace(JPEG="jpeg", BITMAP="bitmap"),
+        imread=MagicMock(return_value=raw),
+    )
+    scaled_sizes: list[QSize] = []
+
+    class _EmbeddedReader:
+        def __init__(self, *_args) -> None:
+            self._scaled = QSize(1600, 1200)
+
+        def setAutoTransform(self, _enabled: bool) -> None:
+            pass
+
+        def size(self) -> QSize:
+            return QSize(1600, 1200)
+
+        def setScaledSize(self, size: QSize) -> None:
+            self._scaled = QSize(size)
+            scaled_sizes.append(QSize(size))
+
+        def read(self) -> QImage:
+            return QImage(
+                self._scaled.width(),
+                self._scaled.height(),
+                QImage.Format.Format_RGB888,
+            )
+
+    with patch(
+        "iPhoto.gui.detail_decode_backend._import_rawpy",
+        return_value=rawpy,
+    ), patch(
+        "iPhoto.gui.detail_decode_backend.QImageReader",
+        _EmbeddedReader,
+    ):
+        surface = RawStillDecodeBackend().decode(_request(source), _Token())
+
+    assert scaled_sizes == [QSize(1024, 768)]
+    assert surface.decoded_size == (1024, 768)
+    raw.postprocess.assert_not_called()
+
+
+def test_raw_backend_falls_back_when_embedded_jpeg_decode_fails(tmp_path: Path) -> None:
+    source = tmp_path / "photo.nef"
+    source.write_bytes(b"raw")
+    raw = MagicMock()
+    raw.__enter__.return_value = raw
+    raw.__exit__.return_value = False
+    raw.sizes = SimpleNamespace(iwidth=3200, iheight=2400, flip=0)
+    raw.extract_thumb.return_value = SimpleNamespace(
+        format="jpeg",
+        data=b"jpeg-with-readable-header-and-broken-pixels",
+    )
+    raw.postprocess.return_value = np.zeros((1200, 1600, 3), dtype=np.uint8)
+    rawpy = SimpleNamespace(
+        ThumbFormat=SimpleNamespace(JPEG="jpeg", BITMAP="bitmap"),
+        imread=MagicMock(return_value=raw),
+    )
+
+    class _BrokenEmbeddedReader:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def setAutoTransform(self, _enabled: bool) -> None:
+            pass
+
+        def size(self) -> QSize:
+            return QSize(1600, 1200)
+
+        def setScaledSize(self, _size: QSize) -> None:
+            pass
+
+        def read(self) -> QImage:
+            return QImage()
+
+    with patch(
+        "iPhoto.gui.detail_decode_backend._import_rawpy",
+        return_value=rawpy,
+    ), patch(
+        "iPhoto.gui.detail_decode_backend.QImageReader",
+        _BrokenEmbeddedReader,
+    ):
+        surface = RawStillDecodeBackend().decode(_request(source), _Token())
+
+    assert surface.fallback == "half"
+    assert surface.decoded_size == (1024, 768)
+    assert [call.kwargs["half_size"] for call in raw.postprocess.call_args_list] == [True]
+
+
+def test_raw_embedded_scaled_decode_accounts_for_orientation() -> None:
+    rawpy = SimpleNamespace(
+        ThumbFormat=SimpleNamespace(JPEG="jpeg", BITMAP="bitmap"),
+    )
+    thumb = SimpleNamespace(format="jpeg", data=b"embedded-jpeg")
+    scaled_sizes: list[QSize] = []
+
+    class _RotatedReader:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def setAutoTransform(self, _enabled: bool) -> None:
+            pass
+
+        def size(self) -> QSize:
+            return QSize(1600, 1200)
+
+        def setScaledSize(self, size: QSize) -> None:
+            scaled_sizes.append(QSize(size))
+
+        def read(self) -> QImage:
+            return QImage(768, 1024, QImage.Format.Format_RGB888)
+
+    with patch("iPhoto.gui.detail_decode_backend.QImageReader", _RotatedReader):
+        image = _qimage_from_raw_thumb(
+            thumb,
+            rawpy,
+            QSize(768, 1024),
+            orientation=6,
+        )
+
+    assert scaled_sizes == [QSize(1024, 768)]
+    assert image.size() == QSize(768, 1024)
+
+
 def test_raw_backend_checks_cancellation_after_native_preview(tmp_path: Path) -> None:
     source = tmp_path / "cancelled.dng"
     source.write_bytes(b"raw")
@@ -391,20 +528,18 @@ def test_raw_backend_checks_cancellation_after_native_preview(tmp_path: Path) ->
     raw.postprocess.assert_not_called()
 
 
-def test_raw_backend_falls_through_half_to_full(tmp_path: Path) -> None:
+def test_raw_backend_skips_half_when_predicted_size_is_insufficient(tmp_path: Path) -> None:
     source = tmp_path / "photo.nef"
     source.write_bytes(b"raw")
     raw = MagicMock()
     raw.__enter__.return_value = raw
     raw.__exit__.return_value = False
+    raw.sizes = SimpleNamespace(iwidth=1600, iheight=1200, flip=0)
     raw.extract_thumb.return_value = SimpleNamespace(
         format="bitmap",
         data=np.zeros((100, 100, 3), dtype=np.uint8),
     )
-    raw.postprocess.side_effect = [
-        np.zeros((600, 800, 3), dtype=np.uint8),
-        np.zeros((1200, 1600, 3), dtype=np.uint8),
-    ]
+    raw.postprocess.return_value = np.zeros((1200, 1600, 3), dtype=np.uint8)
     rawpy = SimpleNamespace(
         ThumbFormat=SimpleNamespace(JPEG="jpeg", BITMAP="bitmap"),
         imread=MagicMock(return_value=raw),
@@ -417,10 +552,7 @@ def test_raw_backend_falls_through_half_to_full(tmp_path: Path) -> None:
         surface = RawStillDecodeBackend().decode(_request(source), _Token())
 
     assert surface.fallback == "full"
-    assert [call.kwargs["half_size"] for call in raw.postprocess.call_args_list] == [
-        True,
-        False,
-    ]
+    assert [call.kwargs["half_size"] for call in raw.postprocess.call_args_list] == [False]
     assert surface.decoded_size == (1024, 768)
 
 
@@ -430,6 +562,7 @@ def test_raw_backend_uses_adequate_half_size_demosaic(tmp_path: Path) -> None:
     raw = MagicMock()
     raw.__enter__.return_value = raw
     raw.__exit__.return_value = False
+    raw.sizes = SimpleNamespace(iwidth=3200, iheight=2400, flip=0)
     raw.extract_thumb.side_effect = RuntimeError("no preview")
     raw.postprocess.return_value = np.zeros((1200, 1600, 3), dtype=np.uint8)
     rawpy = SimpleNamespace(
@@ -443,6 +576,41 @@ def test_raw_backend_uses_adequate_half_size_demosaic(tmp_path: Path) -> None:
     assert surface.fallback == "half"
     assert raw.postprocess.call_count == 1
     assert raw.postprocess.call_args.kwargs["half_size"] is True
+
+
+def test_raw_array_bridge_is_detached_and_does_not_encode_png() -> None:
+    array = np.zeros((2, 3, 3), dtype=np.uint8)
+    array[0, 0] = (12, 34, 56)
+
+    image = _qimage_from_array(array)
+    del array
+    gc.collect()
+
+    assert image.size() == QSize(3, 2)
+    assert image.pixelColor(0, 0).getRgb()[:3] == (12, 34, 56)
+
+
+def test_probe_raw_source_identity_repairs_geometry_and_orientation(tmp_path: Path) -> None:
+    source = tmp_path / "legacy.nef"
+    source.write_bytes(b"raw")
+    raw = MagicMock()
+    raw.__enter__.return_value = raw
+    raw.__exit__.return_value = False
+    raw.sizes = SimpleNamespace(iwidth=6000, iheight=4000, flip=6)
+    rawpy = SimpleNamespace(imread=MagicMock(return_value=raw))
+    identity = AssetSourceIdentity.create(
+        source,
+        size_bytes=123,
+        source_mtime_ns=456,
+        width=0,
+        height=0,
+    )
+
+    with patch("iPhoto.gui.detail_decode_backend._import_rawpy", return_value=rawpy):
+        repaired = probe_raw_source_identity(identity)
+
+    assert (repaired.width, repaired.height, repaired.orientation) == (4000, 6000, 6)
+    assert repaired.revision == identity.revision
 
 
 def test_raw_backend_reports_corrupt_source_as_decode_failure(tmp_path: Path) -> None:

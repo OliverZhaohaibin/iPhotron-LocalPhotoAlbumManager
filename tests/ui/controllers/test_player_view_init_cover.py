@@ -30,6 +30,9 @@ from iPhoto.gui.detail_pipeline import (
 )
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
+    PreparedStillState,
+    _AdjustmentPreparationSignals,
+    _AdjustmentPreparationWorker,
     _PreparedRequestIntent,
 )
 from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
@@ -236,6 +239,65 @@ class TestInitCoverTracking:
         entry = next(iter(controller._preparation_entries.values()))
         assert [intent.generation for intent in entry.intents] == [0, 7]
         assert [priority for _, priority in pool.starts] == [-1, 1]
+        assert entry.worker.generation == 7
+
+    def test_raw_preparation_repairs_unknown_geometry_before_lod_selection(
+        self,
+        controller,
+        mocker,
+    ):
+        source = Path("/tmp/legacy.nef")
+        unknown = AssetSourceIdentity.create(
+            source,
+            width=0,
+            height=0,
+            source_mtime_ns=1,
+        )
+        repaired = AssetSourceIdentity.create(
+            source,
+            width=4644,
+            height=3084,
+            source_mtime_ns=1,
+        )
+        mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.probe_raw_source_identity",
+            return_value=repaired,
+        )
+        emit = mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.emit_detail_event"
+        )
+        signals = _AdjustmentPreparationSignals()
+        states: list[PreparedStillState] = []
+        signals.ready.connect(lambda _key, state: states.append(state))
+        worker = _AdjustmentPreparationWorker(
+            ("asset",),
+            unknown,
+            signals,
+            None,
+            generation=7,
+        )
+
+        worker.run()
+
+        assert len(states) == 1
+        assert states[0].source_identity == repaired
+        assert states[0].adjustments == {}
+        assert emit.call_args_list[0].kwargs["generation"] == 7
+
+        controller._image_viewer.resize(1512, 982)
+        controller._request_generation = 7
+        request = mocker.patch.object(
+            controller._still_scheduler,
+            "request",
+            return_value=True,
+        )
+        assert controller._dispatch_prepared_intent(
+            _PreparedRequestIntent("asset", repaired, 7, "initial"),
+            {},
+        )
+        scheduled = request.call_args.args[0]
+        assert scheduled.source_identity == repaired
+        assert scheduled.decode_level != "full"
 
     def test_stale_decode_generation_is_not_applied(self, controller, mocker):
         apply_ready = mocker.patch.object(controller, "_on_adjusted_image_ready")

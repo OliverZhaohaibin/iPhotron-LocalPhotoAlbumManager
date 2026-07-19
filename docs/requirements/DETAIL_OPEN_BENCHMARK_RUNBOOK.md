@@ -57,6 +57,17 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
   的样本也要计入分母。
 - `surface_ready`：核对最终 detached surface 的宽高与 decode level。
 - `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。
+- RAW 冷解码同时保留 `raw_probe`、`raw_candidate_selected`、`raw_thumb_decode`、
+  `raw_postprocess`、`raw_surface_convert` 和 `color_stats`。未知几何必须先由 `raw_probe` 修复后再产生
+  `level_selected`；每个 cache miss 只能选择 embedded、half、full 之一，不得在同一请求中连续执行
+  half 和 full。事件只记录阶段耗时、候选和尺寸，不记录媒体路径。
+
+开发机可用仓库 NEF 运行非门禁分段微基准；结果只用于定位 codec 阶段，不能替代 packaged SLO：
+
+```bash
+.venv/bin/python tools/benchmark_raw_detail_decode.py \
+  tools/testbase/15/DSC_0291.NEF
+```
 
 Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次：
 

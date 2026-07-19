@@ -8,6 +8,7 @@ import mmap
 import os
 import shutil
 import struct
+import time
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import replace
@@ -427,7 +428,16 @@ class CachedStillDecodeBackend:
         surface = self._delegate.decode(prepared, cancellation)
         stats = self._cached_color_stats(prepared)
         if stats is None:
+            started = time.perf_counter()
             stats = compute_color_statistics(surface.image)
+            emit_detail_event(
+                "color_stats",
+                generation=prepared.generation,
+                asset_id=prepared.asset_id,
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                width=surface.decoded_size[0],
+                height=surface.decoded_size[1],
+            )
         stats = self._remember_color_stats(prepared, stats)
         surface = replace(surface, color_stats=stats)
         self.memory_cache.put(surface)

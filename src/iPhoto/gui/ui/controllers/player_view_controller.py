@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 
 from PySide6.QtCore import (
     QObject,
@@ -20,11 +21,13 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QLabel, QStackedWidget, QWidget
 
 from ....application.ports import EditServicePort
+from ....core.raw_processor import is_raw_extension
 from ....gui.detail_decode_backend import (
     DecodeCancelledError,
     DecodedSurface,
     DefaultStillDecodeBackend,
     StillDecodeBackend,
+    probe_raw_source_identity,
 )
 from ....gui.detail_pipeline import (
     AssetSourceIdentity,
@@ -39,8 +42,8 @@ from ....gui.detail_profile import (
     log_detail_profile,
     shutdown_detail_profile,
 )
-from ....gui.detail_request_scheduler import DetailStillRequestScheduler
 from ....gui.detail_render_session import EditRenderState, PhotoRenderSessionHandle
+from ....gui.detail_request_scheduler import DetailStillRequestScheduler
 from ....gui.detail_surface_cache import CachedStillDecodeBackend
 from ....gui.i18n import tr
 from ..widgets.gl_image_viewer import GLImageViewer
@@ -193,7 +196,7 @@ class _ScheduledStillSurfaceDecodeWorker(_StillSurfaceDecodeWorker):
 
 
 class _AdjustmentPreparationSignals(QObject):
-    ready = Signal(object, dict)
+    ready = Signal(object, object)
     failed = Signal(object, str)
     finished = Signal(object)
 
@@ -204,16 +207,21 @@ class _AdjustmentPreparationWorker(QRunnable):
     def __init__(
         self,
         key: object,
-        source: Path,
+        source_identity: AssetSourceIdentity,
         signals: _AdjustmentPreparationSignals,
         edit_service: EditServicePort | None,
+        *,
+        generation: int = 0,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
         self.key = key
-        self.source = source
+        self.asset_id = str(key[0]) if isinstance(key, tuple) and key else ""
+        self.source_identity = source_identity
+        self.source = source_identity.path
         self.signals = signals
         self._edit_service = edit_service
+        self.generation = max(0, int(generation))
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -221,13 +229,49 @@ class _AdjustmentPreparationWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - worker-thread filesystem boundary
         try:
+            if self._cancelled:
+                return
+            identity = self.source_identity
+            if (
+                is_raw_extension(identity.path.suffix)
+                and (identity.width <= 0 or identity.height <= 0)
+            ):
+                started = time.perf_counter()
+                try:
+                    identity = probe_raw_source_identity(identity)
+                except Exception:
+                    emit_detail_event(
+                        "raw_probe",
+                        generation=self.generation,
+                        asset_id=self.asset_id,
+                        suffix=identity.path.suffix.lower(),
+                        duration_ms=(time.perf_counter() - started) * 1000.0,
+                        geometry_repaired=False,
+                    )
+                    raise
+                else:
+                    emit_detail_event(
+                        "raw_probe",
+                        generation=self.generation,
+                        asset_id=self.asset_id,
+                        suffix=identity.path.suffix.lower(),
+                        duration_ms=(time.perf_counter() - started) * 1000.0,
+                        width=identity.width,
+                        height=identity.height,
+                        geometry_repaired=True,
+                    )
+            if self._cancelled:
+                return
             adjustments = (
                 dict(self._edit_service.read_adjustments(self.source) or {})
                 if self._edit_service is not None
                 else {}
             )
             if not self._cancelled:
-                self.signals.ready.emit(self.key, adjustments)
+                self.signals.ready.emit(
+                    self.key,
+                    PreparedStillState.create(adjustments, identity),
+                )
         except Exception as exc:  # noqa: BLE001 - edit providers have varied I/O failures
             if not self._cancelled:
                 self.signals.failed.emit(self.key, str(exc))
@@ -246,12 +290,28 @@ class _PreparedRequestIntent:
     zoom_factor: float = 1.0
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedStillState:
+    """Worker-prepared sidecar state paired with a cache-safe source identity."""
+
+    adjustments: Mapping
+    source_identity: AssetSourceIdentity
+
+    @classmethod
+    def create(
+        cls,
+        adjustments: dict,
+        source_identity: AssetSourceIdentity,
+    ) -> PreparedStillState:
+        return cls(MappingProxyType(dict(adjustments)), source_identity)
+
+
 @dataclass(slots=True)
 class _PreparationEntry:
     worker: _AdjustmentPreparationWorker
     intents: list[_PreparedRequestIntent]
     priority: int
-    result: dict | None = None
+    result: PreparedStillState | None = None
 
 
 class StillImageDecodeScheduler(QThreadPool):
@@ -325,6 +385,10 @@ class PlayerViewController(QObject):
         self._preparation_pool.setMaxThreadCount(1)
         self._preparation_entries: dict[object, _PreparationEntry] = {}
         self._preparation_entry_by_worker: dict[int, _PreparationEntry] = {}
+        self._raw_source_probe_cache: OrderedDict[
+            tuple,
+            AssetSourceIdentity,
+        ] = OrderedDict()
         self._pending_layout_intent: tuple[_PreparedRequestIntent, dict] | None = None
         self._request_generation = 0
         self._active_transaction: DetailRenderTransaction | None = None
@@ -629,13 +693,28 @@ class PlayerViewController(QObject):
 
     def _schedule_adjustment_preparation(self, intent: _PreparedRequestIntent) -> bool:
         identity = intent.source_identity
+        probe_key = (identity.path, identity.revision)
+        cached_identity = self._raw_source_probe_cache.get(probe_key)
+        if cached_identity is not None:
+            self._raw_source_probe_cache.move_to_end(probe_key)
+            identity = cached_identity
+            intent = replace(intent, source_identity=identity)
         key = (intent.asset_id, identity.path, identity.revision)
         existing = self._preparation_entries.get(key)
         priority = 1 if intent.reason != "prefetch" else -1
         if existing is not None:
             if existing.result is not None:
-                return self._dispatch_prepared_intent(intent, dict(existing.result))
+                prepared_intent = replace(
+                    intent,
+                    source_identity=existing.result.source_identity,
+                )
+                return self._dispatch_prepared_intent(
+                    prepared_intent,
+                    dict(existing.result.adjustments),
+                )
             existing.intents.append(intent)
+            if priority > existing.priority:
+                existing.worker.generation = int(intent.generation)
             if priority > existing.priority and self._preparation_pool.tryTake(existing.worker):
                 existing.priority = priority
                 self._preparation_pool.start(existing.worker, priority)
@@ -653,7 +732,13 @@ class PlayerViewController(QObject):
 
         signals = _AdjustmentPreparationSignals()
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
-        worker = _AdjustmentPreparationWorker(key, identity.path, signals, edit_service)
+        worker = _AdjustmentPreparationWorker(
+            key,
+            identity,
+            signals,
+            edit_service,
+            generation=intent.generation,
+        )
         entry = _PreparationEntry(worker=worker, intents=[intent], priority=priority)
         self._preparation_entries[key] = entry
         self._preparation_entry_by_worker[id(worker)] = entry
@@ -667,13 +752,24 @@ class PlayerViewController(QObject):
             return False
         return True
 
-    def _on_adjustment_prepared(self, key: object, adjustments: dict) -> None:
+    def _on_adjustment_prepared(self, key: object, state: object) -> None:
         entry = self._preparation_entries.get(key)
-        if entry is None:
+        if entry is None or not isinstance(state, PreparedStillState):
             return
-        entry.result = dict(adjustments)
+        entry.result = state
+        identity = state.source_identity
+        if is_raw_extension(identity.path.suffix):
+            probe_key = (identity.path, identity.revision)
+            self._raw_source_probe_cache.pop(probe_key, None)
+            self._raw_source_probe_cache[probe_key] = identity
+            while len(self._raw_source_probe_cache) > 64:
+                self._raw_source_probe_cache.popitem(last=False)
         for intent in tuple(entry.intents):
-            self._dispatch_prepared_intent(intent, dict(adjustments))
+            prepared_intent = replace(intent, source_identity=identity)
+            self._dispatch_prepared_intent(
+                prepared_intent,
+                dict(state.adjustments),
+            )
 
     def _dispatch_prepared_intent(
         self,
@@ -699,6 +795,11 @@ class PlayerViewController(QObject):
             and transaction is not None
             and transaction.generation == int(intent.generation)
         ):
+            if transaction.source_identity != intent.source_identity:
+                transaction = replace(
+                    transaction,
+                    source_identity=intent.source_identity,
+                )
             transaction = transaction.with_viewport(physical_size, dpr)
             self._active_transaction = transaction
             request = DetailRenderRequest.from_transaction(
@@ -1050,6 +1151,9 @@ class PlayerViewController(QObject):
         self.cancel_pending_image_requests()
         root = self._library_root_getter() if self._library_root_getter is not None else None
         self._decode_backend.bind_library(root)
+        probe_cache = getattr(self, "_raw_source_probe_cache", None)
+        if probe_cache is not None:
+            probe_cache.clear()
         clear_residency = getattr(self._image_viewer, "clear_still_residency", None)
         if callable(clear_residency):
             clear_residency()

@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from io import BytesIO
-from pathlib import Path
 import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
 from PySide6.QtGui import QColorSpace, QImage, QImageReader
 
 from iPhoto.core.color_resolver import ColorStats
 from iPhoto.core.raw_processor import is_raw_extension
 from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
     DetailDecodeKey,
     DetailDecodeLevel,
     DetailRenderRequest,
 )
+from iPhoto.gui.detail_profile import emit_detail_event
 from iPhoto.utils.deps import load_pillow
 
 _MAX_DETAIL_SURFACE_BYTES = 192 * 1024 * 1024
@@ -283,7 +285,6 @@ class RawStillDecodeBackend:
     ) -> DecodedSurface:
         prepared = request.with_decode_level()
         target = _target_size(prepared)
-        required = max(target.width(), target.height())
         _check_cancelled(cancellation)
         rawpy = _import_rawpy()
         if rawpy is None:
@@ -291,24 +292,102 @@ class RawStillDecodeBackend:
         source = prepared.source_identity.path
         fallback: str | None = None
         image = QImage()
+        preview_size = QSize()
+        half_size = QSize()
         with rawpy.imread(str(source)) as raw:
             _check_cancelled(cancellation)
+            raw_size = _raw_visible_size(raw, prepared.source_identity)
+            half_size = QSize(
+                max(1, (raw_size.width() + 1) // 2),
+                max(1, (raw_size.height() + 1) // 2),
+            )
+            thumb = None
             try:
                 thumb = raw.extract_thumb()
-                image = _qimage_from_raw_thumb(thumb, rawpy)
             except Exception:  # noqa: BLE001 - embedded previews are optional codec data
-                image = QImage()
-            if image.isNull() or max(image.width(), image.height()) < required:
+                thumb = None
+            preview_size = _raw_thumb_size(thumb, rawpy)
+            if _size_satisfies(preview_size, target):
+                candidate = "embedded"
+            elif _size_satisfies(half_size, target):
+                candidate = "half"
                 fallback = "half"
-                image = _qimage_from_raw_rgb(raw, half_size=True)
-            _check_cancelled(cancellation)
-            if image.isNull() or max(image.width(), image.height()) < required:
+            else:
+                candidate = "full"
                 fallback = "full"
-                image = _qimage_from_raw_rgb(raw, half_size=False)
+            if candidate == "embedded":
+                started = time.perf_counter()
+                image = _qimage_from_raw_thumb(
+                    thumb,
+                    rawpy,
+                    target,
+                    orientation=prepared.source_identity.orientation,
+                )
+                emit_detail_event(
+                    "raw_thumb_decode",
+                    generation=prepared.generation,
+                    asset_id=prepared.asset_id,
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    width=image.width(),
+                    height=image.height(),
+                )
+                _check_cancelled(cancellation)
+                if image.isNull():
+                    candidate = "half" if _size_satisfies(half_size, target) else "full"
+                    fallback = candidate
+            emit_detail_event(
+                "raw_candidate_selected",
+                generation=prepared.generation,
+                asset_id=prepared.asset_id,
+                suffix=source.suffix.lower(),
+                candidate=candidate,
+                decode_level=prepared.decode_level or "full",
+                target_width=target.width(),
+                target_height=target.height(),
+                preview_width=preview_size.width(),
+                preview_height=preview_size.height(),
+                half_width=half_size.width(),
+                half_height=half_size.height(),
+            )
+            if candidate != "embedded":
+                started = time.perf_counter()
+                rgb = _postprocess_raw(raw, half_size=candidate == "half")
+                emit_detail_event(
+                    "raw_postprocess",
+                    generation=prepared.generation,
+                    asset_id=prepared.asset_id,
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    candidate=candidate,
+                )
+                _check_cancelled(cancellation)
+                started = time.perf_counter()
+                image = _qimage_from_array(rgb)
+                emit_detail_event(
+                    "raw_surface_convert",
+                    generation=prepared.generation,
+                    asset_id=prepared.asset_id,
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    candidate=candidate,
+                    phase="array_bridge",
+                    width=image.width(),
+                    height=image.height(),
+                )
+            _check_cancelled(cancellation)
         _check_cancelled(cancellation)
         if image.isNull():
             raise RuntimeError("RAW decoder returned an empty frame")
+        started = time.perf_counter()
         surface = _normalise_surface(image, target)
+        emit_detail_event(
+            "raw_surface_convert",
+            generation=prepared.generation,
+            asset_id=prepared.asset_id,
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+            candidate=candidate,
+            phase="normalise",
+            width=surface.width(),
+            height=surface.height(),
+        )
         _check_cancelled(cancellation)
         return DecodedSurface(
             image=surface,
@@ -363,47 +442,162 @@ def _import_rawpy() -> Any | None:
     return rawpy
 
 
-def _qimage_from_raw_thumb(thumb: Any, rawpy: Any) -> QImage:
+def probe_raw_source_identity(identity: AssetSourceIdentity) -> AssetSourceIdentity:
+    """Resolve missing RAW geometry from LibRaw without filesystem metadata I/O."""
+
+    if identity.width > 0 and identity.height > 0:
+        return identity
+    rawpy = _import_rawpy()
+    if rawpy is None:
+        raise RuntimeError("rawpy is unavailable")
+    try:
+        with rawpy.imread(str(identity.path)) as raw:
+            size = _raw_visible_size(raw, identity)
+            flip = _raw_flip(raw)
+    except Exception as exc:  # noqa: BLE001 - LibRaw exposes format-specific failures
+        raise RuntimeError(f"Unable to probe RAW geometry: {exc}") from exc
+    if size.isEmpty() or not size.isValid():
+        raise RuntimeError("RAW decoder did not report valid source geometry")
+    orientation = identity.orientation
+    if flip in (5, 6):
+        orientation = 8 if flip == 5 else 6
+    elif flip == 3:
+        orientation = 3
+    return AssetSourceIdentity.create(
+        identity.path,
+        size_bytes=identity.size_bytes,
+        source_mtime_ns=identity.source_mtime_ns,
+        index_revision=identity.index_revision,
+        width=size.width(),
+        height=size.height(),
+        orientation=orientation,
+    )
+
+
+def _raw_flip(raw: Any) -> int:
+    try:
+        return int(getattr(raw.sizes, "flip", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def _raw_visible_size(raw: Any, identity: AssetSourceIdentity) -> QSize:
+    sizes = getattr(raw, "sizes", None)
+    width = _positive_int(getattr(sizes, "iwidth", 0))
+    height = _positive_int(getattr(sizes, "iheight", 0))
+    if width <= 0 or height <= 0:
+        width = _positive_int(getattr(sizes, "width", 0))
+        height = _positive_int(getattr(sizes, "height", 0))
+    if width <= 0 or height <= 0:
+        width = max(0, int(identity.width))
+        height = max(0, int(identity.height))
+    if _raw_flip(raw) in (5, 6):
+        width, height = height, width
+    return QSize(width, height)
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _size_satisfies(candidate: QSize, target: QSize) -> bool:
+    if candidate.isEmpty() or not candidate.isValid():
+        return False
+    return (
+        candidate.width() >= target.width()
+        and candidate.height() >= target.height()
+    ) or (
+        candidate.width() >= target.height()
+        and candidate.height() >= target.width()
+    )
+
+
+def _raw_thumb_size(thumb: Any, rawpy: Any) -> QSize:
+    if thumb is None:
+        return QSize()
+    if thumb.format == rawpy.ThumbFormat.JPEG:
+        payload = QByteArray(bytes(thumb.data))
+        buffer = QBuffer(payload)
+        if not buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+            return QSize()
+        try:
+            return QImageReader(buffer, b"JPEG").size()
+        finally:
+            buffer.close()
+    if thumb.format == rawpy.ThumbFormat.BITMAP:
+        shape = getattr(thumb.data, "shape", ())
+        if len(shape) >= 2:
+            return QSize(_positive_int(shape[1]), _positive_int(shape[0]))
+    return QSize()
+
+
+def _qimage_from_raw_thumb(
+    thumb: Any,
+    rawpy: Any,
+    target: QSize,
+    *,
+    orientation: int = 1,
+) -> QImage:
     if thumb is None:
         return QImage()
     if thumb.format == rawpy.ThumbFormat.JPEG:
-        pillow = load_pillow()
-        if pillow is not None:
-            try:
-                with pillow.Image.open(BytesIO(bytes(thumb.data))) as opened:
-                    image = pillow.ImageOps.exif_transpose(opened)
-                    return QImage(pillow.ImageQt(image.convert("RGBA"))).copy()
-            except Exception:  # noqa: BLE001 - fall through to Qt's JPEG decoder
-                return QImage.fromData(bytes(thumb.data), "JPEG")
-        return QImage.fromData(bytes(thumb.data), "JPEG")
+        payload = QByteArray(bytes(thumb.data))
+        buffer = QBuffer(payload)
+        if not buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+            return QImage()
+        try:
+            reader = QImageReader(buffer, b"JPEG")
+            reader.setAutoTransform(True)
+            intrinsic = reader.size()
+            if intrinsic.isValid() and not intrinsic.isEmpty():
+                reader_target = target
+                if orientation in (5, 6, 7, 8):
+                    reader_target = QSize(target.height(), target.width())
+                scaled = intrinsic.scaled(
+                    reader_target,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                )
+                if scaled.width() < intrinsic.width() or scaled.height() < intrinsic.height():
+                    reader.setScaledSize(scaled)
+            return reader.read()
+        finally:
+            buffer.close()
     if thumb.format == rawpy.ThumbFormat.BITMAP:
         return _qimage_from_array(thumb.data)
     return QImage()
 
 
-def _qimage_from_raw_rgb(raw: Any, *, half_size: bool) -> QImage:
+def _postprocess_raw(raw: Any, *, half_size: bool) -> Any:
     try:
-        rgb = raw.postprocess(
+        return raw.postprocess(
             use_camera_wb=True,
             half_size=half_size,
             no_auto_bright=False,
             output_bps=8,
         )
-    except Exception:  # noqa: BLE001 - rawpy surfaces native codec failures variably
-        return QImage()
-    return _qimage_from_array(rgb)
+    except Exception as exc:  # noqa: BLE001 - rawpy surfaces native codec failures variably
+        raise RuntimeError(f"RAW {('half' if half_size else 'full')} decode failed: {exc}") from exc
 
 
 def _qimage_from_array(array: Any) -> QImage:
-    pillow = load_pillow()
-    if pillow is None:
+    shape = getattr(array, "shape", ())
+    strides = getattr(array, "strides", ())
+    if len(shape) != 3 or shape[2] not in (3, 4) or len(strides) < 1:
         return QImage()
     try:
-        image = pillow.Image.fromarray(array)
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        return QImage.fromData(buffer.getvalue(), "PNG")
-    except Exception:  # noqa: BLE001 - numpy/Pillow availability is optional
+        height = int(shape[0])
+        width = int(shape[1])
+        stride = int(strides[0])
+        image_format = (
+            QImage.Format.Format_RGB888
+            if int(shape[2]) == 3
+            else QImage.Format.Format_RGBA8888
+        )
+        return QImage(array.data, width, height, stride, image_format).copy()
+    except (AttributeError, BufferError, TypeError, ValueError):
         return QImage()
 
 
@@ -416,4 +610,5 @@ __all__ = [
     "RawStillDecodeBackend",
     "StillDecodeBackend",
     "StillDecodeBackendRegistry",
+    "probe_raw_source_identity",
 ]

@@ -901,3 +901,90 @@ def test_thumbnail_backfill_candidates_and_ready_update(store: IndexStore) -> No
     rows = store.read_collection_window(query, 0, 10).rows
     assert [row["rel"] for row in rows] == ["stale.jpg"]
     assert rows[0]["thumbnail_state"] == "ready"
+
+
+def test_edit_selected_thumbnail_revision_rejects_late_scan_publish(
+    store: IndexStore,
+) -> None:
+    store.write_rows(
+        [
+            {
+                "rel": "edited.jpg",
+                "id": "edited",
+                "thumbnail_state": "ready",
+                "micro_thumbnail": b"old-micro",
+                "thumb_cache_key": "old-key",
+            }
+        ]
+    )
+
+    store.mark_thumbnail_stale("edited.jpg", desired_key="new-key")
+    visible = store.read_collection_window(CollectionQuery(), 0, 10).rows
+    assert [row["rel"] for row in visible] == ["edited.jpg"]
+    assert visible[0]["thumbnail_state"] == "stale"
+    assert visible[0]["micro_thumbnail"] is None
+
+    store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"late-old-micro",
+        thumb_cache_key="old-key",
+        expected_key="old-key",
+    )
+    store.merge_scan_rows(
+        [
+            {
+                "rel": "edited.jpg",
+                "id": "edited",
+                "thumbnail_state": "ready",
+                "micro_thumbnail": b"late-scan-micro",
+                "thumb_cache_key": "old-key",
+            }
+        ]
+    )
+    stale = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert stale["thumbnail_state"] == "stale"
+    assert stale["thumb_cache_key"] == "new-key"
+    assert stale["micro_thumbnail"] is None
+
+    store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"new-micro",
+        thumb_cache_key="new-key",
+        expected_key="new-key",
+    )
+    ready = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert ready["thumbnail_state"] == "ready"
+    assert ready["micro_thumbnail"] == b"new-micro"
+
+
+def test_missing_key_backfill_cannot_overwrite_edit_selected_revision(
+    store: IndexStore,
+) -> None:
+    store.write_rows(
+        [
+            {
+                "rel": "edited-legacy.jpg",
+                "id": "edited-legacy",
+                "thumbnail_state": "stale",
+            }
+        ]
+    )
+
+    store.mark_thumbnail_stale("edited-legacy.jpg", desired_key="edited-key")
+    store.update_thumbnail_ready(
+        "edited-legacy.jpg",
+        micro_thumbnail=b"late-backfill-micro",
+        thumb_cache_key="late-backfill-key",
+        expected_key="",
+    )
+    store.update_thumbnail_ready(
+        "edited-legacy.jpg",
+        error="late backfill failure",
+        expected_key="",
+    )
+
+    row = store.get_rows_by_rels(["edited-legacy.jpg"])["edited-legacy.jpg"]
+    assert row["thumbnail_state"] == "stale"
+    assert row["thumb_cache_key"] == "edited-key"
+    assert row["micro_thumbnail"] is None
+    assert row["thumb_error"] is None

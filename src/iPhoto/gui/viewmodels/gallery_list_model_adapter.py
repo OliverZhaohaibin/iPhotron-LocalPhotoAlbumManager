@@ -528,9 +528,18 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._store.rebind_asset_query_service(asset_query_service, library_root)
         self._bind_backfill_completion_signal(asset_query_service)
 
-    def invalidate_thumbnail(self, path_str: str) -> None:
+    def invalidate_thumbnail(
+        self,
+        path_str: str,
+        *,
+        desired_key: str | None = None,
+    ) -> None:
         path = Path(path_str)
-        self._thumbnails.invalidate(path, size=self._thumb_size)
+        self._thumbnails.invalidate(
+            path,
+            size=self._thumb_size,
+            desired_key=desired_key,
+        )
         self._duration_cache.pop(path, None)
         row = self._store.row_for_path(path)
         if row is None:

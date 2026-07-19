@@ -474,14 +474,20 @@ class LibraryAssetQueryService:
                     prefer_cached_micro=True,
                 )
                 if thumbnail.thumb_error:
-                    update_thumbnail_ready(library_rel, error=thumbnail.thumb_error)
+                    expected_key = str(row.get("thumb_cache_key") or "")
+                    update_thumbnail_ready(
+                        library_rel,
+                        error=thumbnail.thumb_error,
+                        expected_key=expected_key,
+                    )
                     self.thumbnail_backfill_progress.emit(root, index, total)
                     continue
-                update_thumbnail_ready(
-                    library_rel,
-                    micro_thumbnail=thumbnail.micro_thumbnail,
-                    thumb_cache_key=thumbnail.thumb_cache_key,
-                )
+                ready_kwargs = {
+                    "micro_thumbnail": thumbnail.micro_thumbnail,
+                    "thumb_cache_key": thumbnail.thumb_cache_key,
+                    "expected_key": str(row.get("thumb_cache_key") or ""),
+                }
+                update_thumbnail_ready(library_rel, **ready_kwargs)
                 ready_row = dict(row)
                 ready_row["thumbnail_state"] = "ready"
                 ready_row["micro_thumbnail"] = thumbnail.micro_thumbnail
@@ -582,6 +588,31 @@ class LibraryAssetQueryService:
         if row is None:
             return None
         return bool(row.get("is_favorite"))
+
+    def mark_thumbnail_stale(self, path: Path, desired_key: str) -> None:
+        """Select a new edit-aware artifact revision for *path*."""
+
+        marker = getattr(self._repository(), "mark_thumbnail_stale", None)
+        if callable(marker):
+            marker(self._library_relative_path(path), desired_key=desired_key)
+
+    def publish_thumbnail_ready(
+        self,
+        path: Path,
+        *,
+        cache_key: str,
+        micro_thumbnail: bytes,
+    ) -> None:
+        """Publish an artifact only while its key is still the desired revision."""
+
+        updater = getattr(self._repository(), "update_thumbnail_ready", None)
+        if callable(updater):
+            updater(
+                self._library_relative_path(path),
+                micro_thumbnail=micro_thumbnail,
+                thumb_cache_key=cache_key,
+                expected_key=cache_key,
+            )
 
     def location_cache_writer(self, root: Path) -> _ScopedLocationCacheWriter:
         """Return an object compatible with legacy asset-entry location writes."""

@@ -54,6 +54,13 @@ class LibraryAssetRuntime:
         if callable(setter):
             setter(edit_service)
 
+    def bind_thumbnail_state_service(self, service) -> None:
+        """Bind conditional artifact publication to the active library index."""
+
+        setter = getattr(self._thumbnail_service, "set_thumbnail_state_service", None)
+        if callable(setter):
+            setter(service)
+
     def bind_library_root(self, library_root: Path | None) -> None:
         """Rebuild the asset repository and cache path for *library_root*."""
 

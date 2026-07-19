@@ -1471,27 +1471,44 @@ class AssetRepository:
         micro_thumbnail: bytes | None = None,
         thumb_cache_key: str | None = None,
         error: str | None = None,
+        expected_key: str | None = None,
     ) -> None:
         """Update thumbnail readiness for a single asset row."""
 
         normalized_rel = unicodedata.normalize("NFC", str(rel))
+        expected_key_text = str(expected_key or "").strip()
+        if expected_key is None:
+            key_guard = ""
+            key_guard_params: list[str] = []
+        elif expected_key_text:
+            key_guard = " AND thumb_cache_key = ?"
+            key_guard_params = [expected_key_text]
+        else:
+            key_guard = " AND TRIM(COALESCE(thumb_cache_key, '')) = ''"
+            key_guard_params = []
         if error:
             self._db_manager.execute_in_transaction(
-                """
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'failed',
                     thumb_error = ?,
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{key_guard}
                 """,
-                [str(error), _utc_ms(), normalized_rel],
+                [str(error), _utc_ms(), normalized_rel]
+                + key_guard_params,
             )
         else:
             if not str(thumb_cache_key or "").strip():
                 raise ValueError("ready thumbnails require thumb_cache_key")
+            ready_guard = (
+                f"{key_guard} AND thumbnail_state != 'ready'"
+                if expected_key is not None
+                else ""
+            )
             self._db_manager.execute_in_transaction(
-                """
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'ready',
                     micro_thumbnail = COALESCE(?, micro_thumbnail),
@@ -1499,10 +1516,32 @@ class AssetRepository:
                     thumb_error = NULL,
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{ready_guard}
                 """,
-                [micro_thumbnail, thumb_cache_key, _utc_ms(), normalized_rel],
+                [micro_thumbnail, thumb_cache_key, _utc_ms(), normalized_rel]
+                + key_guard_params,
             )
+        self._clear_collection_anchor_cache()
+
+    def mark_thumbnail_stale(self, rel: str, *, desired_key: str) -> None:
+        """Atomically select *desired_key* and suppress mismatched micro pixels."""
+
+        normalized_rel = unicodedata.normalize("NFC", str(rel))
+        if not str(desired_key).strip():
+            raise ValueError("stale thumbnails require a desired cache key")
+        self._db_manager.execute_in_transaction(
+            """
+            UPDATE assets
+            SET thumbnail_state = 'stale',
+                micro_thumbnail = NULL,
+                thumb_cache_key = ?,
+                thumb_error = NULL,
+                thumb_updated_at = ?,
+                index_revision = COALESCE(index_revision, 0) + 1
+            WHERE rel = ?
+            """,
+            [str(desired_key), _utc_ms(), normalized_rel],
+        )
         self._clear_collection_anchor_cache()
 
     def _cursor_for_collection_offset(

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
@@ -159,8 +159,16 @@ class AssetRepositoryPort(Protocol):
         micro_thumbnail: bytes | None = None,
         thumb_cache_key: str | None = None,
         error: str | None = None,
+        expected_key: str | None = None,
     ) -> None:
-        """Update thumbnail readiness for one row."""
+        """Update readiness when the selected key still matches.
+
+        An empty ``expected_key`` matches rows whose selected key is missing;
+        ``None`` leaves the update unconditional for compatibility callers.
+        """
+
+    def mark_thumbnail_stale(self, rel: str, *, desired_key: str) -> None:
+        """Select a new artifact revision and hide the previous micro layer."""
 
     def create_scan_job(
         self,

@@ -1,6 +1,7 @@
 """Application-level ports for vNext runtime boundaries."""
 
 from .media import (
+    EditCommitResult,
     EditRenderingState,
     EditServicePort,
     EditSidecarPort,
@@ -24,8 +25,8 @@ from .repositories import (
 from .runtime import (
     AssetStateServicePort,
     LocationAssetServicePort,
-    MapInteractionServicePort,
     MapBackendKind,
+    MapInteractionServicePort,
     MapRuntimeCapabilities,
     MapRuntimePort,
     TaskSchedulerPort,
@@ -37,6 +38,7 @@ __all__ = [
     "AssetFavoriteQueryPort",
     "AssetStateServicePort",
     "EditRenderingState",
+    "EditCommitResult",
     "EditServicePort",
     "EditSidecarPort",
     "LibraryStateRepositoryPort",

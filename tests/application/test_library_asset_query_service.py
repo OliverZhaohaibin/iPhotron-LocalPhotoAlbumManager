@@ -487,6 +487,7 @@ def test_thumbnail_backfill_completion_publishes_ready_batch(tmp_path: Path) -> 
             {
                 "micro_thumbnail": b"micro",
                 "thumb_cache_key": "thumb-key",
+                "expected_key": "",
             },
         )
     ]
@@ -524,7 +525,9 @@ def test_thumbnail_backfill_failed_rows_publish_empty_completion_batch(tmp_path:
         fn, args = executor.submitted[0]
         fn(*args)
 
-    assert repo.ready_updates == [("Trip/stale.jpg", {"error": "decode failed"})]
+    assert repo.ready_updates == [
+        ("Trip/stale.jpg", {"error": "decode failed", "expected_key": ""})
+    ]
     assert len(batches) == 1
     assert batches[0].ready_count == 0
     assert batches[0].rows == []

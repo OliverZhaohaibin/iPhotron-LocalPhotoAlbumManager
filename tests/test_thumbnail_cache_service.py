@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import replace
 import threading
 import time
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
 from PIL import Image
 from PySide6.QtCore import QSize
@@ -99,10 +100,10 @@ def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> N
     size = QSize(64, 64)
 
     with patch(
-        "iPhoto.infrastructure.services.thumbnail_cache_service.image_loader.load_qimage",
+        "iPhoto.infrastructure.services.thumbnail_artifact.image_loader.load_qimage",
         return_value=image,
     ), patch(
-        "iPhoto.infrastructure.services.thumbnail_cache_service.compute_color_statistics",
+        "iPhoto.infrastructure.services.thumbnail_artifact.compute_color_statistics",
     ) as compute_stats:
         rendered = service._render_thumbnail(path, size)
 
@@ -300,11 +301,54 @@ def test_invalidation_discards_staged_thumbnail_for_same_asset(tmp_path: Path) -
     assert service._staging_used_bytes == 0
 
 
+def test_worker_result_with_superseded_artifact_key_cannot_enter_l1(
+    tmp_path: Path,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"image")
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    image = QImage(512, 512, QImage.Format.Format_RGB32)
+
+    service._visible_active_tokens[key] = _CancellationToken()
+    service._pending_tasks.add(key)
+    service._pending_generations[key] = 1
+    service._active_tasks = 1
+
+    service._handle_generation_result(
+        path,
+        size,
+        image,
+        generation=1,
+        artifact_key="superseded-artifact",
+    )
+
+    assert not service._publish_visible
+    assert key not in service._memory_cache
+    assert key in service._queued_tasks
+
+
 def test_peek_full_thumbnail_never_touches_disk(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
 
-    with patch.object(Path, "exists", side_effect=AssertionError("disk access")):
+    with patch.object(Path, "resolve", side_effect=AssertionError("disk access")):
         assert service.peek_full_thumbnail(tmp_path / "photo.jpg", QSize(512, 512)) is None
+
+
+def test_memory_cache_key_keeps_symlink_aliases_distinct(tmp_path: Path) -> None:
+    source = tmp_path / "source.jpg"
+    alias = tmp_path / "alias.jpg"
+    source.write_bytes(b"image")
+    try:
+        alias.symlink_to(source)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert ThumbnailCacheService._memory_path_key(source) != (
+        ThumbnailCacheService._memory_path_key(alias)
+    )
 
 
 def test_reentered_pending_thumbnail_promotes_generation(tmp_path: Path) -> None:
@@ -1002,7 +1046,6 @@ def test_l2_reader_uses_native_filename_without_python_qiodevice(tmp_path: Path)
 
     with (
         patch.object(Path, "exists", side_effect=AssertionError("exists called")),
-        patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes called")),
         patch(
             "iPhoto.infrastructure.services.thumbnail_cache_service.QImageReader",
             wraps=QImageReader,

@@ -12,10 +12,36 @@ def test_library_edit_service_round_trips_adjustments(tmp_path: Path) -> None:
 
     assert service.sidecar_exists(asset) is False
 
-    service.write_adjustments(asset, {"Crop_W": 0.8, "Light_Master": 0.2})
+    result = service.write_adjustments(
+        asset,
+        {"Crop_W": 0.8, "Light_Master": 0.2},
+    )
 
     assert service.sidecar_exists(asset) is True
     assert service.read_adjustments(asset)["Crop_W"] == 0.8
+    assert result.thumbnail_cache_key
+
+
+def test_library_edit_service_selects_thumbnail_revision_after_sidecar_write(
+    tmp_path: Path,
+) -> None:
+    asset = tmp_path / "photo.jpg"
+    asset.touch()
+    calls: list[tuple[Path, str]] = []
+
+    class ThumbnailState:
+        def mark_thumbnail_stale(self, path: Path, desired_key: str) -> None:
+            assert path.with_suffix(".ipo").is_file()
+            calls.append((path, desired_key))
+
+    service = LibraryEditService(
+        tmp_path,
+        thumbnail_state_service=ThumbnailState(),
+    )
+
+    result = service.write_adjustments(asset, {"Crop_Rotate90": 1.0})
+
+    assert calls == [(asset.resolve(), result.thumbnail_cache_key)]
 
 
 def test_library_edit_service_describes_video_adjustments(tmp_path: Path) -> None:

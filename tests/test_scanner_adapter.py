@@ -4,8 +4,11 @@ from pathlib import Path
 
 from PIL import Image
 
+from iPhoto.infrastructure.services.thumbnail_cache_keys import (
+    thumbnail_cache_file_for_key,
+)
 from iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
-from iPhoto.io import scanner_adapter
+from iPhoto.io import scanner_adapter, sidecar
 
 
 def test_process_media_paths_falls_back_to_minimal_row_when_metadata_fails(
@@ -173,6 +176,7 @@ def test_scan_album_reextracts_cached_photo_with_unknown_orientation(
     exif = image.getexif()
     exif[0x0112] = 6
     image.save(asset, exif=exif)
+    sidecar.save_adjustments(asset, {"Rotation": 90})
     stat = asset.stat()
     existing = {
         "rotated.jpg": {
@@ -185,8 +189,14 @@ def test_scan_album_reextracts_cached_photo_with_unknown_orientation(
             "image_orientation": 0,
             "thumbnail_state": "ready",
             "thumb_cache_key": "old-key",
+            "micro_thumbnail": b"historic-edited-micro",
         }
     }
+    cache_dir = root / ".iPhoto" / "cache" / "thumbs"
+    historic_cache = cache_dir / "old-key.jpg"
+    historic_cache.parent.mkdir(parents=True)
+    Image.new("RGB", (512, 512), "green").save(historic_cache, "JPEG")
+    before_cache = historic_cache.read_bytes()
     normalized_paths: list[Path] = []
     real_normalize = scanner_adapter._metadata_provider.normalize_metadata
 
@@ -223,6 +233,9 @@ def test_scan_album_reextracts_cached_photo_with_unknown_orientation(
 
     assert normalized_paths == [asset]
     assert rows[0]["image_orientation"] == 6
+    assert rows[0]["thumb_cache_key"] == "old-key"
+    assert rows[0]["micro_thumbnail"] == b"historic-edited-micro"
+    assert historic_cache.read_bytes() == before_cache
 
 
 def test_process_media_paths_keeps_row_when_thumbnail_generation_fails(
@@ -315,13 +328,13 @@ def test_process_media_paths_sets_ready_thumbnail_before_visible_commit(
     assert len(rows) == 1
     row = rows[0]
     assert row["thumbnail_state"] == "ready"
-    assert row["micro_thumbnail"] == b"thumb-bytes"
+    assert row["micro_thumbnail"].startswith(b"\xff\xd8\xff")
     assert row["thumb_cache_key"]
     cache_file = root / ".iPhoto" / "cache" / "thumbs" / f"{row['thumb_cache_key']}.jpg"
     assert cache_file.exists()
 
 
-def test_process_media_paths_overwrites_existing_full_thumbnail_for_rescanned_file(
+def test_process_media_paths_reuses_immutable_current_revision_artifact(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -368,43 +381,45 @@ def test_process_media_paths_overwrites_existing_full_thumbnail_for_rescanned_fi
 
     assert rows[0]["thumb_cache_key"]
     red, green, blue = Image.open(cache_file).getpixel((0, 0))
-    assert red > 200
-    assert green < 80
+    assert green > 100
+    assert red < 100
     assert blue < 80
 
 
-def test_scan_thumbnail_cache_replace_retries_transient_permission_error(
+def test_thumbnail_cache_key_changes_with_sidecar_content(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     asset = tmp_path / "ready.jpg"
     asset.write_bytes(b"jpeg-data")
     cache_dir = tmp_path / ".iPhoto" / "cache" / "thumbs"
-    calls = {"replace": 0}
-    real_replace = scanner_adapter.os.replace
-
-    def flaky_replace(src, dst):
-        calls["replace"] += 1
-        if calls["replace"] == 1:
-            raise PermissionError("locked briefly")
-        return real_replace(src, dst)
-
-    monkeypatch.setattr(scanner_adapter.os, "replace", flaky_replace)
-    monkeypatch.setattr(scanner_adapter.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         scanner_adapter._thumbnail_generator,
         "generate",
         lambda _path, _size: Image.new("RGB", (32, 32), "red"),
     )
+    original_key = scanner_adapter._write_scan_thumbnail_cache(
+        asset,
+        cache_dir,
+        refresh=True,
+    )
+    asset.with_suffix(".ipo").write_text(
+        "<iPhotoAdjustments version='1.0'><Crop><rotate90>1</rotate90></Crop></iPhotoAdjustments>"
+    )
+    edited_key = scanner_adapter._write_scan_thumbnail_cache(
+        asset,
+        cache_dir,
+        refresh=True,
+    )
 
-    key = scanner_adapter._write_scan_thumbnail_cache(asset, cache_dir, refresh=True)
+    assert original_key
+    assert edited_key
+    assert edited_key != original_key
+    assert thumbnail_cache_file_for_key(cache_dir, original_key).is_file()
+    assert thumbnail_cache_file_for_key(cache_dir, edited_key).is_file()
 
-    assert key
-    assert calls["replace"] == 2
-    assert scanner_adapter.thumbnail_cache_file_for_key(cache_dir, key).is_file()
 
-
-def test_scan_thumbnail_cache_keeps_existing_cache_when_replace_is_locked(
+def test_scan_thumbnail_cache_keeps_existing_current_revision_artifact(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -415,16 +430,10 @@ def test_scan_thumbnail_cache_keeps_existing_cache_when_replace_is_locked(
         asset,
         scanner_adapter.DEFAULT_THUMBNAIL_SIZE,
     )
-    cache_file = scanner_adapter.thumbnail_cache_file_for_key(cache_dir, key)
+    cache_file = thumbnail_cache_file_for_key(cache_dir, key)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (512, 512), "green").save(cache_file, format="JPEG")
 
-    monkeypatch.setattr(
-        scanner_adapter.os,
-        "replace",
-        lambda _src, _dst: (_ for _ in ()).throw(PermissionError("locked by sync")),
-    )
-    monkeypatch.setattr(scanner_adapter.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         scanner_adapter._thumbnail_generator,
         "generate",
@@ -493,7 +502,7 @@ def test_scan_album_refreshes_cached_row_missing_full_thumbnail(
     assert len(generate_calls) == 1
     assert rows[0]["rel"] == "cached.jpg"
     assert rows[0]["thumbnail_state"] == "ready"
-    assert rows[0]["micro_thumbnail"] == b"new-micro"
+    assert rows[0]["micro_thumbnail"].startswith(b"\xff\xd8\xff")
     assert rows[0]["thumb_cache_key"]
     cache_file = root / ".iPhoto" / "cache" / "thumbs" / f"{rows[0]['thumb_cache_key']}.jpg"
     assert cache_file.exists()

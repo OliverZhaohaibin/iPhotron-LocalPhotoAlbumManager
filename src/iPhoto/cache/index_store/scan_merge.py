@@ -28,6 +28,13 @@ _PRESERVED_SCAN_STATE_FIELDS = (
     "live_partner_rel",
     "is_deleted",
 )
+_THUMBNAIL_STATE_FIELDS = (
+    "thumbnail_state",
+    "micro_thumbnail",
+    "thumb_cache_key",
+    "thumb_updated_at",
+    "thumb_error",
+)
 
 
 def merge_scan_rows(
@@ -55,6 +62,7 @@ def merge_scan_row(
             if field in existing_row and (field not in merged or merged.get(field) in (None, "")):
                 merged[field] = existing_row.get(field)
         _preserve_location_state(merged, existing_row)
+        _preserve_newer_thumbnail_revision(merged, existing_row)
 
     identity_unchanged = (
         existing_row is not None and _asset_identity_unchanged(existing_row, merged)
@@ -94,6 +102,27 @@ def merge_scan_row(
         )
 
     return merged
+
+
+def _preserve_newer_thumbnail_revision(
+    merged: dict[str, Any],
+    existing_row: dict[str, Any],
+) -> None:
+    """Reject a scan artifact superseded by an edit-selected desired key."""
+
+    existing_key = str(existing_row.get("thumb_cache_key") or "").strip()
+    incoming_key = str(merged.get("thumb_cache_key") or "").strip()
+    if (
+        existing_row.get("thumbnail_state") != "stale"
+        or not existing_key
+        or existing_key == incoming_key
+    ):
+        return
+    for field in _THUMBNAIL_STATE_FIELDS:
+        if field in existing_row:
+            merged[field] = existing_row[field]
+        else:
+            merged.pop(field, None)
 
 
 def _preserve_location_state(

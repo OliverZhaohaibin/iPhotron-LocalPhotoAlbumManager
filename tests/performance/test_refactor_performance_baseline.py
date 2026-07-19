@@ -252,12 +252,14 @@ def test_ready_thumbnail_collection_queries_use_visible_indexes(tmp_path: Path) 
     ]
 
     for query in queries:
-        sql, params = QueryBuilder.build_collection_query(query, limit=100)
+        sql, _params = QueryBuilder.build_collection_query(query, limit=100)
         plan = _collection_query_plan(repository, query)
 
-        assert "thumbnail_state = ?" in sql
-        assert params[params.index("ready")] == "ready"
-        assert "USING INDEX idx_assets_visible" in plan or "USING INDEX idx_assets_gps" in plan
+        assert "thumbnail_state IN ('ready', 'stale')" in sql
+        assert (
+            "USING INDEX idx_assets_visible" in plan
+            or "USING INDEX idx_assets_gps" in plan
+        )
         assert "USE TEMP B-TREE" not in plan
 
 

@@ -331,12 +331,20 @@ class QueryBuilder:
         params: List[Any] = []
 
         if collection_query.min_thumbnail_state:
-            where_clauses.append("thumbnail_state = ?")
-            params.append(collection_query.min_thumbnail_state)
             if collection_query.min_thumbnail_state == "ready":
+                # An edit commit selects its immutable desired artifact before
+                # the worker publishes it. Keep that asset in its collection
+                # as a placeholder while the row is stale; hiding it would make
+                # edit-then-exit look like media loss on the next launch.
+                where_clauses.append(
+                    "thumbnail_state IN ('ready', 'stale')"
+                )
                 where_clauses.append(
                     "TRIM(COALESCE(thumb_cache_key, '')) != ''"
                 )
+            else:
+                where_clauses.append("thumbnail_state = ?")
+                params.append(collection_query.min_thumbnail_state)
 
         if collection_query.collection_type == CollectionType.ALBUM or album_path:
             album_where, album_params = QueryBuilder.build_album_filter(

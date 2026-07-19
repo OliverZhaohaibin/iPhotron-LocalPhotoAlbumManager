@@ -73,6 +73,25 @@ def test_still_residency_honours_byte_budget_without_evicting_active(mocker) -> 
     assert sum(entry[3] for entry in manager._still_textures.values()) <= manager._still_budget_bytes
 
 
+def test_different_sized_texture_evicts_before_allocating_replacement(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    manager.upload_still_texture("previous", _image(8, 8))
+    manager.upload_still_texture("neighbor", _image(9, 8))
+    manager.upload_still_texture("current", _image(10, 8))
+    resident_keys_at_allocation: list[tuple[object, ...]] = []
+
+    def _allocate(_count: int) -> int:
+        resident_keys_at_allocation.append(tuple(manager._still_textures))
+        return 99
+
+    gl.glGenTextures.side_effect = _allocate
+    manager.upload_still_texture("next", _image(11, 8))
+
+    assert resident_keys_at_allocation == [("neighbor", "current")]
+    gl.glDeleteTextures.assert_called()
+
+
 def test_warming_a_resident_neighbor_refreshes_its_lru_position(mocker) -> None:
     _mock_gl_uploads(mocker)
     manager = TextureManager()

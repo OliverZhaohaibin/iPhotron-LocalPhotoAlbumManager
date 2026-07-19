@@ -208,6 +208,10 @@ class TextureManager:
             emit_detail_event("gpu_evict", generation=0, key=str(reusable_key), bytes=old_size, reused=True)
             allocate_storage = False
         else:
+            self._evict_before_still_allocation(
+                incoming_bytes=byte_count,
+                resident_bytes=resident_bytes,
+            )
             created = gl.glGenTextures(1)
             if isinstance(created, (tuple, list)):
                 created = created[0]
@@ -236,6 +240,39 @@ class TextureManager:
         self._texture_uses_mipmaps = False
         self._trim_still_textures()
         return texture_id, width, height
+
+    def _evict_before_still_allocation(
+        self,
+        *,
+        incoming_bytes: int,
+        resident_bytes: int,
+    ) -> None:
+        """Free non-active storage before allocating a differently-sized texture."""
+
+        while (
+            len(self._still_textures) >= 3
+            or resident_bytes + incoming_bytes > self._still_budget_bytes
+        ):
+            victim = next(
+                (
+                    candidate
+                    for candidate in self._still_textures
+                    if candidate != self._active_still_key
+                ),
+                None,
+            )
+            if victim is None:
+                break
+            texture_id, _width, _height, size = self._still_textures.pop(victim)
+            gl.glDeleteTextures(1, np.array([int(texture_id)], dtype=np.uint32))
+            resident_bytes -= size
+            emit_detail_event(
+                "gpu_evict",
+                generation=0,
+                key=str(victim),
+                bytes=size,
+                before_allocate=True,
+            )
 
     def activate_still_texture(self, key: object) -> bool:
         entry = self._still_textures.pop(key, None)

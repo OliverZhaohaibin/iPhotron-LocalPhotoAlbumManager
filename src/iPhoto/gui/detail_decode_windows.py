@@ -295,6 +295,118 @@ def _convert_rgba(factory: ctypes.c_void_p, source: ctypes.c_void_p) -> ctypes.c
     return converter
 
 
+def _create_color_context(factory: ctypes.c_void_p) -> ctypes.c_void_p:
+    context = ctypes.c_void_p()
+    create = _method(
+        factory,
+        15,
+        _HRESULT,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    _check_hresult(
+        create(factory, ctypes.byref(context)),
+        "IWICImagingFactory.CreateColorContext",
+    )
+    return context
+
+
+def _frame_color_context(
+    factory: ctypes.c_void_p,
+    frame: ctypes.c_void_p,
+) -> ctypes.c_void_p:
+    """Return the frame's first embedded color context, if it has one."""
+
+    actual_count = wintypes.UINT()
+    get_contexts = _method(
+        frame,
+        9,
+        _HRESULT,
+        wintypes.UINT,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.UINT),
+    )
+    result = get_contexts(frame, 0, None, ctypes.byref(actual_count))
+    if _failed(result) or actual_count.value == 0:
+        return ctypes.c_void_p()
+
+    context = _create_color_context(factory)
+    contexts = (ctypes.c_void_p * 1)(context.value)
+    try:
+        _check_hresult(
+            get_contexts(frame, 1, contexts, ctypes.byref(actual_count)),
+            "IWICBitmapFrameDecode.GetColorContexts",
+        )
+        if actual_count.value == 0:
+            _release(context)
+            return ctypes.c_void_p()
+    except Exception:
+        _release(context)
+        raise
+    return context
+
+
+def _create_srgb_color_context(factory: ctypes.c_void_p) -> ctypes.c_void_p:
+    context = _create_color_context(factory)
+    initialize = _method(
+        context,
+        5,
+        _HRESULT,
+        wintypes.UINT,
+    )
+    try:
+        _check_hresult(
+            initialize(context, 1),
+            "IWICColorContext.InitializeFromExifColorSpace(sRGB)",
+        )
+    except Exception:
+        _release(context)
+        raise
+    return context
+
+
+def _transform_to_srgb(
+    factory: ctypes.c_void_p,
+    source: ctypes.c_void_p,
+    source_context: ctypes.c_void_p,
+    target_context: ctypes.c_void_p,
+) -> ctypes.c_void_p:
+    transform = ctypes.c_void_p()
+    create = _method(
+        factory,
+        16,
+        _HRESULT,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    _check_hresult(
+        create(factory, ctypes.byref(transform)),
+        "IWICImagingFactory.CreateColorTransformer",
+    )
+    initialize = _method(
+        transform,
+        8,
+        _HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(_GUID),
+    )
+    try:
+        _check_hresult(
+            initialize(
+                transform,
+                source,
+                source_context,
+                target_context,
+                ctypes.byref(_PIXEL_FORMAT_32BPP_RGBA),
+            ),
+            "IWICColorTransform.Initialize",
+        )
+    except Exception:
+        _release(transform)
+        raise
+    return transform
+
+
 def _copy_rgba(source: ctypes.c_void_p, width: int, height: int) -> QImage:
     stride = width * 4
     size = stride * height
@@ -332,6 +444,7 @@ class WindowsWicStillDecodeBackend:
         _check_cancelled(cancellation)
         apartment = _ComApartment.enter()
         factory = decoder = frame = oriented = scaler = converter = None
+        source_color = target_color = color_transform = None
         try:
             factory = _create_factory(apartment)
             decoder = _create_decoder(factory, prepared.source_identity.path)
@@ -355,11 +468,33 @@ class WindowsWicStillDecodeBackend:
                 scaler = _scale_source(factory, current, scaled_width, scaled_height)
                 current = scaler
             _check_cancelled(cancellation)
-            converter = _convert_rgba(factory, current)
-            image = _copy_rgba(converter, scaled_width, scaled_height)
+            source_color = _frame_color_context(factory, frame)
+            if source_color and source_color.value:
+                target_color = _create_srgb_color_context(factory)
+                color_transform = _transform_to_srgb(
+                    factory,
+                    current,
+                    source_color,
+                    target_color,
+                )
+                rgba_source = color_transform
+            else:
+                converter = _convert_rgba(factory, current)
+                rgba_source = converter
+            image = _copy_rgba(rgba_source, scaled_width, scaled_height)
             _check_cancelled(cancellation)
         finally:
-            for interface in (converter, scaler, oriented, frame, decoder, factory):
+            for interface in (
+                converter,
+                color_transform,
+                target_color,
+                source_color,
+                scaler,
+                oriented,
+                frame,
+                decoder,
+                factory,
+            ):
                 _release(interface)
             apartment.close()
         if image.isNull():

@@ -792,6 +792,10 @@ class RhiImageRenderer:
                     reused=True,
                 )
             else:
+                self._evict_before_still_allocation(
+                    incoming_bytes=byte_count,
+                    resident_bytes=resident_bytes,
+                )
                 texture = self._create_texture(QRhiTexture.Format.RGBA8, size, mipmapped=False)
             ru.uploadTexture(
                 texture,
@@ -889,6 +893,7 @@ class RhiImageRenderer:
             )
             self._pending_curve_lut = None
             self._rebuild_srb()
+
         if self._pending_levels_lut is not None:
             self._levels_lut_texture = self._upload_lut_texture(
                 ru,
@@ -897,6 +902,39 @@ class RhiImageRenderer:
             )
             self._pending_levels_lut = None
             self._rebuild_srb()
+
+    def _evict_before_still_allocation(
+        self,
+        *,
+        incoming_bytes: int,
+        resident_bytes: int,
+    ) -> None:
+        """Destroy non-active QRhi textures before allocating new storage."""
+
+        while (
+            len(self._still_textures) >= 3
+            or resident_bytes + incoming_bytes > self._still_budget_bytes
+        ):
+            victim = next(
+                (
+                    candidate
+                    for candidate in self._still_textures
+                    if candidate != self._active_still_key
+                ),
+                None,
+            )
+            if victim is None:
+                break
+            texture, size = self._still_textures.pop(victim)
+            texture.destroy()
+            resident_bytes -= size
+            emit_detail_event(
+                "gpu_evict",
+                generation=0,
+                key=str(victim),
+                bytes=size,
+                before_allocate=True,
+            )
 
     def _upload_lut_texture(self, ru, current: QRhiTexture | None, lut: np.ndarray) -> QRhiTexture:
         lut_format = _texture_format("RGBA32F", QRhiTexture.Format.RGBA8)

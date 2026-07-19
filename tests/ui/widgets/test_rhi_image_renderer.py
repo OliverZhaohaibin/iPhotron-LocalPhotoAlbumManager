@@ -34,6 +34,14 @@ class _FakeBuffer:
         self.destroyed = True
 
 
+class _FakeTexture:
+    def __init__(self) -> None:
+        self.destroyed = False
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
 class _FakeRhi:
     def __init__(self, buffer: _FakeBuffer | None) -> None:
         self.buffer = buffer
@@ -106,6 +114,27 @@ def test_warming_a_resident_rhi_texture_refreshes_its_lru_position() -> None:
     assert renderer.warm_still_texture("previous", _image()) is False
 
     assert tuple(renderer._still_textures) == ("stale", "current", "previous")
+
+
+def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
+    renderer = RhiImageRenderer()
+    stale = _FakeTexture()
+    previous = _FakeTexture()
+    current = _FakeTexture()
+    renderer._still_textures["stale"] = (stale, 64)
+    renderer._still_textures["previous"] = (previous, 64)
+    renderer._still_textures["current"] = (current, 64)
+    renderer._active_still_key = "current"
+
+    renderer._evict_before_still_allocation(
+        incoming_bytes=64,
+        resident_bytes=192,
+    )
+
+    assert stale.destroyed is True
+    assert previous.destroyed is False
+    assert current.destroyed is False
+    assert tuple(renderer._still_textures) == ("previous", "current")
 
 
 def test_rhi_tracks_mipmap_availability_per_texture_source() -> None:

@@ -55,6 +55,9 @@ class _RendererStub:
         self.active = None
         self._has_texture = False
 
+    def trim_still_residency(self) -> None:
+        self.resident = {self.active} if self.active is not None else set()
+
 
 def _manager(renderer: _RendererStub) -> TextureResourceManager:
     return TextureResourceManager(
@@ -109,3 +112,36 @@ def test_stable_still_key_uploads_once_and_then_activates_resident_texture() -> 
     assert manager.has_resident_texture("still-a") is True
     assert manager.activate_resident_texture("still-a") is True
     assert renderer.still_uploads == ["still-a"]
+
+
+def test_residency_deletion_runs_with_the_render_context_current() -> None:
+    events: list[str] = []
+
+    class _ContextRenderer(_RendererStub):
+        def clear_still_residency(self) -> None:
+            events.append("clear")
+            super().clear_still_residency()
+
+        def trim_still_residency(self) -> None:
+            events.append("trim")
+            super().trim_still_residency()
+
+    renderer = _ContextRenderer()
+    manager = TextureResourceManager(
+        renderer_provider=lambda: renderer,
+        context_provider=lambda: object(),
+        make_current=lambda: events.append("make-current"),
+        done_current=lambda: events.append("done-current"),
+    )
+
+    manager.clear_still_residency()
+    manager.trim_still_residency()
+
+    assert events == [
+        "make-current",
+        "clear",
+        "done-current",
+        "make-current",
+        "trim",
+        "done-current",
+    ]

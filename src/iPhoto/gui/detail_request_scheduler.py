@@ -362,7 +362,6 @@ class DetailStillRequestScheduler(QObject):
         signals = getattr(entry.worker, "signals", None)
         if signals is not None:
             signals.deleteLater()
-        entry.worker.setAutoDelete(True)
 
 
 __all__ = ["DetailDecodeKey", "DetailStillRequestScheduler"]

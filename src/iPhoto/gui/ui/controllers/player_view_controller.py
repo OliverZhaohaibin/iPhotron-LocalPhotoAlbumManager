@@ -910,7 +910,6 @@ class PlayerViewController(QObject):
             self._preparation_entries.pop(key, None)
         self._preparation_entry_by_worker.pop(id(entry.worker), None)
         entry.worker.signals.deleteLater()
-        entry.worker.setAutoDelete(True)
 
     def _on_scheduled_image_ready(
         self,

@@ -115,7 +115,15 @@ class TextureResourceManager:
         renderer = self._renderer_provider()
         clear = getattr(renderer, "clear_still_residency", None)
         if callable(clear):
-            clear()
+            context = self._context_provider()
+            if context is not None:
+                self._make_current()
+                try:
+                    clear()
+                finally:
+                    self._done_current()
+            else:
+                clear()
         self._current_image_source = None
         self._current_image = None
         self._current_cache_key = None
@@ -126,7 +134,15 @@ class TextureResourceManager:
         renderer = self._renderer_provider()
         trim = getattr(renderer, "trim_still_residency", None)
         if callable(trim):
-            trim()
+            context = self._context_provider()
+            if context is not None:
+                self._make_current()
+                try:
+                    trim()
+                finally:
+                    self._done_current()
+            else:
+                trim()
     
     def set_image(
         self,

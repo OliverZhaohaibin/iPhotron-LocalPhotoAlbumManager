@@ -335,7 +335,7 @@ def test_shutdown_cancels_and_releases_queued_workers(tmp_path: Path) -> None:
     scheduler.shutdown(timeout_ms=25)
 
     assert workers[0].cancelled
-    assert workers[0].auto_delete
+    assert not workers[0].auto_delete
     assert scheduler.inflight_count == 0
     assert pool.cleared
     assert pool.wait_timeout == 25
@@ -357,5 +357,5 @@ def test_shutdown_retains_worker_when_pool_wait_times_out(tmp_path: Path) -> Non
 
     pool.complete(worker)
 
-    assert worker.auto_delete
+    assert not worker.auto_delete
     assert scheduler.inflight_count == 0

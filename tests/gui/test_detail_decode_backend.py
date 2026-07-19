@@ -179,6 +179,51 @@ def test_windows_wic_hresult_is_a_fixed_signed_32_bit_value() -> None:
     assert _failed(0x80004005)
 
 
+def test_windows_wic_uses_embedded_profile_for_srgb_output(mocker) -> None:
+    import ctypes
+
+    import iPhoto.gui.detail_decode_windows as wic
+
+    apartment = SimpleNamespace(close=MagicMock())
+    factory = ctypes.c_void_p(1)
+    decoder = ctypes.c_void_p(2)
+    frame = ctypes.c_void_p(3)
+    scaler = ctypes.c_void_p(4)
+    source_color = ctypes.c_void_p(5)
+    target_color = ctypes.c_void_p(6)
+    transform = ctypes.c_void_p(7)
+    image = QImage(800, 600, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    mocker.patch.object(wic._ComApartment, "enter", return_value=apartment)
+    mocker.patch.object(wic, "_create_factory", return_value=factory)
+    mocker.patch.object(wic, "_create_decoder", return_value=decoder)
+    mocker.patch.object(wic, "_first_frame", return_value=frame)
+    mocker.patch.object(wic, "_source_size", return_value=(4000, 3000))
+    mocker.patch.object(wic, "_apply_orientation", return_value=ctypes.c_void_p())
+    mocker.patch.object(wic, "_scale_source", return_value=scaler)
+    mocker.patch.object(wic, "_frame_color_context", return_value=source_color)
+    mocker.patch.object(wic, "_create_srgb_color_context", return_value=target_color)
+    transform_to_srgb = mocker.patch.object(wic, "_transform_to_srgb", return_value=transform)
+    convert_rgba = mocker.patch.object(wic, "_convert_rgba")
+    copy_rgba = mocker.patch.object(wic, "_copy_rgba", return_value=image)
+    mocker.patch.object(wic, "_release")
+
+    surface = wic.WindowsWicStillDecodeBackend().decode(
+        _request(Path("profiled.jpg"), level=1024),
+        _Token(),
+    )
+
+    transform_to_srgb.assert_called_once_with(
+        factory,
+        scaler,
+        source_color,
+        target_color,
+    )
+    convert_rgba.assert_not_called()
+    copy_rgba.assert_called_once_with(transform, 1024, 768)
+    assert surface.image.colorSpace() == image.colorSpace()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows WIC")
 def test_windows_wic_backend_decodes_detached_alpha_surface(tmp_path: Path) -> None:
     from iPhoto.gui.detail_decode_windows import create_windows_wic_backend

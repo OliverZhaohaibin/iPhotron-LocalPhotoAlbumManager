@@ -680,6 +680,10 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
         "iPhoto.gui.main._configure_qt_opengl_defaults",
         lambda _library_root=None: call_order.append(("configure_gl", None)),
     )
+    monkeypatch.setattr(
+        "iPhoto.gui.main._startup_feature_plan",
+        lambda: (("detail",), ()),
+    )
     monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
     monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
     monkeypatch.setattr("iPhoto.gui.main.QColor", _FakeColor)
@@ -702,7 +706,17 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     class _FakeWindow:
         def __init__(self, _context):
-            self.ui = type("FakeUi", (), {"sidebar": type("FakeSidebar", (), {"select_all_photos": lambda *a, **k: None})()})()
+            class _FakeUi:
+                sidebar = type(
+                    "FakeSidebar",
+                    (),
+                    {"select_all_photos": lambda *args, **kwargs: None},
+                )()
+
+                def ensure_feature(self, feature: str) -> None:
+                    call_order.append(("ensure_feature", feature))
+
+            self.ui = _FakeUi()
             self.firstPainted = type("FakeSignal", (), {"connect": lambda *a, **k: None})()
 
         def show(self) -> None:
@@ -730,4 +744,5 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     assert call_order[0][0] == "prefer"
     assert not any(name == "apply_pending" for name, _value in call_order)
+    assert ("ensure_feature", "detail") in call_order
     assert call_order[1][0] == "prepare_maps"

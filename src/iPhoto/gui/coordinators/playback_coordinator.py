@@ -615,6 +615,11 @@ class PlaybackCoordinator(QObject):
         )
         self._zoom_handler.connect_controls()
 
+    @property
+    def zoom_handler(self) -> EditZoomHandler:
+        """Return the zoom handler shared by detail and edit presentation modes."""
+        return self._zoom_handler
+
     def _restore_filmstrip_preference(self) -> None:
         stored = self._settings.get("ui.show_filmstrip", True)
         if isinstance(stored, str):

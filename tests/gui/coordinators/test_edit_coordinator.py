@@ -172,6 +172,7 @@ def test_leave_edit_mode_requests_video_restore_with_probed_duration() -> None:
             duration_sec=4.5,
         )
     )
+    coordinator._zoom_handler.disconnect_controls.assert_called_once_with()
     coordinator._router.show_detail.assert_called_once_with()
 
 
@@ -644,6 +645,7 @@ def test_leave_edit_mode_restores_transition_height_flow() -> None:
     coordinator._active_edit_viewport = Mock(return_value=Mock())
     coordinator._preview_manager = Mock()
     coordinator._zoom_handler = Mock()
+    coordinator._owns_zoom_handler = False
     coordinator._header_controller = Mock()
     coordinator._theme_controller = None
     coordinator._media_session = None
@@ -673,6 +675,7 @@ def test_leave_edit_mode_restores_transition_height_flow() -> None:
         EditCoordinator.leave_edit_mode(coordinator)
 
     video_area.set_edit_mode_active.assert_called_once_with(False)
+    coordinator._zoom_handler.disconnect_controls.assert_not_called()
     coordinator._router.show_detail.assert_called_once_with()
     coordinator._transition_manager.leave_edit_mode.assert_called_once_with(
         animate=True,

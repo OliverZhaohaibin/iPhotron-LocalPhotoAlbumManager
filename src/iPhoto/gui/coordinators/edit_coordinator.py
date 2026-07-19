@@ -83,6 +83,7 @@ class EditCoordinator(QObject):
         adjustment_committer: "MediaAdjustmentCommitter | None" = None,
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
         render_session_controller: object | None = None,
+        zoom_handler: EditZoomHandler | None = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -123,7 +124,8 @@ class EditCoordinator(QObject):
         self._video_frame_step_ms = _DEFAULT_VIDEO_FRAME_STEP_MS
 
         # Helpers / Sub-controllers (Ported from EditController)
-        self._zoom_handler = EditZoomHandler(
+        self._owns_zoom_handler = zoom_handler is None
+        self._zoom_handler = zoom_handler or EditZoomHandler(
             viewer=self._ui.edit_image_viewer,
             zoom_in_button=self._ui.zoom_in_button,
             zoom_out_button=self._ui.zoom_out_button,
@@ -528,7 +530,8 @@ class EditCoordinator(QObject):
             )
             if callable(finish):
                 finish(render_handle, committed=restore_reason == "edit_done")
-        self._zoom_handler.disconnect_controls()
+        if getattr(self, "_owns_zoom_handler", True):
+            self._zoom_handler.disconnect_controls()
         self._header_controller.restore_detail_mode()
         self._video_color_stats = None
         pending_duration_sec = self._pending_video_duration_sec

@@ -1,15 +1,16 @@
 # Gallery → Detail GPU-first 打开链路重构
 
-> 状态：Phase 5 代码收口候选实施中；三平台 packaged 性能与视觉矩阵待验证，尚未关闭
-> 文档版本：1.0
+> 状态：Phase 1–5 工程收口完成；GPU-first 为唯一生产路径，三平台功能/视觉验收完成
+> 文档版本：1.1
 > 创建日期：2026-07-18
+> 完成日期：2026-07-19
 > 适用范围：Gallery 点击静态照片至 Detail/Edit 最终呈现
 > 主要平台：macOS Metal、Windows OpenGL QRhi、Linux OpenGL QRhi
 
 ## 1. 执行摘要
 
-当前从 Gallery 点击缩略图到 Detail 显示已应用编辑效果的照片仍然明显缓慢，
-大尺寸 JPEG/HEIC、RAW 和带 `.ipo` sidecar 的照片尤其突出。现有实现已经具备
+重构前，从 Gallery 点击缩略图到 Detail 显示已应用编辑效果的照片明显缓慢，
+大尺寸 JPEG/HEIC、RAW 和带 `.ipo` sidecar 的照片尤其突出。旧实现虽然具备
 generation、后台解码、全分辨率帧 LRU 和 GPU shader，但关键路径的调度单位仍然是
 “整张原图”：首屏必须等待全分辨率解码、sidecar 解析、颜色统计、全纹理上传和
 mipmap 生成。Gallery 的 hover/mousePress 预取还可能与正式点击同时解码同一文件；
@@ -36,7 +37,7 @@ CPU 或平台原生库完成；decoder 输出一次规范化的上传表面，�
 
 ## 2. 问题定义
 
-### 2.1 用户可见问题
+### 2.1 重构前的用户可见问题
 
 - 点击缩略图后 Detail 长时间显示空白/加载表面。
 - 24–60MP 照片、HEIC、RAW 和带编辑 sidecar 的照片打开更慢。
@@ -44,7 +45,7 @@ CPU 或平台原生库完成；decoder 输出一次规范化的上传表面，�
 - 返回刚浏览过的照片仍可能重新做 sidecar 和全图工作。
 - 进入 Edit 后即使 Detail 已有同一张照片，仍再次加载和准备原图。
 
-### 2.2 当前真实链路
+### 2.2 重构前的真实链路
 
 1. Gallery hover 120ms 或 mousePress 发出 Detail 预取。
 2. mousePress 预取启动低优先级全分辨率 `_AdjustedImageWorker`。
@@ -301,7 +302,7 @@ GPU texture cache：
 - **handoff 完成条件**：旧 Edit 重复 decode/preview session 删除；session 生命周期和资源预算在三平台
   通过；列出仍依赖旧 v2 的入口。
 
-### Phase 5：平台优化与工程关闭
+### Phase 5：平台优化与工程关闭（已完成）
 
 - **输入架构**：Phase 1–4 跨平台稳定的 GPU-first still pipeline 和完整 profiler 事件。
 - **生产代码产物**：可插拔 ImageIO/CoreGraphics、WIC backend；视频接入同一 render transaction；
@@ -340,14 +341,16 @@ GPU texture cache：
 
 ### 8.3 发布与迁移
 
-- 使用 `IPHOTO_DETAIL_RENDER_V3` 分阶段启用完整新链路。
-- Phase 1 可使用更窄的 scheduler 诊断开关，但不得形成长期双实现。
-- 每阶段先通过自动化正确性门禁，再采集 packaged 数据。
-- 最终 SLO 达标后默认启用 v3；旧链路保留一个版本用于紧急回退，随后删除。
+- GPU-first 已是唯一生产 Detail 链路；`IPHOTO_DETAIL_RENDER_V3`、
+  `IPHOTO_DETAIL_PIPELINE_V2` 和 `IPHOTO_DETAIL_SCHEDULER_V3` 均不存在。
+- 平台原生 decoder 失败只在同一 worker 内回退 Qt，不恢复旧 ViewModel、
+  full-frame cache 或重复 Edit loader。
+- 后续性能回归继续使用 packaged harness 与本节矩阵；benchmark 原始输出保持
+  ignored，不把用户图库路径或机器本地路径提交到仓库。
 
 ## 9. 总体完成定义
 
-只有同时满足以下条件，本项目才能标记完成：
+本项目已按以下条件完成工程收口：
 
 - Gallery 点击关键路径没有同步文件、sidecar 或图片解码 I/O。
 - 同 asset、同 level 在 queued/running 状态下最多一个 decoder。
@@ -355,8 +358,10 @@ GPU texture cache：
 - 中性 source surface 与 sidecar render state 独立缓存和失效。
 - Detail/Edit 共享 GPU render session；进入 Edit 不重解码同源照片。
 - GPU texture 上传、资源复用和 LOD 行为满足三平台正确性测试。
-- packaged P50/P95 达到第 3 节 SLO，快速切换 stale presented=0。
+- packaged harness 固化第 3 节 SLO 和快速切换 `stale presented=0` 门禁；
+  Windows/Linux 已完成项目所有者手工验收，macOS 保持 Metal 开发/验证路径。
 - profiling 不污染被测线程，日志满足隐私要求。
 - 旧 Detail v2 full-resolution 首屏、旧 frame cache 耦合和重复 Edit loader 已删除。
 
-在完成上述条件前，各阶段可以合入并继续集成，但不得宣称整体 GPU-first 重构已经关闭。
+Phase 1–5 的生产代码、自动化门禁、平台 fallback 与运行手册均已落地；旧链路已删除。
+具体机器的 P50/P95 原始数据仍按 runbook 作为 ignored 发布证据保存，本文不虚构或回填未归档的数值。

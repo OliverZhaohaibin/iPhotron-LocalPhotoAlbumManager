@@ -382,26 +382,40 @@ class _SimpleQtBot:
                 delete_later()
 
 
-@pytest.fixture()
-def qapp():
+_TEST_QAPPLICATION = None
+
+
+def _test_qapplication():
+    """Return one strongly-held QApplication for the entire pytest process.
+
+    PySide may destroy the C++ application when the last Python wrapper is
+    collected.  GUI modules retain QIcon/QPixmap objects across function-scoped
+    fixtures, so recreating QApplication later in the same process can leave
+    those native resources attached to a dead application and crash in QtSvg.
+    """
+
+    global _TEST_QAPPLICATION
+
     from PySide6.QtWidgets import QApplication
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    _TEST_QAPPLICATION = app
+    return app
+
+
+@pytest.fixture()
+def qapp():
+    app = _test_qapplication()
     yield app
     app.processEvents()
 
 
 @pytest.fixture()
 def qtbot():
-    from PySide6.QtWidgets import QApplication
-
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
+    app = _test_qapplication()
     helper = _SimpleQtBot()
     try:
         yield helper

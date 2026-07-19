@@ -6,8 +6,9 @@ import os
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict
 
 from ..core.adjustment_mapping import (
     BW_DEFAULTS,
@@ -22,42 +23,44 @@ from ..core.adjustment_mapping import (
     video_has_visible_edits,
     video_requires_adjusted_preview,
 )
-from ..core.color_resolver import COLOR_KEYS, ColorStats
+from ..core.color_resolver import ColorStats
+from ..core.color_resolver import COLOR_KEYS
 from ..core.light_resolver import LIGHT_KEYS
 from ..core.wb_resolver import WB_DEFAULTS, WB_KEYS
+
 from .sidecar_sections import (
-    _CROP_CHILD_X,
+    _find_child_case_insensitive,
+    _remove_children_case_insensitive,
+    _read_crop_from_node,
+    _read_crop_from_legacy_attributes,
+    _write_crop_node,
+    _read_curve_from_node,
+    _write_curve_node,
+    _read_levels_from_node,
+    _write_levels_node,
+    _read_selective_color_from_node,
+    _write_selective_color_node,
+    _read_definition_from_node,
+    _write_definition_node,
+    _read_denoise_from_node,
+    _write_denoise_node,
+    _read_sharpen_from_node,
+    _write_sharpen_node,
+    _read_vignette_from_node,
+    _write_vignette_node,
+    _read_video_from_node,
+    _write_video_node,
     _CROP_NODE,
-    _CURVE_NODE,
-    _DEFINITION_NODE,
-    _DENOISE_NODE,
+    _CROP_CHILD_X,
     _LEGACY_CROP_NODE,
+    _CURVE_NODE,
     _LEVELS_NODE,
     _SELECTIVE_COLOR_NODE,
+    _DEFINITION_NODE,
+    _DENOISE_NODE,
     _SHARPEN_NODE,
-    _VIDEO_NODE,
     _VIGNETTE_NODE,
-    _find_child_case_insensitive,
-    _read_crop_from_legacy_attributes,
-    _read_crop_from_node,
-    _read_curve_from_node,
-    _read_definition_from_node,
-    _read_denoise_from_node,
-    _read_levels_from_node,
-    _read_selective_color_from_node,
-    _read_sharpen_from_node,
-    _read_video_from_node,
-    _read_vignette_from_node,
-    _remove_children_case_insensitive,
-    _write_crop_node,
-    _write_curve_node,
-    _write_definition_node,
-    _write_denoise_node,
-    _write_levels_node,
-    _write_selective_color_node,
-    _write_sharpen_node,
-    _write_video_node,
-    _write_vignette_node,
+    _VIDEO_NODE,
 )
 
 _SIDE_CAR_ROOT = "iPhotoAdjustments"
@@ -341,7 +344,10 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
         tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
         tmp_path.replace(sidecar_path)
     finally:
-        tmp_path.unlink(missing_ok=True)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return sidecar_path
 
 

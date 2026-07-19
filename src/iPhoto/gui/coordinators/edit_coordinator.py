@@ -1,7 +1,6 @@
 """Coordinator for the Edit View workflow."""
 
 from __future__ import annotations
-
 import logging
 import math
 from pathlib import Path
@@ -10,9 +9,9 @@ from typing import TYPE_CHECKING, Callable, Optional
 from PySide6.QtCore import QObject, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QAbstractSlider,
     QAbstractSpinBox,
-    QApplication,
     QComboBox,
     QLineEdit,
     QPlainTextEdit,
@@ -21,6 +20,27 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.application.ports import EditServicePort
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.events.bus import EventBus
+from iPhoto.gui.ui.models.edit_session import EditSession
+from iPhoto.gui.ui.controllers.edit_history_manager import EditHistoryManager
+from iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
+from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
+from iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreenManager
+from iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
+from iPhoto.gui.ui.tasks.video_trim_thumbnail_worker import VideoTrimThumbnailWorker
+from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import (
+    VideoSidebarPreviewResult,
+    VideoSidebarPreviewWorker,
+)
+from iPhoto.gui.ui.palette import viewer_surface_color
+from iPhoto.gui.ui.media import MediaRestoreRequest
+from iPhoto.io.metadata import read_video_meta
+from iPhoto.media_classifier import VIDEO_EXTENSIONS
+from iPhoto.utils.logging import get_logger
+from iPhoto.utils.ffmpeg import probe_video_rotation
 from iPhoto.core.adjustment_mapping import (
     VIDEO_TRIM_IN_KEY,
     VIDEO_TRIM_OUT_KEY,
@@ -30,33 +50,12 @@ from iPhoto.core.adjustment_mapping import (
 from iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 from iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from iPhoto.core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
-from iPhoto.events.bus import EventBus
-from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreenManager
-from iPhoto.gui.ui.controllers.edit_history_manager import EditHistoryManager
-from iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
-from iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
-from iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
-from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
-from iPhoto.gui.ui.controllers.header_controller import HeaderController
-from iPhoto.gui.ui.media import MediaRestoreRequest
-from iPhoto.gui.ui.models.edit_session import EditSession
-from iPhoto.gui.ui.palette import viewer_surface_color
-from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import (
-    VideoSidebarPreviewResult,
-    VideoSidebarPreviewWorker,
-)
-from iPhoto.gui.ui.tasks.video_trim_thumbnail_worker import VideoTrimThumbnailWorker
-from iPhoto.io.metadata import read_video_meta
-from iPhoto.media_classifier import VIDEO_EXTENSIONS
-from iPhoto.utils.ffmpeg import probe_video_rotation
-from iPhoto.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-    from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
-    from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
     from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
+    from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 
 _LOGGER = logging.getLogger(__name__)
 _APP_LOGGER = get_logger().getChild("video_trim")
@@ -615,14 +614,10 @@ class EditCoordinator(QObject):
                     source,
                     self._session.values(),
                 )
-                desired_key = getattr(commit_result, "thumbnail_cache_key", None)
-                if isinstance(desired_key, str) and desired_key:
-                    self._asset_vm.invalidate_thumbnail(
-                        str(source),
-                        desired_key=desired_key,
-                    )
-                else:
-                    self._asset_vm.invalidate_thumbnail(str(source))
+                self._asset_vm.invalidate_thumbnail(
+                    str(source),
+                    desired_revision=commit_result.thumbnail_revision,
+                )
             finally:
                 if navigation:
                     navigation.resume_library_watcher()

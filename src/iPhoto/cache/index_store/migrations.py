@@ -24,7 +24,7 @@ logger = get_logger()
 # Version 2 adds cached video presentation metadata used by Gallery/Detail reads.
 # Opening an already migrated database must be O(1); in particular it must not
 # revisit every asset row on each desktop launch.
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
 
@@ -66,6 +66,7 @@ _ASSET_COLUMN_MIGRATIONS = {
     "thumb_cache_key": "ALTER TABLE assets ADD COLUMN thumb_cache_key TEXT",
     "thumb_updated_at": "ALTER TABLE assets ADD COLUMN thumb_updated_at INTEGER DEFAULT 0",
     "thumb_error": "ALTER TABLE assets ADD COLUMN thumb_error TEXT",
+    "thumb_revision": "ALTER TABLE assets ADD COLUMN thumb_revision TEXT",
     "scan_job_id": "ALTER TABLE assets ADD COLUMN scan_job_id TEXT",
     "index_revision": "ALTER TABLE assets ADD COLUMN index_revision INTEGER DEFAULT 0",
     "index_updated_at_ms": "ALTER TABLE assets ADD COLUMN index_updated_at_ms INTEGER DEFAULT 0",
@@ -495,6 +496,7 @@ class SchemaMigrator:
                 thumb_cache_key TEXT,
                 thumb_updated_at INTEGER DEFAULT 0,
                 thumb_error TEXT,
+                thumb_revision TEXT,
                 scan_job_id TEXT,
                 index_revision INTEGER DEFAULT 0,
                 index_updated_at_ms INTEGER DEFAULT 0,
@@ -574,6 +576,15 @@ class SchemaMigrator:
         for column_name in ("source_mtime_ns", "image_orientation"):
             if column_name not in existing_columns:
                 conn.execute(_ASSET_COLUMN_MIGRATIONS[column_name])
+
+    @staticmethod
+    def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+        """Add the desired thumbnail render revision without invalidating cache keys."""
+
+        existing_columns = {str(row[1]) for row in _table_info(conn, "assets")}
+        if "thumb_revision" not in existing_columns:
+            conn.execute(_ASSET_COLUMN_MIGRATIONS["thumb_revision"])
+        SchemaMigrator._create_indexes(conn)
 
     @staticmethod
     def prepare_database(database_path: Path) -> tuple[int, tuple[str, ...]]:
@@ -887,8 +898,14 @@ class SchemaMigrator:
             visible_index_needs_refresh = (
                 index_name.startswith("idx_assets_visible_")
                 or index_name == "idx_assets_gps"
-            ) and "thumbnail_state IN ('ready', 'stale')" not in index_sql
-            if columns and ("rel" not in columns or visible_index_needs_refresh):
+            ) and (
+                "thumbnail_state IN ('ready', 'stale')" not in index_sql
+                or "TRIM(COALESCE(thumb_cache_key, '')) != ''" not in index_sql
+            )
+            if columns and (
+                "rel" not in columns
+                or visible_index_needs_refresh
+            ):
                 conn.execute(f"DROP INDEX {index_name}")
 
         # List of all indexes to create
@@ -927,19 +944,6 @@ class SchemaMigrator:
             ("CREATE INDEX IF NOT EXISTS idx_parent_album_path "
              "ON assets (parent_album_path)"),
 
-            # Create broad collection indexes first.  On a fresh database their
-            # leading columns otherwise tie the partial visible indexes below,
-            # and SQLite may select the broader index for Gallery hot queries.
-            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_global "
-             "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_album "
-             "ON assets (parent_album_path, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_media "
-             "ON assets (media_type, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_favorite "
-             "ON assets (is_favorite, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_gps "
-             "ON assets (has_gps, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_visible_global "
              "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
              "WHERE thumbnail_state IN ('ready', 'stale') "
@@ -964,6 +968,16 @@ class SchemaMigrator:
              "sort_ts DESC, id DESC, rel DESC) "
              "WHERE thumbnail_state IN ('ready', 'stale') "
              "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_global "
+             "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_album "
+             "ON assets (parent_album_path, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_media "
+             "ON assets (media_type, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_favorite "
+             "ON assets (is_favorite, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_collection_gps "
+             "ON assets (has_gps, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
             "CREATE INDEX IF NOT EXISTS idx_assets_rel_lookup ON assets (rel)",
             "CREATE INDEX IF NOT EXISTS idx_assets_id_lookup ON assets (id)",
             "CREATE INDEX IF NOT EXISTS idx_assets_revision ON assets (index_revision)",

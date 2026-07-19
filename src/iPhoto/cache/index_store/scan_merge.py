@@ -34,6 +34,7 @@ _THUMBNAIL_STATE_FIELDS = (
     "thumb_cache_key",
     "thumb_updated_at",
     "thumb_error",
+    "thumb_revision",
 )
 
 
@@ -108,14 +109,14 @@ def _preserve_newer_thumbnail_revision(
     merged: dict[str, Any],
     existing_row: dict[str, Any],
 ) -> None:
-    """Reject a scan artifact superseded by an edit-selected desired key."""
+    """Reject scan thumbnail state superseded by a newer edit revision."""
 
-    existing_key = str(existing_row.get("thumb_cache_key") or "").strip()
-    incoming_key = str(merged.get("thumb_cache_key") or "").strip()
+    existing_revision = str(existing_row.get("thumb_revision") or "").strip()
+    incoming_revision = str(merged.get("thumb_revision") or "").strip()
     if (
         existing_row.get("thumbnail_state") != "stale"
-        or not existing_key
-        or existing_key == incoming_key
+        or not existing_revision
+        or existing_revision == incoming_revision
     ):
         return
     for field in _THUMBNAIL_STATE_FIELDS:

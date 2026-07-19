@@ -450,6 +450,31 @@ def test_tile_snapshot_is_micro_first_and_memory_only(adapter, mock_store, mock_
     mock_thumb_service.request_many.assert_not_called()
 
 
+def test_stale_tile_never_exposes_old_full_or_micro_thumbnail(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        micro_thumbnail=micro,
+        thumbnail_state="stale",
+        thumb_revision="revision-2",
+    )
+    mock_thumb_service.peek_full_thumbnail.return_value = object()
+
+    index = adapter.index(0, 0)
+    snapshot = adapter.data(index, Roles.TILE_SNAPSHOT)
+
+    assert snapshot.loading_state == "placeholder"
+    assert snapshot.micro_image is None
+    assert snapshot.full_pixmap is None
+    assert adapter.data(index, Qt.DecorationRole) is None
+    assert adapter.data(index, Roles.MICRO_THUMBNAIL) is None
+    mock_thumb_service.peek_full_thumbnail.assert_not_called()
+
+
 def test_tile_snapshot_miss_does_not_synchronously_load(adapter, mock_store):
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = None
@@ -859,9 +884,12 @@ def test_cached_thumb_cache_key_becomes_prefetch_candidate(
 
     snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
     candidates = snapshot.candidates
-    assert len(candidates) == 1
-    assert candidates[0].path == Path("/library/prefetch.jpg")
-    assert candidates[0].l2_cache_key == "l2-prefetch"
+    prefetch_candidate = next(
+        candidate
+        for candidate in candidates
+        if candidate.path == Path("/library/prefetch.jpg")
+    )
+    assert prefetch_candidate.l2_cache_key == "l2-prefetch"
     assert candidates[0].kind == "guard"
 
 
@@ -1324,6 +1352,38 @@ def test_invalidate_thumbnail_queues_refresh_and_emits_tile_roles(
     assert Qt.DecorationRole in emitted_roles
     assert Roles.TILE_SNAPSHOT in emitted_roles
     assert Roles.SIZE in emitted_roles
+
+
+def test_revisioned_invalidation_queues_stale_target_and_hides_local_micro(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    path = Path("/photos/edited.jpg")
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=path,
+        micro_thumbnail=micro,
+        thumbnail_state="ready",
+    )
+
+    adapter.invalidate_thumbnail(str(path), desired_revision="revision-2")
+
+    mock_thumb_service.invalidate.assert_called_once_with(
+        path,
+        size=adapter._thumb_size,
+        desired_revision="revision-2",
+    )
+    mock_thumb_service.get_thumbnail.assert_called_once_with(
+        path,
+        adapter._thumb_size,
+        priority="high",
+        thumbnail_state="stale",
+        thumb_revision="revision-2",
+    )
+    assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is None
 
 
 def test_size_role_returns_trimmed_duration_for_video(adapter, mock_store):

@@ -41,7 +41,7 @@ from iPhoto.cache.index_store.repository import AssetRepository
 from iPhoto.domain.models.query import CollectionQuery
 
 
-def test_schema_v3_migrates_source_revision_columns() -> None:
+def test_schema_migrates_source_and_thumbnail_revision_columns() -> None:
     connection = sqlite3.connect(":memory:")
     connection.execute("CREATE TABLE assets (rel TEXT PRIMARY KEY)")
     connection.execute("INSERT INTO assets(rel) VALUES ('legacy.jpg')")
@@ -53,12 +53,17 @@ def test_schema_v3_migrates_source_revision_columns() -> None:
     columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(assets)")
     }
-    assert {"source_mtime_ns", "image_orientation"}.issubset(columns)
+    assert {"source_mtime_ns", "image_orientation", "thumb_revision"}.issubset(
+        columns
+    )
     orientation = connection.execute(
         "SELECT image_orientation FROM assets WHERE rel = 'legacy.jpg'"
     ).fetchone()[0]
     assert orientation == 0
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert (
+        connection.execute("PRAGMA user_version").fetchone()[0]
+        == CURRENT_SCHEMA_VERSION
+    )
     connection.close()
 
 

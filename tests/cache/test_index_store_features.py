@@ -875,7 +875,14 @@ def test_thumbnail_hint_window_omits_micro_and_does_not_count(store: IndexStore)
         window = store.read_thumbnail_hint_window(CollectionQuery(), 0, 10)
 
     assert window.total_count == -1
-    assert window.rows == [{"rel": "ready.jpg", "thumb_cache_key": "thumb-ready"}]
+    assert window.rows == [
+        {
+            "rel": "ready.jpg",
+            "thumb_cache_key": "thumb-ready",
+            "thumbnail_state": "ready",
+            "thumb_revision": None,
+        }
+    ]
 
 
 def test_thumbnail_backfill_candidates_and_ready_update(store: IndexStore) -> None:
@@ -903,7 +910,7 @@ def test_thumbnail_backfill_candidates_and_ready_update(store: IndexStore) -> No
     assert rows[0]["thumbnail_state"] == "ready"
 
 
-def test_edit_selected_thumbnail_revision_rejects_late_scan_publish(
+def test_thumbnail_revision_cas_rejects_old_publish_and_noop_updates(
     store: IndexStore,
 ) -> None:
     store.write_rows(
@@ -913,78 +920,92 @@ def test_edit_selected_thumbnail_revision_rejects_late_scan_publish(
                 "id": "edited",
                 "thumbnail_state": "ready",
                 "micro_thumbnail": b"old-micro",
-                "thumb_cache_key": "old-key",
+                "thumb_cache_key": "stable-key",
+                "thumb_revision": "revision-1",
+                "index_revision": 4,
             }
         ]
     )
 
-    store.mark_thumbnail_stale("edited.jpg", desired_key="new-key")
-    visible = store.read_collection_window(CollectionQuery(), 0, 10).rows
-    assert [row["rel"] for row in visible] == ["edited.jpg"]
-    assert visible[0]["thumbnail_state"] == "stale"
-    assert visible[0]["micro_thumbnail"] is None
-
-    store.update_thumbnail_ready(
-        "edited.jpg",
-        micro_thumbnail=b"late-old-micro",
-        thumb_cache_key="old-key",
-        expected_key="old-key",
+    assert store.mark_thumbnail_stale(
+        "edited.jpg", desired_revision="revision-2"
     )
-    store.merge_scan_rows(
+    stale = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert stale["thumbnail_state"] == "stale"
+    assert stale["micro_thumbnail"] is None
+    stale_index_revision = stale["index_revision"]
+
+    assert not store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"old-result",
+        thumb_cache_key="stable-key",
+        expected_revision="revision-1",
+    )
+    rejected = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert rejected["thumbnail_state"] == "stale"
+    assert rejected["index_revision"] == stale_index_revision
+
+    assert store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"new-result",
+        thumb_cache_key="stable-key",
+        expected_revision="revision-2",
+    )
+    ready = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert ready["thumbnail_state"] == "ready"
+    assert ready["micro_thumbnail"] == b"new-result"
+    ready_index_revision = ready["index_revision"]
+
+    assert not store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"new-result",
+        thumb_cache_key="stable-key",
+        expected_revision="revision-2",
+    )
+    unchanged_ready = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert unchanged_ready["index_revision"] == ready_index_revision
+
+    assert store.mark_thumbnail_stale(
+        "edited.jpg", desired_revision="revision-2"
+    )
+    stale_again = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert not store.mark_thumbnail_stale(
+        "edited.jpg", desired_revision="revision-2"
+    )
+    unchanged_stale = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert unchanged_stale["index_revision"] == stale_again["index_revision"]
+
+
+def test_scan_merge_preserves_newer_stale_thumbnail_revision(store: IndexStore) -> None:
+    store.write_rows(
+        [
+            {
+                "rel": "edited.jpg",
+                "id": "edited",
+                "thumbnail_state": "stale",
+                "micro_thumbnail": None,
+                "thumb_cache_key": "stable-key",
+                "thumb_revision": "revision-2",
+            }
+        ]
+    )
+
+    merged = store.merge_scan_rows(
         [
             {
                 "rel": "edited.jpg",
                 "id": "edited",
                 "thumbnail_state": "ready",
-                "micro_thumbnail": b"late-scan-micro",
-                "thumb_cache_key": "old-key",
-            }
-        ]
-    )
-    stale = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
-    assert stale["thumbnail_state"] == "stale"
-    assert stale["thumb_cache_key"] == "new-key"
-    assert stale["micro_thumbnail"] is None
-
-    store.update_thumbnail_ready(
-        "edited.jpg",
-        micro_thumbnail=b"new-micro",
-        thumb_cache_key="new-key",
-        expected_key="new-key",
-    )
-    ready = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
-    assert ready["thumbnail_state"] == "ready"
-    assert ready["micro_thumbnail"] == b"new-micro"
-
-
-def test_missing_key_backfill_cannot_overwrite_edit_selected_revision(
-    store: IndexStore,
-) -> None:
-    store.write_rows(
-        [
-            {
-                "rel": "edited-legacy.jpg",
-                "id": "edited-legacy",
-                "thumbnail_state": "stale",
+                "micro_thumbnail": b"old-result",
+                "thumb_cache_key": "stable-key",
+                "thumb_revision": "revision-1",
             }
         ]
     )
 
-    store.mark_thumbnail_stale("edited-legacy.jpg", desired_key="edited-key")
-    store.update_thumbnail_ready(
-        "edited-legacy.jpg",
-        micro_thumbnail=b"late-backfill-micro",
-        thumb_cache_key="late-backfill-key",
-        expected_key="",
-    )
-    store.update_thumbnail_ready(
-        "edited-legacy.jpg",
-        error="late backfill failure",
-        expected_key="",
-    )
-
-    row = store.get_rows_by_rels(["edited-legacy.jpg"])["edited-legacy.jpg"]
-    assert row["thumbnail_state"] == "stale"
-    assert row["thumb_cache_key"] == "edited-key"
-    assert row["micro_thumbnail"] is None
-    assert row["thumb_error"] is None
+    assert merged[0]["thumbnail_state"] == "stale"
+    assert merged[0]["micro_thumbnail"] is None
+    assert merged[0]["thumb_revision"] == "revision-2"
+    persisted = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert persisted["thumbnail_state"] == "stale"
+    assert persisted["thumb_revision"] == "revision-2"

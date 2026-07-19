@@ -1,29 +1,29 @@
 """Adapter to bridge legacy scanner calls to the new infrastructure."""
 
-import logging
-import mimetypes
+from pathlib import Path
+from typing import Iterator, Dict, Any, List, Optional, Callable, Iterable
+from io import BytesIO
 import os
 import queue
 import threading
-import time
 import unicodedata
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+import logging
+import mimetypes
+import time
+from PIL import Image
 
-from ..config import (
-    ALL_WORK_DIR_NAMES,
-    DEFAULT_EXCLUDE,
-    DEFAULT_INCLUDE,
-    EXPORT_DIR_NAME,
-)
 from ..core.raw_processor import is_raw_extension
 from ..domain.models.query import ThumbnailReadyResult, ThumbnailState
 from ..infrastructure.services.metadata_provider import ExifToolMetadataProvider
-from ..infrastructure.services.thumbnail_artifact import ensure_thumbnail_artifact
+from ..infrastructure.services.thumbnail_artifact import (
+    publish_thumbnail_artifact,
+    thumbnail_revision,
+)
 from ..infrastructure.services.thumbnail_cache_keys import (
     DEFAULT_THUMBNAIL_SIZE,
     thumbnail_cache_file,
+    thumbnail_cache_file_for_key,
     thumbnail_cache_key,
 )
 from ..infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
@@ -31,6 +31,12 @@ from ..people import initial_face_status
 from ..utils.hashutils import compute_file_id
 from ..utils.media_access import media_access
 from ..utils.pathutils import ensure_work_dir, should_include
+from ..config import (
+    ALL_WORK_DIR_NAMES,
+    DEFAULT_EXCLUDE,
+    DEFAULT_INCLUDE,
+    EXPORT_DIR_NAME,
+)
 
 # Instantiate services directly for the adapter (stateless)
 _metadata_provider = ExifToolMetadataProvider()
@@ -48,31 +54,43 @@ def ensure_scan_thumbnail(
     size: tuple[int, int] = DEFAULT_THUMBNAIL_SIZE,
     refresh_cache: bool = False,
     prefer_cached_micro: bool = False,
+    expected_revision: str | None = None,
 ) -> ThumbnailReadyResult:
-    """Generate the scan-time thumbnail payload and 512px disk cache entry."""
+    """Return one edit-aware full/micro artifact under the stable path key."""
 
     with media_access.read(path):
         try:
-            artifact = ensure_thumbnail_artifact(
+            revision = expected_revision or thumbnail_revision(path)
+            cache_key = thumbnail_cache_key(path, size)
+            cache_file = thumbnail_cache_file_for_key(thumbnail_cache_dir, cache_key)
+            if not refresh_cache and _cache_file_is_ready(cache_file):
+                micro_payload = _generate_micro_from_full_cache(cache_file)
+                if micro_payload is not None:
+                    return ThumbnailReadyResult(
+                        state=ThumbnailState.READY,
+                        micro_thumbnail=micro_payload,
+                        thumb_cache_key=cache_key,
+                        thumb_revision=revision,
+                    )
+            del prefer_cached_micro
+            artifact = publish_thumbnail_artifact(
                 path,
                 thumbnail_cache_dir,
                 size=size,
+                expected_revision=revision,
                 generator=_thumbnail_generator,
             )
             if artifact is None:
                 return ThumbnailReadyResult(
                     state=ThumbnailState.FAILED,
                     thumb_error="thumbnail_unavailable",
+                    thumb_revision=revision,
                 )
-            # Full and micro layers must always describe the same source/edit
-            # revision. ``refresh_cache`` and ``prefer_cached_micro`` are kept
-            # as compatibility parameters, but immutable artifacts make an
-            # overwrite refresh both unnecessary and unsafe.
-            del refresh_cache, prefer_cached_micro
             return ThumbnailReadyResult(
                 state=ThumbnailState.READY,
                 micro_thumbnail=artifact.micro_thumbnail,
                 thumb_cache_key=artifact.cache_key,
+                thumb_revision=artifact.revision,
             )
         except Exception as exc:
             LOGGER.warning(
@@ -85,24 +103,24 @@ def ensure_scan_thumbnail(
             return ThumbnailReadyResult(
                 state=ThumbnailState.FAILED,
                 thumb_error=f"{type(exc).__name__}: {exc}",
+                thumb_revision=expected_revision,
             )
 
 
-def _write_scan_thumbnail_cache(
-    path: Path,
-    thumbnail_cache_dir: Path,
-    size: tuple[int, int] = DEFAULT_THUMBNAIL_SIZE,
-    *,
-    refresh: bool = False,
-) -> str | None:
-    del refresh
-    artifact = ensure_thumbnail_artifact(
-        path,
-        thumbnail_cache_dir,
-        size=size,
-        generator=_thumbnail_generator,
-    )
-    return artifact.cache_key if artifact is not None else None
+def _generate_micro_from_full_cache(cache_file: Path) -> bytes | None:
+    """Derive the mandatory micro layer from an already-rendered 512 thumbnail."""
+
+    try:
+        with Image.open(cache_file) as image:
+            image.thumbnail((16, 16), Image.Resampling.BICUBIC)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            payload = BytesIO()
+            image.save(payload, format="JPEG", quality=75)
+            return payload.getvalue()
+    except (OSError, ValueError):
+        LOGGER.debug("Failed to derive micro thumbnail from %s", cache_file, exc_info=True)
+        return None
 
 
 def _cache_file_is_ready(path: Path) -> bool:
@@ -283,61 +301,12 @@ def process_media_paths(
             if thumbnail.thumb_cache_key:
                 row["thumb_cache_key"] = thumbnail.thumb_cache_key
                 row["thumb_updated_at"] = _utc_ms()
+            if thumbnail.thumb_revision:
+                row["thumb_revision"] = thumbnail.thumb_revision
             if thumbnail.thumb_error:
                 row["thumb_error"] = thumbnail.thumb_error
 
             yield row
-
-
-_THUMBNAIL_ROW_FIELDS = (
-    "thumbnail_state",
-    "micro_thumbnail",
-    "thumb_cache_key",
-    "thumb_updated_at",
-    "thumb_error",
-)
-
-
-def _refresh_cached_metadata_rows(
-    root: Path,
-    items: list[tuple[Path, Dict[str, Any]]],
-) -> Iterator[Dict[str, Any]]:
-    """Backfill metadata without touching an unchanged thumbnail artifact."""
-
-    paths = [path for path, _cached in items]
-    metadata = _metadata_provider.get_metadata_batch(paths)
-    lookup: dict[str, dict[str, Any]] = {}
-    for raw in metadata:
-        source = raw.get("SourceFile")
-        if not source:
-            continue
-        source_text = str(source)
-        lookup[source_text] = raw
-        lookup[unicodedata.normalize("NFC", source_text)] = raw
-        lookup[unicodedata.normalize("NFD", source_text)] = raw
-
-    for path, cached in items:
-        raw = (
-            lookup.get(path.as_posix())
-            or lookup.get(unicodedata.normalize("NFC", path.as_posix()))
-            or lookup.get(unicodedata.normalize("NFD", path.as_posix()))
-            or {}
-        )
-        try:
-            refreshed = _metadata_provider.normalize_metadata(root, path, raw)
-        except Exception:
-            LOGGER.warning("Metadata-only backfill failed for %s", path, exc_info=True)
-            refreshed = dict(cached)
-        for field in _THUMBNAIL_ROW_FIELDS:
-            if field in cached:
-                refreshed[field] = cached[field]
-            else:
-                refreshed.pop(field, None)
-        try:
-            refreshed["source_mtime_ns"] = int(path.stat().st_mtime_ns)
-        except OSError:
-            pass
-        yield refreshed
 
 def scan_album(
     root: Path,
@@ -399,11 +368,24 @@ def scan_album(
                             and not _has_indexed_orientation(cached)
                         )
                         if needs_metadata_backfill:
-                            # Source pixels are unchanged. Refresh only the
-                            # missing metadata and preserve the existing
-                            # edit-aware artifact; metadata repair must never
-                            # become a thumbnail overwrite operation.
                             metadata_only_backfill.append((p, cached))
+                            continue
+
+                        indexed_revision = str(
+                            cached.get("thumb_revision") or ""
+                        ).strip()
+                        revision = thumbnail_revision(p)
+                        cached["thumb_revision"] = revision
+                        if indexed_revision != revision and (
+                            indexed_revision or p.with_suffix(".ipo").is_file()
+                        ):
+                            yield _refresh_cached_thumbnail(
+                                p,
+                                cached,
+                                resolved_thumbnail_cache_dir,
+                                expected_revision=revision,
+                                refresh_cache=True,
+                            )
                             continue
                         if _cached_thumbnail_ready(
                             p,
@@ -416,6 +398,7 @@ def scan_album(
                                 p,
                                 cached,
                                 resolved_thumbnail_cache_dir,
+                                expected_revision=revision,
                             )
                         continue
                 except OSError:
@@ -424,7 +407,11 @@ def scan_album(
             paths_to_process.append(p)
 
         if metadata_only_backfill:
-            yield from _refresh_cached_metadata_rows(root, metadata_only_backfill)
+            yield from _refresh_cached_metadata_rows(
+                root,
+                metadata_only_backfill,
+                resolved_thumbnail_cache_dir,
+            )
 
         # Process remaining
         if paths_to_process:
@@ -485,6 +472,8 @@ def _cached_thumbnail_ready(
     cached: Dict[str, Any],
     thumbnail_cache_dir: Path,
 ) -> bool:
+    if cached.get("thumbnail_state") != ThumbnailState.READY.value:
+        return False
     cache_key = cached.get("thumb_cache_key")
     if not isinstance(cache_key, str) or not cache_key.strip():
         return False
@@ -498,12 +487,17 @@ def _refresh_cached_thumbnail(
     path: Path,
     cached: Dict[str, Any],
     thumbnail_cache_dir: Path,
+    *,
+    expected_revision: str | None = None,
+    refresh_cache: bool = True,
 ) -> Dict[str, Any]:
     row = dict(cached)
     thumbnail = ensure_scan_thumbnail(
         path,
         str(row.get("id") or path),
         thumbnail_cache_dir=thumbnail_cache_dir,
+        refresh_cache=refresh_cache,
+        expected_revision=expected_revision,
     )
     row["thumbnail_state"] = thumbnail.state.value
     row.pop("thumb_error", None)
@@ -512,10 +506,79 @@ def _refresh_cached_thumbnail(
     if thumbnail.thumb_cache_key:
         row["thumb_cache_key"] = thumbnail.thumb_cache_key
         row["thumb_updated_at"] = _utc_ms()
+    if thumbnail.thumb_revision:
+        row["thumb_revision"] = thumbnail.thumb_revision
     if thumbnail.thumb_error:
         row["thumb_error"] = thumbnail.thumb_error
-        row.pop("thumb_cache_key", None)
+        if str(cached.get("thumb_cache_key") or "").strip():
+            row["thumbnail_state"] = ThumbnailState.STALE.value
+            row["micro_thumbnail"] = None
+        else:
+            row.pop("thumb_cache_key", None)
     return row
+
+
+_THUMBNAIL_ROW_FIELDS = (
+    "thumbnail_state",
+    "micro_thumbnail",
+    "thumb_cache_key",
+    "thumb_updated_at",
+    "thumb_error",
+    "thumb_revision",
+)
+
+
+def _refresh_cached_metadata_rows(
+    root: Path,
+    items: list[tuple[Path, Dict[str, Any]]],
+    thumbnail_cache_dir: Path,
+) -> Iterator[Dict[str, Any]]:
+    """Backfill metadata while preserving current stable-path thumbnail state."""
+
+    paths = [path for path, _cached in items]
+    metadata = _metadata_provider.get_metadata_batch(paths)
+    lookup: dict[str, dict[str, Any]] = {}
+    for raw in metadata:
+        source = raw.get("SourceFile")
+        if source:
+            lookup[unicodedata.normalize("NFC", str(source))] = raw
+            lookup[unicodedata.normalize("NFD", str(source))] = raw
+
+    for path, cached in items:
+        raw = (
+            lookup.get(unicodedata.normalize("NFC", path.as_posix()))
+            or lookup.get(unicodedata.normalize("NFD", path.as_posix()))
+            or {}
+        )
+        try:
+            refreshed = _metadata_provider.normalize_metadata(root, path, raw)
+        except Exception:
+            LOGGER.warning("Metadata-only backfill failed for %s", path, exc_info=True)
+            refreshed = dict(cached)
+        for field in _THUMBNAIL_ROW_FIELDS:
+            if field in cached:
+                refreshed[field] = cached[field]
+            else:
+                refreshed.pop(field, None)
+        try:
+            refreshed["source_mtime_ns"] = int(path.stat().st_mtime_ns)
+        except OSError:
+            pass
+
+        indexed_revision = str(cached.get("thumb_revision") or "").strip()
+        revision = thumbnail_revision(path)
+        refreshed["thumb_revision"] = revision
+        if indexed_revision != revision and (
+            indexed_revision or path.with_suffix(".ipo").is_file()
+        ):
+            refreshed = _refresh_cached_thumbnail(
+                path,
+                refreshed,
+                thumbnail_cache_dir,
+                expected_revision=revision,
+                refresh_cache=True,
+            )
+        yield refreshed
 
 
 def _utc_ms() -> int:

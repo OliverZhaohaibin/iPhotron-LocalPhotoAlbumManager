@@ -112,7 +112,7 @@ class EditRenderingState:
 class EditCommitResult:
     """Durable sidecar commit and the thumbnail revision it selects."""
 
-    thumbnail_cache_key: str
+    thumbnail_revision: str
 
 
 class EditServicePort(Protocol):
@@ -129,7 +129,7 @@ class EditServicePort(Protocol):
         path: Path,
         adjustments: dict[str, Any],
     ) -> EditCommitResult:
-        """Persist edits and return the selected thumbnail artifact revision."""
+        """Persist edits and return the selected thumbnail render revision."""
 
     def default_adjustments(self) -> dict[str, Any]:
         """Return the canonical default edit-session values."""

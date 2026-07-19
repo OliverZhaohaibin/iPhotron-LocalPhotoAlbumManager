@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -12,7 +13,6 @@ pytest.importorskip(
 )
 
 from iPhoto.gui.ui.media import MediaAdjustmentCommitter
-from iPhoto.application.ports import EditCommitResult
 
 
 def test_commit_persists_adjustments_and_emits_signal() -> None:
@@ -20,7 +20,9 @@ def test_commit_persists_adjustments_and_emits_signal() -> None:
     pause = Mock()
     resume = Mock()
     edit_service = Mock()
-    edit_service.write_adjustments.return_value = EditCommitResult("edited-key")
+    edit_service.write_adjustments.return_value = SimpleNamespace(
+        thumbnail_revision="revision-2"
+    )
     committer = MediaAdjustmentCommitter(
         asset_vm=asset_vm,
         pause_watcher=pause,
@@ -37,7 +39,7 @@ def test_commit_persists_adjustments_and_emits_signal() -> None:
     edit_service.write_adjustments.assert_called_once_with(source, {"Exposure": 0.2})
     asset_vm.invalidate_thumbnail.assert_called_once_with(
         str(source),
-        desired_key="edited-key",
+        desired_revision="revision-2",
     )
     resume.assert_called_once_with()
     assert emitted == [(source, "edit_done")]

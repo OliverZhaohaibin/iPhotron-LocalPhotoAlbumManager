@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
 
-from iPhoto.infrastructure.services.thumbnail_cache_keys import (
-    thumbnail_cache_file_for_key,
+from iPhoto.infrastructure.services.thumbnail_artifact import (
+    publish_thumbnail_artifact,
+    thumbnail_revision,
 )
 from iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
-from iPhoto.io import scanner_adapter, sidecar
+from iPhoto.io import scanner_adapter
+from iPhoto.io.sidecar import save_adjustments
 
 
 def test_process_media_paths_falls_back_to_minimal_row_when_metadata_fails(
@@ -176,7 +179,6 @@ def test_scan_album_reextracts_cached_photo_with_unknown_orientation(
     exif = image.getexif()
     exif[0x0112] = 6
     image.save(asset, exif=exif)
-    sidecar.save_adjustments(asset, {"Rotation": 90})
     stat = asset.stat()
     existing = {
         "rotated.jpg": {
@@ -189,14 +191,8 @@ def test_scan_album_reextracts_cached_photo_with_unknown_orientation(
             "image_orientation": 0,
             "thumbnail_state": "ready",
             "thumb_cache_key": "old-key",
-            "micro_thumbnail": b"historic-edited-micro",
         }
     }
-    cache_dir = root / ".iPhoto" / "cache" / "thumbs"
-    historic_cache = cache_dir / "old-key.jpg"
-    historic_cache.parent.mkdir(parents=True)
-    Image.new("RGB", (512, 512), "green").save(historic_cache, "JPEG")
-    before_cache = historic_cache.read_bytes()
     normalized_paths: list[Path] = []
     real_normalize = scanner_adapter._metadata_provider.normalize_metadata
 
@@ -233,9 +229,241 @@ def test_scan_album_reextracts_cached_photo_with_unknown_orientation(
 
     assert normalized_paths == [asset]
     assert rows[0]["image_orientation"] == 6
-    assert rows[0]["thumb_cache_key"] == "old-key"
-    assert rows[0]["micro_thumbnail"] == b"historic-edited-micro"
-    assert historic_cache.read_bytes() == before_cache
+
+
+def test_orientation_backfill_preserves_revisioned_edited_thumbnail(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "edited.jpg"
+    Image.new("RGB", (100, 50), (35, 45, 55)).save(asset)
+    save_adjustments(asset, {"Light_Master": 0.8})
+    cache_dir = root / ".iPhoto" / "cache" / "thumbs"
+    revision = thumbnail_revision(asset)
+    artifact = publish_thumbnail_artifact(
+        asset,
+        cache_dir,
+        expected_revision=revision,
+    )
+    assert artifact is not None
+    cache_file = scanner_adapter.thumbnail_cache_file(cache_dir, asset)
+    before = cache_file.read_bytes()
+    stat = asset.stat()
+    existing = {
+        "edited.jpg": {
+            "rel": "edited.jpg",
+            "id": "as_edited",
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "w": 100,
+            "h": 50,
+            "image_orientation": 0,
+            "thumbnail_state": "ready",
+            "micro_thumbnail": artifact.micro_thumbnail,
+            "thumb_cache_key": artifact.cache_key,
+            "thumb_revision": revision,
+        }
+    }
+
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider,
+        "get_metadata_batch",
+        lambda _paths: [],
+    )
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider,
+        "normalize_metadata",
+        lambda _root, _path, _raw: {
+            **existing["edited.jpg"],
+            "image_orientation": 1,
+        },
+    )
+    monkeypatch.setattr(
+        scanner_adapter,
+        "publish_thumbnail_artifact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata-only backfill must not refresh thumbnails")
+        ),
+    )
+
+    rows = list(
+        scanner_adapter.scan_album(
+            root,
+            ["*.jpg"],
+            [],
+            existing_index=existing,
+            thumbnail_cache_dir=cache_dir,
+        )
+    )
+
+    assert rows[0]["image_orientation"] == 1
+    assert rows[0]["thumb_revision"] == revision
+    assert cache_file.read_bytes() == before
+
+
+def test_legacy_edited_row_without_revision_is_selectively_rebuilt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "historic.jpg"
+    Image.new("RGB", (80, 60), (30, 30, 30)).save(asset)
+    save_adjustments(asset, {"Light_Master": 0.9})
+    cache_dir = root / ".iPhoto" / "cache" / "thumbs"
+    cache_file = scanner_adapter.thumbnail_cache_file(cache_dir, asset)
+    cache_file.parent.mkdir(parents=True)
+    Image.new("RGB", (512, 512), (30, 30, 30)).save(cache_file)
+    stat = asset.stat()
+    existing = {
+        "historic.jpg": {
+            "rel": "historic.jpg",
+            "id": "as_historic",
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "w": 80,
+            "h": 60,
+            "image_orientation": 1,
+            "thumbnail_state": "ready",
+            "micro_thumbnail": b"legacy-micro",
+            "thumb_cache_key": scanner_adapter.thumbnail_cache_key(asset),
+        }
+    }
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider,
+        "get_metadata_batch",
+        lambda _paths: (_ for _ in ()).throw(
+            AssertionError("unchanged media must not re-extract metadata")
+        ),
+    )
+
+    rows = list(
+        scanner_adapter.scan_album(
+            root,
+            ["*.jpg"],
+            [],
+            existing_index=existing,
+            thumbnail_cache_dir=cache_dir,
+        )
+    )
+
+    assert rows[0]["thumbnail_state"] == "ready"
+    assert rows[0]["thumb_revision"] == thumbnail_revision(asset)
+    red, green, blue = Image.open(cache_file).getpixel((256, 256))
+    assert min(red, green, blue) > 30
+
+
+def test_legacy_unedited_row_keeps_stable_l2_cache_when_revision_is_filled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "plain.jpg"
+    Image.new("RGB", (80, 60), "green").save(asset)
+    cache_dir = root / ".iPhoto" / "cache" / "thumbs"
+    cache_file = scanner_adapter.thumbnail_cache_file(cache_dir, asset)
+    cache_file.parent.mkdir(parents=True)
+    Image.new("RGB", (512, 512), "blue").save(cache_file)
+    before = cache_file.read_bytes()
+    stat = asset.stat()
+    existing = {
+        "plain.jpg": {
+            "rel": "plain.jpg",
+            "id": "as_plain",
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "w": 80,
+            "h": 60,
+            "image_orientation": 1,
+            "thumbnail_state": "ready",
+            "micro_thumbnail": b"legacy-micro",
+            "thumb_cache_key": scanner_adapter.thumbnail_cache_key(asset),
+        }
+    }
+    monkeypatch.setattr(
+        scanner_adapter,
+        "publish_thumbnail_artifact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unedited legacy rows must retain their L2 cache")
+        ),
+    )
+
+    rows = list(
+        scanner_adapter.scan_album(
+            root,
+            ["*.jpg"],
+            [],
+            existing_index=existing,
+            thumbnail_cache_dir=cache_dir,
+        )
+    )
+
+    assert rows[0]["thumbnail_state"] == "ready"
+    assert rows[0]["micro_thumbnail"] == b"legacy-micro"
+    assert rows[0]["thumb_revision"] == thumbnail_revision(asset)
+    assert cache_file.read_bytes() == before
+
+
+def test_scan_detects_external_sidecar_change_and_refreshes_same_cache_key(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    asset = root / "external-edit.jpg"
+    Image.new("RGB", (80, 60), (60, 60, 60)).save(asset)
+    save_adjustments(asset, {"Light_Master": 0.8})
+    cache_dir = root / ".iPhoto" / "cache" / "thumbs"
+    first_revision = thumbnail_revision(asset)
+    first = publish_thumbnail_artifact(
+        asset,
+        cache_dir,
+        expected_revision=first_revision,
+    )
+    assert first is not None
+    stat = asset.stat()
+    existing = {
+        "external-edit.jpg": {
+            "rel": "external-edit.jpg",
+            "id": "as_external",
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "w": 80,
+            "h": 60,
+            "image_orientation": 1,
+            "thumbnail_state": "ready",
+            "micro_thumbnail": first.micro_thumbnail,
+            "thumb_cache_key": first.cache_key,
+            "thumb_revision": first_revision,
+        }
+    }
+    save_adjustments(asset, {"Light_Master": -0.8})
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider,
+        "get_metadata_batch",
+        lambda _paths: (_ for _ in ()).throw(
+            AssertionError("sidecar changes must not re-extract source metadata")
+        ),
+    )
+
+    rows = list(
+        scanner_adapter.scan_album(
+            root,
+            ["*.jpg"],
+            [],
+            existing_index=existing,
+            thumbnail_cache_dir=cache_dir,
+        )
+    )
+
+    assert rows[0]["thumb_cache_key"] == first.cache_key
+    assert rows[0]["thumb_revision"] != first_revision
+    cache_file = scanner_adapter.thumbnail_cache_file(cache_dir, asset)
+    red, green, blue = Image.open(cache_file).getpixel((256, 256))
+    assert max(red, green, blue) < 60
 
 
 def test_process_media_paths_keeps_row_when_thumbnail_generation_fails(
@@ -328,13 +556,14 @@ def test_process_media_paths_sets_ready_thumbnail_before_visible_commit(
     assert len(rows) == 1
     row = rows[0]
     assert row["thumbnail_state"] == "ready"
-    assert row["micro_thumbnail"].startswith(b"\xff\xd8\xff")
+    with Image.open(BytesIO(row["micro_thumbnail"])) as micro:
+        assert micro.size == (16, 16)
     assert row["thumb_cache_key"]
     cache_file = root / ".iPhoto" / "cache" / "thumbs" / f"{row['thumb_cache_key']}.jpg"
     assert cache_file.exists()
 
 
-def test_process_media_paths_reuses_immutable_current_revision_artifact(
+def test_process_media_paths_overwrites_existing_full_thumbnail_for_rescanned_file(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -381,45 +610,52 @@ def test_process_media_paths_reuses_immutable_current_revision_artifact(
 
     assert rows[0]["thumb_cache_key"]
     red, green, blue = Image.open(cache_file).getpixel((0, 0))
-    assert green > 100
-    assert red < 100
+    assert red > 200
+    assert green < 80
     assert blue < 80
 
 
-def test_thumbnail_cache_key_changes_with_sidecar_content(
+def test_shared_thumbnail_cache_replace_retries_transient_permission_error(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     asset = tmp_path / "ready.jpg"
     asset.write_bytes(b"jpeg-data")
     cache_dir = tmp_path / ".iPhoto" / "cache" / "thumbs"
+    calls = {"replace": 0}
+    from iPhoto.infrastructure.services import thumbnail_artifact
+
+    real_replace = thumbnail_artifact.os.replace
+
+    def flaky_replace(src, dst):
+        calls["replace"] += 1
+        if calls["replace"] == 1:
+            raise PermissionError("locked briefly")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(thumbnail_artifact.os, "replace", flaky_replace)
+    monkeypatch.setattr(thumbnail_artifact.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         scanner_adapter._thumbnail_generator,
         "generate",
         lambda _path, _size: Image.new("RGB", (32, 32), "red"),
     )
-    original_key = scanner_adapter._write_scan_thumbnail_cache(
+
+    result = scanner_adapter.ensure_scan_thumbnail(
         asset,
-        cache_dir,
-        refresh=True,
-    )
-    asset.with_suffix(".ipo").write_text(
-        "<iPhotoAdjustments version='1.0'><Crop><rotate90>1</rotate90></Crop></iPhotoAdjustments>"
-    )
-    edited_key = scanner_adapter._write_scan_thumbnail_cache(
-        asset,
-        cache_dir,
-        refresh=True,
+        "asset",
+        thumbnail_cache_dir=cache_dir,
+        refresh_cache=True,
     )
 
-    assert original_key
-    assert edited_key
-    assert edited_key != original_key
-    assert thumbnail_cache_file_for_key(cache_dir, original_key).is_file()
-    assert thumbnail_cache_file_for_key(cache_dir, edited_key).is_file()
+    assert result.thumb_cache_key
+    assert calls["replace"] == 2
+    assert scanner_adapter.thumbnail_cache_file_for_key(
+        cache_dir, result.thumb_cache_key
+    ).is_file()
 
 
-def test_scan_thumbnail_cache_keeps_existing_current_revision_artifact(
+def test_shared_thumbnail_cache_keeps_existing_cache_stale_when_replace_is_locked(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -430,19 +666,33 @@ def test_scan_thumbnail_cache_keeps_existing_current_revision_artifact(
         asset,
         scanner_adapter.DEFAULT_THUMBNAIL_SIZE,
     )
-    cache_file = thumbnail_cache_file_for_key(cache_dir, key)
+    cache_file = scanner_adapter.thumbnail_cache_file_for_key(cache_dir, key)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (512, 512), "green").save(cache_file, format="JPEG")
 
+    from iPhoto.infrastructure.services import thumbnail_artifact
+
+    monkeypatch.setattr(
+        thumbnail_artifact.os,
+        "replace",
+        lambda _src, _dst: (_ for _ in ()).throw(PermissionError("locked by sync")),
+    )
+    monkeypatch.setattr(thumbnail_artifact.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         scanner_adapter._thumbnail_generator,
         "generate",
         lambda _path, _size: Image.new("RGB", (32, 32), "red"),
     )
 
-    result = scanner_adapter._write_scan_thumbnail_cache(asset, cache_dir, refresh=True)
+    result = scanner_adapter.ensure_scan_thumbnail(
+        asset,
+        "asset",
+        thumbnail_cache_dir=cache_dir,
+        refresh_cache=True,
+    )
 
-    assert result == key
+    assert result.state.value == "failed"
+    assert result.thumb_cache_key is None
     red, green, blue = Image.open(cache_file).getpixel((0, 0))
     assert green > 100
     assert red < 100
@@ -502,7 +752,8 @@ def test_scan_album_refreshes_cached_row_missing_full_thumbnail(
     assert len(generate_calls) == 1
     assert rows[0]["rel"] == "cached.jpg"
     assert rows[0]["thumbnail_state"] == "ready"
-    assert rows[0]["micro_thumbnail"].startswith(b"\xff\xd8\xff")
+    with Image.open(BytesIO(rows[0]["micro_thumbnail"])) as micro:
+        assert micro.size == (16, 16)
     assert rows[0]["thumb_cache_key"]
     cache_file = root / ".iPhoto" / "cache" / "thumbs" / f"{rows[0]['thumb_cache_key']}.jpg"
     assert cache_file.exists()

@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import os
 import shutil
@@ -6,7 +5,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Deque, Dict, Literal, Optional, Set
@@ -30,8 +29,9 @@ from iPhoto.infrastructure.services.performance_events import (
     perf_logging_enabled,
 )
 from iPhoto.infrastructure.services.thumbnail_artifact import (
-    encode_micro_thumbnail,
+    publish_thumbnail_artifact,
     render_thumbnail_image,
+    thumbnail_revision,
 )
 from iPhoto.infrastructure.services.thumbnail_cache_keys import (
     thumbnail_cache_file_for_key,
@@ -66,7 +66,7 @@ class ThumbnailWorkerSignals(QObject):
     """Signals emitted by thumbnail generation workers."""
 
     result = Signal(Path, QSize, QImage, int, object, object)
-    failed = Signal(Path, QSize, str, int, object)
+    failed = Signal(Path, QSize, str, int, object, object)
 
 
 class ThumbnailRequestKind(str, Enum):
@@ -85,6 +85,8 @@ class ThumbnailRequest:
     generation: int
     l2_cache_key: str | None = None
     rank: int = 0
+    thumbnail_state: str = "ready"
+    thumb_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +96,8 @@ class ThumbnailPrefetchCandidate:
     kind: Literal["guard", "far_speculative"]
     rank: int = 0
     row: int = -1
+    thumbnail_state: str = "ready"
+    thumb_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +108,7 @@ class ThumbnailLoadResult:
     generation: int
     kind: ThumbnailRequestKind
     promoted: bool = False
-    artifact_key: str | None = None
+    thumb_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +203,8 @@ class ThumbnailGenerationTask(QRunnable):
         platform: str,
         cancellation: _CancellationToken | None = None,
         l2_cache_key: str | None = None,
+        thumbnail_state: str = "ready",
+        thumb_revision: str | None = None,
     ):
         super().__init__()
         self._renderer = renderer
@@ -210,9 +216,10 @@ class ThumbnailGenerationTask(QRunnable):
         self._platform = platform
         self._cancellation = cancellation
         self._l2_cache_key = l2_cache_key
+        self._thumbnail_state = thumbnail_state
+        self._thumb_revision = thumb_revision
 
     def run(self):
-        artifact_key = thumbnail_cache_key(self._path)
         try:
             with speculative_thread_background_mode(
                 self._platform if self._kind is ThumbnailRequestKind.PREFETCH else ""
@@ -224,16 +231,31 @@ class ThumbnailGenerationTask(QRunnable):
                         "cancelled",
                         self._generation,
                         self._kind,
+                        self._thumb_revision,
                     )
                     return
-                if self._l2_cache_key is None:
-                    qimg = self._renderer(self._path, self._size, self._cancellation)
+                if self._thumbnail_state == "ready" and self._thumb_revision is None:
+                    if self._l2_cache_key is None:
+                        qimg = self._renderer(
+                            self._path,
+                            self._size,
+                            self._cancellation,
+                        )
+                    else:
+                        qimg = self._renderer(
+                            self._path,
+                            self._size,
+                            self._cancellation,
+                            self._l2_cache_key,
+                        )
                 else:
                     qimg = self._renderer(
                         self._path,
                         self._size,
                         self._cancellation,
                         self._l2_cache_key,
+                        self._thumbnail_state,
+                        self._thumb_revision,
                     )
                 if self._cancellation is not None and self._cancellation.cancelled():
                     self._signals.failed.emit(
@@ -242,6 +264,7 @@ class ThumbnailGenerationTask(QRunnable):
                         "cancelled",
                         self._generation,
                         self._kind,
+                        self._thumb_revision,
                     )
                     return
                 if qimg is not None and not qimg.isNull():
@@ -251,7 +274,7 @@ class ThumbnailGenerationTask(QRunnable):
                         qimg,
                         self._generation,
                         self._kind,
-                        artifact_key,
+                        self._thumb_revision,
                     )
                 else:
                     self._signals.failed.emit(
@@ -260,14 +283,17 @@ class ThumbnailGenerationTask(QRunnable):
                         "empty_render",
                         self._generation,
                         self._kind,
+                        self._thumb_revision,
                     )
         except Exception:
+            _LOGGER.exception("Thumbnail generation worker failed for %s", self._path)
             self._signals.failed.emit(
                 self._path,
                 self._size,
                 "exception",
                 self._generation,
                 self._kind,
+                self._thumb_revision,
             )
 
 class ThumbnailCacheService(QObject):
@@ -292,6 +318,8 @@ class ThumbnailCacheService(QObject):
         self._generator = PillowThumbnailGenerator()
         self._edit_service: EditServicePort | None = None
         self._thumbnail_state_service = None
+        self._desired_revisions: Dict[str, str] = {}
+        self._thumbnail_states: Dict[str, str] = {}
 
         self._memory_cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._memory_bytes: Dict[str, int] = {}
@@ -358,10 +386,6 @@ class ThumbnailCacheService(QObject):
         self._failure_until: Dict[str, float] = {}
         self._is_shutting_down = False
         self._current_generation = 0
-        # Serialise the final cache-file replacement with invalidation.  A
-        # cancelled worker may finish rendering after an edit has been saved;
-        # without this lock it could recreate the just-deleted stale JPEG.
-        self._disk_write_lock = threading.Lock()
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(self._max_active_jobs)
         self._prefetch_thread_pool = QThreadPool(self)
@@ -468,6 +492,8 @@ class ThumbnailCacheService(QObject):
         self._failure_until.clear()
         self._low_memory_pressure = False
         self._last_low_memory_probe_ms = 0.0
+        self._desired_revisions.clear()
+        self._thumbnail_states.clear()
 
     def set_edit_service(self, edit_service: EditServicePort | None) -> None:
         """Bind the current edit surface used for thumbnail rendering."""
@@ -475,7 +501,7 @@ class ThumbnailCacheService(QObject):
         self._edit_service = edit_service
 
     def set_thumbnail_state_service(self, service) -> None:
-        """Bind the session surface used for conditional ready publication."""
+        """Bind conditional ready publication for stale render requests."""
 
         self._thumbnail_state_service = service
 
@@ -560,13 +586,16 @@ class ThumbnailCacheService(QObject):
         size: QSize,
         *,
         priority: str = "normal",
+        thumbnail_state: str = "ready",
+        thumb_revision: str | None = None,
     ) -> Optional[QPixmap]:
         """Compatibility API: memory-only lookup followed by asynchronous request."""
 
         del priority
-        pixmap = self.peek_full_thumbnail(path, size)
-        if pixmap is not None:
-            return pixmap
+        if thumbnail_state == "ready":
+            pixmap = self.peek_full_thumbnail(path, size)
+            if pixmap is not None:
+                return pixmap
         self.request_many(
             [
                 ThumbnailRequest(
@@ -574,6 +603,8 @@ class ThumbnailCacheService(QObject):
                     size=size,
                     kind=ThumbnailRequestKind.VISIBLE,
                     generation=self._current_generation,
+                    thumbnail_state=thumbnail_state,
+                    thumb_revision=thumb_revision,
                 )
             ],
             generation=self._current_generation,
@@ -594,10 +625,31 @@ class ThumbnailCacheService(QObject):
         for request in requests:
             path = Path(request.path)
             size = request.size
+            key = self._cache_key(path, size)
+            previous_state = self._thumbnail_states.get(key, "ready")
+            previous_revision = self._desired_revisions.get(key)
+            if request.thumbnail_state != "ready":
+                if (
+                    request.thumb_revision is not None
+                    and previous_state == "ready"
+                    and previous_revision == request.thumb_revision
+                ):
+                    # The repository-backed DTO may lag the worker's CAS
+                    # publication by one window refresh. Keep the already
+                    # published L1/L2 artifact resident for the same revision.
+                    request = replace(request, thumbnail_state="ready")
+                else:
+                    self.invalidate(
+                        path,
+                        size=size,
+                        desired_revision=request.thumb_revision,
+                    )
+            self._thumbnail_states[key] = request.thumbnail_state
+            if request.thumb_revision:
+                self._desired_revisions[key] = request.thumb_revision
             if request.kind is not ThumbnailRequestKind.VISIBLE:
                 self._queue_prefetch(request)
                 continue
-            key = self._cache_key(path, size)
             if key in self._memory_cache:
                 continue
             if self._promote_staged_result(request):
@@ -619,6 +671,10 @@ class ThumbnailCacheService(QObject):
                         size=queued.size,
                         kind=ThumbnailRequestKind.VISIBLE,
                         generation=max(queued.generation, int(request.generation)),
+                        l2_cache_key=request.l2_cache_key or queued.l2_cache_key,
+                        rank=request.rank,
+                        thumbnail_state=request.thumbnail_state,
+                        thumb_revision=request.thumb_revision,
                     )
                 continue
             if self._failure_until.get(key, 0.0) > time.monotonic():
@@ -722,6 +778,21 @@ class ThumbnailCacheService(QObject):
                     demand.size,
                     ThumbnailRequestKind.VISIBLE,
                     demand.revision,
+                    l2_cache_key=(
+                        candidate_by_path[path].l2_cache_key
+                        if path in candidate_by_path
+                        else None
+                    ),
+                    thumbnail_state=(
+                        candidate_by_path[path].thumbnail_state
+                        if path in candidate_by_path
+                        else "ready"
+                    ),
+                    thumb_revision=(
+                        candidate_by_path[path].thumb_revision
+                        if path in candidate_by_path
+                        else None
+                    ),
                 )
                 for path in visible
             ),
@@ -747,6 +818,12 @@ class ThumbnailCacheService(QObject):
                     demand.revision,
                     l2_cache_key=(candidate.l2_cache_key if candidate is not None else None),
                     rank=(candidate.rank if candidate is not None else rank),
+                    thumbnail_state=(
+                        candidate.thumbnail_state if candidate is not None else "ready"
+                    ),
+                    thumb_revision=(
+                        candidate.thumb_revision if candidate is not None else None
+                    ),
                 )
             )
         self._discard_stale_staged_results(desired_visible_keys, desired_prefetch_keys)
@@ -880,6 +957,9 @@ class ThumbnailCacheService(QObject):
 
     def _queue_prefetch(self, request: ThumbnailRequest) -> None:
         key = self._cache_key(request.path, request.size)
+        self._thumbnail_states[key] = request.thumbnail_state
+        if request.thumb_revision:
+            self._desired_revisions[key] = request.thumb_revision
         miss_until = self._prefetch_l2_miss_until.get(key, 0.0)
         if miss_until and miss_until <= time.monotonic():
             self._prefetch_l2_miss_until.pop(key, None)
@@ -1199,7 +1279,7 @@ class ThumbnailCacheService(QObject):
                 generation=max(matched.generation, request.generation),
                 kind=ThumbnailRequestKind.VISIBLE,
                 promoted=matched.promoted or was_prefetch,
-                artifact_key=matched.artifact_key,
+                thumb_revision=matched.thumb_revision,
             )
         )
         emit_perf_event(
@@ -1227,7 +1307,7 @@ class ThumbnailCacheService(QObject):
                     generation=max(result.generation, request.generation),
                     kind=result.kind,
                     promoted=result.promoted,
-                    artifact_key=result.artifact_key,
+                    thumb_revision=result.thumb_revision,
                 )
                 return True
         self._publish_keys.discard(key)
@@ -1475,14 +1555,14 @@ class ThumbnailCacheService(QObject):
                 and self._prefetch_results_allowed()
                 and key in self._prefetch_key_order
             )
-            current_artifact = (
-                result.artifact_key is None
-                or result.artifact_key == self._disk_cache_key(result.path)
-            )
             relevant = (
                 not self._is_shutting_down
                 and (fresh_visible or current_prefetch)
-                and current_artifact
+                and (
+                    result.thumb_revision is None
+                    or self._desired_revisions.get(key, result.thumb_revision)
+                    == result.thumb_revision
+                )
             )
             if relevant and not result.image.isNull():
                 convert_started = monotonic_ms()
@@ -1876,6 +1956,8 @@ class ThumbnailCacheService(QObject):
             self._runtime_policy.platform,
             cancellation,
             l2_cache_key,
+            self._thumbnail_states.get(key, "ready"),
+            self._desired_revisions.get(key),
         )
         if kind is ThumbnailRequestKind.GUARD:
             self._guard_thread_pool.start(worker)
@@ -1892,7 +1974,7 @@ class ThumbnailCacheService(QObject):
         image: QImage,
         generation: int = 0,
         kind: ThumbnailRequestKind = ThumbnailRequestKind.VISIBLE,
-        artifact_key: str | None = None,
+        thumb_revision: str | None = None,
     ):
         # Back on main thread
         if kind is not ThumbnailRequestKind.VISIBLE:
@@ -1902,7 +1984,7 @@ class ThumbnailCacheService(QObject):
                 image,
                 generation,
                 kind,
-                artifact_key,
+                thumb_revision,
             )
             return
         key = self._cache_key(path, size)
@@ -1919,11 +2001,16 @@ class ThumbnailCacheService(QObject):
                 kind,
             )
             return
-        if artifact_key is not None and artifact_key != self._disk_cache_key(path):
+        desired_revision = self._desired_revisions.get(key)
+        if (
+            thumb_revision is not None
+            and desired_revision is not None
+            and thumb_revision != desired_revision
+        ):
             self._handle_generation_failure(
                 path,
                 size,
-                "stale_revision",
+                "superseded_revision",
                 generation,
                 kind,
             )
@@ -1955,7 +2042,7 @@ class ThumbnailCacheService(QObject):
                     image=image,
                     generation=desired_generation,
                     kind=ThumbnailRequestKind.VISIBLE,
-                    artifact_key=artifact_key,
+                    thumb_revision=thumb_revision,
                 ),
                 reservation_key=key,
             )
@@ -1968,7 +2055,9 @@ class ThumbnailCacheService(QObject):
         reason: str,
         generation: int = 0,
         kind: ThumbnailRequestKind = ThumbnailRequestKind.VISIBLE,
+        thumb_revision: str | None = None,
     ) -> None:
+        del thumb_revision
         if kind is not ThumbnailRequestKind.VISIBLE:
             self._handle_prefetch_failure(path, size, reason, generation, kind)
             return
@@ -1982,7 +2071,10 @@ class ThumbnailCacheService(QObject):
         self._active_tasks = max(0, self._active_tasks - 1)
         if (
             not self._is_shutting_down
-            and (desired_generation > generation or reason == "stale_revision")
+            and (
+                desired_generation > generation
+                or reason == "superseded_revision"
+            )
             and desired_generation >= self._current_generation
         ):
             self._queue_visible(
@@ -1991,6 +2083,8 @@ class ThumbnailCacheService(QObject):
                     size,
                     ThumbnailRequestKind.VISIBLE,
                     desired_generation,
+                    thumbnail_state=self._thumbnail_states.get(key, "ready"),
+                    thumb_revision=self._desired_revisions.get(key),
                 )
             )
             return
@@ -2013,18 +2107,23 @@ class ThumbnailCacheService(QObject):
         image: QImage,
         generation: int,
         kind: ThumbnailRequestKind = ThumbnailRequestKind.PREFETCH,
-        artifact_key: str | None = None,
+        thumb_revision: str | None = None,
     ) -> None:
-        if artifact_key is not None and artifact_key != self._disk_cache_key(path):
+        key = self._cache_key(path, size)
+        desired_revision = self._desired_revisions.get(key)
+        if (
+            thumb_revision is not None
+            and desired_revision is not None
+            and thumb_revision != desired_revision
+        ):
             self._handle_prefetch_failure(
                 path,
                 size,
-                "stale_revision",
+                "superseded_revision",
                 generation,
                 kind,
             )
             return
-        key = self._cache_key(path, size)
         token = self._prefetch_active_tokens.pop(key, None)
         promoted = key in self._prefetch_promoted_visible
         self._prefetch_promoted_visible.discard(key)
@@ -2073,7 +2172,7 @@ class ThumbnailCacheService(QObject):
                         else kind
                     ),
                     promoted=promoted,
-                    artifact_key=artifact_key,
+                    thumb_revision=thumb_revision,
                 ),
                 reservation_key=key,
             )
@@ -2146,9 +2245,9 @@ class ThumbnailCacheService(QObject):
             generation=generation,
         )
         if (
-            actual_reason in {"cancelled", "stale_revision"}
+            actual_reason in {"cancelled", "superseded_revision"}
             and (
-                actual_reason == "stale_revision"
+                actual_reason == "superseded_revision"
                 or token is None
                 or token.cancel_reason != "demand_replaced"
             )
@@ -2161,6 +2260,8 @@ class ThumbnailCacheService(QObject):
                     size,
                     kind,
                     self._current_generation,
+                    thumbnail_state=self._thumbnail_states.get(key, "ready"),
+                    thumb_revision=self._desired_revisions.get(key),
                 )
             )
         self._drain_generation_queue()
@@ -2170,19 +2271,17 @@ class ThumbnailCacheService(QObject):
         path: Path,
         *,
         size: QSize | None = None,
-        desired_key: str | None = None,
+        desired_revision: str | None = None,
     ):
         """Removes the thumbnail from cache to force regeneration."""
         if size is None:
             size = QSize(512, 512)
-        if desired_key is not None and desired_key != self._disk_cache_key(path):
-            _LOGGER.warning(
-                "Ignoring mismatched thumbnail revision for %s: %s",
-                path,
-                desired_key,
-            )
         key = self._cache_key(path, size)
-        key_prefix = f"{self._memory_path_key(path)}:"
+        if desired_revision:
+            self._desired_revisions[key] = desired_revision
+            self._thumbnail_states[key] = "stale"
+        disk_key = self._disk_cache_key(path)
+        key_prefix = f"{disk_key}:"
         memory_keys = [
             candidate for candidate in self._memory_cache if candidate.startswith(key_prefix)
         ]
@@ -2243,28 +2342,27 @@ class ThumbnailCacheService(QObject):
             self._pending_generations.pop(affected_key, None)
             self._visible_queued_at.pop(affected_key, None)
 
-        # Disk artifacts are immutable and content-versioned. Keep the last
-        # complete artifact until the replacement is safely published; this
-        # removes the edit-then-immediate-shutdown cache hole.
+        # The stable-path L2 file remains as the last complete artifact. Stale
+        # requests are revision-gated and never read it before replacement.
 
     def _discard_staged_path(self, path: Path) -> None:
         """Drop publish-queue images rendered before an asset invalidation."""
 
-        path_key = self._memory_path_key(Path(path))
+        disk_key = self._disk_cache_key(Path(path))
         self._publish_visible = deque(
             result
             for result in self._publish_visible
-            if self._memory_path_key(result.path) != path_key
+            if self._disk_cache_key(result.path) != disk_key
         )
         self._publish_guard = deque(
             result
             for result in self._publish_guard
-            if self._memory_path_key(result.path) != path_key
+            if self._disk_cache_key(result.path) != disk_key
         )
         self._publish_prefetch = deque(
             result
             for result in self._publish_prefetch
-            if self._memory_path_key(result.path) != path_key
+            if self._disk_cache_key(result.path) != disk_key
         )
         self._publish_keys = {
             self._cache_key(result.path, result.size)
@@ -2316,18 +2414,7 @@ class ThumbnailCacheService(QObject):
                     pass
 
     def _cache_key(self, path: Path, size: QSize) -> str:
-        return f"{self._memory_path_key(path)}:{size.width()}x{size.height()}"
-
-    @staticmethod
-    def _memory_path_key(path: Path) -> str:
-        # This key is used by GUI-thread cache peeks and viewport reconciliation.
-        # Keep it lexical: resolving symlinks both touches the filesystem and
-        # collapses distinct library entries that may own different sidecars.
-        normalized = Path(os.path.abspath(os.fspath(Path(path).expanduser())))
-        return hashlib.blake2b(
-            normalized.as_posix().encode("utf-8"),
-            digest_size=20,
-        ).hexdigest()
+        return f"{self._disk_cache_key(path)}:{size.width()}x{size.height()}"
 
     @staticmethod
     def _disk_cache_key(path: Path, known_key: str | None = None) -> str:
@@ -2840,10 +2927,13 @@ class ThumbnailCacheService(QObject):
         size: QSize,
         cancellation: _CancellationToken | None = None,
         l2_cache_key: str | None = None,
+        thumbnail_state: str = "ready",
+        thumb_revision: str | None = None,
     ) -> Optional[QImage]:
         """Read and decode an existing L2 thumbnail without rendering source media."""
 
-        if l2_cache_key is not None and l2_cache_key != self._disk_cache_key(path):
+        del thumb_revision
+        if thumbnail_state != "ready":
             if cancellation is not None:
                 cancellation.l2_outcome = "stale_revision"
             return None
@@ -2924,96 +3014,73 @@ class ThumbnailCacheService(QObject):
         size: QSize,
         cancellation: _CancellationToken | None = None,
         l2_cache_key: str | None = None,
+        thumbnail_state: str = "ready",
+        thumb_revision: str | None = None,
     ) -> Optional[QImage]:
         """Load L2 or render/write a replacement entirely on a worker thread."""
 
         if cancellation is not None and cancellation.cancelled():
             return None
-        expected_disk_key = self._disk_cache_key(path)
-        if l2_cache_key is not None and l2_cache_key != expected_disk_key:
-            l2_cache_key = None
-        disk_file = thumbnail_cache_file_for_key(
-            self._disk_cache_path,
-            self._disk_cache_key(path, l2_cache_key),
-        )
-        image, outcome, _elapsed_ms = self._read_cached_thumbnail(
-            disk_file,
-            path=path,
-            cancellation=None,
-            tier="L2",
-            target_size=size,
-        )
+        image: Optional[QImage] = None
+        outcome = "stale_revision"
+        if thumbnail_state == "ready":
+            disk_file = thumbnail_cache_file_for_key(
+                self._disk_cache_path,
+                self._disk_cache_key(path, l2_cache_key),
+            )
+            image, outcome, _elapsed_ms = self._read_cached_thumbnail(
+                disk_file,
+                path=path,
+                cancellation=None,
+                tier="L2",
+                target_size=size,
+            )
         if cancellation is not None and cancellation.cancelled():
             return None
         if outcome == "hit":
-            if image is not None:
-                self._publish_thumbnail_artifact(path, expected_disk_key, image)
             return image
 
-        storage_size = QSize(512, 512)
-        storage_image = self._render_thumbnail(path, storage_size)
-        if storage_image is None or storage_image.isNull():
-            return None
-        if cancellation is not None and cancellation.cancelled():
-            return None
-        if self._disk_cache_key(path) != expected_disk_key:
-            return None
-        temporary_file = disk_file.with_name(
-            f".{disk_file.name}.{threading.get_ident()}.{time.monotonic_ns()}.tmp"
+        expected_revision = thumb_revision or thumbnail_revision(path)
+        artifact = publish_thumbnail_artifact(
+            path,
+            self._disk_cache_path,
+            expected_revision=expected_revision,
+            edit_service=self._edit_service,
+            generator=self._generator,
         )
-        try:
-            disk_file.parent.mkdir(parents=True, exist_ok=True)
-            saved = storage_image.save(str(temporary_file), "JPEG")
-            if saved:
-                with self._disk_write_lock:
-                    if (
-                        (cancellation is None or not cancellation.cancelled())
-                        and self._disk_cache_key(path) == expected_disk_key
-                    ):
-                        temporary_file.replace(disk_file)
-        except OSError:
-            pass
-        finally:
-            try:
-                temporary_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+        if artifact is None:
+            return None
         if cancellation is not None and cancellation.cancelled():
             return None
-        published = disk_file.is_file()
-        if published:
-            self._publish_thumbnail_artifact(path, expected_disk_key, storage_image)
-        if size == storage_size:
-            return storage_image
-        return storage_image.scaled(
+        if thumbnail_state == "stale":
+            if self._publish_thumbnail_ready(path, artifact):
+                self._thumbnail_states[self._cache_key(path, size)] = "ready"
+        if size == artifact.image.size():
+            return artifact.image
+        return artifact.image.scaled(
             size,
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
 
-    def _publish_thumbnail_artifact(
-        self,
-        path: Path,
-        cache_key: str,
-        image: QImage,
-    ) -> None:
-        """Conditionally publish full/micro readiness for the current revision."""
-
-        service = self._thumbnail_state_service
-        publisher = getattr(service, "publish_thumbnail_ready", None)
-        if not callable(publisher) or self._disk_cache_key(path) != cache_key:
-            return
-        micro = encode_micro_thumbnail(image)
-        if micro is None:
-            return
+    def _publish_thumbnail_ready(self, path: Path, artifact) -> bool:
+        publisher = getattr(
+            self._thumbnail_state_service,
+            "publish_thumbnail_ready",
+            None,
+        )
+        if not callable(publisher):
+            return False
         try:
-            publisher(
+            return bool(publisher(
                 path,
-                cache_key=cache_key,
-                micro_thumbnail=micro,
-            )
+                revision=artifact.revision,
+                cache_key=artifact.cache_key,
+                micro_thumbnail=artifact.micro_thumbnail,
+            ))
         except Exception:
-            _LOGGER.exception("Failed to publish thumbnail artifact for %s", path)
+            _LOGGER.exception("Failed to publish thumbnail revision for %s", path)
+            return False
 
     @staticmethod
     def _resolve_memory_limit(memory_limit_mb: int | None) -> int:

@@ -23,7 +23,10 @@ from ..core.adjustment_mapping import (
 from ..infrastructure.repositories.edit_sidecar_repository import (
     FileSystemEditSidecarRepository,
 )
-from ..infrastructure.services.thumbnail_cache_keys import thumbnail_cache_key
+from ..infrastructure.services.thumbnail_artifact import (
+    thumbnail_artifact_lock,
+    thumbnail_revision,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,25 +59,19 @@ class LibraryEditService(EditServicePort):
         adjustments: dict[str, Any],
     ) -> EditCommitResult:
         normalized = self._normalize_path(path)
-        self._sidecar_repository.write_adjustments(
-            normalized,
-            adjustments,
-        )
-        desired_key = thumbnail_cache_key(normalized)
-        marker = getattr(self._thumbnail_state_service, "mark_thumbnail_stale", None)
-        if callable(marker):
-            try:
-                marker(normalized, desired_key)
-            except Exception:
-                # The sidecar is the durable source of truth. A transient index
-                # failure must not turn a successful edit into a false failure;
-                # invalidation still selects the returned key and the next scan
-                # can rebuild the derived row.
-                _LOGGER.exception(
-                    "Failed to mark thumbnail revision stale for %s",
-                    normalized,
-                )
-        return EditCommitResult(thumbnail_cache_key=desired_key)
+        with thumbnail_artifact_lock(normalized):
+            self._sidecar_repository.write_adjustments(normalized, adjustments)
+            revision = thumbnail_revision(normalized)
+            marker = getattr(self._thumbnail_state_service, "mark_thumbnail_stale", None)
+            if callable(marker):
+                try:
+                    marker(normalized, revision)
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to mark thumbnail revision stale for %s",
+                        normalized,
+                    )
+        return EditCommitResult(thumbnail_revision=revision)
 
     def default_adjustments(self) -> dict[str, Any]:
         return default_adjustment_values()

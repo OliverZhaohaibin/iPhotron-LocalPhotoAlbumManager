@@ -20,11 +20,12 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...config import WORK_DIR_NAME
+from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
     emit_perf_event,
@@ -211,7 +212,7 @@ class AssetRepository:
         """Initialize the database schema."""
         try:
             # Use a transient connection for initialization
-            with sqlite3.connect(self.path, timeout=10.0) as conn:
+            with closing(sqlite3.connect(self.path, timeout=10.0)) as conn, conn:
                 SchemaMigrator.initialize_schema(conn)
         except sqlite3.DatabaseError as exc:
             logger.warning("Detected index.db corruption at %s: %s", self.path, exc)

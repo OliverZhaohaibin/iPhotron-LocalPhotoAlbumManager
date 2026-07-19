@@ -3,7 +3,9 @@
 import pytest
 from unittest.mock import MagicMock
 from PySide6.QtCore import QPointF
+from PySide6.QtGui import QIcon
 
+import iPhoto.gui.ui.widgets.edit_perspective_controls as perspective_controls_module
 from iPhoto.gui.ui.widgets.gl_crop.controller import (
     CropInteractionController,
     _fit_crop_aspect,
@@ -320,10 +322,19 @@ class TestAspectOrientationToggle:
     """Verify the landscape/portrait orientation buttons in _AspectRatioSection."""
 
     @pytest.fixture(autouse=True)
-    def section(self, qtbot):
+    def section(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            perspective_controls_module,
+            "load_icon",
+            lambda *_args, **_kwargs: QIcon(),
+        )
+        monkeypatch.setattr(
+            _AspectRatioSection,
+            "_update_orientation_icons",
+            lambda _self: None,
+        )
         self.widget = _AspectRatioSection()
         qtbot.addWidget(self.widget)
-        self.widget.show()
         self.emitted: list[float] = []
         self.widget.ratioSelected.connect(lambda r: self.emitted.append(r))
 
@@ -335,19 +346,19 @@ class TestAspectOrientationToggle:
         raise ValueError(f"Preset '{label}' not found")
 
     def test_orientation_hidden_for_freeform(self):
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()
 
     def test_orientation_hidden_for_original(self):
         self._select_preset("Original")
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()
 
     def test_orientation_hidden_for_square(self):
         self._select_preset("Square")
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()
 
     def test_orientation_shown_for_16_9(self):
         self._select_preset("16:9")
-        assert self.widget._orientation_widget.isVisible()
+        assert not self.widget._orientation_widget.isHidden()
 
     def test_16_9_default_landscape(self):
         self._select_preset("16:9")
@@ -376,6 +387,6 @@ class TestAspectOrientationToggle:
 
     def test_switching_preset_hides_orientation(self):
         self._select_preset("16:9")
-        assert self.widget._orientation_widget.isVisible()
+        assert not self.widget._orientation_widget.isHidden()
         self._select_preset("Freeform")
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()

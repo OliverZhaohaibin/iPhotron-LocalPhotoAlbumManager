@@ -372,6 +372,20 @@ class TextureManager:
         byte_count: int,
         reason: str,
     ) -> None:
+        _LOGGER.warning(
+            "[detail-diag] gl_texture_upload_failed source_type=%s foreground=%s "
+            "reason=%s size=%sx%s bytes=%s resident_count=%s resident_bytes=%s "
+            "has_active=%s",
+            type(key).__name__,
+            activate,
+            reason,
+            width,
+            height,
+            byte_count,
+            len(self._still_textures),
+            sum(entry[3] for entry in self._still_textures.values()),
+            self._active_still_key is not None,
+        )
         event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
         emit_detail_event(
             event,

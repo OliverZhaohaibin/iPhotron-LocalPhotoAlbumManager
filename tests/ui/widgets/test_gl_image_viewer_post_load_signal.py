@@ -213,3 +213,88 @@ def test_rhi_render_presents_video_uploaded_before_render() -> None:
     viewer._renderer.render.assert_called_once()
     viewer.videoFramePresented.emit.assert_called_once()
     assert viewer._video_frame_presentation_pending is False
+
+
+def test_rhi_first_texture_failure_is_reported_before_no_texture_return() -> None:
+    """A failed first allocation must trigger LOD fallback without an old texture."""
+
+    viewer = Mock()
+    viewer._gl_initialized = True
+    viewer._using_video_frame_source = False
+    viewer._video_frame_dirty = False
+    viewer._video_frame = None
+    viewer._pending_video_image = None
+    viewer._image = None
+    viewer._pending_resident_activation = None
+    viewer._pending_warm_surfaces = []
+    viewer._still_presentation_pending = True
+    viewer._still_generation_by_key = {"first-still": 12}
+    viewer._texture_manager.needs_texture_upload.return_value = False
+    viewer._renderer.has_texture.return_value = False
+    viewer._renderer.take_still_upload_result.return_value = {
+        "key": "first-still",
+        "activate": True,
+        "success": False,
+        "reason": "create_failed",
+    }
+    viewer.renderTarget.return_value.pixelSize.return_value = QSize(64, 64)
+    viewer._consume_still_upload_result = lambda: (
+        GLImageViewer._consume_still_upload_result(viewer)
+    )
+
+    command_buffer = Mock()
+    GLImageViewer._render_rhi(viewer, command_buffer)
+
+    viewer.stillTextureAllocationFailed.emit.assert_called_once_with(
+        "first-still",
+        12,
+        "create_failed",
+    )
+    assert viewer._still_presentation_pending is False
+    viewer._renderer.render.assert_not_called()
+
+
+def test_windows_gl_first_texture_failure_is_reported_before_no_texture_return(
+    mocker,
+) -> None:
+    """The Windows raw-GL path must also report a failed first allocation."""
+
+    viewer = Mock()
+    viewer._uses_raw_gl = True
+    viewer._gl_initialized = True
+    viewer._using_video_frame_source = False
+    viewer._video_frame_dirty = False
+    viewer._video_frame = None
+    viewer._pending_video_image = None
+    viewer._image = None
+    viewer._pending_resident_activation = None
+    viewer._pending_warm_surfaces = []
+    viewer._still_presentation_pending = True
+    viewer._still_generation_by_key = {"first-gl-still": 15}
+    viewer._texture_manager.needs_texture_upload.return_value = False
+    viewer._renderer.has_texture.return_value = False
+    viewer._renderer.take_still_upload_result.return_value = {
+        "key": "first-gl-still",
+        "activate": True,
+        "success": False,
+        "reason": "upload_failed",
+    }
+    viewer.renderTarget.return_value.pixelSize.return_value = QSize(64, 64)
+    viewer._gl_clear_rgba.return_value = (0.0, 0.0, 0.0, 1.0)
+    viewer._consume_still_upload_result = lambda: (
+        GLImageViewer._consume_still_upload_result(viewer)
+    )
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget._load_gl_module",
+        return_value=SimpleNamespace(GL_COLOR_BUFFER_BIT=0x4000),
+    )
+
+    GLImageViewer.render(viewer, Mock())
+
+    viewer.stillTextureAllocationFailed.emit.assert_called_once_with(
+        "first-gl-still",
+        15,
+        "upload_failed",
+    )
+    assert viewer._still_presentation_pending is False
+    viewer._renderer.render.assert_not_called()

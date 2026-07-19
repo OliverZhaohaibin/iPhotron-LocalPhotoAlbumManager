@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
@@ -50,6 +51,9 @@ from ....gui.i18n import tr
 from ..widgets.gl_image_viewer import GLImageViewer
 from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class _StillSurfaceDecodeSignals(QObject):
@@ -1129,6 +1133,31 @@ class PlayerViewController(QObject):
         self._on_adjusted_image_failed(source, message)
 
     def _on_still_frame_presented(self, source: object) -> None:
+        pending_session = self._pending_present_session
+        _LOGGER.warning(
+            "[detail-diag] frame_received generation=%s source_type=%s "
+            "source=%s pending_session=%s pending_key_match=%s",
+            self._present_generation,
+            type(source).__name__,
+            getattr(getattr(source, "source", source), "name", ""),
+            pending_session[1].session_id if pending_session is not None else None,
+            bool(
+                isinstance(source, DetailDecodeKey)
+                and pending_session is not None
+                and pending_session[2] == source
+            ),
+        )
+        emit_detail_event(
+            "still_frame_presented_received",
+            generation=self._present_generation,
+            source_type=type(source).__name__,
+            has_pending_session=self._pending_present_session is not None,
+            pending_key_matches=bool(
+                isinstance(source, DetailDecodeKey)
+                and self._pending_present_session is not None
+                and self._pending_present_session[2] == source
+            ),
+        )
         if isinstance(source, DetailDecodeKey):
             pending_session = self._pending_present_session
             if pending_session is not None and pending_session[2] == source:
@@ -1138,6 +1167,21 @@ class PlayerViewController(QObject):
                 self._current_decode_level = source.decode_level
                 self._touch_render_session(session)
                 self._pending_present_session = None
+                _LOGGER.warning(
+                    "[detail-diag] session_committed generation=%s session_id=%s "
+                    "source=%s decode_level=%s",
+                    self._present_generation,
+                    session.session_id,
+                    session.source.name,
+                    source.decode_level,
+                )
+                emit_detail_event(
+                    "render_session_surface_committed",
+                    generation=self._present_generation,
+                    asset_id=session.asset_id,
+                    session_id=session.session_id,
+                    decode_level=source.decode_level,
+                )
             self._last_presented_decode_key = source
         presented_path = getattr(source, "source", source)
         if presented_path != self._present_source:
@@ -1172,7 +1216,21 @@ class PlayerViewController(QObject):
     ) -> None:
         """Restore the last valid texture and retry initial display at a lower LOD."""
 
+        _LOGGER.warning(
+            "[detail-diag] texture_failure_received generation=%s current_generation=%s "
+            "source=%s decode_level=%s reason=%s",
+            generation,
+            self._request_generation,
+            getattr(getattr(key, "source", None), "name", ""),
+            getattr(key, "decode_level", None),
+            reason,
+        )
         if generation != self._request_generation or not isinstance(key, DetailDecodeKey):
+            _LOGGER.warning(
+                "[detail-diag] texture_failure_ignored generation_match=%s key_type=%s",
+                generation == self._request_generation,
+                type(key).__name__,
+            )
             return
         pending_session = getattr(self, "_pending_present_session", None)
         if pending_session is not None and pending_session[2] == key:
@@ -1199,6 +1257,11 @@ class PlayerViewController(QObject):
                 break
 
         if request_reason != "initial":
+            _LOGGER.warning(
+                "[detail-diag] lod_fallback_skipped generation=%s request_reason=%s",
+                generation,
+                request_reason,
+            )
             emit_detail_event(
                 "lod_upgrade_failed",
                 generation=generation,
@@ -1222,6 +1285,13 @@ class PlayerViewController(QObject):
             None,
         )
         if fallback_level is None:
+            _LOGGER.warning(
+                "[detail-diag] lod_fallback_exhausted generation=%s source=%s "
+                "failed_level=%s",
+                generation,
+                key.source.name,
+                key.decode_level,
+            )
             emit_detail_event(
                 "lod_fallback_exhausted",
                 generation=generation,
@@ -1255,6 +1325,15 @@ class PlayerViewController(QObject):
         )
         self._loading_source = key.source
         self._loading_started_at = time.perf_counter()
+        _LOGGER.warning(
+            "[detail-diag] lod_fallback_requested generation=%s source=%s "
+            "failed_level=%s fallback_level=%s reason=%s",
+            generation,
+            key.source.name,
+            key.decode_level,
+            fallback_level,
+            reason,
+        )
         emit_detail_event(
             "lod_fallback",
             generation=generation,
@@ -1315,13 +1394,88 @@ class PlayerViewController(QObject):
     def acquire_render_session(self, source: Path) -> PhotoRenderSessionHandle | None:
         """Acquire the current still session without reading or decoding the source."""
 
+        normalized_source = Path(source).expanduser().absolute()
         session = self._current_render_session
-        if session is None or session.source != Path(source).expanduser().absolute():
+        if session is None:
+            viewer_source = self._image_viewer.current_image_source()
+            renderer = getattr(self._image_viewer, "_renderer", None)
+            has_texture = (
+                bool(renderer.has_texture())
+                if renderer is not None and hasattr(renderer, "has_texture")
+                else False
+            )
+            pending = self._pending_present_session
+            _LOGGER.warning(
+                "[detail-diag] session_acquire_failed reason=no_current_session "
+                "generation=%s requested=%s session_count=%s pending_session=%s "
+                "viewer_source_type=%s viewer_source=%s renderer=%s has_texture=%s",
+                self._request_generation,
+                normalized_source.name,
+                len(self._render_sessions),
+                pending[1].session_id if pending is not None else None,
+                type(viewer_source).__name__,
+                getattr(getattr(viewer_source, "source", viewer_source), "name", ""),
+                type(renderer).__name__ if renderer is not None else None,
+                has_texture,
+            )
+            emit_detail_event(
+                "render_session_acquire_failed",
+                generation=self._request_generation,
+                reason="no_current_session",
+                session_count=len(self._render_sessions),
+                has_pending_session=self._pending_present_session is not None,
+                viewer_source_type=type(self._image_viewer.current_image_source()).__name__,
+            )
             return None
-        if self._image_viewer.current_image_source() != session.current_texture_key:
+        if session.source != normalized_source:
+            _LOGGER.warning(
+                "[detail-diag] session_acquire_failed reason=source_mismatch "
+                "generation=%s requested=%s session_id=%s session_source=%s",
+                self._request_generation,
+                normalized_source.name,
+                session.session_id,
+                session.source.name,
+            )
+            emit_detail_event(
+                "render_session_acquire_failed",
+                generation=self._request_generation,
+                reason="source_mismatch",
+                session_id=session.session_id,
+                session_count=len(self._render_sessions),
+            )
+            return None
+        viewer_source = self._image_viewer.current_image_source()
+        if viewer_source != session.current_texture_key:
+            _LOGGER.warning(
+                "[detail-diag] session_acquire_failed reason=texture_key_mismatch "
+                "generation=%s requested=%s session_id=%s decode_level=%s "
+                "viewer_source_type=%s viewer_source=%s",
+                self._request_generation,
+                normalized_source.name,
+                session.session_id,
+                session.current_surface.decode_level,
+                type(viewer_source).__name__,
+                getattr(getattr(viewer_source, "source", viewer_source), "name", ""),
+            )
+            emit_detail_event(
+                "render_session_acquire_failed",
+                generation=self._request_generation,
+                reason="texture_key_mismatch",
+                session_id=session.session_id,
+                decode_level=session.current_surface.decode_level,
+                viewer_source_type=type(viewer_source).__name__,
+            )
             return None
         session.edit_references += 1
         self._touch_render_session(session)
+        _LOGGER.warning(
+            "[detail-diag] session_acquired generation=%s source=%s session_id=%s "
+            "decode_level=%s",
+            self._request_generation,
+            normalized_source.name,
+            session.session_id,
+            session.current_surface.decode_level,
+        )
         emit_detail_event(
             "render_session_acquired",
             generation=self._request_generation,
@@ -1805,6 +1959,24 @@ class PlayerViewController(QObject):
                 session,
                 surface.decode_key,
             )
+            emit_detail_event(
+                "render_session_surface_staged",
+                generation=self._present_generation,
+                asset_id=session.asset_id,
+                session_id=session.session_id,
+                decode_level=surface.decode_level,
+            )
+        _LOGGER.warning(
+            "[detail-diag] surface_staged generation=%s source=%s decode_level=%s "
+            "size=%sx%s session_id=%s session_count=%s",
+            self._present_generation,
+            source.name,
+            surface.decode_level,
+            image.width(),
+            image.height(),
+            session.session_id if session is not None else None,
+            len(self._render_sessions),
+        )
         set_still_surface = getattr(self._image_viewer, "set_still_surface", None)
         if callable(set_still_surface):
             set_still_surface(

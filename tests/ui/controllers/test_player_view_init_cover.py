@@ -418,7 +418,10 @@ class TestInitCoverTracking:
 
         controller.end_render_session_interaction(acquired)
 
-        assert handle.current_surface is upgraded
+        # Presentation is now two-phase: ending the gesture releases the
+        # deferred surface to the viewer, while the session keeps its last
+        # drawn surface until ``stillFramePresented`` acknowledges the upload.
+        assert handle.current_surface is initial
         assert handle.session_id not in controller._render_session_pending_surfaces
         present.assert_called_once()
         controller.finish_render_session(acquired, committed=False)

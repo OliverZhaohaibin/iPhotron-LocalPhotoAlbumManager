@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeFailure,
+    IdentityMergeRefreshPolicy,
     IdentityRef,
     RecognitionMergeService,
 )
@@ -1241,7 +1242,10 @@ class PeopleDashboardWidget(QWidget):
             logger.exception("Identity merge failed: %s -> %s", source_identity, target_identity)
             dialogs.show_warning(
                 self,
-                tr("PeopleDashboard", "The identities could not be merged. No photos were deleted."),
+                tr(
+                    "PeopleDashboard",
+                    "The identities could not be merged. No photos were deleted.",
+                ),
                 title=tr("PeopleDashboard", "Merge Failed"),
             )
             return False
@@ -1263,17 +1267,23 @@ class PeopleDashboardWidget(QWidget):
                 self,
                 tr(
                     "PeopleDashboard",
-                    "The identities could not be merged. They may have changed since this view was loaded.",
+                    (
+                        "The identities could not be merged. "
+                        "They may have changed since this view was loaded."
+                    ),
                 ),
                 title=tr("PeopleDashboard", "Merge Failed"),
             )
         if merged:
             self._remove_merged_source_card(source_identity)
-            self._reload_after_mutation(
-                preserve_content=bool(
-                    self._summaries or self._pet_summaries or self._groups
+            if outcome.refresh_policy == IdentityMergeRefreshPolicy.IMMEDIATE:
+                self._reload_after_mutation(
+                    preserve_content=bool(
+                        self._summaries or self._pet_summaries or self._groups
+                    )
                 )
-            )
+            else:
+                self._invalidate_query_cache()
         return merged
 
     def _remove_merged_source_card(self, source_identity: str) -> None:
@@ -1358,7 +1368,11 @@ class PeopleDashboardWidget(QWidget):
         kind, entity_id = normalized.split(":", 1)
         if kind == "person":
             summary = self._summary_for_person(entity_id)
-            return (summary.name or "").strip() if summary is not None else tr("PeopleDashboard", "Unnamed")
+            return (
+                (summary.name or "").strip()
+                if summary is not None
+                else tr("PeopleDashboard", "Unnamed")
+            )
         summary = self._summary_for_pet(entity_id)
         return self._pet_label(summary) if summary is not None else tr("PeopleDashboard", "Unnamed")
 

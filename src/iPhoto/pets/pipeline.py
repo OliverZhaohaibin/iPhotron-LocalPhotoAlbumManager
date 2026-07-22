@@ -12,6 +12,7 @@ import warnings
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 from urllib import request
 
@@ -77,6 +78,28 @@ class DetectedAssetPets:
     asset_rel: str
     detections: list[PetDetectionRecord]
     error: str | None = None
+
+
+class PetIdentityResolutionSource(StrEnum):
+    KEY = "key"
+    REDIRECT_KEY = "redirect_key"
+    PROFILE = "profile"
+    REDIRECT_PROFILE = "redirect_profile"
+    NEW = "new"
+
+
+@dataclass(frozen=True)
+class PetIdentityResolution:
+    raw_pet_id: str
+    canonical_pet_id: str
+    source: PetIdentityResolutionSource
+
+    @property
+    def is_redirect_alias(self) -> bool:
+        return self.source in {
+            PetIdentityResolutionSource.REDIRECT_KEY,
+            PetIdentityResolutionSource.REDIRECT_PROFILE,
+        }
 
 
 @dataclass(frozen=True)
@@ -469,7 +492,10 @@ def canonicalize_pet_identities(
     if not detections or not pets:
         return detections, pets
 
-    profiles = {profile.pet_id: profile for profile in state_repository.get_profiles()}
+    profiles = {
+        profile.pet_id: profile for profile in state_repository.get_identity_profiles()
+    }
+    redirects = state_repository.get_merge_redirect_map()
     pet_key_map = state_repository.get_pet_key_map(detection.pet_key for detection in detections)
     detections_by_pet_id: dict[str, list[PetDetectionRecord]] = defaultdict(list)
     for detection in detections:
@@ -479,22 +505,40 @@ def canonicalize_pet_identities(
     canonical_members: dict[str, list[PetDetectionRecord]] = defaultdict(list)
     canonical_names: dict[str, str | None] = {}
     canonical_created_at: dict[str, str] = {}
+    direct_anchors: set[str] = set()
 
     for pet in pets:
         members = detections_by_pet_id.get(pet.pet_id, [])
-        canonical_id = resolve_canonical_pet_id(
+        resolution = resolve_canonical_pet_id(
             pet,
             members,
             profiles=profiles,
             pet_key_map=pet_key_map,
+            redirects=redirects,
             distance_threshold=distance_threshold,
         )
-        if canonical_members.get(canonical_id) and not _detection_groups_compatible(
-            canonical_members[canonical_id],
-            members,
-            distance_threshold=distance_threshold,
+        canonical_id = resolution.canonical_pet_id
+        is_incompatible = bool(
+            canonical_members.get(canonical_id)
+            and not _detection_groups_compatible(
+                canonical_members[canonical_id],
+                members,
+                distance_threshold=distance_threshold,
+            )
+        )
+        if (
+            is_incompatible
+            and not resolution.is_redirect_alias
+            and canonical_id in direct_anchors
         ):
             canonical_id = uuid.uuid4().hex
+            resolution = PetIdentityResolution(
+                raw_pet_id=canonical_id,
+                canonical_pet_id=canonical_id,
+                source=PetIdentityResolutionSource.NEW,
+            )
+        if not resolution.is_redirect_alias:
+            direct_anchors.add(canonical_id)
         profile = profiles.get(canonical_id)
         canonical_members[canonical_id].extend(members)
         canonical_names.setdefault(canonical_id, profile.name if profile is not None else None)
@@ -527,15 +571,16 @@ def resolve_canonical_pet_id(
     *,
     profiles: dict[str, PetProfile],
     pet_key_map: dict[str, str],
+    redirects: dict[str, str],
     distance_threshold: float,
-) -> str:
+) -> PetIdentityResolution:
     vote_counter = Counter(
         pet_key_map[member.pet_key]
         for member in members
         if member.pet_key in pet_key_map
     )
     if vote_counter:
-        return max(
+        raw_pet_id = max(
             vote_counter.items(),
             key=lambda item: (
                 item[1],
@@ -543,12 +588,23 @@ def resolve_canonical_pet_id(
                 item[0],
             ),
         )[0]
+        canonical_pet_id = redirects.get(raw_pet_id, raw_pet_id)
+        return PetIdentityResolution(
+            raw_pet_id=raw_pet_id,
+            canonical_pet_id=canonical_pet_id,
+            source=(
+                PetIdentityResolutionSource.REDIRECT_KEY
+                if canonical_pet_id != raw_pet_id
+                else PetIdentityResolutionSource.KEY
+            ),
+        )
 
     best_profile_id: str | None = None
     best_distance = float("inf")
     pet_species = _normalize_species_label(pet.species_label)
     for profile in profiles.values():
-        if str(profile.profile_state or "unstable") != "stable":
+        is_redirect_alias = profile.pet_id in redirects
+        if not is_redirect_alias and str(profile.profile_state or "unstable") != "stable":
             continue
         profile_species = _normalize_species_label(profile.species_label)
         if pet_species and profile_species and pet_species != profile_species:
@@ -563,8 +619,22 @@ def resolve_canonical_pet_id(
             best_profile_id = profile.pet_id
 
     if best_profile_id is not None and best_distance <= distance_threshold:
-        return best_profile_id
-    return uuid.uuid4().hex
+        canonical_pet_id = redirects.get(best_profile_id, best_profile_id)
+        return PetIdentityResolution(
+            raw_pet_id=best_profile_id,
+            canonical_pet_id=canonical_pet_id,
+            source=(
+                PetIdentityResolutionSource.REDIRECT_PROFILE
+                if canonical_pet_id != best_profile_id
+                else PetIdentityResolutionSource.PROFILE
+            ),
+        )
+    new_pet_id = uuid.uuid4().hex
+    return PetIdentityResolution(
+        raw_pet_id=new_pet_id,
+        canonical_pet_id=new_pet_id,
+        source=PetIdentityResolutionSource.NEW,
+    )
 
 
 def _cluster_pet_detection_labels(

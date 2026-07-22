@@ -96,8 +96,7 @@ class PetScanWorker(QThread):
         self._reset_done_rows_for_detector_upgrade()
         if self._cancelled:
             return
-        if self._recluster_for_clustering_upgrade(pipeline):
-            self.petIndexUpdated.emit()
+        self._recluster_for_clustering_upgrade(pipeline)
         self._prime_pending_rows()
         if self._cancelled:
             return
@@ -266,28 +265,14 @@ class PetScanWorker(QThread):
         return event is not None
 
     def _recluster_for_clustering_upgrade(self, pipeline: PetClusterPipeline) -> bool:
-        repository = self._pet_service.repository()
-        if repository is None:
+        coordinator = self._pet_service.coordinator
+        if coordinator is None:
             return False
-        current_version = repository.get_scan_metadata("clustering_pipeline_version")
-        if current_version == PET_CLUSTERING_PIPELINE_VERSION:
-            return False
-        reclustered_count = repository.recluster_detections(
+        reclustered_count = coordinator.recluster_for_pipeline_upgrade(
+            clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
             distance_threshold=pipeline.distance_threshold,
             min_samples=pipeline.min_samples,
         )
-        repository.set_scan_metadata(
-            "clustering_pipeline_version",
-            PET_CLUSTERING_PIPELINE_VERSION,
-        )
-        if reclustered_count:
-            LOGGER.info(
-                "Reclustered %d pet detections for clustering pipeline upgrade %s -> %s in %s",
-                reclustered_count,
-                current_version or "<missing>",
-                PET_CLUSTERING_PIPELINE_VERSION,
-                self._library_root,
-            )
         return reclustered_count > 0
 
     def _reset_done_rows_for_detector_upgrade(self) -> None:

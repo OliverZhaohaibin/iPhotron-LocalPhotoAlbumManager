@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeOutcome,
+    IdentityMergeRefreshPolicy,
     IdentityRef,
 )
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
@@ -1142,6 +1143,7 @@ def test_cross_identity_merge_invalidates_query_cache_before_reload(
         True,
         IdentityRef("person", "person-a"),
         IdentityRef("pet", "pet-a"),
+        refresh_policy=IdentityMergeRefreshPolicy.IMMEDIATE,
     )
     monkeypatch.setattr(
         widget._merge_service,
@@ -1241,6 +1243,7 @@ def test_right_click_pet_to_pet_uses_typed_merge_service_once(
             True,
             IdentityRef("pet", "pet-a"),
             IdentityRef("pet", "pet-b"),
+            refresh_policy=IdentityMergeRefreshPolicy.SNAPSHOT,
             pet_redirects={"pet-a": "pet-b"},
         )
     )
@@ -1252,6 +1255,7 @@ def test_right_click_pet_to_pet_uses_typed_merge_service_once(
     widget._merge_pet(widget._pet_summaries[0])
 
     merge.assert_called_once_with("pet:pet-a", "pet:pet-b")
+    widget.reload.assert_not_called()
     assert [card.identity_key for card in widget._board.visible_cards()] == ["pet:pet-b"]
 
 

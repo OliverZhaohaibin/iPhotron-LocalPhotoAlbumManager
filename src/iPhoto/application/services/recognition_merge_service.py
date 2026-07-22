@@ -48,12 +48,19 @@ class IdentityMergeFailure(StrEnum):
     REJECTED = "rejected"
 
 
+class IdentityMergeRefreshPolicy(StrEnum):
+    NONE = "none"
+    SNAPSHOT = "snapshot"
+    IMMEDIATE = "immediate"
+
+
 @dataclass(frozen=True, slots=True)
 class IdentityMergeOutcome:
     merged: bool
     source: IdentityRef | None
     target: IdentityRef | None
     failure: IdentityMergeFailure | None = None
+    refresh_policy: IdentityMergeRefreshPolicy = IdentityMergeRefreshPolicy.NONE
     changed_asset_ids: tuple[str, ...] = ()
     person_redirects: dict[str, str] = field(default_factory=dict)
     pet_redirects: dict[str, str] = field(default_factory=dict)
@@ -118,6 +125,11 @@ class RecognitionMergeService:
                 source_ref,
                 target_ref,
                 None if merged else IdentityMergeFailure.REJECTED,
+                refresh_policy=(
+                    IdentityMergeRefreshPolicy.SNAPSHOT
+                    if merged
+                    else IdentityMergeRefreshPolicy.NONE
+                ),
                 changed_asset_ids=changed_asset_ids if merged else (),
                 person_redirects=(
                     {source_ref.entity_id: target_ref.entity_id} if merged else {}
@@ -140,6 +152,11 @@ class RecognitionMergeService:
                 source_ref,
                 target_ref,
                 None if merged else IdentityMergeFailure.REJECTED,
+                refresh_policy=(
+                    IdentityMergeRefreshPolicy.SNAPSHOT
+                    if merged
+                    else IdentityMergeRefreshPolicy.NONE
+                ),
                 changed_asset_ids=changed_asset_ids if merged else (),
                 pet_redirects=(
                     {source_ref.entity_id: target_ref.entity_id} if merged else {}
@@ -161,6 +178,7 @@ class RecognitionMergeService:
             True,
             source_ref,
             target_ref,
+            refresh_policy=IdentityMergeRefreshPolicy.IMMEDIATE,
             changed_asset_ids=changed_asset_ids,
             group_redirects=dict(result.group_redirects),
         )
@@ -190,6 +208,7 @@ __all__ = [
     "IdentityKind",
     "IdentityMergeFailure",
     "IdentityMergeOutcome",
+    "IdentityMergeRefreshPolicy",
     "IdentityRef",
     "RecognitionMergeService",
 ]

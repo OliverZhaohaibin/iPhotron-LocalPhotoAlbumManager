@@ -54,9 +54,16 @@ class PetStateRepository:
                 self._create_schema(conn)
             self._initialized = True
 
-    def get_profiles(self) -> list[PetProfile]:
+    def get_profiles(self, *, include_redirected: bool = False) -> list[PetProfile]:
         self.initialize()
         with closing(self._connect()) as conn:
+            redirected_ids = {
+                str(row["source_pet_id"])
+                for row in conn.execute(
+                    "SELECT source_pet_id FROM merge_redirects"
+                ).fetchall()
+                if row["source_pet_id"]
+            }
             inferred_counts = {
                 str(row["pet_id"]): int(row["sample_count"] or 0)
                 for row in conn.execute(
@@ -78,6 +85,8 @@ class PetStateRepository:
         profiles: list[PetProfile] = []
         for row in rows:
             pet_id = str(row["pet_id"])
+            if not include_redirected and pet_id in redirected_ids:
+                continue
             sample_count = int(row["sample_count"] or 0)
             if sample_count <= 0:
                 sample_count = inferred_counts.get(pet_id, 0)
@@ -98,6 +107,11 @@ class PetStateRepository:
                 )
             )
         return profiles
+
+    def get_identity_profiles(self) -> list[PetProfile]:
+        """Return active profiles and redirected profiles used as aliases."""
+
+        return self.get_profiles(include_redirected=True)
 
     def get_profile(self, pet_id: str) -> PetProfile | None:
         if not pet_id:
@@ -180,7 +194,19 @@ class PetStateRepository:
         timestamp = utc_now_iso()
         detection_by_id = {detection.detection_id: detection for detection in detections}
         with closing(self._connect()) as conn:
+            redirect_rows = conn.execute(
+                "SELECT source_pet_id, target_pet_id FROM merge_redirects"
+            ).fetchall()
+            redirects = _canonical_redirect_map(
+                {
+                    str(row["source_pet_id"]): str(row["target_pet_id"])
+                    for row in redirect_rows
+                    if row["source_pet_id"] and row["target_pet_id"]
+                }
+            )
             for pet in pets:
+                if pet.pet_id in redirects:
+                    continue
                 sample_count = max(int(pet.sample_count), int(pet.detection_count))
                 existing = conn.execute(
                     "SELECT created_at, name FROM pet_profiles WHERE pet_id = ?",
@@ -227,6 +253,16 @@ class PetStateRepository:
             for detection in detections:
                 if not detection.pet_id:
                     continue
+                canonical_pet_id = redirects.get(detection.pet_id, detection.pet_id)
+                existing_key = conn.execute(
+                    "SELECT pet_id FROM pet_keys WHERE pet_key = ?",
+                    (detection.pet_key,),
+                ).fetchone()
+                durable_pet_id = canonical_pet_id
+                if existing_key is not None and existing_key["pet_id"]:
+                    raw_pet_id = str(existing_key["pet_id"])
+                    if redirects.get(raw_pet_id, raw_pet_id) == canonical_pet_id:
+                        durable_pet_id = raw_pet_id
                 conn.execute(
                     """
                     INSERT INTO pet_keys (pet_key, pet_id, updated_at)
@@ -235,7 +271,7 @@ class PetStateRepository:
                         pet_id = excluded.pet_id,
                         updated_at = excluded.updated_at
                     """,
-                    (detection.pet_key, detection.pet_id, timestamp),
+                    (detection.pet_key, durable_pet_id, timestamp),
                 )
 
             for pet in pets:
@@ -337,13 +373,12 @@ class PetStateRepository:
             for detection in detections:
                 if not detection.pet_id:
                     continue
-                durable_pet_id = redirects.get(detection.pet_id, detection.pet_id)
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO pet_keys (pet_key, pet_id, updated_at)
                     VALUES (?, ?, ?)
                     """,
-                    (detection.pet_key, durable_pet_id, timestamp),
+                    (detection.pet_key, detection.pet_id, timestamp),
                 )
             conn.commit()
 
@@ -580,10 +615,6 @@ class PetStateRepository:
                     ),
                 )
             conn.execute(
-                "UPDATE pet_keys SET pet_id = ?, updated_at = ? WHERE pet_id = ?",
-                (target_pet_id, timestamp, source_pet_id),
-            )
-            conn.execute(
                 """
                 INSERT INTO merge_redirects (source_pet_id, target_pet_id, updated_at)
                 VALUES (?, ?, ?)
@@ -601,7 +632,6 @@ class PetStateRepository:
                 """,
                 (target_pet_id, timestamp, source_pet_id, source_pet_id),
             )
-            conn.execute("DELETE FROM pet_profiles WHERE pet_id = ?", (source_pet_id,))
             conn.execute("DELETE FROM pet_covers WHERE pet_id = ?", (source_pet_id,))
             conn.execute("DELETE FROM hidden_pets WHERE pet_id = ?", (source_pet_id,))
             conn.commit()

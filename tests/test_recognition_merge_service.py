@@ -7,6 +7,7 @@ import pytest
 
 from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeFailure,
+    IdentityMergeRefreshPolicy,
     IdentityRef,
     RecognitionMergeService,
 )
@@ -66,6 +67,11 @@ def test_routes_all_directions_with_typed_identity(
     outcome = service.merge(source, target)
 
     assert outcome.merged is True
+    assert outcome.refresh_policy is (
+        IdentityMergeRefreshPolicy.SNAPSHOT
+        if source.split(":", 1)[0] == target.split(":", 1)[0]
+        else IdentityMergeRefreshPolicy.IMMEDIATE
+    )
     owner = pets if called_method == "merge_pets" else people
     getattr(owner, called_method).assert_called_once_with(*called_args)
 
@@ -89,4 +95,3 @@ def test_untyped_raw_id_is_rejected_without_guessing_kind() -> None:
 
     assert outcome.merged is False
     assert outcome.failure is IdentityMergeFailure.INVALID_IDENTITY
-

@@ -244,6 +244,56 @@ class PetIndexCoordinator(QObject):
             )
             return True
 
+    def recluster_for_pipeline_upgrade(
+        self,
+        *,
+        clustering_pipeline_version: str,
+        distance_threshold: float,
+        min_samples: int,
+    ) -> int:
+        """Serialize a version-gated recluster with every other Pet mutation."""
+
+        with self._lock:
+            if self._shutdown_requested:
+                return 0
+            repository = self._repository()
+            previous_version = repository.get_scan_metadata(
+                "clustering_pipeline_version"
+            )
+            if previous_version == clustering_pipeline_version:
+                return 0
+            previous_detections = repository.get_all_detections()
+            reclustered_count = repository.recluster_detections(
+                distance_threshold=distance_threshold,
+                min_samples=min_samples,
+            )
+            repository.set_scan_metadata(
+                "clustering_pipeline_version",
+                clustering_pipeline_version,
+            )
+            if reclustered_count:
+                self._emit_snapshot(
+                    changed_asset_ids=tuple(
+                        dict.fromkeys(
+                            detection.asset_id
+                            for detection in previous_detections
+                            if detection.asset_id
+                        )
+                    ),
+                    changed_pet_ids=tuple(
+                        pet.pet_id for pet in repository.get_all_pet_records()
+                    ),
+                )
+                LOGGER.info(
+                    "Reclustered %d pet detections for clustering pipeline upgrade "
+                    "%s -> %s in %s",
+                    reclustered_count,
+                    previous_version or "<missing>",
+                    clustering_pipeline_version,
+                    self._library_root,
+                )
+            return reclustered_count
+
     def delete_detection(self, detection_id: str) -> PetSnapshotEvent | None:
         with self._lock:
             if self._shutdown_requested:

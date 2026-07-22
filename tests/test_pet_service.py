@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import warnings
 from dataclasses import replace
 from pathlib import Path
@@ -17,7 +18,7 @@ from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.records import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.pets import pipeline as pet_pipeline
-from iPhoto.pets.index_coordinator import reset_pet_index_coordinators
+from iPhoto.pets.index_coordinator import PetIndexCoordinator, reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
     _DINO_HUB_REPO,
     PET_CLUSTERING_PIPELINE_VERSION,
@@ -832,6 +833,276 @@ def test_merge_pets_repairs_legacy_runtime_without_durable_profiles(tmp_path: Pa
     assert repository.merge_pets("pet-a", "pet-b") is not None
     assert repository.state_repository is not None
     assert [profile.pet_id for profile in repository.state_repository.get_profiles()] == ["pet-b"]
+
+
+def test_manual_pet_merge_survives_incompatible_scan_recluster(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    source_detection = _detection(
+        detection_id="det-source",
+        asset_id="asset-source",
+        pet_id="pet-source",
+        embedding=np.asarray([1.0, 0.0]),
+        species_label="cat",
+    )
+    target_detection = _detection(
+        detection_id="det-target",
+        asset_id="asset-target",
+        pet_id="pet-target",
+        embedding=np.asarray([0.0, 1.0]),
+        species_label="dog",
+    )
+    pets = [
+        PetRecord(
+            pet_id="pet-source",
+            name=None,
+            key_detection_id=source_detection.detection_id,
+            detection_count=1,
+            center_embedding=source_detection.embedding,
+            embedding_dim=source_detection.embedding_dim,
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+            sample_count=1,
+        ),
+        PetRecord(
+            pet_id="pet-target",
+            name=None,
+            key_detection_id=target_detection.detection_id,
+            detection_count=1,
+            center_embedding=target_detection.embedding,
+            embedding_dim=target_detection.embedding_dim,
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+            sample_count=1,
+        ),
+    ]
+    repository.replace_all([source_detection, target_detection], pets)
+    assert repository.merge_pets("pet-source", "pet-target") is not None
+
+    session = PetScanSession()
+    detections, reclustered_pets = session.build_snapshot_from_detections(
+        repository,
+        detections=repository.get_all_detections(),
+        distance_threshold=0.2,
+        min_samples=1,
+    )
+    session.commit(repository, detections=detections, pets=reclustered_pets)
+
+    assert {detection.pet_id for detection in repository.get_all_detections()} == {
+        "pet-target"
+    }
+    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_pet_key_map(
+        [source_detection.pet_key, target_detection.pet_key]
+    ) == {
+        source_detection.pet_key: "pet-source",
+        target_detection.pet_key: "pet-target",
+    }
+    assert [profile.pet_id for profile in repository.state_repository.get_profiles()] == [
+        "pet-target"
+    ]
+    assert {profile.pet_id for profile in repository.state_repository.get_identity_profiles()} == {
+        "pet-source",
+        "pet-target",
+    }
+    assert repository.recluster_detections(distance_threshold=0.2, min_samples=1) == 2
+    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
+
+
+def test_redirected_unstable_pet_profile_recognizes_new_key(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    source_detection = _detection(
+        detection_id="det-source",
+        pet_id="pet-source",
+        embedding=np.asarray([1.0, 0.0]),
+    )
+    target_detection = _detection(
+        detection_id="det-target",
+        asset_id="asset-target",
+        pet_id="pet-target",
+        embedding=np.asarray([0.0, 1.0]),
+    )
+    repository.replace_all(
+        [source_detection, target_detection],
+        [
+            PetRecord(
+                pet_id="pet-source",
+                name=None,
+                key_detection_id=source_detection.detection_id,
+                detection_count=1,
+                center_embedding=source_detection.embedding,
+                embedding_dim=source_detection.embedding_dim,
+                created_at=utc_now_iso(),
+                updated_at=utc_now_iso(),
+                sample_count=1,
+            ),
+            PetRecord(
+                pet_id="pet-target",
+                name=None,
+                key_detection_id=target_detection.detection_id,
+                detection_count=1,
+                center_embedding=target_detection.embedding,
+                embedding_dim=target_detection.embedding_dim,
+                created_at=utc_now_iso(),
+                updated_at=utc_now_iso(),
+                sample_count=1,
+            ),
+        ],
+    )
+    assert repository.merge_pets("pet-source", "pet-target") is not None
+    new_source_detection = _detection(
+        detection_id="det-source-new",
+        asset_id="asset-source-new",
+        pet_key="new-source-key",
+        embedding=np.asarray([0.99, 0.01]),
+    )
+
+    detections, pets = PetScanSession().build_snapshot_from_detections(
+        repository,
+        detections=[*repository.get_all_detections(), new_source_detection],
+        distance_threshold=0.2,
+        min_samples=1,
+    )
+
+    assert {detection.pet_id for detection in detections} == {"pet-target"}
+    assert [pet.pet_id for pet in pets] == ["pet-target"]
+
+
+def test_pipeline_recluster_and_merge_share_coordinator_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    source_detection = _detection(
+        detection_id="det-source",
+        pet_id="pet-source",
+        embedding=np.asarray([1.0, 0.0]),
+    )
+    target_detection = _detection(
+        detection_id="det-target",
+        asset_id="asset-target",
+        pet_id="pet-target",
+        embedding=np.asarray([0.0, 1.0]),
+    )
+    repository.replace_all(
+        [source_detection, target_detection],
+        [
+            PetRecord(
+                pet_id="pet-source",
+                name=None,
+                key_detection_id=source_detection.detection_id,
+                detection_count=1,
+                center_embedding=source_detection.embedding,
+                embedding_dim=source_detection.embedding_dim,
+                created_at=utc_now_iso(),
+                updated_at=utc_now_iso(),
+                sample_count=1,
+            ),
+            PetRecord(
+                pet_id="pet-target",
+                name=None,
+                key_detection_id=target_detection.detection_id,
+                detection_count=1,
+                center_embedding=target_detection.embedding,
+                embedding_dim=target_detection.embedding_dim,
+                created_at=utc_now_iso(),
+                updated_at=utc_now_iso(),
+                sample_count=1,
+            ),
+        ],
+    )
+    coordinator = PetIndexCoordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    original_recluster = repository.recluster_detections
+    recluster_entered = threading.Event()
+    release_recluster = threading.Event()
+    merge_finished = threading.Event()
+    merge_results: list[bool] = []
+
+    def blocked_recluster(*, distance_threshold: float, min_samples: int) -> int:
+        recluster_entered.set()
+        assert release_recluster.wait(2)
+        return original_recluster(
+            distance_threshold=distance_threshold,
+            min_samples=min_samples,
+        )
+
+    monkeypatch.setattr(repository, "recluster_detections", blocked_recluster)
+    recluster_thread = threading.Thread(
+        target=lambda: coordinator.recluster_for_pipeline_upgrade(
+            clustering_pipeline_version="test-version",
+            distance_threshold=0.2,
+            min_samples=1,
+        )
+    )
+
+    def merge() -> None:
+        merge_results.append(coordinator.merge_pets("pet-source", "pet-target"))
+        merge_finished.set()
+
+    recluster_thread.start()
+    assert recluster_entered.wait(2)
+    merge_thread = threading.Thread(target=merge)
+    merge_thread.start()
+    assert merge_finished.wait(0.1) is False
+    release_recluster.set()
+    recluster_thread.join(2)
+    merge_thread.join(2)
+
+    assert merge_results == [True]
+    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
+
+
+def test_pet_merge_redirect_chain_keeps_all_alias_clusters_linked(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    detections = [
+        _detection(
+            detection_id=f"det-{pet_id}",
+            asset_id=f"asset-{pet_id}",
+            pet_id=pet_id,
+            embedding=embedding,
+        )
+        for pet_id, embedding in (
+            ("pet-a", np.asarray([1.0, 0.0, 0.0])),
+            ("pet-b", np.asarray([0.0, 1.0, 0.0])),
+            ("pet-c", np.asarray([0.0, 0.0, 1.0])),
+        )
+    ]
+    repository.replace_all(
+        detections,
+        [
+            PetRecord(
+                pet_id=str(detection.pet_id),
+                name=None,
+                key_detection_id=detection.detection_id,
+                detection_count=1,
+                center_embedding=detection.embedding,
+                embedding_dim=detection.embedding_dim,
+                created_at=utc_now_iso(),
+                updated_at=utc_now_iso(),
+                sample_count=1,
+            )
+            for detection in detections
+        ],
+    )
+
+    assert repository.merge_pets("pet-a", "pet-b") is not None
+    assert repository.merge_pets("pet-b", "pet-c") is not None
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_merge_redirect_map() == {
+        "pet-a": "pet-c",
+        "pet-b": "pet-c",
+    }
+
+    reclustered, pets = PetScanSession().build_snapshot_from_detections(
+        repository,
+        detections=repository.get_all_detections(),
+        distance_threshold=0.2,
+        min_samples=1,
+    )
+
+    assert {detection.pet_id for detection in reclustered} == {"pet-c"}
+    assert [pet.pet_id for pet in pets] == ["pet-c"]
 
 
 def test_pet_summary_asset_count_counts_unique_assets(tmp_path: Path) -> None:

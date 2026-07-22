@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import threading
+
+import pytest
+
 from iPhoto.bootstrap import startup_orchestrator as orchestrator_module
 from iPhoto.bootstrap.startup_orchestrator import (
     StartupFailure,
     StartupOrchestrator,
     StartupPhase,
 )
-from iPhoto.gui.main import _StartupImportRegistry
+from iPhoto.gui.main import _StartupImportRegistry, _StartupModulePreloader
 
 
 def test_startup_import_registry_isolates_retry_generations() -> None:
@@ -26,6 +30,42 @@ def test_startup_import_registry_isolates_retry_generations() -> None:
     else:
         raise AssertionError("first startup generation unexpectedly resolved")
     assert registry.resolve(2) is second_value
+
+
+def test_startup_module_preloader_rejects_cancelled_late_result(qapp) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    settled: list[int] = []
+    preloader = _StartupModulePreloader()
+    preloader.settled.connect(settled.append)
+
+    def slow_loader() -> object:
+        started.set()
+        release.wait(timeout=2.0)
+        return object()
+
+    assert preloader.start(1, slow_loader)
+    assert started.wait(timeout=1.0)
+    preloader.cancel_generation(1)
+    release.set()
+    preloader.close()
+    qapp.processEvents()
+
+    assert preloader.ready(1) is False
+    assert settled == []
+
+
+def test_startup_module_preloader_forwards_import_failure(qapp) -> None:
+    preloader = _StartupModulePreloader()
+
+    def broken_loader() -> object:
+        raise RuntimeError("broken import")
+
+    assert preloader.start(2, broken_loader, asynchronous=False)
+    assert preloader.ready(2) is True
+    with pytest.raises(RuntimeError, match="broken import"):
+        preloader.resolve(2)
+    preloader.close()
 
 
 def test_first_paint_and_watchdog_start_continuation_once(qapp) -> None:

@@ -149,6 +149,13 @@ def _default_context() -> dict[str, Any]:
             "IPHOTO_STARTUP_CACHE_EVICTION_METHOD", "uncontrolled"
         ),
         "scenario": os.environ.get("IPHOTO_STARTUP_SCENARIO", "default"),
+        "build_environment_fingerprint": os.environ.get(
+            "IPHOTO_STARTUP_BUILD_ENVIRONMENT_FINGERPRINT", ""
+        ),
+        "artifact_sha256": os.environ.get("IPHOTO_STARTUP_ARTIFACT_SHA256", ""),
+        "manifest_source_revision": os.environ.get(
+            "IPHOTO_STARTUP_MANIFEST_REVISION", ""
+        ),
     }
 
 

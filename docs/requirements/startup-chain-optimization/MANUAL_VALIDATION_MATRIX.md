@@ -2,6 +2,10 @@
 
 更新日期：2026-07-14
 
+> 2026-07-22：用户报告已完成多平台人工 smoke，未发现明显 bug。由于未附
+> artifact、build fingerprint 和逐项报告，该记录为
+> `user_reported_multi_platform_smoke_pass`，下列正式矩阵状态保持不变。
+
 ## 通用要求
 
 每个平台使用独立、可丢弃的图库和 settings。每个 generation 必须恰好一个 terminal：`startup.completed`、`startup.degraded`、`startup.failed`、`startup.cancelled`。报告不得包含真实用户路径；原始日志先脱敏再共享。
@@ -22,6 +26,7 @@ Metal 与 OpenGL 分开采集：
 .venv/bin/python tools/startup_benchmark.py collect \
   --revision CURRENT_SHA --scenario local-ssd-indexed \
   --library /absolute/dedicated/library --confirm-dedicated-library \
+  --build-manifest /absolute/path/to/build-manifest.json \
   --runtime packaged --qt-backend cocoa --graphics-backend metal \
   --cache-state hot --samples 30 \
   --output-dir benchmark-output/macos-ARCH/candidate/metal/hot \

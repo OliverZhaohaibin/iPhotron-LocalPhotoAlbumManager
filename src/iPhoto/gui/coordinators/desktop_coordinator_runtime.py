@@ -255,7 +255,7 @@ class DesktopCoordinatorRuntime(QObject):
 
         # The edit graph imports CPU/JIT rendering backends.  Construct it on
         # first edit/fullscreen use, never in the Gallery startup turn.
-        self._edit: "EditCoordinator | None" = None
+        self._edit: EditCoordinator | None = None
 
         # --- Legacy Controllers ---
         self._dialog = DialogController(window, context, window.ui.status_bar)
@@ -409,7 +409,7 @@ class DesktopCoordinatorRuntime(QObject):
     # ------------------------------------------------------------------
     # Lazy Edit lifecycle used by the Detail immersive port
     # ------------------------------------------------------------------
-    def _ensure_edit_coordinator(self) -> "EditCoordinator":
+    def _ensure_edit_coordinator(self) -> EditCoordinator:
         if self._edit is not None:
             return self._edit
         from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
@@ -803,11 +803,6 @@ class DesktopCoordinatorRuntime(QObject):
         )
         return self._recognition
 
-    def warm_people_dashboard(self) -> None:
-        """Warm recognition data without constructing the People QWidget."""
-
-        self._ensure_recognition_coordinator().warm_dashboard_snapshot()
-
     def _ensure_preview_window(self):
         self._window.ui.ensure_feature("preview")
         return self._window.ui.preview_window
@@ -820,6 +815,7 @@ class DesktopCoordinatorRuntime(QObject):
     def _bind_people_feature(self, people_page: object) -> None:
         """Attach the People dashboard only when the user first opens it."""
         recognition = self._ensure_recognition_coordinator()
+        recognition.warm_dashboard_snapshot()
         recognition.bind_people_page(people_page)
         if not self._people_view_activation_bound:
             self._people_view_activation_bound = True
@@ -946,7 +942,7 @@ class DesktopCoordinatorRuntime(QObject):
         if callable(package_root_getter):
             try:
                 package_root = package_root_getter()
-            except Exception:
+            except Exception:  # noqa: BLE001 - optional adapter fallback
                 package_root = None
             if package_root is not None:
                 return Path(package_root).resolve()

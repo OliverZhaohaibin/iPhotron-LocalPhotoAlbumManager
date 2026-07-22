@@ -459,6 +459,16 @@ resign_staged_map_runtime "$APP_BUNDLE"
 archive_staged_map_extension "$APP_BUNDLE"
 prune_packaged_development_files "$APP_BUNDLE"
 resign_app_bundle "$APP_BUNDLE"
+"$PYTHON_BIN" "$ROOT_DIR/tools/build_manifest.py" \
+  --root "$ROOT_DIR" \
+  --artifact "$APP_BUNDLE/Contents/MacOS/iPhotron" \
+  --build-driver "$ROOT_DIR/scripts/build_nuitka_macos.sh" \
+  --build-flag "profile=macos" \
+  --build-flag "low_memory=$LOW_MEMORY" \
+  --native-runtime "$ROOT_DIR/src/maps/tiles/extension/bin" \
+  --asset "$ROOT_DIR/src/maps/tiles" \
+  --asset "$ROOT_DIR/src/iPhoto/resources/i18n" \
+  --output "$OUTPUT_DIR/build-manifest.json"
 
 echo "Build complete. App bundles:"
 find "$OUTPUT_DIR" -maxdepth 3 -name "*.app" -print

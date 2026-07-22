@@ -53,3 +53,23 @@ python -m nuitka \
   --assume-yes-for-downloads \
   --output-dir=dist \
   src/entrypoint.py
+
+ARTIFACT_PATH=""
+for candidate in dist/entrypoint.dist/entrypoint.bin dist/entrypoint.dist/entrypoint; do
+  if [[ -f "$candidate" ]]; then
+    ARTIFACT_PATH="$candidate"
+    break
+  fi
+done
+[[ -n "$ARTIFACT_PATH" ]] || { echo "error: built entrypoint not found" >&2; exit 2; }
+python tools/build_manifest.py \
+  --root "$ROOT_DIR" \
+  --artifact "$ARTIFACT_PATH" \
+  --build-driver "$ROOT_DIR/scripts/build_nuitka_fast.sh" \
+  --build-flag "profile=fast" \
+  --build-flag "lto=yes" \
+  --build-flag "compiler=clang" \
+  --native-runtime "$ROOT_DIR/src/maps/tiles/extension/bin" \
+  --asset "$ROOT_DIR/src/maps/tiles" \
+  --asset "$ROOT_DIR/src/iPhoto/resources/i18n" \
+  --output "$ROOT_DIR/dist/build-manifest.json"

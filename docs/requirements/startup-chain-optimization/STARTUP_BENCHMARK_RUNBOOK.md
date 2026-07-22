@@ -10,8 +10,14 @@ diagnostics, so write them below `benchmark-output/` and do not commit them.
   current startup optimization branch.
 - Build the two revisions in separate worktrees with the same Python, locked
   dependencies, Nuitka version, build flags, native map runtime, and assets.
+- Use the build script generated `build-manifest.json` for every packaged run.
+  Collection rejects a manifest whose source revision or executable SHA does
+  not match the launched command; comparison rejects different environment
+  fingerprints.
 - Apply only the startup-profile observability changes to the baseline. Do not
   backport the startup queue, probe, coordinator, or lazy-loading changes.
+  The build-manifest generator and build-script emission are evidence tooling
+  and must be identical in both worktrees.
 - Each platform/scenario/revision pair requires 30 cold and 30 hot runs.
 - A cold run is formal evidence only when an actual OS file-cache eviction
   method is recorded and `--confirm-controlled-cold-cache` is supplied. Merely
@@ -39,6 +45,7 @@ Apple Silicon, default Metal path:
   --revision CURRENT_SHA \
   --scenario local-ssd-indexed \
   --runtime packaged \
+  --build-manifest dist/build-manifest.json \
   --qt-backend cocoa \
   --graphics-backend metal \
   --cache-state hot \
@@ -71,6 +78,10 @@ bash scripts/build_appimage.sh \
   --icon /absolute/path/to/iphoto.png \
   --output dist/iPhotron-x86_64.AppImage
 ```
+
+Use `dist/iPhotron-x86_64.AppImage.build-manifest.json` with `collect` for the
+AppImage artifact. The maintained macOS and Windows Nuitka scripts write
+`build-manifest.json` below their selected output directory.
 
 The AppImage builder refuses bundles without QSB shaders or `maps/tiles` and
 refuses to overwrite an existing AppDir. A real Linux host must perform the

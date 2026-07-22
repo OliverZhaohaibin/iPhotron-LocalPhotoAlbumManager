@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from iPhoto.gui.coordinators.recognition_coordinator import (
     RecognitionCoordinator,
@@ -245,6 +245,25 @@ def test_recognition_page_reuses_inflight_warmup_query() -> None:
 
     assert people_page.set_services.call_args.kwargs["reload"] is False
     people_page.reload.assert_not_called()
+
+
+def test_people_dashboard_warmup_starts_only_when_feature_is_bound() -> None:
+    from iPhoto.gui.coordinators.desktop_coordinator_runtime import (
+        DesktopCoordinatorRuntime,
+    )
+
+    runtime = DesktopCoordinatorRuntime.__new__(DesktopCoordinatorRuntime)
+    runtime._people_view_activation_bound = True
+    recognition = MagicMock()
+    runtime._ensure_recognition_coordinator = MagicMock(return_value=recognition)
+    people_page = MagicMock()
+
+    DesktopCoordinatorRuntime._bind_people_feature(runtime, people_page)
+
+    runtime._ensure_recognition_coordinator.assert_called_once_with()
+    recognition.assert_has_calls(
+        [call.warm_dashboard_snapshot(), call.bind_people_page(people_page)]
+    )
 
 
 def test_recognition_shutdown_rejects_queued_warmup_result() -> None:

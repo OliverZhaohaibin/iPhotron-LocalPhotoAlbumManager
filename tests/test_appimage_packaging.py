@@ -57,6 +57,7 @@ def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path) -> None
 
     assert result.returncode == 0, result.stderr
     assert output.exists()
+    assert Path(f"{output}.build-manifest.json").is_file()
     appdir = tmp_path / "iPhotron.AppDir"
     assert (appdir / "AppRun").stat().st_mode & 0o111
     assert (appdir / "usr/bin/entrypoint.bin").stat().st_mode & 0o111

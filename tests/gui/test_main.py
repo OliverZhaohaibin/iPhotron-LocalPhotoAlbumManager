@@ -346,6 +346,55 @@ def test_startup_input_guard_filters_only_window_startup_input() -> None:
     assert guard.eventFilter(child, _FakeEvent(QEvent.Type.MouseButtonPress)) is False
 
 
+def test_settings_initialization_failure_emits_one_failed_terminal(
+    monkeypatch,
+    qapp,
+    tmp_path: Path,
+) -> None:
+    from iPhoto.bootstrap import startup_orchestrator as orchestrator_module
+    from iPhoto.bootstrap.bootstrap_settings import BootstrapSettings
+    from iPhoto.gui.main import main
+
+    events: list[tuple[str, dict]] = []
+
+    class _FakeApp:
+        def __init__(self, _arguments) -> None:
+            return None
+
+        def platformName(self) -> str:  # noqa: N802 - Qt API
+            return "offscreen"
+
+    class _BrokenSettings:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr("iPhoto.gui.main._prefer_local_source_tree", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._bootstrap_macos_external_tool_path", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._prepare_qt_runtime_for_maps", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._configure_qt_opengl_defaults", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._enable_startup_hang_diagnostics", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
+    monkeypatch.setattr("iPhoto.utils.logging.get_logger", lambda: None)
+    monkeypatch.setattr(
+        "iPhoto.bootstrap.bootstrap_settings.load_bootstrap_settings",
+        lambda: BootstrapSettings(path=tmp_path / "settings.json"),
+    )
+    monkeypatch.setattr("iPhoto.settings.manager.SettingsManager", _BrokenSettings)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "mark",
+        lambda stage, **details: events.append((stage, details)),
+    )
+
+    assert main([]) == 1
+    terminals = [
+        stage
+        for stage, _details in events
+        if stage in {"startup.completed", "startup.degraded", "startup.failed", "startup.cancelled"}
+    ]
+    assert terminals == ["startup.failed"]
+
+
 @pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
 @pytest.mark.parametrize("emit_startup_ready", (True, False))
 def test_main_creates_required_features_in_platform_safe_order(

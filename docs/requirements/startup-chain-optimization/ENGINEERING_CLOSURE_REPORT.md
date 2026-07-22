@@ -1,10 +1,10 @@
 # 启动链路工程收口报告
 
-更新日期：2026-07-14
+更新日期：2026-07-22
 
 ## 当前状态
 
-- 实现状态：`engineering_implementation_complete`
+- 实现状态：`review_remediation_complete`
 - 本机环境：macOS Apple Silicon，Nuitka packaged Metal/OpenGL
 - 本机 packaged 状态：`local_packaged_offscreen_pass / cocoa_manual_run_required`
 - Windows、Linux、macOS Intel：`pending_manual_validation`
@@ -14,6 +14,15 @@
 `engineering_complete` 只在最终 v4 Cocoa/Metal/OpenGL 本机验证和固定 baseline
 `6ff592f7` 的同构 30 次 A/B 证据通过后写入。其他平台未做实机测试，因此本报告不输出“全平台 PASS”。
 
+2026-07-22 严格复审曾将状态重开为 `reopened_review_fixes_required`；terminal
+边界、模块预载资源所有权、Recognition 懒加载回退和 A/B build fingerprint
+门禁现已修复，状态因此更新为 `review_remediation_complete`。详细交接见
+`NEXT_DEVELOPMENT_HANDOFF.md`。
+
+用户报告已在多平台手工 smoke 且未发现明显 bug。因未附逐平台 artifact、
+build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_smoke_pass`，
+不替代下述正式人工矩阵。
+
 ## 已收口的工程链路
 
 ### 生命周期与 GUI 调度
@@ -22,7 +31,9 @@
 - completed、degraded、failed、cancelled 进入统一清理，terminal 事件按 generation 唯一。
 - probe 使用一个长期 controller 连接并按 request/generation 路由，旧结果不能回写新会话。
 - 启动装配已拆为带名称、幂等、逐 event-loop tick 执行的 job；异常只终止当前 generation。
-- `DesktopCoordinatorRuntime` 是唯一桌面组合根，Recognition、Location/Info、Edit 与地图能力均延迟到首次使用。
+- `DesktopCoordinatorRuntime` 是唯一桌面组合根，Recognition、Location/Info、Edit 与地图能力均延迟到首次使用；People dashboard 快照只在 People feature 首次创建时预热。
+- settings/shell 同步初始化和 Windows/Linux pre-show Detail 异常也进入唯一 terminal 协议；pre-show Detail 使用可重试降级窗口。
+- 模块预载使用 generation-aware owner 和完成信号，不再依赖持续轮询 timer；退出时等待预载线程收口。
 - People/Pets 的模型扫描不再在 startup completed 后自动启动；首次进入识别功能才构造服务与 worker，消除快速关窗的 QThread 竞争。
 
 ### Probe、数据库与慢存储
@@ -50,6 +61,7 @@
 - packaged probe 使用 `QCoreApplication.applicationFilePath()` 启动当前真实二进制，支持最终可执行文件改名。
 - Windows/Linux 的入口、路径规范化、helper 生命周期、storage contract、XCB/Wayland 与地图降级均由 platform monkeypatch、协议往返和打包结构测试覆盖。
 - CI 不再默认排除启动测试；benchmark 强制独立 settings、独立图库和 `--confirm-dedicated-library`。
+- packaged benchmark 强制 build manifest；A/B 会校验同构环境指纹、manifest revision 和不同 executable SHA。
 
 ## 已取得的证据
 

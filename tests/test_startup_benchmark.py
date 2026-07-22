@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -25,10 +26,13 @@ def _write_profile(
     scenario: str = "local-ssd",
     return_code: int = 0,
     timed_out: bool = False,
+    revision: str = "candidate",
+    artifact_sha256: str = "a" * 64,
+    build_environment_fingerprint: str = "f" * 64,
 ) -> None:
     context = {
         "run_id": path.stem,
-        "revision": "candidate",
+        "revision": revision,
         "runtime": "packaged",
         "platform": "darwin",
         "architecture": "arm64",
@@ -38,6 +42,9 @@ def _write_profile(
         "cache_controlled": controlled,
         "cache_eviction_method": "purge" if controlled else "uncontrolled",
         "scenario": scenario,
+        "build_environment_fingerprint": build_environment_fingerprint,
+        "artifact_sha256": artifact_sha256,
+        "manifest_source_revision": revision,
     }
     events = [
         ("launcher.process_started", 0.0, {}),
@@ -173,15 +180,22 @@ def test_comparison_enforces_improvement_tail_and_stall_gates(tmp_path) -> None:
     for index in range(30):
         baseline_path = tmp_path / f"baseline-{index:03d}.jsonl"
         candidate_path = tmp_path / f"candidate-{index:03d}.jsonl"
-        _write_profile(baseline_path, scale=1.0)
-        _write_profile(candidate_path, scale=0.6)
+        _write_profile(
+            baseline_path,
+            scale=1.0,
+            revision="6ff592f7",
+            artifact_sha256="a" * 64,
+        )
+        _write_profile(
+            candidate_path,
+            scale=0.6,
+            revision="306326ab",
+            artifact_sha256="b" * 64,
+        )
         baseline_paths.append(baseline_path)
         candidate_paths.append(candidate_path)
     baseline = summarize_profiles(baseline_paths)
     candidate = summarize_profiles(candidate_paths)
-    baseline["context"]["revision"] = "6ff592f7"
-    candidate["context"]["revision"] = "306326ab"
-
     result = compare_summaries(baseline, candidate)
 
     assert result["passed"] is True
@@ -239,6 +253,20 @@ with path.open("a", encoding="utf-8") as stream:
     output = tmp_path / "output"
     library = tmp_path / "benchmark-library"
     library.mkdir()
+    executable = Path(sys.executable).resolve()
+    artifact_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+    build_manifest = tmp_path / "build-manifest.json"
+    build_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_revision": "candidate",
+                "artifact_sha256": artifact_sha256,
+                "environment_fingerprint": "f" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     return_code = benchmark_main(
         [
@@ -252,6 +280,8 @@ with path.open("a", encoding="utf-8") as stream:
             "--confirm-dedicated-library",
             "--runtime",
             "packaged",
+            "--build-manifest",
+            str(build_manifest),
             "--qt-backend",
             "cocoa",
             "--graphics-backend",
@@ -274,3 +304,63 @@ with path.open("a", encoding="utf-8") as stream:
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     assert summary["eligible_count"] == 1
     assert len(list(output.glob("run-*.jsonl"))) == 1
+
+
+def test_packaged_collect_requires_matching_build_manifest(tmp_path) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+
+    result = benchmark_main(
+        [
+            "collect",
+            "--revision",
+            "candidate",
+            "--scenario",
+            "local-ssd",
+            "--library",
+            str(library),
+            "--confirm-dedicated-library",
+            "--runtime",
+            "packaged",
+            "--cache-state",
+            "hot",
+            "--samples",
+            "1",
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--",
+            sys.executable,
+        ]
+    )
+
+    assert result == 2
+
+
+def test_comparison_rejects_environment_mismatch(tmp_path) -> None:
+    baseline_path = tmp_path / "baseline.jsonl"
+    candidate_path = tmp_path / "candidate.jsonl"
+    _write_profile(
+        baseline_path,
+        revision="6ff592f7",
+        artifact_sha256="a" * 64,
+        build_environment_fingerprint="1" * 64,
+    )
+    _write_profile(
+        candidate_path,
+        scale=0.6,
+        revision="306326ab",
+        artifact_sha256="b" * 64,
+        build_environment_fingerprint="2" * 64,
+    )
+
+    result = compare_summaries(
+        summarize_profiles([baseline_path] * 30),
+        summarize_profiles([candidate_path] * 30),
+    )
+
+    assert result["passed"] is False
+    assert any(
+        check["name"] == "build_environment_fingerprints_match"
+        and not check["passed"]
+        for check in result["checks"]
+    )

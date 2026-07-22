@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -66,6 +68,9 @@ BATCH_CONTEXT_KEYS = (
     "cache_controlled",
     "cache_eviction_method",
     "scenario",
+    "build_environment_fingerprint",
+    "artifact_sha256",
+    "manifest_source_revision",
 )
 _ABSOLUTE_PATH = re.compile(
     r"(?i)(?:[a-z]:[\\/]|\\\\|(?<![\w.])/(?:users|home|mnt|media|volumes|private|tmp)/)"
@@ -84,6 +89,54 @@ def nearest_rank(values: Sequence[float], percentile: float) -> float | None:
     ordered = sorted(float(value) for value in values)
     rank = max(1, math.ceil((float(percentile) / 100.0) * len(ordered)))
     return round(ordered[rank - 1], 3)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_build_manifest(
+    path: Path,
+    *,
+    revision: str,
+    command: Sequence[str],
+    cwd: Path,
+) -> dict[str, Any]:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProfileError(f"cannot read build manifest: {exc}") from exc
+    if not isinstance(manifest, dict) or int(manifest.get("schema_version", -1)) != 1:
+        raise ProfileError("build manifest schema is missing or unsupported")
+    source_revision = str(manifest.get("source_revision") or "")
+    if not source_revision or not source_revision.startswith(revision):
+        raise ProfileError("build manifest revision does not match --revision")
+    environment_fingerprint = str(manifest.get("environment_fingerprint") or "")
+    manifest_artifact = str(manifest.get("artifact_sha256") or "")
+    if len(environment_fingerprint) != 64 or len(manifest_artifact) != 64:
+        raise ProfileError("build manifest fingerprints are missing or invalid")
+    executable = Path(command[0]).expanduser()
+    if not executable.is_absolute():
+        cwd_candidate = cwd.expanduser().resolve() / executable
+        if cwd_candidate.is_file():
+            executable = cwd_candidate
+    if not executable.is_file():
+        resolved = shutil.which(command[0])
+        executable = Path(resolved) if resolved else executable
+    if not executable.is_file():
+        raise ProfileError(f"cannot fingerprint packaged command: {command[0]}")
+    artifact_sha256 = _sha256_file(executable.resolve())
+    if artifact_sha256 != manifest_artifact:
+        raise ProfileError("build manifest artifact does not match packaged command")
+    return {
+        "build_environment_fingerprint": environment_fingerprint,
+        "artifact_sha256": artifact_sha256,
+        "manifest_source_revision": source_revision,
+    }
 
 
 def load_events(path: Path) -> list[dict[str, Any]]:
@@ -391,7 +444,14 @@ def summarize_profiles(paths: Iterable[Path], *, require_gallery: bool = True) -
         "valid_count": sum(bool(run.get("valid")) for run in runs),
         "eligible_count": len(eligible),
         "formal_evidence": (
-            len(runs) >= 30 and len(eligible) == len(runs) and context.get("runtime") == "packaged"
+            len(runs) >= 30
+            and len(eligible) == len(runs)
+            and context.get("runtime") == "packaged"
+            and bool(context.get("build_environment_fingerprint"))
+            and bool(context.get("artifact_sha256"))
+            and str(context.get("manifest_source_revision", "")).startswith(
+                str(context.get("revision", "missing"))
+            )
         ),
         "terminal_counts": dict(sorted(terminal_counts.items())),
         "error_codes": dict(sorted(error_codes.items())),
@@ -412,7 +472,11 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
     baseline_metrics = baseline.get("metrics", {})
     baseline_context = baseline.get("context", {})
     candidate_context = candidate.get("context", {})
-    matching_context_keys = tuple(key for key in BATCH_CONTEXT_KEYS if key != "revision")
+    matching_context_keys = tuple(
+        key
+        for key in BATCH_CONTEXT_KEYS
+        if key not in {"revision", "artifact_sha256", "manifest_source_revision"}
+    )
     mismatched_context = {
         key: (baseline_context.get(key), candidate_context.get(key))
         for key in matching_context_keys
@@ -431,6 +495,39 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
         and candidate_context.get("revision") != baseline_context.get("revision"),
         candidate_context.get("revision"),
         "non-baseline commit SHA",
+    )
+    baseline_build_fingerprint = baseline_context.get("build_environment_fingerprint")
+    candidate_build_fingerprint = candidate_context.get("build_environment_fingerprint")
+    add(
+        "build_environment_fingerprints_match",
+        bool(baseline_build_fingerprint)
+        and baseline_build_fingerprint == candidate_build_fingerprint,
+        (baseline_build_fingerprint, candidate_build_fingerprint),
+        "identical dependency/Nuitka/build/native/assets fingerprint",
+    )
+    baseline_artifact = baseline_context.get("artifact_sha256")
+    candidate_artifact = candidate_context.get("artifact_sha256")
+    add(
+        "packaged_artifacts_are_distinct",
+        bool(baseline_artifact)
+        and bool(candidate_artifact)
+        and baseline_artifact != candidate_artifact,
+        (baseline_artifact, candidate_artifact),
+        "two present and distinct executable hashes",
+    )
+    add(
+        "manifest_revisions_match_context",
+        str(baseline_context.get("manifest_source_revision", "")).startswith(
+            str(baseline_context.get("revision", "missing"))
+        )
+        and str(candidate_context.get("manifest_source_revision", "")).startswith(
+            str(candidate_context.get("revision", "missing"))
+        ),
+        (
+            baseline_context.get("manifest_source_revision"),
+            candidate_context.get("manifest_source_revision"),
+        ),
+        "manifest source revisions match benchmark revisions",
     )
     add(
         "baseline_candidate_contexts_match",
@@ -613,6 +710,16 @@ def collect(args: argparse.Namespace) -> int:
         raise ProfileError("samples must be positive")
     if not args.confirm_dedicated_library:
         raise ProfileError("refusing to benchmark without --confirm-dedicated-library")
+    build_identity: dict[str, Any] = {}
+    if args.runtime == "packaged":
+        if args.build_manifest is None:
+            raise ProfileError("packaged collection requires --build-manifest")
+        build_identity = _load_build_manifest(
+            args.build_manifest.expanduser().resolve(),
+            revision=args.revision,
+            command=command,
+            cwd=args.cwd,
+        )
     benchmark_library = args.library.expanduser().resolve()
     if not benchmark_library.is_dir():
         raise ProfileError(f"benchmark library is not a directory: {benchmark_library}")
@@ -647,6 +754,7 @@ def collect(args: argparse.Namespace) -> int:
             "cache_controlled": controlled,
             "cache_eviction_method": method,
             "scenario": args.scenario,
+            **build_identity,
         }
         launched_wall = time.time()
         _append_event(
@@ -672,6 +780,15 @@ def collect(args: argparse.Namespace) -> int:
                 "IPHOTO_STARTUP_CACHE_CONTROLLED": "1" if controlled else "0",
                 "IPHOTO_STARTUP_CACHE_EVICTION_METHOD": method,
                 "IPHOTO_STARTUP_SCENARIO": args.scenario,
+                "IPHOTO_STARTUP_BUILD_ENVIRONMENT_FINGERPRINT": str(
+                    build_identity.get("build_environment_fingerprint", "")
+                ),
+                "IPHOTO_STARTUP_ARTIFACT_SHA256": str(
+                    build_identity.get("artifact_sha256", "")
+                ),
+                "IPHOTO_STARTUP_MANIFEST_REVISION": str(
+                    build_identity.get("manifest_source_revision", "")
+                ),
                 "IPHOTO_STARTUP_BENCHMARK_AUTO_EXIT_MS": str(args.auto_exit_delay_ms),
                 "IPHOTO_STARTUP_BENCHMARK": "1",
                 "IPHOTO_SETTINGS_PATH": str(settings_path),
@@ -739,6 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--library", type=Path, required=True)
     collect_parser.add_argument("--confirm-dedicated-library", action="store_true")
     collect_parser.add_argument("--runtime", choices=("source", "packaged"), required=True)
+    collect_parser.add_argument("--build-manifest", type=Path)
     collect_parser.add_argument("--qt-backend", default="default")
     collect_parser.add_argument("--graphics-backend", default="default")
     collect_parser.add_argument("--cache-state", choices=("cold", "hot"), required=True)

@@ -299,3 +299,27 @@ $pythonArguments = @($pythonPrefixArgs) + $arguments
 if ($LASTEXITCODE -ne 0) {
     throw "Nuitka build failed with exit code $LASTEXITCODE"
 }
+
+$builtExecutable = Join-Path $OutputDir 'entrypoint.dist\entrypoint.exe'
+Assert-Exists $builtExecutable
+$manifestTool = Join-Path $repoRoot 'tools\build_manifest.py'
+$manifestOutput = Join-Path $OutputDir 'build-manifest.json'
+$manifestArguments = @(
+    $manifestTool,
+    '--root', $repoRoot,
+    '--artifact', $builtExecutable,
+    '--build-driver', $PSCommandPath,
+    '--build-flag', 'profile=windows',
+    '--build-flag', "jobs=$Jobs",
+    '--build-flag', "console=$ConsoleMode",
+    '--build-flag', "optional_assets=$([bool]$IncludeOptionalAssets)",
+    '--native-runtime', $extensionBinDir,
+    '--asset', (Join-Path $srcRoot 'maps\tiles'),
+    '--asset', (Join-Path $srcRoot 'iPhoto\resources\i18n'),
+    '--output', $manifestOutput
+)
+& $PythonExe @pythonPrefixArgs @manifestArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Build manifest generation failed with exit code $LASTEXITCODE"
+}
+Write-Host "Build manifest: $manifestOutput"

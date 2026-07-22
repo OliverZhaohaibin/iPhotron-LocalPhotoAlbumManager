@@ -10,6 +10,7 @@ STANDALONE_DIR=""
 ICON_PATH=""
 OUTPUT_PATH=""
 APPIMAGETOOL="${APPIMAGETOOL:-appimagetool}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -87,4 +88,14 @@ install -m 0644 "$ROOT_DIR/packaging/appimage/iphoto.desktop" "$APPDIR/iphoto.de
 install -m 0644 "$ICON_PATH" "$APPDIR/iphoto.png"
 
 ARCH="${ARCH:-$(uname -m)}" "$APPIMAGETOOL" "$APPDIR" "$OUTPUT_PATH"
+"$PYTHON_BIN" "$ROOT_DIR/tools/build_manifest.py" \
+  --root "$ROOT_DIR" \
+  --artifact "$OUTPUT_PATH" \
+  --build-driver "$ROOT_DIR/scripts/build_appimage.sh" \
+  --build-flag "profile=appimage" \
+  --build-flag "architecture=${ARCH:-$(uname -m)}" \
+  --native-runtime "$STANDALONE_DIR/maps/tiles/extension/bin" \
+  --asset "$STANDALONE_DIR/maps/tiles" \
+  --asset "$STANDALONE_DIR/iPhoto/resources/i18n" \
+  --output "${OUTPUT_PATH}.build-manifest.json"
 echo "Created $OUTPUT_PATH"

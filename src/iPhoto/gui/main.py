@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import importlib
+import logging
 import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -15,7 +16,7 @@ from iPhoto.bootstrap.startup_profile import configure as configure_startup_prof
 from iPhoto.bootstrap.startup_profile import mark
 
 mark("module.before_qt_imports")
-from PySide6.QtCore import QEvent, QObject, QTimer, Qt  # noqa: E402, I001
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt, Signal  # noqa: E402, I001
 from PySide6.QtGui import QColor, QPalette, QSurfaceFormat  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -95,6 +96,96 @@ class _StartupImportRegistry:
             if error is not None:
                 raise error
             return self._values[generation]
+
+    def discard(self, generation: int) -> None:
+        with self._lock:
+            self._values.pop(generation, None)
+            self._errors.pop(generation, None)
+
+
+class _StartupModulePreloader(QObject):
+    """Own background imports and reject results from cancelled generations."""
+
+    settled = Signal(int)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._registry = _StartupImportRegistry()
+        self._lock = threading.Lock()
+        self._threads: dict[int, threading.Thread] = {}
+        self._cancelled: set[int] = set()
+        self._closed = False
+
+    def start(
+        self,
+        generation: int,
+        loader: Callable[[], object],
+        *,
+        asynchronous: bool = True,
+    ) -> bool:
+        generation = int(generation)
+        with self._lock:
+            if self._closed or generation in self._cancelled:
+                return False
+            existing = self._threads.get(generation)
+            if existing is not None and existing.is_alive():
+                return False
+
+        def _load() -> None:
+            accepted = False
+            try:
+                value = loader()
+            except Exception as exc:  # noqa: BLE001 - import isolation boundary
+                with self._lock:
+                    accepted = not self._closed and generation not in self._cancelled
+                    if accepted:
+                        self._registry.fail(generation, exc)
+            else:
+                with self._lock:
+                    accepted = not self._closed and generation not in self._cancelled
+                    if accepted:
+                        self._registry.publish(generation, value)
+            finally:
+                with self._lock:
+                    self._threads.pop(generation, None)
+                if accepted:
+                    self.settled.emit(generation)
+
+        if not asynchronous:
+            _load()
+            return True
+        thread = threading.Thread(
+            target=_load,
+            name=f"StartupModulePreloader-{generation}",
+            daemon=False,
+        )
+        with self._lock:
+            self._threads[generation] = thread
+        thread.start()
+        return True
+
+    def ready(self, generation: int) -> bool:
+        return self._registry.ready(generation)
+
+    def resolve(self, generation: int) -> object:
+        return self._registry.resolve(generation)
+
+    def cancel_generation(self, generation: int) -> None:
+        generation = int(generation)
+        with self._lock:
+            self._cancelled.add(generation)
+        self._registry.discard(generation)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._cancelled.update(self._threads)
+            threads = tuple(self._threads.values())
+        for thread in threads:
+            if thread is not threading.current_thread():
+                thread.join()
+        with self._lock:
+            self._threads.clear()
 
 
 class _StartupInputGuard(QObject):
@@ -376,6 +467,32 @@ def _startup_timing_plan(platform: str | None = None) -> _StartupTimingPlan:
     return _StartupTimingPlan(0, 0, 0)
 
 
+def _configure_tooltip_palette(app: QApplication) -> None:
+    """Install an opaque, readable tooltip palette for the frameless shell."""
+
+    tooltip_palette = QPalette(app.palette())
+
+    def _resolved_colour(source: QColor, fallback: QColor) -> QColor:
+        if not source.isValid():
+            return QColor(fallback)
+        resolved = QColor(source)
+        resolved.setAlpha(255)
+        return resolved
+
+    base_colour = _resolved_colour(
+        tooltip_palette.color(QPalette.ColorRole.Window), QColor("#eef3f6")
+    )
+    text_colour = _resolved_colour(
+        tooltip_palette.color(QPalette.ColorRole.WindowText), QColor(Qt.GlobalColor.black)
+    )
+    if abs(base_colour.lightness() - text_colour.lightness()) < 40:
+        base_colour = QColor("#eef3f6")
+        text_colour = QColor(Qt.GlobalColor.black)
+    tooltip_palette.setColor(QPalette.ColorRole.ToolTipBase, base_colour)
+    tooltip_palette.setColor(QPalette.ColorRole.ToolTipText, text_colour)
+    app.setPalette(tooltip_palette, "QToolTip")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
 
@@ -430,12 +547,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     startup = StartupOrchestrator(app if isinstance(app, QObject) else None)
-    startup.begin()
-    startup.transition(StartupPhase.APP_CREATED)
     startup_jobs = GuiStartupJobQueue(
         app if isinstance(app, QObject) else None,
         is_generation_current=startup.is_current,
     )
+    startup_imports = _StartupModulePreloader(
+        app if isinstance(app, QObject) else None,
+    )
+    startup_imports.settled.connect(lambda _generation: startup_jobs.wake())
+    startup.begin()
+    startup.transition(StartupPhase.APP_CREATED)
 
     def _handle_startup_job_failure(failure) -> None:
         if not startup.is_current(failure.generation):
@@ -457,78 +578,77 @@ def main(argv: list[str] | None = None) -> int:
 
     startup_jobs.jobFailed.connect(_handle_startup_job_failure)
 
-    from iPhoto.settings.manager import SettingsManager
-
     try:
-        startup_settings = SettingsManager(path=bootstrap_settings.path)
-    except TypeError:  # lightweight embedders and tests may expose a no-arg factory
-        startup_settings = SettingsManager()
-    recovery_loader = getattr(startup_settings, "load_with_recovery", None)
-    if callable(recovery_loader):
-        settings_recovery_warning = recovery_loader()
-    else:
-        startup_settings.load()
-        settings_recovery_warning = None
+        from iPhoto.settings.manager import SettingsManager
+
+        try:
+            startup_settings = SettingsManager(path=bootstrap_settings.path)
+        except TypeError:  # lightweight embedders and tests may expose a no-arg factory
+            startup_settings = SettingsManager()
+        recovery_loader = getattr(startup_settings, "load_with_recovery", None)
+        if callable(recovery_loader):
+            settings_recovery_warning = recovery_loader()
+        else:
+            startup_settings.load()
+            settings_recovery_warning = None
+    except Exception as exc:  # Startup terminal boundary.
+        _logger.exception("Unable to load application settings")
+        startup.fail(
+            StartupFailure(
+                phase=StartupPhase.APP_CREATED,
+                message=str(exc) or type(exc).__name__,
+                exception_type=type(exc).__name__,
+                recoverable=False,
+                code="settings_initialization_failed",
+                suggested_action="continue_without_library",
+            )
+        )
+        startup_jobs.close()
+        startup_imports.close()
+        return 1
     mark("settings.loaded", recovered=bool(settings_recovery_warning))
 
-    # ``QToolTip`` instances inherit ``WA_TranslucentBackground`` from the frameless
-    # main window, which means they expect the application to provide an opaque fill
-    # colour.  Some Qt styles ignore stylesheet rules for tooltips, so we proactively
-    # update the palette that drives those popups to guarantee readable text.
-    tooltip_palette = QPalette(app.palette())
+    try:
+        _configure_tooltip_palette(app)
+        from iPhoto.bootstrap.runtime_context import RuntimeContext
 
-    def _resolved_colour(source: QColor, fallback: QColor) -> QColor:
-        """Return a copy of *source* with a fully opaque alpha channel.
+        mark("runtime_context.imported")
+        from iPhoto.gui.ui.main_window import MainWindow
 
-        Qt reports transparent colours for certain palette roles when
-        ``WA_TranslucentBackground`` is active.  Failing to normalise the alpha value
-        causes the compositor to blend the tooltip against the desktop wallpaper,
-        producing the solid black rectangle described in the regression report.
-        Falling back to a well-tested default keeps the tooltip legible even on
-        themes that omit one of the roles we query.
-        """
+        mark("main_window.imported")
 
-        if not source.isValid():
-            return QColor(fallback)
+        # Defer heavy library binding + initial scan until the event loop is running.
+        context = RuntimeContext.create(defer_startup=True, settings=startup_settings)
+        mark("runtime_context.created")
+        # --- Phase 4: Coordinator Wiring ---
+        window = MainWindow(context)
+        mark("main_window.created")
+        set_startup_orchestrator = getattr(window, "set_startup_orchestrator", None)
+        if callable(set_startup_orchestrator):
+            set_startup_orchestrator(startup)
+        startup_input_guard = _StartupInputGuard(window, app)
+        startup_input_guard.install()
 
-        resolved = QColor(source)
-        resolved.setAlpha(255)
-        return resolved
+        from iPhoto.bootstrap.library_probe import LibraryProbeController
 
-    base_colour = _resolved_colour(
-        tooltip_palette.color(QPalette.ColorRole.Window), QColor("#eef3f6")
-    )
-    text_colour = _resolved_colour(
-        tooltip_palette.color(QPalette.ColorRole.WindowText), QColor(Qt.GlobalColor.black)
-    )
-
-    # Ensure the text remains readable by checking the lightness contrast.  When the
-    # palette provides nearly identical shades we fall back to a simple dark-on-light
-    # scheme that mirrors Qt's built-in defaults.
-    if abs(base_colour.lightness() - text_colour.lightness()) < 40:
-        base_colour = QColor("#eef3f6")
-        text_colour = QColor(Qt.GlobalColor.black)
-
-    tooltip_palette.setColor(QPalette.ColorRole.ToolTipBase, base_colour)
-    tooltip_palette.setColor(QPalette.ColorRole.ToolTipText, text_colour)
-    app.setPalette(tooltip_palette, "QToolTip")
-
-    from iPhoto.bootstrap.runtime_context import RuntimeContext
-
-    mark("runtime_context.imported")
-    from iPhoto.gui.ui.main_window import MainWindow
-
-    mark("main_window.imported")
-
-    # Defer heavy library binding + initial scan until the event loop is running.
-    context = RuntimeContext.create(defer_startup=True, settings=startup_settings)
-    mark("runtime_context.created")
-    # --- Phase 4: Coordinator Wiring ---
-    window = MainWindow(context)
-    mark("main_window.created")
-    set_startup_orchestrator = getattr(window, "set_startup_orchestrator", None)
-    if callable(set_startup_orchestrator):
-        set_startup_orchestrator(startup)
+        probe_controller = LibraryProbeController(
+            window if isinstance(window, QObject) else None
+        )
+    except Exception as exc:  # Startup terminal boundary.
+        _logger.exception("Unable to construct the application shell")
+        startup.fail(
+            StartupFailure(
+                phase=StartupPhase.APP_CREATED,
+                message=str(exc) or type(exc).__name__,
+                exception_type=type(exc).__name__,
+                recoverable=False,
+                code="shell_initialization_failed",
+                suggested_action="continue_without_library",
+            )
+        )
+        startup_jobs.close()
+        startup_imports.close()
+        return 1
     if settings_recovery_warning:
         QTimer.singleShot(
             0,
@@ -537,12 +657,6 @@ def main(argv: list[str] | None = None) -> int:
                 details=settings_recovery_warning,
             ),
         )
-    startup_input_guard = _StartupInputGuard(window, app)
-    startup_input_guard.install()
-
-    from iPhoto.bootstrap.library_probe import LibraryProbeController
-
-    probe_controller = LibraryProbeController(window if isinstance(window, QObject) else None)
     active_probe: dict[str, object] = {}
 
     def _clear_active_probe(generation: int) -> None:
@@ -552,6 +666,9 @@ def main(argv: list[str] | None = None) -> int:
     def _register_attempt_resources(generation: int) -> None:
         startup.register_cleanup(
             lambda generation=generation: startup_jobs.cancel_generation(generation)
+        )
+        startup.register_cleanup(
+            lambda generation=generation: startup_imports.cancel_generation(generation)
         )
         startup.register_cleanup(probe_controller.cancel)
         startup.register_cleanup(startup_input_guard.release)
@@ -579,83 +696,85 @@ def main(argv: list[str] | None = None) -> int:
 
     pre_show_features, post_show_features = _startup_feature_plan()
     startup_timing = _startup_timing_plan()
-    startup_imports = _StartupImportRegistry()
-    startup_import_poll = QTimer(window if isinstance(window, QObject) else None)
-    startup_import_poll.setInterval(10)
-    startup_import_poll.timeout.connect(startup_jobs.wake)
 
-    def _preload_startup_modules(generation: int) -> None:
-        try:
-            if "detail" in post_show_features:
-                importlib.import_module("iPhoto.gui.ui.widgets.detail_page")
-                importlib.import_module("iPhoto.gui.ui.widgets.gl_image_viewer")
-            module = importlib.import_module(
-                "iPhoto.gui.coordinators.desktop_coordinator_runtime"
-            )
-            startup_imports.publish(generation, module.DesktopCoordinatorRuntime)
-        except Exception as exc:  # noqa: BLE001 - forwarded on the GUI job boundary
-            startup_imports.fail(generation, exc)
+    def _preload_startup_modules() -> object:
+        if "detail" in post_show_features:
+            importlib.import_module("iPhoto.gui.ui.widgets.detail_page")
+            importlib.import_module("iPhoto.gui.ui.widgets.gl_image_viewer")
+        module = importlib.import_module(
+            "iPhoto.gui.coordinators.desktop_coordinator_runtime"
+        )
+        return module.DesktopCoordinatorRuntime
 
     def _start_startup_imports(generation: int) -> None:
-        if not isinstance(app, QObject):
-            _preload_startup_modules(generation)
+        if coordinator_runtime is not None:
             return
-        thread = threading.Thread(
-            target=lambda: _preload_startup_modules(generation),
-            name=f"StartupModulePreloader-{generation}",
-            daemon=True,
+        startup_imports.start(
+            generation,
+            _preload_startup_modules,
+            asynchronous=isinstance(app, QObject),
         )
-        thread.start()
-        startup_import_poll.start()
 
     def _startup_imports_ready(generation: int) -> bool:
-        ready = startup_imports.ready(generation)
-        if ready:
-            startup_import_poll.stop()
-        return ready
-    for feature in pre_show_features:
-        job_name = f"feature.{feature}.pre_show"
-        thread_name = threading.current_thread().name
-        mark(
-            "startup.gui_job.started",
-            job=job_name,
-            generation=startup.generation,
-            duration_ms=0.0,
-            budget_ms=100.0,
-            over_budget=False,
-            thread=thread_name,
-            result="running",
-        )
-        started_ns = time.perf_counter_ns()
-        feature_error = False
-        try:
-            if feature == "detail":
-                mark("rhi_detail.before_create")
-            window.ui.ensure_feature(feature)
-            if feature == "detail":
-                mark("rhi_detail.created")
-        except Exception:
-            feature_error = True
-            raise
-        finally:
-            duration_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
-            details = {
-                "job": job_name,
-                "generation": startup.generation,
-                "duration_ms": round(duration_ms, 3),
-                "budget_ms": 100.0,
-                "over_budget": duration_ms > 100.0,
-                "thread": thread_name,
-                "result": "error" if feature_error else "success",
-            }
-            mark("startup.gui_job.finished", **details)
-            if duration_ms > 100.0:
-                mark("startup.gui_stall", **details)
-                _logger.warning(
-                    "GUI startup job %s exceeded 100.0ms budget (%.1fms)",
-                    job_name,
-                    duration_ms,
+        return coordinator_runtime is not None or startup_imports.ready(generation)
+
+    def _ensure_pre_show_features(generation: int) -> StartupFailure | None:
+        for feature in pre_show_features:
+            job_name = f"feature.{feature}.pre_show"
+            thread_name = threading.current_thread().name
+            mark(
+                "startup.gui_job.started",
+                job=job_name,
+                generation=generation,
+                duration_ms=0.0,
+                budget_ms=100.0,
+                over_budget=False,
+                thread=thread_name,
+                result="running",
+            )
+            started_ns = time.perf_counter_ns()
+            feature_exception: Exception | None = None
+            try:
+                if feature == "detail":
+                    mark("rhi_detail.before_create")
+                window.ui.ensure_feature(feature)
+                if feature == "detail":
+                    mark("rhi_detail.created")
+            except Exception as exc:  # Startup recovery boundary.
+                feature_exception = exc
+                _logger.exception("Pre-show feature %s failed", feature)
+            finally:
+                duration_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
+                details = {
+                    "job": job_name,
+                    "generation": generation,
+                    "duration_ms": round(duration_ms, 3),
+                    "budget_ms": 100.0,
+                    "over_budget": duration_ms > 100.0,
+                    "thread": thread_name,
+                    "result": "error" if feature_exception is not None else "success",
+                }
+                mark("startup.gui_job.finished", **details)
+                if duration_ms > 100.0:
+                    mark("startup.gui_stall", **details)
+                    _logger.warning(
+                        "GUI startup job %s exceeded 100.0ms budget (%.1fms)",
+                        job_name,
+                        duration_ms,
+                    )
+            if feature_exception is not None:
+                return StartupFailure(
+                    phase=StartupPhase.APP_CREATED,
+                    message=str(feature_exception) or type(feature_exception).__name__,
+                    exception_type=type(feature_exception).__name__,
+                    recoverable=True,
+                    code=f"feature_{feature}_pre_show_failed",
+                    suggested_action="retry",
+                    operation=f"feature.{feature}.pre_show",
                 )
+        return None
+
+    pre_show_failure = _ensure_pre_show_features(startup.generation)
 
     coordinator_runtime = None
     coordinator_started = False
@@ -685,9 +804,6 @@ def main(argv: list[str] | None = None) -> int:
             if not startup.is_current(generation):
                 return
             startup.transition(StartupPhase.GALLERY_READY)
-            people_warmup = getattr(coordinator_runtime, "warm_people_dashboard", None)
-            if callable(people_warmup):
-                people_warmup()
             starter = getattr(context, "schedule_idle_startup_jobs", None)
             if not callable(starter):
                 starter = getattr(context, "start_deferred_startup_scan", None)
@@ -961,10 +1077,15 @@ def main(argv: list[str] | None = None) -> int:
         _initialize_features_after_show(generation)
 
     def _retry_startup() -> None:
+        nonlocal pre_show_failure
         if startup.phase is StartupPhase.CANCELLED:
             return
         generation = startup.begin()
         _register_attempt_resources(generation)
+        pre_show_failure = _ensure_pre_show_features(generation)
+        if pre_show_failure is not None:
+            startup.fail(pre_show_failure)
+            return
         startup.transition(StartupPhase.INTERACTIVE, reason="retry")
         _initialize_features_after_show(generation)
 
@@ -994,10 +1115,13 @@ def main(argv: list[str] | None = None) -> int:
 
     startup.startupCompleted.connect(_schedule_benchmark_exit)
     startup.startupDegraded.connect(_schedule_benchmark_exit)
-    window.firstPainted.connect(startup.first_painted)
-    # Arm before show(): test doubles and a few embedded Qt hosts can paint
-    # synchronously from show(), and that event must not be lost.
-    startup.shell_shown(_continue_after_shell)
+    if pre_show_failure is None:
+        window.firstPainted.connect(startup.first_painted)
+        # Arm before show(): test doubles and a few embedded Qt hosts can paint
+        # synchronously from show(), and that event must not be lost.
+        startup.shell_shown(_continue_after_shell)
+    else:
+        startup.fail(pre_show_failure)
     mark("startup.show", generation=startup.generation)
     window.show()
     mark("main_window.show_called")
@@ -1010,6 +1134,8 @@ def main(argv: list[str] | None = None) -> int:
         # immediately).  Cancel the attempt so its watchdog and registered
         # resources cannot fire against an already torn-down window.
         startup.cancel()
+        startup_jobs.close()
+        startup_imports.close()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual launch

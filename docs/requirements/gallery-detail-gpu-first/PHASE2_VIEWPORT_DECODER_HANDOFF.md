@@ -1,9 +1,9 @@
 # Phase 2 Handoff：Detail 视口级 Decoder
 
-> 更新日期：2026-07-18  
-> Phase 2 状态：代码、定向自动化测试与文档完成；packaged 性能采样未执行  
-> 当前分支：`codex/gallery-detail-gpu-first-phase1`  
-> 基线提交：`3f7e5cbf72e79f42aec568685282601af1aeb499`（`fix: preserve detail scheduler request ownership`）  
+> 更新日期：2026-07-18
+> Phase 2 状态：代码、定向自动化测试与文档完成；packaged 性能采样未执行
+> 当前分支：`codex/gallery-detail-gpu-first-phase1`
+> 基线提交：`3f7e5cbf72e79f42aec568685282601af1aeb499`（`fix: preserve detail scheduler request ownership`）
 > 工作树状态：Phase 2 作为未提交变更位于上述基线之上；交付前无已知测试失败
 
 本文只记录 Phase 2 的真实落地结果。Phase 1 历史保持在

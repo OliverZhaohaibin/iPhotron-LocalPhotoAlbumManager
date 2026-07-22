@@ -5,6 +5,7 @@
 > 本文保留为阶段性历史记录。当前实现、证据状态和剩余人工矩阵以
 > `ENGINEERING_CLOSURE_REPORT.md` 与 `MANUAL_VALIDATION_MATRIX.md` 为准；
 > 下文“剩余改造”中的多项工作已在 2026-07-14 完成。
+> 2026-07-22 合并前复审与修复结果见 `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 1. 交接结论
 

@@ -1367,6 +1367,94 @@ class FaceStateRepository:
             conn.commit()
         return True
 
+    def merge_identity_redirect_and_groups(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        target_kind: str,
+        target_id: str,
+    ) -> tuple[bool, dict[str, str | None]]:
+        """Persist a cross-kind redirect and its group remap atomically."""
+
+        source_kind = str(source_kind or "").strip()
+        target_kind = str(target_kind or "").strip()
+        source_id = str(source_id or "").strip()
+        target_id = str(target_id or "").strip()
+        if (
+            source_kind not in {"person", "pet"}
+            or target_kind not in {"person", "pet"}
+            or source_kind == target_kind
+            or not source_id
+            or not target_id
+        ):
+            return False, {}
+
+        self.initialize()
+        timestamp = _utc_now_iso()
+        source_key = (source_kind, source_id)
+        target_key = (target_kind, target_id)
+        with closing(self._connect()) as conn:
+            redirect_rows = conn.execute(
+                """
+                SELECT source_kind, source_id, target_kind, target_id
+                FROM identity_redirects
+                """
+            ).fetchall()
+            redirects = {
+                (str(row["source_kind"]), str(row["source_id"])): (
+                    str(row["target_kind"]),
+                    str(row["target_id"]),
+                )
+                for row in redirect_rows
+            }
+            if source_key in redirects or target_key in redirects:
+                return False, {}
+
+            cursor = target_key
+            visited = {source_key}
+            while cursor in redirects:
+                if cursor in visited:
+                    return False, {}
+                visited.add(cursor)
+                cursor = redirects[cursor]
+
+            conn.execute(
+                """
+                INSERT INTO identity_redirects (
+                    source_kind, source_id, target_kind, target_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (source_kind, source_id, target_kind, target_id, timestamp),
+            )
+            conn.execute(
+                """
+                UPDATE identity_redirects
+                SET target_kind = ?, target_id = ?, updated_at = ?
+                WHERE target_kind = ? AND target_id = ?
+                  AND NOT (source_kind = ? AND source_id = ?)
+                """,
+                (
+                    target_kind,
+                    target_id,
+                    timestamp,
+                    source_kind,
+                    source_id,
+                    source_kind,
+                    source_id,
+                ),
+            )
+            group_redirects = self._remap_groups_for_merged_identity(
+                conn,
+                source_kind=source_kind,
+                source_id=source_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                updated_at=timestamp,
+            )
+            conn.commit()
+        return True, group_redirects
+
     def get_identity_redirects(self) -> list[IdentityRedirectRecord]:
         self.initialize()
         with closing(self._connect()) as conn:

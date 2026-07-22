@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iPhoto.application.services.recognition_merge_service import (
+    IdentityMergeFailure,
+    IdentityRef,
+    RecognitionMergeService,
+)
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
@@ -31,7 +36,7 @@ from iPhoto.pets.records import PetSummary
 from ..menus.core import MenuActionSpec, MenuContext, populate_menu
 from ..menus.style import apply_menu_style
 from . import dialogs
-from .people_dashboard_board import GroupBoard, PeopleBoard
+from .people_dashboard_board import GroupBoard, IdentityBoard
 from .people_dashboard_cards import GroupCard, PeopleCard, PetCard
 from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
 from .people_dashboard_shared import (
@@ -164,6 +169,7 @@ class PeopleDashboardWidget(QWidget):
         super().__init__(parent)
         self._service = _people_service()
         self._pet_service = _pet_service()
+        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
         self._query_service: object | None = None
         self._pinned_service: PinnedItemsService | None = None
         self._status_message: str | None = None
@@ -289,7 +295,7 @@ class PeopleDashboardWidget(QWidget):
         self._people_title.setStyleSheet("color: #111111; font-size: 18px; font-weight: 800;")
         self._content_layout.addWidget(self._people_title)
 
-        self._board = PeopleBoard()
+        self._board = IdentityBoard()
         self._board.mergeRequested.connect(self._merge_cluster_pair)
         self._board.orderChanged.connect(self._persist_cluster_order)
         self._content_layout.addWidget(self._board)
@@ -301,12 +307,14 @@ class PeopleDashboardWidget(QWidget):
 
     def set_people_service(self, service: PeopleService | None) -> None:
         self._service = service or _people_service()
+        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
         self._current_library_root = self._service.library_root()
         configure_people_cover_cache(self._current_library_root)
         self.reload()
 
     def set_pet_service(self, service: PetService | None) -> None:
         self._pet_service = service or _pet_service()
+        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
         self.reload(preserve_content=bool(self._summaries or self._pet_summaries or self._groups))
 
     def set_services(
@@ -322,6 +330,7 @@ class PeopleDashboardWidget(QWidget):
 
         self._service = people_service or _people_service()
         self._pet_service = pet_service or _pet_service()
+        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
         self._pinned_service = pinned_service
         self._query_service = query_service
         self._current_library_root = self._service.library_root()
@@ -716,17 +725,20 @@ class PeopleDashboardWidget(QWidget):
     def _summary_for_pet(self, pet_id: str) -> PetSummary | None:
         return next((item for item in self._pet_summaries if item.pet_id == pet_id), None)
 
-    def _show_card_menu(self, person_id: str, global_pos) -> None:
-        summary = self._summary_for_person(person_id)
-        if summary is None:
-            pet_summary = self._summary_for_pet(person_id)
-            if pet_summary is None:
-                return
-            menu = self._build_pet_menu(pet_summary)
-            menu.exec(global_pos)
+    def _show_card_menu(self, identity_key: str, global_pos) -> None:
+        identity = IdentityRef.parse(identity_key)
+        if identity is None:
             return
-
-        menu = self._build_card_menu(summary)
+        if identity.kind == "person":
+            summary = self._summary_for_person(identity.entity_id)
+            if summary is None:
+                return
+            menu = self._build_card_menu(summary)
+        else:
+            summary = self._summary_for_pet(identity.entity_id)
+            if summary is None:
+                return
+            menu = self._build_pet_menu(summary)
         menu.exec(global_pos)
 
     def _show_group_menu(self, group_id: str, global_pos) -> None:
@@ -1195,11 +1207,7 @@ class PeopleDashboardWidget(QWidget):
             )
         return choices
 
-    def _merge_cluster_pair(self, source_person_id: str, target_person_id: str) -> None:
-        source_identity = self._identity_for_card_id(source_person_id)
-        target_identity = self._identity_for_card_id(target_person_id)
-        if source_identity is None or target_identity is None:
-            return
+    def _merge_cluster_pair(self, source_identity: str, target_identity: str) -> None:
         self._confirm_merge(source_identity, target_identity)
 
     def _confirm_merge(self, source_person_id: str, target_person_id: str) -> bool:
@@ -1227,21 +1235,38 @@ class PeopleDashboardWidget(QWidget):
         if not MergeConfirmDialog.confirm(2, self):
             return False
 
-        source_kind, source_id = source_identity.split(":", 1)
-        target_kind, target_id = target_identity.split(":", 1)
-        if source_kind == "person" and target_kind == "person":
-            merged = self._service.merge_clusters(source_id, target_id)
-        elif source_kind == "pet" and target_kind == "pet":
-            merged = self._pet_service.merge_pets(source_id, target_id)
+        try:
+            outcome = self._merge_service.merge(source_identity, target_identity)
+        except (sqlite3.Error, OSError):
+            logger.exception("Identity merge failed: %s -> %s", source_identity, target_identity)
+            dialogs.show_warning(
+                self,
+                tr("PeopleDashboard", "The identities could not be merged. No photos were deleted."),
+                title=tr("PeopleDashboard", "Merge Failed"),
+            )
+            return False
+        merged = outcome.merged
+        if merged:
+            self._remap_pinned_identity(
+                source_identity,
+                target_identity,
+                group_redirects=outcome.group_redirects,
+            )
+        elif outcome.failure == IdentityMergeFailure.HIDDEN_STATE_MISMATCH:
+            dialogs.show_information(
+                self,
+                self._hidden_state_merge_message(),
+                title=tr("PeopleDashboard", "Cannot Merge People"),
+            )
         else:
-            result = self._service.merge_identities(source_identity, target_identity)
-            merged = bool(result and result.merged)
-            if result is not None:
-                self._remap_pinned_identity(
-                    source_identity,
-                    target_identity,
-                    group_redirects=result.group_redirects,
-                )
+            dialogs.show_warning(
+                self,
+                tr(
+                    "PeopleDashboard",
+                    "The identities could not be merged. They may have changed since this view was loaded.",
+                ),
+                title=tr("PeopleDashboard", "Merge Failed"),
+            )
         if merged:
             self._remove_merged_source_card(source_identity)
             self._reload_after_mutation(
@@ -1266,23 +1291,9 @@ class PeopleDashboardWidget(QWidget):
             ]
         self._populate_cards()
 
-    def _identity_for_card_id(self, card_id: str) -> str | None:
-        if self._summary_for_person(card_id) is not None:
-            return f"person:{card_id}"
-        if self._summary_for_pet(card_id) is not None:
-            return f"pet:{card_id}"
-        return None
-
     def _normalize_identity(self, identity: str) -> str | None:
-        text = str(identity or "").strip()
-        if not text:
-            return None
-        if ":" not in text:
-            return self._identity_for_card_id(text)
-        kind, entity_id = (part.strip() for part in text.split(":", 1))
-        if kind not in {"person", "pet"} or not entity_id:
-            return None
-        return f"{kind}:{entity_id}"
+        parsed = IdentityRef.parse(identity)
+        return parsed.key if parsed is not None else None
 
     def _identity_hidden(self, identity: str) -> bool | None:
         normalized = self._normalize_identity(identity)
@@ -1393,6 +1404,12 @@ class PeopleDashboardWidget(QWidget):
         )
 
     def _persist_cluster_order(self, ordered_person_ids: list[str]) -> None:
+        ordered_person_ids = [
+            identity.entity_id
+            for value in ordered_person_ids
+            if (identity := IdentityRef.parse(value)) is not None
+            and identity.kind == "person"
+        ]
         current_ids = {summary.person_id for summary in self._summaries}
         filtered = [person_id for person_id in ordered_person_ids if person_id in current_ids]
         if len(filtered) != len(self._summaries):

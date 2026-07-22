@@ -31,6 +31,7 @@ from .library_location_service import LibraryLocationService
 from .library_scan_service import LibraryScanService
 
 if TYPE_CHECKING:
+    from ..application.services.recognition_merge_service import RecognitionMergeService
     from ..application.services.recognition_query_service import RecognitionQueryService
     from ..people.service import PeopleService
     from ..pets.service import PetService
@@ -53,6 +54,7 @@ class LibrarySession:
     people: PeopleService | None = None
     pets: PetService | None = None
     recognition_queries: RecognitionQueryService | None = None
+    recognition_merges: RecognitionMergeService | None = None
     maps: MapRuntimePort | None = None
     map_interactions: MapInteractionServicePort | None = None
     edit: EditServicePort | None = None
@@ -60,7 +62,15 @@ class LibrarySession:
     bind_asset_runtime: bool = True
 
     _LAZY_SERVICE_NAMES = frozenset(
-        {"people", "pets", "recognition_queries", "maps", "map_interactions", "locations"}
+        {
+            "people",
+            "pets",
+            "recognition_queries",
+            "recognition_merges",
+            "maps",
+            "map_interactions",
+            "locations",
+        }
     )
 
     def __getattribute__(self, name: str):
@@ -148,6 +158,12 @@ class LibrarySession:
                 people_service=self.people,
                 pet_service=self.pets,
             )
+        if name == "recognition_merges":
+            from ..application.services.recognition_merge_service import (
+                RecognitionMergeService,
+            )
+
+            return RecognitionMergeService(self.people, self.pets)
         if name == "maps":
             return SessionMapRuntimeService()
         if name == "map_interactions":

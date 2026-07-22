@@ -286,6 +286,9 @@ class PetRepository:
 
     def get_pet_summaries(self, *, include_hidden: bool = False) -> list[PetSummary]:
         self.initialize()
+        merge_redirects = (
+            self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}
+        )
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
@@ -313,7 +316,9 @@ class PetRepository:
         for asset_row in asset_rows:
             if not asset_row["pet_id"] or not asset_row["asset_id"]:
                 continue
-            pet_asset_ids = asset_ids_by_pet_id.setdefault(str(asset_row["pet_id"]), set())
+            runtime_pet_id = str(asset_row["pet_id"])
+            canonical_pet_id = merge_redirects.get(runtime_pet_id, runtime_pet_id)
+            pet_asset_ids = asset_ids_by_pet_id.setdefault(canonical_pet_id, set())
             pet_asset_ids.add(str(asset_row["asset_id"]))
         pet_ids = [str(row["pet_id"]) for row in rows if row["pet_id"]]
         hidden_map: dict[str, bool] = {}
@@ -327,6 +332,8 @@ class PetRepository:
         summaries: list[PetSummary] = []
         for row in rows:
             pet_id = str(row["pet_id"])
+            if pet_id in merge_redirects:
+                continue
             thumbnail_path = cover_paths.get(pet_id) or row["thumbnail_path"]
             resolved_thumbnail: Path | None = None
             if thumbnail_path:
@@ -352,15 +359,23 @@ class PetRepository:
         if not pet_id:
             return []
         self.initialize()
+        runtime_pet_ids = [pet_id]
+        if self._state_repo is not None:
+            redirects = self._state_repo.get_merge_redirect_map()
+            runtime_pet_ids.extend(
+                source_id for source_id, target_id in redirects.items() if target_id == pet_id
+            )
+        runtime_pet_ids = list(dict.fromkeys(runtime_pet_ids))
+        placeholders = ", ".join("?" for _ in runtime_pet_ids)
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT asset_id
                 FROM pet_detections
-                WHERE pet_id = ?
+                WHERE pet_id IN ({placeholders})
                 ORDER BY asset_id ASC
                 """,
-                (pet_id,),
+                runtime_pet_ids,
             ).fetchall()
         return [str(row["asset_id"]) for row in rows if row["asset_id"]]
 
@@ -375,9 +390,17 @@ class PetRepository:
         if not ids:
             return result
         self.initialize()
+        redirects = (
+            self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}
+        )
+        runtime_to_requested: dict[str, str] = {pet_id: pet_id for pet_id in ids}
+        for source_id, target_id in redirects.items():
+            if target_id in result:
+                runtime_to_requested[source_id] = target_id
+        runtime_ids = tuple(runtime_to_requested)
         with closing(self._connect()) as conn:
-            for start in range(0, len(ids), 900):
-                chunk = ids[start : start + 900]
+            for start in range(0, len(runtime_ids), 900):
+                chunk = runtime_ids[start : start + 900]
                 placeholders = ", ".join("?" for _ in chunk)
                 rows = conn.execute(
                     f"""
@@ -390,7 +413,11 @@ class PetRepository:
                 ).fetchall()
                 for row in rows:
                     if row["pet_id"] and row["asset_id"]:
-                        result[str(row["pet_id"])].append(str(row["asset_id"]))
+                        result[runtime_to_requested[str(row["pet_id"])]].append(
+                            str(row["asset_id"])
+                        )
+        for requested_id, asset_ids in result.items():
+            result[requested_id] = list(dict.fromkeys(asset_ids))
         return result
 
     def list_asset_pet_annotations(self, asset_id: str) -> list[AssetPetAnnotation]:
@@ -410,18 +437,26 @@ class PetRepository:
                 (asset_id,),
             ).fetchall()
         names = {}
+        redirects: dict[str, str] = {}
         if self._state_repo is not None:
+            redirects = self._state_repo.get_merge_redirect_map()
             names = self._state_repo.get_profile_name_map(
-                str(row["pet_id"]) for row in rows if row["pet_id"]
+                redirects.get(str(row["pet_id"]), str(row["pet_id"]))
+                for row in rows
+                if row["pet_id"]
             )
         annotations: list[AssetPetAnnotation] = []
         for row in rows:
             thumbnail_path = row["thumbnail_path"]
+            runtime_pet_id = str(row["pet_id"]) if row["pet_id"] else None
+            canonical_pet_id = (
+                redirects.get(runtime_pet_id, runtime_pet_id) if runtime_pet_id else None
+            )
             annotations.append(
                 AssetPetAnnotation(
                     detection_id=str(row["detection_id"]),
-                    pet_id=str(row["pet_id"]) if row["pet_id"] else None,
-                    display_name=names.get(str(row["pet_id"])) if row["pet_id"] else None,
+                    pet_id=canonical_pet_id,
+                    display_name=names.get(canonical_pet_id) if canonical_pet_id else None,
                     box_x=int(row["box_x"] or 0),
                     box_y=int(row["box_y"] or 0),
                     box_w=int(row["box_w"] or 0),
@@ -484,8 +519,23 @@ class PetRepository:
     def merge_pets(self, source_pet_id: str, target_pet_id: str) -> PetMutationResult | None:
         if self._state_repo is None:
             return None
-        if not self._state_repo.merge_pets(source_pet_id, target_pet_id):
-            return None
+        self.initialize()
+        runtime_pets = [
+            pet
+            for pet in self.get_all_pet_records()
+            if pet.pet_id in {source_pet_id, target_pet_id}
+        ]
+        runtime_detections = [
+            detection
+            for detection in self.get_all_detections()
+            if detection.pet_id in {source_pet_id, target_pet_id}
+        ]
+        self._state_repo.ensure_runtime_candidates(runtime_pets, runtime_detections)
+        durable_merged = self._state_repo.merge_pets(source_pet_id, target_pet_id)
+        if not durable_merged:
+            redirects = self._state_repo.get_merge_redirect_map()
+            if redirects.get(source_pet_id) != target_pet_id:
+                return None
         with closing(self._connect()) as conn:
             asset_rows = conn.execute(
                 """

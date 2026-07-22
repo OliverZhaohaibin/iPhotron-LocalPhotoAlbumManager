@@ -17,6 +17,10 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
+from iPhoto.application.services.recognition_merge_service import (
+    IdentityMergeOutcome,
+    IdentityRef,
+)
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets import (
     people_dashboard_cards,
@@ -70,6 +74,109 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
     widget._board.finish_drag(cards[0])
 
     assert len(confirm_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "target_kind"),
+    [
+        ("person", "person"),
+        ("pet", "pet"),
+        ("person", "pet"),
+        ("pet", "person"),
+    ],
+)
+def test_real_card_positions_merge_once_in_all_directions(
+    source_kind: str,
+    target_kind: str,
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._board.resize(800, 500)
+
+    def make_card(kind: str, entity_id: str, index: int):
+        if kind == "person":
+            summary = PersonSummary(
+                entity_id,
+                entity_id,
+                f"face-{index}",
+                1,
+                None,
+                f"2024-01-01T00:00:0{index}Z",
+            )
+            return people_dashboard_cards.PeopleCard(
+                board=widget._board,
+                summary=summary,
+                seed_index=index,
+            )
+        summary = PetSummary(
+            entity_id,
+            entity_id,
+            f"det-{index}",
+            1,
+            None,
+            f"2024-01-01T00:00:0{index}Z",
+        )
+        return people_dashboard_cards.PetCard(
+            board=widget._board,
+            summary=summary,
+            seed_index=index,
+        )
+
+    source = make_card(source_kind, "source", 0)
+    target = make_card(target_kind, "target", 1)
+    widget._board.set_cards([source, target])
+    emitted: list[tuple[str, str]] = []
+    widget._board.mergeRequested.disconnect()
+    widget._board.mergeRequested.connect(lambda first, second: emitted.append((first, second)))
+    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+
+    source.begin_drag()
+    source.move(target.pos())
+    widget._board.update_drag(source)
+
+    assert widget._board.top_cards == [source, target]
+    assert widget._board.proximity_pair == (source, target)
+
+    widget._board.finish_drag(source)
+    source.end_drag()
+
+    assert emitted == [(f"{source_kind}:source", f"{target_kind}:target")]
+
+
+def test_person_and_pet_with_same_raw_id_remain_distinct(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._board.resize(800, 500)
+    person = people_dashboard_cards.PeopleCard(
+        board=widget._board,
+        summary=PersonSummary(
+            "same-id", "Alice", "face-a", 1, None, "2024-01-01T00:00:00Z"
+        ),
+        seed_index=0,
+    )
+    pet = people_dashboard_cards.PetCard(
+        board=widget._board,
+        summary=PetSummary(
+            "same-id", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z"
+        ),
+        seed_index=1,
+    )
+    widget._board.set_cards([person, pet])
+    emitted: list[tuple[str, str]] = []
+    widget._board.mergeRequested.disconnect()
+    widget._board.mergeRequested.connect(lambda first, second: emitted.append((first, second)))
+    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+
+    pet.begin_drag()
+    pet.move(person.pos())
+    widget._board.update_drag(pet)
+    widget._board.finish_drag(pet)
+    pet.end_drag()
+
+    assert emitted == [("pet:same-id", "person:same-id")]
 
 
 def test_set_services_binds_people_and_pets_with_one_reload(
@@ -177,7 +284,16 @@ def test_drag_merge_removes_source_card_immediately(monkeypatch, qapp: QApplicat
 
     cards = widget._board.visible_cards()
     monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(lambda *_args: True))
-    monkeypatch.setattr(widget._service, "merge_clusters", lambda _source, _target: True)
+    monkeypatch.setattr(
+        widget._merge_service,
+        "merge",
+        lambda source, target: IdentityMergeOutcome(
+            True,
+            IdentityRef.parse(source),
+            IdentityRef.parse(target),
+            person_redirects={"person-a": "person-b"},
+        ),
+    )
     monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
     monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
@@ -203,7 +319,7 @@ def test_drag_reorder_persists_cluster_order(monkeypatch, qapp: QApplication) ->
 
     cards = widget._board.visible_cards()
     widget._board.top_cards = [cards[1], cards[0]]
-    widget._board._drag_start_order = ("person-a", "person-b")
+    widget._board._drag_start_order = ("person:person-a", "person:person-b")
     widget._board.finish_drag(cards[1])
 
     assert persisted == [["person-b", "person-a"]]
@@ -223,7 +339,7 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(monkeypatch, qapp: Q
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     cards = widget._board.visible_cards()
-    widget._board._drag_start_order = ("person-a", "person-b")
+    widget._board._drag_start_order = ("person:person-a", "person:person-b")
     widget._board.finish_drag(cards[0])
 
     assert persisted == []
@@ -1022,10 +1138,14 @@ def test_cross_identity_merge_invalidates_query_cache_before_reload(
         PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z")
     ]
     widget._query_service = Mock()
-    merge_result = SimpleNamespace(merged=True, group_redirects={})
+    merge_result = IdentityMergeOutcome(
+        True,
+        IdentityRef("person", "person-a"),
+        IdentityRef("pet", "pet-a"),
+    )
     monkeypatch.setattr(
-        widget._service,
-        "merge_identities",
+        widget._merge_service,
+        "merge",
         Mock(return_value=merge_result),
     )
     monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(lambda *_args: True))
@@ -1034,7 +1154,7 @@ def test_cross_identity_merge_invalidates_query_cache_before_reload(
 
     assert widget._confirm_merge("person:person-a", "pet:pet-a") is True
 
-    widget._service.merge_identities.assert_called_once_with(
+    widget._merge_service.merge.assert_called_once_with(
         "person:person-a",
         "pet:pet-a",
     )
@@ -1093,6 +1213,46 @@ def test_merge_pet_dialog_includes_all_same_hidden_pets(
     widget._merge_pet(widget._pet_summaries[0])
 
     assert dialog_calls == [["pet:pet-b"]]
+
+
+def test_right_click_pet_to_pet_uses_typed_merge_service_once(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._pet_summaries = [
+        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:00Z"),
+        PetSummary("pet-b", "Nori", "det-b", 1, None, "2024-01-01T00:00:01Z"),
+    ]
+    widget._populate_cards()
+
+    class _FakeDialog:
+        def __init__(self, _summaries, **_kwargs) -> None:
+            pass
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_person_ids(self) -> list[str]:
+            return ["pet:pet-b"]
+
+    merge = Mock(
+        return_value=IdentityMergeOutcome(
+            True,
+            IdentityRef("pet", "pet-a"),
+            IdentityRef("pet", "pet-b"),
+            pet_redirects={"pet-a": "pet-b"},
+        )
+    )
+    monkeypatch.setattr(people_dashboard_widget, "GroupPeopleDialog", _FakeDialog)
+    monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(lambda *_args: True))
+    monkeypatch.setattr(widget._merge_service, "merge", merge)
+    monkeypatch.setattr(widget, "reload", Mock())
+
+    widget._merge_pet(widget._pet_summaries[0])
+
+    merge.assert_called_once_with("pet:pet-a", "pet:pet-b")
+    assert [card.identity_key for card in widget._board.visible_cards()] == ["pet:pet-b"]
 
 
 def test_merge_pet_shows_warning_when_only_hidden_mismatch_exists(

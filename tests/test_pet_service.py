@@ -792,6 +792,48 @@ def test_merge_pets_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
     }
 
 
+def test_merge_pets_repairs_legacy_runtime_without_durable_profiles(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection(detection_id="det-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection(detection_id="det-b", asset_id="asset-b", pet_id="pet-b")
+    pets = [
+        PetRecord(
+            pet_id="pet-a",
+            name="Miso",
+            key_detection_id="det-a",
+            detection_count=1,
+            center_embedding=first.embedding,
+            embedding_dim=first.embedding_dim,
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+            sample_count=1,
+        ),
+        PetRecord(
+            pet_id="pet-b",
+            name=None,
+            key_detection_id="det-b",
+            detection_count=1,
+            center_embedding=second.embedding,
+            embedding_dim=second.embedding_dim,
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+            sample_count=1,
+        ),
+    ]
+    repository.replace_all([first, second], pets, sync_runtime_state=False)
+
+    result = repository.merge_pets("pet-a", "pet-b")
+
+    assert result is not None
+    assert result.pet_redirects == {"pet-a": "pet-b"}
+    assert [summary.pet_id for summary in repository.get_pet_summaries()] == ["pet-b"]
+    assert repository.get_pet_summaries()[0].name == "Miso"
+    assert repository.get_asset_ids_by_pet("pet-b") == ["asset-a", "asset-b"]
+    assert repository.merge_pets("pet-a", "pet-b") is not None
+    assert repository.state_repository is not None
+    assert [profile.pet_id for profile in repository.state_repository.get_profiles()] == ["pet-b"]
+
+
 def test_pet_summary_asset_count_counts_unique_assets(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     detections = [

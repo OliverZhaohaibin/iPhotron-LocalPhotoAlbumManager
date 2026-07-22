@@ -409,19 +409,14 @@ class PeopleService:
         if source_hidden is None or target_hidden is None or source_hidden != target_hidden:
             return None
 
-        if not state_repository.add_identity_redirect(
-            source_kind=source_kind,
-            source_id=source_id,
-            target_kind=target_kind,
-            target_id=target_id,
-        ):
-            return None
-        group_redirects = state_repository.remap_identity_in_groups(
+        merged, group_redirects = state_repository.merge_identity_redirect_and_groups(
             source_kind=source_kind,
             source_id=source_id,
             target_kind=target_kind,
             target_id=target_id,
         )
+        if not merged:
+            return None
         repository.refresh_all_group_assets()
         return IdentityMergeResult(
             merged=True,

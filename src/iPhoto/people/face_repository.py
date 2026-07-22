@@ -751,21 +751,29 @@ class FaceRepository:
             source_person = person_map.get(source_person_id)
             target_profile = profile_map.get(target_person_id)
             source_profile = profile_map.get(source_person_id)
-            target_name = None
+            target_name = next(
+                (
+                    str(value)
+                    for value in (
+                        target_person["name"] if target_person is not None else None,
+                        target_profile.name if target_profile is not None else None,
+                        source_person["name"] if source_person is not None else None,
+                        source_profile.name if source_profile is not None else None,
+                    )
+                    if value is not None and str(value).strip()
+                ),
+                None,
+            )
             target_created_at = _utc_now_iso()
             if target_person is not None:
-                target_name = target_person["name"]
                 target_created_at = target_person["created_at"]
             elif target_profile is not None:
-                target_name = target_profile.name
                 target_created_at = target_profile.created_at
             elif manual_target_faces:
                 target_created_at = min(face.created_at for face in manual_target_faces)
             elif source_person is not None:
-                target_name = source_person["name"]
                 target_created_at = source_person["created_at"]
             elif source_profile is not None:
-                target_name = source_profile.name
                 target_created_at = source_profile.created_at
             elif manual_source_faces:
                 target_created_at = min(face.created_at for face in manual_source_faces)

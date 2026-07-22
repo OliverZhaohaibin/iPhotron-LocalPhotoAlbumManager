@@ -286,6 +286,84 @@ class PetStateRepository:
             )
             conn.commit()
 
+    def ensure_runtime_candidates(
+        self,
+        pets: Iterable[PetRecord],
+        detections: Iterable[PetDetectionRecord],
+    ) -> None:
+        """Backfill missing durable rows from a legacy runtime snapshot.
+
+        This is deliberately insert-only: names, covers, hidden state and
+        existing key assignments are user state and must never be overwritten
+        by compatibility repair.
+        """
+
+        self.initialize()
+        timestamp = utc_now_iso()
+        with closing(self._connect()) as conn:
+            redirect_rows = conn.execute(
+                "SELECT source_pet_id, target_pet_id FROM merge_redirects"
+            ).fetchall()
+            redirects = _canonical_redirect_map(
+                {
+                    str(row["source_pet_id"]): str(row["target_pet_id"])
+                    for row in redirect_rows
+                    if row["source_pet_id"] and row["target_pet_id"]
+                }
+            )
+            for pet in pets:
+                if pet.pet_id in redirects:
+                    continue
+                sample_count = max(int(pet.sample_count), int(pet.detection_count))
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO pet_profiles (
+                        pet_id, name, center_embedding, embedding_dim,
+                        created_at, updated_at, sample_count, profile_state, species_label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        pet.pet_id,
+                        normalize_name(pet.name),
+                        serialize_embedding(pet.center_embedding),
+                        pet.embedding_dim,
+                        pet.created_at,
+                        timestamp,
+                        sample_count,
+                        profile_state_for_sample_count(sample_count),
+                        _normalize_species_label(pet.species_label),
+                    ),
+                )
+            for detection in detections:
+                if not detection.pet_id:
+                    continue
+                durable_pet_id = redirects.get(detection.pet_id, detection.pet_id)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO pet_keys (pet_key, pet_id, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (detection.pet_key, durable_pet_id, timestamp),
+                )
+            conn.commit()
+
+    def get_merge_redirect_map(self) -> dict[str, str]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT source_pet_id, target_pet_id
+                FROM merge_redirects
+                ORDER BY updated_at ASC, source_pet_id ASC
+                """
+            ).fetchall()
+        redirects = {
+            str(row["source_pet_id"]): str(row["target_pet_id"])
+            for row in rows
+            if row["source_pet_id"] and row["target_pet_id"]
+        }
+        return _canonical_redirect_map(redirects)
+
     def rename_pet(self, pet_id: str, name_or_none: str | None) -> None:
         if not pet_id:
             return
@@ -429,20 +507,78 @@ class PetStateRepository:
         timestamp = utc_now_iso()
         with closing(self._connect()) as conn:
             source = conn.execute(
-                "SELECT pet_id FROM pet_profiles WHERE pet_id = ?",
+                "SELECT pet_id, name FROM pet_profiles WHERE pet_id = ?",
                 (source_pet_id,),
             ).fetchone()
             target = conn.execute(
-                "SELECT pet_id FROM pet_profiles WHERE pet_id = ?",
+                "SELECT pet_id, name FROM pet_profiles WHERE pet_id = ?",
                 (target_pet_id,),
             ).fetchone()
             if source is None or target is None:
+                return False
+            redirects = {
+                str(row["source_pet_id"]): str(row["target_pet_id"])
+                for row in conn.execute(
+                    "SELECT source_pet_id, target_pet_id FROM merge_redirects"
+                ).fetchall()
+            }
+            if source_pet_id in redirects:
+                return False
+            cursor = target_pet_id
+            visited = {source_pet_id}
+            while cursor in redirects:
+                if cursor in visited:
+                    return False
+                visited.add(cursor)
+                cursor = redirects[cursor]
+            if cursor != target_pet_id:
                 return False
             hidden_map = self.get_pet_hidden_map((source_pet_id, target_pet_id))
             if bool(hidden_map.get(source_pet_id, False)) != bool(
                 hidden_map.get(target_pet_id, False)
             ):
                 return False
+            if target["name"] is None and source["name"] is not None:
+                conn.execute(
+                    "UPDATE pet_profiles SET name = ?, updated_at = ? WHERE pet_id = ?",
+                    (source["name"], timestamp, target_pet_id),
+                )
+            source_cover = conn.execute(
+                "SELECT * FROM pet_covers WHERE pet_id = ?",
+                (source_pet_id,),
+            ).fetchone()
+            target_cover = conn.execute(
+                "SELECT is_custom FROM pet_covers WHERE pet_id = ?",
+                (target_pet_id,),
+            ).fetchone()
+            if (
+                source_cover is not None
+                and int(source_cover["is_custom"] or 0) == 1
+                and (target_cover is None or int(target_cover["is_custom"] or 0) == 0)
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO pet_covers (
+                        pet_id, detection_id, pet_key, asset_id, thumbnail_path,
+                        is_custom, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                    ON CONFLICT(pet_id) DO UPDATE SET
+                        detection_id = excluded.detection_id,
+                        pet_key = excluded.pet_key,
+                        asset_id = excluded.asset_id,
+                        thumbnail_path = excluded.thumbnail_path,
+                        is_custom = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        target_pet_id,
+                        source_cover["detection_id"],
+                        source_cover["pet_key"],
+                        source_cover["asset_id"],
+                        source_cover["thumbnail_path"],
+                        timestamp,
+                    ),
+                )
             conn.execute(
                 "UPDATE pet_keys SET pet_id = ?, updated_at = ? WHERE pet_id = ?",
                 (target_pet_id, timestamp, source_pet_id),
@@ -456,6 +592,14 @@ class PetStateRepository:
                     updated_at = excluded.updated_at
                 """,
                 (source_pet_id, target_pet_id, timestamp),
+            )
+            conn.execute(
+                """
+                UPDATE merge_redirects
+                SET target_pet_id = ?, updated_at = ?
+                WHERE target_pet_id = ? AND source_pet_id != ?
+                """,
+                (target_pet_id, timestamp, source_pet_id, source_pet_id),
             )
             conn.execute("DELETE FROM pet_profiles WHERE pet_id = ?", (source_pet_id,))
             conn.execute("DELETE FROM pet_covers WHERE pet_id = ?", (source_pet_id,))
@@ -541,3 +685,18 @@ def _normalize_species_label(value: object) -> str | None:
         return None
     label = str(value).strip().lower()
     return label or None
+
+
+def _canonical_redirect_map(redirects: dict[str, str]) -> dict[str, str]:
+    canonical: dict[str, str] = {}
+    for source in redirects:
+        cursor = source
+        visited: set[str] = set()
+        while cursor in redirects:
+            if cursor in visited:
+                break
+            visited.add(cursor)
+            cursor = redirects[cursor]
+        if cursor not in visited and cursor != source:
+            canonical[source] = cursor
+    return canonical

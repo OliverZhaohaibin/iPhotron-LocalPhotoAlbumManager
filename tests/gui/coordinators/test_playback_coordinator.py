@@ -2158,7 +2158,17 @@ def test_handle_manual_face_ready_merges_selected_pet_identity() -> None:
     coordinator._manual_face_inflight_asset_id = "asset-photo"
     coordinator._manual_face_pending_merge_target = "pet:pet-a"
     coordinator._pending_manual_face_annotations = {"asset-photo": []}
-    coordinator._people_service = Mock(merge_identities=Mock(return_value=SimpleNamespace(merged=True)))
+    coordinator._people_service = Mock(
+        list_clusters=Mock(
+            return_value=[SimpleNamespace(person_id="person-new", is_hidden=False)]
+        ),
+        cluster_asset_ids=Mock(return_value=["asset-photo"]),
+        merge_identities=Mock(return_value=SimpleNamespace(merged=True, group_redirects={})),
+    )
+    coordinator._pet_service = Mock(
+        list_pets=Mock(return_value=[SimpleNamespace(pet_id="pet-a", is_hidden=False)]),
+        pet_asset_ids=Mock(return_value=[]),
+    )
     coordinator._current_presentation = _make_presentation(
         path="/fake/photo.jpg",
         asset_id="asset-photo",

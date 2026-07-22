@@ -26,6 +26,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
+from iPhoto.application.services.recognition_merge_service import RecognitionMergeService
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.detail_pipeline import (
@@ -2832,10 +2833,14 @@ class PlaybackCoordinator(QObject):
             person_id = getattr(result, "person_id", None)
             if isinstance(person_id, str) and person_id:
                 try:
-                    merged = self._people_service.merge_identities(
+                    outcome = RecognitionMergeService(
+                        self._people_service,
+                        self._pet_service,
+                    ).merge(
                         f"person:{person_id}",
                         merge_target,
                     )
+                    merged = outcome if outcome.merged else None
                 except (sqlite3.Error, OSError):
                     LOGGER.exception(
                         "Failed to merge manual face person %s into %s",

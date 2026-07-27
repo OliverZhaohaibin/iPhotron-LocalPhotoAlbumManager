@@ -2,16 +2,19 @@
 
 更新日期：2026-07-27
 
-> 2026-07-27：Pets P0-1～P3-4 的自动化修复与门禁已按
-> `PETS_REVIEW_REMEDIATION_LEDGER.md` 收口。接手者只执行该台账和
-> `MANUAL_VALIDATION_MATRIX.md` 中保留的实机项；人工证据齐全前仍不能把当前分支
-> 视为可合并。
+> 2026-07-27 二次审查：之前的 Pets 自动化收口结论已经重新打开。当前工作分支为
+> `codex/pets-review-remediation`，目标分支为 `codex/startup-chain-optimization`；
+> 审查附件为 `e65678cb-e242-462b-9573-badc6f933d3d/pasted-text.txt`。必须先完成
+> `PETS_REVIEW_REMEDIATION_LEDGER.md` 的 R2-01～R2-13，再执行
+> `MANUAL_VALIDATION_MATRIX.md`；当前 stacked PR 因 workflow 仅监听 `main` 而没有
+> head status，workflow 现已修复为监听 stacked base；最终证据仍必须来自 push 后同一
+> commit SHA。
 
 ## 结论与版本边界
 
 - 合并基线：`edit-base` / `6ff592f72a6a4fd8575d5bd392e035dd2a95a12a`
 - 复审起点：`06a39362289de311368170f6271a0dc4f4de7b15`
-- 当前实现状态：`automated_remediation_complete / manual_validation_pending`
+- 当前实现状态：`automated_core_pass / release_artifact_and_manual_validation_pending`
 - 正式跨平台证据：`pending_manual_validation`
 
 本轮复审发现并修复了启动 terminal 边界、后台 import 资源所有权、
@@ -45,6 +48,16 @@ Recognition 启动期回退和 packaged A/B 同构校验四类问题。用户确
 - `compare` 只有在 baseline/candidate 环境指纹一致、manifest revision 对应且 artifact SHA 存在并不同时才可能 PASS。
 
 ## 验收与已知边界
+
+二次 Pets 审查的 runtime commit marker/向前恢复、durable identity、source/canonical
+annotation、跨类型 detection assignment、embedding generation/contract、持久化
+boundary、分块查询、长期 USearch index、模型 root 自愈、缩略图发布补偿和 stacked
+PR workflow 已完成自动化修复。当前全量 `2756 passed, 14 skipped`，真实模型和
+50k 规模独立门禁均通过。
+
+仍有两个不可伪造为完成的交付边界：仓库不可变 `pet-models-v1` TorchScript Release
+尚未发布，因此生产 Torch Hub 转换路径仍保留；push 后最终 head SHA 的 GitHub
+Actions 尚无证据。这两项及全部真实平台项目继续记录在人工矩阵中。
 
 定向验收覆盖 terminal 唯一性、取消后的迟到 import、Recognition 首用预热、构建清单和 A/B 拒绝路径。完整平台性能数字仍按 `STARTUP_BENCHMARK_RUNBOOK.md` 采集。
 

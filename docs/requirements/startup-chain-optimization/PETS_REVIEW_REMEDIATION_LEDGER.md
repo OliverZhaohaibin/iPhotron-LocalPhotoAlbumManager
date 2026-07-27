@@ -5,9 +5,9 @@
 ## 状态与证据边界
 
 - 合并基线：`edit-base` / `6ff592f72a6a4fd8575d5bd392e035dd2a95a12a`
-- 修复分支：`codex/startup-chain-optimization`
+- 修复分支：`codex/pets-review-remediation`（目标分支：`codex/startup-chain-optimization`）
 - 审查结论：`REQUEST_CHANGES`，保持 Draft
-- 当前工程状态：`automated_remediation_complete / manual_validation_pending`
+- 当前工程状态：`automated_core_pass / release_artifact_and_manual_validation_pending`
 - 修复前定向基线：Pets、People repository、Recognition merge/query 共
   `85 passed, 1 warning`
 - 完成规则：每一项只能进入 `automated_pass`、`manual_pending`，或附有可复核
@@ -16,6 +16,33 @@
 本台账是本轮修复的第一检查点。它完成前不得修改生产代码；之后的实现、测试
 和人工验收都必须回填到这里。本目录在全部人工证据闭环前不得移入
 `docs/finished/requirements`。
+
+## 2026-07-27 二次审查检查点
+
+审查附件：`e65678cb-e242-462b-9573-badc6f933d3d/pasted-text.txt`。审查已确认
+`#884` 从未上线，因此不为未发布的 v4 Pets 数据提升 detector pipeline version，
+但重新打开下列首发版本可达的一致性、身份和验证问题。下表完成并进入
+`automated_pass` 前，之前对应条目的自动化结论不再作为合并证据。
+
+| ID | 当前复现证据与代码位置 | 确定性处置 | 验收要求 | 状态 |
+| --- | --- | --- | --- | --- |
+| R2-01 | `pets/repository.py::replace_assets_incrementally` 先提交 runtime，之后才调用 state sync；`pets/index_coordinator.py` 会在 state 失败时删除已经发布的缩略图并 finalize error。 | runtime 事务内写 operation commit marker；marker 存在时只允许幂等向前恢复 state/outbox/event，禁止回滚已提交 runtime 和文件。 | `test_runtime_commit_marker_recovers_state_without_deleting_published_thumbnail`、原有 asset-status/outbox 故障回归及全量测试通过。 | `automated_pass` |
+| R2-02 | `_assign_incremental_pet_ids` 在 exact key 命中后仍要求 ID 存在于 runtime centers，否则生成新 UUID。 | exact v2 key 优先恢复 durable `pet_id`；新 generation 只重建 embedding profile，保留 name/hidden/cover。 | `test_exact_key_resurrects_durable_identity_and_user_state` 通过。 | `automated_pass` |
+| R2-03 | `RecognitionAnnotation.kind` 同时承担 source detection 和 canonical identity；overlay 编辑使用 source 名称/ID，删除和移动按 canonical kind 路由。 | DTO 分离 source/canonical；identity mutation 使用 canonical，detection mutation 使用 source；跨类型单框归属保存 detection-level assignment。 | 双向跨类型 assignment、overlay 初值、canonical rename、source delete 和 playback 路由回归通过。 | `automated_pass` |
+| R2-04 | `activate_embedding_generation` 通过三次独立 metadata commit 激活 generation/version/dimension。 | generation contract 和 detector/clustering metadata 单事务激活并可幂等恢复。 | `test_generation_contract_is_reused_and_activated_in_one_transaction` 通过。 | `automated_pass` |
+| R2-05 | merge/move/recluster 未校验 generation、version、dimension，可能异常或静默混合 feature space。 | 所有人工和自动聚类操作验证完整 embedding contract；不兼容时明确 rejected。 | `test_generation_contract_rejects_cross_space_merge_and_move` 及 active-generation recluster 回归通过。 | `automated_pass` |
+| R2-06 | persisted boundary embeddings 未进入匹配上下文；回退查询取最低质量样本而非离中心最远样本。 | 直接使用 profile boundary；legacy 数据一次性批量补算最远 8 个样本。 | `test_persisted_boundary_samples_are_used_without_candidate_sql` 及 legacy farthest-8 回归通过。 | `automated_pass` |
+| R2-07 | model resolver 按目录/文件存在选 root，空 cache、损坏 cache 和不完整 bundled artifact 会遮挡有效 fallback 或触发只读写入。 | 按完整且 hash/size/shape 有效的 artifact 选择；只下载到用户 cache；损坏 cache 自愈。 | 空 cache、损坏 cache、完整 bundled 和 hash 校验回归通过；真实只读安装仍在人工矩阵。 | `automated_pass` |
+| R2-08 | state repository 多个 caller-sized `IN` 未分块，50k 测试未传 `pet_state.db`。 | 所有可变 `IN` 统一按 500 分块并增加定向 profile 查询。 | `test_state_repository_chunks_all_large_identity_reads` 覆盖 1,205 项；规模门禁覆盖真实 `pet_state.db` 的 50k。 | `automated_pass` |
+| R2-09 | 每批加载全部 profiles 并重建 ANN；现有规模测试只预装 50k 后测 +2。 | session 级、按 contract/species 分区的增量 USearch index；只读取和更新受影响候选。 | `pets-scale-contract` 覆盖空库 batch 16 增长到 1k/10k/50k 及 50k+2，`1 passed in 68.96s`。 | `automated_pass` |
+| R2-10 | journal recovery 仅在新扫描批次前触发，其他 mutation 可越过旧 applying 操作。 | 初始化和每个 public mutation 前按创建顺序恢复；失败时拒绝新 mutation。 | `test_public_mutation_cannot_overtake_unrecovered_journal_owner` 通过。 | `automated_pass` |
+| R2-11 | `_publish_staged_thumbnails` 的逐文件 replace 没有内部补偿或预登记正式目标。 | publish 前 journal 记录清单；部分失败反向清理，进程恢复也能识别 orphan。 | `test_thumbnail_publish_compensates_when_later_replace_fails` 及 scan recovery 回归通过。 | `automated_pass` |
+| R2-12 | DINO 仅固定 Torch Hub source revision，首次权重内容没有发布前 SHA。 | 生产运行时改用项目固定 Release TorchScript，manifest 固定 URL/SHA/size/shape；Torch Hub 仅保留开发转换工具。 | 已固定并在首次加载前验证官方 checkpoint SHA/size，生成 cache 复核 metadata/hash；仓库 `pet-models-v1` 不可变 TorchScript Release 尚未发布，生产 Torch Hub 路径尚不能删除。 | `manual_pending` |
+| R2-13 | `.github/workflows/test.yml` 的 PR base 仅允许 `main`，当前 stacked PR 没有 head status。 | 同时允许 `main` 与 `codex/startup-chain-optimization`，增加手工触发。 | workflow 触发条件和本地门禁已通过；必须在 push 后记录最终 head SHA 的 required jobs。 | `manual_pending` |
+
+二次审查的工程关闭上限为
+`automated_remediation_complete / manual_validation_pending`。远端 CI、真实安装权限、
+真实图库升级和跨平台 50k 证据未完成时继续保持 Draft / `REQUEST_CHANGES`。
 
 ## 处置原则
 
@@ -29,14 +56,15 @@
 
 ## 自动化证据（2026-07-27）
 
-- 全量：`2744 passed, 14 skipped`；跳过项包含由独立 PR job 强制执行的真实模型与
+- 全量：`2756 passed, 14 skipped`。跳过项包含由独立 PR job 强制执行的真实模型与
   规模契约，以及当前主机不适用的 Windows-only 测试。
 - `pets-model-contract`：`1 passed`。固定模型/图片 SHA，CPU provider，raw-BGR
   输入、dog 类别、bbox、置信度与最终去重全部通过。
-- `pets-scale-contract`：`1 passed in 2.93s`。覆盖 1k/10k/50k 与 50k+2，满足
+- `pets-scale-contract`：`1 passed in 68.96s`。覆盖空库按 batch 16 增长到
+  1k/10k/50k 与 50k+2，满足
   结构、时间、RSS、WAL 和增量阈值。
-- 架构门禁：`23 passed`；静态打包：`11 passed, 2 Windows-only skipped`；
-  `compileall`、变更范围 Ruff `F/E9`、`git diff --check` 均通过。
+- 架构门禁脚本三项检查通过；Pets/AppImage 静态打包 `2 passed`；`compileall`、
+  变更范围 Ruff `F/E9/I`、`git diff --check` 均通过。
 - 故障恢复证据覆盖 scan asset-status commit 失败后的重开向前恢复、operation
   finalized/outbox 时序、缩略图第二框失败清理；跨平台真实安装与全提交点进程级
   kill/restart 仍按人工矩阵保留，不据此宣称全平台完成。

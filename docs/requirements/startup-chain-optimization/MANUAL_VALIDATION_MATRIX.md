@@ -70,10 +70,12 @@ Metal 与 OpenGL 分开采集：
 | --- | --- | --- | --- |
 | 只读安装目录与首次模型落盘 | macOS Apple Silicon、macOS Intel、Windows `Program Files`、Linux AppImage | bundled root 保持只读；查找顺序为 override、用户 cache、bundled；缺失模型只写用户 cache；首次识别成功 | `pending_manual_validation` |
 | 模型获取与自愈 | 在线下载、离线 bundled fallback、损坏 cache、代理失败、证书失败 | 在线文件 hash/size/shape 正确；离线可用 bundled；损坏 cache 可重取；代理/证书失败给出可操作提示且不污染 cache | `pending_manual_validation` |
+| 固定 DINO Release 产物 | 使用固定 source commit 的受控构建环境和本仓库不可变 `pet-models-v1` 标签 | 发布 `dinov2_vits14.pt`，记录 artifact/build manifest SHA；manifest 改用 Release HTTPS URL 后删除生产 Torch Hub 转换路径；重新通过 hash/shape/packaging 门禁 | `pending_manual_validation` |
 | 真实旧图库升级 | 含 name、cover、hidden、rejection、pet merge、跨类型 merge 的脱敏副本 | interactive 不被 backfill 阻塞；后台清空 pending/retry；durable state 不丢；失败资产明确显示 stale/source generation | `pending_manual_validation` |
 | 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
 | 取消、切库与恢复 | 扫描中快速取消、连续切库、journal 各提交点进程 kill/restart | GUI 不阻塞；旧 worker 不写新库或发迟到事件；重启最终 `finalized`；无 redirect/detection/rejection/cover/group-cache split-brain | `pending_manual_validation` |
 | 50k packaged 报告 | 上述四类平台各自正式产物，已有 50k 再新增 2 个 | 记录耗时、峰值 RAM、WAL 增量、取消延迟、退出线程与后台恢复；满足 `pets-scale-contract` 阈值 | `pending_manual_validation` |
+| 最终 head CI | push 后的 `codex/pets-review-remediation` head SHA | stacked PR 的 model、scale、全量和 packaging required jobs 全部对应同一最终 SHA；记录 Actions URL | `pending_manual_validation` |
 
 每条结果必须记录以下字段，任一缺失都不能改为 pass：
 

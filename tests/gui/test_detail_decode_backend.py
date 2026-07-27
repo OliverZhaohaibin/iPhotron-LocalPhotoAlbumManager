@@ -173,6 +173,109 @@ def test_windows_wic_orientation_mapping_covers_exif_transforms() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("frame_size", "display_size", "orientation", "expected"),
+    [
+        ((3024, 4032), (3024, 4032), 6, True),
+        ((4032, 3024), (3024, 4032), 6, False),
+        ((3024, 4032), (3024, 4032), 3, False),
+        ((1024, 1024), (1024, 1024), 6, False),
+        ((0, 0), (3024, 4032), 6, False),
+    ],
+)
+def test_windows_wic_preoriented_frame_detection_is_strict(
+    frame_size: tuple[int, int],
+    display_size: tuple[int, int],
+    orientation: int,
+    expected: bool,
+) -> None:
+    from iPhoto.gui.detail_decode_windows import (
+        _wic_frame_is_already_display_oriented,
+    )
+
+    assert (
+        _wic_frame_is_already_display_oriented(
+            frame_size,
+            display_size,
+            orientation,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("frame_sizes", "already_oriented"),
+    [
+        (((3024, 4032), (3024, 4032)), True),
+        (((4032, 3024), (3024, 4032)), False),
+    ],
+    ids=("heic-preoriented", "raw-coded-geometry"),
+)
+def test_windows_wic_decode_avoids_only_proven_double_orientation(
+    mocker,
+    frame_sizes: tuple[tuple[int, int], tuple[int, int]],
+    already_oriented: bool,
+) -> None:
+    import ctypes
+
+    import iPhoto.gui.detail_decode_windows as wic
+
+    source = Path("C:/library/IMG_3684.HEIC")
+    request = DetailRenderRequest(
+        generation=1,
+        asset_id="live-still",
+        source_identity=AssetSourceIdentity.create(
+            source,
+            size_bytes=100,
+            source_mtime_ns=1,
+            width=3024,
+            height=4032,
+            orientation=6,
+        ),
+        viewport_physical_size=(768, 1024),
+        device_pixel_ratio=1.0,
+        geometry=DetailGeometryState(),
+        reason="initial",
+        decode_level=1024,
+    )
+    apartment = SimpleNamespace(close=MagicMock())
+    factory = ctypes.c_void_p(1)
+    decoder = ctypes.c_void_p(2)
+    frame = ctypes.c_void_p(3)
+    oriented = ctypes.c_void_p(4)
+    scaler = ctypes.c_void_p(5)
+    converter = ctypes.c_void_p(6)
+    image = QImage(768, 1024, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    mocker.patch.object(wic._ComApartment, "enter", return_value=apartment)
+    mocker.patch.object(wic, "_create_factory", return_value=factory)
+    mocker.patch.object(wic, "_create_decoder", return_value=decoder)
+    mocker.patch.object(wic, "_first_frame", return_value=frame)
+    mocker.patch.object(wic, "_source_size", side_effect=frame_sizes)
+    apply_orientation = mocker.patch.object(
+        wic,
+        "_apply_orientation",
+        return_value=oriented,
+    )
+    scale_source = mocker.patch.object(wic, "_scale_source", return_value=scaler)
+    mocker.patch.object(wic, "_frame_color_context", return_value=ctypes.c_void_p())
+    mocker.patch.object(wic, "_convert_rgba", return_value=converter)
+    mocker.patch.object(wic, "_copy_rgba", return_value=image)
+    mocker.patch.object(wic, "_release")
+
+    surface = wic.WindowsWicStillDecodeBackend().decode(request, _Token())
+
+    if already_oriented:
+        apply_orientation.assert_not_called()
+        expected_source = frame
+    else:
+        apply_orientation.assert_called_once_with(factory, frame, 6)
+        expected_source = oriented
+    scale_source.assert_called_once_with(factory, expected_source, 768, 1024)
+    assert surface.decoded_size == (768, 1024)
+    assert surface.orientation_applied is True
+
+
 def test_windows_wic_hresult_is_a_fixed_signed_32_bit_value() -> None:
     from ctypes import sizeof
 

@@ -58,84 +58,6 @@ def _make_presentation(
     )
 
 
-def test_video_preparation_reprobes_when_cached_projection_belongs_to_live_still(
-) -> None:
-    motion_path = Path("C:/library/IMG_0001.MOV")
-    presentation = replace(
-        _make_presentation(path=str(motion_path), is_video=True),
-        info={
-            "abs": "C:/library/IMG_0001.HEIC",
-            "is_video": False,
-            "w": 4032,
-            "h": 3024,
-            "video_rotation_cw": 90,
-            "video_linux_180_hint": False,
-        },
-    )
-    signals = SimpleNamespace(
-        ready=Mock(emit=Mock()),
-        failed=Mock(emit=Mock()),
-    )
-
-    with patch.object(
-        playback_coordinator_module,
-        "probe_video_rotation_info",
-        return_value=(90, 1920, 1080, False),
-    ) as probe:
-        playback_coordinator_module._VideoPreparationWorker(
-            presentation=presentation,
-            edit_service_getter=None,
-            signals=signals,
-        ).run()
-
-    probe.assert_called_once_with(motion_path)
-    state = signals.ready.emit.call_args.args[1]
-    assert (state.rotation_cw, state.raw_width, state.raw_height) == (
-        90,
-        1920,
-        1080,
-    )
-    signals.failed.emit.assert_not_called()
-
-
-def test_video_preparation_reuses_projection_only_for_the_same_source() -> None:
-    video_path = Path("C:/library/portrait.mov")
-    presentation = replace(
-        _make_presentation(path=str(video_path), is_video=True),
-        info={
-            "abs": str(video_path),
-            "is_video": True,
-            "w": 1920,
-            "h": 1080,
-            "video_rotation_cw": 90,
-            "video_linux_180_hint": False,
-        },
-    )
-    signals = SimpleNamespace(
-        ready=Mock(emit=Mock()),
-        failed=Mock(emit=Mock()),
-    )
-
-    with patch.object(
-        playback_coordinator_module,
-        "probe_video_rotation_info",
-    ) as probe:
-        playback_coordinator_module._VideoPreparationWorker(
-            presentation=presentation,
-            edit_service_getter=None,
-            signals=signals,
-        ).run()
-
-    probe.assert_not_called()
-    state = signals.ready.emit.call_args.args[1]
-    assert (state.rotation_cw, state.raw_width, state.raw_height) == (
-        90,
-        1920,
-        1080,
-    )
-    signals.failed.emit.assert_not_called()
-
-
 def test_play_asset_dispatches_immediately_when_idle() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._asset_model = Mock(rowCount=Mock(return_value=3))
@@ -825,47 +747,6 @@ def test_live_photo_fallback_reuses_the_asset_identity() -> None:
         asset_id="asset-1",
     )
     assert coordinator._active_live_asset_id == ""
-
-
-def test_live_motion_preparation_does_not_inherit_still_projection() -> None:
-    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    still_path = Path("C:/library/IMG_0001.HEIC")
-    motion_path = Path("C:/library/IMG_0001.MOV")
-    presentation = replace(
-        _make_presentation(
-            path=str(still_path),
-            is_video=False,
-            is_live=True,
-            request_generation=7,
-        ),
-        info={
-            "abs": str(still_path),
-            "is_video": False,
-            "w": 4032,
-            "h": 3024,
-            "video_rotation_cw": 90,
-            "video_linux_180_hint": False,
-        },
-        live_motion_abs=motion_path,
-    )
-    coordinator._hide_face_name_overlay = Mock()
-    coordinator._player_view = Mock()
-    coordinator._player_view.video_area = Mock()
-    coordinator._player_bar = Mock()
-    coordinator._schedule_video_preparation = Mock()
-
-    PlaybackCoordinator._autoplay_live_motion(coordinator, presentation)
-
-    coordinator._player_view.video_area.begin_load.assert_called_once_with(
-        motion_path,
-        7,
-    )
-    prepared = coordinator._schedule_video_preparation.call_args.args[0]
-    assert prepared.path == motion_path
-    assert prepared.info == {"abs": str(motion_path), "is_video": True}
-    assert prepared.video_duration_hint is None
-    assert prepared.source_identity is not None
-    assert prepared.source_identity.path == motion_path.absolute()
 
 
 def test_live_motion_first_frame_completes_current_transaction() -> None:

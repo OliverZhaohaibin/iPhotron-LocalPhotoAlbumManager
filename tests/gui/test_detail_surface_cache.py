@@ -115,12 +115,23 @@ def test_disk_store_source_revision_changes_key_but_sidecar_is_not_an_input(tmp_
     assert store.entry_path(request) == store.entry_path(edited)
 
 
-def test_decoder_contract_bump_bypasses_legacy_surface_and_redecodes(
+# LIVE PHOTO REGRESSION GUARD — DO NOT DELETE OR WEAKEN THIS TEST.
+# Windows HEIC/WIC may return display-oriented pixels.  Contract 1 caches can
+# therefore contain a second, incorrect rotation and must never bypass a fresh
+# decode after upgrading.  This is the automated counterpart of the verified
+# IMG_3684.HEIC (EXIF Orientation=6) Windows regression.
+def test_live_photo_decoder_contract_rejects_legacy_wrong_orientation_surface(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request(tmp_path / "photo.heic")
     store = NeutralSurfaceStore(tmp_path)
+    production_contract = surface_cache_module._DECODE_SEMANTICS_CONTRACT
+
+    # This assertion deliberately clamps the production contract.  Returning
+    # to 1 would make already-persisted horizontal Live Photo stills visible
+    # again before the corrected WIC decoder has a chance to run.
+    assert production_contract >= 2
 
     monkeypatch.setattr(surface_cache_module, "_DECODE_SEMANTICS_CONTRACT", 1)
     legacy_path = store.entry_path(request)
@@ -128,7 +139,11 @@ def test_decoder_contract_bump_bypasses_legacy_surface_and_redecodes(
     assert store.write(request, _surface(request, width=8, height=4))
     assert legacy_path.exists()
 
-    monkeypatch.setattr(surface_cache_module, "_DECODE_SEMANTICS_CONTRACT", 2)
+    monkeypatch.setattr(
+        surface_cache_module,
+        "_DECODE_SEMANTICS_CONTRACT",
+        production_contract,
+    )
     current_path = store.entry_path(request)
     assert current_path is not None
     assert current_path != legacy_path
@@ -144,6 +159,11 @@ def test_decoder_contract_bump_bypasses_legacy_surface_and_redecodes(
     delegate.decode.assert_called_once()
     assert decoded.decoded_size == (4, 8)
     assert current_path.exists()
+
+    reloaded = store.load(request)
+    assert reloaded is not None
+    assert reloaded.cache_tier == "disk"
+    assert reloaded.decoded_size == (4, 8)
 
 
 @pytest.mark.parametrize("damage", ["truncate", "payload"])

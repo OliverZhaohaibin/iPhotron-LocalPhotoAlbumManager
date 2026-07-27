@@ -31,7 +31,8 @@ build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_s
 Windows 实机复测表明前次 WIC fresh-decode 修复会被已持久化的错误 Detail surface
 绕过。neutral-surface 解码语义契约现已独立提升，旧错误 surface 会 miss 并重新解码；
 文件格式 schema、Live Motion 视频投影和其他 EXIF 规则均未扩大修改。真实 Windows
-packaged 样例仍为 `pending_manual_validation`。
+原问题样例已由用户复测确认通过；正式 packaged artifact、build manifest 和日志证据
+仍为 `pending_manual_validation`。
 
 ## 已收口的工程链路
 

@@ -211,6 +211,11 @@ def test_windows_wic_preoriented_frame_detection_is_strict(
     ],
     ids=("heic-preoriented", "raw-coded-geometry"),
 )
+# LIVE PHOTO REGRESSION GUARD — DO NOT DELETE OR WEAKEN THIS TEST.
+# It locks both Windows codec behaviours: HEIC frames that WIC already
+# presents upright must not be rotated twice, while coded-geometry frames must
+# still receive their EXIF transform.  The paired motion video is already
+# correct and must not be used to compensate for a wrong still orientation.
 def test_windows_wic_decode_avoids_only_proven_double_orientation(
     mocker,
     frame_sizes: tuple[tuple[int, int], tuple[int, int]],

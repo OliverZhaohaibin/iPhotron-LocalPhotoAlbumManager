@@ -73,7 +73,7 @@ Metal 与 OpenGL 分开采集：
 | 固定 DINO Release 产物 | 使用固定 source commit 的受控构建环境和本仓库不可变 `pet-models-v1` 标签 | 发布 `dinov2_vits14.pt`，记录 artifact/build manifest SHA；manifest 改用 Release HTTPS URL 后删除生产 Torch Hub 转换路径；重新通过 hash/shape/packaging 门禁 | `pending_manual_validation` |
 | 真实旧图库升级 | 含 name、cover、hidden、rejection、pet merge、跨类型 merge 的脱敏副本 | interactive 不被 backfill 阻塞；后台清空 pending/retry；durable state 不丢；失败资产明确显示 stale/source generation | `pending_manual_validation` |
 | 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
-| Windows Live Photo 静态图方向 | Windows packaged，优先复测 `IMG_3684.HEIC` 的脱敏副本，并覆盖 iPhone Orientation 5/6/7/8 的 HEIC+MOV/JPEG+MOV | 静态图与动态视频视觉方向一致；静态图无二次 EXIF 旋转；JPEG 等 WIC 未预转正格式仍正确应用 EXIF；首次展示、Live Motion 返回静帧和连续切换均通过 | `pending_manual_validation` |
+| Windows Live Photo 静态图方向 | Windows packaged，优先复测 `IMG_3684.HEIC` 的脱敏副本，并覆盖 iPhone Orientation 5/6/7/8 的 HEIC+MOV/JPEG+MOV | 静态图与动态视频视觉方向一致；静态图无二次 EXIF 旋转；JPEG 等 WIC 未预转正格式仍正确应用 EXIF；首次展示、Live Motion 返回静帧和连续切换均通过 | `user_verified_original_sample_pass / formal_artifact_evidence_pending` |
 | 取消、切库与恢复 | 扫描中快速取消、连续切库、journal 各提交点进程 kill/restart | GUI 不阻塞；旧 worker 不写新库或发迟到事件；重启最终 `finalized`；无 redirect/detection/rejection/cover/group-cache split-brain | `pending_manual_validation` |
 | 50k packaged 报告 | 上述四类平台各自正式产物，已有 50k 再新增 2 个 | 记录耗时、峰值 RAM、WAL 增量、取消延迟、退出线程与后台恢复；满足 `pets-scale-contract` 阈值 | `pending_manual_validation` |
 

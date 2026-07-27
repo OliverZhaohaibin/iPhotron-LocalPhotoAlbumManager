@@ -44,6 +44,9 @@ _SCHEMA: Final = 2
 # identical source identity.  This is intentionally separate from _SCHEMA:
 # the on-disk container remains readable, but surfaces produced by the old
 # decoder contract must not bypass the corrected decode path.
+# LIVE PHOTO REGRESSION GUARD: do not remove this key component or lower it
+# below 2.  Contract 1 may contain Windows HEIC pixels that WIC had already
+# oriented and the old pipeline rotated a second time.
 _DECODE_SEMANTICS_CONTRACT: Final = 2
 _HEADER_SIZE: Final = 4096
 _PREFIX = struct.Struct("<8sIIIQQ")

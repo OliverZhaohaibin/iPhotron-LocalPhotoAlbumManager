@@ -24,6 +24,12 @@ jobs:
           cache: "pip"
           cache-dependency-path: pyproject.toml
 
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libpulse0
+
       - name: Install Pets scale-contract dependencies
         run: |
           python -m pip install --upgrade pip
@@ -32,6 +38,8 @@ jobs:
       - name: Run 50k incremental index contract
         env:
           IPHOTO_RUN_PETS_SCALE_CONTRACT: "1"
+          QT_QPA_PLATFORM: offscreen
+          NUMBA_DISABLE_JIT: "1"
         run: python -m pytest -q tests/contracts/test_pets_scale_contract.py
 
   pets-model-contract:
@@ -46,6 +54,12 @@ jobs:
           cache: "pip"
           cache-dependency-path: pyproject.toml
 
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libpulse0
+
       - uses: actions/cache@v4
         with:
           path: ~/.cache/iphoto-contracts
@@ -59,6 +73,7 @@ jobs:
       - name: Run official YOLOX contract
         env:
           IPHOTO_RUN_PETS_MODEL_CONTRACT: "1"
+          QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q tests/contracts/test_pets_model_contract.py
 
   test:

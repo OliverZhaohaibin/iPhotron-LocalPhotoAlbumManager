@@ -658,6 +658,41 @@ def test_public_mutation_cannot_overtake_unrecovered_journal_owner(
     assert coordinator._recovery_error is not None
 
 
+def test_legacy_outer_pet_merge_is_forward_recovered(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(
+        tmp_path / ".iPhoto" / "pets" / "pet_index.db",
+        tmp_path / ".iPhoto" / "pets" / "pet_state.db",
+    )
+    first = _detection("first", pet_id="pet-a")
+    second = _detection(
+        "second",
+        asset_id="asset-b",
+        embedding=np.asarray([0.0, 1.0, 0.0]),
+        pet_id="pet-b",
+    )
+    repository.replace_all(
+        [first, second],
+        [_pet("pet-a", first), _pet("pet-b", second)],
+    )
+    coordinator = PetIndexCoordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    legacy_operation_id = coordinator._journal.prepare(
+        "recognition_merge",
+        {"source": "pet:pet-a", "target": "pet:pet-b"},
+    )
+    coordinator._journal.transition(legacy_operation_id, "applying")
+
+    assert coordinator.merge_pets("pet-a", "pet-b") is True
+
+    assert coordinator._journal.unfinished() == ()
+    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {"pet-b"}
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_merge_redirect_map()["pet-a"] == "pet-b"
+
+
 def test_overlap_reconciliation_recovers_runtime_commit_state_sync(
     tmp_path: Path,
     monkeypatch,

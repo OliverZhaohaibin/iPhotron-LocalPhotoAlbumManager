@@ -806,6 +806,9 @@ class PetIndexCoordinator(QObject):
         repository = self._repository()
         for operation in self._journal.unfinished():
             if operation.kind != "pet_scan_commit":
+                if operation.kind == "recognition_merge":
+                    if self._recover_legacy_pet_recognition_merge(repository, operation):
+                        continue
                 if operation.kind in {
                     "pet_merge",
                     "pet_delete_detection",
@@ -902,6 +905,47 @@ class PetIndexCoordinator(QObject):
                 removed_pet_ids=tuple(event_payload["removed_pet_ids"]),
             )
             self._journal.mark_published(operation.operation_id)
+
+    def _recover_legacy_pet_recognition_merge(self, repository, operation) -> bool:
+        """Forward-recover the obsolete outer journal used by pet-to-pet merges."""
+
+        source_id = _legacy_pet_identity_id(operation.payload.get("source"))
+        target_id = _legacy_pet_identity_id(operation.payload.get("target"))
+        if source_id is None or target_id is None:
+            return False
+
+        runtime_commit = repository.get_runtime_commit(operation.operation_id)
+        if runtime_commit is None:
+            result = repository.merge_pets(
+                source_id,
+                target_id,
+                operation_id=operation.operation_id,
+            )
+            if result is None:
+                self._journal.transition(
+                    operation.operation_id,
+                    "finalized",
+                    payload=operation.payload,
+                    error="legacy_pet_merge_rejected",
+                )
+                return True
+            self._emit_journaled_snapshot(
+                operation.operation_id,
+                changed_asset_ids=result.changed_asset_ids,
+                changed_pet_ids=result.changed_pet_ids,
+                pet_redirects=result.pet_redirects,
+            )
+            return True
+
+        repository.complete_runtime_state_sync(operation.operation_id)
+        repository._remap_people_groups_for_pet_merge(source_id, target_id)
+        self._emit_journaled_snapshot(
+            operation.operation_id,
+            changed_asset_ids=tuple(runtime_commit.get("changed_asset_ids", ())),
+            changed_pet_ids=tuple(runtime_commit.get("changed_pet_ids", ())),
+            pet_redirects=dict(runtime_commit.get("pet_redirects", {})),
+        )
+        return True
 
     def _finish_runtime_backed_recovery(self, repository, operation, payload) -> None:
         if operation.kind == "pet_recluster":
@@ -1150,6 +1194,14 @@ class PetIndexCoordinator(QObject):
             staged_dir.rmdir()
         except OSError:
             LOGGER.warning("Failed to clean pet staging directory %s", staged_dir)
+
+
+def _legacy_pet_identity_id(value: object) -> str | None:
+    text = str(value or "").strip()
+    kind, separator, entity_id = text.partition(":")
+    if separator != ":" or kind != "pet" or not entity_id.strip():
+        return None
+    return entity_id.strip()
 
 
 _COORDINATORS: dict[Path, PetIndexCoordinator] = {}

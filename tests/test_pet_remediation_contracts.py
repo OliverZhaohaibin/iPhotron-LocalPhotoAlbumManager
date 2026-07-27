@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -13,8 +15,8 @@ from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.people.status import is_face_scan_candidate
 from iPhoto.pets import pipeline as pet_pipeline
-from iPhoto.pets.pipeline import DetectedAssetPets, PetClusterPipeline, build_pet_key
 from iPhoto.pets.index_coordinator import PetIndexCoordinator, PetSnapshotCommittedError
+from iPhoto.pets.pipeline import DetectedAssetPets, PetClusterPipeline, build_pet_key
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
@@ -349,6 +351,311 @@ def test_pipeline_reset_and_bulk_status_update_handle_more_than_sql_limit(
     repository.update_face_statuses(ids, "done")
     assert repository.count_by_pet_status()["done"] == 1205
     assert repository.count_by_face_status()["done"] == 1205
+
+
+def test_runtime_commit_marker_recovers_state_without_deleting_published_thumbnail(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = _AssetStore("asset-a")
+    coordinator = PetIndexCoordinator(tmp_path, asset_repository=store)
+    repository = coordinator._repository()
+    state = repository.state_repository
+    assert state is not None
+    staged_dir = tmp_path / ".iPhoto" / "pets" / "thumbnails" / ".staging" / "op"
+    published_dir = tmp_path / ".iPhoto" / "pets" / "thumbnails"
+    staged_dir.mkdir(parents=True)
+    (staged_dir / "first.png").write_bytes(b"thumbnail")
+    detection = replace(
+        _detection("first"),
+        thumbnail_path="thumbnails/first.png",
+    )
+
+    def fail_state_sync(*args, **kwargs):
+        del args, kwargs
+        raise sqlite3.OperationalError("injected state failure")
+
+    monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
+    with pytest.raises(PetSnapshotCommittedError):
+        coordinator.submit_detected_batch(
+            [DetectedAssetPets("asset-a", "album/a.jpg", [detection])],
+            distance_threshold=0.1,
+            staged_thumbnail_dir=staged_dir,
+            published_thumbnail_dir=published_dir,
+        )
+
+    committed = repository.get_all_detections()
+    assert [item.detection_id for item in committed] == ["first"]
+    assert (published_dir / "first.png").is_file()
+    with sqlite3.connect(repository.db_path) as connection:
+        assert connection.execute(
+            "SELECT state_synced FROM pet_runtime_commits"
+        ).fetchone()[0] == 0
+
+    recovered = PetIndexCoordinator(tmp_path, asset_repository=store)
+    recovered_repository = recovered._repository()
+    assert recovered_repository.state_repository is not None
+    assert recovered_repository.state_repository.get_profiles()
+    assert (published_dir / "first.png").is_file()
+    with sqlite3.connect(repository.db_path) as connection:
+        assert connection.execute(
+            "SELECT state_synced FROM pet_runtime_commits"
+        ).fetchone()[0] == 1
+
+
+def test_exact_key_resurrects_durable_identity_and_user_state(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection("stable-key", pet_id="pet-a")
+    repository.replace_all([first], [_pet("pet-a", first)])
+    assert repository.rename_pet("pet-a", "Miso")
+    assert repository.set_pet_hidden("pet-a", True)
+    assert repository.set_pet_cover("pet-a", "stable-key")
+
+    repository.replace_assets_incrementally(
+        ["asset-a"],
+        [],
+        distance_threshold=0.1,
+    )
+    returned = replace(
+        _detection("returned", pet_id=None),
+        pet_key=first.pet_key,
+    )
+    repository.replace_assets_incrementally(
+        ["asset-a"],
+        [returned],
+        distance_threshold=0.1,
+    )
+
+    restored = repository.get_detection("returned")
+    assert restored is not None and restored.pet_id == "pet-a"
+    summaries = repository.get_pet_summaries(include_hidden=True)
+    assert [(item.pet_id, item.name, item.is_hidden) for item in summaries] == [
+        ("pet-a", "Miso", True)
+    ]
+    assert repository.state_repository is not None
+    cover = repository.state_repository.get_cover("pet-a")
+    assert cover is not None
+    assert cover.detection_id == "returned"
+
+
+def test_generation_contract_rejects_cross_space_merge_and_move(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection("first", pet_id="pet-a")
+    second = replace(
+        _detection(
+            "second",
+            asset_id="asset-b",
+            embedding=np.asarray([1.0, 0.0]),
+            pet_id="pet-b",
+        ),
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    repository.replace_all([first, second], [_pet("pet-a", first), _pet("pet-b", second)])
+
+    assert repository.merge_pets("pet-a", "pet-b") is None
+    assert repository.move_detection_to_pet("first", "pet-b") is None
+
+
+def test_generation_contract_is_reused_and_activated_in_one_transaction(
+    tmp_path: Path,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db")
+    detection = replace(
+        _detection("new"),
+        embedding_pipeline_version="embedding-v2",
+    )
+    first, first_generation = repository.assign_embedding_generation([detection])
+    second, second_generation = repository.assign_embedding_generation([detection])
+    assert first_generation == second_generation
+    assert first[0].generation_id == second[0].generation_id
+
+    repository.activate_embedding_generation(
+        generation_id=first_generation,
+        embedding_pipeline_version="embedding-v2",
+        embedding_dimension=detection.embedding_dim,
+        detector_pipeline_version="detector-v5",
+        clustering_pipeline_version="cluster-v2",
+    )
+    with sqlite3.connect(repository.db_path) as connection:
+        metadata = dict(connection.execute("SELECT key, value FROM scan_metadata"))
+        active = connection.execute(
+            """
+            SELECT pipeline_version, embedding_dimension, status
+            FROM embedding_generations WHERE generation_id = ?
+            """,
+            (first_generation,),
+        ).fetchone()
+    assert metadata["active_generation_id"] == str(first_generation)
+    assert metadata["active_embedding_pipeline_version"] == "embedding-v2"
+    assert metadata["active_embedding_dimension"] == str(detection.embedding_dim)
+    assert metadata["detector_pipeline_version"] == "detector-v5"
+    assert metadata["clustering_pipeline_version"] == "cluster-v2"
+    assert active == ("embedding-v2", detection.embedding_dim, "active")
+
+
+def test_persisted_boundary_samples_are_used_without_candidate_sql(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection("first", pet_id="pet-a")
+    pet = replace(
+        _pet("pet-a", first),
+        boundary_embeddings=(first.embedding,),
+    )
+    repository.replace_all([first], [pet])
+
+    def forbidden(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("boundary samples must come from the persisted profile")
+
+    monkeypatch.setattr(repository, "_load_boundary_samples_for_pets", forbidden)
+    similar = _detection(
+        "similar",
+        asset_id="asset-b",
+        embedding=np.asarray([0.999, 0.001, 0.0]),
+    )
+    result = repository.replace_assets_incrementally(
+        ["asset-b"],
+        [similar],
+        distance_threshold=0.1,
+    )
+    assert result.added_pet_ids == ()
+    assert repository.get_detection("similar").pet_id == "pet-a"  # type: ignore[union-attr]
+
+
+def test_state_repository_chunks_all_large_identity_reads(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    detections = [
+        _detection(f"detection-{index}", pet_id=f"pet-{index}")
+        for index in range(1205)
+    ]
+    repository.replace_all(
+        detections,
+        [_pet(f"pet-{index}", detection) for index, detection in enumerate(detections)],
+    )
+    state = repository.state_repository
+    assert state is not None
+    pet_ids = [f"pet-{index}" for index in range(1205)]
+    pet_keys = [f"v2:detection-{index}" for index in range(1205)]
+    assert len(state.get_profiles_by_ids(pet_ids)) == 1205
+    assert len(state.get_profile_name_map(pet_ids)) == 1205
+    assert len(state.get_pet_key_map(pet_keys)) == 1205
+    assert state.get_rejected_pet_keys(pet_keys) == set()
+    assert len(state.get_pet_hidden_map(pet_ids)) == 1205
+
+
+def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache = tmp_path / "cache"
+    bundled = tmp_path / "bundled"
+    relative = Path("embedding/dinov2_vits14")
+    (cache / relative).mkdir(parents=True)
+    bundled_dir = bundled / relative
+    bundled_dir.mkdir(parents=True)
+    model_path = bundled_dir / "dinov2_vits14.pt"
+    model_path.write_bytes(b"verified-torchscript")
+    manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
+    model_path.with_suffix(".pt.metadata.json").write_text(
+        json.dumps(
+            {
+                "model_name": "dinov2_vits14",
+                "source_repository": manifest["source_repository"],
+                "source_revision": manifest["source_revision"],
+                "torchscript_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
+                "torchscript_size": model_path.stat().st_size,
+                "input_shape": manifest["input_shape"],
+                "output_shape": manifest["output_shape"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "pet_model_search_roots",
+        lambda: (cache, bundled),
+    )
+
+    assert pet_pipeline.resolve_pet_model_path(relative, directory=True) == bundled_dir
+
+
+def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache = tmp_path / "cache"
+    bundled = tmp_path / "bundled"
+    relative = Path("detector/yolox_nano_coco.onnx")
+    cached_model = cache / relative
+    bundled_model = bundled / relative
+    cached_model.parent.mkdir(parents=True)
+    bundled_model.parent.mkdir(parents=True)
+    cached_model.write_bytes(b"corrupt")
+    bundled_model.write_bytes(b"valid")
+
+    def validate(path, **kwargs):
+        del kwargs
+        if Path(path) == cached_model:
+            raise RuntimeError("bad hash")
+
+    monkeypatch.setattr(pet_pipeline, "_validate_downloaded_file", validate)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "pet_model_search_roots",
+        lambda: (cache, bundled),
+    )
+
+    assert pet_pipeline.resolve_pet_model_path(relative) == bundled_model
+    assert not cached_model.exists()
+
+
+def test_thumbnail_publish_compensates_when_later_replace_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    staged = tmp_path / "staged"
+    published = tmp_path / "published"
+    staged.mkdir()
+    for name in ("a.png", "b.png", "c.png"):
+        (staged / name).write_bytes(name.encode())
+    original_replace = Path.replace
+    calls = 0
+
+    def fail_second(source: Path, target: Path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected publish failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_second)
+    with pytest.raises(OSError, match="injected publish failure"):
+        PetIndexCoordinator._publish_staged_thumbnails(staged, published)
+    assert not list(published.glob("*.png"))
+
+
+def test_public_mutation_cannot_overtake_unrecovered_journal_owner(
+    tmp_path: Path,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    blocked_operation_id = coordinator._journal.prepare(
+        "face_rename",
+        {"person_id": "person-a", "name": "Blocked"},
+    )
+    coordinator._journal.transition(blocked_operation_id, "applying")
+
+    assert coordinator.rename_pet("pet-a", "Must not be created") is None
+
+    unfinished = coordinator._journal.unfinished()
+    assert [operation.operation_id for operation in unfinished] == [
+        blocked_operation_id
+    ]
+    assert coordinator._recovery_error is not None
 
 
 def _detection(

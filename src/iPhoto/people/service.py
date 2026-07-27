@@ -12,6 +12,7 @@ from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.repository import PetRepository
+from iPhoto.recognition.operation_journal import RecognitionOperationJournal
 from iPhoto.utils.pathutils import (
     LibraryAssetPathError,
     ensure_work_dir,
@@ -430,6 +431,99 @@ class PeopleService:
             target_id=target_id,
             group_redirects=group_redirects,
         )
+
+    def reassign_detection_identity(
+        self,
+        *,
+        source_kind: str,
+        source_annotation_id: str,
+        target_identity: str,
+    ) -> bool:
+        """Assign one detection to a cross-kind identity without converting it."""
+
+        if self._library_root is None or source_kind not in {"person", "pet"}:
+            return False
+        target = _parse_identity_id(target_identity)
+        if target is None or target[0] == source_kind or not source_annotation_id:
+            return False
+        target_kind, target_id = target
+        repository = self.repository()
+        paths = self.paths()
+        if repository is None or paths is None:
+            return False
+        target_exists = (
+            self.has_cluster(target_id)
+            if target_kind == "person"
+            else self.has_pet(target_id)
+        )
+        if not target_exists:
+            return False
+        if source_kind == "person":
+            source_exists = repository.has_face(source_annotation_id)
+        else:
+            pet_root = ensure_work_dir(self._library_root) / "pets"
+            source_exists = (
+                PetRepository(
+                    pet_root / "pet_index.db",
+                    pet_root / "pet_state.db",
+                ).get_detection(source_annotation_id)
+                is not None
+            )
+        if not source_exists:
+            return False
+
+        payload = {
+            "source_kind": source_kind,
+            "source_annotation_id": source_annotation_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+        }
+        journal = RecognitionOperationJournal(
+            ensure_work_dir(self._library_root) / "recognition" / "operations.db"
+        )
+        state_repository = FaceStateRepository(paths.state_db_path)
+        for pending in journal.unfinished():
+            if pending.kind != "recognition_detection_assignment":
+                continue
+            pending_payload = pending.payload
+            recovered = state_repository.set_annotation_identity_assignment(
+                source_kind=str(pending_payload.get("source_kind") or ""),
+                source_annotation_id=str(
+                    pending_payload.get("source_annotation_id") or ""
+                ),
+                target_kind=str(pending_payload.get("target_kind") or ""),
+                target_id=str(pending_payload.get("target_id") or ""),
+            )
+            if recovered:
+                journal.commit_outbox(
+                    pending.operation_id,
+                    {"kind": "recognition_detection_assignment", **pending_payload},
+                )
+                journal.mark_published(pending.operation_id)
+            else:
+                journal.transition(
+                    pending.operation_id,
+                    "finalized",
+                    error="assignment_recovery_rejected",
+                )
+        operation_id = journal.prepare("recognition_detection_assignment", payload)
+        journal.transition(operation_id, "applying")
+        changed = state_repository.set_annotation_identity_assignment(
+            source_kind=source_kind,
+            source_annotation_id=source_annotation_id,
+            target_kind=target_kind,
+            target_id=target_id,
+        )
+        if not changed:
+            journal.transition(operation_id, "finalized", error="assignment_rejected")
+            return False
+        repository.refresh_all_group_assets()
+        journal.commit_outbox(
+            operation_id,
+            {"kind": "recognition_detection_assignment", **payload},
+        )
+        journal.mark_published(operation_id)
+        return True
 
     def delete_face(self, annotation_face_id: str) -> bool:
         if self._library_root is None or not annotation_face_id:

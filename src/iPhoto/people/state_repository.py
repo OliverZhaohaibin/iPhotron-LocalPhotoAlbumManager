@@ -1444,6 +1444,20 @@ class FaceStateRepository:
                     source_id,
                 ),
             )
+            conn.execute(
+                """
+                UPDATE annotation_identity_assignments
+                SET target_kind = ?, target_id = ?, updated_at = ?
+                WHERE target_kind = ? AND target_id = ?
+                """,
+                (
+                    target_kind,
+                    target_id,
+                    timestamp,
+                    source_kind,
+                    source_id,
+                ),
+            )
             group_redirects = self._remap_groups_for_merged_identity(
                 conn,
                 source_kind=source_kind,
@@ -1475,6 +1489,99 @@ class FaceStateRepository:
             )
             for row in rows
         ]
+
+    def set_annotation_identity_assignment(
+        self,
+        *,
+        source_kind: str,
+        source_annotation_id: str,
+        target_kind: str,
+        target_id: str,
+    ) -> bool:
+        if (
+            source_kind not in {"person", "pet"}
+            or target_kind not in {"person", "pet"}
+            or not source_annotation_id
+            or not target_id
+        ):
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO annotation_identity_assignments (
+                    source_kind, source_annotation_id,
+                    target_kind, target_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_kind, source_annotation_id) DO UPDATE SET
+                    target_kind = excluded.target_kind,
+                    target_id = excluded.target_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source_kind,
+                    source_annotation_id,
+                    target_kind,
+                    target_id,
+                    _utc_now_iso(),
+                ),
+            )
+            conn.commit()
+        return True
+
+    def clear_annotation_identity_assignment(
+        self, source_kind: str, source_annotation_id: str
+    ) -> bool:
+        if source_kind not in {"person", "pet"} or not source_annotation_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM annotation_identity_assignments
+                WHERE source_kind = ? AND source_annotation_id = ?
+                """,
+                (source_kind, source_annotation_id),
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0) > 0
+
+    def get_annotation_identity_assignments(
+        self, refs: Iterable[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[str, str]]:
+        normalized = tuple(
+            dict.fromkeys(
+                (str(kind), str(annotation_id))
+                for kind, annotation_id in refs
+                if kind in {"person", "pet"} and annotation_id
+            )
+        )
+        if not normalized:
+            return {}
+        self.initialize()
+        rows: list[sqlite3.Row] = []
+        with closing(self._connect()) as conn:
+            for start in range(0, len(normalized), 400):
+                chunk = normalized[start : start + 400]
+                placeholders = ", ".join("(?, ?)" for _ in chunk)
+                parameters = tuple(value for ref in chunk for value in ref)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT source_kind, source_annotation_id, target_kind, target_id
+                        FROM annotation_identity_assignments
+                        WHERE (source_kind, source_annotation_id) IN ({placeholders})
+                        """,
+                        parameters,
+                    ).fetchall()
+                )
+        return {
+            (str(row["source_kind"]), str(row["source_annotation_id"])): (
+                str(row["target_kind"]),
+                str(row["target_id"]),
+            )
+            for row in rows
+        }
 
     def remap_identity_redirect_targets(
         self,
@@ -1770,7 +1877,7 @@ class FaceStateRepository:
         target_target_id: str,
         updated_at: str,
     ) -> sqlite3.Cursor:
-        return conn.execute(
+        cursor = conn.execute(
             """
             UPDATE identity_redirects
             SET target_id = ?, updated_at = ?
@@ -1778,6 +1885,15 @@ class FaceStateRepository:
             """,
             (target_target_id, updated_at, target_kind, source_target_id),
         )
+        conn.execute(
+            """
+            UPDATE annotation_identity_assignments
+            SET target_id = ?, updated_at = ?
+            WHERE target_kind = ? AND target_id = ?
+            """,
+            (target_target_id, updated_at, target_kind, source_target_id),
+        )
+        return cursor
 
     def _remap_groups_for_merged_identity(
         self,
@@ -2276,6 +2392,24 @@ class FaceStateRepository:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_identity_redirects_target "
             "ON identity_redirects(target_kind, target_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS annotation_identity_assignments (
+                source_kind TEXT NOT NULL,
+                source_annotation_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (source_kind, source_annotation_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_annotation_identity_assignment_target
+            ON annotation_identity_assignments(target_kind, target_id)
+            """
         )
 
     @staticmethod

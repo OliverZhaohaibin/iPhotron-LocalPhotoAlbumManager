@@ -66,7 +66,23 @@ class PetIndexCoordinator(QObject):
         self._journal = RecognitionOperationJournal(
             ensure_work_dir(self._library_root) / "recognition" / "operations.db"
         )
+        pets_root = ensure_work_dir(self._library_root) / "pets"
+        self._pet_repository = PetRepository(
+            pets_root / "pet_index.db",
+            pets_root / "pet_state.db",
+        )
         self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
+        self._recovery_error: Exception | None = None
+        try:
+            with self._lock:
+                self._recover_operations_locked()
+        except Exception as exc:  # noqa: BLE001
+            self._recovery_error = exc
+            LOGGER.error(
+                "Pets recognition recovery failed during bind for %s",
+                self._library_root,
+                exc_info=True,
+            )
 
     @Slot(object)
     def _fire_snapshot(self, event: object) -> None:
@@ -105,7 +121,8 @@ class PetIndexCoordinator(QObject):
         with self._lock:
             if self._shutdown_requested:
                 return None
-            self._recover_operations_locked()
+            if not self._ensure_recovered_locked():
+                return None
             repository = self._repository()
             filtered_thumbnail_paths: list[str | Path] = []
             if people_boxes_provider is not None:
@@ -166,10 +183,6 @@ class PetIndexCoordinator(QObject):
             }
             operation_id = self._journal.prepare("pet_scan_commit", operation_payload)
             self._journal.transition(operation_id, "applying")
-            published_thumbnail_paths = self._publish_staged_thumbnails(
-                staged_thumbnail_dir,
-                published_thumbnail_dir,
-            )
 
             staged_detections = [
                 detection
@@ -180,29 +193,75 @@ class PetIndexCoordinator(QObject):
             staged_detections, generation_id = repository.assign_embedding_generation(
                 staged_detections
             )
+            operation_payload.update(
+                {
+                    "generation_id": generation_id,
+                    "embedding_pipeline_version": (
+                        staged_detections[0].embedding_pipeline_version
+                        if staged_detections
+                        else ""
+                    ),
+                    "embedding_dimension": (
+                        staged_detections[0].embedding_dim if staged_detections else 0
+                    ),
+                    "detector_pipeline_version": detector_pipeline_version or "",
+                    "clustering_pipeline_version": clustering_pipeline_version or "",
+                    "published_thumbnail_paths": [
+                        str(path)
+                        for path in self._planned_thumbnail_targets(
+                            staged_thumbnail_dir,
+                            published_thumbnail_dir,
+                        )
+                    ],
+                }
+            )
+            self._journal.transition(
+                operation_id,
+                "applying",
+                payload=operation_payload,
+            )
+            try:
+                published_thumbnail_paths = self._publish_staged_thumbnails(
+                    staged_thumbnail_dir,
+                    published_thumbnail_dir,
+                )
+            except Exception as exc:
+                self._journal.transition(
+                    operation_id,
+                    "finalized",
+                    payload=operation_payload,
+                    error=f"thumbnail_publish_failed: {exc}",
+                )
+                raise
             try:
                 commit_result = repository.replace_assets_incrementally(
                     done_ids,
                     staged_detections,
                     distance_threshold=distance_threshold,
+                    operation_id=operation_id,
                 )
             except Exception as exc:
-                for thumbnail_path in published_thumbnail_paths:
-                    try:
-                        thumbnail_path.unlink(missing_ok=True)
-                    except OSError:
-                        LOGGER.warning(
-                            "Failed to clean unpublished pet thumbnail %s",
-                            thumbnail_path,
-                            exc_info=True,
-                        )
+                runtime_commit = repository.get_runtime_commit(operation_id)
+                if runtime_commit is None:
+                    self._cleanup_thumbnail_paths(published_thumbnail_paths)
+                    self._journal.transition(
+                        operation_id,
+                        "finalized",
+                        payload=operation_payload,
+                        error=str(exc),
+                    )
+                    raise
+                operation_payload.update(runtime_commit)
+                operation_payload["index_applied"] = True
                 self._journal.transition(
                     operation_id,
-                    "finalized",
+                    "applying",
                     payload=operation_payload,
                     error=str(exc),
                 )
-                raise
+                raise PetSnapshotCommittedError(
+                    "Pet runtime committed; durable state recovery is pending."
+                ) from exc
             operation_payload.update(
                 {
                     "index_applied": True,
@@ -219,16 +278,6 @@ class PetIndexCoordinator(QObject):
                 "applying",
                 payload=operation_payload,
             )
-            if detector_pipeline_version:
-                repository.set_scan_metadata(
-                    "detector_pipeline_version",
-                    detector_pipeline_version,
-                )
-            if clustering_pipeline_version:
-                repository.set_scan_metadata(
-                    "clustering_pipeline_version",
-                    clustering_pipeline_version,
-                )
             if staged_detections:
                 repository.activate_embedding_generation(
                     generation_id=generation_id,
@@ -236,7 +285,18 @@ class PetIndexCoordinator(QObject):
                         staged_detections[0].embedding_pipeline_version
                     ),
                     embedding_dimension=staged_detections[0].embedding_dim,
+                    detector_pipeline_version=detector_pipeline_version,
+                    clustering_pipeline_version=clustering_pipeline_version,
                 )
+            else:
+                if detector_pipeline_version:
+                    repository.set_scan_metadata(
+                        "detector_pipeline_version", detector_pipeline_version
+                    )
+                if clustering_pipeline_version:
+                    repository.set_scan_metadata(
+                        "clustering_pipeline_version", clustering_pipeline_version
+                    )
             try:
                 self._mark_done_asset_ids(done_ids)
             except Exception as exc:
@@ -282,6 +342,8 @@ class PetIndexCoordinator(QObject):
         with self._lock:
             if self._shutdown_requested:
                 return None
+            if not self._ensure_recovered_locked():
+                return None
             repository = self._repository()
             operation_id = self._journal.prepare(
                 "pet_rename",
@@ -306,6 +368,8 @@ class PetIndexCoordinator(QObject):
             return False
         with self._lock:
             if self._shutdown_requested:
+                return False
+            if not self._ensure_recovered_locked():
                 return False
             repository = self._repository()
             operation_id = self._journal.prepare(
@@ -334,6 +398,8 @@ class PetIndexCoordinator(QObject):
         with self._lock:
             if self._shutdown_requested:
                 return False
+            if not self._ensure_recovered_locked():
+                return False
             repository = self._repository()
             operation_id = self._journal.prepare(
                 "pet_cover",
@@ -358,6 +424,8 @@ class PetIndexCoordinator(QObject):
     def merge_pets(self, source_pet_id: str, target_pet_id: str) -> bool:
         with self._lock:
             if self._shutdown_requested:
+                return False
+            if not self._ensure_recovered_locked():
                 return False
             repository = self._repository()
             operation_id = self._journal.prepare(
@@ -391,6 +459,8 @@ class PetIndexCoordinator(QObject):
 
         with self._lock:
             if self._shutdown_requested:
+                return 0
+            if not self._ensure_recovered_locked():
                 return 0
             repository = self._repository()
             previous_version = repository.get_scan_metadata(
@@ -433,6 +503,8 @@ class PetIndexCoordinator(QObject):
         with self._lock:
             if self._shutdown_requested:
                 return None
+            if not self._ensure_recovered_locked():
+                return None
             repository = self._repository()
             operation_id = self._journal.prepare(
                 "pet_delete_detection",
@@ -465,6 +537,8 @@ class PetIndexCoordinator(QObject):
             return None
         with self._lock:
             if self._shutdown_requested:
+                return None
+            if not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
             scoped_asset_ids = tuple(people_boxes_by_asset_id)
@@ -519,6 +593,8 @@ class PetIndexCoordinator(QObject):
         with self._lock:
             if self._shutdown_requested:
                 return None
+            if not self._ensure_recovered_locked():
+                return None
             repository = self._repository()
             operation_id = self._journal.prepare(
                 "pet_move_detection",
@@ -547,6 +623,8 @@ class PetIndexCoordinator(QObject):
     ) -> PetSnapshotEvent | None:
         with self._lock:
             if self._shutdown_requested:
+                return None
+            if not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
             operation_id = self._journal.prepare(
@@ -581,11 +659,7 @@ class PetIndexCoordinator(QObject):
             self._shutdown_requested = False
 
     def _repository(self) -> PetRepository:
-        pets_root = ensure_work_dir(self._library_root) / "pets"
-        return PetRepository(
-            pets_root / "pet_index.db",
-            pets_root / "pet_state.db",
-        )
+        return self._pet_repository
 
     def _emit_snapshot(
         self,
@@ -657,12 +731,26 @@ class PetIndexCoordinator(QObject):
             raise last_error
 
     def _recover_operations_locked(self) -> None:
+        repository = self._repository()
         for operation in self._journal.unfinished():
             if operation.kind != "pet_scan_commit":
-                self._recover_pet_mutation(operation)
+                if not self._recover_pet_mutation(operation):
+                    raise RuntimeError(
+                        "Recognition operation must be recovered by its owner before "
+                        f"Pets can continue: {operation.kind}/{operation.operation_id}"
+                    )
                 continue
             payload = operation.payload
-            if not bool(payload.get("index_applied")):
+            runtime_commit = repository.get_runtime_commit(operation.operation_id)
+            if runtime_commit is None:
+                self._cleanup_thumbnail_paths(
+                    Path(str(value))
+                    for value in payload.get("published_thumbnail_paths", ())
+                    if value
+                )
+                staged_dir = payload.get("staged_thumbnail_dir")
+                if staged_dir:
+                    self._cleanup_staging_dir(Path(str(staged_dir)))
                 self._journal.transition(
                     operation.operation_id,
                     "finalized",
@@ -670,6 +758,28 @@ class PetIndexCoordinator(QObject):
                     error="superseded_before_index_commit",
                 )
                 continue
+            runtime_commit = repository.complete_runtime_state_sync(operation.operation_id)
+            if runtime_commit is None:
+                raise RuntimeError(
+                    f"Missing runtime commit during recovery: {operation.operation_id}"
+                )
+            payload.update(runtime_commit)
+            payload["index_applied"] = True
+            generation_id = int(payload.get("generation_id") or 0)
+            embedding_version = str(payload.get("embedding_pipeline_version") or "")
+            embedding_dimension = int(payload.get("embedding_dimension") or 0)
+            if embedding_version and embedding_dimension > 0:
+                repository.activate_embedding_generation(
+                    generation_id=generation_id,
+                    embedding_pipeline_version=embedding_version,
+                    embedding_dimension=embedding_dimension,
+                    detector_pipeline_version=(
+                        str(payload.get("detector_pipeline_version") or "") or None
+                    ),
+                    clustering_pipeline_version=(
+                        str(payload.get("clustering_pipeline_version") or "") or None
+                    ),
+                )
             done_ids = [str(value) for value in payload.get("done_asset_ids", ()) if value]
             self._mark_done_asset_ids(done_ids)
             event_payload = {
@@ -696,7 +806,48 @@ class PetIndexCoordinator(QObject):
             )
             self._journal.mark_published(operation.operation_id)
 
-    def _recover_pet_mutation(self, operation) -> None:
+    def _ensure_recovered_locked(self) -> bool:
+        try:
+            self._recover_operations_locked()
+        except Exception as exc:  # noqa: BLE001
+            self._recovery_error = exc
+            LOGGER.error(
+                "Pets recognition recovery is incomplete for %s",
+                self._library_root,
+                exc_info=True,
+            )
+            return False
+        self._recovery_error = None
+        return True
+
+    def _recover_pet_mutation(self, operation) -> bool:
+        if operation.kind == "recognition_detection_assignment":
+            payload = operation.payload
+            face_state_path = (
+                ensure_work_dir(self._library_root) / "faces" / "face_state.db"
+            )
+            from iPhoto.people.state_repository import FaceStateRepository
+
+            state_repository = FaceStateRepository(face_state_path)
+            succeeded = state_repository.set_annotation_identity_assignment(
+                source_kind=str(payload.get("source_kind") or ""),
+                source_annotation_id=str(payload.get("source_annotation_id") or ""),
+                target_kind=str(payload.get("target_kind") or ""),
+                target_id=str(payload.get("target_id") or ""),
+            )
+            if succeeded:
+                self._journal.commit_outbox(
+                    operation.operation_id,
+                    {"kind": operation.kind, **payload},
+                )
+                self._journal.mark_published(operation.operation_id)
+            else:
+                self._journal.transition(
+                    operation.operation_id,
+                    "finalized",
+                    error="assignment_recovery_rejected",
+                )
+            return True
         if operation.kind not in {
             "pet_rename",
             "pet_hide",
@@ -706,7 +857,7 @@ class PetIndexCoordinator(QObject):
             "pet_move_detection",
             "pet_move_detection_new",
         }:
-            return
+            return False
         repository = self._repository()
         payload = operation.payload
         changed_asset_ids: tuple[str, ...] = ()
@@ -774,13 +925,14 @@ class PetIndexCoordinator(QObject):
                 payload=payload,
                 error="recovery_rejected",
             )
-            return
+            return True
         self._emit_journaled_snapshot(
             operation.operation_id,
             changed_asset_ids=changed_asset_ids,
             changed_pet_ids=changed_pet_ids,
             pet_redirects=redirects,
         )
+        return True
 
     @staticmethod
     def _publish_staged_thumbnails(
@@ -791,17 +943,58 @@ class PetIndexCoordinator(QObject):
             return ()
         published_dir.mkdir(parents=True, exist_ok=True)
         published: list[Path] = []
-        for source in sorted(staged_dir.iterdir()):
-            if not source.is_file():
-                continue
-            target = published_dir / source.name
-            source.replace(target)
-            published.append(target)
+        try:
+            for source in sorted(staged_dir.iterdir()):
+                if not source.is_file():
+                    continue
+                target = published_dir / source.name
+                source.replace(target)
+                published.append(target)
+        except Exception:
+            PetIndexCoordinator._cleanup_thumbnail_paths(reversed(published))
+            raise
         try:
             staged_dir.rmdir()
         except OSError:
             pass
         return tuple(published)
+
+    @staticmethod
+    def _planned_thumbnail_targets(
+        staged_dir: Path | None,
+        published_dir: Path | None,
+    ) -> tuple[Path, ...]:
+        if staged_dir is None or published_dir is None or not staged_dir.is_dir():
+            return ()
+        return tuple(
+            published_dir / source.name
+            for source in sorted(staged_dir.iterdir())
+            if source.is_file()
+        )
+
+    @staticmethod
+    def _cleanup_thumbnail_paths(paths: Iterable[Path]) -> None:
+        for path in paths:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning(
+                    "Failed to clean unpublished pet thumbnail %s",
+                    path,
+                    exc_info=True,
+                )
+
+    @staticmethod
+    def _cleanup_staging_dir(staged_dir: Path) -> None:
+        if not staged_dir.is_dir():
+            return
+        PetIndexCoordinator._cleanup_thumbnail_paths(
+            path for path in staged_dir.iterdir() if path.is_file()
+        )
+        try:
+            staged_dir.rmdir()
+        except OSError:
+            LOGGER.warning("Failed to clean pet staging directory %s", staged_dir)
 
 
 _COORDINATORS: dict[Path, PetIndexCoordinator] = {}

@@ -1312,10 +1312,13 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator._refresh_info_panel_faces = Mock()
     coordinator._people_dashboard_refresh_callback = Mock()
     annotation = RecognitionAnnotation(
-        kind="pet",
-        annotation_id="det-1",
-        entity_id="pet-a",
-        display_name="Miso",
+        source_detection_kind="pet",
+        source_annotation_id="det-1",
+        source_identity_kind="pet",
+        source_identity_id="pet-a",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-a",
+        canonical_display_name="Miso",
         box_x=0,
         box_y=0,
         box_w=10,
@@ -1340,6 +1343,69 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator._pet_service.move_detection_to_pet.assert_called_once_with("det-1", "pet-b")
     coordinator._pet_service.move_detection_to_new_pet.assert_called_once_with("det-1", "Nori")
     assert coordinator._refresh_info_panel_faces.call_count == 3
+
+
+def test_cross_kind_annotation_routes_identity_and_detection_mutations_separately() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(
+        rename_cluster=Mock(),
+        delete_face=Mock(return_value=True),
+        reassign_detection_identity=Mock(return_value=True),
+    )
+    coordinator._pet_service = Mock(
+        rename_pet=Mock(),
+        delete_detection=Mock(return_value=True),
+    )
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._recognition_query_service = Mock()
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    pet_source_person_identity = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="det-1",
+        source_identity_kind="pet",
+        source_identity_id="pet-a",
+        canonical_identity_kind="person",
+        canonical_identity_id="person-a",
+        canonical_display_name="Alice",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+
+    PlaybackCoordinator._handle_face_name_rename_submitted(
+        coordinator,
+        pet_source_person_identity.person_id,
+        "Alice Updated",
+    )
+    PlaybackCoordinator._handle_info_panel_face_delete_requested(
+        coordinator,
+        pet_source_person_identity,
+    )
+    PlaybackCoordinator._handle_info_panel_face_move_requested(
+        coordinator,
+        pet_source_person_identity,
+        "person:person-b",
+    )
+
+    coordinator._people_service.rename_cluster.assert_called_once_with(
+        "person-a", "Alice Updated"
+    )
+    coordinator._pet_service.delete_detection.assert_called_once_with("det-1")
+    coordinator._people_service.reassign_detection_identity.assert_called_once_with(
+        source_kind="pet",
+        source_annotation_id="det-1",
+        target_identity="person:person-b",
+    )
+    coordinator._people_service.delete_face.assert_not_called()
 
 
 def test_handle_people_snapshot_committed_refreshes_current_overlay() -> None:

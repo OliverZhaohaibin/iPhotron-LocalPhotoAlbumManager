@@ -22,6 +22,8 @@ def test_incremental_commit_scales_to_50k_without_full_rewrite(tmp_path: Path) -
     one_k = _benchmark_incremental(tmp_path / "one-k", 1_000)
     ten_k = _benchmark_incremental(tmp_path / "ten-k", 10_000)
     fifty_k = _benchmark_incremental(tmp_path / "fifty-k", 50_000)
+    growth_ten_k = _benchmark_growth(tmp_path / "growth-ten-k", 10_000)
+    growth_fifty_k = _benchmark_growth(tmp_path / "growth-fifty-k", 50_000)
 
     assert one_k["seconds"] <= 5.0
     assert fifty_k["seconds"] <= max(ten_k["seconds"] * 8.0, 0.5)
@@ -32,11 +34,14 @@ def test_incremental_commit_scales_to_50k_without_full_rewrite(tmp_path: Path) -
         statement.strip().upper() in {"DELETE FROM PETS", "DELETE FROM PET_DETECTIONS"}
         for statement in fifty_k["sql"]
     )
+    assert growth_fifty_k["seconds"] <= max(growth_ten_k["seconds"] * 8.0, 1.0)
+    assert growth_fifty_k["rss_bytes"] <= 1536 * 1024 * 1024
+    assert growth_fifty_k["full_profile_reads"] <= 1
 
 
 def _benchmark_incremental(root: Path, count: int) -> dict[str, object]:
     root.mkdir(parents=True)
-    repository = PetRepository(root / "pet_index.db")
+    repository = PetRepository(root / "pet_index.db", root / "pet_state.db")
     detections, pets = _synthetic_snapshot(count)
     repository.replace_all(detections, pets)
     wal_path = Path(f"{repository.db_path}-wal")
@@ -77,6 +82,56 @@ def _benchmark_incremental(root: Path, count: int) -> dict[str, object]:
         "wal_delta": max(0, wal_after - wal_before),
         "rss_bytes": rss_bytes,
         "sql": tuple(sql),
+    }
+
+
+def _benchmark_growth(root: Path, count: int) -> dict[str, object]:
+    root.mkdir(parents=True)
+    repository = PetRepository(root / "pet_index.db", root / "pet_state.db")
+    sql: list[str] = []
+    original_connect = repository._connect
+
+    def traced_connect():
+        connection = original_connect()
+        connection.set_trace_callback(sql.append)
+        return connection
+
+    repository._connect = traced_connect  # type: ignore[method-assign]
+    started = time.perf_counter()
+    for start in range(0, count, 16):
+        batch = [
+            _detection(
+                detection_id=f"growth-{index:06d}",
+                asset_id=f"growth-asset-{index:06d}",
+                embedding=normalize_vector(
+                    np.asarray(
+                        [1.0, float(index % 97), float(index % 193), float(index % 389)],
+                        dtype=np.float32,
+                    )
+                ),
+                pet_id=None,
+            )
+            for index in range(start, min(start + 16, count))
+        ]
+        repository.replace_assets_incrementally(
+            [detection.asset_id for detection in batch],
+            batch,
+            distance_threshold=-1.0,
+        )
+    elapsed = time.perf_counter() - started
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_bytes = int(rss if os.uname().sysname == "Darwin" else rss * 1024)
+    full_profile_reads = sum(
+        1
+        for statement in sql
+        if "FROM PETS" in statement.upper()
+        and "WHERE PET_ID IN" not in statement.upper()
+        and statement.lstrip().upper().startswith("SELECT")
+    )
+    return {
+        "seconds": elapsed,
+        "rss_bytes": rss_bytes,
+        "full_profile_reads": full_profile_reads,
     }
 
 

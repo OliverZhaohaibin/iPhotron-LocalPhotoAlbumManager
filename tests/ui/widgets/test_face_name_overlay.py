@@ -398,10 +398,13 @@ def test_face_name_overlay_chip_stays_above_overlay_after_activation(qapp) -> No
 def test_face_name_overlay_pet_annotation_uses_same_hover_path(qapp) -> None:
     surface, viewer, overlay = _make_overlay(qapp)
     annotation = RecognitionAnnotation(
-        kind="pet",
-        annotation_id="det-1",
-        entity_id="pet-1",
-        display_name="Miso",
+        source_detection_kind="pet",
+        source_annotation_id="det-1",
+        source_identity_kind="pet",
+        source_identity_id="pet-1",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-1",
+        canonical_display_name="Miso",
         box_x=80,
         box_y=80,
         box_w=120,

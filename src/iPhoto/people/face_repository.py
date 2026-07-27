@@ -575,6 +575,14 @@ class FaceRepository:
         canonical = self._canonical_annotation_identities(
             str(row["person_id"]) for row in rows if row["person_id"]
         )
+        assignments = (
+            self._state_repo.get_annotation_identity_assignments(
+                ("person", str(row["face_id"])) for row in rows if row["face_id"]
+            )
+            if self._state_repo is not None
+            else {}
+        )
+        assigned_canonical = self._canonical_identity_refs(assignments.values())
         annotations = [
             AssetFaceAnnotation(
                 face_id=str(row["face_id"]),
@@ -596,19 +604,22 @@ class FaceRepository:
                     str(row["person_id"]) if row["person_id"] else None
                 ),
                 canonical_identity_kind=(
-                    canonical[str(row["person_id"])][0]
-                    if row["person_id"]
-                    else "person"
+                    assigned_canonical[assignments[("person", str(row["face_id"]))]][0]
+                    if ("person", str(row["face_id"])) in assignments
+                    else canonical[str(row["person_id"])][0]
+                    if row["person_id"] else "person"
                 ),
                 canonical_identity_id=(
-                    canonical[str(row["person_id"])][1]
-                    if row["person_id"]
-                    else None
+                    assigned_canonical[assignments[("person", str(row["face_id"]))]][1]
+                    if ("person", str(row["face_id"])) in assignments
+                    else canonical[str(row["person_id"])][1]
+                    if row["person_id"] else None
                 ),
                 canonical_display_name=(
-                    canonical[str(row["person_id"])][2]
-                    if row["person_id"]
-                    else None
+                    assigned_canonical[assignments[("person", str(row["face_id"]))]][2]
+                    if ("person", str(row["face_id"])) in assignments
+                    else canonical[str(row["person_id"])][2]
+                    if row["person_id"] else None
                 ),
             )
             for row in rows
@@ -679,6 +690,26 @@ class FaceRepository:
         source_ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
         if not source_ids:
             return {}
+        resolved = self._canonical_identity_refs(
+            ("person", source_id) for source_id in source_ids
+        )
+        return {
+            source_id: resolved[("person", source_id)] for source_id in source_ids
+        }
+
+    def _canonical_identity_refs(
+        self,
+        refs: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], tuple[str, str, str | None]]:
+        source_refs = tuple(
+            dict.fromkeys(
+                (str(kind), str(entity_id))
+                for kind, entity_id in refs
+                if kind in {"person", "pet"} and entity_id
+            )
+        )
+        if not source_refs:
+            return {}
         redirect_map: dict[tuple[str, str], tuple[str, str]] = {}
         if self._state_repo is not None:
             redirect_map = {
@@ -689,12 +720,8 @@ class FaceRepository:
                 for redirect in self._state_repo.get_identity_redirects()
             }
         resolved = {
-            source_id: _resolve_identity_redirect(
-                "person",
-                source_id,
-                redirect_map,
-            )
-            for source_id in source_ids
+            source_ref: _resolve_identity_redirect(*source_ref, redirect_map)
+            for source_ref in source_refs
         }
         person_targets = [
             entity_id for kind, entity_id in resolved.values() if kind == "person"
@@ -712,12 +739,12 @@ class FaceRepository:
 
             pet_names = PetStateRepository(pet_state_path).get_profile_name_map(pet_targets)
         return {
-            source_id: (
+            source_ref: (
                 kind,
                 entity_id,
                 person_names.get(entity_id) if kind == "person" else pet_names.get(entity_id),
             )
-            for source_id, (kind, entity_id) in resolved.items()
+            for source_ref, (kind, entity_id) in resolved.items()
         }
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> None:
@@ -968,6 +995,9 @@ class FaceRepository:
                 conn.execute("UPDATE faces SET person_id = NULL WHERE face_id = ?", (face_id,))
                 conn.commit()
                 if self._state_repo is not None:
+                    self._state_repo.clear_annotation_identity_assignment(
+                        "person", face_id
+                    )
                     self._state_repo.reject_face_key(
                         face.face_key,
                         asset_id=face.asset_id,
@@ -983,10 +1013,28 @@ class FaceRepository:
         manual_face = self._state_repo.get_manual_face(face_id)
         if manual_face is None:
             return None
+        self._state_repo.clear_annotation_identity_assignment("person", face_id)
         self._state_repo.delete_manual_face(face_id)
         return self._finalize_face_mutation(
             changed_asset_ids=(manual_face.asset_id,),
             changed_person_ids=(manual_face.person_id,),
+        )
+
+    def has_face(self, face_id: str) -> bool:
+        if not face_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM faces WHERE face_id = ?",
+                (face_id,),
+            ).fetchone()
+        return bool(
+            row is not None
+            or (
+                self._state_repo is not None
+                and self._state_repo.get_manual_face(face_id) is not None
+            )
         )
 
     def move_face_to_person(

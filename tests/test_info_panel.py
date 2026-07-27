@@ -839,10 +839,13 @@ def test_info_panel_pet_avatar_uses_neutral_menu_and_mixed_candidate_shape(
     monkeypatch.setattr(info_panel_module, "GroupPeopleDialog", _FakeDialog)
 
     annotation = RecognitionAnnotation(
-        kind="pet",
-        annotation_id="det-a",
-        entity_id="pet-a",
-        display_name="Miso",
+        source_detection_kind="pet",
+        source_annotation_id="det-a",
+        source_identity_kind="pet",
+        source_identity_id="pet-a",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-a",
+        canonical_display_name="Miso",
         box_x=0,
         box_y=0,
         box_w=10,

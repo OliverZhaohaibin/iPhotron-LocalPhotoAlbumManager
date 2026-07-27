@@ -17,6 +17,10 @@ from iPhoto.bootstrap.library_people_service import (
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
+from iPhoto.gui.ui.widgets.recognition_annotations import (
+    face_annotation_adapter,
+    pet_annotation_adapter,
+)
 from iPhoto.library.workers.face_scan_worker import FaceScanWorker
 from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 from iPhoto.people import service as people_service
@@ -856,6 +860,89 @@ def test_cross_merge_person_into_pet_redirects_person_assets(tmp_path: Path) -> 
     assert face_annotations[0].canonical_identity_kind == "pet"
     assert face_annotations[0].canonical_identity_id == "pet-a"
     assert face_annotations[0].canonical_display_name == "Miso"
+
+
+def test_cross_kind_single_detection_assignment_preserves_source_and_identity(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/person.jpg", "id": "asset-person", "media_type": 0},
+            {"rel": "album/pet.jpg", "id": "asset-pet", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [
+            _person_record(
+                person_id="person-a",
+                key_face_id="face-a",
+                face_count=1,
+                name="Alice",
+            )
+        ],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [pet_detection],
+        [
+            _pet_record(
+                pet_id="pet-a",
+                key_detection_id="det-a",
+                detection_count=1,
+                name="Miso",
+            )
+        ],
+    )
+
+    assert people_service.reassign_detection_identity(
+        source_kind="pet",
+        source_annotation_id="det-a",
+        target_identity="person:person-a",
+    )
+    pet_annotation = pet_annotation_adapter(
+        pet_service.list_asset_pet_annotations("asset-pet")[0]
+    )
+    assert pet_annotation.source_detection_kind == "pet"
+    assert pet_annotation.source_annotation_id == "det-a"
+    assert pet_annotation.person_id == "person:person-a"
+    assert pet_annotation.canonical_display_name == "Alice"
+
+    assert people_service.reassign_detection_identity(
+        source_kind="person",
+        source_annotation_id="face-a",
+        target_identity="pet:pet-a",
+    )
+    face_annotation = face_annotation_adapter(
+        people_service.list_asset_face_annotations("asset-person")[0]
+    )
+    assert face_annotation.source_detection_kind == "person"
+    assert face_annotation.source_annotation_id == "face-a"
+    assert face_annotation.person_id == "pet:pet-a"
+    assert face_annotation.canonical_display_name == "Miso"
+
+    assert {item.person_id for item in people_service.list_clusters()} == {"person-a"}
+    assert {item.pet_id for item in pet_service.list_pets()} == {"pet-a"}
 
 
 def test_cross_merge_retargets_existing_redirect_sources(tmp_path: Path) -> None:

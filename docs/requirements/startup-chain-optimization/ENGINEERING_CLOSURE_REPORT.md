@@ -72,7 +72,7 @@ build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_s
 - 当前分支全量自动化：`2756 passed, 14 skipped`。
 - Pets 真实模型契约：`1 passed`；固定 YOLOX/dog fixture SHA、CPU provider、
   raw-BGR、类别、bbox、置信度和去重通过。
-- Pets 规模契约：`1 passed in 68.96s`；空库按 batch 16 增长到 1k/10k/50k 与
+- Pets 规模契约：`1 passed in 65.08s`；空库按 batch 16 增长到 1k/10k/50k 与
   50k+2 通过时间、RSS、WAL、增量写入和结构门禁。
 - Pets 修复覆盖 generation/key migration、stale 结果、old/new event diff、SQL
   query budget、超 bind-limit reset、缩略图回滚、journal 恢复、跨类型 annotation、

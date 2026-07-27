@@ -34,7 +34,7 @@
 | R2-06 | persisted boundary embeddings 未进入匹配上下文；回退查询取最低质量样本而非离中心最远样本。 | 直接使用 profile boundary；legacy 数据一次性批量补算最远 8 个样本。 | `test_persisted_boundary_samples_are_used_without_candidate_sql` 及 legacy farthest-8 回归通过。 | `automated_pass` |
 | R2-07 | model resolver 按目录/文件存在选 root，空 cache、损坏 cache 和不完整 bundled artifact 会遮挡有效 fallback 或触发只读写入。 | 按完整且 hash/size/shape 有效的 artifact 选择；只下载到用户 cache；损坏 cache 自愈。 | 空 cache、损坏 cache、完整 bundled 和 hash 校验回归通过；真实只读安装仍在人工矩阵。 | `automated_pass` |
 | R2-08 | state repository 多个 caller-sized `IN` 未分块，50k 测试未传 `pet_state.db`。 | 所有可变 `IN` 统一按 500 分块并增加定向 profile 查询。 | `test_state_repository_chunks_all_large_identity_reads` 覆盖 1,205 项；规模门禁覆盖真实 `pet_state.db` 的 50k。 | `automated_pass` |
-| R2-09 | 每批加载全部 profiles 并重建 ANN；现有规模测试只预装 50k 后测 +2。 | session 级、按 contract/species 分区的增量 USearch index；只读取和更新受影响候选。 | `pets-scale-contract` 覆盖空库 batch 16 增长到 1k/10k/50k 及 50k+2，`1 passed in 68.96s`。 | `automated_pass` |
+| R2-09 | 每批加载全部 profiles 并重建 ANN；现有规模测试只预装 50k 后测 +2。 | session 级、按 contract/species 分区的增量 USearch index；只读取和更新受影响候选；初始、重建和 batch 16 更新均使用批量 `index.add`。 | `pets-scale-contract` 覆盖空库 batch 16 增长到 1k/10k/50k 及 50k+2，`1 passed in 65.08s`。 | `automated_pass` |
 | R2-10 | journal recovery 仅在新扫描批次前触发，其他 mutation 可越过旧 applying 操作。 | 初始化和每个 public mutation 前按创建顺序恢复；失败时拒绝新 mutation。 | `test_public_mutation_cannot_overtake_unrecovered_journal_owner` 通过。 | `automated_pass` |
 | R2-11 | `_publish_staged_thumbnails` 的逐文件 replace 没有内部补偿或预登记正式目标。 | publish 前 journal 记录清单；部分失败反向清理，进程恢复也能识别 orphan。 | `test_thumbnail_publish_compensates_when_later_replace_fails` 及 scan recovery 回归通过。 | `automated_pass` |
 | R2-12 | DINO 仅固定 Torch Hub source revision，首次权重内容没有发布前 SHA。 | 生产运行时改用项目固定 Release TorchScript，manifest 固定 URL/SHA/size/shape；Torch Hub 仅保留开发转换工具。 | 已固定并在首次加载前验证官方 checkpoint SHA/size，生成 cache 复核 metadata/hash；仓库 `pet-models-v1` 不可变 TorchScript Release 尚未发布，生产 Torch Hub 路径尚不能删除。 | `manual_pending` |
@@ -60,7 +60,7 @@
   规模契约，以及当前主机不适用的 Windows-only 测试。
 - `pets-model-contract`：`1 passed`。固定模型/图片 SHA，CPU provider，raw-BGR
   输入、dog 类别、bbox、置信度与最终去重全部通过。
-- `pets-scale-contract`：`1 passed in 68.96s`。覆盖空库按 batch 16 增长到
+- `pets-scale-contract`：`1 passed in 65.08s`。覆盖空库按 batch 16 增长到
   1k/10k/50k 与 50k+2，满足
   结构、时间、RSS、WAL 和增量阈值。
 - 架构门禁脚本三项检查通过；Pets/AppImage 静态打包 `2 passed`；`compileall`、

@@ -761,11 +761,15 @@ class PetRepository:
                 context.boundary_samples[pet.pet_id] = tuple(
                     normalize_vector(value) for value in pet.boundary_embeddings
                 )
-                context.candidate_index.upsert(
+            context.candidate_index.upsert_many(
+                (
                     pet.pet_id,
                     normalize_vector(pet.center_embedding),
                     _normalize_species_label(pet.species_label),
                 )
+                for pet in rebuilt_pets
+                if EmbeddingContract.from_pet(pet) == contract
+            )
 
     def _invalidate_profile_indexes(self) -> None:
         with self._mutation_lock:
@@ -2129,9 +2133,11 @@ class _ProfileCandidateIndex:
             from usearch.index import Index  # noqa: F401
         except ImportError:
             return
-        for pet_id, center in sorted(centers.items()):
-            if center.size:
-                self.upsert(pet_id, center, species.get(pet_id))
+        self.upsert_many(
+            (pet_id, center, species.get(pet_id))
+            for pet_id, center in sorted(centers.items())
+            if center.size
+        )
 
     def upsert(
         self,
@@ -2139,39 +2145,66 @@ class _ProfileCandidateIndex:
         center: np.ndarray,
         species_label: str | None,
     ) -> None:
-        vector = normalize_vector(center)
-        if not pet_id or not vector.size:
+        self.upsert_many(((pet_id, center, species_label),))
+
+    def upsert_many(
+        self,
+        profiles: Iterable[tuple[str, np.ndarray, str | None]],
+    ) -> None:
+        staged: list[tuple[str, np.ndarray, str | None]] = []
+        for pet_id, center, species_label in profiles:
+            vector = normalize_vector(center)
+            if not pet_id or not vector.size:
+                continue
+            old_species = self._species.get(pet_id)
+            old_center = self._centers.get(pet_id)
+            old_group = (
+                (int(old_center.size), old_species)
+                if old_center is not None and old_center.size
+                else None
+            )
+            if old_group is not None:
+                self._remove_from_group(old_group, pet_id)
+            self._centers[pet_id] = vector
+            self._species[pet_id] = species_label
+            staged.append((pet_id, vector, species_label))
+        if not staged:
             return
-        old_species = self._species.get(pet_id)
-        old_center = self._centers.get(pet_id)
-        old_group = (
-            (int(old_center.size), old_species)
-            if old_center is not None and old_center.size
-            else None
-        )
-        if old_group is not None:
-            self._remove_from_group(old_group, pet_id)
-        self._centers[pet_id] = vector
-        self._species[pet_id] = species_label
         try:
             from usearch.index import Index
         except ImportError:
             return
-        group = (int(vector.size), species_label)
-        entry = self._indexes.get(group)
-        if entry is None:
-            entry = (Index(ndim=group[0], metric="cos", dtype="f32"), {}, {})
-            self._indexes[group] = entry
-        index, key_to_pet, pet_to_key = entry
-        key = self._next_key
-        self._next_key += 1
-        try:
-            index.add(key, vector)
-        except Exception:  # noqa: BLE001
-            self._rebuild_group(group)
-            return
-        key_to_pet[key] = pet_id
-        pet_to_key[pet_id] = key
+        grouped: dict[
+            tuple[int, str | None],
+            list[tuple[str, np.ndarray]],
+        ] = {}
+        for pet_id, vector, species_label in staged:
+            grouped.setdefault((int(vector.size), species_label), []).append(
+                (pet_id, vector)
+            )
+        for group, members in grouped.items():
+            entry = self._indexes.get(group)
+            if entry is None:
+                entry = (Index(ndim=group[0], metric="cos", dtype="f32"), {}, {})
+                self._indexes[group] = entry
+            index, key_to_pet, pet_to_key = entry
+            keys = np.arange(
+                self._next_key,
+                self._next_key + len(members),
+                dtype=np.uint64,
+            )
+            self._next_key += len(members)
+            try:
+                index.add(
+                    keys,
+                    np.stack([vector for _, vector in members], axis=0),
+                )
+            except Exception:  # noqa: BLE001
+                self._rebuild_group(group)
+                continue
+            for key, (pet_id, _) in zip(keys.tolist(), members, strict=True):
+                key_to_pet[int(key)] = pet_id
+                pet_to_key[pet_id] = int(key)
 
     def remove(self, pet_id: str) -> None:
         center = self._centers.pop(pet_id, None)
@@ -2212,12 +2245,20 @@ class _ProfileCandidateIndex:
             ),
             key=lambda item: item[0],
         )
-        for pet_id, center in members:
-            key = self._next_key
-            self._next_key += 1
-            index.add(key, center)
-            key_to_pet[key] = pet_id
-            pet_to_key[pet_id] = key
+        if members:
+            keys = np.arange(
+                self._next_key,
+                self._next_key + len(members),
+                dtype=np.uint64,
+            )
+            self._next_key += len(members)
+            index.add(
+                keys,
+                np.stack([center for _, center in members], axis=0),
+            )
+            for key, (pet_id, _) in zip(keys.tolist(), members, strict=True):
+                key_to_pet[int(key)] = pet_id
+                pet_to_key[pet_id] = int(key)
         self._indexes[group] = (index, key_to_pet, pet_to_key)
 
     def search(

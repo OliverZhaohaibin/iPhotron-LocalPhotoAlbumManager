@@ -143,6 +143,25 @@ class _VideoPreparationSignals(QObject):
     failed = Signal(int, Path, object)
 
 
+def _video_projection_matches_source(
+    presentation: DetailPresentation,
+) -> bool:
+    """Return whether cached video columns describe the selected source.
+
+    A Live Photo presentation is owned by its still image.  Replacing only its
+    path with the motion sidecar must not make the still image's dimensions or
+    rotation projection authoritative for that video.
+    """
+
+    cached_source = presentation.info.get("abs")
+    if not isinstance(cached_source, (str, Path)) or not str(cached_source):
+        return False
+    try:
+        return Path(cached_source) == Path(presentation.path)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 class _VideoPreparationWorker(QRunnable):
     """Read edit and rotation state without blocking the GUI thread."""
 
@@ -193,7 +212,11 @@ class _VideoPreparationWorker(QRunnable):
                 )
             cached_rotation = presentation.info.get("video_rotation_cw")
             cached_linux_hint = presentation.info.get("video_linux_180_hint")
-            if cached_rotation is None or cached_linux_hint is None:
+            if (
+                not _video_projection_matches_source(presentation)
+                or cached_rotation is None
+                or cached_linux_hint is None
+            ):
                 rotation, raw_w, raw_h, linux_hint = probe_video_rotation_info(
                     presentation.path
                 )
@@ -1212,9 +1235,12 @@ class PlaybackCoordinator(QObject):
                 path=motion_path,
                 is_video=True,
                 is_live=False,
+                info={"abs": str(motion_path), "is_video": True},
                 video_adjustments=None,
                 video_trim_range_ms=None,
                 video_adjusted_preview=False,
+                video_duration_hint=None,
+                source_identity=AssetSourceIdentity.create(motion_path),
             )
         )
         self._player_view.show_video_surface(interactive=False)

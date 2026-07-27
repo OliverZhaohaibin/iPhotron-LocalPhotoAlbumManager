@@ -70,7 +70,8 @@ build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_s
 
 ## 已取得的证据
 
-- 当前分支全量自动化：`2756 passed, 14 skipped`。
+- 当前分支全量自动化：`2759 passed, 14 skipped`。
+- Windows Live Photo 竖屏回归已增加源身份校验：动态视频不再继承静态照片的旋转/尺寸投影；真实 Windows packaged 配对素材仍在人工矩阵。
 - Pets 真实模型契约：`1 passed`；固定 YOLOX/dog fixture SHA、CPU provider、
   raw-BGR、类别、bbox、置信度和去重通过。
 - Pets 规模契约：`1 passed in 65.08s`；空库按 batch 16 增长到 1k/10k/50k 与

@@ -44,6 +44,12 @@
 `automated_remediation_complete / manual_validation_pending`。远端 CI、真实安装权限、
 真实图库升级和跨平台 50k 证据未完成时继续保持 Draft / `REQUEST_CHANGES`。
 
+## 2026-07-27 Windows Live Photo 方向回归检查点
+
+| ID | 当前复现证据与代码位置 | 确定性处置 | 验收要求 | 状态 |
+| --- | --- | --- | --- | --- |
+| R3-01 | `playback_coordinator.py::_autoplay_live_motion` 只将 `DetailPresentation.path` 从静态照片替换为动态视频，但保留了静态照片的 `info` 投影；`_VideoPreparationWorker` 会不加源文件身份校验地复用其中的 `video_rotation_cw` 和 `w/h`。Windows 解码后端依赖 coded size 判定是否已预旋转，因此 90°/270° 竖屏 Live Photo 可被错误判定。 | Live Motion 准备对象使用动态视频自己的源身份并丢弃静态投影；准备线程只在 `info.abs` 与当前视频 path 一致时复用索引旋转/尺寸，否则对当前 `.mov` 重新 probe。 | `test_video_preparation_reprobes_when_cached_projection_belongs_to_live_still`、`test_video_preparation_reuses_projection_only_for_the_same_source`、`test_live_motion_preparation_does_not_inherit_still_projection` 通过；Detail 回归 `127 passed, 1 skipped`，全量 `2759 passed, 14 skipped`。Windows 真实 Live Photo 产物仍保留人工验证。 | `automated_pass` |
+
 ## 处置原则
 
 1. 事实与审查建议分开裁决。确认的问题必须修复；建议与上游模型契约冲突时，

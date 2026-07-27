@@ -73,6 +73,7 @@ Metal 与 OpenGL 分开采集：
 | 固定 DINO Release 产物 | 使用固定 source commit 的受控构建环境和本仓库不可变 `pet-models-v1` 标签 | 发布 `dinov2_vits14.pt`，记录 artifact/build manifest SHA；manifest 改用 Release HTTPS URL 后删除生产 Torch Hub 转换路径；重新通过 hash/shape/packaging 门禁 | `pending_manual_validation` |
 | 真实旧图库升级 | 含 name、cover、hidden、rejection、pet merge、跨类型 merge 的脱敏副本 | interactive 不被 backfill 阻塞；后台清空 pending/retry；durable state 不丢；失败资产明确显示 stale/source generation | `pending_manual_validation` |
 | 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
+| Windows Live Photo 方向一致性 | Windows packaged，至少覆盖 iPhone 90°/270° 竖屏、横屏、HEIC+MOV 与 JPEG+MOV 脱敏配对素材 | 静态照片与动态视频视觉方向一致；首次自动播放、重播、连续切换和返回静帧都不发生 90° 偏转或双重旋转；记录 Qt media backend、视频 coded size 和 display matrix | `pending_manual_validation` |
 | 取消、切库与恢复 | 扫描中快速取消、连续切库、journal 各提交点进程 kill/restart | GUI 不阻塞；旧 worker 不写新库或发迟到事件；重启最终 `finalized`；无 redirect/detection/rejection/cover/group-cache split-brain | `pending_manual_validation` |
 | 50k packaged 报告 | 上述四类平台各自正式产物，已有 50k 再新增 2 个 | 记录耗时、峰值 RAM、WAL 增量、取消延迟、退出线程与后台恢复；满足 `pets-scale-contract` 阈值 | `pending_manual_validation` |
 

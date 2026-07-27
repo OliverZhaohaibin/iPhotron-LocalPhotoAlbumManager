@@ -388,11 +388,25 @@ class PeopleService:
         if repository is None or paths is None:
             return None
         state_repository = FaceStateRepository(paths.state_db_path)
-        redirect_sources = {
-            (redirect.source_kind, redirect.source_id)
+        redirects = {
+            (redirect.source_kind, redirect.source_id): (
+                redirect.target_kind,
+                redirect.target_id,
+            )
             for redirect in state_repository.get_identity_redirects()
         }
-        if source in redirect_sources or target in redirect_sources:
+        existing_target = redirects.get(source)
+        if existing_target == target:
+            repository.refresh_all_group_assets()
+            return IdentityMergeResult(
+                merged=True,
+                source_kind=source_kind,
+                source_id=source_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                group_redirects={},
+            )
+        if existing_target is not None or target in redirects:
             return None
 
         person_summaries = {
@@ -414,13 +428,13 @@ class PeopleService:
         if source_hidden is None or target_hidden is None or source_hidden != target_hidden:
             return None
 
-        merged, group_redirects = state_repository.merge_identity_redirect_and_groups(
+        ensured = state_repository.merge_identity_redirect_and_groups(
             source_kind=source_kind,
             source_id=source_id,
             target_kind=target_kind,
             target_id=target_id,
         )
-        if not merged:
+        if not ensured.succeeded:
             return None
         repository.refresh_all_group_assets()
         return IdentityMergeResult(
@@ -429,7 +443,7 @@ class PeopleService:
             source_id=source_id,
             target_kind=target_kind,
             target_id=target_id,
-            group_redirects=group_redirects,
+            group_redirects=ensured.group_redirects,
         )
 
     def reassign_detection_identity(
@@ -482,9 +496,9 @@ class PeopleService:
             ensure_work_dir(self._library_root) / "recognition" / "operations.db"
         )
         state_repository = FaceStateRepository(paths.state_db_path)
-        for pending in journal.unfinished():
+        while (pending := journal.unfinished_head()) is not None:
             if pending.kind != "recognition_detection_assignment":
-                continue
+                return False
             pending_payload = pending.payload
             recovered = state_repository.set_annotation_identity_assignment(
                 source_kind=str(pending_payload.get("source_kind") or ""),
@@ -506,7 +520,9 @@ class PeopleService:
                     "finalized",
                     error="assignment_recovery_rejected",
                 )
-        operation_id = journal.prepare("recognition_detection_assignment", payload)
+        operation_id = journal.try_prepare("recognition_detection_assignment", payload)
+        if operation_id is None:
+            return False
         journal.transition(operation_id, "applying")
         changed = state_repository.set_annotation_identity_assignment(
             source_kind=source_kind,

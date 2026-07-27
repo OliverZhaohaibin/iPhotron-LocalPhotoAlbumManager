@@ -658,6 +658,186 @@ def test_public_mutation_cannot_overtake_unrecovered_journal_owner(
     assert coordinator._recovery_error is not None
 
 
+def test_overlap_reconciliation_recovers_runtime_commit_state_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(
+        tmp_path / ".iPhoto" / "pets" / "pet_index.db",
+        tmp_path / ".iPhoto" / "pets" / "pet_state.db",
+    )
+    detection = _detection("overlap", pet_id="pet-a")
+    repository.replace_all([detection], [_pet("pet-a", detection)])
+    coordinator = PetIndexCoordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    state = repository.state_repository
+    assert state is not None
+
+    def fail_state_sync(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("injected state sync failure")
+
+    monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
+    with pytest.raises(sqlite3.OperationalError, match="injected state sync failure"):
+        coordinator.reconcile_people_overlaps(
+            {"asset-a": ((10, 20, 80, 90),)},
+        )
+
+    pending = coordinator._journal.unfinished()
+    assert [operation.kind for operation in pending] == ["pet_overlap_reconcile"]
+    operation_id = pending[0].operation_id
+    assert repository.get_runtime_commit(operation_id)["state_synced"] is False  # type: ignore[index]
+    assert repository.get_detection("overlap") is None
+
+    recovered = PetIndexCoordinator(tmp_path)
+    with recovered._lock:
+        recovered._recover_operations_locked()
+    recovered_repository = recovered._repository()
+    assert recovered_repository.get_runtime_commit(operation_id)["state_synced"] is True  # type: ignore[index]
+    assert recovered._journal.unfinished() == ()
+    assert recovered_repository.state_repository is not None
+    assert recovered_repository.state_repository.get_cover("pet-a") is None
+
+
+def test_delete_recovery_syncs_state_when_runtime_detection_is_already_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(
+        tmp_path / ".iPhoto" / "pets" / "pet_index.db",
+        tmp_path / ".iPhoto" / "pets" / "pet_state.db",
+    )
+    detection = _detection("delete-me", pet_id="pet-a")
+    repository.replace_all([detection], [_pet("pet-a", detection)])
+    coordinator = PetIndexCoordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    state = repository.state_repository
+    assert state is not None
+
+    def fail_state_sync(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("injected state sync failure")
+
+    monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
+    with pytest.raises(sqlite3.OperationalError, match="injected state sync failure"):
+        coordinator.delete_detection("delete-me")
+
+    pending = coordinator._journal.unfinished()
+    assert [operation.kind for operation in pending] == ["pet_delete_detection"]
+    operation_id = pending[0].operation_id
+    assert repository.get_detection("delete-me") is None
+    assert repository.get_runtime_commit(operation_id)["state_synced"] is False  # type: ignore[index]
+
+    recovered = PetIndexCoordinator(tmp_path)
+    with recovered._lock:
+        recovered._recover_operations_locked()
+    recovered_repository = recovered._repository()
+    assert recovered_repository.get_runtime_commit(operation_id)["state_synced"] is True  # type: ignore[index]
+    assert recovered._journal.unfinished() == ()
+    assert recovered_repository.state_repository is not None
+    assert detection.pet_key in recovered_repository.state_repository.get_rejected_pet_keys(
+        (detection.pet_key,)
+    )
+
+
+@pytest.mark.parametrize("mutation", ["move", "merge"])
+def test_move_and_merge_recover_after_runtime_commit(
+    tmp_path: Path,
+    monkeypatch,
+    mutation: str,
+) -> None:
+    repository = PetRepository(
+        tmp_path / ".iPhoto" / "pets" / "pet_index.db",
+        tmp_path / ".iPhoto" / "pets" / "pet_state.db",
+    )
+    first = _detection("first", pet_id="pet-a")
+    second = _detection(
+        "second",
+        asset_id="asset-b",
+        embedding=np.asarray([0.0, 1.0, 0.0]),
+        pet_id="pet-b",
+    )
+    repository.replace_all(
+        [first, second],
+        [_pet("pet-a", first), _pet("pet-b", second)],
+    )
+    coordinator = PetIndexCoordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    state = repository.state_repository
+    assert state is not None
+
+    def fail_state_sync(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("injected state sync failure")
+
+    monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
+    with pytest.raises(sqlite3.OperationalError, match="injected state sync failure"):
+        if mutation == "move":
+            coordinator.move_detection_to_pet("first", "pet-b")
+        else:
+            coordinator.merge_pets("pet-a", "pet-b")
+
+    operation = coordinator._journal.unfinished()[0]
+    assert repository.get_runtime_commit(operation.operation_id)["state_synced"] is False  # type: ignore[index]
+
+    recovered = PetIndexCoordinator(tmp_path)
+    with recovered._lock:
+        recovered._recover_operations_locked()
+    recovered_repository = recovered._repository()
+    assert recovered_repository.get_runtime_commit(operation.operation_id)["state_synced"] is True  # type: ignore[index]
+    assert recovered._journal.unfinished() == ()
+    if mutation == "move":
+        assert recovered_repository.get_detection("first").pet_id == "pet-b"  # type: ignore[union-attr]
+    else:
+        assert {pet.pet_id for pet in recovered_repository.get_all_pet_records()} == {"pet-b"}
+
+
+def test_recluster_recovers_state_and_pipeline_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(
+        tmp_path / ".iPhoto" / "pets" / "pet_index.db",
+        tmp_path / ".iPhoto" / "pets" / "pet_state.db",
+    )
+    first = _detection("first", pet_id="pet-a")
+    second = _detection(
+        "second",
+        asset_id="asset-b",
+        embedding=np.asarray([0.99, 0.01, 0.0]),
+        pet_id="pet-b",
+    )
+    repository.replace_all(
+        [first, second],
+        [_pet("pet-a", first), _pet("pet-b", second)],
+    )
+    coordinator = PetIndexCoordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    state = repository.state_repository
+    assert state is not None
+
+    def fail_state_sync(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("injected state sync failure")
+
+    monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
+    with pytest.raises(sqlite3.OperationalError, match="injected state sync failure"):
+        coordinator.recluster_for_pipeline_upgrade(
+            clustering_pipeline_version="cluster-v-next",
+            distance_threshold=0.2,
+        )
+
+    operation = coordinator._journal.unfinished()[0]
+    assert operation.kind == "pet_recluster"
+    assert repository.get_runtime_commit(operation.operation_id)["state_synced"] is False  # type: ignore[index]
+
+    recovered = PetIndexCoordinator(tmp_path)
+    with recovered._lock:
+        recovered._recover_operations_locked()
+    recovered_repository = recovered._repository()
+    assert recovered_repository.get_runtime_commit(operation.operation_id)["state_synced"] is True  # type: ignore[index]
+    assert recovered_repository.get_scan_metadata("clustering_pipeline_version") == (
+        "cluster-v-next"
+    )
+    assert recovered._journal.unfinished() == ()
+
+
 def _detection(
     detection_id: str,
     *,

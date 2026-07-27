@@ -49,6 +49,7 @@ class IdentityMergeFailure(StrEnum):
     NOT_FOUND = "not_found"
     HIDDEN_STATE_MISMATCH = "hidden_state_mismatch"
     REDIRECT_CONFLICT = "redirect_conflict"
+    RECOVERY_PENDING = "recovery_pending"
     REJECTED = "rejected"
 
 
@@ -121,8 +122,6 @@ class RecognitionMergeService:
                 IdentityMergeFailure.HIDDEN_STATE_MISMATCH,
             )
 
-        operation_id = self._prepare_merge(source_ref, target_ref)
-
         if source_ref.kind == target_ref.kind == "person":
             changed_asset_ids = tuple(
                 dict.fromkeys(
@@ -134,7 +133,6 @@ class RecognitionMergeService:
                 source_ref.entity_id,
                 target_ref.entity_id,
             )
-            self._finish_merge(operation_id, merged)
             return IdentityMergeOutcome(
                 merged,
                 source_ref,
@@ -162,7 +160,6 @@ class RecognitionMergeService:
                 source_ref.entity_id,
                 target_ref.entity_id,
             )
-            self._finish_merge(operation_id, merged)
             return IdentityMergeOutcome(
                 merged,
                 source_ref,
@@ -177,6 +174,16 @@ class RecognitionMergeService:
                 pet_redirects=(
                     {source_ref.entity_id: target_ref.entity_id} if merged else {}
                 ),
+            )
+
+        self._recover_merges()
+        operation_id = self._prepare_merge(source_ref, target_ref)
+        if self._journal is not None and operation_id is None:
+            return IdentityMergeOutcome(
+                False,
+                source_ref,
+                target_ref,
+                IdentityMergeFailure.RECOVERY_PENDING,
             )
 
         changed_asset_ids = tuple(
@@ -204,10 +211,12 @@ class RecognitionMergeService:
     def _prepare_merge(self, source: IdentityRef, target: IdentityRef) -> str | None:
         if self._journal is None:
             return None
-        operation_id = self._journal.prepare(
+        operation_id = self._journal.try_prepare(
             "recognition_merge",
             {"source": source.key, "target": target.key},
         )
+        if operation_id is None:
+            return None
         self._journal.transition(operation_id, "applying")
         return operation_id
 
@@ -227,25 +236,19 @@ class RecognitionMergeService:
     def _recover_merges(self) -> None:
         if self._journal is None:
             return
-        for operation in self._journal.unfinished():
+        while (operation := self._journal.unfinished_head()) is not None:
             if operation.kind != "recognition_merge":
-                continue
+                return
             source = IdentityRef.parse(operation.payload.get("source"))
             target = IdentityRef.parse(operation.payload.get("target"))
             if source is None or target is None:
                 self._finish_merge(operation.operation_id, False)
                 continue
-            if source.kind == target.kind == "person":
-                succeeded = bool(
-                    self._people_service.merge_clusters(source.entity_id, target.entity_id)
-                )
-            elif source.kind == target.kind == "pet":
-                succeeded = bool(
-                    self._pet_service.merge_pets(source.entity_id, target.entity_id)
-                )
-            else:
-                result = self._people_service.merge_identities(source.key, target.key)
-                succeeded = bool(result is not None and result.merged)
+            if source.kind == target.kind:
+                self._finish_merge(operation.operation_id, False)
+                continue
+            result = self._people_service.merge_identities(source.key, target.key)
+            succeeded = bool(result is not None and result.merged)
             self._finish_merge(operation.operation_id, succeeded)
 
     def _hidden_state(self, identity: IdentityRef) -> bool | None:

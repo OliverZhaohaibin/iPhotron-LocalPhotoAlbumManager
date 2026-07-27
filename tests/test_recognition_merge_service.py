@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 from iPhoto.application.services.recognition_merge_service import (
@@ -11,6 +12,9 @@ from iPhoto.application.services.recognition_merge_service import (
     IdentityRef,
     RecognitionMergeService,
 )
+from iPhoto.bootstrap.library_pet_service import create_pet_service
+from iPhoto.pets.records import PetDetectionRecord, PetRecord
+from iPhoto.pets.repository_utils import utc_now_iso
 
 
 def _services(*, person_hidden: bool = False, pet_hidden: bool = False):
@@ -95,3 +99,61 @@ def test_untyped_raw_id_is_rejected_without_guessing_kind() -> None:
 
     assert outcome.merged is False
     assert outcome.failure is IdentityMergeFailure.INVALID_IDENTITY
+
+
+def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) -> None:
+    pets = create_pet_service(tmp_path)
+    repository = pets.repository()
+    assert repository is not None
+    timestamp = utc_now_iso()
+    detections: list[PetDetectionRecord] = []
+    records: list[PetRecord] = []
+    for index, pet_id in enumerate(("pet-a", "pet-b")):
+        embedding = np.asarray([float(index == 0), float(index == 1)], dtype=np.float32)
+        detection = PetDetectionRecord(
+            detection_id=f"detection-{pet_id}",
+            pet_key=f"v2:{pet_id}",
+            asset_id=f"asset-{pet_id}",
+            asset_rel=f"album/{pet_id}.jpg",
+            box_x=0,
+            box_y=0,
+            box_w=100,
+            box_h=100,
+            confidence=0.9,
+            embedding=embedding,
+            embedding_dim=2,
+            embedding_model="test-model",
+            detector_model="test-detector",
+            thumbnail_path=None,
+            pet_id=pet_id,
+            detected_at=timestamp,
+            image_width=100,
+            image_height=100,
+            species_label="dog",
+        )
+        detections.append(detection)
+        records.append(
+            PetRecord(
+                pet_id=pet_id,
+                name=None,
+                key_detection_id=detection.detection_id,
+                detection_count=1,
+                center_embedding=embedding,
+                embedding_dim=2,
+                created_at=timestamp,
+                updated_at=timestamp,
+                sample_count=1,
+            )
+        )
+    repository.replace_all(detections, records)
+    service = RecognitionMergeService(SimpleNamespace(), pets)
+
+    outcome = service.merge("pet:pet-a", "pet:pet-b")
+
+    assert outcome.merged is True
+    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-b"]
+    assert {detection.pet_id for detection in repository.get_all_detections()} == {"pet-b"}
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_merge_redirect_map()["pet-a"] == "pet-b"
+    assert service._journal is not None
+    assert service._journal.unfinished() == ()

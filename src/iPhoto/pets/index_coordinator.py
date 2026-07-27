@@ -181,8 +181,11 @@ class PetIndexCoordinator(QObject):
                     str(staged_thumbnail_dir) if staged_thumbnail_dir is not None else None
                 ),
             }
-            operation_id = self._journal.prepare("pet_scan_commit", operation_payload)
-            self._journal.transition(operation_id, "applying")
+            operation_id = self._try_prepare_operation_locked(
+                "pet_scan_commit", operation_payload
+            )
+            if operation_id is None:
+                return None
 
             staged_detections = [
                 detection
@@ -345,11 +348,12 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
-            operation_id = self._journal.prepare(
+            operation_id = self._try_prepare_operation_locked(
                 "pet_rename",
                 {"pet_id": pet_id, "name": name_or_none},
             )
-            self._journal.transition(operation_id, "applying")
+            if operation_id is None:
+                return None
             if not repository.rename_pet(pet_id, name_or_none):
                 self._journal.transition(
                     operation_id,
@@ -372,11 +376,12 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return False
             repository = self._repository()
-            operation_id = self._journal.prepare(
+            operation_id = self._try_prepare_operation_locked(
                 "pet_hide",
                 {"pet_id": pet_id, "hidden": bool(hidden)},
             )
-            self._journal.transition(operation_id, "applying")
+            if operation_id is None:
+                return False
             changed = repository.set_pet_hidden(pet_id, hidden)
             if changed:
                 self._emit_journaled_snapshot(
@@ -401,11 +406,12 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return False
             repository = self._repository()
-            operation_id = self._journal.prepare(
+            operation_id = self._try_prepare_operation_locked(
                 "pet_cover",
                 {"pet_id": pet_id, "detection_id": detection_id},
             )
-            self._journal.transition(operation_id, "applying")
+            if operation_id is None:
+                return False
             changed = repository.set_pet_cover(pet_id, detection_id)
             if changed:
                 self._emit_journaled_snapshot(
@@ -428,12 +434,17 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return False
             repository = self._repository()
-            operation_id = self._journal.prepare(
+            operation_id = self._try_prepare_operation_locked(
                 "pet_merge",
                 {"source_pet_id": source_pet_id, "target_pet_id": target_pet_id},
             )
-            self._journal.transition(operation_id, "applying")
-            result = repository.merge_pets(source_pet_id, target_pet_id)
+            if operation_id is None:
+                return False
+            result = repository.merge_pets(
+                source_pet_id,
+                target_pet_id,
+                operation_id=operation_id,
+            )
             if result is None:
                 self._journal.transition(
                     operation_id,
@@ -469,15 +480,33 @@ class PetIndexCoordinator(QObject):
             if previous_version == clustering_pipeline_version:
                 return 0
             previous_detections = repository.get_all_detections()
+            operation_payload = {
+                "clustering_pipeline_version": clustering_pipeline_version,
+                "previous_clustering_pipeline_version": previous_version or "",
+                "changed_asset_ids": list(
+                    dict.fromkeys(
+                        detection.asset_id
+                        for detection in previous_detections
+                        if detection.asset_id
+                    )
+                ),
+            }
+            operation_id = self._try_prepare_operation_locked(
+                "pet_recluster", operation_payload
+            )
+            if operation_id is None:
+                return 0
             reclustered_count = repository.recluster_detections(
                 distance_threshold=distance_threshold,
+                operation_id=operation_id,
             )
             repository.set_scan_metadata(
                 "clustering_pipeline_version",
                 clustering_pipeline_version,
             )
             if reclustered_count:
-                self._emit_snapshot(
+                self._emit_journaled_snapshot(
+                    operation_id,
                     changed_asset_ids=tuple(
                         dict.fromkeys(
                             detection.asset_id
@@ -497,6 +526,8 @@ class PetIndexCoordinator(QObject):
                     clustering_pipeline_version,
                     self._library_root,
                 )
+            else:
+                self._emit_journaled_snapshot(operation_id)
             return reclustered_count
 
     def delete_detection(self, detection_id: str) -> PetSnapshotEvent | None:
@@ -506,12 +537,16 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
-            operation_id = self._journal.prepare(
+            operation_id = self._try_prepare_operation_locked(
                 "pet_delete_detection",
                 {"detection_id": detection_id},
             )
-            self._journal.transition(operation_id, "applying")
-            result = repository.delete_detection(detection_id)
+            if operation_id is None:
+                return None
+            result = repository.delete_detection(
+                detection_id,
+                operation_id=operation_id,
+            )
             if result is None:
                 self._journal.transition(
                     operation_id,
@@ -567,18 +602,30 @@ class PetIndexCoordinator(QObject):
                 for detection in previous_detections
                 if detection.detection_id not in removed_ids
             ]
+            changed_asset_ids = tuple(
+                dict.fromkeys(detection.asset_id for detection in removed if detection.asset_id)
+            )
+            operation_id = self._try_prepare_operation_locked(
+                "pet_overlap_reconcile",
+                {
+                    "asset_ids": list(scoped_asset_ids),
+                    "changed_asset_ids": list(changed_asset_ids),
+                },
+            )
+            if operation_id is None:
+                return None
             commit_result = repository.replace_assets_incrementally(
                 scoped_asset_ids,
                 retained,
                 distance_threshold=distance_threshold,
-            )
-            changed_asset_ids = tuple(
-                dict.fromkeys(detection.asset_id for detection in removed if detection.asset_id)
+                operation_id=operation_id,
+                operation_kind="pet_overlap_reconcile",
             )
             repository.prune_unreferenced_thumbnails(
                 commit_result.previous_thumbnail_paths
             )
-            return self._emit_snapshot(
+            return self._emit_journaled_snapshot(
+                operation_id,
                 changed_asset_ids=changed_asset_ids,
                 added_pet_ids=commit_result.added_pet_ids,
                 updated_pet_ids=commit_result.updated_pet_ids,
@@ -596,12 +643,17 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
-            operation_id = self._journal.prepare(
+            operation_id = self._try_prepare_operation_locked(
                 "pet_move_detection",
                 {"detection_id": detection_id, "target_pet_id": target_pet_id},
             )
-            self._journal.transition(operation_id, "applying")
-            result = repository.move_detection_to_pet(detection_id, target_pet_id)
+            if operation_id is None:
+                return None
+            result = repository.move_detection_to_pet(
+                detection_id,
+                target_pet_id,
+                operation_id=operation_id,
+            )
             if result is None:
                 self._journal.transition(
                     operation_id,
@@ -627,7 +679,7 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
-            operation_id = self._journal.prepare(
+            operation_id = self._try_prepare_operation_locked(
                 "pet_move_detection_new",
                 {
                     "detection_id": detection_id,
@@ -635,8 +687,14 @@ class PetIndexCoordinator(QObject):
                     "new_name": new_name,
                 },
             )
-            self._journal.transition(operation_id, "applying")
-            result = repository.move_detection_to_new_pet(detection_id, new_pet_id, new_name)
+            if operation_id is None:
+                return None
+            result = repository.move_detection_to_new_pet(
+                detection_id,
+                new_pet_id,
+                new_name,
+                operation_id=operation_id,
+            )
             if result is None:
                 self._journal.transition(
                     operation_id,
@@ -711,6 +769,20 @@ class PetIndexCoordinator(QObject):
         self._journal.mark_published(operation_id)
         return event
 
+    def _try_prepare_operation_locked(
+        self,
+        kind: str,
+        payload: dict[str, object],
+    ) -> str | None:
+        operation_id = self._journal.try_prepare(kind, payload)
+        if operation_id is None:
+            self._recovery_error = RuntimeError(
+                "Another recognition operation must finish before Pets can continue."
+            )
+            return None
+        self._journal.transition(operation_id, "applying")
+        return operation_id
+
     def _mark_done_asset_ids(self, done_ids: list[str]) -> None:
         if not done_ids:
             return
@@ -734,6 +806,31 @@ class PetIndexCoordinator(QObject):
         repository = self._repository()
         for operation in self._journal.unfinished():
             if operation.kind != "pet_scan_commit":
+                if operation.kind in {
+                    "pet_merge",
+                    "pet_delete_detection",
+                    "pet_move_detection",
+                    "pet_move_detection_new",
+                    "pet_overlap_reconcile",
+                    "pet_recluster",
+                }:
+                    runtime_commit = repository.get_runtime_commit(operation.operation_id)
+                    if runtime_commit is not None:
+                        repository.complete_runtime_state_sync(operation.operation_id)
+                        self._finish_runtime_backed_recovery(
+                            repository,
+                            operation,
+                            runtime_commit,
+                        )
+                        continue
+                    if operation.kind in {"pet_overlap_reconcile", "pet_recluster"}:
+                        self._journal.transition(
+                            operation.operation_id,
+                            "finalized",
+                            payload=operation.payload,
+                            error="superseded_before_index_commit",
+                        )
+                        continue
                 if not self._recover_pet_mutation(operation):
                     raise RuntimeError(
                         "Recognition operation must be recovered by its owner before "
@@ -805,6 +902,55 @@ class PetIndexCoordinator(QObject):
                 removed_pet_ids=tuple(event_payload["removed_pet_ids"]),
             )
             self._journal.mark_published(operation.operation_id)
+
+    def _finish_runtime_backed_recovery(self, repository, operation, payload) -> None:
+        if operation.kind == "pet_recluster":
+            clustering_version = str(
+                operation.payload.get("clustering_pipeline_version") or ""
+            )
+            if clustering_version:
+                repository.set_scan_metadata(
+                    "clustering_pipeline_version",
+                    clustering_version,
+                )
+        elif operation.kind == "pet_merge":
+            source_id = str(payload.get("source_pet_id") or "")
+            target_id = str(payload.get("target_pet_id") or "")
+            if source_id and target_id:
+                repository._remap_people_groups_for_pet_merge(source_id, target_id)
+        elif operation.kind in {
+            "pet_delete_detection",
+            "pet_move_detection",
+            "pet_move_detection_new",
+        }:
+            repository._refresh_people_group_assets_for_pets(
+                str(value) for value in payload.get("changed_pet_ids", ()) if value
+            )
+
+        previous_paths = tuple(
+            str(value) for value in payload.get("previous_thumbnail_paths", ()) if value
+        )
+        if previous_paths:
+            repository.prune_unreferenced_thumbnails(previous_paths)
+        event_payload = {
+            "changed_asset_ids": list(payload.get("changed_asset_ids", ())),
+            "changed_pet_ids": list(payload.get("changed_pet_ids", ())),
+            "added_pet_ids": list(payload.get("added_pet_ids", ())),
+            "updated_pet_ids": list(payload.get("updated_pet_ids", ())),
+            "removed_pet_ids": list(payload.get("removed_pet_ids", ())),
+            "pet_redirects": dict(payload.get("pet_redirects", {})),
+        }
+        self._journal.commit_outbox(operation.operation_id, event_payload)
+        self._emit_snapshot(
+            operation_id=operation.operation_id,
+            changed_asset_ids=tuple(event_payload["changed_asset_ids"]),
+            changed_pet_ids=tuple(event_payload["changed_pet_ids"]),
+            added_pet_ids=tuple(event_payload["added_pet_ids"]),
+            updated_pet_ids=tuple(event_payload["updated_pet_ids"]),
+            removed_pet_ids=tuple(event_payload["removed_pet_ids"]),
+            pet_redirects=event_payload["pet_redirects"],
+        )
+        self._journal.mark_published(operation.operation_id)
 
     def _ensure_recovered_locked(self) -> bool:
         try:
@@ -885,7 +1031,11 @@ class PetIndexCoordinator(QObject):
         elif operation.kind == "pet_merge":
             source_id = str(payload.get("source_pet_id") or "")
             target_id = str(payload.get("target_pet_id") or "")
-            result = repository.merge_pets(source_id, target_id)
+            result = repository.merge_pets(
+                source_id,
+                target_id,
+                operation_id=operation.operation_id,
+            )
             succeeded = result is not None
             if result is not None:
                 changed_asset_ids = result.changed_asset_ids
@@ -893,16 +1043,20 @@ class PetIndexCoordinator(QObject):
                 redirects = result.pet_redirects
         elif operation.kind == "pet_delete_detection":
             result = repository.delete_detection(
-                str(payload.get("detection_id") or "")
+                str(payload.get("detection_id") or ""),
+                operation_id=operation.operation_id,
             )
             succeeded = True
             if result is not None:
                 changed_asset_ids = result.changed_asset_ids
                 changed_pet_ids = result.changed_pet_ids
+            else:
+                repository.sync_runtime_state()
         elif operation.kind == "pet_move_detection":
             result = repository.move_detection_to_pet(
                 str(payload.get("detection_id") or ""),
                 str(payload.get("target_pet_id") or ""),
+                operation_id=operation.operation_id,
             )
             succeeded = result is not None
             if result is not None:
@@ -913,6 +1067,7 @@ class PetIndexCoordinator(QObject):
                 str(payload.get("detection_id") or ""),
                 str(payload.get("new_pet_id") or ""),
                 payload.get("new_name"),
+                operation_id=operation.operation_id,
             )
             succeeded = result is not None
             if result is not None:

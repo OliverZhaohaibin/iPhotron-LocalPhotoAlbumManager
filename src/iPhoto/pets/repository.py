@@ -121,6 +121,7 @@ class PetRepository:
                 self._state_repo.initialize()
             self._migrate_pet_keys_v2()
             self._initialized = True
+            self.recover_pending_runtime_state_syncs()
 
     def _migrate_pet_keys_v2(self) -> None:
         from .pipeline import PET_EMBEDDING_PIPELINE_VERSION, build_pet_key
@@ -184,6 +185,8 @@ class PetRepository:
         pets: list[PetRecord],
         *,
         sync_runtime_state: bool = True,
+        operation_id: str | None = None,
+        operation_kind: str = "pet_replace_all",
     ) -> tuple[str, ...]:
         self.initialize()
         if self._state_repo is not None and detections:
@@ -198,7 +201,13 @@ class PetRepository:
                     str(detection.pet_id) for detection in detections if detection.pet_id
                 }
                 pets = [pet for pet in pets if pet.pet_id in retained_pet_ids]
+        effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
+            previous_pet_ids = {
+                str(row["pet_id"])
+                for row in conn.execute("SELECT pet_id FROM pets").fetchall()
+                if row["pet_id"]
+            }
             previous_thumbnail_paths = tuple(
                 str(row["thumbnail_path"])
                 for row in conn.execute(
@@ -248,9 +257,34 @@ class PetRepository:
                 """,
                 (utc_now_iso(),),
             )
+            current_pet_ids = {pet.pet_id for pet in pets if pet.pet_id}
+            self._write_runtime_commit(
+                conn,
+                effective_operation_id,
+                {
+                    "operation_kind": operation_kind,
+                    "asset_ids": list(
+                        dict.fromkeys(
+                            detection.asset_id
+                            for detection in detections
+                            if detection.asset_id
+                        )
+                    ),
+                    "affected_pet_ids": sorted(previous_pet_ids | current_pet_ids),
+                    "changed_asset_ids": list(
+                        dict.fromkeys(
+                            detection.asset_id
+                            for detection in detections
+                            if detection.asset_id
+                        )
+                    ),
+                    "changed_pet_ids": sorted(previous_pet_ids | current_pet_ids),
+                    "previous_thumbnail_paths": list(previous_thumbnail_paths),
+                },
+            )
             conn.commit()
         if sync_runtime_state:
-            self.sync_runtime_state()
+            self.complete_runtime_state_sync(effective_operation_id)
             self.prune_unreferenced_thumbnails(previous_thumbnail_paths)
         self._invalidate_profile_indexes()
         return previous_thumbnail_paths
@@ -262,6 +296,7 @@ class PetRepository:
         *,
         distance_threshold: float,
         operation_id: str | None = None,
+        operation_kind: str = "pet_scan_commit",
     ) -> PetIncrementalCommitResult:
         """Replace detections for a bounded asset set without rewriting the index."""
 
@@ -309,6 +344,7 @@ class PetRepository:
             distance_threshold=distance_threshold,
         )
 
+        effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             previous_rows = self._select_detections_by_asset_ids(conn, changed_asset_ids)
             previous_detections = [self._detection_from_row(row) for row in previous_rows]
@@ -413,8 +449,11 @@ class PetRepository:
                 sorted((old_pet_ids | new_pet_ids) - set(added) - set(removed))
             )
             commit_payload = {
+                "operation_kind": operation_kind,
                 "asset_ids": list(changed_asset_ids),
+                "changed_asset_ids": list(changed_asset_ids),
                 "affected_pet_ids": list(affected_pet_ids),
+                "changed_pet_ids": list(affected_pet_ids),
                 "previous_thumbnail_paths": list(previous_thumbnail_paths),
                 "added_pet_ids": list(added),
                 "updated_pet_ids": list(updated),
@@ -423,33 +462,10 @@ class PetRepository:
                 "embedding_dimension": int(contract[1]) if contract else 0,
                 "generation_id": int(contract[2]) if contract else 0,
             }
-            if operation_id:
-                conn.execute(
-                    """
-                    INSERT INTO pet_runtime_commits (
-                        operation_id, payload_json, state_synced, created_at, updated_at
-                    ) VALUES (?, ?, 0, ?, ?)
-                    ON CONFLICT(operation_id) DO UPDATE SET
-                        payload_json = excluded.payload_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        str(operation_id),
-                        json.dumps(commit_payload, sort_keys=True, separators=(",", ":")),
-                        utc_now_iso(),
-                        utc_now_iso(),
-                    ),
-                )
+            self._write_runtime_commit(conn, effective_operation_id, commit_payload)
             conn.commit()
 
-        if operation_id:
-            self.complete_runtime_state_sync(operation_id)
-        elif self._state_repo is not None:
-            self._state_repo.sync_scan_results(
-                rebuilt_pets,
-                runtime_detections,
-                replaced_pet_ids=affected_pet_ids,
-            )
+        self.complete_runtime_state_sync(effective_operation_id)
         if embedding_contract is not None:
             self._update_profile_indexes(
                 embedding_contract,
@@ -462,6 +478,51 @@ class PetRepository:
             updated_pet_ids=updated,
             removed_pet_ids=removed,
         )
+
+    @staticmethod
+    def _write_runtime_commit(
+        conn: sqlite3.Connection,
+        operation_id: str,
+        payload: dict[str, object],
+    ) -> None:
+        timestamp = utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO pet_runtime_commits (
+                operation_id, payload_json, state_synced, created_at, updated_at
+            ) VALUES (?, ?, 0, ?, ?)
+            ON CONFLICT(operation_id) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(operation_id),
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                timestamp,
+                timestamp,
+            ),
+        )
+
+    def recover_pending_runtime_state_syncs(self) -> tuple[str, ...]:
+        """Finish orphaned runtime commits before accepting another mutation."""
+
+        if not self._initialized:
+            return ()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT operation_id
+                FROM pet_runtime_commits
+                WHERE state_synced = 0
+                ORDER BY rowid ASC
+                """
+            ).fetchall()
+        recovered: list[str] = []
+        for row in rows:
+            operation_id = str(row["operation_id"])
+            self.complete_runtime_state_sync(operation_id)
+            recovered.append(operation_id)
+        return tuple(recovered)
 
     def get_runtime_commit(self, operation_id: str) -> dict[str, object] | None:
         if not operation_id:
@@ -497,11 +558,37 @@ class PetRepository:
         pets = [self._pet_from_row(row) for row in pet_rows]
         detections = [self._detection_from_row(row) for row in detection_rows]
         if self._state_repo is not None:
+            operation_kind = str(payload.get("operation_kind") or "")
+            if operation_kind == "pet_delete_detection":
+                pet_key = str(payload.get("pet_key") or "")
+                detection_id = str(payload.get("detection_id") or "")
+                if pet_key:
+                    self._state_repo.add_rejected_pet_key(pet_key)
+                if detection_id:
+                    self._state_repo.clear_cover_for_detection(detection_id)
             self._state_repo.sync_scan_results(
                 pets,
                 detections,
                 replaced_pet_ids=affected_pet_ids,
             )
+            if operation_kind == "pet_move_detection_new":
+                new_pet_id = str(payload.get("new_pet_id") or "")
+                new_name = payload.get("new_name")
+                if new_pet_id and new_name:
+                    self._state_repo.rename_pet(new_pet_id, str(new_name))
+                    with closing(self._connect()) as conn:
+                        conn.execute(
+                            "UPDATE pets SET name = ?, updated_at = ? WHERE pet_id = ?",
+                            (normalize_name(str(new_name)), utc_now_iso(), new_pet_id),
+                        )
+                        conn.commit()
+        if str(payload.get("operation_kind") or "") == "pet_delete_detection":
+            face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
+            detection_id = str(payload.get("detection_id") or "")
+            if face_state_path.exists() and detection_id:
+                FaceStateRepository(face_state_path).clear_annotation_identity_assignment(
+                    "pet", detection_id
+                )
         with closing(self._connect()) as conn:
             conn.execute(
                 """
@@ -1123,6 +1210,7 @@ class PetRepository:
         self,
         *,
         distance_threshold: float,
+        operation_id: str | None = None,
     ) -> int:
         from .pipeline import canonicalize_pet_identities, cluster_pet_records
 
@@ -1172,7 +1260,12 @@ class PetRepository:
             for pet in self.get_all_pet_records()
             if EmbeddingContract.from_pet(pet) != active
         ]
-        self.replace_all(retained_detections + clustered_detections, retained_pets + pets)
+        self.replace_all(
+            retained_detections + clustered_detections,
+            retained_pets + pets,
+            operation_id=operation_id,
+            operation_kind="pet_recluster",
+        )
         return len(clustered_detections)
 
     def get_all_detections(self) -> list[PetDetectionRecord]:
@@ -1631,7 +1724,13 @@ class PetRepository:
             return canonical
         return None
 
-    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> PetMutationResult | None:
+    def merge_pets(
+        self,
+        source_pet_id: str,
+        target_pet_id: str,
+        *,
+        operation_id: str | None = None,
+    ) -> PetMutationResult | None:
         if self._state_repo is None:
             return None
         self.initialize()
@@ -1654,6 +1753,7 @@ class PetRepository:
             redirects = self._state_repo.get_merge_redirect_map()
             if redirects.get(source_pet_id) != target_pet_id:
                 return None
+        effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             asset_rows = conn.execute(
                 """
@@ -1667,12 +1767,28 @@ class PetRepository:
                 "UPDATE pet_detections SET pet_id = ? WHERE pet_id = ?",
                 (target_pet_id, source_pet_id),
             )
-            conn.execute("DELETE FROM pets WHERE pet_id = ?", (source_pet_id,))
+            self._rebuild_pet_records_in_connection(conn)
+            changed_asset_ids = tuple(
+                str(row["asset_id"]) for row in asset_rows if row["asset_id"]
+            )
+            self._write_runtime_commit(
+                conn,
+                effective_operation_id,
+                {
+                    "operation_kind": "pet_merge",
+                    "affected_pet_ids": [source_pet_id, target_pet_id],
+                    "changed_pet_ids": [source_pet_id, target_pet_id],
+                    "changed_asset_ids": list(changed_asset_ids),
+                    "pet_redirects": {source_pet_id: target_pet_id},
+                    "source_pet_id": source_pet_id,
+                    "target_pet_id": target_pet_id,
+                },
+            )
             conn.commit()
+        self.complete_runtime_state_sync(effective_operation_id)
         self._remap_people_groups_for_pet_merge(source_pet_id, target_pet_id)
-        self._rebuild_pet_records_from_detections()
         return PetMutationResult(
-            changed_asset_ids=tuple(str(row["asset_id"]) for row in asset_rows if row["asset_id"]),
+            changed_asset_ids=changed_asset_ids,
             changed_pet_ids=(source_pet_id, target_pet_id),
             pet_redirects={source_pet_id: target_pet_id},
         )
@@ -1708,7 +1824,12 @@ class PetRepository:
         for group_id in group_ids:
             face_repository.refresh_group_assets(group_id)
 
-    def delete_detection(self, detection_id: str) -> PetMutationResult | None:
+    def delete_detection(
+        self,
+        detection_id: str,
+        *,
+        operation_id: str | None = None,
+    ) -> PetMutationResult | None:
         detection = self.get_detection(detection_id)
         if detection is None:
             return None
@@ -1720,10 +1841,28 @@ class PetRepository:
             FaceStateRepository(face_state_path).clear_annotation_identity_assignment(
                 "pet", detection_id
             )
+        effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM pet_detections WHERE detection_id = ?", (detection_id,))
+            self._rebuild_pet_records_in_connection(conn)
+            changed_pet_ids = (detection.pet_id,) if detection.pet_id else ()
+            self._write_runtime_commit(
+                conn,
+                effective_operation_id,
+                {
+                    "operation_kind": "pet_delete_detection",
+                    "affected_pet_ids": list(changed_pet_ids),
+                    "changed_pet_ids": list(changed_pet_ids),
+                    "changed_asset_ids": [detection.asset_id],
+                    "detection_id": detection_id,
+                    "pet_key": detection.pet_key,
+                    "previous_thumbnail_paths": (
+                        [detection.thumbnail_path] if detection.thumbnail_path else []
+                    ),
+                },
+            )
             conn.commit()
-        self._rebuild_pet_records_from_detections()
+        self.complete_runtime_state_sync(effective_operation_id)
         if detection.thumbnail_path:
             self.prune_unreferenced_thumbnails((detection.thumbnail_path,))
         self._refresh_people_group_assets_for_pets((detection.pet_id,))
@@ -1736,10 +1875,13 @@ class PetRepository:
         self,
         detection_id: str,
         target_pet_id: str,
+        *,
+        operation_id: str | None = None,
     ) -> PetMutationResult | None:
         detection = self.get_detection(detection_id)
         if detection is None or not target_pet_id:
             return None
+        effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             target = conn.execute(
                 """
@@ -1761,14 +1903,29 @@ class PetRepository:
                 "UPDATE pet_detections SET pet_id = ? WHERE detection_id = ?",
                 (target_pet_id, detection_id),
             )
+            self._rebuild_pet_records_in_connection(conn)
+            changed_pet_ids = tuple(
+                pet_id for pet_id in (detection.pet_id, target_pet_id) if pet_id
+            )
+            self._write_runtime_commit(
+                conn,
+                effective_operation_id,
+                {
+                    "operation_kind": "pet_move_detection",
+                    "affected_pet_ids": list(changed_pet_ids),
+                    "changed_pet_ids": list(changed_pet_ids),
+                    "changed_asset_ids": [detection.asset_id],
+                    "detection_id": detection_id,
+                    "source_pet_id": detection.pet_id or "",
+                    "target_pet_id": target_pet_id,
+                },
+            )
             conn.commit()
-        self._rebuild_pet_records_from_detections()
+        self.complete_runtime_state_sync(effective_operation_id)
         self._refresh_people_group_assets_for_pets((detection.pet_id, target_pet_id))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
-            changed_pet_ids=tuple(
-                pet_id for pet_id in (detection.pet_id, target_pet_id) if pet_id
-            ),
+            changed_pet_ids=changed_pet_ids,
         )
 
     def move_detection_to_new_pet(
@@ -1776,24 +1933,107 @@ class PetRepository:
         detection_id: str,
         new_pet_id: str,
         new_name: str | None,
+        *,
+        operation_id: str | None = None,
     ) -> PetMutationResult | None:
         detection = self.get_detection(detection_id)
         if detection is None or not new_pet_id:
             return None
+        effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             conn.execute(
                 "UPDATE pet_detections SET pet_id = ? WHERE detection_id = ?",
                 (new_pet_id, detection_id),
             )
+            self._rebuild_pet_records_in_connection(conn)
+            changed_pet_ids = tuple(
+                pet_id for pet_id in (detection.pet_id, new_pet_id) if pet_id
+            )
+            self._write_runtime_commit(
+                conn,
+                effective_operation_id,
+                {
+                    "operation_kind": "pet_move_detection_new",
+                    "affected_pet_ids": list(changed_pet_ids),
+                    "changed_pet_ids": list(changed_pet_ids),
+                    "changed_asset_ids": [detection.asset_id],
+                    "detection_id": detection_id,
+                    "source_pet_id": detection.pet_id or "",
+                    "new_pet_id": new_pet_id,
+                    "new_name": new_name,
+                },
+            )
             conn.commit()
-        self._rebuild_pet_records_from_detections()
+        self.complete_runtime_state_sync(effective_operation_id)
         if new_name:
             self.rename_pet(new_pet_id, new_name)
         self._refresh_people_group_assets_for_pets((detection.pet_id, new_pet_id))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
-            changed_pet_ids=tuple(pet_id for pet_id in (detection.pet_id, new_pet_id) if pet_id),
+            changed_pet_ids=changed_pet_ids,
         )
+
+    def _rebuild_pet_records_in_connection(
+        self,
+        conn: sqlite3.Connection,
+    ) -> tuple[list[PetDetectionRecord], list[PetRecord]]:
+        """Rebuild the runtime pet rows without leaving the active transaction."""
+
+        from .pipeline import build_pet_records_from_detections
+
+        rows = conn.execute(
+            """
+            SELECT
+                detection_id, pet_key, asset_id, asset_rel,
+                box_x, box_y, box_w, box_h, confidence, embedding, embedding_dim,
+                embedding_model, detector_model, thumbnail_path, pet_id, detected_at,
+                image_width, image_height, species_label, quality_score,
+                pet_key_version, embedding_pipeline_version, generation_id,
+                is_stale, stale_reason, source_generation_id
+            FROM pet_detections
+            ORDER BY detected_at ASC, detection_id ASC
+            """
+        ).fetchall()
+        rejected: set[str] = set()
+        if self._state_repo is not None:
+            rejected = self._state_repo.get_rejected_pet_keys(
+                row["pet_key"] for row in rows if row["pet_key"]
+            )
+        detections = [
+            self._detection_from_row(row)
+            for row in rows
+            if row["pet_key"] not in rejected
+        ]
+        names: dict[str, str | None] = {}
+        created_at: dict[str, str] = {}
+        if self._state_repo is not None:
+            profiles = {
+                profile.pet_id: profile for profile in self._state_repo.get_profiles()
+            }
+            names = {pet_id: profile.name for pet_id, profile in profiles.items()}
+            created_at = {
+                pet_id: profile.created_at for pet_id, profile in profiles.items()
+            }
+        pets = build_pet_records_from_detections(
+            detections,
+            names_by_pet_id=names,
+            created_at_by_pet_id=created_at,
+        )
+        conn.execute("DELETE FROM pets")
+        if pets:
+            conn.executemany(
+                """
+                INSERT INTO pets (
+                    pet_id, name, key_detection_id, detection_count,
+                    center_embedding, embedding_dim, created_at, updated_at,
+                    sample_count, profile_state, species_label,
+                    embedding_pipeline_version, generation_id,
+                    boundary_embeddings, boundary_sample_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [self._pet_to_row(pet) for pet in pets],
+            )
+        return detections, pets
 
     def _rebuild_pet_records_from_detections(self) -> None:
         from .pipeline import build_pet_records_from_detections

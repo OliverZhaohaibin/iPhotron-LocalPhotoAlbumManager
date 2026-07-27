@@ -1029,10 +1029,13 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
     merge_finished = threading.Event()
     merge_results: list[bool] = []
 
-    def blocked_recluster(*, distance_threshold: float) -> int:
+    def blocked_recluster(*, distance_threshold: float, operation_id: str | None = None) -> int:
         recluster_entered.set()
         assert release_recluster.wait(2)
-        return original_recluster(distance_threshold=distance_threshold)
+        return original_recluster(
+            distance_threshold=distance_threshold,
+            operation_id=operation_id,
+        )
 
     monkeypatch.setattr(repository, "recluster_detections", blocked_recluster)
     recluster_thread = threading.Thread(

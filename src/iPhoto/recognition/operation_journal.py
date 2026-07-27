@@ -15,6 +15,7 @@ from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
 @dataclass(frozen=True)
 class RecognitionOperation:
+    sequence: int
     operation_id: str
     kind: str
     state: str
@@ -29,8 +30,39 @@ class RecognitionOperationJournal:
         self._initialize()
 
     def prepare(self, kind: str, payload: dict[str, Any]) -> str:
+        """Append an operation without applying the global-empty guard.
+
+        Recovery and test setup use this primitive. New user mutations should
+        use :meth:`try_prepare` so two owners cannot both start work.
+        """
+
+        operation_id = self._insert_operation(kind, payload, require_empty=False)
+        if operation_id is None:
+            raise RuntimeError("Unconditional recognition operation insert was rejected.")
+        return operation_id
+
+    def try_prepare(self, kind: str, payload: dict[str, Any]) -> str | None:
+        """Atomically append an operation only when the global queue is empty."""
+
+        return self._insert_operation(kind, payload, require_empty=True)
+
+    def _insert_operation(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        require_empty: bool,
+    ) -> str | None:
         operation_id = uuid.uuid4().hex
         with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if require_empty:
+                pending = conn.execute(
+                    "SELECT 1 FROM operations WHERE state != 'finalized' LIMIT 1"
+                ).fetchone()
+                if pending is not None:
+                    conn.rollback()
+                    return None
             conn.execute(
                 """
                 INSERT INTO operations (
@@ -114,14 +146,15 @@ class RecognitionOperationJournal:
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
-                SELECT operation_id, kind, state, payload_json
+                SELECT sequence, operation_id, kind, state, payload_json
                 FROM operations
                 WHERE state != 'finalized'
-                ORDER BY created_at ASC, operation_id ASC
+                ORDER BY sequence ASC
                 """
             ).fetchall()
         return tuple(
             RecognitionOperation(
+                sequence=int(row["sequence"]),
                 operation_id=str(row["operation_id"]),
                 kind=str(row["kind"]),
                 state=str(row["state"]),
@@ -130,22 +163,40 @@ class RecognitionOperationJournal:
             for row in rows
         )
 
+    def unfinished_head(self) -> RecognitionOperation | None:
+        pending = self.unfinished()
+        return pending[0] if pending else None
+
     def _initialize(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operations (
-                    operation_id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
+            existing = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operations'"
+            ).fetchone()
+            if existing is None:
+                self._create_operations_table(conn, "operations")
+            else:
+                columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(operations)").fetchall()
+                }
+                if "sequence" not in columns:
+                    conn.execute("BEGIN IMMEDIATE")
+                    self._create_operations_table(conn, "operations_v2")
+                    conn.execute(
+                        """
+                        INSERT INTO operations_v2 (
+                            operation_id, kind, state, payload_json, last_error,
+                            created_at, updated_at
+                        )
+                        SELECT operation_id, kind, state, payload_json, last_error,
+                               created_at, updated_at
+                        FROM operations
+                        ORDER BY created_at ASC, operation_id ASC
+                        """
+                    )
+                    conn.execute("DROP TABLE operations")
+                    conn.execute("ALTER TABLE operations_v2 RENAME TO operations")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS event_outbox (
@@ -156,6 +207,25 @@ class RecognitionOperationJournal:
                 """
             )
             conn.commit()
+
+    @staticmethod
+    def _create_operations_table(conn: sqlite3.Connection, name: str) -> None:
+        if name not in {"operations", "operations_v2"}:
+            raise ValueError(f"Unsupported operations table name: {name}")
+        conn.execute(
+            f"""
+            CREATE TABLE {name} (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_id TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = connect_sqlite(self._db_path)

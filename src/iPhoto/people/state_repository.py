@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from contextlib import closing
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Iterable
 
@@ -51,6 +52,25 @@ class IdentityRedirectRecord:
     target_kind: str
     target_id: str
     updated_at: str
+
+
+class IdentityMergeEnsureStatus(StrEnum):
+    APPLIED = "applied"
+    ALREADY_APPLIED = "already_applied"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class IdentityMergeEnsureResult:
+    status: IdentityMergeEnsureStatus
+    group_redirects: dict[str, str | None]
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status in {
+            IdentityMergeEnsureStatus.APPLIED,
+            IdentityMergeEnsureStatus.ALREADY_APPLIED,
+        }
 
 
 class FaceStateRepository:
@@ -1374,7 +1394,7 @@ class FaceStateRepository:
         source_id: str,
         target_kind: str,
         target_id: str,
-    ) -> tuple[bool, dict[str, str | None]]:
+    ) -> IdentityMergeEnsureResult:
         """Persist a cross-kind redirect and its group remap atomically."""
 
         source_kind = str(source_kind or "").strip()
@@ -1388,7 +1408,7 @@ class FaceStateRepository:
             or not source_id
             or not target_id
         ):
-            return False, {}
+            return IdentityMergeEnsureResult(IdentityMergeEnsureStatus.CONFLICT, {})
 
         self.initialize()
         timestamp = _utc_now_iso()
@@ -1408,14 +1428,23 @@ class FaceStateRepository:
                 )
                 for row in redirect_rows
             }
-            if source_key in redirects or target_key in redirects:
-                return False, {}
+            existing_target = redirects.get(source_key)
+            if existing_target == target_key:
+                return IdentityMergeEnsureResult(
+                    IdentityMergeEnsureStatus.ALREADY_APPLIED,
+                    {},
+                )
+            if existing_target is not None or target_key in redirects:
+                return IdentityMergeEnsureResult(IdentityMergeEnsureStatus.CONFLICT, {})
 
             cursor = target_key
             visited = {source_key}
             while cursor in redirects:
                 if cursor in visited:
-                    return False, {}
+                    return IdentityMergeEnsureResult(
+                        IdentityMergeEnsureStatus.CONFLICT,
+                        {},
+                    )
                 visited.add(cursor)
                 cursor = redirects[cursor]
 
@@ -1467,7 +1496,10 @@ class FaceStateRepository:
                 updated_at=timestamp,
             )
             conn.commit()
-        return True, group_redirects
+        return IdentityMergeEnsureResult(
+            IdentityMergeEnsureStatus.APPLIED,
+            group_redirects,
+        )
 
     def get_identity_redirects(self) -> list[IdentityRedirectRecord]:
         self.initialize()

@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from iPhoto.application.services.recognition_merge_service import RecognitionMergeService
 from iPhoto.bootstrap.library_people_service import (
     create_people_asset_repository,
     create_people_service,
@@ -31,7 +32,8 @@ from iPhoto.people.index_coordinator import (
 )
 from iPhoto.people.pipeline import DetectedAssetFaces, FaceClusterPipeline
 from iPhoto.people.records import AssetFaceAnnotation
-from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
+from iPhoto.people.repository import FaceRecord, FaceRepository, ManualFaceRecord, PersonRecord
+from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.people.scan_session import FaceScanSession
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
@@ -860,6 +862,73 @@ def test_cross_merge_person_into_pet_redirects_person_assets(tmp_path: Path) -> 
     assert face_annotations[0].canonical_identity_kind == "pet"
     assert face_annotations[0].canonical_identity_id == "pet-a"
     assert face_annotations[0].canonical_display_name == "Miso"
+
+
+def test_cross_merge_recovery_refreshes_cache_after_state_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_refresh = FaceRepository.refresh_all_group_assets
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    people = create_people_service(library_root)
+    people_repository = people.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [_person_record(person_id="person-a", key_face_id="face-a", face_count=1)],
+    )
+    pets = create_pet_service(library_root)
+    pet_repository = pets.repository()
+    assert pet_repository is not None
+    detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1)],
+    )
+    merge_service = RecognitionMergeService(people, pets)
+
+    def fail_refresh(_repository) -> None:
+        raise RuntimeError("injected after state commit")
+
+    monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", fail_refresh)
+    with pytest.raises(RuntimeError, match="injected after state commit"):
+        merge_service.merge("pet:pet-a", "person:person-a")
+
+    state = FaceStateRepository(face_library_paths(library_root).state_db_path)
+    redirects = state.get_identity_redirects()
+    assert [
+        (redirect.source_kind, redirect.source_id, redirect.target_kind, redirect.target_id)
+        for redirect in redirects
+    ] == [("pet", "pet-a", "person", "person-a")]
+
+    refresh_calls = 0
+    def count_refresh(repository) -> None:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        original_refresh(repository)
+
+    monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", count_refresh)
+    recovered = RecognitionMergeService(
+        create_people_service(library_root),
+        create_pet_service(library_root),
+    )
+
+    assert refresh_calls == 1
+    assert recovered._journal is not None
+    assert recovered._journal.unfinished() == ()
 
 
 def test_cross_kind_single_detection_assignment_preserves_source_and_identity(

@@ -14,6 +14,7 @@ from iPhoto.pets.pipeline import (
     DEFAULT_PET_DETECTOR_MODEL_SHA256,
     DEFAULT_PET_DETECTOR_MODEL_URL,
     _bbox_iou,
+    _download_ssl_context,
     _preprocess_yolox,
     _YoloxOnnxPetDetector,
 )
@@ -69,7 +70,11 @@ def _cached_dog_image() -> Path:
     target = cache_root / "yolox-dog.jpg"
     if target.is_file() and _sha256(target) == DOG_IMAGE_SHA256:
         return target
-    with request.urlopen(DOG_IMAGE_URL, timeout=60) as response:  # noqa: S310
+    with request.urlopen(  # noqa: S310
+        DOG_IMAGE_URL,
+        timeout=60,
+        context=_download_ssl_context(DOG_IMAGE_URL),
+    ) as response:
         payload = response.read(2 * 1024 * 1024)
     if hashlib.sha256(payload).hexdigest() != DOG_IMAGE_SHA256:
         raise AssertionError("official YOLOX dog fixture SHA-256 mismatch")
@@ -86,7 +91,11 @@ def _contract_model_path(repository_root: Path) -> Path:
     target = cache_root / "yolox_nano_coco.onnx"
     if target.is_file() and _sha256(target) == DEFAULT_PET_DETECTOR_MODEL_SHA256:
         return target
-    with request.urlopen(DEFAULT_PET_DETECTOR_MODEL_URL, timeout=60) as response:  # noqa: S310
+    with request.urlopen(  # noqa: S310
+        DEFAULT_PET_DETECTOR_MODEL_URL,
+        timeout=60,
+        context=_download_ssl_context(DEFAULT_PET_DETECTOR_MODEL_URL),
+    ) as response:
         payload = response.read(DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES + 1)
     if len(payload) > DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES:
         raise AssertionError("official YOLOX model exceeds manifest size limit")

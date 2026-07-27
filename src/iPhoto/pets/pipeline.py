@@ -66,6 +66,10 @@ def _load_pet_model_manifest() -> dict:
         raise RuntimeError("Pets detector manifest input contract is invalid.")
     if embedder.get("input_shape") != [1, 3, 224, 224]:
         raise RuntimeError("Pets embedder manifest input contract is invalid.")
+    if urlparse(str(embedder.get("checkpoint_url") or "")).scheme.lower() != "https":
+        raise RuntimeError("Pets embedder checkpoint URL must use HTTPS.")
+    if len(str(embedder.get("checkpoint_sha256") or "")) != 64:
+        raise RuntimeError("Pets embedder checkpoint SHA-256 is invalid.")
     return manifest
 
 
@@ -527,6 +531,19 @@ def build_pet_records_from_detections(
     updated_at = utc_now_iso()
     pets: list[PetRecord] = []
     for pet_id, members in grouped.items():
+        contracts = {
+            (
+                str(member.embedding_pipeline_version or ""),
+                int(member.embedding_dim),
+                int(member.generation_id),
+            )
+            for member in members
+        }
+        if len(contracts) != 1:
+            raise ValueError(
+                f"Pet {pet_id} mixes incompatible embedding contracts: "
+                f"{sorted(contracts)}"
+            )
         key_detection = max(members, key=key_detection_sort_key)
         center_embedding = compute_cluster_center(
             np.stack([member.embedding for member in members], axis=0)
@@ -1052,6 +1069,29 @@ class _DinoV2Embedder:
         torch = self._torch
         try:
             _install_certifi_environment()
+            hub_dir_getter = getattr(torch.hub, "get_dir", None)
+            if callable(hub_dir_getter):
+                checkpoint_path = (
+                    Path(hub_dir_getter())
+                    / "checkpoints"
+                    / str(_EMBEDDER_MANIFEST["checkpoint_filename"])
+                )
+                try:
+                    _validate_downloaded_file(
+                        checkpoint_path,
+                        label="DINOv2 checkpoint",
+                        expected_sha256=str(_EMBEDDER_MANIFEST["checkpoint_sha256"]),
+                        max_bytes=int(_EMBEDDER_MANIFEST["checkpoint_max_bytes"]),
+                    )
+                except (OSError, RuntimeError):
+                    checkpoint_path.unlink(missing_ok=True)
+                    _download_file(
+                        str(_EMBEDDER_MANIFEST["checkpoint_url"]),
+                        checkpoint_path,
+                        label="DINOv2 checkpoint",
+                        expected_sha256=str(_EMBEDDER_MANIFEST["checkpoint_sha256"]),
+                        max_bytes=int(_EMBEDDER_MANIFEST["checkpoint_max_bytes"]),
+                    )
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
@@ -1582,11 +1622,53 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
     relative = Path(relative_path)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Pet model path must be relative to a configured model root.")
+    override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
+    user_cache = user_pet_model_cache_dir()
     for root in pet_model_search_roots():
         candidate = root / relative
         exists = candidate.is_dir() if directory else candidate.is_file()
-        if exists:
+        if not exists:
+            continue
+        try:
+            if directory:
+                model_name = relative.name
+                model_path = candidate / f"{model_name}.pt"
+                if not model_path.is_file():
+                    raise RuntimeError("DINOv2 model file is missing")
+                _validate_dinov2_cache_metadata(model_path, model_name=model_name)
+            else:
+                _validate_downloaded_file(
+                    candidate,
+                    label="YOLOX pet detector model",
+                    expected_sha256=(
+                        str(
+                            os.environ.get(PET_DETECTOR_MODEL_SHA256_ENV)
+                            or DEFAULT_PET_DETECTOR_MODEL_SHA256
+                        ).lower()
+                    ),
+                    max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+                )
             return candidate
+        except (OSError, RuntimeError) as exc:
+            if override and root == Path(override).expanduser():
+                raise RuntimeError(
+                    f"Pet scanning unavailable: invalid model override artifact at {candidate}."
+                ) from exc
+            if root == user_cache:
+                model_path = candidate / f"{relative.name}.pt" if directory else candidate
+                try:
+                    model_path.unlink(missing_ok=True)
+                    if directory:
+                        _dinov2_metadata_path(model_path).unlink(missing_ok=True)
+                except OSError:
+                    _LOGGER.warning(
+                        "Failed to quarantine invalid Pets model cache %s",
+                        candidate,
+                        exc_info=True,
+                    )
+            # Bundled artifacts are read-only. An invalid one must never become
+            # a download target and must not shadow a later valid artifact.
+            continue
     return user_pet_model_cache_dir() / relative
 
 

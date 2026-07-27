@@ -28,6 +28,11 @@
 build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_smoke_pass`，
 不替代下述正式人工矩阵。
 
+Windows 实机复测表明前次 WIC fresh-decode 修复会被已持久化的错误 Detail surface
+绕过。neutral-surface 解码语义契约现已独立提升，旧错误 surface 会 miss 并重新解码；
+文件格式 schema、Live Motion 视频投影和其他 EXIF 规则均未扩大修改。真实 Windows
+packaged 样例仍为 `pending_manual_validation`。
+
 ## 已收口的工程链路
 
 ### 生命周期与 GUI 调度
@@ -70,8 +75,9 @@ build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_s
 
 ## 已取得的证据
 
-- 当前分支全量自动化：`2763 passed, 14 skipped`。
+- 当前分支全量自动化：`2764 passed, 14 skipped`。
 - Windows Live Photo 静态 HEIC 仅在 WIC frame 已精确匹配应用 EXIF 后的展示尺寸时跳过二次换轴旋转；原始尺寸 JPEG/WIC 分支仍应用 EXIF。前一视频投影修复 `4e522e60` 已完整反向恢复。
+- Detail neutral-surface 解码契约从 1 提升为 2；旧 WIC 错误 surface 不再绕过修复后的 fresh-decode 路径。旧缓存迁移回归、完整 Detail 门禁及全量测试通过。
 - Pets 真实模型契约：`1 passed`；固定 YOLOX/dog fixture SHA、CPU provider、
   raw-BGR、类别、bbox、置信度和去重通过。
 - Pets 规模契约：`1 passed in 65.08s`；空库按 batch 16 增长到 1k/10k/50k 与

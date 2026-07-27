@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 from PySide6.QtGui import QImage
 
+import iPhoto.gui.detail_surface_cache as surface_cache_module
 from iPhoto.core.color_resolver import ColorStats
 from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_pipeline import (
@@ -112,6 +113,37 @@ def test_disk_store_source_revision_changes_key_but_sidecar_is_not_an_input(tmp_
     # mappings therefore do not affect the neutral cache identity.
     edited = replace(request, raw_adjustments={"Exposure": 0.5})
     assert store.entry_path(request) == store.entry_path(edited)
+
+
+def test_decoder_contract_bump_bypasses_legacy_surface_and_redecodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.heic")
+    store = NeutralSurfaceStore(tmp_path)
+
+    monkeypatch.setattr(surface_cache_module, "_DECODE_SEMANTICS_CONTRACT", 1)
+    legacy_path = store.entry_path(request)
+    assert legacy_path is not None
+    assert store.write(request, _surface(request, width=8, height=4))
+    assert legacy_path.exists()
+
+    monkeypatch.setattr(surface_cache_module, "_DECODE_SEMANTICS_CONTRACT", 2)
+    current_path = store.entry_path(request)
+    assert current_path is not None
+    assert current_path != legacy_path
+    assert store.load(request) is None
+
+    corrected = _surface(request, width=4, height=8)
+    delegate = Mock()
+    delegate.decode.return_value = corrected
+    backend = CachedStillDecodeBackend(delegate, store=store)
+    decoded = backend.decode(request, _Token())
+    backend.shutdown()
+
+    delegate.decode.assert_called_once()
+    assert decoded.decoded_size == (4, 8)
+    assert current_path.exists()
 
 
 @pytest.mark.parametrize("damage", ["truncate", "payload"])

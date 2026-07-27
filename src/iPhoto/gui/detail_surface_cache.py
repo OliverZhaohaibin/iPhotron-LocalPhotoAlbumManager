@@ -40,6 +40,11 @@ _MIB: Final = 1024 * 1024
 _GIB: Final = 1024 * _MIB
 _MAGIC: Final = b"IPHSURF\0"
 _SCHEMA: Final = 2
+# Bump this when decoder semantics can change the pixels for an otherwise
+# identical source identity.  This is intentionally separate from _SCHEMA:
+# the on-disk container remains readable, but surfaces produced by the old
+# decoder contract must not bypass the corrected decode path.
+_DECODE_SEMANTICS_CONTRACT: Final = 2
 _HEADER_SIZE: Final = 4096
 _PREFIX = struct.Struct("<8sIIIQQ")
 
@@ -135,7 +140,7 @@ def _canonical_key(request: DetailRenderRequest) -> bytes:
         "orientation": request.source_identity.orientation,
         "pixel_format": "rgba8888",
         "color_space": "srgb",
-        "contract": 1,
+        "contract": _DECODE_SEMANTICS_CONTRACT,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 

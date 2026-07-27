@@ -1,12 +1,17 @@
 # 启动链路合并前复审修复交接
 
-更新日期：2026-07-22
+更新日期：2026-07-27
+
+> 2026-07-27：Pets P0-1～P3-4 的自动化修复与门禁已按
+> `PETS_REVIEW_REMEDIATION_LEDGER.md` 收口。接手者只执行该台账和
+> `MANUAL_VALIDATION_MATRIX.md` 中保留的实机项；人工证据齐全前仍不能把当前分支
+> 视为可合并。
 
 ## 结论与版本边界
 
 - 合并基线：`edit-base` / `6ff592f72a6a4fd8575d5bd392e035dd2a95a12a`
 - 复审起点：`06a39362289de311368170f6271a0dc4f4de7b15`
-- 当前实现状态：`review_remediation_complete`
+- 当前实现状态：`automated_remediation_complete / manual_validation_pending`
 - 正式跨平台证据：`pending_manual_validation`
 
 本轮复审发现并修复了启动 terminal 边界、后台 import 资源所有权、

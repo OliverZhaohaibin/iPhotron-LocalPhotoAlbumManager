@@ -10,6 +10,56 @@ permissions:
   contents: read
 
 jobs:
+  pets-scale-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Pets scale-contract dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" "usearch>=2.26,<3"
+
+      - name: Run 50k incremental index contract
+        env:
+          IPHOTO_RUN_PETS_SCALE_CONTRACT: "1"
+        run: python -m pytest -q tests/contracts/test_pets_scale_contract.py
+
+  pets-model-contract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/iphoto-contracts
+          key: pets-yolox-c789161ed43c8269-dog-5a9522051c3cec2b
+
+      - name: Install Pets model-contract dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" onnxruntime
+
+      - name: Run official YOLOX contract
+        env:
+          IPHOTO_RUN_PETS_MODEL_CONTRACT: "1"
+        run: python -m pytest -q tests/contracts/test_pets_model_contract.py
+
   test:
     runs-on: ubuntu-latest
 

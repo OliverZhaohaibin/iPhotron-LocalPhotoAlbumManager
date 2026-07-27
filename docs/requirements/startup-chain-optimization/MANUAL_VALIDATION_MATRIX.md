@@ -1,6 +1,6 @@
 # 启动链路人工实机验收包
 
-更新日期：2026-07-14
+更新日期：2026-07-27
 
 > 2026-07-22：用户报告已完成多平台人工 smoke，未发现明显 bug。由于未附
 > artifact、build fingerprint 和逐项报告，该记录为
@@ -60,6 +60,38 @@ Metal 与 OpenGL 分开采集：
 - XCB/GLX 地图 helper 崩溃不结束主进程
 
 记录发行版、kernel、桌面环境、Wayland/XCB、GPU/driver、AppImage runtime。当前状态：`pending_manual_validation`。
+
+## Pets 审查修复人工矩阵
+
+下列项目只保留当前主机和自动化无法证明的 packaged 权限、网络故障、真实升级
+数据与交互体验。所有未附证据项一律为 `pending_manual_validation`。
+
+| 场景 | 必测平台/输入 | 通过条件 | 状态 |
+| --- | --- | --- | --- |
+| 只读安装目录与首次模型落盘 | macOS Apple Silicon、macOS Intel、Windows `Program Files`、Linux AppImage | bundled root 保持只读；查找顺序为 override、用户 cache、bundled；缺失模型只写用户 cache；首次识别成功 | `pending_manual_validation` |
+| 模型获取与自愈 | 在线下载、离线 bundled fallback、损坏 cache、代理失败、证书失败 | 在线文件 hash/size/shape 正确；离线可用 bundled；损坏 cache 可重取；代理/证书失败给出可操作提示且不污染 cache | `pending_manual_validation` |
+| 真实旧图库升级 | 含 name、cover、hidden、rejection、pet merge、跨类型 merge 的脱敏副本 | interactive 不被 backfill 阻塞；后台清空 pending/retry；durable state 不丢；失败资产明确显示 stale/source generation | `pending_manual_validation` |
+| 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
+| 取消、切库与恢复 | 扫描中快速取消、连续切库、journal 各提交点进程 kill/restart | GUI 不阻塞；旧 worker 不写新库或发迟到事件；重启最终 `finalized`；无 redirect/detection/rejection/cover/group-cache split-brain | `pending_manual_validation` |
+| 50k packaged 报告 | 上述四类平台各自正式产物，已有 50k 再新增 2 个 | 记录耗时、峰值 RAM、WAL 增量、取消延迟、退出线程与后台恢复；满足 `pets-scale-contract` 阈值 | `pending_manual_validation` |
+
+每条结果必须记录以下字段，任一缺失都不能改为 pass：
+
+```text
+artifact_sha256:
+build_manifest_path_and_sha256:
+platform / arch / OS version:
+model_sha256:
+redacted_fixture_id_and_sha256:
+redacted_log_path_and_sha256:
+scenario:
+observed_metrics:
+result: pass | fail | pending_manual_validation
+```
+
+真实图库只允许使用脱敏 fixture；日志不得包含用户名、图库绝对路径、原图内容或
+数据库中的用户文本。失败项应同时保留 operation ID、generation ID、journal 状态
+和恢复后的最终状态。
 
 ## 故障采集
 

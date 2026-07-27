@@ -38,6 +38,8 @@ class RecognitionAnnotation:
     image_height: int
     thumbnail_path: Path | None = None
     is_manual: bool = False
+    is_stale: bool = False
+    stale_reason: str | None = None
 
     @property
     def face_id(self) -> str:
@@ -55,11 +57,13 @@ class RecognitionAnnotation:
 
 
 def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotation:
-    display_name = annotation.display_name
+    display_name = annotation.canonical_display_name or annotation.display_name
+    if annotation.is_stale:
+        display_name = f"{display_name or 'unnamed'} · previous generation"
     return RecognitionAnnotation(
-        kind="pet",
+        kind=annotation.canonical_identity_kind,
         annotation_id=annotation.detection_id,
-        entity_id=annotation.pet_id,
+        entity_id=annotation.canonical_identity_id or annotation.pet_id,
         display_name=display_name,
         box_x=annotation.box_x,
         box_y=annotation.box_y,
@@ -68,4 +72,6 @@ def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotat
         image_width=annotation.image_width,
         image_height=annotation.image_height,
         thumbnail_path=annotation.thumbnail_path,
+        is_stale=annotation.is_stale,
+        stale_reason=annotation.stale_reason,
     )

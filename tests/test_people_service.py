@@ -796,6 +796,12 @@ def test_cross_merge_pet_into_person_redirects_pet_assets(tmp_path: Path) -> Non
         "asset-pet",
     }
     assert pet_service.build_pet_query("pet-a").asset_ids == []
+    pet_annotations = pet_service.list_asset_pet_annotations("asset-pet")
+    assert len(pet_annotations) == 1
+    assert pet_annotations[0].pet_id == "pet-a"
+    assert pet_annotations[0].canonical_identity_kind == "person"
+    assert pet_annotations[0].canonical_identity_id == "person-a"
+    assert pet_annotations[0].canonical_display_name == "Alice"
 
 
 def test_cross_merge_person_into_pet_redirects_person_assets(tmp_path: Path) -> None:
@@ -844,6 +850,12 @@ def test_cross_merge_person_into_pet_redirects_person_assets(tmp_path: Path) -> 
         "asset-person",
     }
     assert people_service.build_cluster_query("person-a").asset_ids == []
+    face_annotations = people_service.list_asset_face_annotations("asset-person")
+    assert len(face_annotations) == 1
+    assert face_annotations[0].person_id == "person-a"
+    assert face_annotations[0].canonical_identity_kind == "pet"
+    assert face_annotations[0].canonical_identity_id == "pet-a"
+    assert face_annotations[0].canonical_display_name == "Miso"
 
 
 def test_cross_merge_retargets_existing_redirect_sources(tmp_path: Path) -> None:
@@ -1250,7 +1262,12 @@ def test_asset_face_annotations_skip_manual_person_redirected_to_pet(tmp_path: P
     merge = people_service.merge_identities(f"person:{result.person_id}", "pet:pet-a")
 
     assert merge is not None and merge.merged is True
-    assert people_service.list_asset_face_annotations("asset-a") == []
+    annotations = people_service.list_asset_face_annotations("asset-a")
+    assert len(annotations) == 1
+    assert annotations[0].person_id == result.person_id
+    assert annotations[0].canonical_identity_kind == "pet"
+    assert annotations[0].canonical_identity_id == "pet-a"
+    assert annotations[0].canonical_display_name == "Miso"
 
 
 def test_merge_manual_only_people_keeps_profiles_embedding_free(tmp_path: Path) -> None:

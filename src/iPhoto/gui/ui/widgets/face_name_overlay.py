@@ -593,7 +593,7 @@ class FaceNameOverlayWidget(QWidget):
             pass
 
     def _display_name(self, annotation: AssetFaceAnnotation) -> str:
-        name = annotation.display_name
+        name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
         return (
             name.strip()
             if isinstance(name, str) and name.strip()

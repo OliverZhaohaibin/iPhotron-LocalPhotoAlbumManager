@@ -211,6 +211,35 @@ class FaceRepository:
             ).fetchall()
         return [self._person_from_row(row) for row in rows]
 
+    def get_person_name_map(
+        self,
+        person_ids: Iterable[str],
+    ) -> dict[str, str | None]:
+        """Return runtime display names for a bounded set of canonical people."""
+
+        unique_ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
+        if not unique_ids:
+            return {}
+        self.initialize()
+        result: dict[str, str | None] = {}
+        with closing(self._connect()) as conn:
+            for start in range(0, len(unique_ids), 500):
+                chunk = unique_ids[start : start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT person_id, name FROM persons "
+                    f"WHERE person_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                result.update(
+                    {
+                        str(row["person_id"]): row["name"]
+                        for row in rows
+                        if row["person_id"]
+                    }
+                )
+        return result
+
     def remove_faces_for_assets(
         self,
         asset_ids: Iterable[str],
@@ -543,6 +572,9 @@ class FaceRepository:
             rejected_face_keys = self._state_repo.get_rejected_face_keys(
                 row["face_key"] for row in rows if row["face_key"]
             )
+        canonical = self._canonical_annotation_identities(
+            str(row["person_id"]) for row in rows if row["person_id"]
+        )
         annotations = [
             AssetFaceAnnotation(
                 face_id=str(row["face_id"]),
@@ -560,12 +592,33 @@ class FaceRepository:
                     else None
                 ),
                 is_manual=False,
+                source_identity_id=(
+                    str(row["person_id"]) if row["person_id"] else None
+                ),
+                canonical_identity_kind=(
+                    canonical[str(row["person_id"])][0]
+                    if row["person_id"]
+                    else "person"
+                ),
+                canonical_identity_id=(
+                    canonical[str(row["person_id"])][1]
+                    if row["person_id"]
+                    else None
+                ),
+                canonical_display_name=(
+                    canonical[str(row["person_id"])][2]
+                    if row["person_id"]
+                    else None
+                ),
             )
             for row in rows
             if row["face_id"] and row["face_key"] not in rejected_face_keys
         ]
         if self._state_repo is not None:
             manual_faces = self._state_repo.get_manual_faces_for_asset(asset_id)
+            manual_canonical = self._canonical_annotation_identities(
+                face.person_id for face in manual_faces
+            )
             names = self._state_repo.get_profile_name_map(
                 face.person_id for face in manual_faces
             )
@@ -609,11 +662,63 @@ class FaceRepository:
                         else None
                     ),
                     is_manual=True,
+                    source_identity_id=face.person_id,
+                    canonical_identity_kind=manual_canonical[face.person_id][0],
+                    canonical_identity_id=manual_canonical[face.person_id][1],
+                    canonical_display_name=manual_canonical[face.person_id][2],
                 )
                 for face in manual_faces
             )
         annotations.sort(key=lambda face: (face.box_x, face.box_y, face.face_id))
         return annotations
+
+    def _canonical_annotation_identities(
+        self,
+        person_ids: Iterable[str],
+    ) -> dict[str, tuple[str, str, str | None]]:
+        source_ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
+        if not source_ids:
+            return {}
+        redirect_map: dict[tuple[str, str], tuple[str, str]] = {}
+        if self._state_repo is not None:
+            redirect_map = {
+                (redirect.source_kind, redirect.source_id): (
+                    redirect.target_kind,
+                    redirect.target_id,
+                )
+                for redirect in self._state_repo.get_identity_redirects()
+            }
+        resolved = {
+            source_id: _resolve_identity_redirect(
+                "person",
+                source_id,
+                redirect_map,
+            )
+            for source_id in source_ids
+        }
+        person_targets = [
+            entity_id for kind, entity_id in resolved.values() if kind == "person"
+        ]
+        person_names = (
+            self._state_repo.get_profile_name_map(person_targets)
+            if self._state_repo is not None
+            else {}
+        )
+        pet_names: dict[str, str | None] = {}
+        pet_targets = [entity_id for kind, entity_id in resolved.values() if kind == "pet"]
+        pet_state_path = self._db_path.parent.parent / "pets" / "pet_state.db"
+        if pet_targets and pet_state_path.exists():
+            from iPhoto.pets.state_repository import PetStateRepository
+
+            pet_names = PetStateRepository(pet_state_path).get_profile_name_map(pet_targets)
+        return {
+            source_id: (
+                kind,
+                entity_id,
+                person_names.get(entity_id) if kind == "person" else pet_names.get(entity_id),
+            )
+            for source_id, (kind, entity_id) in resolved.items()
+        }
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> None:
         self.initialize()
@@ -1608,3 +1713,16 @@ class FaceRepository:
         }
         if column_name not in columns:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
+def _resolve_identity_redirect(
+    source_kind: str,
+    source_id: str,
+    redirects: dict[tuple[str, str], tuple[str, str]],
+) -> tuple[str, str]:
+    cursor = (source_kind, source_id)
+    visited: set[tuple[str, str]] = set()
+    while cursor in redirects and cursor not in visited:
+        visited.add(cursor)
+        cursor = redirects[cursor]
+    return cursor

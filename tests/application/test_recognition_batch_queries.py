@@ -70,3 +70,30 @@ def test_pet_asset_validation_is_constant_for_100_identities() -> None:
     assert repository.get_asset_ids_by_pets.call_count == 1
     assert assets.calls == 1
     assert all(summary.asset_count == 1 for summary in result)
+
+
+def test_pet_dashboard_reuses_one_request_scoped_redirect_context() -> None:
+    assets = _AssetRepository()
+    repository = Mock()
+    summary = PetSummary(
+        pet_id="pet-a",
+        name=None,
+        key_detection_id="detection-a",
+        detection_count=1,
+        thumbnail_path=None,
+        created_at="",
+    )
+    repository.get_pet_summaries.return_value = [summary]
+    repository.get_asset_ids_by_pets.return_value = {"pet-a": ["asset-pet-a"]}
+    service = PetService(Path("/library"), asset_repository=assets)
+    service._repository = repository
+    service._identity_redirects = Mock(return_value=[])
+    service._face_repository = Mock(return_value=Mock())
+    service.pet_status_counts = Mock(return_value={"pending": 2, "retry": 1})
+
+    summaries, pending = service.load_dashboard(include_hidden=True)
+
+    assert summaries[0].asset_count == 1
+    assert pending == 3
+    service._identity_redirects.assert_called_once_with()
+    service._face_repository.assert_called_once_with()

@@ -141,6 +141,8 @@ class LibraryRuntimeController(
         self._pet_index_coordinator: PetIndexCoordinator | None = None
         self._recognition_services_root: Path | None = None
         self._recognition_scans_root: Path | None = None
+        self._recognition_generation = 0
+        self._retiring_recognition_workers: set[QThread] = set()
         self._library_session: "LibrarySession | None" = None
         self._owns_library_session = False
         self._scan_service: "LibraryScanService | None" = None
@@ -595,6 +597,35 @@ class LibraryRuntimeController(
         self._recognition_services_root = root
         if root != self._recognition_scans_root:
             self._recognition_scans_root = None
+        if root is not None and pet_service is not None:
+            from ..pets.pipeline import PET_DETECTOR_PIPELINE_VERSION
+
+            repository = pet_service.repository()
+            store = pet_service.asset_repository
+            if repository is not None and store is not None:
+                required_value = repository.get_scan_metadata(
+                    "pet_backfill_required"
+                )
+                previous_version = repository.get_scan_metadata(
+                    "detector_pipeline_version"
+                )
+                if not isinstance(required_value, (str, type(None))) or not isinstance(
+                    previous_version,
+                    (str, type(None)),
+                ):
+                    return
+                backfill_required = required_value == "1"
+                if previous_version != PET_DETECTOR_PIPELINE_VERSION:
+                    counts = store.count_by_pet_status()
+                    if not isinstance(counts, dict):
+                        return
+                    backfill_required = backfill_required or int(
+                        counts.get("done", 0)
+                    ) > 0
+                    if backfill_required:
+                        repository.set_scan_metadata("pet_backfill_required", "1")
+                if backfill_required:
+                    QTimer.singleShot(0, lambda: self._start_pet_backfill_worker(root))
 
     def activate_recognition_scans(self) -> None:
         """Start model workers after a recognition viewport is usable."""

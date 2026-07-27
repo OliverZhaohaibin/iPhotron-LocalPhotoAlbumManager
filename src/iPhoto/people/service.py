@@ -12,7 +12,11 @@ from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.repository import PetRepository
-from iPhoto.utils.pathutils import ensure_work_dir
+from iPhoto.utils.pathutils import (
+    LibraryAssetPathError,
+    ensure_work_dir,
+    resolve_library_asset_path,
+)
 
 from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
@@ -513,14 +517,7 @@ class PeopleService:
             rows_by_id = asset_repository.get_rows_by_ids([asset_id])
             if asset_id not in rows_by_id:
                 return []
-        redirected_people = self._redirected_source_ids("person")
-        if not redirected_people:
-            return repository.list_asset_face_annotations(asset_id)
-        return [
-            annotation
-            for annotation in repository.list_asset_face_annotations(asset_id)
-            if annotation.person_id not in redirected_people
-        ]
+        return repository.list_asset_face_annotations(asset_id)
 
     def list_person_name_suggestions(self) -> list[PersonSummary]:
         return [
@@ -556,11 +553,9 @@ class PeopleService:
         asset_rel = str(row.get("rel") or row.get("path") or "").strip()
         if not asset_rel:
             raise ManualFaceValidationError("The selected photo path could not be resolved.")
-        resolved_library_root = library_root.resolve()
-        image_path = (resolved_library_root / asset_rel).resolve()
         try:
-            image_path.relative_to(resolved_library_root)
-        except ValueError as exc:
+            image_path = resolve_library_asset_path(library_root, asset_rel)
+        except LibraryAssetPathError as exc:
             raise ManualFaceValidationError("The selected photo path is invalid.") from exc
         if not image_path.is_file():
             raise ManualFaceValidationError("The selected photo file could not be found.")

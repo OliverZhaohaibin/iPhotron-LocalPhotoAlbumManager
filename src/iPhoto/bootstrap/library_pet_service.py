@@ -48,6 +48,9 @@ class IndexStorePetAssetRepository:
     def update_pet_statuses(self, asset_ids: Iterable[str], status: str) -> None:
         self._repository().update_pet_statuses(asset_ids, status)
 
+    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
+        return int(self._repository().reset_pet_statuses_for_pipeline_upgrade())
+
     def count_by_pet_status(self) -> dict[str, int]:
         return dict(self._repository().count_by_pet_status())
 

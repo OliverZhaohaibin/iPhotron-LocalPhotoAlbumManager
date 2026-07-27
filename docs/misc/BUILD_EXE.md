@@ -177,7 +177,7 @@ python -m pip install -e ".[pets-ai]"
 ```
 
 The standalone bundle must retain `onnxruntime`, `torch`, `torchvision`,
-`hdbscan`, and `certifi`. An offline-ready build must also include:
+`usearch`, and `certifi`. An offline-ready build must also include:
 
 ```text
 extension/models/pets/
@@ -193,20 +193,20 @@ that enable Pets should also include the optional runtime explicitly:
 --include-package=onnxruntime
 --include-package=torch
 --include-package=torchvision
---include-package=hdbscan
+--include-package=usearch
 --include-package=certifi
 --include-data-dir=src/extension/models=extension/models
 ```
 
 The current platform build scripts explicitly include the People runtime but do
-not yet add `torch`, `torchvision`, or `hdbscan` flags. Therefore a stock script
+not yet add `torch`, `torchvision`, or `usearch` flags. Therefore a stock script
 build must not be advertised as Pets-enabled merely because the model directory
 was copied; add the flags above (or update the script) and perform the Pets smoke
 test before release.
 
-If models are intentionally omitted, first-use download requires a writable
-`extension/models/pets` location or an explicit writable
-`IPHOTO_PET_MODEL_DIR`. Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` for controlled
+If models are intentionally omitted, first-use download uses the platform user
+cache (or an explicit `IPHOTO_PET_MODEL_DIR`). Set
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` for controlled
 offline deployments. See
 [`PETS_RECOGNITION_RUNTIME.md`](PETS_RECOGNITION_RUNTIME.md) for the runtime and
 persistence contract.

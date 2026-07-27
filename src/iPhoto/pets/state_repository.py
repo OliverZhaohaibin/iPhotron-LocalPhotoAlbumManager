@@ -11,6 +11,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
 from .records import PetDetectionRecord, PetProfile, PetRecord
@@ -78,7 +80,9 @@ class PetStateRepository:
                 """
                 SELECT
                     pet_id, name, center_embedding, embedding_dim,
-                    created_at, updated_at, sample_count, profile_state, species_label
+                    created_at, updated_at, sample_count, profile_state, species_label,
+                    embedding_pipeline_version, generation_id,
+                    boundary_embeddings, boundary_sample_count
                 FROM pet_profiles
                 """
             ).fetchall()
@@ -104,6 +108,15 @@ class PetStateRepository:
                     sample_count=sample_count,
                     profile_state=profile_state_for_sample_count(sample_count),
                     species_label=_normalize_species_label(row["species_label"]),
+                    embedding_pipeline_version=str(
+                        row["embedding_pipeline_version"] or ""
+                    ),
+                    generation_id=int(row["generation_id"] or 0),
+                    boundary_embeddings=_deserialize_boundary_embeddings(
+                        row["boundary_embeddings"],
+                        embedding_dim=int(row["embedding_dim"] or 0),
+                        sample_count=int(row["boundary_sample_count"] or 0),
+                    ),
                 )
             )
         return profiles
@@ -184,10 +197,37 @@ class PetStateRepository:
             )
             conn.commit()
 
+    def migrate_pet_keys(self, mappings: Iterable[tuple[str, str]]) -> None:
+        """Add replacement keys without copying any rejection decisions."""
+
+        normalized = tuple(
+            (str(pet_key), str(pet_id))
+            for pet_key, pet_id in mappings
+            if pet_key and pet_id
+        )
+        if not normalized:
+            return
+        self.initialize()
+        timestamp = utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO pet_keys (pet_key, pet_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(pet_key) DO UPDATE SET
+                    pet_id = excluded.pet_id,
+                    updated_at = excluded.updated_at
+                """,
+                [(pet_key, pet_id, timestamp) for pet_key, pet_id in normalized],
+            )
+            conn.commit()
+
     def sync_scan_results(
         self,
         pets: list[PetRecord],
         detections: list[PetDetectionRecord],
+        *,
+        replaced_pet_ids: Iterable[str] = (),
     ) -> None:
         self.initialize()
         names = self.get_profile_name_map(pet.pet_id for pet in pets)
@@ -226,8 +266,10 @@ class PetStateRepository:
                     """
                     INSERT INTO pet_profiles (
                         pet_id, name, center_embedding, embedding_dim,
-                        created_at, updated_at, sample_count, profile_state, species_label
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, sample_count, profile_state, species_label,
+                        embedding_pipeline_version, generation_id,
+                        boundary_embeddings, boundary_sample_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pet_id) DO UPDATE SET
                         name = COALESCE(pet_profiles.name, excluded.name),
                         center_embedding = excluded.center_embedding,
@@ -235,7 +277,11 @@ class PetStateRepository:
                         updated_at = excluded.updated_at,
                         sample_count = excluded.sample_count,
                         profile_state = excluded.profile_state,
-                        species_label = excluded.species_label
+                        species_label = excluded.species_label,
+                        embedding_pipeline_version = excluded.embedding_pipeline_version,
+                        generation_id = excluded.generation_id
+                        , boundary_embeddings = excluded.boundary_embeddings
+                        , boundary_sample_count = excluded.boundary_sample_count
                     """,
                     (
                         pet.pet_id,
@@ -247,6 +293,13 @@ class PetStateRepository:
                         sample_count,
                         profile_state_for_sample_count(sample_count),
                         _normalize_species_label(pet.species_label),
+                        pet.embedding_pipeline_version,
+                        pet.generation_id,
+                        _serialize_boundary_embeddings(
+                            pet.boundary_embeddings,
+                            pet.embedding_dim,
+                        ),
+                        min(len(pet.boundary_embeddings), 8),
                     ),
                 )
 
@@ -308,14 +361,8 @@ class PetStateRepository:
                 )
 
             current_pet_ids = {pet.pet_id for pet in pets if pet.pet_id}
-            automatic_cover_rows = conn.execute(
-                "SELECT pet_id FROM pet_covers WHERE is_custom = 0"
-            ).fetchall()
-            stale_automatic_cover_ids = [
-                str(row["pet_id"])
-                for row in automatic_cover_rows
-                if row["pet_id"] and str(row["pet_id"]) not in current_pet_ids
-            ]
+            replaced_ids = {str(pet_id) for pet_id in replaced_pet_ids if pet_id}
+            stale_automatic_cover_ids = sorted(replaced_ids - current_pet_ids)
             conn.executemany(
                 "DELETE FROM pet_covers WHERE pet_id = ? AND is_custom = 0",
                 [(pet_id,) for pet_id in stale_automatic_cover_ids],
@@ -655,7 +702,11 @@ class PetStateRepository:
                 updated_at TEXT NOT NULL,
                 sample_count INTEGER DEFAULT 0,
                 profile_state TEXT DEFAULT 'unstable',
-                species_label TEXT
+                species_label TEXT,
+                embedding_pipeline_version TEXT NOT NULL DEFAULT '',
+                generation_id INTEGER NOT NULL DEFAULT 0,
+                boundary_embeddings BLOB,
+                boundary_sample_count INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -707,6 +758,25 @@ class PetStateRepository:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pet_keys_pet_id ON pet_keys (pet_id)")
+        _ensure_column(
+            conn,
+            "pet_profiles",
+            "embedding_pipeline_version",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            conn,
+            "pet_profiles",
+            "generation_id",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(conn, "pet_profiles", "boundary_embeddings", "BLOB")
+        _ensure_column(
+            conn,
+            "pet_profiles",
+            "boundary_sample_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         conn.commit()
 
 
@@ -730,3 +800,44 @@ def _canonical_redirect_map(redirects: dict[str, str]) -> dict[str, str]:
         if cursor not in visited and cursor != source:
             canonical[source] = cursor
     return canonical
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _serialize_boundary_embeddings(
+    embeddings: tuple[np.ndarray, ...],
+    embedding_dim: int,
+) -> sqlite3.Binary | None:
+    selected = [
+        np.asarray(embedding, dtype=np.float32).reshape(-1)
+        for embedding in embeddings[:8]
+        if int(np.asarray(embedding).size) == int(embedding_dim)
+    ]
+    if not selected:
+        return None
+    return sqlite3.Binary(np.stack(selected, axis=0).tobytes())
+
+
+def _deserialize_boundary_embeddings(
+    blob: bytes | None,
+    *,
+    embedding_dim: int,
+    sample_count: int,
+) -> tuple[np.ndarray, ...]:
+    count = max(0, min(int(sample_count), 8))
+    if not blob or embedding_dim <= 0 or count <= 0:
+        return ()
+    matrix = np.frombuffer(blob, dtype=np.float32, count=count * embedding_dim).reshape(
+        count,
+        embedding_dim,
+    )
+    return tuple(row.copy() for row in matrix)

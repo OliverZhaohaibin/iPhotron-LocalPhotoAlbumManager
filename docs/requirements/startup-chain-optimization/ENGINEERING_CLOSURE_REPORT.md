@@ -1,10 +1,10 @@
 # 启动链路工程收口报告
 
-更新日期：2026-07-22
+更新日期：2026-07-27
 
 ## 当前状态
 
-- 实现状态：`review_remediation_complete`
+- 实现状态：`automated_remediation_complete / manual_validation_pending`
 - 本机环境：macOS Apple Silicon，Nuitka packaged Metal/OpenGL
 - 本机 packaged 状态：`local_packaged_offscreen_pass / cocoa_manual_run_required`
 - Windows、Linux、macOS Intel：`pending_manual_validation`
@@ -14,10 +14,11 @@
 `engineering_complete` 只在最终 v4 Cocoa/Metal/OpenGL 本机验证和固定 baseline
 `6ff592f7` 的同构 30 次 A/B 证据通过后写入。其他平台未做实机测试，因此本报告不输出“全平台 PASS”。
 
-2026-07-22 严格复审曾将状态重开为 `reopened_review_fixes_required`；terminal
-边界、模块预载资源所有权、Recognition 懒加载回退和 A/B build fingerprint
-门禁现已修复，状态因此更新为 `review_remediation_complete`。详细交接见
-`NEXT_DEVELOPMENT_HANDOFF.md`。
+2026-07-22 的启动链复审修复仍保留；2026-07-27 对 Pets 模型契约、大图库
+复杂度、跨库一致性、升级回填、打包模型目录和身份语义的复审重新打开了工程
+状态。完整问题、裁决和验收要求见 `PETS_REVIEW_REMEDIATION_LEDGER.md`。本轮自动化
+修复与门禁已经完成；只读 packaged 安装、真实升级库、网络失败和跨平台 50k 报告
+仍为 `manual_validation_pending`，因此不得恢复 `engineering_complete`。
 
 用户报告已在多平台手工 smoke 且未发现明显 bug。因未附逐平台 artifact、
 build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_smoke_pass`，
@@ -65,7 +66,14 @@ build fingerprint 与报告，该记录标记为 `user_reported_multi_platform_s
 
 ## 已取得的证据
 
-- 全量自动化：`2624 passed, 11 skipped`。
+- 当前分支全量自动化：`2744 passed, 14 skipped`。
+- Pets 真实模型契约：`1 passed`；固定 YOLOX/dog fixture SHA、CPU provider、
+  raw-BGR、类别、bbox、置信度和去重通过。
+- Pets 规模契约：`1 passed in 2.93s`；1k/10k/50k 与 50k+2 通过时间、RSS、WAL、
+  增量写入和结构门禁。
+- Pets 修复覆盖 generation/key migration、stale 结果、old/new event diff、SQL
+  query budget、超 bind-limit reset、缩略图回滚、journal 恢复、跨类型 annotation、
+  backfill 和切库迟到 worker。
 - `tools/check_architecture.py`：通过。
 - `compileall`、`git diff --check`、macOS/fast build shell 语法：通过。
 - v4 packaged 低内存构建、严格 codesign、arm64 架构、资源裁剪、710 MB 地图 archive 和 protocol v2 helper 往返：通过；warm helper 0.12 秒。

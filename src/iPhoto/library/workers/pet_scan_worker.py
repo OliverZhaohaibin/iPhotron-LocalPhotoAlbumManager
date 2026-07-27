@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import time
+import uuid
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -21,13 +23,13 @@ from ...pets.pipeline import (
 )
 from ...pets.service import PetService, pet_library_paths
 from ...pets.status import (
-    PET_STATUS_DONE,
     PET_STATUS_FAILED,
     PET_STATUS_PENDING,
     PET_STATUS_RETRY,
     is_pet_scan_candidate,
     normalize_pet_status,
 )
+from ...recognition.operation_journal import RecognitionOperationJournal
 from ...utils.logging import get_logger
 
 LOGGER = get_logger()
@@ -39,7 +41,7 @@ class PetScanWorker(QThread):
     petIndexUpdated = Signal()  # noqa: N815
     statusChanged = Signal(str)  # noqa: N815
 
-    BATCH_SIZE = 2
+    BATCH_SIZE = 16
     QUEUE_TARGET_SIZE = 8
     CPU_BACKOFF_SECONDS = 0.08
 
@@ -90,6 +92,7 @@ class PetScanWorker(QThread):
             return
 
         paths = pet_library_paths(self._library_root)
+        self._cleanup_stale_thumbnail_staging(paths.thumbnail_dir)
         pipeline = PetClusterPipeline(model_root=paths.model_dir)
         if self._cancelled:
             return
@@ -113,6 +116,7 @@ class PetScanWorker(QThread):
                 if self._input_closed:
                     self._top_up_pending_rows()
                     if self._queue.empty():
+                        self._mark_backfill_complete_if_drained()
                         return
                 continue
 
@@ -197,16 +201,19 @@ class PetScanWorker(QThread):
             return False
         batch_asset_ids = [str(row.get("id") or "") for row in batch if row.get("id")]
         people_boxes = self._pet_service.people_boxes_by_asset_ids(batch_asset_ids)
+        staging_dir = thumbnail_dir / ".staging" / uuid.uuid4().hex
         detected = list(
             pipeline.detect_pets_for_rows(
                 batch,
                 library_root=self._library_root,
-                thumbnail_dir=thumbnail_dir,
+                thumbnail_dir=staging_dir,
+                published_thumbnail_dir=thumbnail_dir,
                 is_cancelled=lambda: self._cancelled,
                 people_boxes_by_asset_id=people_boxes,
             )
         )
         if self._cancelled:
+            shutil.rmtree(staging_dir, ignore_errors=True)
             self._mark_rows_retry(batch)
             return False
 
@@ -257,11 +264,13 @@ class PetScanWorker(QThread):
         event = coordinator.submit_detected_batch(
             retry_detected,
             distance_threshold=pipeline.distance_threshold,
-            min_samples=pipeline.min_samples,
             detector_pipeline_version=pipeline.detector_pipeline_version,
             clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
             people_boxes_provider=self._pet_service.people_boxes_by_asset_ids,
+            staged_thumbnail_dir=staging_dir,
+            published_thumbnail_dir=thumbnail_dir,
         )
+        shutil.rmtree(staging_dir, ignore_errors=True)
         return event is not None
 
     def _recluster_for_clustering_upgrade(self, pipeline: PetClusterPipeline) -> bool:
@@ -271,7 +280,6 @@ class PetScanWorker(QThread):
         reclustered_count = coordinator.recluster_for_pipeline_upgrade(
             clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
             distance_threshold=pipeline.distance_threshold,
-            min_samples=pipeline.min_samples,
         )
         return reclustered_count > 0
 
@@ -284,17 +292,12 @@ class PetScanWorker(QThread):
         if current_version == PET_DETECTOR_PIPELINE_VERSION:
             return
 
-        reset_ids = [
-            str(row.get("id") or "")
-            for row in store.read_rows_by_pet_status([PET_STATUS_DONE])
-            if row.get("id") and is_pet_scan_candidate(row)
-        ]
-        if reset_ids:
-            store.update_pet_statuses(reset_ids, PET_STATUS_PENDING)
+        reset_count = store.reset_pet_statuses_for_pipeline_upgrade()
+        if reset_count:
             LOGGER.info(
                 "Reset %d pet-scanned assets to pending for detector pipeline upgrade "
                 "%s -> %s in %s",
-                len(reset_ids),
+                reset_count,
                 current_version or "<missing>",
                 PET_DETECTOR_PIPELINE_VERSION,
                 self._library_root,
@@ -309,6 +312,38 @@ class PetScanWorker(QThread):
         self._update_pet_statuses(ids, PET_STATUS_RETRY)
         for asset_id in ids:
             self._queued_ids.discard(asset_id)
+
+    def _mark_backfill_complete_if_drained(self) -> None:
+        repository = self._pet_service.repository()
+        store = self._pet_service.asset_repository
+        if repository is None or store is None:
+            return
+        counts = store.count_by_pet_status()
+        if int(counts.get(PET_STATUS_PENDING, 0)) == 0 and int(
+            counts.get(PET_STATUS_RETRY, 0)
+        ) == 0:
+            repository.set_scan_metadata("pet_backfill_required", "0")
+
+    def _cleanup_stale_thumbnail_staging(self, thumbnail_dir: Path) -> None:
+        staging_root = (Path(thumbnail_dir) / ".staging").resolve()
+        if not staging_root.is_dir():
+            return
+        journal = RecognitionOperationJournal(
+            pet_library_paths(self._library_root).root_dir.parent
+            / "recognition"
+            / "operations.db"
+        )
+        active = {
+            str(Path(value).resolve())
+            for operation in journal.unfinished()
+            if (value := operation.payload.get("staged_thumbnail_dir"))
+        }
+        for candidate in staging_root.iterdir():
+            resolved = candidate.resolve()
+            if resolved.parent != staging_root or str(resolved) in active:
+                continue
+            if resolved.is_dir():
+                shutil.rmtree(resolved, ignore_errors=True)
 
     def _update_pet_statuses(self, asset_ids: Iterable[str], status: str) -> None:
         store = self._pet_service.asset_repository

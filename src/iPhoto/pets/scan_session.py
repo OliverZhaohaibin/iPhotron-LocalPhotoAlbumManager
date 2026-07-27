@@ -36,7 +36,6 @@ class PetScanSession:
         repository: PetRepository,
         *,
         distance_threshold: float,
-        min_samples: int,
         existing_detections: list[PetDetectionRecord],
     ) -> tuple[list[PetDetectionRecord], list[PetRecord]]:
         done_asset_ids = {result.asset_id for result in self._staged_results if result.asset_id}
@@ -59,7 +58,6 @@ class PetScanSession:
             repository,
             detections=all_detections,
             distance_threshold=distance_threshold,
-            min_samples=min_samples,
         )
 
     def build_snapshot_from_detections(
@@ -68,7 +66,6 @@ class PetScanSession:
         *,
         detections: list[PetDetectionRecord],
         distance_threshold: float,
-        min_samples: int,
     ) -> tuple[list[PetDetectionRecord], list[PetRecord]]:
         all_detections = list(detections)
         state_repository = repository.state_repository
@@ -82,7 +79,6 @@ class PetScanSession:
         clustered_detections, pets = cluster_pet_records(
             all_detections,
             distance_threshold=distance_threshold,
-            min_samples=min_samples,
         )
         if state_repository is not None:
             clustered_detections, pets = canonicalize_pet_identities(

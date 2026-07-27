@@ -19,8 +19,9 @@
 因此之前记录的 Pets 自动化完成结论已经撤回。对 Pets 模型契约、大图库
 复杂度、跨库一致性、升级回填、打包模型目录和身份语义的复审已完成本机自动化
 核心修复。完整问题、裁决和验收要求见 `PETS_REVIEW_REMEDIATION_LEDGER.md`。项目固定
-`pet-models-v1` TorchScript Release 尚未发布，最终 head 远端 CI、只读 packaged
-安装、真实升级库、网络失败和跨平台 50k 报告仍为
+`pet-models-v1` TorchScript Release 尚未发布；远端 CI 已在
+`e0001ee646e95fadc33659ebe277eb067e79a084` 上 9/9 成功。只读 packaged 安装、
+真实升级库、网络失败和跨平台 50k 报告仍为
 `manual_validation_pending`，因此不得恢复 `engineering_complete`。
 
 用户报告已在多平台手工 smoke 且未发现明显 bug。因未附逐平台 artifact、

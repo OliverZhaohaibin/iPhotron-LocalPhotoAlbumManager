@@ -75,7 +75,6 @@ Metal 与 OpenGL 分开采集：
 | 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
 | 取消、切库与恢复 | 扫描中快速取消、连续切库、journal 各提交点进程 kill/restart | GUI 不阻塞；旧 worker 不写新库或发迟到事件；重启最终 `finalized`；无 redirect/detection/rejection/cover/group-cache split-brain | `pending_manual_validation` |
 | 50k packaged 报告 | 上述四类平台各自正式产物，已有 50k 再新增 2 个 | 记录耗时、峰值 RAM、WAL 增量、取消延迟、退出线程与后台恢复；满足 `pets-scale-contract` 阈值 | `pending_manual_validation` |
-| 最终 head CI | push 后的 `codex/pets-review-remediation` head SHA | stacked PR 的 model、scale、全量和 packaging required jobs 全部对应同一最终 SHA；记录 Actions URL | `pending_manual_validation` |
 
 每条结果必须记录以下字段，任一缺失都不能改为 pass：
 

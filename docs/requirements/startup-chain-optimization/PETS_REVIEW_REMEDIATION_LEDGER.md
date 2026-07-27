@@ -38,7 +38,7 @@
 | R2-10 | journal recovery 仅在新扫描批次前触发，其他 mutation 可越过旧 applying 操作。 | 初始化和每个 public mutation 前按创建顺序恢复；失败时拒绝新 mutation。 | `test_public_mutation_cannot_overtake_unrecovered_journal_owner` 通过。 | `automated_pass` |
 | R2-11 | `_publish_staged_thumbnails` 的逐文件 replace 没有内部补偿或预登记正式目标。 | publish 前 journal 记录清单；部分失败反向清理，进程恢复也能识别 orphan。 | `test_thumbnail_publish_compensates_when_later_replace_fails` 及 scan recovery 回归通过。 | `automated_pass` |
 | R2-12 | DINO 仅固定 Torch Hub source revision，首次权重内容没有发布前 SHA。 | 生产运行时改用项目固定 Release TorchScript，manifest 固定 URL/SHA/size/shape；Torch Hub 仅保留开发转换工具。 | 已固定并在首次加载前验证官方 checkpoint SHA/size，生成 cache 复核 metadata/hash；仓库 `pet-models-v1` 不可变 TorchScript Release 尚未发布，生产 Torch Hub 路径尚不能删除。 | `manual_pending` |
-| R2-13 | `.github/workflows/test.yml` 的 PR base 仅允许 `main`，当前 stacked PR 没有 head status。 | 同时允许 `main` 与 `codex/startup-chain-optimization`，增加手工触发。 | workflow 触发条件和本地门禁已通过；必须在 push 后记录最终 head SHA 的 required jobs。 | `manual_pending` |
+| R2-13 | `.github/workflows/test.yml` 的 PR base 仅允许 `main`，当前 stacked PR 没有 head status。 | 同时允许 `main` 与 `codex/startup-chain-optimization`，增加手工触发，并为独立 Pets job 配置 Linux Qt headless runtime。 | `e0001ee646e95fadc33659ebe277eb067e79a084` 的 9 个 GitHub Actions job 全部成功：[run 30263442145](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/30263442145)。 | `automated_pass` |
 
 二次审查的工程关闭上限为
 `automated_remediation_complete / manual_validation_pending`。远端 CI、真实安装权限、

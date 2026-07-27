@@ -55,9 +55,11 @@ boundary、分块查询、长期 USearch index、模型 root 自愈、缩略图�
 PR workflow 已完成自动化修复。当前全量 `2756 passed, 14 skipped`，真实模型和
 50k 规模独立门禁均通过。
 
-仍有两个不可伪造为完成的交付边界：仓库不可变 `pet-models-v1` TorchScript Release
-尚未发布，因此生产 Torch Hub 转换路径仍保留；push 后最终 head SHA 的 GitHub
-Actions 尚无证据。这两项及全部真实平台项目继续记录在人工矩阵中。
+远端 CI 已在 `e0001ee646e95fadc33659ebe277eb067e79a084` 上 9/9 成功，证据为
+[run 30263442145](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/30263442145)。
+仍有一个不可伪造为完成的交付边界：仓库不可变 `pet-models-v1` TorchScript Release
+尚未发布，因此生产 Torch Hub 转换路径仍保留。该项及全部真实平台项目继续记录
+在人工矩阵中。
 
 定向验收覆盖 terminal 唯一性、取消后的迟到 import、Recognition 首用预热、构建清单和 A/B 拒绝路径。完整平台性能数字仍按 `STARTUP_BENCHMARK_RUNBOOK.md` 采集。
 

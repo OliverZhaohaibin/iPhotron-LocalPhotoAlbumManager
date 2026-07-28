@@ -12,6 +12,7 @@ from ..people.service import PeopleService
 
 if TYPE_CHECKING:
     from ..people.index_coordinator import PeopleIndexCoordinator
+    from ..recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
 class IndexStorePeopleAssetRepository:
@@ -48,6 +49,9 @@ class IndexStorePeopleAssetRepository:
     def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
         self._repository().update_face_statuses(asset_ids, status)
 
+    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
+        return int(self._repository().reset_face_statuses_for_pipeline_upgrade())
+
     def count_by_face_status(self) -> dict[str, int]:
         return dict(self._repository().count_by_face_status())
 
@@ -73,6 +77,7 @@ def create_people_service(
     *,
     asset_repository: PeopleAssetRepositoryPort | None = None,
     coordinator: PeopleIndexCoordinator | None = None,
+    mutation_coordinator: RecognitionMutationCoordinator | None = None,
     repository_factory: Callable[[Path], Any] | None = None,
 ) -> PeopleService:
     """Create a session-bound People service for one library."""
@@ -88,6 +93,7 @@ def create_people_service(
         root,
         asset_repository=repository,
         coordinator=coordinator,
+        mutation_coordinator=mutation_coordinator,
     )
 
 

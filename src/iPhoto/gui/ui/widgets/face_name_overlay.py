@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QCompleter, QLineEdit, QListView, QT
 from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
+
 from .recognition_annotations import RecognitionIdentitySuggestion
 
 _LABEL_MARGIN_X = 10
@@ -593,12 +594,18 @@ class FaceNameOverlayWidget(QWidget):
             pass
 
     def _display_name(self, annotation: AssetFaceAnnotation) -> str:
-        name = annotation.display_name
-        return (
+        name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
+        display_name = (
             name.strip()
             if isinstance(name, str) and name.strip()
             else tr("FaceNameOverlay", "unnamed")
         )
+        if bool(getattr(annotation, "is_stale", False)):
+            return tr(
+                "FaceNameOverlay",
+                "%1 · previous generation",
+            ).replace("%1", display_name)
+        return display_name
 
     def retranslate_ui(self) -> None:
         """Refresh overlay labels after the application language changes."""
@@ -1158,7 +1165,11 @@ class FaceNameOverlayWidget(QWidget):
         self._editing_face_id = face_id
         editor = _FaceNameEditor(self.parentWidget() or self)
         editor.set_name_suggestions(self._name_suggestions)
-        editor.setText(state.annotation.display_name or "")
+        editor.setText(
+            getattr(state.annotation, "canonical_display_name", None)
+            or state.annotation.display_name
+            or ""
+        )
         editor.commitRequested.connect(self._commit_editing)
         editor.cancelRequested.connect(self._cancel_editing)
         self._editor = editor
@@ -1175,7 +1186,14 @@ class FaceNameOverlayWidget(QWidget):
             self._cancel_editing()
             return
         new_name = self._editor.text().strip() or None
-        state.annotation = replace(state.annotation, display_name=new_name)
+        if hasattr(state.annotation, "canonical_display_name"):
+            fields = getattr(state.annotation, "__dataclass_fields__", {})
+            changes = {"canonical_display_name": new_name}
+            if "display_name" in fields:
+                changes["display_name"] = new_name
+            state.annotation = replace(state.annotation, **changes)
+        else:
+            state.annotation = replace(state.annotation, display_name=new_name)
         person_id = state.annotation.person_id
         self._teardown_editor(show_chip=True)
         if person_id:

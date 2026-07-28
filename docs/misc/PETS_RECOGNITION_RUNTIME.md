@@ -38,9 +38,9 @@ Install the optional runtime with:
 pip install -e ".[pets-ai]"
 ```
 
-The extra provides `onnxruntime`, `torch`, `torchvision`, `hdbscan`, and
-`certifi`. The default model root remains part of the repository extension
-contract:
+The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
+`certifi`. Bundled models are read-only fallbacks; downloads are written to the
+platform user cache:
 
 ```text
 src/extension/models/pets/

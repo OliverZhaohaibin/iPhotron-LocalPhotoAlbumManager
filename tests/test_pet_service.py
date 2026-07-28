@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import sys
 import threading
 import warnings
@@ -21,8 +23,11 @@ from iPhoto.pets import pipeline as pet_pipeline
 from iPhoto.pets.index_coordinator import PetIndexCoordinator, reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
     _DINO_HUB_REPO,
+    DEFAULT_PET_DETECTOR_MODEL_SHA256,
+    DEFAULT_PET_DETECTOR_MODEL_URL,
     PET_CLUSTERING_PIPELINE_VERSION,
     PET_DETECTOR_PIPELINE_VERSION,
+    PET_MODEL_MANIFEST,
     DetectedAssetPets,
     PetClusterPipeline,
     _decode_yolox_predictions,
@@ -32,7 +37,6 @@ from iPhoto.pets.pipeline import (
     _map_yolox_box_to_source,
     _pet_box_overlaps_people_boxes,
     _preprocess_yolox,
-    _tile_scan_regions,
     _YoloxOnnxPetDetector,
     build_pet_key,
     canonicalize_pet_identities,
@@ -84,6 +88,15 @@ class _FakePetAssetRepository:
             status = str(row.get("pet_status") or "")
             counts[status] = counts.get(status, 0) + 1
         return counts
+
+    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
+        eligible = [
+            str(row["id"])
+            for row in self.rows
+            if row.get("pet_status") == "done" and int(row.get("media_type") or 0) == 0
+        ]
+        self.update_pet_statuses(eligible, "pending")
+        return len(eligible)
 
 
 @pytest.fixture(autouse=True)
@@ -182,8 +195,6 @@ def test_cluster_pet_records_splits_known_detector_species() -> None:
     clustered, pets = cluster_pet_records(
         detections,
         distance_threshold=0.2,
-        min_samples=2,
-        prefer_hdbscan=False,
     )
 
     assert len(pets) == 2
@@ -202,7 +213,6 @@ def test_cluster_pet_records_keeps_unknown_species_backward_compatible() -> None
     clustered, pets = cluster_pet_records(
         detections,
         distance_threshold=0.2,
-        min_samples=2,
     )
 
     assert len(pets) == 1
@@ -218,7 +228,6 @@ def test_cluster_pet_records_default_clusters_small_similar_pet_samples() -> Non
     clustered, pets = cluster_pet_records(
         detections,
         distance_threshold=0.2,
-        min_samples=2,
     )
 
     assert len(pets) == 1
@@ -264,7 +273,6 @@ def test_cluster_pet_records_ignores_hdbscan_for_default_identity_grouping(
     clustered, pets = cluster_pet_records(
         detections,
         distance_threshold=0.2,
-        min_samples=2,
     )
 
     assert len(pets) == 2
@@ -299,7 +307,6 @@ def test_cluster_pet_records_complete_link_blocks_similarity_chain() -> None:
     clustered, pets = cluster_pet_records(
         detections,
         distance_threshold=0.2,
-        min_samples=2,
     )
 
     assert len(pets) == 2
@@ -362,12 +369,12 @@ def test_yolox_detector_scans_tiles_when_full_image_has_no_supported_pet() -> No
 
     boxes = detector.detect(Image.new("RGB", (400, 300)))
 
-    assert len(calls) == 1 + len(_tile_scan_regions(400, 300))
+    assert len(calls) == 5
     assert [box.species_label for box in boxes] == ["sheep", "dog"]
     assert [box.confidence for box in boxes] == [pytest.approx(0.95), pytest.approx(0.60)]
 
 
-def test_yolox_detector_skips_tiles_when_full_image_has_supported_pet() -> None:
+def test_yolox_detector_scans_uncovered_tiles_when_full_image_has_large_dog() -> None:
     detector = object.__new__(_YoloxOnnxPetDetector)
     detector._enable_tiled_detection = True
     detector._tile_scan_min_confidence = 0.30
@@ -377,15 +384,18 @@ def test_yolox_detector_skips_tiles_when_full_image_has_supported_pet() -> None:
     def fake_detect_single_image(image, *, offset=(0, 0)):
         nonlocal calls
         calls += 1
-        return [_DetectedPetBox((5, 5, 80, 80), 0.60, "dog")]
+        if image.size == (400, 300):
+            return [_DetectedPetBox((0, 0, 250, 300), 0.90, "dog")]
+        if offset[0] > 0:
+            return [_DetectedPetBox((offset[0] + 180, 120, 40, 50), 0.60, "cat")]
+        return []
 
     detector._detect_single_image = fake_detect_single_image
 
     boxes = detector.detect(Image.new("RGB", (400, 300)))
 
-    assert calls == 1
-    assert len(boxes) == 1
-    assert boxes[0].species_label == "dog"
+    assert calls == 5
+    assert {box.species_label for box in boxes} == {"cat", "dog"}
 
 
 def test_dedupe_supported_species_boxes_keeps_best_overlapping_pet_label() -> None:
@@ -399,6 +409,7 @@ def test_dedupe_supported_species_boxes_keeps_best_overlapping_pet_label() -> No
 
     assert [(box.species_label, box.confidence) for box in deduped] == [
         ("dog", 0.72),
+        ("cat", 0.61),
         ("cat", 0.55),
     ]
 
@@ -508,10 +519,11 @@ def test_pet_pipeline_dedupes_overlapping_supported_species_after_filtering(
     assert [round(detection.confidence, 2) for detection in results[0].detections] == [
         0.82,
         0.76,
+        0.70,
     ]
     assert pipeline.last_scan_metrics.candidate_boxes == 4
     assert pipeline.last_scan_metrics.unsupported_species == 1
-    assert pipeline.last_scan_metrics.accepted_detections == 2
+    assert pipeline.last_scan_metrics.accepted_detections == 3
 
 
 def test_pet_pipeline_filters_people_overlaps_before_embedding(tmp_path: Path) -> None:
@@ -883,7 +895,6 @@ def test_manual_pet_merge_survives_incompatible_scan_recluster(tmp_path: Path) -
         repository,
         detections=repository.get_all_detections(),
         distance_threshold=0.2,
-        min_samples=1,
     )
     session.commit(repository, detections=detections, pets=reclustered_pets)
 
@@ -905,7 +916,7 @@ def test_manual_pet_merge_survives_incompatible_scan_recluster(tmp_path: Path) -
         "pet-source",
         "pet-target",
     }
-    assert repository.recluster_detections(distance_threshold=0.2, min_samples=1) == 2
+    assert repository.recluster_detections(distance_threshold=0.2) == 2
     assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
 
 
@@ -961,7 +972,6 @@ def test_redirected_unstable_pet_profile_recognizes_new_key(tmp_path: Path) -> N
         repository,
         detections=[*repository.get_all_detections(), new_source_detection],
         distance_threshold=0.2,
-        min_samples=1,
     )
 
     assert {detection.pet_id for detection in detections} == {"pet-target"}
@@ -1019,12 +1029,12 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
     merge_finished = threading.Event()
     merge_results: list[bool] = []
 
-    def blocked_recluster(*, distance_threshold: float, min_samples: int) -> int:
+    def blocked_recluster(*, distance_threshold: float, operation_id: str | None = None) -> int:
         recluster_entered.set()
         assert release_recluster.wait(2)
         return original_recluster(
             distance_threshold=distance_threshold,
-            min_samples=min_samples,
+            operation_id=operation_id,
         )
 
     monkeypatch.setattr(repository, "recluster_detections", blocked_recluster)
@@ -1032,12 +1042,13 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
         target=lambda: coordinator.recluster_for_pipeline_upgrade(
             clustering_pipeline_version="test-version",
             distance_threshold=0.2,
-            min_samples=1,
         )
     )
 
     def merge() -> None:
-        merge_results.append(coordinator.merge_pets("pet-source", "pet-target"))
+        merge_results.append(
+            coordinator.merge_pets("pet-source", "pet-target").merged
+        )
         merge_finished.set()
 
     recluster_thread.start()
@@ -1098,7 +1109,6 @@ def test_pet_merge_redirect_chain_keeps_all_alias_clusters_linked(tmp_path: Path
         repository,
         detections=repository.get_all_detections(),
         distance_threshold=0.2,
-        min_samples=1,
     )
 
     assert {detection.pet_id for detection in reclustered} == {"pet-c"}
@@ -1199,7 +1209,6 @@ def test_pet_scan_session_replaces_stale_detections_for_same_asset_path(tmp_path
     detections, _pets = session.build_runtime_snapshot(
         repository,
         distance_threshold=0.2,
-        min_samples=1,
         existing_detections=repository.get_all_detections(),
     )
 
@@ -1236,7 +1245,6 @@ def test_pet_batch_revalidates_people_overlaps_inside_serialized_commit(tmp_path
             )
         ],
         distance_threshold=0.42,
-        min_samples=1,
         people_boxes_provider=lambda _asset_ids: {"asset-face": ((732, 668, 2089, 2930),)},
     )
 
@@ -1340,7 +1348,6 @@ def test_pet_reconciliation_removes_people_overlap_and_preserves_other_pet_state
     detections, pets = cluster_pet_records(
         [conflicting, retained],
         distance_threshold=0.42,
-        min_samples=1,
     )
     repository.replace_all(detections, pets)
     retained_detection = next(
@@ -1356,7 +1363,6 @@ def test_pet_reconciliation_removes_people_overlap_and_preserves_other_pet_state
 
     event = coordinator.reconcile_people_overlaps(
         {"asset-face": ((732, 668, 2089, 2930),)},
-        min_samples=1,
     )
 
     assert event is not None
@@ -1462,10 +1468,18 @@ def test_pet_status_helpers_and_scan_merge(tmp_path: Path) -> None:
 
 
 def test_pet_detector_model_downloads_when_missing(tmp_path: Path, monkeypatch) -> None:
-    source = tmp_path / "remote-yolox.onnx"
-    source.write_bytes(b"pet-detector")
+    payload = b"pet-detector"
     target = tmp_path / "models" / "pets" / "detector" / "yolox_nano_coco.onnx"
-    monkeypatch.setenv("IPHOTO_PET_DETECTOR_MODEL_URL", source.as_uri())
+    monkeypatch.setenv("IPHOTO_PET_DETECTOR_MODEL_URL", "https://models.example/yolox.onnx")
+    monkeypatch.setenv(
+        "IPHOTO_PET_DETECTOR_MODEL_SHA256",
+        hashlib.sha256(payload).hexdigest(),
+    )
+    monkeypatch.setattr(
+        pet_pipeline.request,
+        "urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(payload),
+    )
     real_temporary_directory = pet_pipeline.tempfile.TemporaryDirectory
     temporary_directories: list[Path] = []
 
@@ -1578,9 +1592,27 @@ def test_dinov2_cache_uses_target_volume_and_only_suppresses_dinov2_tracer_warni
             )
             return FakeTracedModel()
 
+        @staticmethod
+        def load(_path: str, *, map_location: str):
+            assert map_location == "cpu"
+
+            class LoadedModel:
+                @staticmethod
+                def __call__(_example):
+                    return SimpleNamespace(shape=(1, 384))
+
+            return LoadedModel()
+
     class FakeTorch:
         float32 = object()
         jit = FakeJit()
+
+        class no_grad:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
 
         @staticmethod
         def zeros(shape, *, dtype):
@@ -1643,11 +1675,26 @@ def test_pet_embedding_hub_source_is_pinned_to_commit() -> None:
     assert all(character in "0123456789abcdef" for character in revision)
 
 
-def test_default_pet_model_dir_stays_under_extension(monkeypatch) -> None:
-    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
-    expected = Path(__file__).resolve().parents[1] / "src" / "extension" / "models" / "pets"
+def test_pet_model_manifest_is_the_runtime_contract_source() -> None:
+    detector = PET_MODEL_MANIFEST["detector"]
+    assert detector["url"] == DEFAULT_PET_DETECTOR_MODEL_URL
+    assert detector["sha256"] == DEFAULT_PET_DETECTOR_MODEL_SHA256
+    assert detector["input"] == {
+        "layout": "NCHW",
+        "channel_order": "BGR",
+        "dtype": "float32",
+        "range": [0, 255],
+        "shape": [1, 3, 416, 416],
+    }
+    assert PET_MODEL_MANIFEST["embedder"]["source_revision"] == _DINO_HUB_REPO.rpartition(
+        ":"
+    )[2]
 
-    assert default_pet_model_dir() == expected
+
+def test_default_pet_model_dir_uses_user_cache(monkeypatch) -> None:
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    assert default_pet_model_dir().name == "pets"
+    assert "Caches" in default_pet_model_dir().parts or ".cache" in default_pet_model_dir().parts
 
 
 def test_pet_scan_worker_resets_done_rows_for_detector_upgrade(tmp_path: Path) -> None:

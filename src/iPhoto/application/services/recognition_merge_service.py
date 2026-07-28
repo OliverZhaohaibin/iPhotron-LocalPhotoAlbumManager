@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
+
+from iPhoto.pets.records import PetMergeOutcome, PetMutationFailure
+from iPhoto.recognition.mutation_coordinator import (
+    RecognitionMutationCoordinator,
+    get_recognition_mutation_coordinator,
+)
 
 IdentityKind = Literal["person", "pet"]
 
@@ -45,6 +52,7 @@ class IdentityMergeFailure(StrEnum):
     NOT_FOUND = "not_found"
     HIDDEN_STATE_MISMATCH = "hidden_state_mismatch"
     REDIRECT_CONFLICT = "redirect_conflict"
+    RECOVERY_PENDING = "recovery_pending"
     REJECTED = "rejected"
 
 
@@ -67,14 +75,85 @@ class IdentityMergeOutcome:
     group_redirects: dict[str, str | None] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class _MergeRecoveryResult:
+    blocked: bool = False
+    matching_outcome: IdentityMergeOutcome | None = None
+
+
 class RecognitionMergeService:
     """Route every directional identity merge through one typed boundary."""
 
-    def __init__(self, people_service, pet_service) -> None:
+    def __init__(
+        self,
+        people_service,
+        pet_service,
+        *,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
+    ) -> None:
         self._people_service = people_service
         self._pet_service = pet_service
+        self._journal = None
+        self._recovered_outcomes: dict[tuple[str, str], IdentityMergeOutcome] = {}
+        root_getter = getattr(pet_service, "library_root", None)
+        root = root_getter() if callable(root_getter) else None
+        if isinstance(root, (str, Path)):
+            self._journal = mutation_coordinator or get_recognition_mutation_coordinator(
+                Path(root)
+            )
+            self._journal.register_recovery_handler(
+                {"recognition_merge"},
+                self._recover_registered_merge,
+            )
+            self._recover_merges()
+
+    def _recover_registered_merge(self, operation) -> bool:
+        if operation.kind != "recognition_merge":
+            return False
+        source = IdentityRef.parse(operation.payload.get("source"))
+        target = IdentityRef.parse(operation.payload.get("target"))
+        if source is None or target is None:
+            self._finish_merge(operation.operation_id, False)
+            return True
+        if source.kind == target.kind:
+            return False
+        result = self._people_service.merge_identities(source.key, target.key)
+        succeeded = bool(result is not None and result.merged)
+        self._finish_merge(operation.operation_id, succeeded)
+        self._recovered_outcomes[(source.key, target.key)] = IdentityMergeOutcome(
+            succeeded,
+            source,
+            target,
+            None if succeeded else IdentityMergeFailure.REDIRECT_CONFLICT,
+            refresh_policy=(
+                IdentityMergeRefreshPolicy.IMMEDIATE
+                if succeeded
+                else IdentityMergeRefreshPolicy.NONE
+            ),
+            changed_asset_ids=tuple(
+                str(value)
+                for value in operation.payload.get("changed_asset_ids", ())
+                if value
+            ),
+            group_redirects=(
+                dict(result.group_redirects)
+                if succeeded and result is not None
+                else {}
+            ),
+        )
+        return True
 
     def merge(self, source: IdentityRef | str, target: IdentityRef | str) -> IdentityMergeOutcome:
+        if self._journal is None:
+            return self._merge_locked(source, target)
+        with self._journal.mutation_scope():
+            return self._merge_locked(source, target)
+
+    def _merge_locked(
+        self,
+        source: IdentityRef | str,
+        target: IdentityRef | str,
+    ) -> IdentityMergeOutcome:
         source_ref = IdentityRef.parse(source)
         target_ref = IdentityRef.parse(target)
         if source_ref is None or target_ref is None:
@@ -90,6 +169,17 @@ class RecognitionMergeService:
                 source_ref,
                 target_ref,
                 IdentityMergeFailure.SAME_IDENTITY,
+            )
+
+        recovery = self._recover_merges(source_ref, target_ref)
+        if recovery.matching_outcome is not None:
+            return recovery.matching_outcome
+        if recovery.blocked:
+            return IdentityMergeOutcome(
+                False,
+                source_ref,
+                target_ref,
+                IdentityMergeFailure.RECOVERY_PENDING,
             )
 
         source_hidden = self._hidden_state(source_ref)
@@ -120,11 +210,26 @@ class RecognitionMergeService:
                 source_ref.entity_id,
                 target_ref.entity_id,
             )
+            pending = bool(
+                not merged
+                and callable(
+                    pending_getter := getattr(
+                        self._people_service,
+                        "recognition_mutation_pending",
+                        None,
+                    )
+                )
+                and pending_getter()
+            )
             return IdentityMergeOutcome(
                 merged,
                 source_ref,
                 target_ref,
-                None if merged else IdentityMergeFailure.REJECTED,
+                None
+                if merged
+                else IdentityMergeFailure.RECOVERY_PENDING
+                if pending
+                else IdentityMergeFailure.REJECTED,
                 refresh_policy=(
                     IdentityMergeRefreshPolicy.SNAPSHOT
                     if merged
@@ -143,15 +248,28 @@ class RecognitionMergeService:
                     + self._pet_service.pet_asset_ids(target_ref.entity_id)
                 )
             )
-            merged = self._pet_service.merge_pets(
+            pet_outcome = self._pet_service.merge_pets(
                 source_ref.entity_id,
                 target_ref.entity_id,
             )
+            if isinstance(pet_outcome, PetMergeOutcome):
+                merged = pet_outcome.merged
+                temporary_failure = pet_outcome.failure in {
+                    PetMutationFailure.RECOVERY_PENDING,
+                    PetMutationFailure.SHUTTING_DOWN,
+                }
+            else:
+                merged = bool(pet_outcome)
+                temporary_failure = False
             return IdentityMergeOutcome(
                 merged,
                 source_ref,
                 target_ref,
-                None if merged else IdentityMergeFailure.REJECTED,
+                None
+                if merged
+                else IdentityMergeFailure.RECOVERY_PENDING
+                if temporary_failure
+                else IdentityMergeFailure.REJECTED,
                 refresh_policy=(
                     IdentityMergeRefreshPolicy.SNAPSHOT
                     if merged
@@ -166,14 +284,29 @@ class RecognitionMergeService:
         changed_asset_ids = tuple(
             dict.fromkeys(self._asset_ids(source_ref) + self._asset_ids(target_ref))
         )
+        operation_id = self._prepare_merge(
+            source_ref,
+            target_ref,
+            changed_asset_ids=changed_asset_ids,
+        )
+        if self._journal is not None and operation_id is None:
+            return IdentityMergeOutcome(
+                False,
+                source_ref,
+                target_ref,
+                IdentityMergeFailure.RECOVERY_PENDING,
+            )
+
         result = self._people_service.merge_identities(source_ref.key, target_ref.key)
         if result is None or not result.merged:
+            self._finish_merge(operation_id, False)
             return IdentityMergeOutcome(
                 False,
                 source_ref,
                 target_ref,
                 IdentityMergeFailure.REDIRECT_CONFLICT,
             )
+        self._finish_merge(operation_id, True)
         return IdentityMergeOutcome(
             True,
             source_ref,
@@ -181,6 +314,61 @@ class RecognitionMergeService:
             refresh_policy=IdentityMergeRefreshPolicy.IMMEDIATE,
             changed_asset_ids=changed_asset_ids,
             group_redirects=dict(result.group_redirects),
+        )
+
+    def _prepare_merge(
+        self,
+        source: IdentityRef,
+        target: IdentityRef,
+        *,
+        changed_asset_ids: tuple[str, ...],
+    ) -> str | None:
+        if self._journal is None:
+            return None
+        operation_id = self._journal.try_prepare(
+            "recognition_merge",
+            {
+                "source": source.key,
+                "target": target.key,
+                "changed_asset_ids": list(changed_asset_ids),
+            },
+        )
+        if operation_id is None:
+            return None
+        return operation_id
+
+    def _finish_merge(self, operation_id: str | None, succeeded: bool) -> None:
+        if self._journal is None or operation_id is None:
+            return
+        if not succeeded:
+            self._journal.transition(
+                operation_id,
+                "finalized",
+                error="merge_rejected",
+            )
+            return
+        self._journal.commit_and_dispatch(
+            operation_id,
+            {"kind": "recognition_merge"},
+            lambda: None,
+        )
+
+    def _recover_merges(
+        self,
+        requested_source: IdentityRef | None = None,
+        requested_target: IdentityRef | None = None,
+    ) -> _MergeRecoveryResult:
+        if self._journal is None:
+            return _MergeRecoveryResult()
+        if not self._journal.recover_pending():
+            return _MergeRecoveryResult(blocked=True)
+        if requested_source is None or requested_target is None:
+            return _MergeRecoveryResult()
+        return _MergeRecoveryResult(
+            matching_outcome=self._recovered_outcomes.pop(
+                (requested_source.key, requested_target.key),
+                None,
+            )
         )
 
     def _hidden_state(self, identity: IdentityRef) -> bool | None:

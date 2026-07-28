@@ -1609,3 +1609,34 @@ def test_cross_identity_group_failure_rolls_back_redirect(
         )
 
     assert state_repository.get_identity_redirects() == []
+
+
+def test_cross_identity_redirect_ensure_is_idempotent_and_rejects_conflict(
+    tmp_path: Path,
+) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+
+    applied = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-a",
+    )
+    repeated = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-a",
+    )
+    conflict = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-b",
+    )
+
+    assert applied.status == "applied"
+    assert repeated.status == "already_applied"
+    assert repeated.succeeded is True
+    assert conflict.status == "conflict"
+    assert conflict.succeeded is False

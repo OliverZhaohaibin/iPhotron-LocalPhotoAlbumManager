@@ -141,6 +141,9 @@ class LibraryRuntimeController(
         self._pet_index_coordinator: PetIndexCoordinator | None = None
         self._recognition_services_root: Path | None = None
         self._recognition_scans_root: Path | None = None
+        self._recognition_generation = 0
+        self._delivered_recognition_event_ids: set[str] = set()
+        self._retiring_recognition_workers: set[QThread] = set()
         self._library_session: "LibrarySession | None" = None
         self._owns_library_session = False
         self._scan_service: "LibraryScanService | None" = None
@@ -193,6 +196,7 @@ class LibraryRuntimeController(
         self.stop_scanning()
         self._recognition_services_root = None
         self._recognition_scans_root = None
+        self._delivered_recognition_event_ids.clear()
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
         self._root = Path(prepared.root)
@@ -595,6 +599,35 @@ class LibraryRuntimeController(
         self._recognition_services_root = root
         if root != self._recognition_scans_root:
             self._recognition_scans_root = None
+        if root is not None and pet_service is not None:
+            from ..pets.pipeline import PET_DETECTOR_PIPELINE_VERSION
+
+            repository = pet_service.repository()
+            store = pet_service.asset_repository
+            if repository is not None and store is not None:
+                required_value = repository.get_scan_metadata(
+                    "pet_backfill_required"
+                )
+                previous_version = repository.get_scan_metadata(
+                    "detector_pipeline_version"
+                )
+                if not isinstance(required_value, (str, type(None))) or not isinstance(
+                    previous_version,
+                    (str, type(None)),
+                ):
+                    return
+                backfill_required = required_value == "1"
+                if previous_version != PET_DETECTOR_PIPELINE_VERSION:
+                    counts = store.count_by_pet_status()
+                    if not isinstance(counts, dict):
+                        return
+                    backfill_required = backfill_required or int(
+                        counts.get("done", 0)
+                    ) > 0
+                    if backfill_required:
+                        repository.set_scan_metadata("pet_backfill_required", "1")
+                if backfill_required:
+                    QTimer.singleShot(0, lambda: self._start_pet_backfill_worker(root))
 
     def activate_recognition_scans(self) -> None:
         """Start model workers after a recognition viewport is usable."""
@@ -610,8 +643,8 @@ class LibraryRuntimeController(
             return
         self.bind_people_service(self._people_service)
         self.bind_pet_service(self._pet_service)
-        self._recognition_scans_root = root
-        self._start_ai_scan_workers(root, startup=True)
+        if self._start_ai_scan_workers(root, startup=True):
+            self._recognition_scans_root = root
 
     def activate_recognition_services(
         self,
@@ -742,6 +775,8 @@ class LibraryRuntimeController(
         self._pet_index_coordinator = None
 
     def _on_people_snapshot_committed(self, event: object) -> None:
+        if self._recognition_event_was_delivered(event):
+            return
         pet_service = self._pet_service
         if pet_service is not None:
             try:
@@ -758,8 +793,25 @@ class LibraryRuntimeController(
         self.peopleSnapshotCommitted.emit(event)
 
     def _on_pet_snapshot_committed(self, event: object) -> None:
+        if self._recognition_event_was_delivered(event):
+            return
         self.petIndexUpdated.emit()
         self.petSnapshotCommitted.emit(event)
+
+    def _recognition_event_was_delivered(self, event: object) -> bool:
+        event_id = str(getattr(event, "event_id", None) or "")
+        if not event_id:
+            return False
+        delivered = getattr(self, "_delivered_recognition_event_ids", None)
+        if delivered is None:
+            delivered = set()
+            self._delivered_recognition_event_ids = delivered
+        if event_id in delivered:
+            return True
+        delivered.add(event_id)
+        if len(delivered) > 4096:
+            delivered.pop()
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers (coordinator-level)

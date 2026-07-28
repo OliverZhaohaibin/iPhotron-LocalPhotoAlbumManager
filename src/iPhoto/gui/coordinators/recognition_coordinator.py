@@ -112,6 +112,7 @@ class RecognitionCoordinator(QObject):
         group_callback: Callable[[str], None],
         pet_callback: Callable[[str], None],
         recognition_query_getter: Callable[..., object | None] | None = None,
+        recognition_merge_getter: Callable[..., object | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -122,6 +123,7 @@ class RecognitionCoordinator(QObject):
         self._people_service_getter = people_service_getter
         self._pet_service_getter = pet_service_getter
         self._recognition_query_getter = recognition_query_getter
+        self._recognition_merge_getter = recognition_merge_getter
         self._cluster_callback = cluster_callback
         self._group_callback = group_callback
         self._pet_callback = pet_callback
@@ -163,9 +165,15 @@ class RecognitionCoordinator(QObject):
             if self._recognition_query_getter is not None
             else None
         )
+        merge_service = (
+            self._recognition_merge_getter(library_root=root)
+            if self._recognition_merge_getter is not None
+            else None
+        )
         self._people_service = people_service
         self._pet_service = pet_service
         self._query_service = query_service
+        self._merge_service = merge_service
         bind = getattr(self._context.library, "bind_recognition_services", None)
         if callable(bind):
             bind(people_service, pet_service)
@@ -176,13 +184,21 @@ class RecognitionCoordinator(QObject):
         self._first_viewport_ready = False
         self._detail.set_people_service(people_service)
         self._detail.set_pet_service(pet_service)
+        set_merge_service = getattr(self._detail, "set_recognition_merge_service", None)
+        if callable(set_merge_service):
+            set_merge_service(merge_service)
         set_query_service = getattr(self._detail, "set_recognition_query_service", None)
         if callable(set_query_service):
             set_query_service(query_service)
         self._detail.set_people_library_root(root)
         if self._people_page is not None:
             self._bind_services(
-                self._people_page, root, people_service, pet_service, query_service
+                self._people_page,
+                root,
+                people_service,
+                pet_service,
+                query_service,
+                merge_service,
             )
 
     def set_face_name_display_enabled(self, enabled: bool) -> None:
@@ -208,6 +224,11 @@ class RecognitionCoordinator(QObject):
             (
                 self._recognition_query_getter(library_root=root)
                 if self._recognition_query_getter is not None
+                else None
+            ),
+            (
+                self._recognition_merge_getter(library_root=root)
+                if self._recognition_merge_getter is not None
                 else None
             ),
         )
@@ -370,6 +391,7 @@ class RecognitionCoordinator(QObject):
         people_service: object | None,
         pet_service: object | None,
         query_service: object | None,
+        merge_service: object | None,
     ) -> None:
         snapshot = self._dashboard_snapshot
         snapshot_matches = (
@@ -385,6 +407,7 @@ class RecognitionCoordinator(QObject):
                 pet_service,
                 self._pinned_items_service,
                 query_service=query_service,
+                merge_service=merge_service,
                 reload=not (snapshot_matches or warmup_matches),
             )
         elif people_service is not None and hasattr(people_page, "set_people_service"):

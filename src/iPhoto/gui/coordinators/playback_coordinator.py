@@ -26,7 +26,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
-from iPhoto.application.services.recognition_merge_service import RecognitionMergeService
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.detail_pipeline import (
@@ -415,6 +414,9 @@ class PlaybackCoordinator(QObject):
     def set_recognition_query_service(self, service: object | None) -> None:
         self._invalidate_overlay_requests(clear=True)
         self._recognition_query_service = service
+
+    def set_recognition_merge_service(self, service: object | None) -> None:
+        self._recognition_merge_service = service
 
     def rebind_library(self) -> None:
         """Invalidate library-scoped media preparation and decoded-frame caches."""
@@ -1349,10 +1351,11 @@ class PlaybackCoordinator(QObject):
 
         from iPhoto.gui.ui.widgets.recognition_annotations import (
             RecognitionIdentitySuggestion,
+            face_annotation_adapter,
             pet_annotation_adapter,
         )
 
-        annotations = list(snapshot.faces)
+        annotations = [face_annotation_adapter(value) for value in snapshot.faces]
         annotations.extend(pet_annotation_adapter(value) for value in snapshot.pets)
         suggestions = [
             RecognitionIdentitySuggestion(
@@ -1447,16 +1450,22 @@ class PlaybackCoordinator(QObject):
         if not asset_id:
             return []
         annotations: list[object] = []
+        from iPhoto.gui.ui.widgets.recognition_annotations import (
+            face_annotation_adapter,
+            pet_annotation_adapter,
+        )
+
         people_service = getattr(self, "_people_service", None)
         if people_service is not None:
             try:
-                annotations.extend(people_service.list_asset_face_annotations(asset_id))
+                annotations.extend(
+                    face_annotation_adapter(annotation)
+                    for annotation in people_service.list_asset_face_annotations(asset_id)
+                )
             except (sqlite3.Error, OSError):
                 LOGGER.exception("Failed to load face annotations for asset %s", asset_id)
         pet_service = getattr(self, "_pet_service", None)
         if pet_service is not None:
-            from iPhoto.gui.ui.widgets.recognition_annotations import pet_annotation_adapter
-
             try:
                 annotations.extend(
                     pet_annotation_adapter(annotation)
@@ -1561,12 +1570,23 @@ class PlaybackCoordinator(QObject):
 
     @staticmethod
     def _annotation_kind(annotation: object) -> str:
-        return "pet" if getattr(annotation, "kind", "person") == "pet" else "person"
+        source_kind = getattr(
+            annotation,
+            "source_detection_kind",
+            getattr(annotation, "kind", "person"),
+        )
+        return "pet" if source_kind == "pet" else "person"
 
     @staticmethod
     def _annotation_id(annotation: object) -> str:
+        source_id = getattr(annotation, "source_annotation_id", None)
+        if source_id:
+            return str(source_id)
         if getattr(annotation, "kind", "person") == "pet":
-            return str(getattr(annotation, "detection_id", "") or getattr(annotation, "annotation_id", ""))
+            return str(
+                getattr(annotation, "detection_id", "")
+                or getattr(annotation, "annotation_id", "")
+            )
         return str(getattr(annotation, "face_id", ""))
 
     @staticmethod
@@ -1615,8 +1635,6 @@ class PlaybackCoordinator(QObject):
 
     @Slot(object)
     def _handle_info_panel_face_delete_requested(self, annotation: object) -> None:
-        from iPhoto.people.repository import AssetFaceAnnotation
-
         annotation_id = self._annotation_id(annotation)
         if not annotation_id:
             return
@@ -1631,8 +1649,6 @@ class PlaybackCoordinator(QObject):
                 return
             if changed:
                 self._refresh_recognition_views_after_mutation()
-            return
-        if not isinstance(annotation, AssetFaceAnnotation):
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:
@@ -1652,18 +1668,40 @@ class PlaybackCoordinator(QObject):
         annotation: object,
         target_person_id: str,
     ) -> None:
-        from iPhoto.people.repository import AssetFaceAnnotation
-
         if not target_person_id:
             return
         annotation_id = self._annotation_id(annotation)
         if not annotation_id:
             return
-        if self._annotation_kind(annotation) == "pet":
+        source_kind = self._annotation_kind(annotation)
+        target_kind, target_id = self._entity_kind_and_id(target_person_id)
+        if source_kind != target_kind:
+            people_service = getattr(self, "_people_service", None)
+            if people_service is None:
+                return
+            try:
+                changed = people_service.reassign_detection_identity(
+                    source_kind=source_kind,
+                    source_annotation_id=annotation_id,
+                    target_identity=f"{target_kind}:{target_id}",
+                )
+            except (sqlite3.Error, OSError):
+                LOGGER.exception(
+                    "Failed to reassign %s detection %s to %s identity %s",
+                    source_kind,
+                    annotation_id,
+                    target_kind,
+                    target_id,
+                )
+                return
+            if changed:
+                self._refresh_recognition_views_after_mutation()
+            return
+        if source_kind == "pet":
             pet_service = getattr(self, "_pet_service", None)
             if pet_service is None:
                 return
-            target_pet_id = self._target_entity_id(target_person_id)
+            target_pet_id = target_id
             try:
                 changed = pet_service.move_detection_to_pet(annotation_id, target_pet_id)
             except (sqlite3.Error, OSError):
@@ -1676,12 +1714,10 @@ class PlaybackCoordinator(QObject):
             if changed:
                 self._refresh_recognition_views_after_mutation()
             return
-        if not isinstance(annotation, AssetFaceAnnotation):
-            return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:
             return
-        target_person_id = self._target_entity_id(target_person_id)
+        target_person_id = target_id
         try:
             changed = people_service.move_face_to_person(annotation_id, target_person_id)
         except (sqlite3.Error, OSError):
@@ -1701,8 +1737,6 @@ class PlaybackCoordinator(QObject):
         annotation: object,
         new_name: str,
     ) -> None:
-        from iPhoto.people.repository import AssetFaceAnnotation
-
         annotation_id = self._annotation_id(annotation)
         if not annotation_id:
             return
@@ -1717,8 +1751,6 @@ class PlaybackCoordinator(QObject):
                 return
             if created_pet_id:
                 self._refresh_recognition_views_after_mutation()
-            return
-        if not isinstance(annotation, AssetFaceAnnotation):
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:
@@ -2832,22 +2864,20 @@ class PlaybackCoordinator(QObject):
         if isinstance(merge_target, str) and merge_target.startswith("pet:"):
             person_id = getattr(result, "person_id", None)
             if isinstance(person_id, str) and person_id:
-                try:
-                    outcome = RecognitionMergeService(
-                        self._people_service,
-                        self._pet_service,
-                    ).merge(
-                        f"person:{person_id}",
-                        merge_target,
-                    )
-                    merged = outcome if outcome.merged else None
-                except (sqlite3.Error, OSError):
-                    LOGGER.exception(
-                        "Failed to merge manual face person %s into %s",
-                        person_id,
-                        merge_target,
-                    )
+                merge_service = getattr(self, "_recognition_merge_service", None)
+                if merge_service is None:
                     merged = None
+                else:
+                    try:
+                        outcome = merge_service.merge(f"person:{person_id}", merge_target)
+                        merged = outcome if outcome.merged else None
+                    except (sqlite3.Error, OSError):
+                        LOGGER.exception(
+                            "Failed to merge manual face person %s into %s",
+                            person_id,
+                            merge_target,
+                        )
+                        merged = None
                 if merged is None:
                     LOGGER.warning(
                         "Manual face was saved but could not be merged into %s",

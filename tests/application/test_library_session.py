@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from iPhoto.bootstrap.library_session import LibrarySession
+from iPhoto.recognition.operation_journal import RecognitionOperationKind
 
 
 def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None:
@@ -54,3 +55,22 @@ def test_library_session_shutdown_delegates_to_asset_runtime(tmp_path: Path) -> 
 
     runtime.bind_edit_service.assert_any_call(None)
     runtime.shutdown.assert_called_once()
+
+
+def test_library_session_injects_one_recognition_mutation_owner(tmp_path: Path) -> None:
+    runtime = Mock()
+    runtime.assets = object()
+    runtime.repository = object()
+    runtime.thumbnail_service = object()
+    session = LibrarySession(tmp_path, asset_runtime=runtime, state_repository=Mock())
+
+    mutations = session.recognition_mutations
+
+    assert session.people._mutation_coordinator is mutations
+    assert session.pets._mutation_coordinator is mutations
+    assert session.recognition_merges._journal is mutations
+    assert session.people.coordinator is not None
+    assert session.pets.coordinator is not None
+    assert {kind.value for kind in RecognitionOperationKind}.issubset(
+        mutations._handlers
+    )

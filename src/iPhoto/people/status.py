@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from iPhoto.utils.pathutils import tolerant_int
 
 FACE_STATUS_PENDING = "pending"
 FACE_STATUS_DONE = "done"
@@ -43,8 +44,8 @@ def is_face_scan_candidate(row: dict[str, Any]) -> bool:
     if normalized_media in {"1", "video"}:
         return False
 
-    live_role = row.get("live_role")
-    if isinstance(live_role, (int, float)) and int(live_role) != 0:
+    live_role = tolerant_int(row.get("live_role"))
+    if live_role is not None and live_role != 0:
         return False
 
     mime = row.get("mime")
@@ -58,4 +59,3 @@ def is_face_scan_candidate(row: dict[str, Any]) -> bool:
 
 def initial_face_status(row: dict[str, Any]) -> str:
     return FACE_STATUS_PENDING if is_face_scan_candidate(row) else FACE_STATUS_SKIPPED
-

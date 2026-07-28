@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ..application.services.recognition_query_service import RecognitionQueryService
     from ..people.service import PeopleService
     from ..pets.service import PetService
+    from ..recognition.mutation_coordinator import RecognitionMutationCoordinator
     from .library_probe import PreparedLibrary, ValidatedPreparedLibrary
 
 
@@ -51,6 +52,7 @@ class LibrarySession:
     scans: LibraryScanService | None = None
     asset_lifecycle: LibraryAssetLifecycleService | None = None
     asset_operations: LibraryAssetOperationService | None = None
+    recognition_mutations: RecognitionMutationCoordinator | None = None
     people: PeopleService | None = None
     pets: PetService | None = None
     recognition_queries: RecognitionQueryService | None = None
@@ -65,6 +67,7 @@ class LibrarySession:
         {
             "people",
             "pets",
+            "recognition_mutations",
             "recognition_queries",
             "recognition_merges",
             "maps",
@@ -140,14 +143,26 @@ class LibrarySession:
         # People, Pets, Map and Location remain feature-scoped.
 
     def _create_lazy_service(self, name: str):
+        if name == "recognition_mutations":
+            from ..recognition.mutation_coordinator import (
+                RecognitionMutationCoordinator,
+            )
+
+            return RecognitionMutationCoordinator(self.library_root)
         if name == "people":
             from .library_people_service import create_people_service
 
-            return create_people_service(self.library_root)
+            return create_people_service(
+                self.library_root,
+                mutation_coordinator=self.recognition_mutations,
+            )
         if name == "pets":
             from .library_pet_service import create_pet_service
 
-            return create_pet_service(self.library_root)
+            return create_pet_service(
+                self.library_root,
+                mutation_coordinator=self.recognition_mutations,
+            )
         if name == "recognition_queries":
             from ..application.services.recognition_query_service import (
                 RecognitionQueryService,
@@ -163,7 +178,11 @@ class LibrarySession:
                 RecognitionMergeService,
             )
 
-            return RecognitionMergeService(self.people, self.pets)
+            return RecognitionMergeService(
+                self.people,
+                self.pets,
+                mutation_coordinator=self.recognition_mutations,
+            )
         if name == "maps":
             return SessionMapRuntimeService()
         if name == "map_interactions":

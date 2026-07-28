@@ -144,6 +144,7 @@ class FaceScanSession:
         previous_persons: list[PersonRecord] | None = None,
         clustered_faces: list[FaceRecord] | None = None,
         persons: list[PersonRecord] | None = None,
+        operation_id: str | None = None,
     ) -> bool:
         """Commit one unified People snapshot for this scan session."""
 
@@ -165,13 +166,27 @@ class FaceScanSession:
                 min_samples=min_samples,
                 existing_faces=previous_faces,
             )
-        repository.replace_all(clustered_faces, persons, sync_runtime_state=False)
+        repository.replace_all(
+            clustered_faces,
+            persons,
+            sync_runtime_state=False,
+            operation_id=operation_id,
+            operation_kind="people_scan_commit",
+        )
         state_repository = repository.state_repository
         try:
-            repository.sync_runtime_state()
-            if state_repository is not None and clustered_faces:
-                state_repository.sync_scan_results(persons, clustered_faces)
+            if operation_id is not None:
+                repository.complete_runtime_state_sync(operation_id)
+            else:
+                repository.sync_runtime_state()
+                if state_repository is not None and clustered_faces:
+                    state_repository.sync_scan_results(persons, clustered_faces)
         except Exception:
+            # Journal-backed commits recover forward from the runtime marker.
+            # Rolling them back would invalidate the marker and make recovery
+            # ambiguous after a process crash.
+            if operation_id is not None:
+                raise
             repository.replace_all(previous_faces, previous_persons, sync_runtime_state=False)
             repository.sync_runtime_state()
             raise

@@ -12,7 +12,15 @@ from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.repository import PetRepository
-from iPhoto.utils.pathutils import ensure_work_dir
+from iPhoto.recognition.assignment_recovery import (
+    apply_detection_assignment_with_group_refresh,
+)
+from iPhoto.recognition.mutation_coordinator import get_recognition_mutation_coordinator
+from iPhoto.utils.pathutils import (
+    LibraryAssetPathError,
+    ensure_work_dir,
+    resolve_library_asset_path,
+)
 
 from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
@@ -27,6 +35,8 @@ from .state_repository import FaceStateRepository
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 
 if TYPE_CHECKING:
+    from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
+
     from .index_coordinator import PeopleIndexCoordinator
 
 
@@ -102,11 +112,45 @@ class PeopleService:
         *,
         asset_repository: PeopleAssetRepositoryPort | None = None,
         coordinator: PeopleIndexCoordinator | None = None,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
     ) -> None:
         self._library_root = library_root
         self._asset_repository = asset_repository
         self._coordinator = coordinator
+        self._mutation_coordinator = mutation_coordinator
         self._repository: FaceRepository | None = None
+        if self._mutation_coordinator is not None:
+            self._mutation_coordinator.register_recovery_handler(
+                {"recognition_detection_assignment"},
+                self._recover_assignment_operation,
+            )
+
+    def _recover_assignment_operation(self, operation) -> bool:
+        if (
+            self._library_root is None
+            or operation.kind != "recognition_detection_assignment"
+        ):
+            return False
+        changed = apply_detection_assignment_with_group_refresh(
+            self._library_root,
+            operation.payload,
+        )
+        coordinator = self._mutation_coordinator
+        if coordinator is None:
+            return False
+        if changed:
+            coordinator.commit_and_dispatch(
+                operation.operation_id,
+                {"kind": operation.kind, **operation.payload},
+                lambda: None,
+            )
+        else:
+            coordinator.transition(
+                operation.operation_id,
+                "finalized",
+                error="assignment_recovery_rejected",
+            )
+        return True
 
     def set_library_root(self, library_root: Path | None) -> None:
         if self._library_root == library_root:
@@ -114,6 +158,7 @@ class PeopleService:
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
+        self._mutation_coordinator = None
         self._repository = None
 
     def library_root(self) -> Path | None:
@@ -137,6 +182,7 @@ class PeopleService:
         self._coordinator = get_people_index_coordinator(
             self._library_root,
             asset_repository=self._asset_repository,
+            mutation_coordinator=self._mutation_coordinator,
         )
         return self._coordinator
 
@@ -346,10 +392,10 @@ class PeopleService:
             coordinator.set_group_order(group_ids)
 
     def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return False
-        return repository.set_person_hidden(person_id, hidden)
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.set_person_hidden(person_id, hidden))
 
     def is_cluster_hidden(self, person_id: str) -> bool:
         repository = self.repository()
@@ -365,6 +411,10 @@ class PeopleService:
             source_person_id,
             target_person_id,
         ))
+
+    def recognition_mutation_pending(self) -> bool:
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.recovery_pending)
 
     def merge_identities(self, source_identity: str, target_identity: str) -> IdentityMergeResult | None:
         if self._library_root is None:
@@ -383,11 +433,25 @@ class PeopleService:
         if repository is None or paths is None:
             return None
         state_repository = FaceStateRepository(paths.state_db_path)
-        redirect_sources = {
-            (redirect.source_kind, redirect.source_id)
+        redirects = {
+            (redirect.source_kind, redirect.source_id): (
+                redirect.target_kind,
+                redirect.target_id,
+            )
             for redirect in state_repository.get_identity_redirects()
         }
-        if source in redirect_sources or target in redirect_sources:
+        existing_target = redirects.get(source)
+        if existing_target == target:
+            repository.refresh_all_group_assets()
+            return IdentityMergeResult(
+                merged=True,
+                source_kind=source_kind,
+                source_id=source_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                group_redirects={},
+            )
+        if existing_target is not None or target in redirects:
             return None
 
         person_summaries = {
@@ -409,13 +473,13 @@ class PeopleService:
         if source_hidden is None or target_hidden is None or source_hidden != target_hidden:
             return None
 
-        merged, group_redirects = state_repository.merge_identity_redirect_and_groups(
+        ensured = state_repository.merge_identity_redirect_and_groups(
             source_kind=source_kind,
             source_id=source_id,
             target_kind=target_kind,
             target_id=target_id,
         )
-        if not merged:
+        if not ensured.succeeded:
             return None
         repository.refresh_all_group_assets()
         return IdentityMergeResult(
@@ -424,8 +488,83 @@ class PeopleService:
             source_id=source_id,
             target_kind=target_kind,
             target_id=target_id,
-            group_redirects=group_redirects,
+            group_redirects=ensured.group_redirects,
         )
+
+    def reassign_detection_identity(
+        self,
+        *,
+        source_kind: str,
+        source_annotation_id: str,
+        target_identity: str,
+    ) -> bool:
+        """Assign one detection to a cross-kind identity without converting it."""
+
+        if self._library_root is None or source_kind not in {"person", "pet"}:
+            return False
+        target = _parse_identity_id(target_identity)
+        if target is None or target[0] == source_kind or not source_annotation_id:
+            return False
+        target_kind, target_id = target
+        repository = self.repository()
+        paths = self.paths()
+        if repository is None or paths is None:
+            return False
+        target_exists = (
+            self.has_cluster(target_id)
+            if target_kind == "person"
+            else self.has_pet(target_id)
+        )
+        if not target_exists:
+            return False
+        if source_kind == "person":
+            source_exists = repository.has_face(source_annotation_id)
+        else:
+            pet_root = ensure_work_dir(self._library_root) / "pets"
+            source_exists = (
+                PetRepository(
+                    pet_root / "pet_index.db",
+                    pet_root / "pet_state.db",
+                ).get_detection(source_annotation_id)
+                is not None
+            )
+        if not source_exists:
+            return False
+
+        payload = {
+            "source_kind": source_kind,
+            "source_annotation_id": source_annotation_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+        }
+        if self._mutation_coordinator is None:
+            self._mutation_coordinator = get_recognition_mutation_coordinator(
+                self._library_root
+            )
+            self._mutation_coordinator.register_recovery_handler(
+                {"recognition_detection_assignment"},
+                self._recover_assignment_operation,
+            )
+        journal = self._mutation_coordinator
+        with journal.mutation_scope():
+            if not journal.recover_pending():
+                return False
+            operation_id = journal.try_prepare("recognition_detection_assignment", payload)
+            if operation_id is None:
+                return False
+            changed = apply_detection_assignment_with_group_refresh(
+                self._library_root,
+                payload,
+            )
+            if not changed:
+                journal.transition(operation_id, "finalized", error="assignment_rejected")
+                return False
+            journal.commit_and_dispatch(
+                operation_id,
+                {"kind": "recognition_detection_assignment", **payload},
+                lambda: None,
+            )
+            return True
 
     def delete_face(self, annotation_face_id: str) -> bool:
         if self._library_root is None or not annotation_face_id:
@@ -513,14 +652,7 @@ class PeopleService:
             rows_by_id = asset_repository.get_rows_by_ids([asset_id])
             if asset_id not in rows_by_id:
                 return []
-        redirected_people = self._redirected_source_ids("person")
-        if not redirected_people:
-            return repository.list_asset_face_annotations(asset_id)
-        return [
-            annotation
-            for annotation in repository.list_asset_face_annotations(asset_id)
-            if annotation.person_id not in redirected_people
-        ]
+        return repository.list_asset_face_annotations(asset_id)
 
     def list_person_name_suggestions(self) -> list[PersonSummary]:
         return [
@@ -556,11 +688,9 @@ class PeopleService:
         asset_rel = str(row.get("rel") or row.get("path") or "").strip()
         if not asset_rel:
             raise ManualFaceValidationError("The selected photo path could not be resolved.")
-        resolved_library_root = library_root.resolve()
-        image_path = (resolved_library_root / asset_rel).resolve()
         try:
-            image_path.relative_to(resolved_library_root)
-        except ValueError as exc:
+            image_path = resolve_library_asset_path(library_root, asset_rel)
+        except LibraryAssetPathError as exc:
             raise ManualFaceValidationError("The selected photo path is invalid.") from exc
         if not image_path.is_file():
             raise ManualFaceValidationError("The selected photo file could not be found.")

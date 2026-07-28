@@ -11,6 +11,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
 from .records import PetDetectionRecord, PetProfile, PetRecord
@@ -78,7 +80,9 @@ class PetStateRepository:
                 """
                 SELECT
                     pet_id, name, center_embedding, embedding_dim,
-                    created_at, updated_at, sample_count, profile_state, species_label
+                    created_at, updated_at, sample_count, profile_state, species_label,
+                    embedding_pipeline_version, generation_id,
+                    boundary_embeddings, boundary_sample_count
                 FROM pet_profiles
                 """
             ).fetchall()
@@ -104,6 +108,15 @@ class PetStateRepository:
                     sample_count=sample_count,
                     profile_state=profile_state_for_sample_count(sample_count),
                     species_label=_normalize_species_label(row["species_label"]),
+                    embedding_pipeline_version=str(
+                        row["embedding_pipeline_version"] or ""
+                    ),
+                    generation_id=int(row["generation_id"] or 0),
+                    boundary_embeddings=_deserialize_boundary_embeddings(
+                        row["boundary_embeddings"],
+                        embedding_dim=int(row["embedding_dim"] or 0),
+                        sample_count=int(row["boundary_sample_count"] or 0),
+                    ),
                 )
             )
         return profiles
@@ -116,24 +129,56 @@ class PetStateRepository:
     def get_profile(self, pet_id: str) -> PetProfile | None:
         if not pet_id:
             return None
-        profiles = [profile for profile in self.get_profiles() if profile.pet_id == pet_id]
-        return profiles[0] if profiles else None
+        return self.get_profiles_by_ids((pet_id,)).get(pet_id)
+
+    def get_profiles_by_ids(self, pet_ids: Iterable[str]) -> dict[str, PetProfile]:
+        unique_ids = tuple(str(value) for value in dict.fromkeys(pet_ids) if value)
+        if not unique_ids:
+            return {}
+        self.initialize()
+        rows: list[sqlite3.Row] = []
+        with closing(self._connect()) as conn:
+            for chunk in _chunked(unique_ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT
+                            pet_id, name, center_embedding, embedding_dim,
+                            created_at, updated_at, sample_count, profile_state,
+                            species_label, embedding_pipeline_version, generation_id,
+                            boundary_embeddings, boundary_sample_count
+                        FROM pet_profiles
+                        WHERE pet_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+        return {
+            str(row["pet_id"]): _profile_from_row(row)
+            for row in rows
+            if row["pet_id"]
+        }
 
     def get_profile_name_map(self, pet_ids: Iterable[str]) -> dict[str, str | None]:
         unique_ids = [str(pet_id) for pet_id in dict.fromkeys(pet_ids) if pet_id]
         if not unique_ids:
             return {}
         self.initialize()
-        placeholders = ", ".join(["?"] * len(unique_ids))
+        rows: list[sqlite3.Row] = []
         with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT pet_id, name
-                FROM pet_profiles
-                WHERE pet_id IN ({placeholders})
-                """,
-                unique_ids,
-            ).fetchall()
+            for chunk in _chunked(tuple(unique_ids), 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT pet_id, name
+                        FROM pet_profiles
+                        WHERE pet_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
         return {str(row["pet_id"]): row["name"] for row in rows if row["pet_id"]}
 
     def get_pet_key_map(self, pet_keys: Iterable[str]) -> dict[str, str]:
@@ -141,16 +186,20 @@ class PetStateRepository:
         if not unique_keys:
             return {}
         self.initialize()
-        placeholders = ", ".join(["?"] * len(unique_keys))
+        rows: list[sqlite3.Row] = []
         with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT pet_key, pet_id
-                FROM pet_keys
-                WHERE pet_key IN ({placeholders})
-                """,
-                unique_keys,
-            ).fetchall()
+            for chunk in _chunked(tuple(unique_keys), 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT pet_key, pet_id
+                        FROM pet_keys
+                        WHERE pet_key IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
         return {str(row["pet_key"]): str(row["pet_id"]) for row in rows if row["pet_key"]}
 
     def get_rejected_pet_keys(self, pet_keys: Iterable[str]) -> set[str]:
@@ -158,16 +207,20 @@ class PetStateRepository:
         if not unique_keys:
             return set()
         self.initialize()
-        placeholders = ", ".join(["?"] * len(unique_keys))
+        rows: list[sqlite3.Row] = []
         with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT pet_key
-                FROM rejected_pet_keys
-                WHERE pet_key IN ({placeholders})
-                """,
-                unique_keys,
-            ).fetchall()
+            for chunk in _chunked(tuple(unique_keys), 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT pet_key
+                        FROM rejected_pet_keys
+                        WHERE pet_key IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
         return {str(row["pet_key"]) for row in rows if row["pet_key"]}
 
     def add_rejected_pet_key(self, pet_key: str) -> None:
@@ -184,10 +237,37 @@ class PetStateRepository:
             )
             conn.commit()
 
+    def migrate_pet_keys(self, mappings: Iterable[tuple[str, str]]) -> None:
+        """Add replacement keys without copying any rejection decisions."""
+
+        normalized = tuple(
+            (str(pet_key), str(pet_id))
+            for pet_key, pet_id in mappings
+            if pet_key and pet_id
+        )
+        if not normalized:
+            return
+        self.initialize()
+        timestamp = utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO pet_keys (pet_key, pet_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(pet_key) DO UPDATE SET
+                    pet_id = excluded.pet_id,
+                    updated_at = excluded.updated_at
+                """,
+                [(pet_key, pet_id, timestamp) for pet_key, pet_id in normalized],
+            )
+            conn.commit()
+
     def sync_scan_results(
         self,
         pets: list[PetRecord],
         detections: list[PetDetectionRecord],
+        *,
+        replaced_pet_ids: Iterable[str] = (),
     ) -> None:
         self.initialize()
         names = self.get_profile_name_map(pet.pet_id for pet in pets)
@@ -226,8 +306,10 @@ class PetStateRepository:
                     """
                     INSERT INTO pet_profiles (
                         pet_id, name, center_embedding, embedding_dim,
-                        created_at, updated_at, sample_count, profile_state, species_label
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, sample_count, profile_state, species_label,
+                        embedding_pipeline_version, generation_id,
+                        boundary_embeddings, boundary_sample_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pet_id) DO UPDATE SET
                         name = COALESCE(pet_profiles.name, excluded.name),
                         center_embedding = excluded.center_embedding,
@@ -235,7 +317,11 @@ class PetStateRepository:
                         updated_at = excluded.updated_at,
                         sample_count = excluded.sample_count,
                         profile_state = excluded.profile_state,
-                        species_label = excluded.species_label
+                        species_label = excluded.species_label,
+                        embedding_pipeline_version = excluded.embedding_pipeline_version,
+                        generation_id = excluded.generation_id
+                        , boundary_embeddings = excluded.boundary_embeddings
+                        , boundary_sample_count = excluded.boundary_sample_count
                     """,
                     (
                         pet.pet_id,
@@ -247,6 +333,13 @@ class PetStateRepository:
                         sample_count,
                         profile_state_for_sample_count(sample_count),
                         _normalize_species_label(pet.species_label),
+                        pet.embedding_pipeline_version,
+                        pet.generation_id,
+                        _serialize_boundary_embeddings(
+                            pet.boundary_embeddings,
+                            pet.embedding_dim,
+                        ),
+                        min(len(pet.boundary_embeddings), 8),
                     ),
                 )
 
@@ -279,10 +372,36 @@ class PetStateRepository:
                 if key_detection is None:
                     continue
                 custom = conn.execute(
-                    "SELECT is_custom FROM pet_covers WHERE pet_id = ?",
+                    "SELECT is_custom, pet_key FROM pet_covers WHERE pet_id = ?",
                     (pet.pet_id,),
                 ).fetchone()
                 if custom is not None and int(custom["is_custom"] or 0) == 1:
+                    custom_key = str(custom["pet_key"] or "")
+                    replacement = next(
+                        (
+                            detection
+                            for detection in detections
+                            if detection.pet_id == pet.pet_id
+                            and detection.pet_key == custom_key
+                        ),
+                        None,
+                    )
+                    if replacement is not None:
+                        conn.execute(
+                            """
+                            UPDATE pet_covers
+                            SET detection_id = ?, asset_id = ?, thumbnail_path = ?,
+                                updated_at = ?
+                            WHERE pet_id = ?
+                            """,
+                            (
+                                replacement.detection_id,
+                                replacement.asset_id,
+                                replacement.thumbnail_path,
+                                timestamp,
+                                pet.pet_id,
+                            ),
+                        )
                     continue
                 conn.execute(
                     """
@@ -308,14 +427,8 @@ class PetStateRepository:
                 )
 
             current_pet_ids = {pet.pet_id for pet in pets if pet.pet_id}
-            automatic_cover_rows = conn.execute(
-                "SELECT pet_id FROM pet_covers WHERE is_custom = 0"
-            ).fetchall()
-            stale_automatic_cover_ids = [
-                str(row["pet_id"])
-                for row in automatic_cover_rows
-                if row["pet_id"] and str(row["pet_id"]) not in current_pet_ids
-            ]
+            replaced_ids = {str(pet_id) for pet_id in replaced_pet_ids if pet_id}
+            stale_automatic_cover_ids = sorted(replaced_ids - current_pet_ids)
             conn.executemany(
                 "DELETE FROM pet_covers WHERE pet_id = ? AND is_custom = 0",
                 [(pet_id,) for pet_id in stale_automatic_cover_ids],
@@ -447,16 +560,20 @@ class PetStateRepository:
         if not unique_ids:
             return {}
         self.initialize()
-        placeholders = ", ".join(["?"] * len(unique_ids))
+        rows: list[sqlite3.Row] = []
         with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT pet_id
-                FROM hidden_pets
-                WHERE pet_id IN ({placeholders})
-                """,
-                unique_ids,
-            ).fetchall()
+            for chunk in _chunked(tuple(unique_ids), 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT pet_id
+                        FROM hidden_pets
+                        WHERE pet_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
         hidden = {str(row["pet_id"]) for row in rows if row["pet_id"]}
         return {pet_id: pet_id in hidden for pet_id in unique_ids}
 
@@ -495,16 +612,20 @@ class PetStateRepository:
         if not unique_ids:
             return {}
         self.initialize()
-        placeholders = ", ".join(["?"] * len(unique_ids))
+        rows: list[sqlite3.Row] = []
         with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT pet_id, thumbnail_path
-                FROM pet_covers
-                WHERE pet_id IN ({placeholders})
-                """,
-                unique_ids,
-            ).fetchall()
+            for chunk in _chunked(tuple(unique_ids), 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT pet_id, thumbnail_path
+                        FROM pet_covers
+                        WHERE pet_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
         return {
             str(row["pet_id"]): str(row["thumbnail_path"])
             for row in rows
@@ -520,6 +641,57 @@ class PetStateRepository:
                 "SELECT thumbnail_path FROM pet_covers WHERE thumbnail_path IS NOT NULL"
             ).fetchall()
         return {str(row["thumbnail_path"]) for row in rows if row["thumbnail_path"]}
+
+    def get_cover(self, pet_id: str) -> PetCoverRecord | None:
+        if not pet_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM pet_covers WHERE pet_id = ?",
+                (pet_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return PetCoverRecord(
+            pet_id=str(row["pet_id"]),
+            detection_id=str(row["detection_id"]) if row["detection_id"] else None,
+            pet_key=str(row["pet_key"]) if row["pet_key"] else None,
+            asset_id=str(row["asset_id"]) if row["asset_id"] else None,
+            thumbnail_path=(
+                str(row["thumbnail_path"]) if row["thumbnail_path"] else None
+            ),
+            is_custom=bool(row["is_custom"]),
+        )
+
+    def get_summary_state_maps(
+        self,
+    ) -> tuple[dict[str, bool], dict[str, str], dict[str, str | None]]:
+        """Load dashboard state with a fixed query budget independent of pet count."""
+
+        self.initialize()
+        with closing(self._connect()) as conn:
+            hidden_rows = conn.execute("SELECT pet_id FROM hidden_pets").fetchall()
+            cover_rows = conn.execute(
+                "SELECT pet_id, thumbnail_path FROM pet_covers"
+            ).fetchall()
+            profile_rows = conn.execute(
+                "SELECT pet_id, name FROM pet_profiles"
+            ).fetchall()
+        hidden = {
+            str(row["pet_id"]): True for row in hidden_rows if row["pet_id"]
+        }
+        covers = {
+            str(row["pet_id"]): str(row["thumbnail_path"])
+            for row in cover_rows
+            if row["pet_id"] and row["thumbnail_path"]
+        }
+        names = {
+            str(row["pet_id"]): row["name"]
+            for row in profile_rows
+            if row["pet_id"]
+        }
+        return hidden, covers, names
 
     def clear_cover_for_detection(self, detection_id: str) -> bool:
         """Remove a cover choice that points at a detection being deleted."""
@@ -655,7 +827,11 @@ class PetStateRepository:
                 updated_at TEXT NOT NULL,
                 sample_count INTEGER DEFAULT 0,
                 profile_state TEXT DEFAULT 'unstable',
-                species_label TEXT
+                species_label TEXT,
+                embedding_pipeline_version TEXT NOT NULL DEFAULT '',
+                generation_id INTEGER NOT NULL DEFAULT 0,
+                boundary_embeddings BLOB,
+                boundary_sample_count INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -707,6 +883,25 @@ class PetStateRepository:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pet_keys_pet_id ON pet_keys (pet_id)")
+        _ensure_column(
+            conn,
+            "pet_profiles",
+            "embedding_pipeline_version",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            conn,
+            "pet_profiles",
+            "generation_id",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(conn, "pet_profiles", "boundary_embeddings", "BLOB")
+        _ensure_column(
+            conn,
+            "pet_profiles",
+            "boundary_sample_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         conn.commit()
 
 
@@ -730,3 +925,73 @@ def _canonical_redirect_map(redirects: dict[str, str]) -> dict[str, str]:
         if cursor not in visited and cursor != source:
             canonical[source] = cursor
     return canonical
+
+
+def _chunked(values: tuple[str, ...], size: int) -> Iterable[tuple[str, ...]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
+def _profile_from_row(row: sqlite3.Row) -> PetProfile:
+    sample_count = int(row["sample_count"] or 0)
+    return PetProfile(
+        pet_id=str(row["pet_id"]),
+        name=row["name"],
+        center_embedding=deserialize_embedding(
+            row["center_embedding"], int(row["embedding_dim"] or 0)
+        ),
+        embedding_dim=int(row["embedding_dim"] or 0),
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+        sample_count=sample_count,
+        profile_state=profile_state_for_sample_count(sample_count),
+        species_label=_normalize_species_label(row["species_label"]),
+        embedding_pipeline_version=str(row["embedding_pipeline_version"] or ""),
+        generation_id=int(row["generation_id"] or 0),
+        boundary_embeddings=_deserialize_boundary_embeddings(
+            row["boundary_embeddings"],
+            embedding_dim=int(row["embedding_dim"] or 0),
+            sample_count=int(row["boundary_sample_count"] or 0),
+        ),
+    )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _serialize_boundary_embeddings(
+    embeddings: tuple[np.ndarray, ...],
+    embedding_dim: int,
+) -> sqlite3.Binary | None:
+    selected = [
+        np.asarray(embedding, dtype=np.float32).reshape(-1)
+        for embedding in embeddings[:8]
+        if int(np.asarray(embedding).size) == int(embedding_dim)
+    ]
+    if not selected:
+        return None
+    return sqlite3.Binary(np.stack(selected, axis=0).tobytes())
+
+
+def _deserialize_boundary_embeddings(
+    blob: bytes | None,
+    *,
+    embedding_dim: int,
+    sample_count: int,
+) -> tuple[np.ndarray, ...]:
+    count = max(0, min(int(sample_count), 8))
+    if not blob or embedding_dim <= 0 or count <= 0:
+        return ()
+    matrix = np.frombuffer(blob, dtype=np.float32, count=count * embedding_dim).reshape(
+        count,
+        embedding_dim,
+    )
+    return tuple(row.copy() for row in matrix)

@@ -605,6 +605,245 @@ def test_recognition_binding_does_not_start_ai_before_viewport_ready(
     start_ai.assert_called_once_with(root, startup=True)
 
 
+def test_upgraded_library_schedules_closed_input_pet_backfill_after_bind(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.side_effect = lambda key: {
+        "pet_backfill_required": None,
+        "detector_pipeline_version": "legacy-detector",
+    }[key]
+    asset_repository = Mock()
+    asset_repository.count_by_pet_status.return_value = {"done": 3}
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = asset_repository
+
+    with (
+        patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot,
+        patch.object(manager, "_start_pet_backfill_worker") as start_backfill,
+    ):
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_called_once()
+        single_shot.call_args.args[1]()
+
+    repository.set_scan_metadata.assert_called_once_with(
+        "pet_backfill_required", "1"
+    )
+    start_backfill.assert_called_once_with(root)
+
+
+def test_new_library_does_not_schedule_pet_backfill_until_feature_use(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.return_value = None
+    asset_repository = Mock()
+    asset_repository.count_by_pet_status.return_value = {"done": 0}
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = asset_repository
+
+    with patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot:
+        manager.bind_recognition_services(Mock(), pet_service)
+
+    single_shot.assert_not_called()
+    repository.set_scan_metadata.assert_not_called()
+
+
+def test_pet_backfill_event_does_not_block_face_activation(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.side_effect = lambda key: {
+        "pet_backfill_required": "1",
+        "detector_pipeline_version": "legacy-detector",
+    }[key]
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = Mock()
+    pet_service.asset_repository.count_by_pet_status.return_value = {"done": 1}
+    pet_service.coordinator = None
+    people_service = Mock()
+    people_service.coordinator = None
+    class _BackfillWorker:
+        def cancel(self) -> None:
+            return None
+
+        def wait(self, _timeout: int = 0) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+    backfill = _BackfillWorker()
+    created_faces: list[object] = []
+
+    class _FakeSignal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class _FaceWorker:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.statusChanged = _FakeSignal()
+            self.finished = _FakeSignal()
+            self.started = False
+            self.input_closed = False
+            created_faces.append(self)
+
+        def setObjectName(self, _name: str) -> None:
+            return None
+
+        def finish_input(self) -> None:
+            self.input_closed = True
+
+        def start(self) -> None:
+            self.started = True
+
+        def cancel(self) -> None:
+            return None
+
+        def wait(self, _timeout: int = 0) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.face_scan_worker",
+        SimpleNamespace(FaceScanWorker=_FaceWorker),
+    )
+    with patch.object(
+        manager,
+        "_start_pet_backfill_worker",
+        side_effect=lambda _root: setattr(manager, "_current_pet_scanner", backfill),
+    ):
+        manager.bind_recognition_services(people_service, pet_service)
+        qapp.processEvents()
+
+    assert manager._current_pet_scanner is backfill
+    manager.activate_recognition_scans()
+
+    assert len(created_faces) == 1
+    assert created_faces[0].started is True
+    assert created_faces[0].input_closed is True
+    assert manager._current_pet_scanner is backfill
+    assert manager._recognition_scans_root == root
+
+
+def test_recognition_activation_retries_only_failed_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    manager._recognition_services_root = root
+    manager._people_service = Mock(coordinator=None)
+    manager._pet_service = Mock(coordinator=None)
+    face_starts: list[int] = []
+    pet_instances: list[object] = []
+
+    class _FakeSignal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class _WorkerBase:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.statusChanged = _FakeSignal()
+            self.finished = _FakeSignal()
+
+        def setObjectName(self, _name: str) -> None:
+            return None
+
+        def finish_input(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+        def wait(self, _timeout: int = 0) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+    class _FaceWorker(_WorkerBase):
+        def start(self) -> None:
+            face_starts.append(1)
+
+    class _PetWorker(_WorkerBase):
+        def __init__(self, *_args, **_kwargs) -> None:
+            super().__init__(*_args, **_kwargs)
+            pet_instances.append(self)
+
+        def start(self) -> None:
+            if len(pet_instances) == 1:
+                raise RuntimeError("injected Pet start failure")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.face_scan_worker",
+        SimpleNamespace(FaceScanWorker=_FaceWorker),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.pet_scan_worker",
+        SimpleNamespace(PetScanWorker=_PetWorker),
+    )
+
+    manager.activate_recognition_scans()
+    assert manager._recognition_scans_root is None
+    assert len(face_starts) == 1
+    assert len(pet_instances) == 1
+
+    manager.activate_recognition_scans()
+    assert manager._recognition_scans_root == root
+    assert len(face_starts) == 1
+    assert len(pet_instances) == 2
+
+
+def test_library_switch_retires_pet_worker_and_rejects_late_status(
+    qapp: QApplication,
+) -> None:
+    manager = LibraryRuntimeController()
+    worker = Mock()
+    worker._recognition_generation_token = manager._recognition_generation
+    manager._current_pet_scanner = worker
+    old_generation = manager._recognition_generation
+
+    manager.stop_scanning(wait=False)
+
+    worker.cancel.assert_called_once_with()
+    worker.wait.assert_not_called()
+    assert manager._recognition_generation == old_generation + 1
+    assert worker in manager._retiring_recognition_workers
+
+    manager._on_recognition_worker_status(worker, "pet", "late old-library status")
+    assert manager._pet_scan_status_message is None
+
+    manager._on_pet_scan_finished(worker)
+    assert worker not in manager._retiring_recognition_workers
+
+
 def test_map_activation_binds_location_runtime_and_interaction_services() -> None:
     manager = LibraryRuntimeController.__new__(LibraryRuntimeController)
     manager.bind_location_service = Mock()

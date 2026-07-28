@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import ctypes
+import sys
+import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 from typing import Any
-import uuid
 
 from PySide6.QtGui import QColorSpace, QImage
 
@@ -189,6 +189,31 @@ def _orientation_transform(orientation: int) -> int:
         7: 11,
         8: 3,
     }.get(orientation, 0)
+
+
+def _wic_frame_is_already_display_oriented(
+    frame_size: tuple[int, int],
+    display_size: tuple[int, int],
+    orientation: int,
+) -> bool:
+    """Detect WIC frames that already applied an axis-swapping EXIF transform.
+
+    Indexed image geometry is stored after EXIF orientation is applied.  Some
+    Windows HEIC codecs expose WIC frames in that display geometry, while JPEG
+    codecs commonly expose the original coded geometry.  Exact, non-square
+    dimensions let us distinguish those cases without guessing for 180-degree
+    rotations, mirrors, square images, or missing metadata.
+    """
+
+    if int(orientation) not in (5, 6, 7, 8):
+        return False
+    frame_width, frame_height = (int(frame_size[0]), int(frame_size[1]))
+    display_width, display_height = (int(display_size[0]), int(display_size[1]))
+    if min(frame_width, frame_height, display_width, display_height) <= 0:
+        return False
+    if frame_width == frame_height or display_width == display_height:
+        return False
+    return (frame_width, frame_height) == (display_width, display_height)
 
 
 def _apply_orientation(
@@ -450,11 +475,20 @@ class WindowsWicStillDecodeBackend:
             decoder = _create_decoder(factory, prepared.source_identity.path)
             frame = _first_frame(decoder)
             intrinsic = _source_size(frame)
-            oriented = _apply_orientation(
-                factory,
-                frame,
-                prepared.source_identity.orientation,
+            display_size = (
+                int(prepared.source_identity.width),
+                int(prepared.source_identity.height),
             )
+            if not _wic_frame_is_already_display_oriented(
+                intrinsic,
+                display_size,
+                prepared.source_identity.orientation,
+            ):
+                oriented = _apply_orientation(
+                    factory,
+                    frame,
+                    prepared.source_identity.orientation,
+                )
             current = oriented if oriented and oriented.value else frame
             current_size = _source_size(current)
             scaled_width, scaled_height = current_size

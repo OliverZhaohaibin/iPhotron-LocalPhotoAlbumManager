@@ -18,6 +18,8 @@ from typing import Callable, Sequence
 
 import numpy as np
 
+from iPhoto.utils.pathutils import resolve_library_asset_path
+
 from .image_utils import (
     PeopleImageLoadError,
     load_image_rgb,
@@ -90,8 +92,8 @@ class FaceClusterPipeline:
                 break
             asset_id = str(row.get("id") or "")
             asset_rel = Path(str(row.get("rel") or "")).as_posix()
-            image_path = (library_root / asset_rel).resolve()
             try:
+                image_path = resolve_library_asset_path(library_root, asset_rel)
                 image = load_image_rgb(image_path)
                 image_bgr = pil_image_to_bgr(image)
                 detected_faces = face_app.get(image_bgr)

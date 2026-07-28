@@ -264,6 +264,7 @@ $arguments = @(
     '--noinclude-data-files=torch/include',
     "--output-dir=$OutputDir",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\resources\i18n')=iPhoto/resources/i18n",
+    "--include-data-file=$(Join-Path $srcRoot 'iPhoto\pets\model_manifest.json')=iPhoto/pets/model_manifest.json",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\schemas')=iPhoto/schemas",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\icon')=iPhoto/gui/ui/icon",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\qml')=iPhoto/gui/ui/qml",

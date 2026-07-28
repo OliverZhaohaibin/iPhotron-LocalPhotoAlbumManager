@@ -13,7 +13,7 @@ from iPhoto.application.services.recognition_merge_service import (
     RecognitionMergeService,
 )
 from iPhoto.bootstrap.library_pet_service import create_pet_service
-from iPhoto.pets.records import PetDetectionRecord, PetRecord
+from iPhoto.pets.records import PetDetectionRecord, PetMergeOutcome, PetMutationFailure, PetRecord
 from iPhoto.pets.repository_utils import utc_now_iso
 from iPhoto.recognition.operation_journal import RecognitionOperationJournal
 from iPhoto.utils.pathutils import ensure_work_dir
@@ -101,6 +101,20 @@ def test_untyped_raw_id_is_rejected_without_guessing_kind() -> None:
 
     assert outcome.merged is False
     assert outcome.failure is IdentityMergeFailure.INVALID_IDENTITY
+
+
+def test_pet_merge_recovery_pending_is_not_reported_as_rejected() -> None:
+    people, pets = _services()
+    pets.merge_pets.return_value = PetMergeOutcome(
+        False,
+        PetMutationFailure.RECOVERY_PENDING,
+    )
+    service = RecognitionMergeService(people, pets)
+
+    outcome = service.merge("pet:same", "pet:other-pet")
+
+    assert outcome.merged is False
+    assert outcome.failure is IdentityMergeFailure.RECOVERY_PENDING
 
 
 def test_pending_assignment_blocks_person_merge_before_people_mutation(tmp_path) -> None:

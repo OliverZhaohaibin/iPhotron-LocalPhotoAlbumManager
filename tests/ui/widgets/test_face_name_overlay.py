@@ -430,6 +430,42 @@ def test_face_name_overlay_pet_annotation_uses_same_hover_path(qapp) -> None:
     _assert_cursor_restored()
 
 
+@pytest.mark.parametrize("canonical_name", ["Milo", None])
+def test_stale_pet_editor_uses_pure_canonical_name(qapp, canonical_name) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="det-stale",
+        source_identity_kind="pet",
+        source_identity_id="pet-stale",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-stale",
+        canonical_display_name=canonical_name,
+        box_x=80,
+        box_y=80,
+        box_w=120,
+        box_h=90,
+        image_width=420,
+        image_height=320,
+        is_stale=True,
+        stale_reason="asset_scan_failed_in_current_generation",
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    assert overlay._display_name(annotation).endswith("previous generation")
+    overlay._start_editing("pet:det-stale")
+
+    assert overlay._editor is not None
+    assert overlay._editor.text() == (canonical_name or "")
+    overlay._commit_editing()
+    assert (
+        overlay._states["pet:det-stale"].annotation.canonical_display_name
+        == canonical_name
+    )
+
+
 def test_face_name_overlay_clicking_saved_circle_does_not_toggle_hover(qapp) -> None:
     _surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations([_annotation(face_id="face-1", box_x=80, box_y=80)])

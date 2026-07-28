@@ -18,6 +18,7 @@ from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.application.services.recognition_merge_service import (
+    IdentityMergeFailure,
     IdentityMergeOutcome,
     IdentityMergeRefreshPolicy,
     IdentityRef,
@@ -1162,6 +1163,41 @@ def test_cross_identity_merge_invalidates_query_cache_before_reload(
     )
     widget._query_service.invalidate.assert_called_once_with()
     widget.reload.assert_called_once_with(preserve_content=True)
+
+
+def test_merge_recovery_pending_uses_distinct_information_message(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 1, None, "2024-01-01T00:00:00Z")
+    ]
+    widget._pet_summaries = [
+        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z")
+    ]
+    outcome = IdentityMergeOutcome(
+        False,
+        IdentityRef("person", "person-a"),
+        IdentityRef("pet", "pet-a"),
+        IdentityMergeFailure.RECOVERY_PENDING,
+    )
+    monkeypatch.setattr(widget._merge_service, "merge", Mock(return_value=outcome))
+    monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(lambda *_args: True))
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        people_dashboard_widget.dialogs,
+        "show_information",
+        lambda _parent, message, title="iPhoto": messages.append((title, message)),
+    )
+
+    assert widget._confirm_merge("person:person-a", "pet:pet-a") is False
+    assert messages == [
+        (
+            "Recognition Busy",
+            "Recognition data is still recovering. Please try again shortly.",
+        )
+    ]
 
 
 def test_merge_person_dialog_includes_same_hidden_people_and_pets(

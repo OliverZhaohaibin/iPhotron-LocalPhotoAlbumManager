@@ -12,6 +12,7 @@ from ..pets.service import PetService
 
 if TYPE_CHECKING:
     from ..pets.index_coordinator import PetIndexCoordinator
+    from ..recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
 class IndexStorePetAssetRepository:
@@ -76,6 +77,7 @@ def create_pet_service(
     *,
     asset_repository: PetAssetRepositoryPort | None = None,
     coordinator: PetIndexCoordinator | None = None,
+    mutation_coordinator: RecognitionMutationCoordinator | None = None,
     repository_factory: Callable[[Path], Any] | None = None,
 ) -> PetService:
     """Create a session-bound Pets service for one library."""
@@ -91,6 +93,7 @@ def create_pet_service(
         root,
         asset_repository=repository,
         coordinator=coordinator,
+        mutation_coordinator=mutation_coordinator,
     )
 
 

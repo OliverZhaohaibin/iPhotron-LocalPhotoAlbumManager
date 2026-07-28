@@ -361,6 +361,10 @@ class FaceRepository:
                 new_name = payload.get("new_name")
                 if new_person_id and new_name:
                     self._state_repo.rename_person(new_person_id, str(new_name))
+            elif operation_kind == "people_rename":
+                person_id = str(payload.get("person_id") or "")
+                if person_id:
+                    self._state_repo.rename_person(person_id, payload.get("name"))
             elif operation_kind == "people_merge":
                 payload["group_redirects"] = self._complete_merge_state_sync(
                     payload,
@@ -992,18 +996,50 @@ class FaceRepository:
             for source_ref, (kind, entity_id) in resolved.items()
         }
 
-    def rename_person(self, person_id: str, name_or_none: str | None) -> None:
+    def rename_person(
+        self,
+        person_id: str,
+        name_or_none: str | None,
+        *,
+        operation_id: str | None = None,
+    ) -> bool:
+        if not person_id:
+            return False
         self.initialize()
         normalized_name = _normalize_name(name_or_none)
         updated_at = _utc_now_iso()
         with closing(self._connect()) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM persons WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+            if exists is None and (
+                self._state_repo is None
+                or self._state_repo.get_profile(person_id) is None
+            ):
+                return False
             conn.execute(
                 "UPDATE persons SET name = ?, updated_at = ? WHERE person_id = ?",
                 (normalized_name, updated_at, person_id),
             )
+            if operation_id is not None:
+                self._write_runtime_commit(
+                    conn,
+                    operation_id,
+                    {
+                        "operation_kind": "people_rename",
+                        "person_id": person_id,
+                        "name": normalized_name,
+                        "changed_asset_ids": self.get_asset_ids_by_person(person_id),
+                        "changed_person_ids": [person_id],
+                    },
+                )
             conn.commit()
-        if self._state_repo is not None:
+        if operation_id is not None:
+            self.complete_runtime_state_sync(operation_id)
+        elif self._state_repo is not None:
             self._state_repo.rename_person(person_id, normalized_name)
+        return True
 
     def set_person_cover(self, person_id: str, face_id: str) -> bool:
         if self._state_repo is None or not person_id or not face_id:

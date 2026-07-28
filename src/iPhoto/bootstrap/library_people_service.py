@@ -12,6 +12,7 @@ from ..people.service import PeopleService
 
 if TYPE_CHECKING:
     from ..people.index_coordinator import PeopleIndexCoordinator
+    from ..recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
 class IndexStorePeopleAssetRepository:
@@ -76,6 +77,7 @@ def create_people_service(
     *,
     asset_repository: PeopleAssetRepositoryPort | None = None,
     coordinator: PeopleIndexCoordinator | None = None,
+    mutation_coordinator: RecognitionMutationCoordinator | None = None,
     repository_factory: Callable[[Path], Any] | None = None,
 ) -> PeopleService:
     """Create a session-bound People service for one library."""
@@ -91,6 +93,7 @@ def create_people_service(
         root,
         asset_repository=repository,
         coordinator=coordinator,
+        mutation_coordinator=mutation_coordinator,
     )
 
 

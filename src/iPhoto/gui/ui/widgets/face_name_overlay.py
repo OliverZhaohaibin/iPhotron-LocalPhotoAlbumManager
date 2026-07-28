@@ -595,11 +595,17 @@ class FaceNameOverlayWidget(QWidget):
 
     def _display_name(self, annotation: AssetFaceAnnotation) -> str:
         name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
-        return (
+        display_name = (
             name.strip()
             if isinstance(name, str) and name.strip()
             else tr("FaceNameOverlay", "unnamed")
         )
+        if bool(getattr(annotation, "is_stale", False)):
+            return tr(
+                "FaceNameOverlay",
+                "%1 · previous generation",
+            ).replace("%1", display_name)
+        return display_name
 
     def retranslate_ui(self) -> None:
         """Refresh overlay labels after the application language changes."""

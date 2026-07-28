@@ -13,12 +13,18 @@ from PIL import Image
 
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository
+from iPhoto.gui.ui.widgets.recognition_annotations import pet_annotation_adapter
 from iPhoto.people.repository import FaceRepository
 from iPhoto.people.status import is_face_scan_candidate
 from iPhoto.pets import pipeline as pet_pipeline
 from iPhoto.pets.index_coordinator import PetIndexCoordinator, PetSnapshotCommittedError
 from iPhoto.pets.pipeline import DetectedAssetPets, PetClusterPipeline, build_pet_key
-from iPhoto.pets.records import PetDetectionRecord, PetRecord
+from iPhoto.pets.records import (
+    AssetPetAnnotation,
+    PetDetectionRecord,
+    PetMutationFailure,
+    PetRecord,
+)
 from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 from iPhoto.pets.status import is_pet_scan_candidate
@@ -193,6 +199,115 @@ def test_failed_asset_keeps_previous_detection_as_explicit_stale_result(
     assert detection.is_stale
     assert detection.stale_reason == "asset_scan_failed_in_current_generation"
     assert detection.source_generation_id == detection.generation_id
+
+
+def test_stale_annotation_adapter_keeps_canonical_name_pure() -> None:
+    annotation = AssetPetAnnotation(
+        detection_id="det-stale",
+        pet_id="pet-stale",
+        display_name="Milo",
+        box_x=1,
+        box_y=2,
+        box_w=3,
+        box_h=4,
+        image_width=100,
+        image_height=100,
+        canonical_display_name="Milo",
+        is_stale=True,
+    )
+
+    adapted = pet_annotation_adapter(annotation)
+
+    assert adapted.canonical_display_name == "Milo"
+    assert adapted.is_stale is True
+
+
+@pytest.mark.parametrize("include_done_asset", [False, True])
+def test_pet_batch_cannot_mutate_before_global_journal_ownership(
+    tmp_path: Path,
+    monkeypatch,
+    include_done_asset: bool,
+) -> None:
+    store = _AssetStore("asset-a")
+    coordinator = PetIndexCoordinator(tmp_path, asset_repository=store)
+    repository = coordinator._repository()
+    coordinator.submit_detected_batch(
+        [DetectedAssetPets("asset-a", "album/a.jpg", [_detection("first")])],
+        distance_threshold=0.1,
+    )
+    before = repository.get_detection("first")
+    assert before is not None and before.is_stale is False
+    assert store.status == "done"
+
+    foreign_operation_id: str | None = None
+
+    def lose_global_ownership(_kind, _payload):
+        nonlocal foreign_operation_id
+        foreign_operation_id = coordinator._journal.prepare(
+            "people_scan_commit",
+            {"done_asset_ids": [], "retry_asset_ids": []},
+        )
+        return None
+
+    monkeypatch.setattr(
+        coordinator,
+        "_try_prepare_operation_locked",
+        lose_global_ownership,
+    )
+
+    batch = [DetectedAssetPets("asset-a", "album/a.jpg", [], error="decode failed")]
+    if include_done_asset:
+        batch.append(
+            DetectedAssetPets(
+                "asset-b",
+                "album/b.jpg",
+                [_detection("unowned-new", asset_id="asset-b")],
+            )
+        )
+    event = coordinator.submit_detected_batch(
+        batch,
+        distance_threshold=0.1,
+    )
+
+    after = repository.get_detection("first")
+    assert event is None
+    assert after is not None and after.is_stale is False
+    assert repository.get_detection("unowned-new") is None
+    assert store.status == "done"
+    assert foreign_operation_id is not None
+    assert [item.operation_id for item in coordinator._journal.unfinished()] == [
+        foreign_operation_id
+    ]
+
+
+def test_pet_merge_reports_shutdown_as_temporary_failure(tmp_path: Path) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    coordinator.begin_shutdown()
+
+    outcome = coordinator.merge_pets("pet-a", "pet-b")
+
+    assert outcome.merged is False
+    assert outcome.failure is PetMutationFailure.SHUTTING_DOWN
+
+
+def test_pet_merge_reports_business_rejection(tmp_path: Path) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+
+    outcome = coordinator.merge_pets("missing-source", "missing-target")
+
+    assert outcome.merged is False
+    assert outcome.failure is PetMutationFailure.REJECTED
+
+
+def test_pet_merge_reports_busy_journal_as_recovery_pending(tmp_path: Path) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    operation_id = coordinator._journal.prepare("future-operation", {})
+    coordinator._journal.transition(operation_id, "applying")
+
+    outcome = coordinator.merge_pets("pet-a", "pet-b")
+
+    assert outcome.merged is False
+    assert outcome.failure is PetMutationFailure.RECOVERY_PENDING
 
 
 def test_second_bbox_failure_rolls_back_thumbnails_and_metric(
@@ -727,7 +842,7 @@ def test_legacy_outer_pet_merge_is_forward_recovered(
     )
     coordinator._journal.transition(legacy_operation_id, "applying")
 
-    assert coordinator.merge_pets("pet-a", "pet-b") is True
+    assert coordinator.merge_pets("pet-a", "pet-b").merged is True
 
     assert coordinator._journal.unfinished() == ()
     assert {pet.pet_id for pet in repository.get_all_pet_records()} == {"pet-b"}

@@ -7,19 +7,58 @@ import sqlite3
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
 
+class RecognitionOperationKind(StrEnum):
+    PEOPLE_SCAN_COMMIT = "people_scan_commit"
+    PEOPLE_ADD_MANUAL_FACE = "people_add_manual_face"
+    PEOPLE_DELETE_FACE = "people_delete_face"
+    PEOPLE_MOVE_FACE = "people_move_face"
+    PEOPLE_MOVE_FACE_NEW = "people_move_face_new"
+    PEOPLE_MERGE = "people_merge"
+    PEOPLE_CREATE_GROUP = "people_create_group"
+    PEOPLE_DELETE_GROUP = "people_delete_group"
+    PEOPLE_RENAME = "people_rename"
+    PET_SCAN_COMMIT = "pet_scan_commit"
+    PET_RENAME = "pet_rename"
+    PET_HIDE = "pet_hide"
+    PET_COVER = "pet_cover"
+    PET_MERGE = "pet_merge"
+    PET_DELETE_DETECTION = "pet_delete_detection"
+    PET_MOVE_DETECTION = "pet_move_detection"
+    PET_MOVE_DETECTION_NEW = "pet_move_detection_new"
+    PET_OVERLAP_RECONCILE = "pet_overlap_reconcile"
+    PET_RECLUSTER = "pet_recluster"
+    RECOGNITION_MERGE = "recognition_merge"
+    RECOGNITION_DETECTION_ASSIGNMENT = "recognition_detection_assignment"
+
+
+class RecognitionOperationState(StrEnum):
+    PREPARED = "prepared"
+    APPLYING = "applying"
+    COMMITTED = "committed"
+    FINALIZED = "finalized"
+
+
 @dataclass(frozen=True)
 class RecognitionOperation:
     sequence: int
     operation_id: str
-    kind: str
-    state: str
+    kind: RecognitionOperationKind | str
+    state: RecognitionOperationState
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RecognitionOutboxEvent:
+    event_id: str
+    operation_id: str
+    event: dict[str, Any]
 
 
 class RecognitionOperationJournal:
@@ -29,7 +68,7 @@ class RecognitionOperationJournal:
         self._db_path = Path(db_path)
         self._initialize()
 
-    def prepare(self, kind: str, payload: dict[str, Any]) -> str:
+    def prepare(self, kind: str | RecognitionOperationKind, payload: dict[str, Any]) -> str:
         """Append an operation without applying the global-empty guard.
 
         Recovery and test setup use this primitive. New user mutations should
@@ -41,14 +80,18 @@ class RecognitionOperationJournal:
             raise RuntimeError("Unconditional recognition operation insert was rejected.")
         return operation_id
 
-    def try_prepare(self, kind: str, payload: dict[str, Any]) -> str | None:
+    def try_prepare(
+        self,
+        kind: str | RecognitionOperationKind,
+        payload: dict[str, Any],
+    ) -> str | None:
         """Atomically append an operation only when the global queue is empty."""
 
         return self._insert_operation(kind, payload, require_empty=True)
 
     def _insert_operation(
         self,
-        kind: str,
+        kind: str | RecognitionOperationKind,
         payload: dict[str, Any],
         *,
         require_empty: bool,
@@ -77,70 +120,157 @@ class RecognitionOperationJournal:
     def transition(
         self,
         operation_id: str,
-        state: str,
+        state: str | RecognitionOperationState,
         *,
+        expected_state: str | RecognitionOperationState | None = None,
         payload: dict[str, Any] | None = None,
         error: str | None = None,
-    ) -> None:
-        if state not in {"prepared", "applying", "committed", "finalized"}:
+    ) -> bool:
+        normalized_state = str(state)
+        if normalized_state not in {value.value for value in RecognitionOperationState}:
             raise ValueError(f"Unsupported recognition operation state: {state}")
         with closing(self._connect()) as conn:
             if payload is None:
-                conn.execute(
-                    """
-                    UPDATE operations
-                    SET state = ?, last_error = ?, updated_at = datetime('now')
-                    WHERE operation_id = ?
-                    """,
-                    (state, error, operation_id),
-                )
+                if expected_state is None:
+                    cursor = conn.execute(
+                        """
+                        UPDATE operations
+                        SET state = ?, last_error = ?, updated_at = datetime('now')
+                        WHERE operation_id = ?
+                        """,
+                        (normalized_state, error, operation_id),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE operations
+                        SET state = ?, last_error = ?, updated_at = datetime('now')
+                        WHERE operation_id = ? AND state = ?
+                        """,
+                        (normalized_state, error, operation_id, str(expected_state)),
+                    )
             else:
-                conn.execute(
-                    """
-                    UPDATE operations
-                    SET state = ?, payload_json = ?, last_error = ?,
-                        updated_at = datetime('now')
-                    WHERE operation_id = ?
-                    """,
-                    (state, _json(payload), error, operation_id),
-                )
+                if expected_state is None:
+                    cursor = conn.execute(
+                        """
+                        UPDATE operations
+                        SET state = ?, payload_json = ?, last_error = ?,
+                            updated_at = datetime('now')
+                        WHERE operation_id = ?
+                        """,
+                        (normalized_state, _json(payload), error, operation_id),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE operations
+                        SET state = ?, payload_json = ?, last_error = ?,
+                            updated_at = datetime('now')
+                        WHERE operation_id = ? AND state = ?
+                        """,
+                        (
+                            normalized_state,
+                            _json(payload),
+                            error,
+                            operation_id,
+                            str(expected_state),
+                        ),
+                    )
             conn.commit()
+        return int(cursor.rowcount or 0) == 1
 
-    def commit_outbox(self, operation_id: str, event: dict[str, Any]) -> None:
+    def commit_outbox(
+        self,
+        operation_id: str,
+        event: dict[str, Any],
+        *,
+        event_id: str | None = None,
+    ) -> str:
+        stable_event_id = str(event_id or operation_id)
         with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
-                INSERT INTO event_outbox (operation_id, event_json, published)
-                VALUES (?, ?, 0)
-                ON CONFLICT(operation_id) DO UPDATE SET event_json = excluded.event_json
+                INSERT INTO event_outbox (
+                    event_id, operation_id, event_json, delivery_state
+                ) VALUES (?, ?, ?, 'pending')
+                ON CONFLICT(operation_id) DO UPDATE SET
+                    event_json = excluded.event_json,
+                    delivery_state = CASE
+                        WHEN event_outbox.delivery_state = 'dispatched' THEN 'dispatched'
+                        ELSE 'pending'
+                    END
                 """,
-                (operation_id, _json(event)),
+                (stable_event_id, operation_id, _json(event)),
             )
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE operations
                 SET state = 'committed', updated_at = datetime('now')
-                WHERE operation_id = ?
+                WHERE operation_id = ? AND state IN ('applying', 'committed')
                 """,
                 (operation_id,),
             )
+            if int(cursor.rowcount or 0) != 1:
+                conn.rollback()
+                raise RuntimeError(
+                    "Recognition operation cannot commit outbox from its current state: "
+                    f"{operation_id}"
+                )
             conn.commit()
+        return stable_event_id
 
-    def mark_published(self, operation_id: str) -> None:
+    def mark_dispatched(self, operation_id: str) -> bool:
         with closing(self._connect()) as conn:
-            conn.execute(
-                "UPDATE event_outbox SET published = 1 WHERE operation_id = ?",
+            conn.execute("BEGIN IMMEDIATE")
+            event_cursor = conn.execute(
+                """
+                UPDATE event_outbox
+                SET delivery_state = 'dispatched'
+                WHERE operation_id = ? AND delivery_state IN ('pending', 'dispatched')
+                """,
                 (operation_id,),
             )
-            conn.execute(
+            operation_cursor = conn.execute(
                 """
                 UPDATE operations
                 SET state = 'finalized', updated_at = datetime('now')
-                WHERE operation_id = ?
+                WHERE operation_id = ? AND state = 'committed'
                 """,
                 (operation_id,),
             )
+            if int(event_cursor.rowcount or 0) != 1 or int(operation_cursor.rowcount or 0) != 1:
+                conn.rollback()
+                return False
             conn.commit()
+        return True
+
+    def mark_published(self, operation_id: str) -> None:
+        """Compatibility alias for callers migrating to dispatcher terminology."""
+
+        if not self.mark_dispatched(operation_id):
+            raise RuntimeError(
+                f"Recognition event cannot be dispatched from its current state: {operation_id}"
+            )
+
+    def pending_events(self) -> tuple[RecognitionOutboxEvent, ...]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT event_id, operation_id, event_json
+                FROM event_outbox
+                WHERE delivery_state = 'pending'
+                ORDER BY rowid ASC
+                """
+            ).fetchall()
+        return tuple(
+            RecognitionOutboxEvent(
+                event_id=str(row["event_id"]),
+                operation_id=str(row["operation_id"]),
+                event=json.loads(str(row["event_json"] or "{}")),
+            )
+            for row in rows
+        )
 
     def unfinished(self) -> tuple[RecognitionOperation, ...]:
         with closing(self._connect()) as conn:
@@ -156,8 +286,8 @@ class RecognitionOperationJournal:
             RecognitionOperation(
                 sequence=int(row["sequence"]),
                 operation_id=str(row["operation_id"]),
-                kind=str(row["kind"]),
-                state=str(row["state"]),
+                kind=_parse_operation_kind(str(row["kind"])),
+                state=RecognitionOperationState(str(row["state"])),
                 payload=json.loads(str(row["payload_json"] or "{}")),
             )
             for row in rows
@@ -197,16 +327,53 @@ class RecognitionOperationJournal:
                     )
                     conn.execute("DROP TABLE operations")
                     conn.execute("ALTER TABLE operations_v2 RENAME TO operations")
+            self._initialize_outbox(conn)
+            conn.commit()
+
+    @staticmethod
+    def _initialize_outbox(conn: sqlite3.Connection) -> None:
+        existing = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event_outbox'"
+        ).fetchone()
+        if existing is None:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS event_outbox (
-                    operation_id TEXT PRIMARY KEY,
+                CREATE TABLE event_outbox (
+                    event_id TEXT NOT NULL PRIMARY KEY,
+                    operation_id TEXT NOT NULL UNIQUE,
                     event_json TEXT NOT NULL,
-                    published INTEGER NOT NULL DEFAULT 0
+                    delivery_state TEXT NOT NULL DEFAULT 'pending'
                 )
                 """
             )
-            conn.commit()
+            return
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(event_outbox)").fetchall()
+        }
+        if {"event_id", "delivery_state"}.issubset(columns):
+            return
+        conn.execute("ALTER TABLE event_outbox RENAME TO event_outbox_legacy")
+        conn.execute(
+            """
+            CREATE TABLE event_outbox (
+                event_id TEXT NOT NULL PRIMARY KEY,
+                operation_id TEXT NOT NULL UNIQUE,
+                event_json TEXT NOT NULL,
+                delivery_state TEXT NOT NULL DEFAULT 'pending'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO event_outbox (
+                event_id, operation_id, event_json, delivery_state
+            )
+            SELECT operation_id, operation_id, event_json,
+                   CASE WHEN published = 1 THEN 'dispatched' ELSE 'pending' END
+            FROM event_outbox_legacy
+            """
+        )
+        conn.execute("DROP TABLE event_outbox_legacy")
 
     @staticmethod
     def _create_operations_table(conn: sqlite3.Connection, name: str) -> None:
@@ -238,4 +405,19 @@ def _json(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-__all__ = ["RecognitionOperation", "RecognitionOperationJournal"]
+def _parse_operation_kind(value: str) -> RecognitionOperationKind | str:
+    try:
+        return RecognitionOperationKind(value)
+    except ValueError:
+        # Preserve unknown legacy/future values so FIFO recovery blocks at the
+        # exact operation instead of silently discarding data.
+        return value
+
+
+__all__ = [
+    "RecognitionOperation",
+    "RecognitionOperationJournal",
+    "RecognitionOperationKind",
+    "RecognitionOperationState",
+    "RecognitionOutboxEvent",
+]

@@ -15,7 +15,7 @@ from iPhoto.pets.repository import PetRepository
 from iPhoto.recognition.assignment_recovery import (
     apply_detection_assignment_with_group_refresh,
 )
-from iPhoto.recognition.operation_journal import RecognitionOperationJournal
+from iPhoto.recognition.mutation_coordinator import get_recognition_mutation_coordinator
 from iPhoto.utils.pathutils import (
     LibraryAssetPathError,
     ensure_work_dir,
@@ -35,6 +35,8 @@ from .state_repository import FaceStateRepository
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 
 if TYPE_CHECKING:
+    from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
+
     from .index_coordinator import PeopleIndexCoordinator
 
 
@@ -110,11 +112,45 @@ class PeopleService:
         *,
         asset_repository: PeopleAssetRepositoryPort | None = None,
         coordinator: PeopleIndexCoordinator | None = None,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
     ) -> None:
         self._library_root = library_root
         self._asset_repository = asset_repository
         self._coordinator = coordinator
+        self._mutation_coordinator = mutation_coordinator
         self._repository: FaceRepository | None = None
+        if self._mutation_coordinator is not None:
+            self._mutation_coordinator.register_recovery_handler(
+                {"recognition_detection_assignment"},
+                self._recover_assignment_operation,
+            )
+
+    def _recover_assignment_operation(self, operation) -> bool:
+        if (
+            self._library_root is None
+            or operation.kind != "recognition_detection_assignment"
+        ):
+            return False
+        changed = apply_detection_assignment_with_group_refresh(
+            self._library_root,
+            operation.payload,
+        )
+        coordinator = self._mutation_coordinator
+        if coordinator is None:
+            return False
+        if changed:
+            coordinator.commit_and_dispatch(
+                operation.operation_id,
+                {"kind": operation.kind, **operation.payload},
+                lambda: None,
+            )
+        else:
+            coordinator.transition(
+                operation.operation_id,
+                "finalized",
+                error="assignment_recovery_rejected",
+            )
+        return True
 
     def set_library_root(self, library_root: Path | None) -> None:
         if self._library_root == library_root:
@@ -122,6 +158,7 @@ class PeopleService:
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
+        self._mutation_coordinator = None
         self._repository = None
 
     def library_root(self) -> Path | None:
@@ -145,6 +182,7 @@ class PeopleService:
         self._coordinator = get_people_index_coordinator(
             self._library_root,
             asset_repository=self._asset_repository,
+            mutation_coordinator=self._mutation_coordinator,
         )
         return self._coordinator
 
@@ -499,33 +537,20 @@ class PeopleService:
             "target_kind": target_kind,
             "target_id": target_id,
         }
-        journal = RecognitionOperationJournal(
-            ensure_work_dir(self._library_root) / "recognition" / "operations.db"
-        )
-        while (pending := journal.unfinished_head()) is not None:
-            if pending.kind != "recognition_detection_assignment":
-                return False
-            pending_payload = pending.payload
-            recovered = apply_detection_assignment_with_group_refresh(
-                self._library_root,
-                pending_payload,
+        if self._mutation_coordinator is None:
+            self._mutation_coordinator = get_recognition_mutation_coordinator(
+                self._library_root
             )
-            if recovered:
-                journal.commit_outbox(
-                    pending.operation_id,
-                    {"kind": "recognition_detection_assignment", **pending_payload},
-                )
-                journal.mark_published(pending.operation_id)
-            else:
-                journal.transition(
-                    pending.operation_id,
-                    "finalized",
-                    error="assignment_recovery_rejected",
-                )
+            self._mutation_coordinator.register_recovery_handler(
+                {"recognition_detection_assignment"},
+                self._recover_assignment_operation,
+            )
+        journal = self._mutation_coordinator
+        if not journal.recover_pending():
+            return False
         operation_id = journal.try_prepare("recognition_detection_assignment", payload)
         if operation_id is None:
             return False
-        journal.transition(operation_id, "applying")
         changed = apply_detection_assignment_with_group_refresh(
             self._library_root,
             payload,
@@ -533,11 +558,11 @@ class PeopleService:
         if not changed:
             journal.transition(operation_id, "finalized", error="assignment_rejected")
             return False
-        journal.commit_outbox(
+        journal.commit_and_dispatch(
             operation_id,
             {"kind": "recognition_detection_assignment", **payload},
+            lambda: None,
         )
-        journal.mark_published(operation_id)
         return True
 
     def delete_face(self, annotation_face_id: str) -> bool:

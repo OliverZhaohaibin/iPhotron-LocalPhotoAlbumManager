@@ -14,7 +14,10 @@ from iPhoto.application.ports.pets import PetAssetRepositoryPort
 from iPhoto.recognition.assignment_recovery import (
     apply_detection_assignment_with_group_refresh,
 )
-from iPhoto.recognition.operation_journal import RecognitionOperationJournal
+from iPhoto.recognition.mutation_coordinator import (
+    RecognitionMutationCoordinator,
+    get_recognition_mutation_coordinator,
+)
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
@@ -23,11 +26,27 @@ from .pipeline import (
     DetectedAssetPets,
     _pet_box_overlaps_people_boxes,
 )
+from .records import PetMergeOutcome, PetMutationFailure
 from .repository import PetRepository
 from .scan_session import PetScanSession
 from .status import PET_STATUS_DONE, PET_STATUS_RETRY
 
 LOGGER = get_logger()
+
+_PET_JOURNAL_KINDS = {
+    "pet_scan_commit",
+    "pet_rename",
+    "pet_hide",
+    "pet_cover",
+    "pet_merge",
+    "pet_delete_detection",
+    "pet_move_detection",
+    "pet_move_detection_new",
+    "pet_overlap_reconcile",
+    "pet_recluster",
+    "recognition_detection_assignment",
+    "recognition_merge",
+}
 
 
 class PetSnapshotCommittedError(RuntimeError):
@@ -39,6 +58,7 @@ class PetSnapshotEvent:
     library_root: Path
     revision: int
     operation_id: str | None = None
+    event_id: str | None = None
     generation_id: int = 0
     changed_asset_ids: tuple[str, ...] = ()
     added_pet_ids: tuple[str, ...] = ()
@@ -59,6 +79,7 @@ class PetIndexCoordinator(QObject):
         library_root: Path,
         *,
         asset_repository: PetAssetRepositoryPort | None = None,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
     ) -> None:
         super().__init__()
         self._library_root = Path(library_root)
@@ -66,8 +87,12 @@ class PetIndexCoordinator(QObject):
         self._lock = threading.RLock()
         self._revision = 0
         self._shutdown_requested = False
-        self._journal = RecognitionOperationJournal(
-            ensure_work_dir(self._library_root) / "recognition" / "operations.db"
+        self._journal = mutation_coordinator or get_recognition_mutation_coordinator(
+            self._library_root
+        )
+        self._journal.register_recovery_handler(
+            _PET_JOURNAL_KINDS,
+            self._recover_registered_pet_operation,
         )
         pets_root = ensure_work_dir(self._library_root) / "pets"
         self._pet_repository = PetRepository(
@@ -78,7 +103,10 @@ class PetIndexCoordinator(QObject):
         self._recovery_error: Exception | None = None
         try:
             with self._lock:
-                self._recover_operations_locked()
+                if not self._journal.recover_pending():
+                    raise self._journal.recovery_error or RuntimeError(
+                        "Pets recognition recovery is incomplete."
+                    )
                 self._prune_runtime_commits_locked()
         except Exception as exc:  # noqa: BLE001
             self._recovery_error = exc
@@ -162,21 +190,6 @@ class PetIndexCoordinator(QObject):
                 detected_batch = revalidated_batch
             session = PetScanSession()
             done_ids, retry_ids = session.stage_detection_results(detected_batch)
-            store = self._asset_repository
-            if retry_ids and store is not None:
-                store.update_pet_statuses(retry_ids, PET_STATUS_RETRY)
-            stale_pet_ids = repository.mark_asset_detections_stale(
-                retry_ids,
-                reason="asset_scan_failed_in_current_generation",
-            )
-            if not done_ids:
-                if not stale_pet_ids:
-                    return None
-                return self._emit_snapshot(
-                    changed_asset_ids=tuple(retry_ids),
-                    updated_pet_ids=stale_pet_ids,
-                )
-
             operation_payload = {
                 "done_asset_ids": list(done_ids),
                 "retry_asset_ids": list(retry_ids),
@@ -244,6 +257,7 @@ class PetIndexCoordinator(QObject):
                 commit_result = repository.replace_assets_incrementally(
                     done_ids,
                     staged_detections,
+                    retry_asset_ids=retry_ids,
                     distance_threshold=distance_threshold,
                     operation_id=operation_id,
                 )
@@ -274,9 +288,7 @@ class PetIndexCoordinator(QObject):
                     "index_applied": True,
                     "generation_id": generation_id,
                     "added_pet_ids": list(commit_result.added_pet_ids),
-                    "updated_pet_ids": list(
-                        dict.fromkeys(commit_result.updated_pet_ids + stale_pet_ids)
-                    ),
+                    "updated_pet_ids": list(commit_result.updated_pet_ids),
                     "removed_pet_ids": list(commit_result.removed_pet_ids),
                 }
             )
@@ -305,6 +317,7 @@ class PetIndexCoordinator(QObject):
                         "clustering_pipeline_version", clustering_pipeline_version
                     )
             try:
+                self._mark_retry_asset_ids(retry_ids)
                 self._mark_done_asset_ids(done_ids)
             except Exception as exc:
                 LOGGER.error(
@@ -320,27 +333,27 @@ class PetIndexCoordinator(QObject):
                 "generation_id": generation_id,
                 "changed_asset_ids": list(done_ids + retry_ids),
                 "added_pet_ids": list(commit_result.added_pet_ids),
-                "updated_pet_ids": list(
-                    dict.fromkeys(commit_result.updated_pet_ids + stale_pet_ids)
-                ),
+                "updated_pet_ids": list(commit_result.updated_pet_ids),
                 "removed_pet_ids": list(commit_result.removed_pet_ids),
             }
-            self._journal.commit_outbox(operation_id, outbox_payload)
             event = self._emit_snapshot(
                 operation_id=operation_id,
                 generation_id=generation_id,
                 changed_asset_ids=tuple(done_ids + retry_ids),
                 added_pet_ids=commit_result.added_pet_ids,
-                updated_pet_ids=tuple(
-                    dict.fromkeys(commit_result.updated_pet_ids + stale_pet_ids)
-                ),
+                updated_pet_ids=commit_result.updated_pet_ids,
                 removed_pet_ids=commit_result.removed_pet_ids,
+                dispatch=False,
             )
             repository.prune_unreferenced_thumbnails(
                 commit_result.previous_thumbnail_paths
             )
             repository.prune_unreferenced_thumbnails(filtered_thumbnail_paths)
-            self._journal.mark_published(operation_id)
+            self._journal.commit_and_dispatch(
+                operation_id,
+                outbox_payload,
+                lambda: self._scheduleEmit.emit(event),
+            )
             return event
 
     def rename_pet(self, pet_id: str, name_or_none: str | None) -> PetSnapshotEvent | None:
@@ -431,19 +444,19 @@ class PetIndexCoordinator(QObject):
                 )
             return changed
 
-    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> bool:
+    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> PetMergeOutcome:
         with self._lock:
             if self._shutdown_requested:
-                return False
+                return PetMergeOutcome(False, PetMutationFailure.SHUTTING_DOWN)
             if not self._ensure_recovered_locked():
-                return False
+                return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
                 "pet_merge",
                 {"source_pet_id": source_pet_id, "target_pet_id": target_pet_id},
             )
             if operation_id is None:
-                return False
+                return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
             result = repository.merge_pets(
                 source_pet_id,
                 target_pet_id,
@@ -455,14 +468,18 @@ class PetIndexCoordinator(QObject):
                     "finalized",
                     error="merge_rejected",
                 )
-                return False
+                return PetMergeOutcome(
+                    False,
+                    PetMutationFailure.REJECTED,
+                    operation_id,
+                )
             self._emit_journaled_snapshot(
                 operation_id,
                 changed_asset_ids=result.changed_asset_ids,
                 changed_pet_ids=result.changed_pet_ids,
                 pet_redirects=result.pet_redirects,
             )
-            return True
+            return PetMergeOutcome(True, operation_id=operation_id)
 
     def recluster_for_pipeline_upgrade(
         self,
@@ -727,6 +744,7 @@ class PetIndexCoordinator(QObject):
         removed_pet_ids: tuple[str, ...] = (),
         changed_pet_ids: tuple[str, ...] = (),
         pet_redirects: dict[str, str] | None = None,
+        dispatch: bool = True,
     ) -> PetSnapshotEvent:
         self._revision += 1
         changed_pet_ids = tuple(
@@ -741,6 +759,7 @@ class PetIndexCoordinator(QObject):
             library_root=self._library_root,
             revision=self._revision,
             operation_id=operation_id,
+            event_id=operation_id,
             generation_id=generation_id,
             changed_asset_ids=tuple(dict.fromkeys(changed_asset_ids)),
             added_pet_ids=tuple(dict.fromkeys(added_pet_ids)),
@@ -749,7 +768,8 @@ class PetIndexCoordinator(QObject):
             changed_pet_ids=tuple(dict.fromkeys(changed_pet_ids)),
             pet_redirects=dict(pet_redirects or {}),
         )
-        self._scheduleEmit.emit(event)
+        if dispatch:
+            self._scheduleEmit.emit(event)
         return event
 
     def _emit_journaled_snapshot(
@@ -761,9 +781,16 @@ class PetIndexCoordinator(QObject):
             key: list(value) if isinstance(value, tuple) else value
             for key, value in event_fields.items()
         }
-        self._journal.commit_outbox(operation_id, outbox_payload)
-        event = self._emit_snapshot(operation_id=operation_id, **event_fields)
-        self._journal.mark_published(operation_id)
+        event = self._emit_snapshot(
+            operation_id=operation_id,
+            dispatch=False,
+            **event_fields,
+        )
+        self._journal.commit_and_dispatch(
+            operation_id,
+            outbox_payload,
+            lambda: self._scheduleEmit.emit(event),
+        )
         self._prune_runtime_commits_locked()
         return event
 
@@ -786,11 +813,16 @@ class PetIndexCoordinator(QObject):
                 "Another recognition operation must finish before Pets can continue."
             )
             return None
-        self._journal.transition(operation_id, "applying")
         return operation_id
 
     def _mark_done_asset_ids(self, done_ids: list[str]) -> None:
-        if not done_ids:
+        self._mark_asset_ids_with_status(done_ids, PET_STATUS_DONE)
+
+    def _mark_retry_asset_ids(self, retry_ids: list[str]) -> None:
+        self._mark_asset_ids_with_status(retry_ids, PET_STATUS_RETRY)
+
+    def _mark_asset_ids_with_status(self, asset_ids: list[str], status: str) -> None:
+        if not asset_ids:
             return
         store = self._asset_repository
         if store is None:
@@ -798,7 +830,7 @@ class PetIndexCoordinator(QObject):
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                store.update_pet_statuses(done_ids, PET_STATUS_DONE)
+                store.update_pet_statuses(asset_ids, status)
                 return
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
@@ -808,9 +840,24 @@ class PetIndexCoordinator(QObject):
         if last_error is not None:
             raise last_error
 
-    def _recover_operations_locked(self) -> None:
+    def _recover_registered_pet_operation(self, operation) -> bool:
+        if operation.kind == "recognition_merge" and (
+            _legacy_pet_identity_id(operation.payload.get("source")) is None
+            or _legacy_pet_identity_id(operation.payload.get("target")) is None
+        ):
+            return False
+        self._recover_operations_locked(operation)
+        return all(
+            pending.operation_id != operation.operation_id
+            for pending in self._journal.unfinished()
+        )
+
+    def _recover_operations_locked(self, only_operation=None) -> None:
         repository = self._repository()
-        for operation in self._journal.unfinished():
+        operations = (
+            (only_operation,) if only_operation is not None else self._journal.unfinished()
+        )
+        for operation in operations:
             if operation.kind != "pet_scan_commit":
                 if operation.kind == "recognition_merge":
                     if self._recover_legacy_pet_recognition_merge(repository, operation):
@@ -887,6 +934,10 @@ class PetIndexCoordinator(QObject):
                     ),
                 )
             done_ids = [str(value) for value in payload.get("done_asset_ids", ()) if value]
+            retry_ids = [
+                str(value) for value in payload.get("retry_asset_ids", ()) if value
+            ]
+            self._mark_retry_asset_ids(retry_ids)
             self._mark_done_asset_ids(done_ids)
             event_payload = {
                 "changed_asset_ids": [
@@ -901,16 +952,20 @@ class PetIndexCoordinator(QObject):
                 "updated_pet_ids": list(payload.get("updated_pet_ids", ())),
                 "removed_pet_ids": list(payload.get("removed_pet_ids", ())),
             }
-            self._journal.commit_outbox(operation.operation_id, event_payload)
-            self._emit_snapshot(
+            event = self._emit_snapshot(
                 operation_id=operation.operation_id,
                 generation_id=int(payload.get("generation_id") or 0),
                 changed_asset_ids=tuple(event_payload["changed_asset_ids"]),
                 added_pet_ids=tuple(event_payload["added_pet_ids"]),
                 updated_pet_ids=tuple(event_payload["updated_pet_ids"]),
                 removed_pet_ids=tuple(event_payload["removed_pet_ids"]),
+                dispatch=False,
             )
-            self._journal.mark_published(operation.operation_id)
+            self._journal.commit_and_dispatch(
+                operation.operation_id,
+                event_payload,
+                lambda: self._scheduleEmit.emit(event),
+            )
 
     def _recover_legacy_pet_recognition_merge(self, repository, operation) -> bool:
         """Forward-recover the obsolete outer journal used by pet-to-pet merges."""
@@ -944,7 +999,7 @@ class PetIndexCoordinator(QObject):
             return True
 
         repository.complete_runtime_state_sync(operation.operation_id)
-        repository._remap_people_groups_for_pet_merge(source_id, target_id)
+        repository.recover_pet_merge_people_groups(source_id, target_id)
         self._emit_journaled_snapshot(
             operation.operation_id,
             changed_asset_ids=tuple(runtime_commit.get("changed_asset_ids", ())),
@@ -967,14 +1022,14 @@ class PetIndexCoordinator(QObject):
             source_id = str(payload.get("source_pet_id") or "")
             target_id = str(payload.get("target_pet_id") or "")
             if source_id and target_id:
-                repository._remap_people_groups_for_pet_merge(source_id, target_id)
+                repository.recover_pet_merge_people_groups(source_id, target_id)
         elif operation.kind in {
             "pet_delete_detection",
             "pet_move_detection",
             "pet_move_detection_new",
             "pet_overlap_reconcile",
         }:
-            repository._refresh_people_group_assets_for_pets(
+            repository.refresh_people_group_assets_for_pets(
                 str(value)
                 for value in (
                     payload.get("affected_pet_ids")
@@ -996,8 +1051,7 @@ class PetIndexCoordinator(QObject):
             "removed_pet_ids": list(payload.get("removed_pet_ids", ())),
             "pet_redirects": dict(payload.get("pet_redirects", {})),
         }
-        self._journal.commit_outbox(operation.operation_id, event_payload)
-        self._emit_snapshot(
+        event = self._emit_snapshot(
             operation_id=operation.operation_id,
             changed_asset_ids=tuple(event_payload["changed_asset_ids"]),
             changed_pet_ids=tuple(event_payload["changed_pet_ids"]),
@@ -1005,18 +1059,20 @@ class PetIndexCoordinator(QObject):
             updated_pet_ids=tuple(event_payload["updated_pet_ids"]),
             removed_pet_ids=tuple(event_payload["removed_pet_ids"]),
             pet_redirects=event_payload["pet_redirects"],
+            dispatch=False,
         )
-        self._journal.mark_published(operation.operation_id)
+        self._journal.commit_and_dispatch(
+            operation.operation_id,
+            event_payload,
+            lambda: self._scheduleEmit.emit(event),
+        )
 
     def _ensure_recovered_locked(self) -> bool:
-        try:
-            self._recover_operations_locked()
-        except Exception as exc:  # noqa: BLE001
-            self._recovery_error = exc
+        if not self._journal.recover_pending():
+            self._recovery_error = self._journal.recovery_error
             LOGGER.error(
                 "Pets recognition recovery is incomplete for %s",
                 self._library_root,
-                exc_info=True,
             )
             return False
         self._recovery_error = None
@@ -1030,11 +1086,11 @@ class PetIndexCoordinator(QObject):
                 payload,
             )
             if succeeded:
-                self._journal.commit_outbox(
+                self._journal.commit_and_dispatch(
                     operation.operation_id,
                     {"kind": operation.kind, **payload},
+                    lambda: None,
                 )
-                self._journal.mark_published(operation.operation_id)
             else:
                 self._journal.transition(
                     operation.operation_id,
@@ -1216,12 +1272,20 @@ def get_pet_index_coordinator(
     library_root: Path,
     *,
     asset_repository: PetAssetRepositoryPort | None = None,
+    mutation_coordinator: RecognitionMutationCoordinator | None = None,
 ) -> PetIndexCoordinator:
     resolved = Path(library_root).resolve()
     with _COORDINATORS_LOCK:
         coordinator = _COORDINATORS.get(resolved)
-        if coordinator is None:
-            coordinator = PetIndexCoordinator(resolved, asset_repository=asset_repository)
+        if coordinator is None or (
+            mutation_coordinator is not None
+            and coordinator._journal is not mutation_coordinator
+        ):
+            coordinator = PetIndexCoordinator(
+                resolved,
+                asset_repository=asset_repository,
+                mutation_coordinator=mutation_coordinator,
+            )
             app = QCoreApplication.instance()
             if app is not None:
                 coordinator.moveToThread(app.thread())

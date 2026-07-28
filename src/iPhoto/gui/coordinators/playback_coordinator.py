@@ -26,7 +26,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.application.ports import EditServicePort, LocationWriteJobRecord, MapRuntimePort
-from iPhoto.application.services.recognition_merge_service import RecognitionMergeService
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.detail_pipeline import (
@@ -415,6 +414,9 @@ class PlaybackCoordinator(QObject):
     def set_recognition_query_service(self, service: object | None) -> None:
         self._invalidate_overlay_requests(clear=True)
         self._recognition_query_service = service
+
+    def set_recognition_merge_service(self, service: object | None) -> None:
+        self._recognition_merge_service = service
 
     def rebind_library(self) -> None:
         """Invalidate library-scoped media preparation and decoded-frame caches."""
@@ -2862,22 +2864,20 @@ class PlaybackCoordinator(QObject):
         if isinstance(merge_target, str) and merge_target.startswith("pet:"):
             person_id = getattr(result, "person_id", None)
             if isinstance(person_id, str) and person_id:
-                try:
-                    outcome = RecognitionMergeService(
-                        self._people_service,
-                        self._pet_service,
-                    ).merge(
-                        f"person:{person_id}",
-                        merge_target,
-                    )
-                    merged = outcome if outcome.merged else None
-                except (sqlite3.Error, OSError):
-                    LOGGER.exception(
-                        "Failed to merge manual face person %s into %s",
-                        person_id,
-                        merge_target,
-                    )
+                merge_service = getattr(self, "_recognition_merge_service", None)
+                if merge_service is None:
                     merged = None
+                else:
+                    try:
+                        outcome = merge_service.merge(f"person:{person_id}", merge_target)
+                        merged = outcome if outcome.merged else None
+                    except (sqlite3.Error, OSError):
+                        LOGGER.exception(
+                            "Failed to merge manual face person %s into %s",
+                            person_id,
+                            merge_target,
+                        )
+                        merged = None
                 if merged is None:
                     LOGGER.warning(
                         "Manual face was saved but could not be merged into %s",

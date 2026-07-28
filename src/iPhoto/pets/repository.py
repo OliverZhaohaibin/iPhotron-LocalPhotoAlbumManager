@@ -294,6 +294,8 @@ class PetRepository:
         asset_ids: Iterable[str],
         detections: list[PetDetectionRecord],
         *,
+        retry_asset_ids: Iterable[str] = (),
+        stale_reason: str = "asset_scan_failed_in_current_generation",
         distance_threshold: float,
         operation_id: str | None = None,
         operation_kind: str = "pet_scan_commit",
@@ -301,7 +303,17 @@ class PetRepository:
         """Replace detections for a bounded asset set without rewriting the index."""
 
         self.initialize()
-        changed_asset_ids = tuple(dict.fromkeys(str(value) for value in asset_ids if value))
+        replaced_asset_ids = tuple(
+            dict.fromkeys(str(value) for value in asset_ids if value)
+        )
+        retry_ids = tuple(
+            value
+            for value in dict.fromkeys(
+                str(value) for value in retry_asset_ids if value
+            )
+            if value not in set(replaced_asset_ids)
+        )
+        changed_asset_ids = tuple(dict.fromkeys((*replaced_asset_ids, *retry_ids)))
         if not changed_asset_ids:
             return PetIncrementalCommitResult()
 
@@ -346,7 +358,10 @@ class PetRepository:
 
         effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
-            previous_rows = self._select_detections_by_asset_ids(conn, changed_asset_ids)
+            previous_rows = self._select_detections_by_asset_ids(
+                conn,
+                replaced_asset_ids,
+            )
             previous_detections = [self._detection_from_row(row) for row in previous_rows]
             previous_thumbnail_paths = tuple(
                 str(detection.thumbnail_path)
@@ -361,9 +376,31 @@ class PetRepository:
             new_pet_ids = {
                 str(detection.pet_id) for detection in assigned if detection.pet_id
             }
-            affected_pet_ids = tuple(sorted(old_pet_ids | new_pet_ids))
+            stale_pet_ids: set[str] = set()
+            if retry_ids:
+                retry_rows = self._select_detections_by_asset_ids(conn, retry_ids)
+                stale_pet_ids.update(
+                    str(row["pet_id"])
+                    for row in retry_rows
+                    if row["pet_id"]
+                )
+                for chunk in _chunked(retry_ids, 500):
+                    placeholders = ", ".join("?" for _ in chunk)
+                    conn.execute(
+                        f"""
+                        UPDATE pet_detections
+                        SET is_stale = 1,
+                            stale_reason = ?,
+                            source_generation_id = generation_id
+                        WHERE asset_id IN ({placeholders})
+                        """,
+                        (str(stale_reason), *chunk),
+                    )
+            affected_pet_ids = tuple(
+                sorted(old_pet_ids | new_pet_ids | stale_pet_ids)
+            )
 
-            for chunk in _chunked(changed_asset_ids, 500):
+            for chunk in _chunked(replaced_asset_ids, 500):
                 placeholders = ", ".join("?" for _ in chunk)
                 conn.execute(
                     f"DELETE FROM pet_detections WHERE asset_id IN ({placeholders})",
@@ -446,11 +483,15 @@ class PetRepository:
             )
             removed = tuple(sorted(old_pet_ids - surviving_pet_ids))
             updated = tuple(
-                sorted((old_pet_ids | new_pet_ids) - set(added) - set(removed))
+                sorted(
+                    ((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed))
+                )
             )
             commit_payload = {
                 "operation_kind": operation_kind,
                 "asset_ids": list(changed_asset_ids),
+                "done_asset_ids": list(replaced_asset_ids),
+                "retry_asset_ids": list(retry_ids),
                 "changed_asset_ids": list(changed_asset_ids),
                 "affected_pet_ids": list(affected_pet_ids),
                 "changed_pet_ids": list(affected_pet_ids),
@@ -1964,6 +2005,15 @@ class PetRepository:
         if face_index_db_path.exists():
             FaceRepository(face_index_db_path, face_state_db_path).refresh_all_group_assets()
 
+    def recover_pet_merge_people_groups(
+        self,
+        source_pet_id: str,
+        target_pet_id: str,
+    ) -> None:
+        """Idempotently finish the People group side of a committed Pet merge."""
+
+        self._remap_people_groups_for_pet_merge(source_pet_id, target_pet_id)
+
     def _refresh_people_group_assets_for_pets(self, pet_ids: Iterable[str]) -> None:
         unique_pet_ids = tuple(dict.fromkeys(str(pet_id) for pet_id in pet_ids if pet_id))
         if not unique_pet_ids:
@@ -1979,6 +2029,11 @@ class PetRepository:
         face_repository = FaceRepository(face_index_db_path, face_state_db_path)
         for group_id in group_ids:
             face_repository.refresh_group_assets(group_id)
+
+    def refresh_people_group_assets_for_pets(self, pet_ids: Iterable[str]) -> None:
+        """Refresh cross-kind group caches after a committed Pet mutation."""
+
+        self._refresh_people_group_assets_for_pets(pet_ids)
 
     def delete_detection(
         self,

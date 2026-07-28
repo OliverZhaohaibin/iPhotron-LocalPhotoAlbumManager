@@ -102,8 +102,6 @@ def face_annotation_adapter(annotation: AssetFaceAnnotation) -> RecognitionAnnot
 
 def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotation:
     display_name = annotation.canonical_display_name or annotation.display_name
-    if annotation.is_stale:
-        display_name = f"{display_name or 'unnamed'} · previous generation"
     return RecognitionAnnotation(
         source_detection_kind="pet",
         source_annotation_id=annotation.detection_id,

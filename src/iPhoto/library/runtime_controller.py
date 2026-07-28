@@ -142,6 +142,7 @@ class LibraryRuntimeController(
         self._recognition_services_root: Path | None = None
         self._recognition_scans_root: Path | None = None
         self._recognition_generation = 0
+        self._delivered_recognition_event_ids: set[str] = set()
         self._retiring_recognition_workers: set[QThread] = set()
         self._library_session: "LibrarySession | None" = None
         self._owns_library_session = False
@@ -195,6 +196,7 @@ class LibraryRuntimeController(
         self.stop_scanning()
         self._recognition_services_root = None
         self._recognition_scans_root = None
+        self._delivered_recognition_event_ids.clear()
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
         self._root = Path(prepared.root)
@@ -641,8 +643,8 @@ class LibraryRuntimeController(
             return
         self.bind_people_service(self._people_service)
         self.bind_pet_service(self._pet_service)
-        self._recognition_scans_root = root
-        self._start_ai_scan_workers(root, startup=True)
+        if self._start_ai_scan_workers(root, startup=True):
+            self._recognition_scans_root = root
 
     def activate_recognition_services(
         self,
@@ -773,6 +775,8 @@ class LibraryRuntimeController(
         self._pet_index_coordinator = None
 
     def _on_people_snapshot_committed(self, event: object) -> None:
+        if self._recognition_event_was_delivered(event):
+            return
         pet_service = self._pet_service
         if pet_service is not None:
             try:
@@ -789,8 +793,25 @@ class LibraryRuntimeController(
         self.peopleSnapshotCommitted.emit(event)
 
     def _on_pet_snapshot_committed(self, event: object) -> None:
+        if self._recognition_event_was_delivered(event):
+            return
         self.petIndexUpdated.emit()
         self.petSnapshotCommitted.emit(event)
+
+    def _recognition_event_was_delivered(self, event: object) -> bool:
+        event_id = str(getattr(event, "event_id", None) or "")
+        if not event_id:
+            return False
+        delivered = getattr(self, "_delivered_recognition_event_ids", None)
+        if delivered is None:
+            delivered = set()
+            self._delivered_recognition_event_ids = delivered
+        if event_id in delivered:
+            return True
+        delivered.add(event_id)
+        if len(delivered) > 4096:
+            delivered.pop()
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers (coordinator-level)

@@ -3,9 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
+
+
+class PetMutationFailure(StrEnum):
+    REJECTED = "rejected"
+    RECOVERY_PENDING = "recovery_pending"
+    SHUTTING_DOWN = "shutting_down"
+
+
+@dataclass(frozen=True, slots=True)
+class PetMergeOutcome:
+    merged: bool
+    failure: PetMutationFailure | None = None
+    operation_id: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.merged
 
 
 @dataclass(frozen=True)

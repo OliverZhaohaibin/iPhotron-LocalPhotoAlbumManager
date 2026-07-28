@@ -158,7 +158,7 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
             with _Image.open(BytesIO(data)) as img:  # type: ignore[union-attr]
                 img = _ImageOps.exif_transpose(img)
                 qt_image = _ImageQt(img.convert("RGBA"))
-            return QImage(qt_image)
+                return QImage(qt_image).copy()
         except Exception:
             _LOGGER.debug("Pillow failed to decode image bytes in qimage_from_bytes")
 
@@ -180,7 +180,7 @@ def qimage_from_pil(image: "Image.Image") -> Optional[QImage]:
         return None
     try:
         qt_image = _ImageQt(image.convert("RGBA"))
-        return QImage(qt_image)
+        return QImage(qt_image).copy()
     except Exception:
         _LOGGER.exception("Failed to convert PIL image to QImage")
         return None
@@ -197,10 +197,10 @@ def _load_with_pillow(source: Path, target: QSize | None = None) -> Optional[QIm
                 resample_filter = getattr(resample, "LANCZOS", _Image.BICUBIC)
                 img.thumbnail((target.width(), target.height()), resample_filter)
             qt_image = _ImageQt(img.convert("RGBA"))  # type: ignore[attr-defined]
+            return QImage(qt_image).copy()
     except Exception:
         _LOGGER.exception("Pillow failed to load image from %s", source)
         return None
-    return QImage(qt_image)
 
 
 def _load_raw_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
@@ -229,10 +229,10 @@ def _load_raw_qimage(source: Path, target: QSize | None = None) -> Optional[QIma
 
     try:
         qt_image = _ImageQt(pil_img.convert("RGBA"))
+        return QImage(qt_image).copy()
     except Exception:
         _LOGGER.exception("Failed to convert RAW PIL image to QImage for %s", source)
         return None
-    return QImage(qt_image)
 
 
 def generate_micro_thumbnail(source: Path) -> Optional[bytes]:

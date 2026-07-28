@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from PIL import Image
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QColor, QImage
 
 from iPhoto.utils import image_loader
 
@@ -101,6 +101,25 @@ def test_qimage_from_pil_converts_to_rgba():
         args, _ = mock_qt.call_args
         passed_image = args[0]
         assert passed_image.mode == "RGBA"
+
+
+def test_qimage_from_pil_detaches_from_temporary_imageqt_storage():
+    class SharedImageQt(QImage):
+        instances = []
+
+        def __init__(self, _image):
+            super().__init__(8, 8, QImage.Format.Format_RGBA8888)
+            self.fill(QColor("red"))
+            self.instances.append(self)
+
+    pil_image = Image.new("RGB", (8, 8), color="red")
+    with patch.object(image_loader, "_ImageQt", SharedImageQt):
+        qimg = image_loader.qimage_from_pil(pil_image)
+
+    assert qimg is not None
+    SharedImageQt.instances[0].fill(QColor("blue"))
+    assert qimg.pixelColor(4, 4).red() > 200
+    assert qimg.pixelColor(4, 4).blue() < 50
 
 def test_qimage_from_bytes_returns_none_when_pillow_decode_fails(monkeypatch):
     """Return None when neither Pillow nor Qt can decode broken data."""

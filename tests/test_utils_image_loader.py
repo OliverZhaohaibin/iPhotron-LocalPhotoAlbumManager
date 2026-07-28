@@ -1,11 +1,59 @@
 
-from unittest.mock import MagicMock, patch
-from PySide6.QtGui import QImage
-from PIL import Image
-import pytest
 from io import BytesIO
+from unittest.mock import MagicMock, patch
+
+from PIL import Image
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QImage
 
 from iPhoto.utils import image_loader
+
+
+def test_load_qimage_uses_pillow_for_jpeg_without_entering_qt_reader(tmp_path):
+    image_path = tmp_path / "photo.jpg"
+    Image.new("RGB", (80, 40), "red").save(image_path)
+
+    with patch.object(
+        image_loader,
+        "QImageReader",
+        side_effect=AssertionError("Pillow-native JPEG must not enter Qt plugins"),
+    ):
+        loaded = image_loader.load_qimage(image_path, QSize(20, 20))
+
+    assert loaded is not None and not loaded.isNull()
+    assert (loaded.width(), loaded.height()) == (20, 10)
+
+
+def test_load_qimage_does_not_send_corrupt_jpeg_to_qt_reader(tmp_path):
+    image_path = tmp_path / "broken.jpg"
+    image_path.write_bytes(b"not a jpeg")
+
+    with patch.object(
+        image_loader,
+        "QImageReader",
+        side_effect=AssertionError("corrupt JPEG must remain inside the safe decoder boundary"),
+    ):
+        loaded = image_loader.load_qimage(image_path, QSize(20, 20))
+
+    assert loaded is None
+
+
+def test_load_qimage_retains_qt_fallback_when_pillow_bridge_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    image_path = tmp_path / "photo.jpg"
+    image_path.write_bytes(b"decoder input")
+    expected = QImage(4, 4, QImage.Format.Format_RGB32)
+    qt_decode = MagicMock(return_value=expected)
+    monkeypatch.setattr(image_loader, "_ImageQt", None)
+    monkeypatch.setattr(image_loader, "_load_with_qt", qt_decode)
+
+    loaded = image_loader.load_qimage(image_path)
+
+    assert loaded is expected
+    qt_decode.assert_called_once_with(image_path, None)
+
 
 def test_qimage_from_pil_success():
     """Test successful conversion from PIL Image to QImage."""

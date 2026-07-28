@@ -77,6 +77,13 @@ PR #888 二次审查确认了两个遗漏的合并阻断项，并指出 stacked 
 | R5-02 | `PeopleService.set_cluster_hidden` 直写 repository，可在 merge hidden 检查与 operation admission 之间插入。 | People hidden 改由 `PeopleIndexCoordinator` 执行，先通过统一 recovery gate，再在共享 lifecycle lease 内完成单 DB mutation；merge 从 hidden read 到最终 mutation 全程持有同一 lease。 | hidden 路由契约与真实线程交错测试通过；hidden writer 在 merge 完成前不能进入临界区。 | `automated_pass` |
 | R5-03 | PR #888 base `codex/pets-review-remediation` 不在 workflow 的 `pull_request.branches`，且 384 维 job 仅允许手工触发。 | workflow 增加 stacked base；production-shape job 在 pull request 与手工触发时均运行 Linux/macOS/Windows matrix。 | workflow 静态配置已更新；远端 run 待推送后核验。 | `remote_pending` |
 
+首次自动 run `30365797816` 已证明 workflow 触发修复生效：常规 test、50k 快速
+契约、模型契约、startup 与 GPU-first jobs 全部通过，Linux/macOS 384 维通过。
+Windows 在完成约 16 分钟 benchmark 后仅因 ctypes 未声明 64 位 Win32 API 签名，
+`GetProcessMemoryInfo` 收到截断 handle 而失败；已显式声明 `HANDLE`/pointer/DWORD
+参数与 BOOL 返回值，并将无跨平台时间 SLA 的 production matrix job 余量调为
+30 分钟。修复后的 Windows run 仍待成功证据，R5-03 状态不提前提升。
+
 本轮本地证据：新增/关联定向 `161 passed, 1 warning`；全量
 `2809 passed, 16 skipped, 10 warnings`；架构门禁、`compileall`、变更范围 Ruff
 `F/E9/I` 与 `git diff --check` 全部通过。PR 在 R5-03 远端常规 CI 与三平台

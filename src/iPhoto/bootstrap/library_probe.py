@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -639,6 +640,7 @@ class LibraryProbeController(QObject):
         self._timeout = QTimer(self)
         self._timeout.setSingleShot(True)
         self._timeout.timeout.connect(self._on_timeout)
+        self._termination_callbacks: set[Callable[[], None]] = set()
 
     def start(self, request: LibraryProbeRequest) -> None:
         self.cancel()
@@ -668,8 +670,7 @@ class LibraryProbeController(QObject):
             return
         self._stop_process(process)
 
-    @staticmethod
-    def _stop_process(process: QProcess) -> None:
+    def _stop_process(self, process: QProcess) -> None:
         if process.state() == QProcess.ProcessState.NotRunning:
             process.deleteLater()
             return
@@ -681,8 +682,13 @@ class LibraryProbeController(QObject):
                     process.kill()
             except RuntimeError:
                 # deleteLater may have run after terminate() completed.
-                return
+                pass
+            finally:
+                self._termination_callbacks.discard(_kill_if_running)
 
+        # Keep the Python callable strongly referenced until Qt invokes it.
+        # Some PySide/macOS builds otherwise discard static singleShot callables.
+        self._termination_callbacks.add(_kill_if_running)
         QTimer.singleShot(250, _kill_if_running)
 
     def _emit_failure(self, failure: LibraryProbeFailure) -> None:

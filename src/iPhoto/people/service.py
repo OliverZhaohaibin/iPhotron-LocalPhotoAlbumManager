@@ -12,6 +12,9 @@ from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.repository import PetRepository
+from iPhoto.recognition.assignment_recovery import (
+    apply_detection_assignment_with_group_refresh,
+)
 from iPhoto.recognition.operation_journal import RecognitionOperationJournal
 from iPhoto.utils.pathutils import (
     LibraryAssetPathError,
@@ -499,18 +502,13 @@ class PeopleService:
         journal = RecognitionOperationJournal(
             ensure_work_dir(self._library_root) / "recognition" / "operations.db"
         )
-        state_repository = FaceStateRepository(paths.state_db_path)
         while (pending := journal.unfinished_head()) is not None:
             if pending.kind != "recognition_detection_assignment":
                 return False
             pending_payload = pending.payload
-            recovered = state_repository.set_annotation_identity_assignment(
-                source_kind=str(pending_payload.get("source_kind") or ""),
-                source_annotation_id=str(
-                    pending_payload.get("source_annotation_id") or ""
-                ),
-                target_kind=str(pending_payload.get("target_kind") or ""),
-                target_id=str(pending_payload.get("target_id") or ""),
+            recovered = apply_detection_assignment_with_group_refresh(
+                self._library_root,
+                pending_payload,
             )
             if recovered:
                 journal.commit_outbox(
@@ -528,16 +526,13 @@ class PeopleService:
         if operation_id is None:
             return False
         journal.transition(operation_id, "applying")
-        changed = state_repository.set_annotation_identity_assignment(
-            source_kind=source_kind,
-            source_annotation_id=source_annotation_id,
-            target_kind=target_kind,
-            target_id=target_id,
+        changed = apply_detection_assignment_with_group_refresh(
+            self._library_root,
+            payload,
         )
         if not changed:
             journal.transition(operation_id, "finalized", error="assignment_rejected")
             return False
-        repository.refresh_all_group_assets()
         journal.commit_outbox(
             operation_id,
             {"kind": "recognition_detection_assignment", **payload},

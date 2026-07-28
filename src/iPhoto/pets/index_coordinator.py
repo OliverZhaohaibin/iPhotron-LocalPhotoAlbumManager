@@ -11,6 +11,9 @@ from pathlib import Path
 from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, Slot
 
 from iPhoto.application.ports.pets import PetAssetRepositoryPort
+from iPhoto.recognition.assignment_recovery import (
+    apply_detection_assignment_with_group_refresh,
+)
 from iPhoto.recognition.operation_journal import RecognitionOperationJournal
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
@@ -969,9 +972,15 @@ class PetIndexCoordinator(QObject):
             "pet_delete_detection",
             "pet_move_detection",
             "pet_move_detection_new",
+            "pet_overlap_reconcile",
         }:
             repository._refresh_people_group_assets_for_pets(
-                str(value) for value in payload.get("changed_pet_ids", ()) if value
+                str(value)
+                for value in (
+                    payload.get("affected_pet_ids")
+                    or payload.get("changed_pet_ids", ())
+                )
+                if value
             )
 
         previous_paths = tuple(
@@ -1016,17 +1025,9 @@ class PetIndexCoordinator(QObject):
     def _recover_pet_mutation(self, operation) -> bool:
         if operation.kind == "recognition_detection_assignment":
             payload = operation.payload
-            face_state_path = (
-                ensure_work_dir(self._library_root) / "faces" / "face_state.db"
-            )
-            from iPhoto.people.state_repository import FaceStateRepository
-
-            state_repository = FaceStateRepository(face_state_path)
-            succeeded = state_repository.set_annotation_identity_assignment(
-                source_kind=str(payload.get("source_kind") or ""),
-                source_annotation_id=str(payload.get("source_annotation_id") or ""),
-                target_kind=str(payload.get("target_kind") or ""),
-                target_id=str(payload.get("target_id") or ""),
+            succeeded = apply_detection_assignment_with_group_refresh(
+                self._library_root,
+                payload,
             )
             if succeeded:
                 self._journal.commit_outbox(

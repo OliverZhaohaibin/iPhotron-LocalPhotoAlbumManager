@@ -36,6 +36,7 @@ from iPhoto.people.repository import FaceRecord, FaceRepository, ManualFaceRecor
 from iPhoto.people.scan_session import FaceScanSession
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
 from iPhoto.people.state_repository import FaceStateRepository
+from iPhoto.pets.index_coordinator import PetIndexCoordinator
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import utc_now_iso
@@ -1345,6 +1346,112 @@ def test_cross_kind_assignment_refreshes_target_and_source_group_assets(
     assert reverse_group is not None
     assert people.group_asset_ids(reverse_group.group_id) == ["asset-shared"]
     assert people.build_cluster_query("person-b").asset_ids == []
+
+
+@pytest.mark.parametrize("recovery_owner", ["people", "pets"])
+def test_assignment_recovery_refreshes_source_and_target_group_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_owner: str,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/own.jpg", "id": "asset-own", "media_type": 0},
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0},
+        ]
+    )
+    people = create_people_service(library_root)
+    people_repository = people.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-own",
+                asset_rel="album/own.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1),
+        ],
+    )
+    pets = create_pet_service(library_root)
+    pet_repository = pets.repository()
+    assert pet_repository is not None
+    detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-shared",
+        asset_rel="album/shared.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1)],
+    )
+    target_group = people.create_group(["person:person-a", "person:person-b"])
+    source_group = people.create_group(["pet:pet-a", "person:person-b"])
+    assert target_group is not None and source_group is not None
+    assert people.group_asset_ids(target_group.group_id) == []
+    assert people.group_asset_ids(source_group.group_id) == ["asset-shared"]
+
+    original_refresh = FaceRepository.refresh_all_group_assets
+    refresh_calls = 0
+
+    def fail_first_refresh(repository: FaceRepository) -> None:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("injected assignment group refresh failure")
+        original_refresh(repository)
+
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        fail_first_refresh,
+    )
+    with pytest.raises(RuntimeError, match="assignment group refresh"):
+        people.reassign_detection_identity(
+            source_kind="pet",
+            source_annotation_id="det-a",
+            target_identity="person:person-a",
+        )
+
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(library_root) / "recognition" / "operations.db"
+    )
+    assert [operation.kind for operation in journal.unfinished()] == [
+        "recognition_detection_assignment"
+    ]
+    assert people.group_asset_ids(target_group.group_id) == []
+    assert people.group_asset_ids(source_group.group_id) == ["asset-shared"]
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        original_refresh,
+    )
+
+    if recovery_owner == "people":
+        assert people.reassign_detection_identity(
+            source_kind="pet",
+            source_annotation_id="det-a",
+            target_identity="person:person-a",
+        )
+    else:
+        PetIndexCoordinator(library_root)
+
+    assert journal.unfinished() == ()
+    assert people.group_asset_ids(target_group.group_id) == ["asset-shared"]
+    assert people.group_asset_ids(source_group.group_id) == []
 
 
 def test_cross_merge_retargets_existing_redirect_sources(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from PIL import Image
 
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository
+from iPhoto.people.repository import FaceRepository
 from iPhoto.people.status import is_face_scan_candidate
 from iPhoto.pets import pipeline as pet_pipeline
 from iPhoto.pets.index_coordinator import PetIndexCoordinator, PetSnapshotCommittedError
@@ -743,7 +744,24 @@ def test_overlap_reconciliation_recovers_runtime_commit_state_sync(
         tmp_path / ".iPhoto" / "pets" / "pet_state.db",
     )
     detection = _detection("overlap", pet_id="pet-a")
-    repository.replace_all([detection], [_pet("pet-a", detection)])
+    peer = replace(
+        _detection("peer", pet_id="pet-b"),
+        box_x=250,
+        box_y=200,
+    )
+    repository.replace_all(
+        [detection, peer],
+        [_pet("pet-a", detection), _pet("pet-b", peer)],
+    )
+    face_repository = FaceRepository(
+        tmp_path / ".iPhoto" / "faces" / "face_index.db",
+        tmp_path / ".iPhoto" / "faces" / "face_state.db",
+    )
+    group = face_repository.create_group(["pet:pet-a", "pet:pet-b"])
+    assert group is not None
+    assert face_repository.get_common_asset_ids_for_group(group.group_id) == [
+        "asset-a"
+    ]
     coordinator = PetIndexCoordinator(tmp_path)
     monkeypatch.setattr(coordinator, "_repository", lambda: repository)
     state = repository.state_repository
@@ -772,6 +790,11 @@ def test_overlap_reconciliation_recovers_runtime_commit_state_sync(
     assert recovered._journal.unfinished() == ()
     assert recovered_repository.state_repository is not None
     assert recovered_repository.state_repository.get_cover("pet-a") is None
+    recovered_face_repository = FaceRepository(
+        tmp_path / ".iPhoto" / "faces" / "face_index.db",
+        tmp_path / ".iPhoto" / "faces" / "face_state.db",
+    )
+    assert recovered_face_repository.get_common_asset_ids_for_group(group.group_id) == []
 
 
 def test_overlap_reconciliation_preserves_retained_mixed_generations(

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QCompleter, QLineEdit, QListView, QT
 from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.utils.image_loader import load_qpixmap
 
 from .recognition_annotations import RecognitionIdentitySuggestion
 
@@ -1281,8 +1282,8 @@ def _distance(left: QPointF, right: QPointF) -> float:
 
 
 def _icon_for_thumbnail(path: Path) -> QIcon:
-    pixmap = QPixmap(str(path))
-    if pixmap.isNull():
+    pixmap = load_qpixmap(path)
+    if pixmap is None or pixmap.isNull():
         return QIcon()
     size = 34
     scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)

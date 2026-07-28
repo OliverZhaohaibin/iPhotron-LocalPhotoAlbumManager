@@ -144,6 +144,16 @@ class RecognitionMergeService:
         return True
 
     def merge(self, source: IdentityRef | str, target: IdentityRef | str) -> IdentityMergeOutcome:
+        if self._journal is None:
+            return self._merge_locked(source, target)
+        with self._journal.mutation_scope():
+            return self._merge_locked(source, target)
+
+    def _merge_locked(
+        self,
+        source: IdentityRef | str,
+        target: IdentityRef | str,
+    ) -> IdentityMergeOutcome:
         source_ref = IdentityRef.parse(source)
         target_ref = IdentityRef.parse(target)
         if source_ref is None or target_ref is None:

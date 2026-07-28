@@ -41,7 +41,7 @@ def test_incremental_commit_scales_to_50k_without_full_rewrite(tmp_path: Path) -
 
 def test_production_shape_50k_with_usearch(tmp_path: Path) -> None:
     if os.environ.get("IPHOTO_RUN_PETS_PRODUCTION_SHAPE_CONTRACT") != "1":
-        pytest.skip("production-shape contract is a manual/nightly CI job")
+        pytest.skip("production-shape contract is run by its dedicated PR job")
     pytest.importorskip("usearch.index")
 
     metrics = _benchmark_growth(
@@ -66,7 +66,7 @@ def test_production_shape_fallback_is_correct_at_1k(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if os.environ.get("IPHOTO_RUN_PETS_PRODUCTION_SHAPE_CONTRACT") != "1":
-        pytest.skip("fallback production-shape contract accompanies the manual CI job")
+        pytest.skip("fallback production-shape contract accompanies the dedicated PR job")
     monkeypatch.setitem(sys.modules, "usearch", None)
     monkeypatch.setitem(sys.modules, "usearch.index", None)
 

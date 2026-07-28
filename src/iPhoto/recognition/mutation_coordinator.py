@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -38,6 +39,22 @@ RecoveryHandler = Callable[[RecognitionOperation], bool]
 EventSubscriber = Callable[[RecognitionOutboxEvent], None]
 
 
+_EXECUTION_LOCKS: dict[Path, threading.RLock] = {}
+_EXECUTION_LOCKS_GUARD = threading.Lock()
+
+
+def _execution_lock_for(library_root: Path) -> threading.RLock:
+    """Return the process-wide lifecycle lease for one recognition library."""
+
+    resolved = Path(library_root).resolve()
+    with _EXECUTION_LOCKS_GUARD:
+        lock = _EXECUTION_LOCKS.get(resolved)
+        if lock is None:
+            lock = threading.RLock()
+            _EXECUTION_LOCKS[resolved] = lock
+        return lock
+
+
 class RecognitionMutationCoordinator:
     """The only owner of a library's global recognition operation journal.
 
@@ -51,6 +68,7 @@ class RecognitionMutationCoordinator:
         self._journal = RecognitionOperationJournal(
             ensure_work_dir(self._library_root) / "recognition" / "operations.db"
         )
+        self._execution_lock = _execution_lock_for(self._library_root)
         self._lock = threading.RLock()
         self._handlers: dict[str, list[RecoveryHandler]] = {}
         self._subscribers: list[EventSubscriber] = []
@@ -68,6 +86,25 @@ class RecognitionMutationCoordinator:
     def recovery_error(self) -> Exception | None:
         return self._recovery_error
 
+    @property
+    def execution_lock(self) -> threading.RLock:
+        """The shared lease that covers a mutation's complete apply lifecycle."""
+
+        return self._execution_lock
+
+    @contextmanager
+    def mutation_scope(self) -> Iterator[None]:
+        """Prevent live work from being mistaken for crash recovery.
+
+        The lease is shared by every coordinator instance for this library and
+        intentionally remains held from admission through commit/finalize. A
+        process crash releases it, allowing the next process to recover the
+        durable journal head.
+        """
+
+        with self._execution_lock:
+            yield
+
     def register_recovery_handler(
         self,
         kinds: set[str | RecognitionOperationKind],
@@ -84,7 +121,7 @@ class RecognitionMutationCoordinator:
         with self._lock:
             if subscriber not in self._subscribers:
                 self._subscribers.append(subscriber)
-            self.dispatch_pending()
+        self.dispatch_pending()
 
     def unsubscribe(self, subscriber: EventSubscriber) -> None:
         with self._lock:
@@ -92,7 +129,7 @@ class RecognitionMutationCoordinator:
                 self._subscribers.remove(subscriber)
 
     def recover_pending(self) -> bool:
-        with self._lock:
+        with self.mutation_scope(), self._lock:
             try:
                 while (operation := self._journal.unfinished_head()) is not None:
                     if operation.state == RecognitionOperationState.COMMITTED and self._subscribers:
@@ -123,7 +160,7 @@ class RecognitionMutationCoordinator:
         kind: str | RecognitionOperationKind,
         payload: dict[str, Any],
     ) -> str | None:
-        with self._lock:
+        with self.mutation_scope(), self._lock:
             operation_id = self._journal.try_prepare(kind, payload)
             if operation_id is None:
                 return None
@@ -138,31 +175,34 @@ class RecognitionMutationCoordinator:
     def prepare(self, kind: str, payload: dict[str, Any]) -> str:
         """Compatibility primitive for recovery fixtures and legacy tests."""
 
-        return self._journal.prepare(kind, payload)
+        with self.mutation_scope():
+            return self._journal.prepare(kind, payload)
 
     def transition(self, *args, **kwargs) -> bool:
-        operation_id = str(args[0] if args else kwargs.get("operation_id") or "")
-        if kwargs.get("expected_state") is None:
-            current = next(
-                (
-                    operation.state
-                    for operation in self._journal.unfinished()
-                    if operation.operation_id == operation_id
-                ),
-                None,
-            )
-            if current is None:
-                raise RuntimeError(
-                    f"Recognition operation has no active state lease: {operation_id}"
+        with self.mutation_scope():
+            operation_id = str(args[0] if args else kwargs.get("operation_id") or "")
+            if kwargs.get("expected_state") is None:
+                current = next(
+                    (
+                        operation.state
+                        for operation in self._journal.unfinished()
+                        if operation.operation_id == operation_id
+                    ),
+                    None,
                 )
-            kwargs["expected_state"] = current
-        succeeded = self._journal.transition(*args, **kwargs)
-        if not succeeded:
-            raise RuntimeError(f"Recognition operation state CAS failed: {operation_id}")
-        return True
+                if current is None:
+                    raise RuntimeError(
+                        f"Recognition operation has no active state lease: {operation_id}"
+                    )
+                kwargs["expected_state"] = current
+            succeeded = self._journal.transition(*args, **kwargs)
+            if not succeeded:
+                raise RuntimeError(f"Recognition operation state CAS failed: {operation_id}")
+            return True
 
     def commit_outbox(self, *args, **kwargs) -> str:
-        return self._journal.commit_outbox(*args, **kwargs)
+        with self.mutation_scope():
+            return self._journal.commit_outbox(*args, **kwargs)
 
     def commit_and_dispatch(
         self,
@@ -172,7 +212,7 @@ class RecognitionMutationCoordinator:
     ) -> str:
         """Persist an event before delivery, then finalize its CAS acknowledgment."""
 
-        with self._lock:
+        with self.mutation_scope(), self._lock:
             event_id = self._journal.commit_outbox(operation_id, event)
             dispatch()
             if not self._journal.mark_dispatched(operation_id):
@@ -180,22 +220,27 @@ class RecognitionMutationCoordinator:
             return event_id
 
     def mark_dispatched(self, operation_id: str) -> bool:
-        return self._journal.mark_dispatched(operation_id)
+        with self.mutation_scope():
+            return self._journal.mark_dispatched(operation_id)
 
     def mark_published(self, operation_id: str) -> None:
-        self._journal.mark_published(operation_id)
+        with self.mutation_scope():
+            self._journal.mark_published(operation_id)
 
     def unfinished(self) -> tuple[RecognitionOperation, ...]:
-        return self._journal.unfinished()
+        with self.mutation_scope():
+            return self._journal.unfinished()
 
     def unfinished_head(self) -> RecognitionOperation | None:
-        return self._journal.unfinished_head()
+        with self.mutation_scope():
+            return self._journal.unfinished_head()
 
     def pending_events(self) -> tuple[RecognitionOutboxEvent, ...]:
-        return self._journal.pending_events()
+        with self.mutation_scope():
+            return self._journal.pending_events()
 
     def dispatch_pending(self) -> bool:
-        with self._lock:
+        with self.mutation_scope(), self._lock:
             for event in self._journal.pending_events():
                 try:
                     for subscriber in tuple(self._subscribers):

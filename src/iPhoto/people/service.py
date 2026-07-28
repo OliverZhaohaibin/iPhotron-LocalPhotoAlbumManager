@@ -392,10 +392,10 @@ class PeopleService:
             coordinator.set_group_order(group_ids)
 
     def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return False
-        return repository.set_person_hidden(person_id, hidden)
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.set_person_hidden(person_id, hidden))
 
     def is_cluster_hidden(self, person_id: str) -> bool:
         repository = self.repository()
@@ -546,24 +546,25 @@ class PeopleService:
                 self._recover_assignment_operation,
             )
         journal = self._mutation_coordinator
-        if not journal.recover_pending():
-            return False
-        operation_id = journal.try_prepare("recognition_detection_assignment", payload)
-        if operation_id is None:
-            return False
-        changed = apply_detection_assignment_with_group_refresh(
-            self._library_root,
-            payload,
-        )
-        if not changed:
-            journal.transition(operation_id, "finalized", error="assignment_rejected")
-            return False
-        journal.commit_and_dispatch(
-            operation_id,
-            {"kind": "recognition_detection_assignment", **payload},
-            lambda: None,
-        )
-        return True
+        with journal.mutation_scope():
+            if not journal.recover_pending():
+                return False
+            operation_id = journal.try_prepare("recognition_detection_assignment", payload)
+            if operation_id is None:
+                return False
+            changed = apply_detection_assignment_with_group_refresh(
+                self._library_root,
+                payload,
+            )
+            if not changed:
+                journal.transition(operation_id, "finalized", error="assignment_rejected")
+                return False
+            journal.commit_and_dispatch(
+                operation_id,
+                {"kind": "recognition_detection_assignment", **payload},
+                lambda: None,
+            )
+            return True
 
     def delete_face(self, annotation_face_id: str) -> bool:
         if self._library_root is None or not annotation_face_id:

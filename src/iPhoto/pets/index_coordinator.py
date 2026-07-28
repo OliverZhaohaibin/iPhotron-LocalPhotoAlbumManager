@@ -84,12 +84,12 @@ class PetIndexCoordinator(QObject):
         super().__init__()
         self._library_root = Path(library_root)
         self._asset_repository = asset_repository
-        self._lock = threading.RLock()
         self._revision = 0
         self._shutdown_requested = False
         self._journal = mutation_coordinator or get_recognition_mutation_coordinator(
             self._library_root
         )
+        self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PET_JOURNAL_KINDS,
             self._recover_registered_pet_operation,

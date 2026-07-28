@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -140,6 +141,36 @@ def test_mutation_coordinator_recovers_registered_operations_fifo(tmp_path: Path
 
     assert coordinator.recover_pending()
     assert recovered == [0, 1, 2]
+
+
+def test_live_mutation_lease_prevents_second_owner_from_recovering_active_work(
+    tmp_path: Path,
+) -> None:
+    active_owner = RecognitionMutationCoordinator(tmp_path)
+    recovery_owner = RecognitionMutationCoordinator(tmp_path)
+    recovery_called = threading.Event()
+
+    def recover(operation) -> bool:
+        recovery_called.set()
+        return recovery_owner.transition(operation.operation_id, "finalized")
+
+    recovery_owner.register_recovery_handler({"pet_rename"}, recover)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with active_owner.mutation_scope():
+            operation_id = active_owner.try_prepare("pet_rename", {"pet_id": "pet-a"})
+            assert operation_id is not None
+            recovery = executor.submit(recovery_owner.recover_pending)
+
+            assert not recovery_called.wait(timeout=0.2)
+            assert not recovery.done()
+            active_owner.transition(
+                operation_id,
+                "finalized",
+                expected_state="applying",
+            )
+
+        assert recovery.result(timeout=2.0) is True
+    assert not recovery_called.is_set()
 
 
 def test_mutation_coordinator_unknown_kind_blocks_head(tmp_path: Path) -> None:

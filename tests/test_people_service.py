@@ -725,6 +725,15 @@ def test_people_service_can_hide_people_and_optionally_include_them(tmp_path: Pa
     }
 
 
+def test_people_hidden_mutation_routes_through_index_coordinator(tmp_path: Path) -> None:
+    coordinator = Mock()
+    coordinator.set_person_hidden.return_value = True
+    service = PeopleService(tmp_path, coordinator=coordinator)
+
+    assert service.set_cluster_hidden("person-a", True) is True
+    coordinator.set_person_hidden.assert_called_once_with("person-a", True)
+
+
 def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()

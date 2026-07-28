@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, codex/startup-chain-optimization]
+    branches: [main, codex/startup-chain-optimization, codex/pets-review-remediation]
 
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
         run: python -m pytest -q tests/contracts/test_pets_scale_contract.py
 
   pets-production-shape-contract:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:

@@ -66,6 +66,23 @@ diff 检查通过，全量为 `2806 passed, 16 skipped, 10 warnings`。只有远
 `pets-production-shape-contract` 三平台
 成功并回填 run URL 后，R4-06 才能改为 `automated_pass` 并重新评估合并状态。
 
+## 2026-07-28 Recognition 二次并发审查检查点
+
+PR #888 二次审查确认了两个遗漏的合并阻断项，并指出 stacked PR base 未被 CI
+监听。本轮已在本地完成处置；远端 workflow run 仍须以推送后的 GitHub 结果为准。
+
+| ID | 复查结论与代码范围 | 已实施处置 | 自动化证据 | 状态 |
+| --- | --- | --- | --- | --- |
+| R5-01 | operation 进入 `applying` 后原 coordinator 锁即释放，另一个线程可把仍在正常 apply 的 head 当成崩溃残留恢复。 | 每个 resolved library root 增加进程级可重入 lifecycle lease；People、Pets、merge 与 assignment 从 recovery/admission 一直持有到 commit/finalize；所有 coordinator 实例共享同一 lease，崩溃后由新进程自然取得并恢复。 | 两个独立 owner 并发测试证明 active owner 持有 lease 时 recovery 线程阻塞、handler 未执行；active owner finalize 后 recovery 仅观察到空队列。 | `automated_pass` |
+| R5-02 | `PeopleService.set_cluster_hidden` 直写 repository，可在 merge hidden 检查与 operation admission 之间插入。 | People hidden 改由 `PeopleIndexCoordinator` 执行，先通过统一 recovery gate，再在共享 lifecycle lease 内完成单 DB mutation；merge 从 hidden read 到最终 mutation 全程持有同一 lease。 | hidden 路由契约与真实线程交错测试通过；hidden writer 在 merge 完成前不能进入临界区。 | `automated_pass` |
+| R5-03 | PR #888 base `codex/pets-review-remediation` 不在 workflow 的 `pull_request.branches`，且 384 维 job 仅允许手工触发。 | workflow 增加 stacked base；production-shape job 在 pull request 与手工触发时均运行 Linux/macOS/Windows matrix。 | workflow 静态配置已更新；远端 run 待推送后核验。 | `remote_pending` |
+
+本轮本地证据：新增/关联定向 `161 passed, 1 warning`；全量
+`2809 passed, 16 skipped, 10 warnings`；架构门禁、`compileall`、变更范围 Ruff
+`F/E9/I` 与 `git diff --check` 全部通过。PR 在 R5-03 远端常规 CI 与三平台
+production-shape job 全绿前继续保持 No-Go，并按 stacked 顺序先合并 #888、再在
+#887 组合 head 上重跑后合并 #887。
+
 ## 2026-07-27 Windows Live Photo 静态图方向回归检查点
 
 Windows 实机样例 `IMG_3684.HEIC` 已确认动态视频方向正确，错误仅位于

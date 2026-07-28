@@ -74,12 +74,12 @@ class PeopleIndexCoordinator(QObject):
         super().__init__()
         self._library_root = Path(library_root)
         self._asset_repository = asset_repository
-        self._lock = threading.RLock()
         self._revision = 0
         self._shutdown_requested = False
         self._journal = mutation_coordinator or get_recognition_mutation_coordinator(
             self._library_root
         )
+        self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PEOPLE_JOURNAL_KINDS,
             self._recover_people_operation_locked,
@@ -245,6 +245,23 @@ class PeopleIndexCoordinator(QObject):
                 return False
             repository = self._repository()
             changed = repository.set_person_cover(person_id, face_id)
+            if changed:
+                self._emit_snapshot(
+                    changed_asset_ids=tuple(repository.get_asset_ids_by_person(person_id)),
+                    changed_person_ids=(person_id,),
+                )
+            return changed
+
+    def set_person_hidden(self, person_id: str, hidden: bool) -> bool:
+        """Apply a single-DB hidden mutation behind global recovery admission."""
+
+        if not person_id:
+            return False
+        with self._lock:
+            if self._shutdown_requested or not self._recover_operations_locked():
+                return False
+            repository = self._repository()
+            changed = repository.set_person_hidden(person_id, hidden)
             if changed:
                 self._emit_snapshot(
                     changed_asset_ids=tuple(repository.get_asset_ids_by_person(person_id)),

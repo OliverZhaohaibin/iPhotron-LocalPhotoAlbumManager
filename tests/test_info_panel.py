@@ -2181,12 +2181,18 @@ def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
         fallback_receiver.setGeometry(0, 0, 24, 24)
         fallback_receiver.show()
 
-        _send_mouse_event(
-            fallback_receiver,
+        assert map_view._application_event_filter_installed is True
+        local_pos = QPointF(12.0, 12.0)
+        outside_host = QPointF(-10_000.0, -10_000.0)
+        press_event = QMouseEvent(
             QEvent.Type.MouseButtonPress,
-            button=Qt.MouseButton.LeftButton,
-            buttons=Qt.MouseButton.LeftButton,
+            local_pos,
+            outside_host,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
         )
+        map_view.eventFilter(fallback_receiver, press_event)
 
         override_cursor = QApplication.overrideCursor()
         assert fallback_receiver not in map_view._map_event_targets
@@ -2198,12 +2204,15 @@ def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
         )
         assert override_cursor.shape() == Qt.CursorShape.ClosedHandCursor
 
-        _send_mouse_event(
-            fallback_receiver,
+        release_event = QMouseEvent(
             QEvent.Type.MouseButtonRelease,
-            button=Qt.MouseButton.LeftButton,
-            buttons=Qt.MouseButton.NoButton,
+            local_pos,
+            outside_host,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
         )
+        map_view.eventFilter(fallback_receiver, release_event)
 
         assert QApplication.overrideCursor() is None, (
             "map-host application filter did not release the drag cursor: "

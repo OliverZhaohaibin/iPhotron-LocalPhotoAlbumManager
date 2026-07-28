@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
 from PIL import Image
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QColor, QImage, QImageReader, QPixmap
+from PySide6.QtGui import QColor, QImage, QPixmap
 
 from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file
 from iPhoto.infrastructure.services.thumbnail_artifact import thumbnail_revision
@@ -27,6 +27,7 @@ from iPhoto.infrastructure.services.thumbnail_cache_service import (
     _CancellationToken,
 )
 from iPhoto.infrastructure.services.thumbnail_runtime_policy import ThumbnailRuntimePolicy
+from iPhoto.utils.image_loader import load_qimage
 
 
 def _reconcile(
@@ -1072,7 +1073,7 @@ def test_l1_rejects_stale_thumbnail_writes_outside_current_demand(
     assert stale_key not in service._memory_bytes
 
 
-def test_l2_reader_uses_native_filename_without_python_qiodevice(tmp_path: Path) -> None:
+def test_l2_reader_uses_safe_shared_decoder(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     path = tmp_path / "photo.jpg"
     size = QSize(512, 512)
@@ -1081,17 +1082,16 @@ def test_l2_reader_uses_native_filename_without_python_qiodevice(tmp_path: Path)
     Image.new("RGB", (32, 32), "red").save(disk_file, format="JPEG")
 
     with (
-        patch.object(Path, "exists", side_effect=AssertionError("exists called")),
         patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes called")),
         patch(
-            "iPhoto.infrastructure.services.thumbnail_cache_service.QImageReader",
-            wraps=QImageReader,
-        ) as reader,
+            "iPhoto.infrastructure.services.thumbnail_cache_service.load_qimage",
+            wraps=load_qimage,
+        ) as decode,
     ):
         image = service._load_cached_thumbnail_only(path, size)
 
     assert image is not None and not image.isNull()
-    reader.assert_called_once_with(str(disk_file))
+    decode.assert_called_once_with(disk_file, size)
 
 
 def test_l2_512_file_decodes_directly_to_display_bucket_without_new_disk_file(
@@ -1833,9 +1833,10 @@ def test_l2_reader_distinguishes_miss_read_and_decode_errors(tmp_path: Path) -> 
         cancellation=None,
         tier="L2",
     )
-    with patch("iPhoto.infrastructure.services.thumbnail_cache_service.QImageReader") as reader:
-        reader.return_value.read.return_value = QImage()
-        reader.return_value.error.return_value = QImageReader.ImageReaderError.DeviceError
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.load_qimage",
+        side_effect=OSError("cache file is unreadable"),
+    ):
         _image, read_error, _elapsed = service._read_cached_thumbnail(
             invalid,
             path=invalid,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from PySide6.QtGui import QColor, QImage
 
 from iPhoto.infrastructure.services import thumbnail_artifact
 from iPhoto.infrastructure.services.thumbnail_artifact import (
+    encode_micro_thumbnail,
     publish_thumbnail_artifact,
     thumbnail_revision,
 )
@@ -18,6 +20,20 @@ from iPhoto.infrastructure.services.thumbnail_cache_keys import (
 )
 from iPhoto.io.sidecar import save_adjustments
 from iPhoto.utils.image_loader import qimage_from_bytes
+
+
+def test_micro_thumbnail_encoding_uses_pillow_compatible_pixels() -> None:
+    image = QImage(32, 16, QImage.Format.Format_ARGB32)
+    image.fill(QColor("red"))
+
+    payload = encode_micro_thumbnail(image)
+
+    assert payload is not None
+    with Image.open(BytesIO(payload)) as decoded:
+        assert decoded.format == "JPEG"
+        assert decoded.size == (16, 8)
+        red, green, blue = decoded.convert("RGB").getpixel((8, 4))
+    assert red > 150 and red > green and red > blue
 
 
 def test_stable_cache_key_survives_edit_while_revision_changes(tmp_path: Path) -> None:

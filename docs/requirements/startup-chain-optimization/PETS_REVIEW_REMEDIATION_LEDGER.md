@@ -1,6 +1,6 @@
 # Pets 合并前审查修复台账
 
-更新日期：2026-07-27
+更新日期：2026-07-28
 
 ## 状态与证据边界
 
@@ -43,6 +43,59 @@
 二次审查的工程关闭上限为
 `automated_remediation_complete / manual_validation_pending`。远端 CI、真实安装权限、
 真实图库升级和跨平台 50k 证据未完成时继续保持 Draft / `REQUEST_CHANGES`。
+
+## 2026-07-28 Recognition 并发与恢复审查检查点
+
+审查附件：`04480d6f-5dfb-45c5-90d7-94504b86cdda/pasted-text.txt`。本轮六项
+问题均复现并完成代码处置；其中 production-shape 远端三平台 CI 尚未取得成功
+run，因此 PR 继续保持 `REQUEST_CHANGES`。
+
+| ID | 复查结论与代码范围 | 已实施处置 | 自动化证据 | 状态 |
+| --- | --- | --- | --- | --- |
+| R4-01 | Pet backfill 已占用 Pet worker 时，原 `_start_ai_scan_workers` 同时跳过 Face/Pet，且 root 在启动成功前写入。 | Face/Pet 构造与启动改为独立幂等；部分失败清除对应 worker 并仅重试失败项；两个 worker 均满足后才激活 root。 | Qt 真事件循环 backfill→activate 与 Pet 首次启动失败重试测试通过。 | `automated_pass` |
+| R4-02 | Pet retry stale/status、正式缩略图和 People done status 可在取得全局 journal lease 前或 outbox 前对外可见。 | Pet done/retry 同一 runtime transaction 写 detection/profile/commit marker；资产 status 在 runtime/state 后幂等推进；People 对称调整为 bookkeeping→outbox→dispatch。 | retry-only、done+retry 无 lease 零变更；asset status/state/outbox 故障向前恢复测试通过。 | `automated_pass` |
+| R4-03 | stale 展示后缀被写入 `canonical_display_name`，Enter 可污染持久名称。 | adapter 永远保留纯 canonical name；overlay 只在绘制阶段由 `is_stale/stale_reason` 拼接后缀。 | 有名/无名 stale editor 初值、Enter 提交和 adapter 契约通过。 | `automated_pass` |
+| R4-04 | People/Pets/merge/assignment 分散打开 journal、按 kind 自行恢复，状态更新无 CAS。 | 新增 session-owned `RecognitionMutationCoordinator`；生产源码仅该 owner 打开 journal；active/legacy typed handler registry 严格 FIFO；未知 kind 阻塞；状态 CAS、原位 outbox migration、稳定 event id、统一 commit-and-dispatch；People rename 纳入 durable operation。 | FIFO、未知 kind、两实例 admission/CAS、legacy schema、dispatch crash 重放、LibrarySession 单 owner/全 kind registry 和架构门禁通过。 | `automated_pass` |
+| R4-05 | Pet merge bool 丢失临时失败语义，UI 全部显示业务拒绝。 | `PetMergeOutcome/PetMutationFailure` 区分 rejected、recovery pending、shutdown；跨 identity 映射为 `IdentityMergeFailure.RECOVERY_PENDING`；UI 使用独立 busy 文案。 | 业务拒绝、busy journal、recovery pending、shutdown 和 UI 信息分支测试通过。 | `automated_pass` |
+| R4-06 | 原 50k 契约仅 4 维，未覆盖生产 384 维冷启动与 mutation。 | 保留 4 维 PR job；新增 `50k × 384` USearch 与 `1k × 384` fallback，覆盖 batch 16、冷重启精确匹配、增量、merge/delete、时间/RSS/WAL；手工 CI 扩展 Linux/macOS/Windows matrix。 | 本机 USearch：build `94.00s`、cold restart `7.04s`、peak RSS `1,153,368,064 B`、incremental WAL `0 B`、mutation `12.05s`；fallback `1k × 384` 通过；远端三平台 run 待补。 | `manual_pending` |
+
+本轮本地证据：Recognition/Pets/People/UI 定向 `354 passed, 1 warning`；架构
+`23 passed`；原 4 维 50k PR 契约 `1 passed in 71.89s`；384 维 USearch
+`1 passed in 114.97s`；fallback `1 passed in 3.89s`。全量、compileall、Ruff 与
+diff 检查通过，全量为 `2806 passed, 16 skipped, 10 warnings`。只有远端
+`pets-production-shape-contract` 三平台
+成功并回填 run URL 后，R4-06 才能改为 `automated_pass` 并重新评估合并状态。
+
+## 2026-07-28 Recognition 二次并发审查检查点
+
+PR #888 二次审查确认了两个遗漏的合并阻断项，并指出 stacked PR base 未被 CI
+监听。本轮已在本地完成处置；远端 workflow run 仍须以推送后的 GitHub 结果为准。
+
+| ID | 复查结论与代码范围 | 已实施处置 | 自动化证据 | 状态 |
+| --- | --- | --- | --- | --- |
+| R5-01 | operation 进入 `applying` 后原 coordinator 锁即释放，另一个线程可把仍在正常 apply 的 head 当成崩溃残留恢复。 | 每个 resolved library root 增加进程级可重入 lifecycle lease；People、Pets、merge 与 assignment 从 recovery/admission 一直持有到 commit/finalize；所有 coordinator 实例共享同一 lease，崩溃后由新进程自然取得并恢复。 | 两个独立 owner 并发测试证明 active owner 持有 lease 时 recovery 线程阻塞、handler 未执行；active owner finalize 后 recovery 仅观察到空队列。 | `automated_pass` |
+| R5-02 | `PeopleService.set_cluster_hidden` 直写 repository，可在 merge hidden 检查与 operation admission 之间插入。 | People hidden 改由 `PeopleIndexCoordinator` 执行，先通过统一 recovery gate，再在共享 lifecycle lease 内完成单 DB mutation；merge 从 hidden read 到最终 mutation 全程持有同一 lease。 | hidden 路由契约与真实线程交错测试通过；hidden writer 在 merge 完成前不能进入临界区。 | `automated_pass` |
+| R5-03 | PR #888 base `codex/pets-review-remediation` 不在 workflow 的 `pull_request.branches`，且 384 维 job 仅允许手工触发。 | workflow 增加 stacked base；production-shape job 在 pull request 与手工触发时均运行 Linux/macOS/Windows matrix。 | workflow 静态配置已更新；远端 run 待推送后核验。 | `remote_pending` |
+
+首次自动 run `30365797816` 已证明 workflow 触发修复生效：常规 test、50k 快速
+契约、模型契约、startup 与 GPU-first jobs 全部通过，Linux/macOS 384 维通过。
+Windows 在完成约 16 分钟 benchmark 后仅因 ctypes 未声明 64 位 Win32 API 签名，
+`GetProcessMemoryInfo` 收到截断 handle 而失败；已显式声明 `HANDLE`/pointer/DWORD
+参数与 BOOL 返回值，并将无跨平台时间 SLA 的 production matrix job 余量调为
+30 分钟。修复后的 Windows run 仍待成功证据，R5-03 状态不提前提升。
+
+第二次自动 run `30367483000` 已取得 Linux/macOS/Windows 三平台 384 维成功
+证据；Windows job `90302358960` 完整通过，证明 Win32 RSS 读取修复有效。该 run
+的独立 4 维快速契约暴露了既有 fixture 的 ANN 非确定性：两个相邻超密向量可合法
+命中同一 nearby profile，却硬编码要求两个 distinct updated IDs。fixture 已改为
+图库首尾跨度内的两个远距离 probe，保持“两次增量、无新增 identity”的结构门禁，
+同时不把近邻近似召回误判为写入失败。完整 run 仍须在该修复推送后再次全绿。
+
+本轮本地证据：新增/关联定向 `161 passed, 1 warning`；全量
+`2809 passed, 16 skipped, 10 warnings`；架构门禁、`compileall`、变更范围 Ruff
+`F/E9/I` 与 `git diff --check` 全部通过。PR 在 R5-03 远端常规 CI 与三平台
+production-shape job 全绿前继续保持 No-Go，并按 stacked 顺序先合并 #888、再在
+#887 组合 head 上重跑后合并 #887。
 
 ## 2026-07-27 Windows Live Photo 静态图方向回归检查点
 

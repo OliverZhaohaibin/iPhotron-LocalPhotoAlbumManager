@@ -15,11 +15,18 @@ from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
-from .records import AssetPetAnnotation, PetSummary
+from .records import (
+    AssetPetAnnotation,
+    PetMergeOutcome,
+    PetMutationFailure,
+    PetSummary,
+)
 from .repository import PetRepository
 from .status import PET_STATUS_RETRY, PET_STATUS_SKIPPED, normalize_pet_status
 
 if TYPE_CHECKING:
+    from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
+
     from .index_coordinator import PetIndexCoordinator, PetSnapshotEvent
 
 LOGGER = get_logger()
@@ -67,10 +74,12 @@ class PetService:
         *,
         asset_repository: PetAssetRepositoryPort | None = None,
         coordinator: PetIndexCoordinator | None = None,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
     ) -> None:
         self._library_root = library_root
         self._asset_repository = asset_repository
         self._coordinator = coordinator
+        self._mutation_coordinator = mutation_coordinator
         self._repository: PetRepository | None = None
 
     def set_library_root(self, library_root: Path | None) -> None:
@@ -79,6 +88,7 @@ class PetService:
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
+        self._mutation_coordinator = None
         self._repository = None
 
     def library_root(self) -> Path | None:
@@ -91,6 +101,24 @@ class PetService:
     def asset_repository(self) -> PetAssetRepositoryPort | None:
         return self._asset_repository
 
+    def active_thumbnail_staging_dirs(self) -> tuple[Path, ...]:
+        """Return staging directories protected by unfinished journal operations."""
+
+        if self._library_root is None:
+            return ()
+        from iPhoto.recognition.mutation_coordinator import (
+            get_recognition_mutation_coordinator,
+        )
+
+        coordinator = self._mutation_coordinator or get_recognition_mutation_coordinator(
+            self._library_root
+        )
+        return tuple(
+            Path(str(value)).resolve()
+            for operation in coordinator.unfinished()
+            if (value := operation.payload.get("staged_thumbnail_dir"))
+        )
+
     @property
     def coordinator(self) -> PetIndexCoordinator | None:
         if self._coordinator is not None:
@@ -102,6 +130,7 @@ class PetService:
         self._coordinator = get_pet_index_coordinator(
             self._library_root,
             asset_repository=self._asset_repository,
+            mutation_coordinator=self._mutation_coordinator,
         )
         return self._coordinator
 
@@ -219,9 +248,11 @@ class PetService:
         coordinator = self.coordinator
         return bool(coordinator and coordinator.set_pet_hidden(pet_id, hidden))
 
-    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> bool:
+    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> PetMergeOutcome:
         coordinator = self.coordinator
-        return bool(coordinator and coordinator.merge_pets(source_pet_id, target_pet_id))
+        if coordinator is None:
+            return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
+        return coordinator.merge_pets(source_pet_id, target_pet_id)
 
     def set_pet_cover(self, pet_id: str, detection_id: str) -> bool:
         coordinator = self.coordinator

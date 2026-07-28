@@ -1046,7 +1046,9 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
     )
 
     def merge() -> None:
-        merge_results.append(coordinator.merge_pets("pet-source", "pet-target"))
+        merge_results.append(
+            coordinator.merge_pets("pet-source", "pet-target").merged
+        )
         merge_finished.set()
 
     recluster_thread.start()

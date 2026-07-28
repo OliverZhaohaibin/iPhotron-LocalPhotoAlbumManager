@@ -29,7 +29,6 @@ from ...pets.status import (
     is_pet_scan_candidate,
     normalize_pet_status,
 )
-from ...recognition.operation_journal import RecognitionOperationJournal
 from ...utils.logging import get_logger
 
 LOGGER = get_logger()
@@ -328,15 +327,8 @@ class PetScanWorker(QThread):
         staging_root = (Path(thumbnail_dir) / ".staging").resolve()
         if not staging_root.is_dir():
             return
-        journal = RecognitionOperationJournal(
-            pet_library_paths(self._library_root).root_dir.parent
-            / "recognition"
-            / "operations.db"
-        )
         active = {
-            str(Path(value).resolve())
-            for operation in journal.unfinished()
-            if (value := operation.payload.get("staged_thumbnail_dir"))
+            str(path) for path in self._pet_service.active_thumbnail_staging_dirs()
         }
         for candidate in staging_root.iterdir():
             resolved = candidate.resolve()

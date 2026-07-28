@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -13,8 +15,9 @@ from iPhoto.application.services.recognition_merge_service import (
     RecognitionMergeService,
 )
 from iPhoto.bootstrap.library_pet_service import create_pet_service
-from iPhoto.pets.records import PetDetectionRecord, PetRecord
+from iPhoto.pets.records import PetDetectionRecord, PetMergeOutcome, PetMutationFailure, PetRecord
 from iPhoto.pets.repository_utils import utc_now_iso
+from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
 from iPhoto.recognition.operation_journal import RecognitionOperationJournal
 from iPhoto.utils.pathutils import ensure_work_dir
 
@@ -93,6 +96,56 @@ def test_hidden_state_mismatch_is_structured_and_does_not_mutate() -> None:
     people.merge_identities.assert_not_called()
 
 
+def test_merge_holds_library_lease_from_hidden_check_through_mutation(tmp_path) -> None:
+    hidden = {"source": False, "target": False}
+    merge_entered = threading.Event()
+    allow_merge = threading.Event()
+    hidden_started = threading.Event()
+    hidden_finished = threading.Event()
+
+    def merge_clusters(source: str, target: str) -> bool:
+        assert (source, target) == ("source", "target")
+        merge_entered.set()
+        assert allow_merge.wait(timeout=2.0)
+        return True
+
+    people = SimpleNamespace(
+        list_clusters=lambda *, include_hidden: [
+            SimpleNamespace(person_id=person_id, is_hidden=is_hidden)
+            for person_id, is_hidden in hidden.items()
+        ],
+        cluster_asset_ids=lambda person_id: [f"asset-{person_id}"],
+        merge_clusters=merge_clusters,
+    )
+    pets = SimpleNamespace(library_root=lambda: tmp_path)
+    merge_owner = RecognitionMutationCoordinator(tmp_path)
+    hidden_owner = RecognitionMutationCoordinator(tmp_path)
+    service = RecognitionMergeService(
+        people,
+        pets,
+        mutation_coordinator=merge_owner,
+    )
+
+    def hide_target() -> None:
+        hidden_started.set()
+        with hidden_owner.mutation_scope():
+            hidden["target"] = True
+        hidden_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        merge = executor.submit(service.merge, "person:source", "person:target")
+        assert merge_entered.wait(timeout=2.0)
+        hide = executor.submit(hide_target)
+        assert hidden_started.wait(timeout=2.0)
+        assert not hidden_finished.wait(timeout=0.2)
+
+        allow_merge.set()
+        assert merge.result(timeout=2.0).merged is True
+        hide.result(timeout=2.0)
+
+    assert hidden["target"] is True
+
+
 def test_untyped_raw_id_is_rejected_without_guessing_kind() -> None:
     people, pets = _services()
     service = RecognitionMergeService(people, pets)
@@ -101,6 +154,20 @@ def test_untyped_raw_id_is_rejected_without_guessing_kind() -> None:
 
     assert outcome.merged is False
     assert outcome.failure is IdentityMergeFailure.INVALID_IDENTITY
+
+
+def test_pet_merge_recovery_pending_is_not_reported_as_rejected() -> None:
+    people, pets = _services()
+    pets.merge_pets.return_value = PetMergeOutcome(
+        False,
+        PetMutationFailure.RECOVERY_PENDING,
+    )
+    service = RecognitionMergeService(people, pets)
+
+    outcome = service.merge("pet:same", "pet:other-pet")
+
+    assert outcome.merged is False
+    assert outcome.failure is IdentityMergeFailure.RECOVERY_PENDING
 
 
 def test_pending_assignment_blocks_person_merge_before_people_mutation(tmp_path) -> None:

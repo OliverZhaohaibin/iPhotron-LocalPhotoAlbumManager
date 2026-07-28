@@ -25,9 +25,9 @@ from PySide6.QtWidgets import (
 
 from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeFailure,
+    IdentityMergeOutcome,
     IdentityMergeRefreshPolicy,
     IdentityRef,
-    RecognitionMergeService,
 )
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
@@ -160,6 +160,16 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         )
 
 
+class _UnboundRecognitionMergeService:
+    def merge(self, source: object, target: object) -> IdentityMergeOutcome:
+        return IdentityMergeOutcome(
+            False,
+            IdentityRef.parse(source),
+            IdentityRef.parse(target),
+            IdentityMergeFailure.RECOVERY_PENDING,
+        )
+
+
 class PeopleDashboardWidget(QWidget):
     clusterActivated = Signal(str)  # noqa: N815
     groupActivated = Signal(str)  # noqa: N815
@@ -170,7 +180,7 @@ class PeopleDashboardWidget(QWidget):
         super().__init__(parent)
         self._service = _people_service()
         self._pet_service = _pet_service()
-        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
+        self._merge_service: object = _UnboundRecognitionMergeService()
         self._query_service: object | None = None
         self._pinned_service: PinnedItemsService | None = None
         self._status_message: str | None = None
@@ -308,14 +318,14 @@ class PeopleDashboardWidget(QWidget):
 
     def set_people_service(self, service: PeopleService | None) -> None:
         self._service = service or _people_service()
-        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
+        self._merge_service = _UnboundRecognitionMergeService()
         self._current_library_root = self._service.library_root()
         configure_people_cover_cache(self._current_library_root)
         self.reload()
 
     def set_pet_service(self, service: PetService | None) -> None:
         self._pet_service = service or _pet_service()
-        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
+        self._merge_service = _UnboundRecognitionMergeService()
         self.reload(preserve_content=bool(self._summaries or self._pet_summaries or self._groups))
 
     def set_services(
@@ -325,13 +335,14 @@ class PeopleDashboardWidget(QWidget):
         pinned_service: PinnedItemsService | None = None,
         *,
         query_service: object | None = None,
+        merge_service: object | None = None,
         reload: bool = True,
     ) -> None:
         """Atomically bind the dashboard domain and schedule at most one load."""
 
         self._service = people_service or _people_service()
         self._pet_service = pet_service or _pet_service()
-        self._merge_service = RecognitionMergeService(self._service, self._pet_service)
+        self._merge_service = merge_service or _UnboundRecognitionMergeService()
         self._pinned_service = pinned_service
         self._query_service = query_service
         self._current_library_root = self._service.library_root()
@@ -1261,6 +1272,15 @@ class PeopleDashboardWidget(QWidget):
                 self,
                 self._hidden_state_merge_message(),
                 title=tr("PeopleDashboard", "Cannot Merge People"),
+            )
+        elif outcome.failure == IdentityMergeFailure.RECOVERY_PENDING:
+            dialogs.show_information(
+                self,
+                tr(
+                    "PeopleDashboard",
+                    "Recognition data is still recovering. Please try again shortly.",
+                ),
+                title=tr("PeopleDashboard", "Recognition Busy"),
             )
         else:
             dialogs.show_warning(

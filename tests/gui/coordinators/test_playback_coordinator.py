@@ -2235,6 +2235,9 @@ def test_handle_manual_face_ready_merges_selected_pet_identity() -> None:
         list_pets=Mock(return_value=[SimpleNamespace(pet_id="pet-a", is_hidden=False)]),
         pet_asset_ids=Mock(return_value=[]),
     )
+    coordinator._recognition_merge_service = Mock(
+        merge=Mock(return_value=SimpleNamespace(merged=True, group_redirects={}))
+    )
     coordinator._current_presentation = _make_presentation(
         path="/fake/photo.jpg",
         asset_id="asset-photo",
@@ -2254,7 +2257,7 @@ def test_handle_manual_face_ready_merges_selected_pet_identity() -> None:
         ),
     )
 
-    coordinator._people_service.merge_identities.assert_called_once_with(
+    coordinator._recognition_merge_service.merge.assert_called_once_with(
         "person:person-new",
         "pet:pet-a",
     )

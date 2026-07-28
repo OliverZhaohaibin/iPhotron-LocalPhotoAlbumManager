@@ -725,6 +725,15 @@ def test_people_service_can_hide_people_and_optionally_include_them(tmp_path: Pa
     }
 
 
+def test_people_hidden_mutation_routes_through_index_coordinator(tmp_path: Path) -> None:
+    coordinator = Mock()
+    coordinator.set_person_hidden.return_value = True
+    service = PeopleService(tmp_path, coordinator=coordinator)
+
+    assert service.set_cluster_hidden("person-a", True) is True
+    coordinator.set_person_hidden.assert_called_once_with("person-a", True)
+
+
 def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
@@ -893,17 +902,17 @@ def test_people_runtime_mutation_recovers_forward_after_phase_failure(
 
         monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", fail_once)
     else:
-        original = coordinator._journal.commit_outbox
+        original = coordinator._journal.commit_and_dispatch
         calls = 0
 
-        def fail_once(operation_id: str, event: dict[str, object]) -> None:
+        def fail_once(operation_id: str, event: dict[str, object], dispatch) -> None:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise RuntimeError("injected outbox failure")
-            original(operation_id, event)
+            original(operation_id, event, dispatch)
 
-        monkeypatch.setattr(coordinator._journal, "commit_outbox", fail_once)
+        monkeypatch.setattr(coordinator._journal, "commit_and_dispatch", fail_once)
 
     with pytest.raises(RuntimeError, match="injected"):
         coordinator.move_face_to_person("face-a", "person-b")
@@ -1626,7 +1635,7 @@ def test_pet_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> Non
     same_kind_merge = pet_service.merge_pets("pet-a", "pet-b")
 
     assert cross_merge is not None and cross_merge.merged is True
-    assert same_kind_merge is True
+    assert same_kind_merge.merged is True
     assert set(pet_service.build_pet_query("pet-b").asset_ids) == {
         "asset-person",
         "asset-pet-a",

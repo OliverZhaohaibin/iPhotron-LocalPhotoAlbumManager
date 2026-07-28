@@ -150,58 +150,83 @@ class ScanCoordinatorMixin:
             mark("startup_metadata_scan.started", root=root)
         self._scan_thread_pool.start(worker)
 
-    def _start_ai_scan_workers(self, library_root: Path, *, startup: bool = False) -> None:
+    def _start_ai_scan_workers(self, library_root: Path, *, startup: bool = False) -> bool:
         """Start face and pet workers for an already-bound scan root."""
 
-        if self._current_face_scanner is not None or self._current_pet_scanner is not None:
-            return
-        from .workers.face_scan_worker import FaceScanWorker
-        from .workers.pet_scan_worker import PetScanWorker
-
         ai_root = Path(library_root)
-        face_worker = FaceScanWorker(
-            ai_root,
-            self,
-            people_service=getattr(self, "_people_service", None),
-        )
-        pet_worker = PetScanWorker(
-            ai_root,
-            self,
-            pet_service=getattr(self, "_pet_service", None),
-        )
         generation = int(getattr(self, "_recognition_generation", 0))
-        setattr(face_worker, "_recognition_generation_token", generation)
-        setattr(pet_worker, "_recognition_generation_token", generation)
-        set_face_name = getattr(face_worker, "setObjectName", None)
-        if callable(set_face_name):
-            set_face_name("FaceScanWorker")
-        set_pet_name = getattr(pet_worker, "setObjectName", None)
-        if callable(set_pet_name):
-            set_pet_name("PetScanWorker")
-        face_worker.statusChanged.connect(
-            lambda message, worker=face_worker: self._on_recognition_worker_status(
-                worker, "face", message
+        started: list[object] = []
+
+        if self._current_face_scanner is None:
+            from .workers.face_scan_worker import FaceScanWorker
+
+            face_worker = FaceScanWorker(
+                ai_root,
+                self,
+                people_service=getattr(self, "_people_service", None),
             )
-        )
-        face_worker.finished.connect(
-            lambda face_worker=face_worker: self._on_face_scan_finished(face_worker)
-        )
-        pet_worker.statusChanged.connect(
-            lambda message, worker=pet_worker: self._on_recognition_worker_status(
-                worker, "pet", message
+            setattr(face_worker, "_recognition_generation_token", generation)
+            set_face_name = getattr(face_worker, "setObjectName", None)
+            if callable(set_face_name):
+                set_face_name("FaceScanWorker")
+            face_worker.statusChanged.connect(
+                lambda message, worker=face_worker: self._on_recognition_worker_status(
+                    worker, "face", message
+                )
             )
-        )
-        pet_worker.finished.connect(
-            lambda pet_worker=pet_worker: self._on_pet_scan_finished(pet_worker)
-        )
-        self._current_face_scanner = face_worker
-        self._current_pet_scanner = pet_worker
+            face_worker.finished.connect(
+                lambda face_worker=face_worker: self._on_face_scan_finished(face_worker)
+            )
+            self._current_face_scanner = face_worker
+            started.append(face_worker)
+
+        if self._current_pet_scanner is None:
+            from .workers.pet_scan_worker import PetScanWorker
+
+            pet_worker = PetScanWorker(
+                ai_root,
+                self,
+                pet_service=getattr(self, "_pet_service", None),
+            )
+            setattr(pet_worker, "_recognition_generation_token", generation)
+            set_pet_name = getattr(pet_worker, "setObjectName", None)
+            if callable(set_pet_name):
+                set_pet_name("PetScanWorker")
+            pet_worker.statusChanged.connect(
+                lambda message, worker=pet_worker: self._on_recognition_worker_status(
+                    worker, "pet", message
+                )
+            )
+            pet_worker.finished.connect(
+                lambda pet_worker=pet_worker: self._on_pet_scan_finished(pet_worker)
+            )
+            self._current_pet_scanner = pet_worker
+            started.append(pet_worker)
+
         if startup:
             mark("startup_ai_scan.started", root=ai_root)
-            face_worker.finish_input()
-            pet_worker.finish_input()
-        face_worker.start()
-        pet_worker.start()
+        all_started = True
+        for worker in started:
+            try:
+                if startup:
+                    worker.finish_input()
+                worker.start()
+            except Exception:  # noqa: BLE001
+                all_started = False
+                if self._current_face_scanner is worker:
+                    self._current_face_scanner = None
+                if self._current_pet_scanner is worker:
+                    self._current_pet_scanner = None
+                LOGGER.exception(
+                    "Failed to start recognition worker %s for %s",
+                    type(worker).__name__,
+                    ai_root,
+                )
+        return (
+            all_started
+            and self._current_face_scanner is not None
+            and self._current_pet_scanner is not None
+        )
 
     def _start_pet_backfill_worker(self, library_root: Path) -> None:
         """Drain an upgraded library's Pet backlog after the UI is interactive."""

@@ -687,23 +687,11 @@ def test_generation_contract_is_reused_and_activated_in_one_transaction(
     assert active == ("embedding-v2", detection.embedding_dim, "active")
 
 
-def test_persisted_boundary_samples_are_used_without_candidate_sql(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_unstable_profile_only_reuses_identity_by_exact_pet_key(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     first = _detection("first", pet_id="pet-a")
-    pet = replace(
-        _pet("pet-a", first),
-        boundary_embeddings=(first.embedding,),
-    )
-    repository.replace_all([first], [pet])
+    repository.replace_all([first], [_pet("pet-a", first)])
 
-    def forbidden(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("boundary samples must come from the persisted profile")
-
-    monkeypatch.setattr(repository, "_load_boundary_samples_for_pets", forbidden)
     similar = _detection(
         "similar",
         asset_id="asset-b",
@@ -714,8 +702,96 @@ def test_persisted_boundary_samples_are_used_without_candidate_sql(
         [similar],
         distance_threshold=0.1,
     )
-    assert result.added_pet_ids == ()
-    assert repository.get_detection("similar").pet_id == "pet-a"  # type: ignore[union-attr]
+    assert len(result.added_pet_ids) == 1
+    assert repository.get_detection("similar").pet_id != "pet-a"  # type: ignore[union-attr]
+
+    exact_key = replace(
+        _detection("same-key", asset_id="asset-c"),
+        pet_key=first.pet_key,
+    )
+    repository.replace_assets_incrementally(
+        ["asset-c"],
+        [exact_key],
+        distance_threshold=0.1,
+    )
+    assert repository.get_detection("same-key").pet_id == "pet-a"  # type: ignore[union-attr]
+
+
+def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    close = [
+        _detection(f"close-{index}", asset_id=f"asset-{index}", pet_id="pet-a")
+        for index in range(8)
+    ]
+    distant = _detection(
+        "distant",
+        asset_id="asset-distant",
+        embedding=np.asarray([0.8, 0.6, 0.0]),
+        pet_id="pet-a",
+    )
+    members = [*close, distant]
+    center = normalize_vector(np.mean([member.embedding for member in members], axis=0))
+    stable = replace(
+        _pet("pet-a", close[0]),
+        detection_count=len(members),
+        sample_count=len(members),
+        profile_state="stable",
+        center_embedding=center,
+        boundary_embeddings=tuple(member.embedding for member in close),
+    )
+    repository.replace_all(members, [stable])
+
+    candidate = _detection("candidate", asset_id="asset-candidate")
+    result = repository.replace_assets_incrementally(
+        [candidate.asset_id],
+        [candidate],
+        distance_threshold=0.15,
+    )
+
+    assert len(result.added_pet_ids) == 1
+    assert repository.get_detection("candidate").pet_id != "pet-a"  # type: ignore[union-attr]
+
+
+def test_stable_incremental_matching_is_input_order_invariant(tmp_path: Path) -> None:
+    def assignments(root: Path, incoming: list[PetDetectionRecord]) -> dict[str, bool]:
+        repository = PetRepository(root / "pet_index.db", root / "pet_state.db")
+        members = [
+            _detection(f"base-{index}", asset_id=f"base-{index}", pet_id="pet-a")
+            for index in range(3)
+        ]
+        stable = replace(
+            _pet("pet-a", members[0]),
+            detection_count=3,
+            sample_count=3,
+            profile_state="stable",
+        )
+        repository.replace_all(members, [stable])
+        repository.replace_assets_incrementally(
+            [detection.asset_id for detection in incoming],
+            incoming,
+            distance_threshold=0.2,
+        )
+        return {
+            detection.detection_id: repository.get_detection(detection.detection_id).pet_id  # type: ignore[union-attr]
+            == "pet-a"
+            for detection in incoming
+        }
+
+    positive = _detection(
+        "positive",
+        asset_id="asset-a",
+        embedding=np.asarray([0.8660254, 0.5, 0.0]),
+    )
+    negative = _detection(
+        "negative",
+        asset_id="asset-b",
+        embedding=np.asarray([0.8660254, -0.5, 0.0]),
+    )
+
+    forward = assignments(tmp_path / "forward", [positive, negative])
+    reverse = assignments(tmp_path / "reverse", [negative, positive])
+
+    assert forward == reverse == {"positive": True, "negative": False}
 
 
 def test_state_repository_chunks_all_large_identity_reads(tmp_path: Path) -> None:

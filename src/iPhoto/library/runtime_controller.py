@@ -612,7 +612,15 @@ class LibraryRuntimeController(
                     migration_target == PET_DETECTOR_PIPELINE_VERSION
                     and migration_state in {"pending", "running"}
                 )
-                backfill_required = required_value == "1" or migration_incomplete
+                counts = store.count_by_pet_status()
+                if not isinstance(counts, dict):
+                    return
+                ordinary_drain_required = (
+                    int(counts.get("pending", 0)) > 0 or int(counts.get("retry", 0)) > 0
+                )
+                backfill_required = (
+                    required_value == "1" or migration_incomplete or ordinary_drain_required
+                )
                 if required_value == "1" and migration_state not in {"pending", "running"}:
                     set_many = getattr(repository, "set_scan_metadata_many", None)
                     metadata = {
@@ -629,9 +637,6 @@ class LibraryRuntimeController(
                         for key, value in metadata.items():
                             repository.set_scan_metadata(key, value)
                 if previous_version != PET_DETECTOR_PIPELINE_VERSION:
-                    counts = store.count_by_pet_status()
-                    if not isinstance(counts, dict):
-                        return
                     backfill_required = backfill_required or int(counts.get("done", 0)) > 0
                     if backfill_required:
                         set_many = getattr(repository, "set_scan_metadata_many", None)

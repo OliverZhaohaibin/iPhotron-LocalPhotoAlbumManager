@@ -83,9 +83,8 @@ class PetIncrementalCommitResult:
 class _ProfileMatchContext:
     profiles: dict[str, PetRecord]
     centers: dict[str, np.ndarray]
-    sample_counts: dict[str, int]
     species: dict[str, str | None]
-    boundary_samples: dict[str, tuple[np.ndarray, ...]]
+    member_samples: dict[str, tuple[tuple[str, np.ndarray], ...]]
     candidate_index: "_ProfileCandidateIndex"
 
 
@@ -771,133 +770,101 @@ class PetRepository:
         durable_profiles = (
             self._state_repo.get_profiles_by_ids(mapped_ids) if self._state_repo is not None else {}
         )
-        base_centers = (
+        stable_profiles = {
+            pet_id: pet
+            for pet_id, pet in existing_pets.items()
+            if str(pet.profile_state or "unstable") == "stable"
+        }
+        centers = (
             match_context.centers
             if match_context is not None
             else {
                 pet_id: normalize_vector(pet.center_embedding)
-                for pet_id, pet in existing_pets.items()
+                for pet_id, pet in stable_profiles.items()
             }
         )
-        base_sample_counts = (
-            match_context.sample_counts
-            if match_context is not None
-            else {
-                pet_id: max(int(pet.sample_count), int(pet.detection_count), 1)
-                for pet_id, pet in existing_pets.items()
-            }
-        )
-        base_species = (
+        species = (
             match_context.species
             if match_context is not None
             else {
                 pet_id: _normalize_species_label(pet.species_label)
-                for pet_id, pet in existing_pets.items()
+                for pet_id, pet in stable_profiles.items()
             }
         )
-        base_boundaries = (
-            match_context.boundary_samples
-            if match_context is not None
-            else {
-                pet_id: tuple(
-                    normalize_vector(sample)
-                    for sample in pet.boundary_embeddings
-                    if int(np.asarray(sample).size) == int(pet.embedding_dim)
-                )
-                for pet_id, pet in existing_pets.items()
-            }
-        )
-        centers: dict[str, np.ndarray] = {}
-        sample_counts: dict[str, int] = {}
-        species: dict[str, str | None] = {}
-        boundary_samples: dict[str, tuple[np.ndarray, ...]] = {}
+        member_samples = match_context.member_samples if match_context is not None else {}
+        replaced_asset_ids = {detection.asset_id for detection in detections}
         candidate_index = candidate_index or _ProfileCandidateIndex(centers, species)
-        new_pet_ids: set[str] = set()
-        assigned: list[PetDetectionRecord] = []
-        for detection in detections:
+        staged_samples: dict[str, list[np.ndarray]] = {}
+        assigned_by_detection_id: dict[str, PetDetectionRecord] = {}
+        unmatched: list[PetDetectionRecord] = []
+
+        # Resolve durable/manual keys before embedding matches. Sorting makes the
+        # incremental result independent of the caller's detection order.
+        ordered = sorted(
+            detections,
+            key=lambda value: (value.asset_id, value.pet_key, value.detection_id),
+        )
+        for detection in ordered:
             detection_species = _normalize_species_label(detection.species_label)
             mapped_id = key_map.get(detection.pet_key, "")
             candidate_id = redirects.get(mapped_id, mapped_id)
             durable_profile = durable_profiles.get(candidate_id)
             known_species = (
-                species.get(candidate_id, base_species.get(candidate_id))
-                if candidate_id in species or candidate_id in base_species
+                species.get(candidate_id)
+                if candidate_id in species
                 else _normalize_species_label(
-                    durable_profile.species_label if durable_profile is not None else None
+                    existing_pets[candidate_id].species_label
+                    if candidate_id in existing_pets
+                    else durable_profile.species_label
+                    if durable_profile is not None
+                    else None
                 )
             )
             if candidate_id and not _species_compatible(detection_species, known_species):
                 candidate_id = ""
-            elif candidate_id and candidate_id not in centers and candidate_id not in base_centers:
-                if durable_profile is None:
-                    candidate_id = ""
-                else:
-                    compatible_contract = (
-                        durable_profile.embedding_pipeline_version
-                        == detection.embedding_pipeline_version
-                        and int(durable_profile.embedding_dim) == detection.embedding_dim
-                        and int(durable_profile.generation_id) == detection.generation_id
-                    )
-                    centers[candidate_id] = normalize_vector(
-                        durable_profile.center_embedding
-                        if compatible_contract
-                        else detection.embedding
-                    )
-                    sample_counts[candidate_id] = (
-                        max(int(durable_profile.sample_count), 1) if compatible_contract else 0
-                    )
-                    species[candidate_id] = detection_species or known_species
-                    boundary_samples[candidate_id] = (
-                        tuple(
-                            normalize_vector(sample)
-                            for sample in durable_profile.boundary_embeddings
-                            if int(np.asarray(sample).size) == detection.embedding_dim
-                        )
-                        if compatible_contract
-                        else ()
-                    )
-            elif candidate_id and candidate_id not in centers:
-                centers[candidate_id] = base_centers[candidate_id]
-                sample_counts[candidate_id] = base_sample_counts[candidate_id]
-                species[candidate_id] = base_species.get(candidate_id)
-                boundary_samples[candidate_id] = base_boundaries.get(candidate_id, ())
-            if not candidate_id:
-                candidate_id = self._nearest_compatible_pet_id(
-                    detection,
-                    centers=centers,
-                    species=species,
-                    boundary_samples=boundary_samples,
-                    base_boundary_samples=base_boundaries,
-                    candidate_index=candidate_index,
-                    new_pet_ids=new_pet_ids,
-                    distance_threshold=distance_threshold,
+            elif candidate_id and candidate_id not in existing_pets and durable_profile is None:
+                candidate_id = ""
+            if candidate_id:
+                assigned_by_detection_id[detection.detection_id] = replace(
+                    detection, pet_id=candidate_id
                 )
-            if not candidate_id:
-                candidate_id = str(uuid.uuid4())
-                centers[candidate_id] = normalize_vector(detection.embedding)
-                sample_counts[candidate_id] = 0
-                species[candidate_id] = detection_species
-                boundary_samples[candidate_id] = ()
-                new_pet_ids.add(candidate_id)
-            count = sample_counts.get(
-                candidate_id,
-                base_sample_counts.get(candidate_id, 0),
+                staged_samples.setdefault(candidate_id, []).append(
+                    normalize_vector(detection.embedding)
+                )
+            else:
+                unmatched.append(detection)
+
+        still_unmatched: list[PetDetectionRecord] = []
+        for detection in unmatched:
+            candidate_id = self._nearest_compatible_pet_id(
+                detection,
+                member_samples=member_samples,
+                staged_samples=staged_samples,
+                excluded_asset_ids=replaced_asset_ids,
+                candidate_index=candidate_index,
+                distance_threshold=distance_threshold,
             )
-            center = centers.get(
-                candidate_id,
-                base_centers.get(candidate_id, normalize_vector(detection.embedding)),
+            if candidate_id:
+                assigned_by_detection_id[detection.detection_id] = replace(
+                    detection, pet_id=candidate_id
+                )
+                staged_samples.setdefault(candidate_id, []).append(
+                    normalize_vector(detection.embedding)
+                )
+            else:
+                still_unmatched.append(detection)
+
+        if still_unmatched:
+            from .pipeline import cluster_pet_records
+
+            clustered, _ = cluster_pet_records(
+                still_unmatched,
+                distance_threshold=distance_threshold,
             )
-            centers[candidate_id] = normalize_vector(
-                (center * float(count) + normalize_vector(detection.embedding)) / float(count + 1)
+            assigned_by_detection_id.update(
+                {detection.detection_id: detection for detection in clustered}
             )
-            sample_counts[candidate_id] = count + 1
-            samples = boundary_samples.get(candidate_id, ())
-            boundary_samples[candidate_id] = (
-                *samples,
-                normalize_vector(detection.embedding),
-            )[-8:]
-            assigned.append(replace(detection, pet_id=candidate_id))
-        return assigned
+        return [assigned_by_detection_id[detection.detection_id] for detection in detections]
 
     def _profiles_for_contract(
         self,
@@ -911,36 +878,24 @@ class PetRepository:
                     for pet in self.get_all_pet_records()
                     if EmbeddingContract.from_pet(pet) == contract
                 }
+                stable_profiles = {
+                    pet_id: pet
+                    for pet_id, pet in profiles.items()
+                    if str(pet.profile_state or "unstable") == "stable"
+                }
                 centers = {
                     pet_id: normalize_vector(pet.center_embedding)
-                    for pet_id, pet in profiles.items()
+                    for pet_id, pet in stable_profiles.items()
                 }
                 species = {
                     pet_id: _normalize_species_label(pet.species_label)
-                    for pet_id, pet in profiles.items()
+                    for pet_id, pet in stable_profiles.items()
                 }
-                boundaries = {
-                    pet_id: tuple(normalize_vector(value) for value in pet.boundary_embeddings)
-                    for pet_id, pet in profiles.items()
-                }
-                missing = tuple(pet_id for pet_id in profiles if not boundaries.get(pet_id))
-                if missing:
-                    boundaries.update(
-                        self._load_boundary_samples_for_pets(
-                            missing,
-                            centers=centers,
-                            limit=8,
-                        )
-                    )
                 context = _ProfileMatchContext(
                     profiles=profiles,
                     centers=centers,
-                    sample_counts={
-                        pet_id: max(int(pet.sample_count), int(pet.detection_count), 1)
-                        for pet_id, pet in profiles.items()
-                    },
                     species=species,
-                    boundary_samples=boundaries,
+                    member_samples={},
                     candidate_index=_ProfileCandidateIndex(centers, species),
                 )
                 self._match_contexts[contract] = context
@@ -960,19 +915,17 @@ class PetRepository:
             for pet_id in affected_pet_ids:
                 context.candidate_index.remove(pet_id)
                 context.profiles.pop(pet_id, None)
-                context.sample_counts.pop(pet_id, None)
-                context.boundary_samples.pop(pet_id, None)
+                context.member_samples.pop(pet_id, None)
+                context.centers.pop(pet_id, None)
+                context.species.pop(pet_id, None)
             for pet in rebuilt_pets:
                 pet_contract = EmbeddingContract.from_pet(pet)
                 if pet_contract != contract:
                     continue
                 context.profiles[pet.pet_id] = pet
-                context.sample_counts[pet.pet_id] = max(
-                    int(pet.sample_count), int(pet.detection_count), 1
-                )
-                context.boundary_samples[pet.pet_id] = tuple(
-                    normalize_vector(value) for value in pet.boundary_embeddings
-                )
+                if str(pet.profile_state or "unstable") == "stable":
+                    context.centers[pet.pet_id] = normalize_vector(pet.center_embedding)
+                    context.species[pet.pet_id] = _normalize_species_label(pet.species_label)
             context.candidate_index.upsert_many(
                 (
                     pet.pet_id,
@@ -981,6 +934,7 @@ class PetRepository:
                 )
                 for pet in rebuilt_pets
                 if EmbeddingContract.from_pet(pet) == contract
+                and str(pet.profile_state or "unstable") == "stable"
             )
 
     def _invalidate_profile_indexes(self) -> None:
@@ -991,12 +945,10 @@ class PetRepository:
         self,
         detection: PetDetectionRecord,
         *,
-        centers: dict[str, np.ndarray],
-        species: dict[str, str | None],
-        boundary_samples: dict[str, tuple[np.ndarray, ...]],
-        base_boundary_samples: dict[str, tuple[np.ndarray, ...]],
+        member_samples: dict[str, tuple[tuple[str, np.ndarray], ...]],
+        staged_samples: dict[str, list[np.ndarray]],
+        excluded_asset_ids: set[str],
         candidate_index: _ProfileCandidateIndex,
-        new_pet_ids: set[str],
         distance_threshold: float,
     ) -> str:
         detection_species = _normalize_species_label(detection.species_label)
@@ -1005,18 +957,24 @@ class PetRepository:
             species_label=detection_species,
             limit=8,
         )
-        candidates.extend(
-            (cosine_distance(detection.embedding, centers[pet_id]), pet_id)
-            for pet_id in new_pet_ids
-            if centers[pet_id].size == detection.embedding_dim
-            and _species_compatible(detection_species, species.get(pet_id))
-        )
+        shortlisted = [
+            pet_id
+            for center_distance, pet_id in sorted(candidates)[:8]
+            if center_distance <= distance_threshold
+        ]
+        missing = tuple(pet_id for pet_id in shortlisted if pet_id not in member_samples)
+        if missing:
+            member_samples.update(self._load_complete_link_samples_for_pets(missing))
         for center_distance, pet_id in sorted(candidates)[:8]:
             if center_distance > distance_threshold:
                 continue
-            samples = boundary_samples.get(
-                pet_id,
-                base_boundary_samples.get(pet_id, ()),
+            samples = (
+                *(
+                    sample
+                    for asset_id, sample in member_samples.get(pet_id, ())
+                    if asset_id not in excluded_asset_ids
+                ),
+                *staged_samples.get(pet_id, ()),
             )
             if (
                 samples
@@ -1027,14 +985,11 @@ class PetRepository:
             return pet_id
         return ""
 
-    def _load_boundary_samples_for_pets(
+    def _load_complete_link_samples_for_pets(
         self,
         pet_ids: tuple[str, ...],
-        *,
-        centers: dict[str, np.ndarray],
-        limit: int,
-    ) -> dict[str, tuple[np.ndarray, ...]]:
-        grouped: dict[str, list[tuple[str, np.ndarray]]] = {pet_id: [] for pet_id in pet_ids}
+    ) -> dict[str, tuple[tuple[str, np.ndarray], ...]]:
+        grouped: dict[str, list[tuple[str, str, np.ndarray]]] = {pet_id: [] for pet_id in pet_ids}
         with closing(self._connect()) as conn:
             rows = self._select_detections_by_pet_ids(conn, pet_ids)
         for row in rows:
@@ -1044,21 +999,19 @@ class PetRepository:
             grouped[pet_id].append(
                 (
                     str(row["detection_id"]),
-                    deserialize_embedding(row["embedding"], int(row["embedding_dim"] or 0)),
+                    str(row["asset_id"]),
+                    normalize_vector(
+                        deserialize_embedding(row["embedding"], int(row["embedding_dim"] or 0))
+                    ),
                 )
             )
-        selected: dict[str, tuple[np.ndarray, ...]] = {}
-        cap = max(1, min(int(limit), 8))
-        for pet_id, samples in grouped.items():
-            center = centers.get(pet_id, np.asarray([], dtype=np.float32))
-            compatible = [
-                (detection_id, normalize_vector(sample))
-                for detection_id, sample in samples
-                if sample.size == center.size
-            ]
-            compatible.sort(key=lambda item: (-cosine_distance(center, item[1]), item[0]))
-            selected[pet_id] = tuple(sample for _, sample in compatible[:cap])
-        return selected
+        return {
+            pet_id: tuple(
+                (asset_id, sample)
+                for _, asset_id, sample in sorted(samples, key=lambda item: item[0])
+            )
+            for pet_id, samples in grouped.items()
+        }
 
     def _select_detections_by_asset_ids(
         self, conn: sqlite3.Connection, asset_ids: tuple[str, ...]

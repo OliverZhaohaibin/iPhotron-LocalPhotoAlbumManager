@@ -202,8 +202,10 @@ def _benchmark_growth(
         distance_threshold=0.05,
     )
     cold_elapsed = time.perf_counter() - cold_started
-    assert not incremental_result.added_pet_ids
-    assert match_target.pet_id in incremental_result.updated_pet_ids
+    # Growth creates one-sample unstable profiles. A restart must not turn one
+    # of them into an embedding candidate; only exact pet_key reuse may do so.
+    assert len(incremental_result.added_pet_ids) == 1
+    assert match_target.pet_id not in incremental_result.updated_pet_ids
     wal_after = wal_path.stat().st_size if wal_path.exists() else 0
     records = reopened.get_all_pet_records()
     assert len(records) >= 2
@@ -257,7 +259,10 @@ def _synthetic_snapshot(
                 embedding_dim=vector.size,
                 created_at=timestamp,
                 updated_at=timestamp,
-                sample_count=1,
+                # Synthetic snapshot profiles model already-confirmed identities
+                # so the incremental benchmark exercises the stable ANN path.
+                sample_count=3,
+                profile_state="stable",
                 species_label="dog",
             )
         )

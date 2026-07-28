@@ -15,6 +15,8 @@ from iPhoto.application.services.recognition_merge_service import (
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository_utils import utc_now_iso
+from iPhoto.recognition.operation_journal import RecognitionOperationJournal
+from iPhoto.utils.pathutils import ensure_work_dir
 
 
 def _services(*, person_hidden: bool = False, pet_hidden: bool = False):
@@ -99,6 +101,30 @@ def test_untyped_raw_id_is_rejected_without_guessing_kind() -> None:
 
     assert outcome.merged is False
     assert outcome.failure is IdentityMergeFailure.INVALID_IDENTITY
+
+
+def test_pending_assignment_blocks_person_merge_before_people_mutation(tmp_path) -> None:
+    people, pets = _services()
+    pets.library_root = lambda: tmp_path
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(tmp_path) / "recognition" / "operations.db"
+    )
+    operation_id = journal.prepare(
+        "recognition_detection_assignment",
+        {
+            "source_kind": "pet",
+            "source_annotation_id": "det-a",
+            "target_kind": "person",
+            "target_id": "same",
+        },
+    )
+    journal.transition(operation_id, "applying")
+    service = RecognitionMergeService(people, pets)
+
+    outcome = service.merge("person:same", "person:other-person")
+
+    assert outcome.failure is IdentityMergeFailure.RECOVERY_PENDING
+    people.merge_clusters.assert_not_called()
 
 
 def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) -> None:

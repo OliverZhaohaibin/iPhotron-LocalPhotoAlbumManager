@@ -1615,6 +1615,45 @@ class FaceStateRepository:
             for row in rows
         }
 
+    def get_annotation_identity_assignments_for_targets(
+        self, targets: Iterable[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[str, str]]:
+        """Return per-annotation assignments whose effective target is requested."""
+
+        normalized = tuple(
+            dict.fromkeys(
+                (str(kind), str(entity_id))
+                for kind, entity_id in targets
+                if kind in {"person", "pet"} and entity_id
+            )
+        )
+        if not normalized:
+            return {}
+        self.initialize()
+        rows: list[sqlite3.Row] = []
+        with closing(self._connect()) as conn:
+            for start in range(0, len(normalized), 400):
+                chunk = normalized[start : start + 400]
+                placeholders = ", ".join("(?, ?)" for _ in chunk)
+                parameters = tuple(value for ref in chunk for value in ref)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT source_kind, source_annotation_id, target_kind, target_id
+                        FROM annotation_identity_assignments
+                        WHERE (target_kind, target_id) IN ({placeholders})
+                        """,
+                        parameters,
+                    ).fetchall()
+                )
+        return {
+            (str(row["source_kind"]), str(row["source_annotation_id"])): (
+                str(row["target_kind"]),
+                str(row["target_id"]),
+            )
+            for row in rows
+        }
+
     def remap_identity_redirect_targets(
         self,
         *,

@@ -403,6 +403,47 @@ def test_runtime_commit_marker_recovers_state_without_deleting_published_thumbna
         ).fetchone()[0] == 1
 
 
+def test_runtime_commit_cleanup_keeps_unsynced_and_protected_rows(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    repository.initialize()
+    with sqlite3.connect(repository.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO pet_runtime_commits (
+                operation_id, payload_json, state_synced, created_at, updated_at
+            ) VALUES (?, '{}', 1, '2026-01-01', '2026-01-01')
+            """,
+            [(f"done-{index:04d}",) for index in range(1201)],
+        )
+        conn.execute(
+            """
+            INSERT INTO pet_runtime_commits
+                (operation_id, payload_json, state_synced, created_at, updated_at)
+            VALUES ('pending', '{}', 0, '2026-01-01', '2026-01-01')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO pet_runtime_commits
+                (operation_id, payload_json, state_synced, created_at, updated_at)
+            VALUES ('protected', '{}', 1, '2026-01-01', '2026-01-01')
+            """
+        )
+
+    deleted = repository.prune_runtime_commits(
+        protected_operation_ids=("protected",),
+    )
+
+    assert deleted == 201
+    with sqlite3.connect(repository.db_path) as conn:
+        rows = conn.execute(
+            "SELECT operation_id, state_synced FROM pet_runtime_commits"
+        ).fetchall()
+    assert len(rows) == 1002
+    assert ("pending", 0) in rows
+    assert ("protected", 1) in rows
+
+
 def test_exact_key_resurrects_durable_identity_and_user_state(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     first = _detection("stable-key", pet_id="pet-a")
@@ -731,6 +772,51 @@ def test_overlap_reconciliation_recovers_runtime_commit_state_sync(
     assert recovered._journal.unfinished() == ()
     assert recovered_repository.state_repository is not None
     assert recovered_repository.state_repository.get_cover("pet-a") is None
+
+
+def test_overlap_reconciliation_preserves_retained_mixed_generations(
+    tmp_path: Path,
+) -> None:
+    repository = PetRepository(
+        tmp_path / ".iPhoto" / "pets" / "pet_index.db",
+        tmp_path / ".iPhoto" / "pets" / "pet_state.db",
+    )
+    removed = _detection("remove", asset_id="asset-a", pet_id="pet-a")
+    retained_old = replace(
+        _detection("retain-old", asset_id="asset-a", pet_id="pet-a"),
+        box_x=250,
+        box_y=200,
+    )
+    retained_new = replace(
+        _detection(
+            "retain-new",
+            asset_id="asset-b",
+            embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            pet_id="pet-b",
+        ),
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    repository.replace_all(
+        [removed, retained_old, retained_new],
+        [_pet("pet-a", retained_old), _pet("pet-b", retained_new)],
+    )
+    coordinator = PetIndexCoordinator(tmp_path)
+
+    event = coordinator.reconcile_people_overlaps(
+        {
+            "asset-a": ((10, 20, 80, 90),),
+            "asset-b": (),
+        }
+    )
+
+    assert event is not None
+    remaining = {item.detection_id: item for item in repository.get_all_detections()}
+    assert set(remaining) == {"retain-old", "retain-new"}
+    assert remaining["retain-old"].generation_id == 0
+    assert remaining["retain-new"].generation_id == 1
+    assert remaining["retain-old"].pet_id == "pet-a"
+    assert remaining["retain-new"].pet_id == "pet-b"
 
 
 def test_delete_recovery_syncs_state_when_runtime_detection_is_already_missing(

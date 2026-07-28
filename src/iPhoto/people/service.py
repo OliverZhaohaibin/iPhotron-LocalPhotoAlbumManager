@@ -371,6 +371,10 @@ class PeopleService:
             target_person_id,
         ))
 
+    def recognition_mutation_pending(self) -> bool:
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.recovery_pending)
+
     def merge_identities(self, source_identity: str, target_identity: str) -> IdentityMergeResult | None:
         if self._library_root is None:
             return None

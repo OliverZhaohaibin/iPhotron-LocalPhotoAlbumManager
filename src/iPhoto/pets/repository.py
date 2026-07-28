@@ -479,6 +479,78 @@ class PetRepository:
             removed_pet_ids=removed,
         )
 
+    def delete_detections_transactionally(
+        self,
+        detection_ids: Iterable[str],
+        *,
+        operation_id: str,
+        operation_kind: str,
+    ) -> PetIncrementalCommitResult:
+        """Delete exact detections without reassigning retained embedding generations."""
+
+        ids = tuple(dict.fromkeys(str(value) for value in detection_ids if value))
+        if not ids or not operation_id:
+            return PetIncrementalCommitResult()
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows: list[sqlite3.Row] = []
+            for chunk in _chunked(ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT detection_id, asset_id, pet_id, thumbnail_path
+                        FROM pet_detections
+                        WHERE detection_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+            if not rows:
+                return PetIncrementalCommitResult()
+            changed_asset_ids = tuple(
+                dict.fromkeys(str(row["asset_id"]) for row in rows if row["asset_id"])
+            )
+            affected_pet_ids = tuple(
+                dict.fromkeys(str(row["pet_id"]) for row in rows if row["pet_id"])
+            )
+            previous_thumbnail_paths = tuple(
+                str(row["thumbnail_path"]) for row in rows if row["thumbnail_path"]
+            )
+            for chunk in _chunked(ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM pet_detections WHERE detection_id IN ({placeholders})",
+                    chunk,
+                )
+            _detections, rebuilt_pets = self._rebuild_pet_records_in_connection(conn)
+            surviving = {pet.pet_id for pet in rebuilt_pets}
+            removed = tuple(sorted(set(affected_pet_ids) - surviving))
+            updated = tuple(sorted(set(affected_pet_ids) & surviving))
+            self._write_runtime_commit(
+                conn,
+                operation_id,
+                {
+                    "operation_kind": operation_kind,
+                    "detection_ids": list(ids),
+                    "affected_pet_ids": list(affected_pet_ids),
+                    "changed_pet_ids": list(affected_pet_ids),
+                    "changed_asset_ids": list(changed_asset_ids),
+                    "previous_thumbnail_paths": list(previous_thumbnail_paths),
+                    "added_pet_ids": [],
+                    "updated_pet_ids": list(updated),
+                    "removed_pet_ids": list(removed),
+                },
+            )
+            conn.commit()
+        self.complete_runtime_state_sync(operation_id)
+        self._refresh_people_group_assets_for_pets(affected_pet_ids)
+        return PetIncrementalCommitResult(
+            previous_thumbnail_paths=previous_thumbnail_paths,
+            updated_pet_ids=updated,
+            removed_pet_ids=removed,
+        )
+
     @staticmethod
     def _write_runtime_commit(
         conn: sqlite3.Connection,
@@ -584,11 +656,17 @@ class PetRepository:
                         conn.commit()
         if str(payload.get("operation_kind") or "") == "pet_delete_detection":
             face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
+            face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
             detection_id = str(payload.get("detection_id") or "")
             if face_state_path.exists() and detection_id:
                 FaceStateRepository(face_state_path).clear_annotation_identity_assignment(
                     "pet", detection_id
                 )
+                if face_index_path.exists():
+                    FaceRepository(
+                        face_index_path,
+                        face_state_path,
+                    ).refresh_all_group_assets()
         with closing(self._connect()) as conn:
             conn.execute(
                 """
@@ -600,7 +678,60 @@ class PetRepository:
             )
             conn.commit()
         payload["state_synced"] = True
+        if str(operation_id).startswith("internal-"):
+            self.prune_runtime_commits()
         return payload
+
+    def prune_runtime_commits(
+        self,
+        *,
+        protected_operation_ids: Iterable[str] = (),
+        high_watermark: int = 1200,
+        retain: int = 1000,
+    ) -> int:
+        """Bound synced commit history while retaining unfinished journal owners."""
+
+        protected = tuple(
+            dict.fromkeys(str(value) for value in protected_operation_ids if value)
+        )
+        deleted = 0
+        with closing(self._connect()) as conn:
+            where = "state_synced = 1"
+            parameters: tuple[object, ...] = ()
+            if protected:
+                placeholders = ", ".join("?" for _ in protected)
+                where += f" AND operation_id NOT IN ({placeholders})"
+                parameters = protected
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count FROM pet_runtime_commits WHERE {where}",
+                parameters,
+            ).fetchone()
+            if row is None or int(row["count"] or 0) <= high_watermark:
+                return 0
+            while True:
+                stale = conn.execute(
+                    f"""
+                    SELECT operation_id
+                    FROM pet_runtime_commits
+                    WHERE {where}
+                    ORDER BY rowid DESC
+                    LIMIT 500 OFFSET ?
+                    """,
+                    (*parameters, retain),
+                ).fetchall()
+                if not stale:
+                    break
+                stale_ids = tuple(str(item["operation_id"]) for item in stale)
+                placeholders = ", ".join("?" for _ in stale_ids)
+                cursor = conn.execute(
+                    f"DELETE FROM pet_runtime_commits WHERE operation_id IN ({placeholders})",
+                    stale_ids,
+                )
+                deleted += int(cursor.rowcount or 0)
+                conn.commit()
+                if len(stale_ids) < 500:
+                    break
+        return deleted
 
     def _assign_incremental_pet_ids(
         self,
@@ -1357,20 +1488,31 @@ class PetRepository:
                 WHERE pet_id IS NOT NULL
                 """
             ).fetchall()
-        asset_ids_by_pet_id: dict[str, set[str]] = {}
-        for asset_row in asset_rows:
-            if not asset_row["pet_id"] or not asset_row["asset_id"]:
-                continue
-            runtime_pet_id = str(asset_row["pet_id"])
-            canonical_pet_id = merge_redirects.get(runtime_pet_id, runtime_pet_id)
-            pet_asset_ids = asset_ids_by_pet_id.setdefault(canonical_pet_id, set())
-            pet_asset_ids.add(str(asset_row["asset_id"]))
         hidden_map: dict[str, bool] = {}
         cover_paths: dict[str, str] = {}
         profile_names: dict[str, str | None] = {}
         if self._state_repo is not None:
             hidden_map, cover_paths, profile_names = (
                 self._state_repo.get_summary_state_maps()
+            )
+        effective_asset_sets: dict[str, set[str]] = {}
+        for asset_row in asset_rows:
+            runtime_pet_id = str(asset_row["pet_id"])
+            canonical_pet_id = merge_redirects.get(runtime_pet_id, runtime_pet_id)
+            if asset_row["asset_id"]:
+                effective_asset_sets.setdefault(canonical_pet_id, set()).add(
+                    str(asset_row["asset_id"])
+                )
+        effective_assets: dict[str, list[str]] = {
+            pet_id: sorted(asset_ids)
+            for pet_id, asset_ids in effective_asset_sets.items()
+        }
+        face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
+        if face_state_path.exists():
+            effective_assets = self.get_asset_ids_by_pets(
+                str(row["pet_id"])
+                for row in rows
+                if row["pet_id"] and str(row["pet_id"]) not in merge_redirects
             )
 
         summaries: list[PetSummary] = []
@@ -1392,7 +1534,7 @@ class PetRepository:
                     thumbnail_path=resolved_thumbnail,
                     created_at=str(row["created_at"] or ""),
                     is_hidden=bool(hidden_map.get(pet_id, False)),
-                    asset_count=len(asset_ids_by_pet_id.get(pet_id, set())),
+                    asset_count=len(effective_assets.get(pet_id, ())),
                 )
             )
         if not include_hidden:
@@ -1402,6 +1544,13 @@ class PetRepository:
     def get_asset_ids_by_pet(self, pet_id: str) -> list[str]:
         if not pet_id:
             return []
+        face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
+        if face_state_path.exists():
+            face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
+            return FaceRepository(
+                face_index_path,
+                face_state_path,
+            ).get_asset_ids_by_pets_effective((pet_id,)).get(pet_id, [])
         self.initialize()
         runtime_pet_ids = [pet_id]
         if self._state_repo is not None:
@@ -1439,6 +1588,13 @@ class PetRepository:
         result: dict[str, list[str]] = {pet_id: [] for pet_id in ids}
         if not ids:
             return result
+        face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
+        if face_state_path.exists():
+            face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
+            return FaceRepository(
+                face_index_path,
+                face_state_path,
+            ).get_asset_ids_by_pets_effective(ids)
         self.initialize()
         redirects = (
             self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}

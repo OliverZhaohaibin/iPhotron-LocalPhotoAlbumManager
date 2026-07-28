@@ -76,6 +76,7 @@ class PetIndexCoordinator(QObject):
         try:
             with self._lock:
                 self._recover_operations_locked()
+                self._prune_runtime_commits_locked()
         except Exception as exc:  # noqa: BLE001
             self._recovery_error = exc
             LOGGER.error(
@@ -597,11 +598,6 @@ class PetIndexCoordinator(QObject):
                 return None
 
             removed_ids = {detection.detection_id for detection in removed}
-            retained = [
-                detection
-                for detection in previous_detections
-                if detection.detection_id not in removed_ids
-            ]
             changed_asset_ids = tuple(
                 dict.fromkeys(detection.asset_id for detection in removed if detection.asset_id)
             )
@@ -614,10 +610,8 @@ class PetIndexCoordinator(QObject):
             )
             if operation_id is None:
                 return None
-            commit_result = repository.replace_assets_incrementally(
-                scoped_asset_ids,
-                retained,
-                distance_threshold=distance_threshold,
+            commit_result = repository.delete_detections_transactionally(
+                removed_ids,
                 operation_id=operation_id,
                 operation_kind="pet_overlap_reconcile",
             )
@@ -767,7 +761,16 @@ class PetIndexCoordinator(QObject):
         self._journal.commit_outbox(operation_id, outbox_payload)
         event = self._emit_snapshot(operation_id=operation_id, **event_fields)
         self._journal.mark_published(operation_id)
+        self._prune_runtime_commits_locked()
         return event
+
+    def _prune_runtime_commits_locked(self) -> None:
+        protected = tuple(
+            operation.operation_id for operation in self._journal.unfinished()
+        )
+        self._repository().prune_runtime_commits(
+            protected_operation_ids=protected,
+        )
 
     def _try_prepare_operation_locked(
         self,

@@ -142,9 +142,12 @@ def test_incremental_event_reports_removed_pet_and_journal_finalizes(tmp_path: P
 
     operation_db = tmp_path / ".iPhoto" / "recognition" / "operations.db"
     with sqlite3.connect(operation_db) as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM operations WHERE state != 'finalized'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM operations WHERE state != 'finalized'"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_scan_journal_recovers_after_asset_status_commit_failure(tmp_path: Path) -> None:
@@ -171,9 +174,12 @@ def test_scan_journal_recovers_after_asset_status_commit_failure(tmp_path: Path)
         recovered._recover_operations_locked()
     assert store.status == "done"
     with sqlite3.connect(tmp_path / ".iPhoto" / "recognition" / "operations.db") as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM operations WHERE state != 'finalized'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM operations WHERE state != 'finalized'"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_failed_asset_keeps_previous_detection_as_explicit_stale_result(
@@ -199,6 +205,40 @@ def test_failed_asset_keeps_previous_detection_as_explicit_stale_result(
     assert detection.is_stale
     assert detection.stale_reason == "asset_scan_failed_in_current_generation"
     assert detection.source_generation_id == detection.generation_id
+
+
+def test_terminal_failed_status_is_journaled_and_recovered_without_retry_downgrade(
+    tmp_path: Path,
+) -> None:
+    class FailingStore(_AssetStore):
+        fail_failed = True
+
+        def update_pet_statuses(self, asset_ids, status):
+            if status == "failed" and self.fail_failed:
+                raise sqlite3.OperationalError("injected failed-status write")
+            super().update_pet_statuses(asset_ids, status)
+
+    store = FailingStore("asset-a")
+    coordinator = PetIndexCoordinator(tmp_path, asset_repository=store)
+    with pytest.raises(PetSnapshotCommittedError):
+        coordinator.submit_detected_batch(
+            [DetectedAssetPets("asset-a", "album/a.jpg", [], error="bad image")],
+            failed_asset_ids=["asset-a"],
+            distance_threshold=0.1,
+        )
+    assert store.status == "pending"
+    operation = coordinator._journal.unfinished()[0]
+    assert operation.payload["done_asset_ids"] == []
+    assert operation.payload["retry_asset_ids"] == []
+    assert operation.payload["failed_asset_ids"] == ["asset-a"]
+
+    store.fail_failed = False
+    recovered = PetIndexCoordinator(tmp_path, asset_repository=store)
+    with recovered._lock:
+        recovered._recover_operations_locked()
+
+    assert store.status == "failed"
+    assert recovered._journal.unfinished() == ()
 
 
 def test_stale_annotation_adapter_keeps_canonical_name_pure() -> None:
@@ -419,9 +459,11 @@ def test_dashboard_query_budget_is_constant_from_10_to_1000_pets(tmp_path: Path)
         def traced(connect):
             connection = connect()
             connection.set_trace_callback(
-                lambda sql: statements.append(sql)
-                if sql.lstrip().upper().startswith(("SELECT", "WITH"))
-                else None
+                lambda sql: (
+                    statements.append(sql)
+                    if sql.lstrip().upper().startswith(("SELECT", "WITH"))
+                    else None
+                )
             )
             return connection
 
@@ -504,9 +546,7 @@ def test_runtime_commit_marker_recovers_state_without_deleting_published_thumbna
     assert [item.detection_id for item in committed] == ["first"]
     assert (published_dir / "first.png").is_file()
     with sqlite3.connect(repository.db_path) as connection:
-        assert connection.execute(
-            "SELECT state_synced FROM pet_runtime_commits"
-        ).fetchone()[0] == 0
+        assert connection.execute("SELECT state_synced FROM pet_runtime_commits").fetchone()[0] == 0
 
     recovered = PetIndexCoordinator(tmp_path, asset_repository=store)
     recovered_repository = recovered._repository()
@@ -514,9 +554,7 @@ def test_runtime_commit_marker_recovers_state_without_deleting_published_thumbna
     assert recovered_repository.state_repository.get_profiles()
     assert (published_dir / "first.png").is_file()
     with sqlite3.connect(repository.db_path) as connection:
-        assert connection.execute(
-            "SELECT state_synced FROM pet_runtime_commits"
-        ).fetchone()[0] == 1
+        assert connection.execute("SELECT state_synced FROM pet_runtime_commits").fetchone()[0] == 1
 
 
 def test_runtime_commit_cleanup_keeps_unsynced_and_protected_rows(tmp_path: Path) -> None:
@@ -552,9 +590,7 @@ def test_runtime_commit_cleanup_keeps_unsynced_and_protected_rows(tmp_path: Path
 
     assert deleted == 201
     with sqlite3.connect(repository.db_path) as conn:
-        rows = conn.execute(
-            "SELECT operation_id, state_synced FROM pet_runtime_commits"
-        ).fetchall()
+        rows = conn.execute("SELECT operation_id, state_synced FROM pet_runtime_commits").fetchall()
     assert len(rows) == 1002
     assert ("pending", 0) in rows
     assert ("protected", 1) in rows
@@ -684,10 +720,7 @@ def test_persisted_boundary_samples_are_used_without_candidate_sql(
 
 def test_state_repository_chunks_all_large_identity_reads(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
-    detections = [
-        _detection(f"detection-{index}", pet_id=f"pet-{index}")
-        for index in range(1205)
-    ]
+    detections = [_detection(f"detection-{index}", pet_id=f"pet-{index}") for index in range(1205)]
     repository.replace_all(
         detections,
         [_pet(f"pet-{index}", detection) for index, detection in enumerate(detections)],
@@ -716,6 +749,12 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
     model_path = bundled_dir / "dinov2_vits14.pt"
     model_path.write_bytes(b"verified-torchscript")
     manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
+    monkeypatch.setitem(
+        manifest,
+        "torchscript_sha256",
+        hashlib.sha256(model_path.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setitem(manifest, "torchscript_size", model_path.stat().st_size)
     model_path.with_suffix(".pt.metadata.json").write_text(
         json.dumps(
             {
@@ -809,9 +848,7 @@ def test_public_mutation_cannot_overtake_unrecovered_journal_owner(
     assert coordinator.rename_pet("pet-a", "Must not be created") is None
 
     unfinished = coordinator._journal.unfinished()
-    assert [operation.operation_id for operation in unfinished] == [
-        blocked_operation_id
-    ]
+    assert [operation.operation_id for operation in unfinished] == [blocked_operation_id]
     assert coordinator._recovery_error is not None
 
 
@@ -874,9 +911,7 @@ def test_overlap_reconciliation_recovers_runtime_commit_state_sync(
     )
     group = face_repository.create_group(["pet:pet-a", "pet:pet-b"])
     assert group is not None
-    assert face_repository.get_common_asset_ids_for_group(group.group_id) == [
-        "asset-a"
-    ]
+    assert face_repository.get_common_asset_ids_for_group(group.group_id) == ["asset-a"]
     coordinator = PetIndexCoordinator(tmp_path)
     monkeypatch.setattr(coordinator, "_repository", lambda: repository)
     state = repository.state_repository
@@ -1105,9 +1140,7 @@ def _detection(
     pet_id: str | None = None,
 ) -> PetDetectionRecord:
     vector = normalize_vector(
-        embedding
-        if embedding is not None
-        else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+        embedding if embedding is not None else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     )
     return PetDetectionRecord(
         detection_id=detection_id,

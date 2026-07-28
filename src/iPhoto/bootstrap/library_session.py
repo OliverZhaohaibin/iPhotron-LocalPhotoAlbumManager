@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,6 +62,7 @@ class LibrarySession:
     edit: EditServicePort | None = None
     locations: LocationAssetServicePort | None = None
     bind_asset_runtime: bool = True
+    _shutdown: bool = field(default=False, init=False, repr=False)
 
     _LAZY_SERVICE_NAMES = frozenset(
         {
@@ -80,6 +81,8 @@ class LibrarySession:
         value = object.__getattribute__(self, name)
         if name not in object.__getattribute__(self, "_LAZY_SERVICE_NAMES"):
             return value
+        if object.__getattribute__(self, "_shutdown"):
+            raise RuntimeError("LibrarySession is shut down.")
         if value is not None:
             return value
         factory = object.__getattribute__(self, "_create_lazy_service")
@@ -208,6 +211,18 @@ class LibrarySession:
         return self.state_repository
 
     def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
+        people = object.__getattribute__(self, "people")
+        pets = object.__getattribute__(self, "pets")
+        mutations = object.__getattribute__(self, "recognition_mutations")
+        if people is not None:
+            people.shutdown()
+        if pets is not None:
+            pets.shutdown()
+        if mutations is not None:
+            mutations.close()
         shutdown_queries = getattr(self.asset_queries, "shutdown", None)
         if callable(shutdown_queries):
             shutdown_queries()

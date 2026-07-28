@@ -346,7 +346,12 @@ class PetCard(IdentityCard):
         name = (self.summary.name or "").strip()
         if name:
             return name
-        return ""
+        species = str(self.summary.species_label or "").strip().casefold()
+        if species == "cat":
+            return self.tr("Unconfirmed Cat")
+        if species == "dog":
+            return self.tr("Unconfirmed Dog")
+        return self.tr("Unconfirmed Pet")
 
     def _paint_count_badge(self, painter: QPainter, card_rect: QRectF) -> None:
         badge_rect = QRectF(card_rect.left() + 12, card_rect.top() + 12, 44, 28)
@@ -356,6 +361,20 @@ class PetCard(IdentityCard):
         painter.setPen(_qcolor("#FFFFFF"))
         painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
         painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self._badge_count()))
+        if str(self.summary.profile_state or "unstable") != "stable":
+            label = self.tr("Unconfirmed")
+            label_width = max(82, painter.fontMetrics().horizontalAdvance(label) + 22)
+            state_rect = QRectF(
+                card_rect.right() - label_width - 12,
+                card_rect.top() + 12,
+                label_width,
+                28,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_qcolor("#B45309", 220))
+            painter.drawRoundedRect(state_rect, 14, 14)
+            painter.setPen(_qcolor("#FFFFFF"))
+            painter.drawText(state_rect, Qt.AlignmentFlag.AlignCenter, label)
 
     def _badge_count(self) -> int:
         if hasattr(self.summary, "asset_count"):
@@ -571,7 +590,9 @@ class GroupCard(QWidget):
         self._paint_bottom_overlay(painter, card_rect)
         painter.restore()
 
-        border_color = QColor("#2272F2") if (self._hovered or self._dragging) else QColor(255, 255, 255, 120)
+        border_color = (
+            QColor("#2272F2") if (self._hovered or self._dragging) else QColor(255, 255, 255, 120)
+        )
         border_width = 2.6 if (self._hovered or self._dragging) else 1.2
         painter.setPen(QPen(border_color, border_width))
         painter.setBrush(Qt.BrushStyle.NoBrush)

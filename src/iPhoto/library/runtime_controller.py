@@ -283,9 +283,7 @@ class LibraryRuntimeController(
         # cleared all watcher directories, ensure we restore them so filesystem
         # monitoring is active even when binding an (initially) empty library.
         if not self._watcher.directories():
-            LOGGER.info(
-                "bind_path: watcher has no directories after refresh; rebuilding watches"
-            )
+            LOGGER.info("bind_path: watcher has no directories after refresh; rebuilding watches")
             self._rebuild_watches()
         # ``_refresh_tree()`` skips the ``treeUpdated`` emission when the album
         # list is unchanged (an optimisation for filesystem-watcher refreshes).
@@ -387,11 +385,7 @@ class LibraryRuntimeController(
         # turn an unchanged root snapshot into a self-sustaining rescan loop;
         # new albums are still scanned, while direct-root changes remain an
         # explicit/manual refresh scope.
-        changed = {
-            path
-            for path in result.changed_paths
-            if path != self._root and path in nodes
-        }
+        changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
         self._start_watcher_scans(changed)
 
@@ -605,27 +599,52 @@ class LibraryRuntimeController(
             repository = pet_service.repository()
             store = pet_service.asset_repository
             if repository is not None and store is not None:
-                required_value = repository.get_scan_metadata(
-                    "pet_backfill_required"
-                )
-                previous_version = repository.get_scan_metadata(
-                    "detector_pipeline_version"
-                )
+                required_value = repository.get_scan_metadata("pet_backfill_required")
+                previous_version = repository.get_scan_metadata("detector_pipeline_version")
+                migration_target = repository.get_scan_metadata("detector_migration_target")
+                migration_state = repository.get_scan_metadata("detector_migration_state")
                 if not isinstance(required_value, (str, type(None))) or not isinstance(
                     previous_version,
                     (str, type(None)),
                 ):
                     return
-                backfill_required = required_value == "1"
+                migration_incomplete = (
+                    migration_target == PET_DETECTOR_PIPELINE_VERSION
+                    and migration_state in {"pending", "running"}
+                )
+                backfill_required = required_value == "1" or migration_incomplete
+                if required_value == "1" and migration_state not in {"pending", "running"}:
+                    set_many = getattr(repository, "set_scan_metadata_many", None)
+                    metadata = {
+                        "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                        "detector_migration_state": (
+                            "running"
+                            if previous_version == PET_DETECTOR_PIPELINE_VERSION
+                            else "pending"
+                        ),
+                    }
+                    if callable(set_many):
+                        set_many(metadata)
+                    else:
+                        for key, value in metadata.items():
+                            repository.set_scan_metadata(key, value)
                 if previous_version != PET_DETECTOR_PIPELINE_VERSION:
                     counts = store.count_by_pet_status()
                     if not isinstance(counts, dict):
                         return
-                    backfill_required = backfill_required or int(
-                        counts.get("done", 0)
-                    ) > 0
+                    backfill_required = backfill_required or int(counts.get("done", 0)) > 0
                     if backfill_required:
-                        repository.set_scan_metadata("pet_backfill_required", "1")
+                        set_many = getattr(repository, "set_scan_metadata_many", None)
+                        metadata = {
+                            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                            "detector_migration_state": "pending",
+                            "pet_backfill_required": "1",
+                        }
+                        if callable(set_many):
+                            set_many(metadata)
+                        else:
+                            for key, value in metadata.items():
+                                repository.set_scan_metadata(key, value)
                 if backfill_required:
                     QTimer.singleShot(0, lambda: self._start_pet_backfill_worker(root))
 
@@ -780,9 +799,7 @@ class LibraryRuntimeController(
         pet_service = self._pet_service
         if pet_service is not None:
             try:
-                pet_service.reconcile_people_overlaps(
-                    getattr(event, "changed_asset_ids", ())
-                )
+                pet_service.reconcile_people_overlaps(getattr(event, "changed_asset_ids", ()))
             except Exception:  # noqa: BLE001 - do not break People snapshot delivery
                 LOGGER.warning(
                     "Failed to reconcile People-priority pet detections for %s",
@@ -842,7 +859,9 @@ class LibraryRuntimeController(
             node = self._build_node(album_dir, level=1)
             albums.append(node)
             new_nodes[album_dir] = node
-            child_nodes = [self._build_node(child, level=2) for child in self._iter_album_dirs(album_dir)]
+            child_nodes = [
+                self._build_node(child, level=2) for child in self._iter_album_dirs(album_dir)
+            ]
             for child in child_nodes:
                 new_nodes[child.path] = child
             children[album_dir] = child_nodes

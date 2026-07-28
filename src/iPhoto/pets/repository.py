@@ -75,9 +75,7 @@ class PetIncrementalCommitResult:
     @property
     def changed_pet_ids(self) -> tuple[str, ...]:
         return tuple(
-            dict.fromkeys(
-                self.added_pet_ids + self.updated_pet_ids + self.removed_pet_ids
-            )
+            dict.fromkeys(self.added_pet_ids + self.updated_pet_ids + self.removed_pet_ids)
         )
 
 
@@ -265,17 +263,13 @@ class PetRepository:
                     "operation_kind": operation_kind,
                     "asset_ids": list(
                         dict.fromkeys(
-                            detection.asset_id
-                            for detection in detections
-                            if detection.asset_id
+                            detection.asset_id for detection in detections if detection.asset_id
                         )
                     ),
                     "affected_pet_ids": sorted(previous_pet_ids | current_pet_ids),
                     "changed_asset_ids": list(
                         dict.fromkeys(
-                            detection.asset_id
-                            for detection in detections
-                            if detection.asset_id
+                            detection.asset_id for detection in detections if detection.asset_id
                         )
                     ),
                     "changed_pet_ids": sorted(previous_pet_ids | current_pet_ids),
@@ -303,14 +297,10 @@ class PetRepository:
         """Replace detections for a bounded asset set without rewriting the index."""
 
         self.initialize()
-        replaced_asset_ids = tuple(
-            dict.fromkeys(str(value) for value in asset_ids if value)
-        )
+        replaced_asset_ids = tuple(dict.fromkeys(str(value) for value in asset_ids if value))
         retry_ids = tuple(
             value
-            for value in dict.fromkeys(
-                str(value) for value in retry_asset_ids if value
-            )
+            for value in dict.fromkeys(str(value) for value in retry_asset_ids if value)
             if value not in set(replaced_asset_ids)
         )
         changed_asset_ids = tuple(dict.fromkeys((*replaced_asset_ids, *retry_ids)))
@@ -369,21 +359,13 @@ class PetRepository:
                 if detection.thumbnail_path
             )
             old_pet_ids = {
-                str(detection.pet_id)
-                for detection in previous_detections
-                if detection.pet_id
+                str(detection.pet_id) for detection in previous_detections if detection.pet_id
             }
-            new_pet_ids = {
-                str(detection.pet_id) for detection in assigned if detection.pet_id
-            }
+            new_pet_ids = {str(detection.pet_id) for detection in assigned if detection.pet_id}
             stale_pet_ids: set[str] = set()
             if retry_ids:
                 retry_rows = self._select_detections_by_asset_ids(conn, retry_ids)
-                stale_pet_ids.update(
-                    str(row["pet_id"])
-                    for row in retry_rows
-                    if row["pet_id"]
-                )
+                stale_pet_ids.update(str(row["pet_id"]) for row in retry_rows if row["pet_id"])
                 for chunk in _chunked(retry_ids, 500):
                     placeholders = ", ".join("?" for _ in chunk)
                     conn.execute(
@@ -396,9 +378,7 @@ class PetRepository:
                         """,
                         (str(stale_reason), *chunk),
                     )
-            affected_pet_ids = tuple(
-                sorted(old_pet_ids | new_pet_ids | stale_pet_ids)
-            )
+            affected_pet_ids = tuple(sorted(old_pet_ids | new_pet_ids | stale_pet_ids))
 
             for chunk in _chunked(replaced_asset_ids, 500):
                 placeholders = ", ".join("?" for _ in chunk)
@@ -438,13 +418,9 @@ class PetRepository:
             }
             if self._state_repo is not None:
                 durable_profiles = self._state_repo.get_profiles_by_ids(affected_pet_ids)
-                names.update(
-                    (pet_id, profile.name)
-                    for pet_id, profile in durable_profiles.items()
-                )
+                names.update((pet_id, profile.name) for pet_id, profile in durable_profiles.items())
                 created_at.update(
-                    (pet_id, profile.created_at)
-                    for pet_id, profile in durable_profiles.items()
+                    (pet_id, profile.created_at) for pet_id, profile in durable_profiles.items()
                 )
             from .pipeline import build_pet_records_from_detections
 
@@ -478,14 +454,10 @@ class PetRepository:
                 (utc_now_iso(),),
             )
             surviving_pet_ids = {pet.pet_id for pet in rebuilt_pets}
-            added = tuple(
-                sorted(pet_id for pet_id in new_pet_ids if pet_id not in existing_pets)
-            )
+            added = tuple(sorted(pet_id for pet_id in new_pet_ids if pet_id not in existing_pets))
             removed = tuple(sorted(old_pet_ids - surviving_pet_ids))
             updated = tuple(
-                sorted(
-                    ((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed))
-                )
+                sorted(((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed)))
             )
             commit_payload = {
                 "operation_kind": operation_kind,
@@ -732,9 +704,7 @@ class PetRepository:
     ) -> int:
         """Bound synced commit history while retaining unfinished journal owners."""
 
-        protected = tuple(
-            dict.fromkeys(str(value) for value in protected_operation_ids if value)
-        )
+        protected = tuple(dict.fromkeys(str(value) for value in protected_operation_ids if value))
         deleted = 0
         with closing(self._connect()) as conn:
             where = "state_synced = 1"
@@ -795,15 +765,11 @@ class PetRepository:
         )
         mapped_ids = tuple(
             dict.fromkeys(
-                redirects.get(mapped_id, mapped_id)
-                for mapped_id in key_map.values()
-                if mapped_id
+                redirects.get(mapped_id, mapped_id) for mapped_id in key_map.values() if mapped_id
             )
         )
         durable_profiles = (
-            self._state_repo.get_profiles_by_ids(mapped_ids)
-            if self._state_repo is not None
-            else {}
+            self._state_repo.get_profiles_by_ids(mapped_ids) if self._state_repo is not None else {}
         )
         base_centers = (
             match_context.centers
@@ -862,11 +828,7 @@ class PetRepository:
             )
             if candidate_id and not _species_compatible(detection_species, known_species):
                 candidate_id = ""
-            elif (
-                candidate_id
-                and candidate_id not in centers
-                and candidate_id not in base_centers
-            ):
+            elif candidate_id and candidate_id not in centers and candidate_id not in base_centers:
                 if durable_profile is None:
                     candidate_id = ""
                 else:
@@ -882,9 +844,7 @@ class PetRepository:
                         else detection.embedding
                     )
                     sample_counts[candidate_id] = (
-                        max(int(durable_profile.sample_count), 1)
-                        if compatible_contract
-                        else 0
+                        max(int(durable_profile.sample_count), 1) if compatible_contract else 0
                     )
                     species[candidate_id] = detection_species or known_species
                     boundary_samples[candidate_id] = (
@@ -928,8 +888,7 @@ class PetRepository:
                 base_centers.get(candidate_id, normalize_vector(detection.embedding)),
             )
             centers[candidate_id] = normalize_vector(
-                (center * float(count) + normalize_vector(detection.embedding))
-                / float(count + 1)
+                (center * float(count) + normalize_vector(detection.embedding)) / float(count + 1)
             )
             sample_counts[candidate_id] = count + 1
             samples = boundary_samples.get(candidate_id, ())
@@ -961,14 +920,10 @@ class PetRepository:
                     for pet_id, pet in profiles.items()
                 }
                 boundaries = {
-                    pet_id: tuple(
-                        normalize_vector(value) for value in pet.boundary_embeddings
-                    )
+                    pet_id: tuple(normalize_vector(value) for value in pet.boundary_embeddings)
                     for pet_id, pet in profiles.items()
                 }
-                missing = tuple(
-                    pet_id for pet_id in profiles if not boundaries.get(pet_id)
-                )
+                missing = tuple(pet_id for pet_id in profiles if not boundaries.get(pet_id))
                 if missing:
                     boundaries.update(
                         self._load_boundary_samples_for_pets(
@@ -981,9 +936,7 @@ class PetRepository:
                     profiles=profiles,
                     centers=centers,
                     sample_counts={
-                        pet_id: max(
-                            int(pet.sample_count), int(pet.detection_count), 1
-                        )
+                        pet_id: max(int(pet.sample_count), int(pet.detection_count), 1)
                         for pet_id, pet in profiles.items()
                     },
                     species=species,
@@ -1065,9 +1018,11 @@ class PetRepository:
                 pet_id,
                 base_boundary_samples.get(pet_id, ()),
             )
-            if samples and max(
-                cosine_distance(detection.embedding, sample) for sample in samples
-            ) > distance_threshold:
+            if (
+                samples
+                and max(cosine_distance(detection.embedding, sample) for sample in samples)
+                > distance_threshold
+            ):
                 continue
             return pet_id
         return ""
@@ -1079,9 +1034,7 @@ class PetRepository:
         centers: dict[str, np.ndarray],
         limit: int,
     ) -> dict[str, tuple[np.ndarray, ...]]:
-        grouped: dict[str, list[tuple[str, np.ndarray]]] = {
-            pet_id: [] for pet_id in pet_ids
-        }
+        grouped: dict[str, list[tuple[str, np.ndarray]]] = {pet_id: [] for pet_id in pet_ids}
         with closing(self._connect()) as conn:
             rows = self._select_detections_by_pet_ids(conn, pet_ids)
         for row in rows:
@@ -1103,9 +1056,7 @@ class PetRepository:
                 for detection_id, sample in samples
                 if sample.size == center.size
             ]
-            compatible.sort(
-                key=lambda item: (-cosine_distance(center, item[1]), item[0])
-            )
+            compatible.sort(key=lambda item: (-cosine_distance(center, item[1]), item[0]))
             selected[pet_id] = tuple(sample for _, sample in compatible[:cap])
         return selected
 
@@ -1329,6 +1280,26 @@ class PetRepository:
             )
             conn.commit()
 
+    def set_scan_metadata_many(self, values: dict[str, object]) -> None:
+        """Persist related scan metadata in one SQLite transaction."""
+
+        normalized = [
+            (str(key).strip(), str(value)) for key, value in values.items() if str(key).strip()
+        ]
+        if not normalized:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO scan_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                normalized,
+            )
+            conn.commit()
+
     def sync_runtime_state(self) -> None:
         if self._state_repo is None:
             return
@@ -1390,16 +1361,13 @@ class PetRepository:
         if not all_detections:
             return 0
         active = EmbeddingContract(
-            pipeline_version=str(
-                self.get_scan_metadata("active_embedding_pipeline_version") or ""
-            ),
+            pipeline_version=str(self.get_scan_metadata("active_embedding_pipeline_version") or ""),
             dimension=int(self.get_scan_metadata("active_embedding_dimension") or 0),
             generation_id=int(self.get_scan_metadata("active_generation_id") or 0),
         )
         if not active.pipeline_version or active.dimension <= 0:
             contracts = {
-                EmbeddingContract.from_detection(detection)
-                for detection in all_detections
+                EmbeddingContract.from_detection(detection) for detection in all_detections
             }
             if len(contracts) != 1:
                 return 0
@@ -1428,9 +1396,7 @@ class PetRepository:
             if EmbeddingContract.from_detection(detection) != active
         ]
         retained_pets = [
-            pet
-            for pet in self.get_all_pet_records()
-            if EmbeddingContract.from_pet(pet) != active
+            pet for pet in self.get_all_pet_records() if EmbeddingContract.from_pet(pet) != active
         ]
         self.replace_all(
             retained_detections + clustered_detections,
@@ -1478,11 +1444,7 @@ class PetRepository:
             if self._state_repo is not None
             else set()
         )
-        return [
-            self._detection_from_row(row)
-            for row in rows
-            if row["pet_key"] not in rejected
-        ]
+        return [self._detection_from_row(row) for row in rows if row["pet_key"] not in rejected]
 
     def get_all_pet_records(self) -> list[PetRecord]:
         self.initialize()
@@ -1515,6 +1477,8 @@ class PetRepository:
                     pets.key_detection_id,
                     pets.detection_count,
                     pets.created_at,
+                    pets.profile_state,
+                    pets.species_label,
                     pet_detections.thumbnail_path
                 FROM pets
                 LEFT JOIN pet_detections
@@ -1533,9 +1497,7 @@ class PetRepository:
         cover_paths: dict[str, str] = {}
         profile_names: dict[str, str | None] = {}
         if self._state_repo is not None:
-            hidden_map, cover_paths, profile_names = (
-                self._state_repo.get_summary_state_maps()
-            )
+            hidden_map, cover_paths, profile_names = self._state_repo.get_summary_state_maps()
         effective_asset_sets: dict[str, set[str]] = {}
         for asset_row in asset_rows:
             runtime_pet_id = str(asset_row["pet_id"])
@@ -1545,8 +1507,7 @@ class PetRepository:
                     str(asset_row["asset_id"])
                 )
         effective_assets: dict[str, list[str]] = {
-            pet_id: sorted(asset_ids)
-            for pet_id, asset_ids in effective_asset_sets.items()
+            pet_id: sorted(asset_ids) for pet_id, asset_ids in effective_asset_sets.items()
         }
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         if face_state_path.exists():
@@ -1576,6 +1537,8 @@ class PetRepository:
                     created_at=str(row["created_at"] or ""),
                     is_hidden=bool(hidden_map.get(pet_id, False)),
                     asset_count=len(effective_assets.get(pet_id, ())),
+                    profile_state=str(row["profile_state"] or "unstable"),
+                    species_label=_normalize_species_label(row["species_label"]),
                 )
             )
         if not include_hidden:
@@ -1588,10 +1551,14 @@ class PetRepository:
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         if face_state_path.exists():
             face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
-            return FaceRepository(
-                face_index_path,
-                face_state_path,
-            ).get_asset_ids_by_pets_effective((pet_id,)).get(pet_id, [])
+            return (
+                FaceRepository(
+                    face_index_path,
+                    face_state_path,
+                )
+                .get_asset_ids_by_pets_effective((pet_id,))
+                .get(pet_id, [])
+            )
         self.initialize()
         runtime_pet_ids = [pet_id]
         if self._state_repo is not None:
@@ -1615,9 +1582,7 @@ class PetRepository:
                         chunk,
                     ).fetchall()
                 )
-        return list(
-            dict.fromkeys(str(row["asset_id"]) for row in rows if row["asset_id"])
-        )
+        return list(dict.fromkeys(str(row["asset_id"]) for row in rows if row["asset_id"]))
 
     def get_asset_ids_by_pets(
         self,
@@ -1699,12 +1664,8 @@ class PetRepository:
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         assignments: dict[tuple[str, str], tuple[str, str]] = {}
         if face_state_path.exists():
-            assignments = FaceStateRepository(
-                face_state_path
-            ).get_annotation_identity_assignments(
-                ("pet", str(row["detection_id"]))
-                for row in rows
-                if row["detection_id"]
+            assignments = FaceStateRepository(face_state_path).get_annotation_identity_assignments(
+                ("pet", str(row["detection_id"])) for row in rows if row["detection_id"]
             )
         assigned_canonical = self._canonical_identity_refs(assignments.values())
         annotations: list[AssetPetAnnotation] = []
@@ -1732,28 +1693,25 @@ class PetRepository:
                     ),
                     source_identity_id=runtime_pet_id,
                     canonical_identity_kind=(
-                        assigned_canonical[
-                            assignments[("pet", str(row["detection_id"]))]
-                        ][0]
+                        assigned_canonical[assignments[("pet", str(row["detection_id"]))]][0]
                         if ("pet", str(row["detection_id"])) in assignments
                         else canonical_identities[runtime_pet_id][0]
-                        if runtime_pet_id else "pet"
+                        if runtime_pet_id
+                        else "pet"
                     ),
                     canonical_identity_id=(
-                        assigned_canonical[
-                            assignments[("pet", str(row["detection_id"]))]
-                        ][1]
+                        assigned_canonical[assignments[("pet", str(row["detection_id"]))]][1]
                         if ("pet", str(row["detection_id"])) in assignments
                         else canonical_identities[runtime_pet_id][1]
-                        if runtime_pet_id else None
+                        if runtime_pet_id
+                        else None
                     ),
                     canonical_display_name=(
-                        assigned_canonical[
-                            assignments[("pet", str(row["detection_id"]))]
-                        ][2]
+                        assigned_canonical[assignments[("pet", str(row["detection_id"]))]][2]
                         if ("pet", str(row["detection_id"])) in assignments
                         else canonical_identities[runtime_pet_id][2]
-                        if runtime_pet_id else None
+                        if runtime_pet_id
+                        else None
                     ),
                     is_stale=bool(row["is_stale"]),
                     stale_reason=row["stale_reason"],
@@ -1773,9 +1731,7 @@ class PetRepository:
         source_ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
         if not source_ids:
             return {}
-        resolved = self._canonical_identity_refs(
-            ("pet", source_id) for source_id in source_ids
-        )
+        resolved = self._canonical_identity_refs(("pet", source_id) for source_id in source_ids)
         return {source_id: resolved[("pet", source_id)] for source_id in source_ids}
 
     def _canonical_identity_refs(
@@ -1795,8 +1751,7 @@ class PetRepository:
             self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}
         )
         redirect_map: dict[tuple[str, str], tuple[str, str]] = {
-            ("pet", source_id): ("pet", target_id)
-            for source_id, target_id in pet_redirects.items()
+            ("pet", source_id): ("pet", target_id) for source_id, target_id in pet_redirects.items()
         }
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         face_state = None
@@ -1821,9 +1776,7 @@ class PetRepository:
             if self._state_repo is not None
             else {}
         )
-        person_targets = [
-            entity_id for kind, entity_id in resolved.values() if kind == "person"
-        ]
+        person_targets = [entity_id for kind, entity_id in resolved.values() if kind == "person"]
         person_names: dict[str, str | None] = {}
         if face_state is not None and person_targets:
             person_names = face_state.get_profile_name_map(person_targets)
@@ -1882,9 +1835,10 @@ class PetRepository:
                 (normalize_name(name_or_none), utc_now_iso(), canonical_pet_id),
             )
             conn.commit()
-        return int(cursor.rowcount or 0) > 0 or self._state_repo.get_profile(
-            canonical_pet_id
-        ) is not None
+        return (
+            int(cursor.rowcount or 0) > 0
+            or self._state_repo.get_profile(canonical_pet_id) is not None
+        )
 
     def set_pet_hidden(self, pet_id: str, hidden: bool) -> bool:
         if self._state_repo is None:
@@ -1965,9 +1919,7 @@ class PetRepository:
                 (target_pet_id, source_pet_id),
             )
             self._rebuild_pet_records_in_connection(conn)
-            changed_asset_ids = tuple(
-                str(row["asset_id"]) for row in asset_rows if row["asset_id"]
-            )
+            changed_asset_ids = tuple(str(row["asset_id"]) for row in asset_rows if row["asset_id"])
             self._write_runtime_commit(
                 conn,
                 effective_operation_id,
@@ -2157,9 +2109,7 @@ class PetRepository:
                 (new_pet_id, detection_id),
             )
             self._rebuild_pet_records_in_connection(conn)
-            changed_pet_ids = tuple(
-                pet_id for pet_id in (detection.pet_id, new_pet_id) if pet_id
-            )
+            changed_pet_ids = tuple(pet_id for pet_id in (detection.pet_id, new_pet_id) if pet_id)
             self._write_runtime_commit(
                 conn,
                 effective_operation_id,
@@ -2211,20 +2161,14 @@ class PetRepository:
                 row["pet_key"] for row in rows if row["pet_key"]
             )
         detections = [
-            self._detection_from_row(row)
-            for row in rows
-            if row["pet_key"] not in rejected
+            self._detection_from_row(row) for row in rows if row["pet_key"] not in rejected
         ]
         names: dict[str, str | None] = {}
         created_at: dict[str, str] = {}
         if self._state_repo is not None:
-            profiles = {
-                profile.pet_id: profile for profile in self._state_repo.get_profiles()
-            }
+            profiles = {profile.pet_id: profile for profile in self._state_repo.get_profiles()}
             names = {pet_id: profile.name for pet_id, profile in profiles.items()}
-            created_at = {
-                pet_id: profile.created_at for pet_id, profile in profiles.items()
-            }
+            created_at = {pet_id: profile.created_at for pet_id, profile in profiles.items()}
         pets = build_pet_records_from_detections(
             detections,
             names_by_pet_id=names,
@@ -2463,9 +2407,7 @@ class PetRepository:
                 float(row["quality_score"]) if row["quality_score"] is not None else None
             ),
             pet_key_version=str(_row_value(row, "pet_key_version", "v1") or "v1"),
-            embedding_pipeline_version=str(
-                _row_value(row, "embedding_pipeline_version", "") or ""
-            ),
+            embedding_pipeline_version=str(_row_value(row, "embedding_pipeline_version", "") or ""),
             generation_id=int(_row_value(row, "generation_id", 0) or 0),
             is_stale=bool(_row_value(row, "is_stale", 0)),
             stale_reason=_row_value(row, "stale_reason", None),
@@ -2492,9 +2434,7 @@ class PetRepository:
             sample_count=int(row["sample_count"] or 0),
             profile_state=str(row["profile_state"] or "unstable"),
             species_label=_normalize_species_label(row["species_label"]),
-            embedding_pipeline_version=str(
-                _row_value(row, "embedding_pipeline_version", "") or ""
-            ),
+            embedding_pipeline_version=str(_row_value(row, "embedding_pipeline_version", "") or ""),
             generation_id=int(_row_value(row, "generation_id", 0) or 0),
             boundary_embeddings=_deserialize_boundary_embeddings(
                 _row_value(row, "boundary_embeddings", None),
@@ -2630,9 +2570,7 @@ class _ProfileCandidateIndex:
             list[tuple[str, np.ndarray]],
         ] = {}
         for pet_id, vector, species_label in staged:
-            grouped.setdefault((int(vector.size), species_label), []).append(
-                (pet_id, vector)
-            )
+            grouped.setdefault((int(vector.size), species_label), []).append((pet_id, vector))
         for group, members in grouped.items():
             entry = self._indexes.get(group)
             if entry is None:
@@ -2663,9 +2601,7 @@ class _ProfileCandidateIndex:
         if center is not None and center.size:
             self._remove_from_group((int(center.size), species_label), pet_id)
 
-    def _remove_from_group(
-        self, group: tuple[int, str | None], pet_id: str
-    ) -> None:
+    def _remove_from_group(self, group: tuple[int, str | None], pet_id: str) -> None:
         entry = self._indexes.get(group)
         if entry is None:
             return

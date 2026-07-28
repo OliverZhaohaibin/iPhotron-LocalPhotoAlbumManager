@@ -4,7 +4,6 @@ import hashlib
 import io
 import sys
 import threading
-import warnings
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,9 +19,10 @@ from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.records import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.pets import pipeline as pet_pipeline
+from iPhoto.pets.errors import PetModelUnavailableError, PetRuntimeUnavailableError
 from iPhoto.pets.index_coordinator import PetIndexCoordinator, reset_pet_index_coordinators
 from iPhoto.pets.pipeline import (
-    _DINO_HUB_REPO,
+    _DINO_SOURCE_REVISION,
     DEFAULT_PET_DETECTOR_MODEL_SHA256,
     DEFAULT_PET_DETECTOR_MODEL_URL,
     PET_CLUSTERING_PIPELINE_VERSION,
@@ -444,6 +444,24 @@ def test_people_priority_overlap_matches_iou_and_smaller_box_coverage() -> None:
     assert not _pet_box_overlaps_people_boxes(
         (0, 0, 100, 100),
         [(200, 200, 100, 100)],
+    )
+
+
+def test_people_overlap_keeps_held_pet_but_suppresses_mural_false_positive() -> None:
+    # A normal pet-body candidate can contain a smaller human face without
+    # being the same object.  Its bounded image coverage keeps it eligible.
+    assert not _pet_box_overlaps_people_boxes(
+        (400, 500, 1200, 1400),
+        [(760, 620, 300, 340)],
+        image_dimensions=(3000, 2400),
+    )
+
+    # Real regression captured from DSCF6999.JPG.  YOLOX labels the wall mural
+    # as a giant dog while InsightFace finds the painted face inside it.
+    assert _pet_box_overlaps_people_boxes(
+        (59, 134, 4024, 5216),
+        [(732, 668, 2089, 2930)],
+        image_dimensions=(4160, 6240),
     )
 
 
@@ -898,9 +916,7 @@ def test_manual_pet_merge_survives_incompatible_scan_recluster(tmp_path: Path) -
     )
     session.commit(repository, detections=detections, pets=reclustered_pets)
 
-    assert {detection.pet_id for detection in repository.get_all_detections()} == {
-        "pet-target"
-    }
+    assert {detection.pet_id for detection in repository.get_all_detections()} == {"pet-target"}
     assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
     assert repository.state_repository is not None
     assert repository.state_repository.get_pet_key_map(
@@ -1046,9 +1062,7 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
     )
 
     def merge() -> None:
-        merge_results.append(
-            coordinator.merge_pets("pet-source", "pet-target").merged
-        )
+        merge_results.append(coordinator.merge_pets("pet-source", "pet-target").merged)
         merge_finished.set()
 
     recluster_thread.start()
@@ -1173,6 +1187,82 @@ def test_pet_service_summary_asset_count_matches_filtered_query(tmp_path: Path) 
     assert service.build_pet_query("pet-a").asset_ids == ["asset-a"]
 
 
+def test_pet_summaries_expose_profile_species_and_sort_stable_first(
+    tmp_path: Path,
+) -> None:
+    get_global_repository(tmp_path).write_rows(
+        [
+            {
+                "rel": f"stable-{index}.jpg",
+                "id": f"asset-stable-{index}",
+                "media_type": 0,
+                "pet_status": "done",
+            }
+            for index in range(3)
+        ]
+        + [
+            {"rel": "unstable.jpg", "id": "asset-unstable", "media_type": 0, "pet_status": "done"},
+        ]
+    )
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    assert repository is not None
+    stable_detections = [
+        _detection(
+            detection_id=f"det-stable-{index}",
+            asset_id=f"asset-stable-{index}",
+            pet_id="pet-stable",
+            species_label="dog",
+        )
+        for index in range(3)
+    ]
+    unstable_detection = _detection(
+        detection_id="det-unstable",
+        asset_id="asset-unstable",
+        pet_id="pet-unstable",
+        species_label="cat",
+    )
+    repository.replace_all(
+        [*stable_detections, unstable_detection],
+        [
+            PetRecord(
+                pet_id="pet-stable",
+                name="Rex",
+                key_detection_id="det-stable-0",
+                detection_count=3,
+                center_embedding=stable_detections[0].embedding,
+                embedding_dim=stable_detections[0].embedding_dim,
+                created_at="2024-01-02T00:00:00Z",
+                updated_at=utc_now_iso(),
+                sample_count=3,
+                profile_state="stable",
+                species_label="dog",
+            ),
+            PetRecord(
+                pet_id="pet-unstable",
+                name=None,
+                key_detection_id="det-unstable",
+                detection_count=1,
+                center_embedding=unstable_detection.embedding,
+                embedding_dim=unstable_detection.embedding_dim,
+                created_at="2024-01-01T00:00:00Z",
+                updated_at=utc_now_iso(),
+                sample_count=1,
+                profile_state="unstable",
+                species_label="cat",
+            ),
+        ],
+    )
+
+    summaries = service.list_pets()
+
+    assert [summary.pet_id for summary in summaries] == ["pet-stable", "pet-unstable"]
+    assert summaries[0].profile_state == "stable"
+    assert summaries[0].species_label == "dog"
+    assert summaries[1].profile_state == "unstable"
+    assert summaries[1].species_label == "cat"
+
+
 def test_pet_scan_session_replaces_stale_detections_for_same_asset_path(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     old_detection = replace(
@@ -1230,10 +1320,12 @@ def test_pet_batch_revalidates_people_overlaps_inside_serialized_commit(tmp_path
             asset_id="asset-face",
             thumbnail_path="thumbnails/stale.png",
         ),
-        box_x=29,
-        box_y=122,
-        box_w=2675,
-        box_h=3882,
+        box_x=59,
+        box_y=134,
+        box_w=4024,
+        box_h=5216,
+        image_width=4160,
+        image_height=6240,
     )
 
     event = coordinator.submit_detected_batch(
@@ -1317,10 +1409,10 @@ def test_pet_reconciliation_removes_people_overlap_and_preserves_other_pet_state
             species_label="dog",
             thumbnail_path="thumbnails/conflict.png",
         ),
-        box_x=29,
-        box_y=122,
-        box_w=2675,
-        box_h=3882,
+        box_x=59,
+        box_y=134,
+        box_w=4024,
+        box_h=5216,
         image_width=4160,
         image_height=6240,
     )
@@ -1503,7 +1595,7 @@ def test_pet_detector_model_downloads_when_missing(tmp_path: Path, monkeypatch) 
     assert not temporary_directories[0].exists()
 
 
-def test_dinov2_hub_load_only_suppresses_known_xformers_warnings(
+def test_dinov2_runtime_downloads_only_the_fixed_torchscript_artifact(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1514,165 +1606,53 @@ def test_dinov2_hub_load_only_suppresses_known_xformers_warnings(
         def to(self, _device):
             return self
 
-    class FakeHub:
+    class FakeJit:
         @staticmethod
-        def load(*_args, **_kwargs):
-            warnings.warn_explicit(
-                "xFormers is not available (Attention)",
-                UserWarning,
-                filename="dinov2/layers/attention.py",
-                lineno=33,
-                module="dinov2.layers.attention",
-            )
-            warnings.warn_explicit(
-                "keep this DINO warning",
-                UserWarning,
-                filename="dinov2/models/vision_transformer.py",
-                lineno=1,
-                module="dinov2.models.vision_transformer",
-            )
-            warnings.warn_explicit(
-                "xFormers is not available (Attention)",
-                UserWarning,
-                filename="other/layers/attention.py",
-                lineno=1,
-                module="other.layers.attention",
-            )
+        def load(path: str, *, map_location: str):
+            assert Path(path).read_bytes() == b"fixed-torchscript"
+            assert map_location == "cpu"
             return FakeModel()
 
     embedder = _DinoV2Embedder.__new__(_DinoV2Embedder)
-    embedder._torch = SimpleNamespace(hub=FakeHub())
+    embedder._torch = SimpleNamespace(jit=FakeJit())
     embedder._device = "cpu"
     embedder._model_name = "dinov2_vits14"
     monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
-    monkeypatch.setattr(embedder, "_cache_dinov2_torchscript", lambda *_args: None)
+    monkeypatch.setitem(
+        pet_pipeline._EMBEDDER_MANIFEST,
+        "torchscript_url",
+        "https://models.example.test/dinov2_vits14.pt",
+    )
+    monkeypatch.setitem(
+        pet_pipeline._EMBEDDER_MANIFEST,
+        "torchscript_sha256",
+        hashlib.sha256(b"fixed-torchscript").hexdigest(),
+    )
+    monkeypatch.setitem(
+        pet_pipeline._EMBEDDER_MANIFEST,
+        "torchscript_size",
+        len(b"fixed-torchscript"),
+    )
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        model = embedder._download_dinov2_model(tmp_path / "dinov2_vits14.pt")
+    def fake_download(url, path, **kwargs):
+        assert url == "https://models.example.test/dinov2_vits14.pt"
+        assert kwargs["expected_sha256"] == hashlib.sha256(b"fixed-torchscript").hexdigest()
+        assert kwargs["max_bytes"] == len(b"fixed-torchscript")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"fixed-torchscript")
+
+    monkeypatch.setattr(pet_pipeline, "_download_file", fake_download)
+    model_path = tmp_path / "dinov2_vits14.pt"
+    model = embedder._download_dinov2_model(model_path)
 
     assert isinstance(model, FakeModel)
-    assert [str(item.message) for item in caught] == [
-        "keep this DINO warning",
-        "xFormers is not available (Attention)",
-    ]
+    assert model_path.read_bytes() == b"fixed-torchscript"
+    assert pet_pipeline._dinov2_metadata_path(model_path).is_file()
 
 
-def test_dinov2_cache_uses_target_volume_and_only_suppresses_dinov2_tracer_warnings(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    class FakeTracerWarning(UserWarning):
-        pass
-
-    class FakeTracedModel:
-        @staticmethod
-        def save(path: str) -> None:
-            Path(path).write_bytes(b"torchscript-model")
-
-    class FakeJit:
-        TracerWarning = FakeTracerWarning
-
-        @staticmethod
-        def trace(_model, _example, *, strict: bool):
-            assert strict is False
-            warnings.warn_explicit(
-                "known DINO trace warning",
-                FakeTracerWarning,
-                filename="dinov2/models/vision_transformer.py",
-                lineno=186,
-                module="dinov2.models.vision_transformer",
-            )
-            warnings.warn_explicit(
-                "keep this third-party trace warning",
-                FakeTracerWarning,
-                filename="other/model.py",
-                lineno=1,
-                module="other.model",
-            )
-            return FakeTracedModel()
-
-        @staticmethod
-        def load(_path: str, *, map_location: str):
-            assert map_location == "cpu"
-
-            class LoadedModel:
-                @staticmethod
-                def __call__(_example):
-                    return SimpleNamespace(shape=(1, 384))
-
-            return LoadedModel()
-
-    class FakeTorch:
-        float32 = object()
-        jit = FakeJit()
-
-        class no_grad:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-        @staticmethod
-        def zeros(shape, *, dtype):
-            assert shape == (1, 3, 224, 224)
-            assert dtype is FakeTorch.float32
-            return object()
-
-    class FakeModel:
-        def __init__(self) -> None:
-            self.moves: list[str] = []
-
-        @staticmethod
-        def parameters():
-            yield SimpleNamespace(device="original-device")
-
-        def cpu(self):
-            self.moves.append("cpu")
-            return self
-
-        def to(self, device):
-            self.moves.append(device)
-            return self
-
-    target = tmp_path / "models" / "embedding" / "dinov2_vits14.pt"
-    real_temporary_directory = pet_pipeline.tempfile.TemporaryDirectory
-    temporary_directories: list[Path] = []
-
-    def recording_temporary_directory(*args, **kwargs):
-        assert Path(kwargs["dir"]) == target.parent
-        manager = real_temporary_directory(*args, **kwargs)
-        temporary_directories.append(Path(manager.name))
-        return manager
-
-    monkeypatch.setattr(
-        pet_pipeline.tempfile,
-        "TemporaryDirectory",
-        recording_temporary_directory,
-    )
-    embedder = _DinoV2Embedder.__new__(_DinoV2Embedder)
-    embedder._torch = FakeTorch()
-    embedder._device = "fallback-device"
-    model = FakeModel()
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        embedder._cache_dinov2_torchscript(model, target)
-
-    assert target.read_bytes() == b"torchscript-model"
-    assert model.moves == ["cpu", "original-device"]
-    assert [str(item.message) for item in caught] == ["keep this third-party trace warning"]
-    assert len(temporary_directories) == 1
-    assert not temporary_directories[0].exists()
-
-
-def test_pet_embedding_hub_source_is_pinned_to_commit() -> None:
-    _owner_repo, separator, revision = _DINO_HUB_REPO.partition(":")
-
-    assert separator == ":"
-    assert len(revision) == 40
-    assert all(character in "0123456789abcdef" for character in revision)
+def test_pet_embedding_source_is_pinned_to_commit() -> None:
+    assert len(_DINO_SOURCE_REVISION) == 40
+    assert all(character in "0123456789abcdef" for character in _DINO_SOURCE_REVISION)
 
 
 def test_pet_model_manifest_is_the_runtime_contract_source() -> None:
@@ -1686,9 +1666,10 @@ def test_pet_model_manifest_is_the_runtime_contract_source() -> None:
         "range": [0, 255],
         "shape": [1, 3, 416, 416],
     }
-    assert PET_MODEL_MANIFEST["embedder"]["source_revision"] == _DINO_HUB_REPO.rpartition(
-        ":"
-    )[2]
+    embedder = PET_MODEL_MANIFEST["embedder"]
+    assert embedder["source_revision"] == _DINO_SOURCE_REVISION
+    assert len(embedder["torchscript_sha256"]) == 64
+    assert embedder["torchscript_size"] > 0
 
 
 def test_default_pet_model_dir_uses_user_cache(monkeypatch) -> None:
@@ -1714,9 +1695,11 @@ def test_pet_scan_worker_resets_done_rows_for_detector_upgrade(tmp_path: Path) -
     assert asset_repo.rows[1]["pet_status"] == "done"
     repository = service.repository()
     assert repository is not None
-    assert repository.get_scan_metadata("detector_pipeline_version") == (
+    assert repository.get_scan_metadata("detector_pipeline_version") is None
+    assert repository.get_scan_metadata("detector_migration_target") == (
         PET_DETECTOR_PIPELINE_VERSION
     )
+    assert repository.get_scan_metadata("detector_migration_state") == "running"
 
 
 def test_pet_scan_worker_does_not_reset_current_detector_version(tmp_path: Path) -> None:
@@ -1733,6 +1716,32 @@ def test_pet_scan_worker_does_not_reset_current_detector_version(tmp_path: Path)
 
     assert asset_repo.update_calls == []
     assert asset_repo.rows[0]["pet_status"] == "done"
+
+
+def test_pet_scan_worker_maps_legacy_backfill_marker_to_running_migration(
+    tmp_path: Path,
+) -> None:
+    asset_repo = _FakePetAssetRepository(
+        [{"id": "asset-photo", "rel": "photo.jpg", "media_type": 0, "pet_status": "pending"}]
+    )
+    service = create_pet_service(tmp_path, asset_repository=asset_repo)
+    repository = service.repository()
+    assert repository is not None
+    repository.set_scan_metadata_many(
+        {
+            "detector_pipeline_version": PET_DETECTOR_PIPELINE_VERSION,
+            "pet_backfill_required": "1",
+        }
+    )
+    worker = PetScanWorker(tmp_path, pet_service=service)
+
+    worker._prepare_detector_migration()
+
+    assert asset_repo.update_calls == []
+    assert repository.get_scan_metadata("detector_migration_target") == (
+        PET_DETECTOR_PIPELINE_VERSION
+    )
+    assert repository.get_scan_metadata("detector_migration_state") == "running"
 
 
 def test_pet_scan_worker_reclusters_for_clustering_upgrade_without_resetting_assets(
@@ -1858,3 +1867,42 @@ def test_pet_scan_worker_missing_runtime_keeps_pending(tmp_path: Path, monkeypat
 
     row = repo.get_rows_by_ids(["asset-a"])["asset-a"]
     assert row["pet_status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_message"),
+    [
+        (RuntimeError("program bug"), "Pet scanning paused: program bug"),
+        (PetRuntimeUnavailableError("missing dependency"), "missing dependency"),
+        (PetModelUnavailableError("missing model"), "missing model"),
+    ],
+)
+def test_pet_scan_worker_only_typed_availability_errors_use_unavailable_path(
+    tmp_path: Path,
+    monkeypatch,
+    error: RuntimeError,
+    expected_message: str,
+) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.write_rows(
+        [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "pet_status": "pending"}]
+    )
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    assert repository is not None
+    repository.set_scan_metadata(
+        "clustering_pipeline_version",
+        PET_CLUSTERING_PIPELINE_VERSION,
+    )
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    messages: list[str] = []
+    worker.statusChanged.connect(messages.append)
+
+    def fail_batch(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(worker, "_process_batch", fail_batch)
+    worker.run()
+
+    assert repo.get_rows_by_ids(["asset-a"])["asset-a"]["pet_status"] == "pending"
+    assert messages[-1] == expected_message

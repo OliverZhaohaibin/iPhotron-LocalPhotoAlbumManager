@@ -51,10 +51,11 @@ src/extension/models/pets/
 `IPHOTO_PET_MODEL_DIR` overrides that root. Missing models may be populated on
 first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL defaults
 to the upstream YOLOX release and can be overridden with
-`IPHOTO_PET_DETECTOR_MODEL_URL`. DINOv2 Torch Hub loading is pinned to an
-immutable upstream commit; do not replace it with an unversioned default
-branch. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without disabling the
-rest of the application.
+`IPHOTO_PET_DETECTOR_MODEL_URL`. Production does not execute Torch Hub. DINOv2
+must be supplied as the hash- and size-verified TorchScript artifact declared
+in `iPhoto/pets/model_manifest.json`; Torch Hub is restricted to the release
+conversion tool. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without
+disabling the rest of the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
 runtime and the two model files under `extension/models/pets`. A build that

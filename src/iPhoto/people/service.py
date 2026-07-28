@@ -15,7 +15,6 @@ from iPhoto.pets.repository import PetRepository
 from iPhoto.recognition.assignment_recovery import (
     apply_detection_assignment_with_group_refresh,
 )
-from iPhoto.recognition.mutation_coordinator import get_recognition_mutation_coordinator
 from iPhoto.utils.pathutils import (
     LibraryAssetPathError,
     ensure_work_dir,
@@ -46,10 +45,7 @@ def _default_shared_face_model_dir() -> Path:
         return Path(override).expanduser()
 
     if os.name == "nt":
-        base = Path(
-            os.environ.get("LOCALAPPDATA")
-            or Path.home() / "AppData" / "Local"
-        )
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         # InsightFace expects ``root/models/<pack>``. Keeping the cache outside
         # Program Files makes on-demand model installation work for a standard
         # non-administrator account and keeps models out of the base bundle.
@@ -118,6 +114,8 @@ class PeopleService:
         self._asset_repository = asset_repository
         self._coordinator = coordinator
         self._mutation_coordinator = mutation_coordinator
+        self._owns_mutation_coordinator = False
+        self._shutdown = False
         self._repository: FaceRepository | None = None
         if self._mutation_coordinator is not None:
             self._mutation_coordinator.register_recovery_handler(
@@ -126,10 +124,7 @@ class PeopleService:
             )
 
     def _recover_assignment_operation(self, operation) -> bool:
-        if (
-            self._library_root is None
-            or operation.kind != "recognition_detection_assignment"
-        ):
+        if self._library_root is None or operation.kind != "recognition_detection_assignment":
             return False
         changed = apply_detection_assignment_with_group_refresh(
             self._library_root,
@@ -153,13 +148,26 @@ class PeopleService:
         return True
 
     def set_library_root(self, library_root: Path | None) -> None:
-        if self._library_root == library_root:
+        if self._library_root == library_root and not self._shutdown:
             return
+        self.shutdown()
+        self._shutdown = False
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
         self._mutation_coordinator = None
         self._repository = None
+
+    def shutdown(self) -> None:
+        self._shutdown = True
+        coordinator = self._coordinator
+        if coordinator is not None:
+            coordinator.close()
+        if self._owns_mutation_coordinator and self._mutation_coordinator is not None:
+            self._mutation_coordinator.close()
+        self._coordinator = None
+        self._mutation_coordinator = None
+        self._owns_mutation_coordinator = False
 
     def library_root(self) -> Path | None:
         return self._library_root
@@ -173,18 +181,34 @@ class PeopleService:
 
     @property
     def coordinator(self) -> PeopleIndexCoordinator | None:
+        if self._shutdown:
+            return None
         if self._coordinator is not None:
             return self._coordinator
         if self._library_root is None:
             return None
-        from .index_coordinator import get_people_index_coordinator
+        from .index_coordinator import PeopleIndexCoordinator
 
-        self._coordinator = get_people_index_coordinator(
+        self._coordinator = PeopleIndexCoordinator(
             self._library_root,
             asset_repository=self._asset_repository,
-            mutation_coordinator=self._mutation_coordinator,
+            mutation_coordinator=self._ensure_mutation_coordinator(),
         )
         return self._coordinator
+
+    def _ensure_mutation_coordinator(self) -> RecognitionMutationCoordinator:
+        if self._shutdown:
+            raise RuntimeError("People service is shut down.")
+        if self._mutation_coordinator is None:
+            from iPhoto.recognition.mutation_coordinator import (
+                RecognitionMutationCoordinator,
+            )
+
+            if self._library_root is None:
+                raise RuntimeError("People service is not bound to a library.")
+            self._mutation_coordinator = RecognitionMutationCoordinator(self._library_root)
+            self._owns_mutation_coordinator = True
+        return self._mutation_coordinator
 
     def paths(self) -> FaceLibraryPaths | None:
         if self._library_root is None:
@@ -407,16 +431,21 @@ class PeopleService:
         if self._library_root is None:
             return False
         coordinator = self.coordinator
-        return bool(coordinator and coordinator.merge_persons(
-            source_person_id,
-            target_person_id,
-        ))
+        return bool(
+            coordinator
+            and coordinator.merge_persons(
+                source_person_id,
+                target_person_id,
+            )
+        )
 
     def recognition_mutation_pending(self) -> bool:
         coordinator = self.coordinator
         return bool(coordinator and coordinator.recovery_pending)
 
-    def merge_identities(self, source_identity: str, target_identity: str) -> IdentityMergeResult | None:
+    def merge_identities(
+        self, source_identity: str, target_identity: str
+    ) -> IdentityMergeResult | None:
         if self._library_root is None:
             return None
         source = _parse_identity_id(source_identity)
@@ -468,8 +497,12 @@ class PeopleService:
             for summary in pet_repository.get_pet_summaries(include_hidden=True)
         }
 
-        source_hidden = self._identity_hidden(source_kind, source_id, person_summaries, pet_summaries)
-        target_hidden = self._identity_hidden(target_kind, target_id, person_summaries, pet_summaries)
+        source_hidden = self._identity_hidden(
+            source_kind, source_id, person_summaries, pet_summaries
+        )
+        target_hidden = self._identity_hidden(
+            target_kind, target_id, person_summaries, pet_summaries
+        )
         if source_hidden is None or target_hidden is None or source_hidden != target_hidden:
             return None
 
@@ -511,9 +544,7 @@ class PeopleService:
         if repository is None or paths is None:
             return False
         target_exists = (
-            self.has_cluster(target_id)
-            if target_kind == "person"
-            else self.has_pet(target_id)
+            self.has_cluster(target_id) if target_kind == "person" else self.has_pet(target_id)
         )
         if not target_exists:
             return False
@@ -537,15 +568,11 @@ class PeopleService:
             "target_kind": target_kind,
             "target_id": target_id,
         }
-        if self._mutation_coordinator is None:
-            self._mutation_coordinator = get_recognition_mutation_coordinator(
-                self._library_root
-            )
-            self._mutation_coordinator.register_recovery_handler(
-                {"recognition_detection_assignment"},
-                self._recover_assignment_operation,
-            )
-        journal = self._mutation_coordinator
+        journal = self._ensure_mutation_coordinator()
+        journal.register_recovery_handler(
+            {"recognition_detection_assignment"},
+            self._recover_assignment_operation,
+        )
         with journal.mutation_scope():
             if not journal.recover_pending():
                 return False
@@ -868,18 +895,14 @@ class PeopleService:
             else []
         )
         redirected_pets = {
-            redirect.source_id
-            for redirect in redirects
-            if redirect.source_kind == "pet"
+            redirect.source_id for redirect in redirects if redirect.source_kind == "pet"
         }
         summaries = [
             summary
             for summary in repository.get_pet_summaries(include_hidden=True)
             if summary.pet_id not in redirected_pets
         ]
-        assets_by_pet = repository.get_asset_ids_by_pets(
-            summary.pet_id for summary in summaries
-        )
+        assets_by_pet = repository.get_asset_ids_by_pets(summary.pet_id for summary in summaries)
         source_pet_ids = tuple(
             dict.fromkeys(
                 redirect.source_id
@@ -920,9 +943,7 @@ class PeopleService:
             )
         all_asset_ids = list(
             dict.fromkeys(
-                asset_id
-                for asset_ids in assets_by_pet.values()
-                for asset_id in asset_ids
+                asset_id for asset_ids in assets_by_pet.values() for asset_id in asset_ids
             )
         )
         valid_ids = set(self._valid_asset_ids(all_asset_ids))
@@ -930,8 +951,7 @@ class PeopleService:
             replace(
                 summary,
                 asset_count=sum(
-                    asset_id in valid_ids
-                    for asset_id in assets_by_pet.get(summary.pet_id, ())
+                    asset_id in valid_ids for asset_id in assets_by_pet.get(summary.pet_id, ())
                 ),
             )
             for summary in summaries
@@ -958,9 +978,7 @@ class PeopleService:
         )
         all_asset_ids = list(
             dict.fromkeys(
-                asset_id
-                for asset_ids in assets_by_person.values()
-                for asset_id in asset_ids
+                asset_id for asset_ids in assets_by_person.values() for asset_id in asset_ids
             )
         )
         valid_ids = set(self._valid_asset_ids(all_asset_ids))

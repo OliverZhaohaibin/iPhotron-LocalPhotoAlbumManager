@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 from iPhoto.bootstrap.library_session import LibrarySession
+from iPhoto.recognition import mutation_coordinator as mutation_module
 from iPhoto.recognition.operation_journal import RecognitionOperationKind
 
 
@@ -71,6 +74,41 @@ def test_library_session_injects_one_recognition_mutation_owner(tmp_path: Path) 
     assert session.recognition_merges._journal is mutations
     assert session.people.coordinator is not None
     assert session.pets.coordinator is not None
-    assert {kind.value for kind in RecognitionOperationKind}.issubset(
-        mutations._handlers
-    )
+    assert {kind.value for kind in RecognitionOperationKind}.issubset(mutations._handlers)
+
+
+def test_same_root_sessions_release_recognition_lease_by_reference_count(
+    tmp_path: Path,
+) -> None:
+    def make_runtime():
+        runtime = Mock()
+        runtime.assets = object()
+        runtime.repository = object()
+        runtime.thumbnail_service = object()
+        return runtime
+
+    first = LibrarySession(tmp_path, asset_runtime=make_runtime(), state_repository=Mock())
+    second = LibrarySession(tmp_path, asset_runtime=make_runtime(), state_repository=Mock())
+    first_mutations = first.recognition_mutations
+    second_mutations = second.recognition_mutations
+    first_people = first.people
+    first_pets = first.pets
+    resolved = tmp_path.resolve()
+
+    assert first_mutations.execution_lock is second_mutations.execution_lock
+    assert mutation_module._EXECUTION_LOCKS[resolved].references == 2
+
+    first.shutdown()
+
+    assert mutation_module._EXECUTION_LOCKS[resolved].references == 1
+    assert second_mutations.unfinished() == ()
+    assert first_people.coordinator is None
+    assert first_pets.coordinator is None
+    with pytest.raises(RuntimeError, match="closed"):
+        first_mutations.unfinished()
+    with pytest.raises(RuntimeError, match="shut down"):
+        _ = first.people
+
+    second.shutdown()
+
+    assert resolved not in mutation_module._EXECUTION_LOCKS

@@ -1875,4 +1875,23 @@ Select a tile directory to switch back to the legacy backend.</source>
             <translation>返回地图</translation>
         </message>
     </context>
+    <context>
+        <name>PetCard</name>
+        <message>
+            <source>Unconfirmed Cat</source>
+            <translation>未确认的猫</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Dog</source>
+            <translation>未确认的狗</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Pet</source>
+            <translation>未确认的宠物</translation>
+        </message>
+        <message>
+            <source>Unconfirmed</source>
+            <translation>未确认</translation>
+        </message>
+    </context>
 </TS>

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from ...pets.errors import PetModelUnavailableError, PetRuntimeUnavailableError
 from ...pets.index_coordinator import (
     PetIndexCoordinator,
     PetSnapshotCommittedError,
@@ -23,7 +24,6 @@ from ...pets.pipeline import (
 )
 from ...pets.service import PetService, pet_library_paths
 from ...pets.status import (
-    PET_STATUS_FAILED,
     PET_STATUS_PENDING,
     PET_STATUS_RETRY,
     is_pet_scan_candidate,
@@ -95,7 +95,7 @@ class PetScanWorker(QThread):
         pipeline = PetClusterPipeline(model_root=paths.model_dir)
         if self._cancelled:
             return
-        self._reset_done_rows_for_detector_upgrade()
+        self._prepare_detector_migration()
         if self._cancelled:
             return
         self._recluster_for_clustering_upgrade(pipeline)
@@ -137,10 +137,7 @@ class PetScanWorker(QThread):
                     self._queued_ids.discard(asset_id)
                 self.statusChanged.emit(str(exc))
                 return
-            except RuntimeError as exc:
-                # Missing optional dependencies or models are runtime-level
-                # availability problems. Keep pending/retry rows untouched so
-                # installing the runtime lets scanning resume without rescan.
+            except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
                 LOGGER.warning("Pet scanning unavailable: %s", exc)
                 for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
                     self._queued_ids.discard(asset_id)
@@ -148,11 +145,11 @@ class PetScanWorker(QThread):
                 return
             except Exception as exc:  # noqa: BLE001  # pragma: no cover
                 LOGGER.warning("Pet scan batch failed: %s", exc, exc_info=True)
-                self._mark_rows_retry(batch)
+                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                    self._queued_ids.discard(asset_id)
                 reason = str(exc).strip() or exc.__class__.__name__
                 self.statusChanged.emit(f"Pet scanning paused: {reason}")
-                if self._input_closed:
-                    return
+                return
 
     def _prime_pending_rows(self) -> None:
         self._top_up_pending_rows()
@@ -239,10 +236,7 @@ class PetScanWorker(QThread):
         if first_retry_ids:
             self.statusChanged.emit("Some assets need a pet-scan retry.")
         if failed_ids:
-            self._update_pet_statuses(failed_ids, PET_STATUS_FAILED)
-            self.statusChanged.emit(
-                "Some assets could not be pet scanned and will be retried after a rescan."
-            )
+            self.statusChanged.emit("Some assets could not be pet scanned and were marked failed.")
         retry_detected = [
             item for item in detected if not item.asset_id or str(item.asset_id) not in failed_ids
         ]
@@ -260,16 +254,19 @@ class PetScanWorker(QThread):
             len(first_retry_ids),
             len(failed_ids),
         )
-        event = coordinator.submit_detected_batch(
-            retry_detected,
-            distance_threshold=pipeline.distance_threshold,
-            detector_pipeline_version=pipeline.detector_pipeline_version,
-            clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
-            people_boxes_provider=self._pet_service.people_boxes_by_asset_ids,
-            staged_thumbnail_dir=staging_dir,
-            published_thumbnail_dir=thumbnail_dir,
-        )
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        try:
+            event = coordinator.submit_detected_batch(
+                retry_detected,
+                distance_threshold=pipeline.distance_threshold,
+                detector_pipeline_version=pipeline.detector_pipeline_version,
+                clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+                people_boxes_provider=self._pet_service.people_boxes_by_asset_ids,
+                staged_thumbnail_dir=staging_dir,
+                published_thumbnail_dir=thumbnail_dir,
+                failed_asset_ids=failed_ids,
+            )
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         return event is not None
 
     def _recluster_for_clustering_upgrade(self, pipeline: PetClusterPipeline) -> bool:
@@ -282,13 +279,53 @@ class PetScanWorker(QThread):
         )
         return reclustered_count > 0
 
-    def _reset_done_rows_for_detector_upgrade(self) -> None:
+    def _prepare_detector_migration(self) -> None:
         repository = self._pet_service.repository()
         store = self._pet_service.asset_repository
         if repository is None or store is None:
             return
         current_version = repository.get_scan_metadata("detector_pipeline_version")
-        if current_version == PET_DETECTOR_PIPELINE_VERSION:
+        target_version = repository.get_scan_metadata("detector_migration_target")
+        migration_state = repository.get_scan_metadata("detector_migration_state")
+        legacy_backfill = repository.get_scan_metadata("pet_backfill_required") == "1"
+        if (
+            current_version == PET_DETECTOR_PIPELINE_VERSION
+            and legacy_backfill
+            and migration_state not in {"pending", "running"}
+        ):
+            repository.set_scan_metadata_many(
+                {
+                    "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                    "detector_migration_state": "running",
+                }
+            )
+            return
+        if current_version == PET_DETECTOR_PIPELINE_VERSION and migration_state not in {
+            "pending",
+            "running",
+        }:
+            repository.set_scan_metadata_many(
+                {
+                    "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                    "detector_migration_state": "complete",
+                }
+            )
+            return
+
+        if target_version != PET_DETECTOR_PIPELINE_VERSION or migration_state not in {
+            "pending",
+            "running",
+        }:
+            repository.set_scan_metadata_many(
+                {
+                    "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                    "detector_migration_state": "pending",
+                    "pet_backfill_required": "1",
+                }
+            )
+            migration_state = "pending"
+
+        if migration_state == "running":
             return
 
         reset_count = store.reset_pet_statuses_for_pipeline_upgrade()
@@ -301,10 +338,17 @@ class PetScanWorker(QThread):
                 PET_DETECTOR_PIPELINE_VERSION,
                 self._library_root,
             )
-        repository.set_scan_metadata(
-            "detector_pipeline_version",
-            PET_DETECTOR_PIPELINE_VERSION,
+        repository.set_scan_metadata_many(
+            {
+                "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                "detector_migration_state": "running",
+                "pet_backfill_required": "1",
+            }
         )
+
+    # Kept as a compatibility alias for older callers and focused tests.
+    def _reset_done_rows_for_detector_upgrade(self) -> None:
+        self._prepare_detector_migration()
 
     def _mark_rows_retry(self, rows: Iterable[dict]) -> None:
         ids = [str(row.get("id") or "") for row in rows if row.get("id")]
@@ -318,18 +362,24 @@ class PetScanWorker(QThread):
         if repository is None or store is None:
             return
         counts = store.count_by_pet_status()
-        if int(counts.get(PET_STATUS_PENDING, 0)) == 0 and int(
-            counts.get(PET_STATUS_RETRY, 0)
-        ) == 0:
-            repository.set_scan_metadata("pet_backfill_required", "0")
+        if (
+            int(counts.get(PET_STATUS_PENDING, 0)) == 0
+            and int(counts.get(PET_STATUS_RETRY, 0)) == 0
+        ):
+            repository.set_scan_metadata_many(
+                {
+                    "detector_pipeline_version": PET_DETECTOR_PIPELINE_VERSION,
+                    "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                    "detector_migration_state": "complete",
+                    "pet_backfill_required": "0",
+                }
+            )
 
     def _cleanup_stale_thumbnail_staging(self, thumbnail_dir: Path) -> None:
         staging_root = (Path(thumbnail_dir) / ".staging").resolve()
         if not staging_root.is_dir():
             return
-        active = {
-            str(path) for path in self._pet_service.active_thumbnail_staging_dirs()
-        }
+        active = {str(path) for path in self._pet_service.active_thumbnail_staging_dirs()}
         for candidate in staging_root.iterdir():
             resolved = candidate.resolve()
             if resolved.parent != staging_root or str(resolved) in active:

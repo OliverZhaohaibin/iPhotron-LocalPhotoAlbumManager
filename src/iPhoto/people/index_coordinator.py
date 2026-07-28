@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -79,6 +78,7 @@ class PeopleIndexCoordinator(QObject):
         self._journal = mutation_coordinator or get_recognition_mutation_coordinator(
             self._library_root
         )
+        self._owns_journal = mutation_coordinator is None
         self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PEOPLE_JOURNAL_KINDS,
@@ -531,7 +531,9 @@ class PeopleIndexCoordinator(QObject):
             if group is not None:
                 event = self._emit_snapshot(
                     operation_id=operation_id,
-                    changed_asset_ids=tuple(repository.get_common_asset_ids_for_group(group.group_id)),
+                    changed_asset_ids=tuple(
+                        repository.get_common_asset_ids_for_group(group.group_id)
+                    ),
                     changed_person_ids=tuple(group.member_person_ids),
                     changed_group_ids=(group.group_id,),
                     dispatch=False,
@@ -602,6 +604,13 @@ class PeopleIndexCoordinator(QObject):
         with self._lock:
             self._shutdown_requested = False
 
+    def close(self) -> None:
+        """Permanently release resources owned by this coordinator."""
+
+        self.begin_shutdown()
+        if self._owns_journal:
+            self._journal.close()
+
     def _emit_snapshot(
         self,
         *,
@@ -661,11 +670,7 @@ class PeopleIndexCoordinator(QObject):
         if runtime_commit is None:
             if operation.kind == "people_scan_commit":
                 self._mark_retry_asset_ids(
-                    [
-                        str(value)
-                        for value in operation.payload.get("retry_asset_ids", ())
-                        if value
-                    ]
+                    [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
                 )
             self._journal.transition(
                 operation.operation_id,
@@ -681,18 +686,10 @@ class PeopleIndexCoordinator(QObject):
             )
         if operation.kind == "people_scan_commit":
             self._mark_retry_asset_ids(
-                [
-                    str(value)
-                    for value in operation.payload.get("retry_asset_ids", ())
-                    if value
-                ]
+                [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
             )
             self._mark_done_asset_ids(
-                [
-                    str(value)
-                    for value in operation.payload.get("done_asset_ids", ())
-                    if value
-                ]
+                [str(value) for value in operation.payload.get("done_asset_ids", ()) if value]
             )
         event = self._emit_snapshot(
             operation_id=operation.operation_id,
@@ -763,45 +760,25 @@ class PeopleIndexCoordinator(QObject):
             raise last_error
 
 
-_COORDINATORS: dict[Path, PeopleIndexCoordinator] = {}
-_COORDINATORS_LOCK = threading.Lock()
-
-
 def get_people_index_coordinator(
     library_root: Path,
     *,
     asset_repository: PeopleAssetRepositoryPort | None = None,
     mutation_coordinator: RecognitionMutationCoordinator | None = None,
 ) -> PeopleIndexCoordinator:
-    resolved = Path(library_root).resolve()
-    with _COORDINATORS_LOCK:
-        coordinator = _COORDINATORS.get(resolved)
-        if coordinator is None or (
-            mutation_coordinator is not None
-            and coordinator._journal is not mutation_coordinator
-        ):
-            coordinator = PeopleIndexCoordinator(
-                resolved,
-                asset_repository=asset_repository,
-                mutation_coordinator=mutation_coordinator,
-            )
-            # Ensure the coordinator lives on the Qt main thread so that the
-            # QueuedConnection on _scheduleEmit can deliver events via the GUI
-            # event loop regardless of which thread first calls this function.
-            app = QCoreApplication.instance()
-            if app is not None:
-                coordinator.moveToThread(app.thread())
-            _COORDINATORS[resolved] = coordinator
-        else:
-            if asset_repository is not None:
-                coordinator.set_asset_repository(asset_repository)
-            coordinator.resume()
-        return coordinator
+    coordinator = PeopleIndexCoordinator(
+        Path(library_root).resolve(),
+        asset_repository=asset_repository,
+        mutation_coordinator=mutation_coordinator,
+    )
+    app = QCoreApplication.instance()
+    if app is not None:
+        coordinator.moveToThread(app.thread())
+    return coordinator
 
 
 def reset_people_index_coordinators() -> None:
-    with _COORDINATORS_LOCK:
-        _COORDINATORS.clear()
+    """Compatibility no-op; coordinators are session-owned."""
 
 
 __all__ = [

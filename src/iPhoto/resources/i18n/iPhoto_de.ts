@@ -1875,4 +1875,23 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
             <translation>Zurück zur Karte</translation>
         </message>
     </context>
+    <context>
+        <name>PetCard</name>
+        <message>
+            <source>Unconfirmed Cat</source>
+            <translation>Unbestätigte Katze</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Dog</source>
+            <translation>Unbestätigter Hund</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Pet</source>
+            <translation>Unbestätigtes Haustier</translation>
+        </message>
+        <message>
+            <source>Unconfirmed</source>
+            <translation>Unbestätigt</translation>
+        </message>
+    </context>
 </TS>

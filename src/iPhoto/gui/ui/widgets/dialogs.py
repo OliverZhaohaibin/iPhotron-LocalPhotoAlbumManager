@@ -144,18 +144,27 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     from .information_popup import InformationPopup
 
     popup = InformationPopup(parent, title=title, message=message)
-    popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    # Do not delete the QWidget while its signal is unwinding through a nested
+    # event loop.  Qt's offscreen platform can otherwise destroy the native
+    # object from inside ``closeEvent`` and crash before ``loop.exec`` returns.
+    popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
     popup.setPalette(_resolve_popup_palette_source(parent))
     popup.setBackgroundRole(QPalette.ColorRole.Window)
     popup.center_on(parent)
 
     loop = QEventLoop()
+    popup.closed.connect(loop.quit)
     popup.destroyed.connect(loop.quit)
     popup.show()
     popup.setPalette(_resolve_popup_palette_source(parent))
     popup.center_on(parent)
     popup.raise_()
     loop.exec()
+    try:
+        popup.deleteLater()
+    except RuntimeError:
+        # The parent may have been destroyed while the local loop was active.
+        pass
 
 
 def show_warning(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:

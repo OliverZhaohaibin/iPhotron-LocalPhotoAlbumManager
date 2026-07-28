@@ -84,6 +84,13 @@ Windows 在完成约 16 分钟 benchmark 后仅因 ctypes 未声明 64 位 Win32
 参数与 BOOL 返回值，并将无跨平台时间 SLA 的 production matrix job 余量调为
 30 分钟。修复后的 Windows run 仍待成功证据，R5-03 状态不提前提升。
 
+第二次自动 run `30367483000` 已取得 Linux/macOS/Windows 三平台 384 维成功
+证据；Windows job `90302358960` 完整通过，证明 Win32 RSS 读取修复有效。该 run
+的独立 4 维快速契约暴露了既有 fixture 的 ANN 非确定性：两个相邻超密向量可合法
+命中同一 nearby profile，却硬编码要求两个 distinct updated IDs。fixture 已改为
+图库首尾跨度内的两个远距离 probe，保持“两次增量、无新增 identity”的结构门禁，
+同时不把近邻近似召回误判为写入失败。完整 run 仍须在该修复推送后再次全绿。
+
 本轮本地证据：新增/关联定向 `161 passed, 1 warning`；全量
 `2809 passed, 16 skipped, 10 warnings`；架构门禁、`compileall`、变更范围 Ruff
 `F/E9/I` 与 `git diff --check` 全部通过。PR 在 R5-03 远端常规 CI 与三平台

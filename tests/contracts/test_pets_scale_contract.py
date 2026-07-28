@@ -100,6 +100,10 @@ def _benchmark_incremental(root: Path, count: int) -> dict[str, object]:
         return connection
 
     repository._connect = traced_connect  # type: ignore[method-assign]
+    # Keep the two probes far apart. Adjacent synthetic vectors are deliberately
+    # dense, so an approximate ANN lookup may validly resolve both to the same
+    # nearby profile even though the incremental write itself is correct.
+    probe_indices = (0, count // 2)
     increment = [
         _detection(
             detection_id=f"increment-{index}",
@@ -107,7 +111,7 @@ def _benchmark_incremental(root: Path, count: int) -> dict[str, object]:
             embedding=detections[index].embedding,
             pet_id=None,
         )
-        for index in range(2)
+        for index in probe_indices
     ]
     started = time.perf_counter()
     result = repository.replace_assets_incrementally(

@@ -139,7 +139,7 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     expected.
     """
 
-    from PySide6.QtCore import QEventLoop
+    from PySide6.QtCore import QCoreApplication, QEventLoop
 
     from .information_popup import InformationPopup
 
@@ -152,14 +152,26 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     popup.setBackgroundRole(QPalette.ColorRole.Window)
     popup.center_on(parent)
 
-    loop = QEventLoop()
-    popup.closed.connect(loop.quit)
-    popup.destroyed.connect(loop.quit)
+    close_state = {"closed": False}
+
+    def _mark_closed(*_args: object) -> None:
+        close_state["closed"] = True
+
+    popup.closed.connect(_mark_closed)
+    popup.destroyed.connect(_mark_closed)
     popup.show()
     popup.setPalette(_resolve_popup_palette_source(parent))
     popup.center_on(parent)
     popup.raise_()
-    loop.exec()
+    process_flags = (
+        QEventLoop.ProcessEventsFlag.AllEvents
+        | QEventLoop.ProcessEventsFlag.WaitForMoreEvents
+    )
+    while not close_state["closed"]:
+        # ``QEventLoop.exec`` can crash in Qt's offscreen platform after a
+        # large widget test run.  Pumping the application dispatcher retains
+        # this helper's blocking contract without creating a nested loop.
+        QCoreApplication.processEvents(process_flags)
     try:
         popup.deleteLater()
     except RuntimeError:

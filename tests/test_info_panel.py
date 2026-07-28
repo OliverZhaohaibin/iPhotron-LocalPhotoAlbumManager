@@ -2190,7 +2190,12 @@ def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
 
         override_cursor = QApplication.overrideCursor()
         assert fallback_receiver not in map_view._map_event_targets
-        assert override_cursor is not None
+        assert override_cursor is not None, (
+            "map-host application filter did not start drag: "
+            f"installed={map_view._application_event_filter_installed}, "
+            f"dragging={map_view._dragging}, "
+            f"receiver_parent_is_host={fallback_receiver.parent() is map_view._map_host}"
+        )
         assert override_cursor.shape() == Qt.CursorShape.ClosedHandCursor
 
         _send_mouse_event(
@@ -2200,7 +2205,10 @@ def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
             buttons=Qt.MouseButton.NoButton,
         )
 
-        assert QApplication.overrideCursor() is None
+        assert QApplication.overrideCursor() is None, (
+            "map-host application filter did not release the drag cursor: "
+            f"dragging={map_view._dragging}"
+        )
     finally:
         panel.shutdown()
         panel.close()

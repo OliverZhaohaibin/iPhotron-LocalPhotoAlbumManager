@@ -36,7 +36,6 @@ from iPhoto.gui.ui.controllers.player_view_controller import (
     _PreparedRequestIntent,
 )
 from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
-from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.people.repository import AssetFaceAnnotation
 
 
@@ -153,6 +152,40 @@ class _FakeImageViewer(QWidget):
         return QRectF(float(x), float(y), float(width), float(height))
 
 
+class _FakePlayerBar(QWidget):
+    """Player-bar seam required by ``DetailPageWidget.retranslate_ui``."""
+
+    def retranslate_ui(self) -> None:
+        pass
+
+
+class _FakeVideoArea(QWidget):
+    """Widget-only video seam for controller tests that do not exercise media IO.
+
+    Constructing the production ``VideoArea`` starts QtMultimedia and its native
+    backend.  That is outside this module's init-cover contract and can crash on
+    Linux's offscreen platform before the first assertion is reached.
+    """
+
+    firstFrameReady = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.player_bar = _FakePlayerBar(self)
+
+    def hide_controls(self, *, animate: bool = True) -> None:
+        del animate
+
+    def show_controls(self, *, animate: bool = True) -> None:
+        del animate
+
+    def set_controls_enabled(self, enabled: bool) -> None:
+        del enabled
+
+    def video_view(self) -> QWidget:
+        return self
+
+
 @pytest.fixture(scope="module")
 def qapp():
     """Create QApplication instance for Qt tests."""
@@ -172,7 +205,7 @@ def controller(qapp):
     stack = QStackedWidget(parent_widget)
     placeholder = QLabel("placeholder")
     image_viewer = _FakeImageViewer()
-    video_area = VideoArea()
+    video_area = _FakeVideoArea()
     from iPhoto.gui.ui.widgets.live_badge import LiveBadge
 
     live_badge = LiveBadge(parent_widget)
@@ -189,7 +222,13 @@ def controller(qapp):
         placeholder=placeholder,
         live_badge=live_badge,
     )
-    yield pvc
+    try:
+        yield pvc
+    finally:
+        pvc.shutdown(timeout_ms=500)
+        parent_widget.close()
+        parent_widget.deleteLater()
+        qapp.processEvents()
 
 
 class TestInitCoverTracking:
@@ -218,6 +257,13 @@ class TestInitCoverTracking:
                 if worker not in self.queued:
                     return False
                 self.queued.remove(worker)
+                return True
+
+            def clear(self):
+                self.queued.clear()
+
+            def waitForDone(self, timeout_ms):
+                del timeout_ms
                 return True
 
         pool = _Pool()
@@ -496,7 +542,14 @@ class TestInitCoverTracking:
         assert controller._video_renderer_rendered is True
 
 
-def test_init_cover_stays_below_face_name_overlay_and_does_not_take_mouse(qapp):
+def test_init_cover_stays_below_face_name_overlay_and_does_not_take_mouse(
+    qapp,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.widgets.detail_page.VideoArea",
+        _FakeVideoArea,
+    )
     main_window = QWidget()
     image_viewer = _FakeImageViewer()
     detail = DetailPageWidget(main_window, image_viewer=image_viewer)

@@ -1,3 +1,4 @@
+import gc
 import os
 import sys
 from types import ModuleType
@@ -434,8 +435,10 @@ def _keep_test_qapplication_alive():
         # begun disappearing.  Shut the binding down while pytest's fixture
         # graph is still intact so native QRhi resources are released in Qt's
         # normal application teardown order.
+        gc.collect()
         app.shutdown()
         _TEST_QAPPLICATION = None
+        gc.collect()
 
 
 @pytest.fixture()

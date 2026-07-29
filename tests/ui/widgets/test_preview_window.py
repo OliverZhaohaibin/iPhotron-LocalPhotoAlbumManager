@@ -145,8 +145,9 @@ def test_rhi_popup_resize_preview_includes_shadow_padding(qapp, monkeypatch) -> 
         assert popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         assert popup.mask().isEmpty()
     finally:
+        popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         popup.close_preview()
-        popup.deleteLater()
+        popup.close()
 
 
 def _make_rhi_popup_for_show() -> _RhiPreviewPopup:

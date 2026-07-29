@@ -303,6 +303,7 @@ nuitka_args=(
   "--include-package=insightface"
   "--include-package=onnxruntime"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/resources/i18n=iPhoto/resources/i18n"
+  "--include-data-file=$ROOT_DIR/src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/schemas=iPhoto/schemas"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/icon=iPhoto/gui/ui/icon"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/qml=iPhoto/gui/ui/qml"

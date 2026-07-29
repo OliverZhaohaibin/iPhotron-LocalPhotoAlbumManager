@@ -16,6 +16,48 @@ LOGGER = logging.getLogger(__name__)
 _WARNED_WORK_DIR_CONFLICTS: set[Path] = set()
 
 
+class LibraryAssetPathError(ValueError):
+    """Raised when an indexed asset path escapes its owning library."""
+
+
+def tolerant_int(value: object) -> int | None:
+    """Parse integer-like SQLite/JSON values without accepting fractions."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = float(text)
+        except ValueError:
+            return None
+        return int(parsed) if parsed.is_integer() else None
+    return None
+
+
+def resolve_library_asset_path(library_root: Path, relative_path: object) -> Path:
+    """Resolve an indexed relative asset path and reject every root escape."""
+
+    root = Path(library_root).expanduser().resolve()
+    raw = Path(str(relative_path or ""))
+    if not str(relative_path or "").strip() or raw.is_absolute():
+        raise LibraryAssetPathError("Asset path must be a non-empty relative path.")
+    candidate = (root / raw).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise LibraryAssetPathError("Asset path escapes the library root.") from exc
+    if candidate == root:
+        raise LibraryAssetPathError("Asset path resolves to the library root.")
+    return candidate
+
+
 def _expand(pattern: str) -> Iterator[str]:
     match = re.search(r"\{([^{}]*,[^{}]*)\}", pattern)
     if not match:

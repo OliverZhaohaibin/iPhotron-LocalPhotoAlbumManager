@@ -441,9 +441,16 @@ class AssetRepository:
         if normalized is None or not ids_list:
             return
 
-        placeholders = ", ".join(["?"] * len(ids_list))
-        query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
-        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+        for start in range(0, len(ids_list), 500):
+            chunk = ids_list[start : start + 500]
+            placeholders = ", ".join(["?"] * len(chunk))
+            query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
+            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
+
+    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
+        """Reset eligible completed assets after a People contract upgrade."""
+
+        return self._reset_ai_statuses_for_pipeline_upgrade("face_status")
 
     def count_by_face_status(self) -> Dict[str, int]:
         """Return a status-to-count mapping for ``assets.face_status``."""
@@ -520,9 +527,38 @@ class AssetRepository:
         if normalized is None or not ids_list:
             return
 
-        placeholders = ", ".join(["?"] * len(ids_list))
-        query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
-        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+        for start in range(0, len(ids_list), 500):
+            chunk = ids_list[start : start + 500]
+            placeholders = ", ".join(["?"] * len(chunk))
+            query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
+            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
+
+    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
+        """Reset eligible completed assets after a Pets contract upgrade."""
+
+        return self._reset_ai_statuses_for_pipeline_upgrade("pet_status")
+
+    def _reset_ai_statuses_for_pipeline_upgrade(self, column: str) -> int:
+        if column not in {"face_status", "pet_status"}:
+            raise ValueError("Unsupported AI status column")
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            cursor = conn.execute(
+                f"""
+                UPDATE assets
+                SET {column} = 'pending'
+                WHERE {column} = 'done'
+                  AND COALESCE(CAST(media_type AS TEXT), '0') NOT IN ('1', 'video')
+                  AND COALESCE(CAST(live_role AS INTEGER), 0) = 0
+                  AND COALESCE(mime, '') NOT LIKE 'video/%'
+                """
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            if should_close:
+                conn.close()
 
     def count_by_pet_status(self) -> Dict[str, int]:
         """Return a status-to-count mapping for ``assets.pet_status``."""

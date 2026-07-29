@@ -100,6 +100,13 @@ version change reclusters stored embeddings without resetting asset scan state.
 The People-priority filter is part of the detector pipeline version so existing
 libraries are re-evaluated after upgrading.
 
+When an exact `pet_key` carries a canonical identity into a new embedding
+contract, compatible detections from the same batch may join that staged anchor.
+The runtime switch atomically retires the identity's incompatible old-contract
+detections. Any retired asset outside the committed replacement scope is marked
+`pending`, and the complete changed/retired asset sets are persisted for crash
+recovery before the snapshot event is dispatched.
+
 ## Scan Scheduling And Status
 
 `global_index.db.assets.pet_status` is independent from `face_status` and uses:

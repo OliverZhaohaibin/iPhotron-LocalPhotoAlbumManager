@@ -1,4 +1,3 @@
-
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -68,8 +67,13 @@ def test_qimage_from_pil_success():
     assert qimg.height() == 10
     # Check format (Pillow converts to RGBA before creation)
     # ImageQt typically produces ARGB32 or RGBA8888 depending on platform/version
-    valid_formats = (QImage.Format.Format_RGBA8888, QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32)
+    valid_formats = (
+        QImage.Format.Format_RGBA8888,
+        QImage.Format.Format_RGB32,
+        QImage.Format.Format_ARGB32,
+    )
     assert qimg.format() in valid_formats
+
 
 def test_qimage_from_pil_handles_missing_imageqt(monkeypatch):
     """Test returns None if ImageQt is not available."""
@@ -79,6 +83,7 @@ def test_qimage_from_pil_handles_missing_imageqt(monkeypatch):
     qimg = image_loader.qimage_from_pil(pil_image)
 
     assert qimg is None
+
 
 def test_qimage_from_pil_handles_exception(monkeypatch):
     """Test returns None if conversion raises exception."""
@@ -90,17 +95,24 @@ def test_qimage_from_pil_handles_exception(monkeypatch):
 
     assert qimg is None
 
-def test_qimage_from_pil_converts_to_rgba():
+
+def test_qimage_from_pil_converts_to_rgba(monkeypatch):
     """Test that image is converted to RGBA before QImage creation."""
-    pil_image = Image.new("L", (10, 10)) # Grayscale
+    pil_image = Image.new("L", (10, 10))  # Grayscale
+    captured_modes: list[str] = []
 
-    with patch("iPhoto.utils.image_loader._ImageQt") as mock_qt:
-        image_loader.qimage_from_pil(pil_image)
+    def fake_image_qt(image):
+        captured_modes.append(image.mode)
+        result = QImage(10, 10, QImage.Format.Format_RGBA8888)
+        result.fill(0)
+        return result
 
-        # Check that the image passed to ImageQt was converted
-        args, _ = mock_qt.call_args
-        passed_image = args[0]
-        assert passed_image.mode == "RGBA"
+    monkeypatch.setattr(image_loader, "_ImageQt", fake_image_qt)
+
+    result = image_loader.qimage_from_pil(pil_image)
+
+    assert result is not None
+    assert captured_modes == ["RGBA"]
 
 
 def test_qimage_from_pil_detaches_from_temporary_imageqt_storage():
@@ -121,6 +133,7 @@ def test_qimage_from_pil_detaches_from_temporary_imageqt_storage():
     assert qimg.pixelColor(4, 4).red() > 200
     assert qimg.pixelColor(4, 4).blue() < 50
 
+
 def test_qimage_from_bytes_returns_none_when_pillow_decode_fails(monkeypatch):
     """Return None when neither Pillow nor Qt can decode broken data."""
     monkeypatch.setattr(
@@ -134,7 +147,22 @@ def test_qimage_from_bytes_returns_none_when_pillow_decode_fails(monkeypatch):
     assert qimg is None
 
 
-def test_qimage_from_bytes_falls_back_to_qt_when_pillow_decode_fails(monkeypatch):
+def test_qimage_from_bytes_does_not_enter_qt_when_pillow_decode_fails(monkeypatch):
+    monkeypatch.setattr(
+        image_loader._Image,
+        "open",
+        MagicMock(side_effect=OSError("Pillow rejected payload")),
+    )
+    qt_image = MagicMock(side_effect=AssertionError("corrupt native format reached Qt"))
+    monkeypatch.setattr(image_loader, "QImage", qt_image)
+
+    qimg = image_loader.qimage_from_bytes(b"\xff\xd8\xffcorrupt-image")
+
+    assert qimg is None
+    qt_image.assert_not_called()
+
+
+def test_qimage_from_bytes_uses_qt_when_pillow_bridge_is_unavailable(monkeypatch):
     class FakeQImage:
         def __init__(self, *_args):
             self.loaded = False
@@ -143,14 +171,28 @@ def test_qimage_from_bytes_falls_back_to_qt_when_pillow_decode_fails(monkeypatch
             self.loaded = True
             return True
 
-    monkeypatch.setattr(
-        image_loader._Image,
-        "open",
-        MagicMock(side_effect=OSError("Pillow rejected payload")),
-    )
+    monkeypatch.setattr(image_loader, "_ImageQt", None)
     monkeypatch.setattr(image_loader, "QImage", FakeQImage)
 
     qimg = image_loader.qimage_from_bytes(b"\xff\xd8\xffqt-supported-image")
+
+    assert isinstance(qimg, FakeQImage)
+    assert qimg.loaded
+
+
+def test_qimage_from_bytes_uses_qt_when_pillow_does_not_support_format(monkeypatch):
+    class FakeQImage:
+        def __init__(self, *_args):
+            self.loaded = False
+
+        def loadFromData(self, *_args):  # noqa: N802 - mirrors the Qt API
+            self.loaded = True
+            return True
+
+    monkeypatch.setattr(image_loader, "_pillow_supports_format", lambda _format: False)
+    monkeypatch.setattr(image_loader, "QImage", FakeQImage)
+
+    qimg = image_loader.qimage_from_bytes(b"RIFF\x04\x00\x00\x00WEBP")
 
     assert isinstance(qimg, FakeQImage)
     assert qimg.loaded
@@ -175,6 +217,7 @@ def test_generate_micro_thumbnail_success(tmp_path):
     # Verify dimensions: 100x50 -> max 16 -> 16x8
     assert thumb.size == (16, 8)
 
+
 def test_generate_micro_thumbnail_preserves_aspect_ratio(tmp_path):
     """Test that aspect ratio is preserved during scaling."""
     image_path = tmp_path / "tall.jpg"
@@ -189,6 +232,7 @@ def test_generate_micro_thumbnail_preserves_aspect_ratio(tmp_path):
     # 50x100 -> max 16 -> 8x16
     assert thumb.size == (8, 16)
 
+
 def test_generate_micro_thumbnail_converts_to_rgb(tmp_path):
     """Test that RGBA images are converted to RGB for JPEG compatibility."""
     image_path = tmp_path / "alpha.png"
@@ -202,6 +246,7 @@ def test_generate_micro_thumbnail_converts_to_rgb(tmp_path):
     assert thumb.mode == "RGB"
     assert thumb.format == "JPEG"
 
+
 def test_generate_micro_thumbnail_handles_missing_dependencies(monkeypatch, tmp_path):
     """Test returns None if Pillow dependencies are missing."""
     monkeypatch.setattr(image_loader, "_Image", None)
@@ -210,6 +255,7 @@ def test_generate_micro_thumbnail_handles_missing_dependencies(monkeypatch, tmp_
 
     blob = image_loader.generate_micro_thumbnail(image_path)
     assert blob is None
+
 
 def test_generate_micro_thumbnail_handles_io_errors(tmp_path):
     """Test handles file not found or invalid image gracefully."""

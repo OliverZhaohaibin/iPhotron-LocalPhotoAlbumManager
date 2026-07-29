@@ -68,9 +68,7 @@ def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
     # null QImage.  If Pillow itself is unavailable, retain the Qt compatibility
     # path so installations with a partially broken optional Pillow stack can
     # still display images.
-    pillow_qimage_available = (
-        _Image is not None and _ImageOps is not None and _ImageQt is not None
-    )
+    pillow_qimage_available = _Image is not None and _ImageOps is not None and _ImageQt is not None
     if source.suffix.casefold() in _PILLOW_NATIVE_EXTENSIONS and pillow_qimage_available:
         return _load_with_pillow(source, target)
 
@@ -146,14 +144,22 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
 
     # Avoid handing arbitrary/corrupt index BLOBs to platform image plugins.
     # Some Qt/PySide builds can crash natively instead of returning a null image.
-    if not (
-        data.startswith(b"\xff\xd8\xff")
-        or data.startswith(b"\x89PNG\r\n\x1a\n")
-        or (len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP")
-    ):
+    if data.startswith(b"\xff\xd8\xff"):
+        image_format = "JPEG"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        image_format = "PNG"
+    elif len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        image_format = "WEBP"
+    else:
         return None
 
-    if _Image is not None and _ImageOps is not None and _ImageQt is not None:
+    pillow_owns_format = (
+        _Image is not None
+        and _ImageOps is not None
+        and _ImageQt is not None
+        and _pillow_supports_format(image_format)
+    )
+    if pillow_owns_format:
         try:
             with _Image.open(BytesIO(data)) as img:  # type: ignore[union-attr]
                 img = _ImageOps.exif_transpose(img)
@@ -161,7 +167,11 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
                 return QImage(qt_image).copy()
         except Exception:
             _LOGGER.debug("Pillow failed to decode image bytes in qimage_from_bytes")
+            return None
 
+    # Qt remains a compatibility decoder only when the Pillow-to-QImage bridge
+    # is unavailable.  Once Pillow has accepted responsibility for these native
+    # formats, a decode failure must not be retried inside a native Qt plugin.
     image = QImage()
     if image.loadFromData(data):
         return image
@@ -172,6 +182,18 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
     if image.loadFromData(data, "PNG"):
         return image
     return None
+
+
+def _pillow_supports_format(image_format: str) -> bool:
+    if _Image is None:
+        return False
+    try:
+        initialize = getattr(_Image, "init", None)
+        if callable(initialize):
+            initialize()
+        return str(image_format).upper() in getattr(_Image, "OPEN", {})
+    except Exception:
+        return False
 
 
 def qimage_from_pil(image: "Image.Image") -> Optional[QImage]:

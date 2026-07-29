@@ -33,7 +33,7 @@ from .pipeline import (
 from .records import PetMergeOutcome, PetMutationFailure
 from .repository import PetRepository
 from .scan_session import PetScanSession
-from .status import PET_STATUS_DONE, PET_STATUS_FAILED, PET_STATUS_RETRY
+from .status import PET_STATUS_DONE, PET_STATUS_FAILED, PET_STATUS_PENDING, PET_STATUS_RETRY
 
 LOGGER = get_logger()
 
@@ -319,6 +319,7 @@ class PetIndexCoordinator(QObject):
                     "index_applied": True,
                     "generation_id": generation_id,
                     "changed_asset_ids": list(commit_result.changed_asset_ids),
+                    "retired_asset_ids": list(commit_result.retired_asset_ids),
                     "added_pet_ids": list(commit_result.added_pet_ids),
                     "updated_pet_ids": list(commit_result.updated_pet_ids),
                     "removed_pet_ids": list(commit_result.removed_pet_ids),
@@ -341,7 +342,14 @@ class PetIndexCoordinator(QObject):
                     repository.set_scan_metadata(
                         "clustering_pipeline_version", clustering_pipeline_version
                     )
+            explicit_status_ids = set(done_ids) | set(retry_ids) | set(terminal_failed_ids)
+            retired_pending_ids = [
+                asset_id
+                for asset_id in commit_result.retired_asset_ids
+                if asset_id not in explicit_status_ids
+            ]
             try:
+                self._mark_pending_asset_ids(retired_pending_ids)
                 self._mark_retry_asset_ids(retry_ids)
                 self._mark_failed_asset_ids(terminal_failed_ids)
                 self._mark_done_asset_ids(done_ids)
@@ -854,6 +862,9 @@ class PetIndexCoordinator(QObject):
     def _mark_done_asset_ids(self, done_ids: list[str]) -> None:
         self._mark_asset_ids_with_status(done_ids, PET_STATUS_DONE)
 
+    def _mark_pending_asset_ids(self, pending_ids: list[str]) -> None:
+        self._mark_asset_ids_with_status(pending_ids, PET_STATUS_PENDING)
+
     def _mark_retry_asset_ids(self, retry_ids: list[str]) -> None:
         self._mark_asset_ids_with_status(retry_ids, PET_STATUS_RETRY)
 
@@ -969,15 +980,23 @@ class PetIndexCoordinator(QObject):
             done_ids = [str(value) for value in payload.get("done_asset_ids", ()) if value]
             retry_ids = [str(value) for value in payload.get("retry_asset_ids", ()) if value]
             failed_ids = [str(value) for value in payload.get("failed_asset_ids", ()) if value]
+            explicit_status_ids = set(done_ids) | set(retry_ids) | set(failed_ids)
+            retired_pending_ids = [
+                str(value)
+                for value in payload.get("retired_asset_ids", ())
+                if value and str(value) not in explicit_status_ids
+            ]
+            self._mark_pending_asset_ids(retired_pending_ids)
             self._mark_retry_asset_ids(retry_ids)
             self._mark_failed_asset_ids(failed_ids)
             self._mark_done_asset_ids(done_ids)
+            changed_asset_ids = tuple(
+                str(value) for value in payload.get("changed_asset_ids", ()) if value
+            )
+            if not changed_asset_ids:
+                changed_asset_ids = tuple(dict.fromkeys((*done_ids, *retry_ids, *failed_ids)))
             event_payload = {
-                "changed_asset_ids": [
-                    *done_ids,
-                    *[str(value) for value in payload.get("retry_asset_ids", ()) if value],
-                    *failed_ids,
-                ],
+                "changed_asset_ids": list(changed_asset_ids),
                 "added_pet_ids": list(payload.get("added_pet_ids", ())),
                 "updated_pet_ids": list(payload.get("updated_pet_ids", ())),
                 "removed_pet_ids": list(payload.get("removed_pet_ids", ())),

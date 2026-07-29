@@ -65,6 +65,19 @@ class _AssetStore:
         return {self.status: 1}
 
 
+class _AssetStatusStore:
+    def __init__(self, *asset_ids: str) -> None:
+        self.statuses = {asset_id: "done" for asset_id in asset_ids}
+        self.fail_done = False
+
+    def update_pet_statuses(self, asset_ids, status):
+        if status == "done" and self.fail_done:
+            raise sqlite3.OperationalError("injected done-status failure")
+        for asset_id in asset_ids:
+            if asset_id in self.statuses:
+                self.statuses[asset_id] = status
+
+
 def test_live_role_integer_parser_is_shared() -> None:
     for value in (1, 1.0, "1"):
         row = {"media_type": 0, "live_role": value, "mime": "image/jpeg"}
@@ -671,6 +684,7 @@ def test_cross_generation_exact_key_atomically_switches_runtime_contract(
         for item in runtime
     } == {("embedding-v2", 2, 1)}
     assert result.changed_asset_ids == ("asset-a", "asset-b")
+    assert result.retired_asset_ids == ("asset-b",)
     assert result.added_pet_ids == ()
     assert result.updated_pet_ids == ("pet-a",)
     summaries = repository.get_pet_summaries(include_hidden=True)
@@ -681,6 +695,123 @@ def test_cross_generation_exact_key_atomically_switches_runtime_contract(
     cover = repository.state_repository.get_cover("pet-a")
     assert cover is not None and cover.is_custom
     assert cover.detection_id == "old-b"
+
+
+def test_cross_generation_exact_key_anchor_absorbs_compatible_same_batch_detection(
+    tmp_path: Path,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    repository.replace_all(
+        [first, second],
+        [
+            replace(
+                _pet("pet-a", first),
+                detection_count=2,
+                sample_count=2,
+                profile_state="stable",
+            )
+        ],
+    )
+    anchored = replace(
+        _detection("new-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    moved_box = replace(
+        _detection("new-b", asset_id="asset-b", embedding=np.asarray([0.999, 0.001])),
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+
+    repository.replace_assets_incrementally(
+        ["asset-a", "asset-b"],
+        [anchored, moved_box],
+        distance_threshold=0.05,
+    )
+
+    assert {(item.detection_id, item.pet_id) for item in repository.get_all_detections()} == {
+        ("new-a", "pet-a"),
+        ("new-b", "pet-a"),
+    }
+    rebuilt = repository.get_all_pet_records()
+    assert [(pet.pet_id, pet.detection_count, pet.generation_id) for pet in rebuilt] == [
+        ("pet-a", 2, 1)
+    ]
+
+
+def test_contract_retirement_marks_unscanned_assets_pending(tmp_path: Path) -> None:
+    store = _AssetStatusStore("asset-a", "asset-b")
+    coordinator = PetIndexCoordinator(tmp_path, asset_repository=store)  # type: ignore[arg-type]
+    repository = coordinator._repository()
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    repository.replace_all(
+        [first, second],
+        [replace(_pet("pet-a", first), detection_count=2, sample_count=2)],
+    )
+    incoming = replace(
+        _detection("new-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+    )
+
+    event = coordinator.submit_detected_batch(
+        [DetectedAssetPets("asset-a", "album/asset-a.jpg", [incoming])],
+        distance_threshold=0.1,
+    )
+
+    assert event is not None
+    assert event.changed_asset_ids == ("asset-a", "asset-b")
+    assert store.statuses == {"asset-a": "done", "asset-b": "pending"}
+    assert repository.get_detections_by_asset_ids(["asset-b"]) == []
+
+
+def test_contract_retirement_recovery_uses_full_assets_and_restores_pending_status(
+    tmp_path: Path,
+) -> None:
+    store = _AssetStatusStore("asset-a", "asset-b")
+    store.fail_done = True
+    coordinator = PetIndexCoordinator(tmp_path, asset_repository=store)  # type: ignore[arg-type]
+    repository = coordinator._repository()
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    repository.replace_all(
+        [first, second],
+        [replace(_pet("pet-a", first), detection_count=2, sample_count=2)],
+    )
+    incoming = replace(
+        _detection("new-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+    )
+
+    with pytest.raises(PetSnapshotCommittedError):
+        coordinator.submit_detected_batch(
+            [DetectedAssetPets("asset-a", "album/asset-a.jpg", [incoming])],
+            distance_threshold=0.1,
+        )
+    operation = coordinator._journal.unfinished()[0]
+    assert operation.payload["changed_asset_ids"] == ["asset-a", "asset-b"]
+    assert operation.payload["retired_asset_ids"] == ["asset-b"]
+
+    store.fail_done = False
+    recovered = PetIndexCoordinator(tmp_path, asset_repository=store)  # type: ignore[arg-type]
+    with recovered._lock:
+        recovered._recover_operations_locked()
+
+    assert store.statuses == {"asset-a": "done", "asset-b": "pending"}
+    operation_db = tmp_path / ".iPhoto" / "recognition" / "operations.db"
+    with sqlite3.connect(operation_db) as connection:
+        event_payload = json.loads(
+            connection.execute(
+                "SELECT event_json FROM event_outbox WHERE operation_id = ?",
+                (operation.operation_id,),
+            ).fetchone()[0]
+        )
+    assert event_payload["changed_asset_ids"] == ["asset-a", "asset-b"]
 
 
 def test_cross_generation_contract_switch_rolls_back_old_runtime_on_failure(
@@ -909,6 +1040,7 @@ def test_complete_link_expands_ann_shortlist_until_ninth_candidate(tmp_path: Pat
         staged_samples={},
         excluded_asset_ids=set(),
         candidate_index=candidate_index,  # type: ignore[arg-type]
+        staged_candidate_species={},
         distance_threshold=0.1,
     )
 
@@ -947,6 +1079,7 @@ def test_complete_link_progressive_search_stops_at_threshold_or_exhaustion(
         staged_samples={},
         excluded_asset_ids=set(),
         candidate_index=candidate_index,  # type: ignore[arg-type]
+        staged_candidate_species={},
         distance_threshold=0.1,
     )
 

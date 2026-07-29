@@ -631,6 +631,99 @@ def test_exact_key_resurrects_durable_identity_and_user_state(tmp_path: Path) ->
     assert cover.detection_id == "returned"
 
 
+def test_cross_generation_exact_key_atomically_switches_runtime_contract(
+    tmp_path: Path,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    old_pet = replace(
+        _pet("pet-a", first),
+        detection_count=2,
+        sample_count=2,
+        profile_state="stable",
+    )
+    repository.replace_all([first, second], [old_pet])
+    assert repository.rename_pet("pet-a", "Miso")
+    assert repository.set_pet_hidden("pet-a", True)
+    assert repository.set_pet_cover("pet-a", "old-b")
+
+    incoming = replace(
+        _detection(
+            "new-a",
+            asset_id="asset-a",
+            embedding=np.asarray([1.0, 0.0]),
+        ),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    result = repository.replace_assets_incrementally(
+        ["asset-a"],
+        [incoming],
+        distance_threshold=0.1,
+    )
+
+    runtime = repository.get_all_detections()
+    assert [(item.detection_id, item.pet_id) for item in runtime] == [("new-a", "pet-a")]
+    assert {
+        (item.embedding_pipeline_version, item.embedding_dim, item.generation_id)
+        for item in runtime
+    } == {("embedding-v2", 2, 1)}
+    assert result.changed_asset_ids == ("asset-a", "asset-b")
+    assert result.added_pet_ids == ()
+    assert result.updated_pet_ids == ("pet-a",)
+    summaries = repository.get_pet_summaries(include_hidden=True)
+    assert [(item.pet_id, item.name, item.is_hidden) for item in summaries] == [
+        ("pet-a", "Miso", True)
+    ]
+    assert repository.state_repository is not None
+    cover = repository.state_repository.get_cover("pet-a")
+    assert cover is not None and cover.is_custom
+    assert cover.detection_id == "old-b"
+
+
+def test_cross_generation_contract_switch_rolls_back_old_runtime_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    repository.replace_all(
+        [first, second],
+        [replace(_pet("pet-a", first), detection_count=2, sample_count=2)],
+    )
+    assert repository.rename_pet("pet-a", "Miso")
+    incoming = replace(
+        _detection("new-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+
+    def fail_rebuild(*_args, **_kwargs):
+        raise RuntimeError("injected rebuild failure")
+
+    monkeypatch.setattr(pet_pipeline, "build_pet_records_from_detections", fail_rebuild)
+    with pytest.raises(RuntimeError, match="injected rebuild failure"):
+        repository.replace_assets_incrementally(
+            ["asset-a"],
+            [incoming],
+            distance_threshold=0.1,
+        )
+
+    assert {item.detection_id for item in repository.get_all_detections()} == {
+        "old-a",
+        "old-b",
+    }
+    assert repository.state_repository is not None
+    profile = repository.state_repository.get_profile("pet-a")
+    assert profile is not None
+    assert profile.name == "Miso"
+    assert profile.generation_id == 0
+
+
 def test_generation_contract_rejects_cross_space_merge_and_move(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     first = _detection("first", pet_id="pet-a")
@@ -750,6 +843,115 @@ def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -
 
     assert len(result.added_pet_ids) == 1
     assert repository.get_detection("candidate").pet_id != "pet-a"  # type: ignore[union-attr]
+
+
+def test_complete_link_excludes_zero_detection_replacement_assets(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    outlier = _detection(
+        "outlier",
+        asset_id="asset-a",
+        embedding=np.asarray([0.94, 0.341, 0.0]),
+        pet_id="pet-a",
+    )
+    retained = [
+        _detection(f"retained-{index}", asset_id=f"asset-{index}", pet_id="pet-a")
+        for index in ("b", "c")
+    ]
+    members = [outlier, *retained]
+    stable = replace(
+        _pet("pet-a", outlier),
+        detection_count=3,
+        sample_count=3,
+        profile_state="stable",
+        center_embedding=normalize_vector(
+            np.mean([member.embedding for member in members], axis=0)
+        ),
+    )
+    repository.replace_all(members, [stable])
+    candidate = _detection("candidate", asset_id="asset-d")
+
+    repository.replace_assets_incrementally(
+        ["asset-a", "asset-d"],
+        [candidate],
+        distance_threshold=0.03,
+    )
+
+    assigned = repository.get_detection("candidate")
+    assert assigned is not None and assigned.pet_id == "pet-a"
+    assert repository.get_detection("outlier") is None
+
+
+def test_complete_link_expands_ann_shortlist_until_ninth_candidate(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db")
+    detection = _detection("candidate", asset_id="asset-candidate")
+    ordered = [(index / 100.0, f"pet-{index}") for index in range(1, 10)]
+
+    class ExpandingIndex:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        def search(self, _embedding, *, species_label, limit):
+            assert species_label == "dog"
+            self.limits.append(limit)
+            return ordered[:limit]
+
+    candidate_index = ExpandingIndex()
+    bad_sample = normalize_vector(np.asarray([0.0, 1.0, 0.0]))
+    good_sample = normalize_vector(np.asarray([1.0, 0.0, 0.0]))
+    member_samples = {
+        pet_id: ((f"asset-{pet_id}", bad_sample),) for _distance, pet_id in ordered[:8]
+    }
+    member_samples["pet-9"] = (("asset-pet-9", good_sample),)
+
+    matched = repository._nearest_compatible_pet_id(
+        detection,
+        member_samples=member_samples,
+        staged_samples={},
+        excluded_asset_ids=set(),
+        candidate_index=candidate_index,  # type: ignore[arg-type]
+        distance_threshold=0.1,
+    )
+
+    assert matched == "pet-9"
+    assert candidate_index.limits == [8, 16]
+
+
+@pytest.mark.parametrize(
+    ("ordered", "expected_limits"),
+    [
+        ([(0.2, "too-far")], [8]),
+        ([(0.01, f"pet-{index}") for index in range(8)], [8, 16]),
+    ],
+)
+def test_complete_link_progressive_search_stops_at_threshold_or_exhaustion(
+    tmp_path: Path,
+    ordered: list[tuple[float, str]],
+    expected_limits: list[int],
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db")
+
+    class FiniteIndex:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        def search(self, _embedding, *, species_label, limit):
+            assert species_label == "dog"
+            self.limits.append(limit)
+            return ordered[:limit]
+
+    candidate_index = FiniteIndex()
+    bad_sample = normalize_vector(np.asarray([0.0, 1.0, 0.0]))
+    matched = repository._nearest_compatible_pet_id(
+        _detection("candidate"),
+        member_samples={pet_id: ((pet_id, bad_sample),) for _distance, pet_id in ordered},
+        staged_samples={},
+        excluded_asset_ids=set(),
+        candidate_index=candidate_index,  # type: ignore[arg-type]
+        distance_threshold=0.1,
+    )
+
+    assert matched == ""
+    assert candidate_index.limits == expected_limits
 
 
 def test_stable_incremental_matching_is_input_order_invariant(tmp_path: Path) -> None:

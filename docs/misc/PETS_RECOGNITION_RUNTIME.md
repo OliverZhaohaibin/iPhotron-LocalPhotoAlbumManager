@@ -88,9 +88,11 @@ Each accepted crop receives:
 
 Clustering is species-separated and uses the current complete-link pipeline
 (`species-complete-link-v1`) with a default cosine distance threshold of
-`0.42`. Cats and dogs must never enter the same identity cluster. Stable state
-uses `pet_key` mappings and profile distance to preserve canonical `pet_id`
-values across rebuilds.
+`0.42`. Incremental identity matching uses a progressively expanded ANN
+shortlist followed by exact complete-link verification against every persisted
+member of each shortlisted candidate. Cats and dogs must never enter the same
+identity cluster. Stable state uses `pet_key` mappings and profile distance to
+preserve canonical `pet_id` values across rebuilds.
 
 The detector and clustering pipeline versions are stored separately. A detector
 version change resets eligible `done` assets to `pending`; a clustering-only

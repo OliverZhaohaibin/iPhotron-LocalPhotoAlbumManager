@@ -318,6 +318,7 @@ class PetIndexCoordinator(QObject):
                 {
                     "index_applied": True,
                     "generation_id": generation_id,
+                    "changed_asset_ids": list(commit_result.changed_asset_ids),
                     "added_pet_ids": list(commit_result.added_pet_ids),
                     "updated_pet_ids": list(commit_result.updated_pet_ids),
                     "removed_pet_ids": list(commit_result.removed_pet_ids),
@@ -354,9 +355,12 @@ class PetIndexCoordinator(QObject):
                 raise PetSnapshotCommittedError(
                     "Pet scan committed, but updating scan bookkeeping failed."
                 ) from exc
+            changed_asset_ids = commit_result.changed_asset_ids or tuple(
+                done_ids + retry_ids + terminal_failed_ids
+            )
             outbox_payload = {
                 "generation_id": generation_id,
-                "changed_asset_ids": list(done_ids + retry_ids + terminal_failed_ids),
+                "changed_asset_ids": list(changed_asset_ids),
                 "added_pet_ids": list(commit_result.added_pet_ids),
                 "updated_pet_ids": list(commit_result.updated_pet_ids),
                 "removed_pet_ids": list(commit_result.removed_pet_ids),
@@ -364,7 +368,7 @@ class PetIndexCoordinator(QObject):
             event = self._emit_snapshot(
                 operation_id=operation_id,
                 generation_id=generation_id,
-                changed_asset_ids=tuple(done_ids + retry_ids + terminal_failed_ids),
+                changed_asset_ids=changed_asset_ids,
                 added_pet_ids=commit_result.added_pet_ids,
                 updated_pet_ids=commit_result.updated_pet_ids,
                 removed_pet_ids=commit_result.removed_pet_ids,

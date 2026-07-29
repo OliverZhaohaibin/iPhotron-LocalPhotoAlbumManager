@@ -20,7 +20,7 @@ from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
-from .records import AssetPetAnnotation, PetDetectionRecord, PetRecord, PetSummary
+from .records import AssetPetAnnotation, PetDetectionRecord, PetProfile, PetRecord, PetSummary
 from .repository_utils import (
     cosine_distance,
     deserialize_embedding,
@@ -58,15 +58,20 @@ class EmbeddingContract:
 
     @classmethod
     def from_pet(cls, pet: PetRecord) -> "EmbeddingContract":
+        return cls.from_profile(pet)
+
+    @classmethod
+    def from_profile(cls, profile: PetProfile | PetRecord) -> "EmbeddingContract":
         return cls(
-            pipeline_version=str(pet.embedding_pipeline_version or ""),
-            dimension=int(pet.embedding_dim),
-            generation_id=int(pet.generation_id),
+            pipeline_version=str(profile.embedding_pipeline_version or ""),
+            dimension=int(profile.embedding_dim),
+            generation_id=int(profile.generation_id),
         )
 
 
 @dataclass(frozen=True)
 class PetIncrementalCommitResult:
+    changed_asset_ids: tuple[str, ...] = ()
     previous_thumbnail_paths: tuple[str, ...] = ()
     added_pet_ids: tuple[str, ...] = ()
     updated_pet_ids: tuple[str, ...] = ()
@@ -86,6 +91,12 @@ class _ProfileMatchContext:
     species: dict[str, str | None]
     member_samples: dict[str, tuple[tuple[str, np.ndarray], ...]]
     candidate_index: "_ProfileCandidateIndex"
+
+
+@dataclass(frozen=True)
+class _IncrementalPetAssignment:
+    detections: tuple[PetDetectionRecord, ...] = ()
+    contract_replacement_pet_ids: tuple[str, ...] = ()
 
 
 class PetRepository:
@@ -302,8 +313,8 @@ class PetRepository:
             for value in dict.fromkeys(str(value) for value in retry_asset_ids if value)
             if value not in set(replaced_asset_ids)
         )
-        changed_asset_ids = tuple(dict.fromkeys((*replaced_asset_ids, *retry_ids)))
-        if not changed_asset_ids:
+        requested_changed_asset_ids = tuple(dict.fromkeys((*replaced_asset_ids, *retry_ids)))
+        if not requested_changed_asset_ids:
             return PetIncrementalCommitResult()
 
         staged = list(detections)
@@ -337,21 +348,56 @@ class PetRepository:
             match_context = self._profiles_for_contract(embedding_contract)
             existing_pets = match_context.profiles
             candidate_index = match_context.candidate_index
-        assigned = self._assign_incremental_pet_ids(
+        assignment = self._assign_incremental_pet_ids(
             staged,
             existing_pets=existing_pets,
             candidate_index=candidate_index,
             match_context=match_context,
+            excluded_asset_ids=set(replaced_asset_ids),
             distance_threshold=distance_threshold,
         )
+        assigned = list(assignment.detections)
+        contract_replacement_pet_ids = assignment.contract_replacement_pet_ids
 
         effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
-            previous_rows = self._select_detections_by_asset_ids(
+            replaced_rows = self._select_detections_by_asset_ids(
                 conn,
                 replaced_asset_ids,
             )
+            retired_rows: list[sqlite3.Row] = []
+            if embedding_contract is not None and contract_replacement_pet_ids:
+                candidate_rows = self._select_detections_by_pet_ids(
+                    conn,
+                    contract_replacement_pet_ids,
+                )
+                retired_rows = [
+                    row
+                    for row in candidate_rows
+                    if EmbeddingContract(
+                        pipeline_version=str(row["embedding_pipeline_version"] or ""),
+                        dimension=int(row["embedding_dim"] or 0),
+                        generation_id=int(row["generation_id"] or 0),
+                    )
+                    != embedding_contract
+                ]
+            previous_rows_by_id = {
+                str(row["detection_id"]): row for row in (*replaced_rows, *retired_rows)
+            }
+            previous_rows = list(previous_rows_by_id.values())
             previous_detections = [self._detection_from_row(row) for row in previous_rows]
+            changed_asset_ids = tuple(
+                dict.fromkeys(
+                    (
+                        *requested_changed_asset_ids,
+                        *(
+                            detection.asset_id
+                            for detection in previous_detections
+                            if detection.asset_id
+                        ),
+                    )
+                )
+            )
             previous_thumbnail_paths = tuple(
                 str(detection.thumbnail_path)
                 for detection in previous_detections
@@ -383,6 +429,15 @@ class PetRepository:
                 placeholders = ", ".join("?" for _ in chunk)
                 conn.execute(
                     f"DELETE FROM pet_detections WHERE asset_id IN ({placeholders})",
+                    chunk,
+                )
+            retired_detection_ids = tuple(
+                dict.fromkeys(str(row["detection_id"]) for row in retired_rows)
+            )
+            for chunk in _chunked(retired_detection_ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM pet_detections WHERE detection_id IN ({placeholders})",
                     chunk,
                 )
             if assigned:
@@ -453,7 +508,15 @@ class PetRepository:
                 (utc_now_iso(),),
             )
             surviving_pet_ids = {pet.pet_id for pet in rebuilt_pets}
-            added = tuple(sorted(pet_id for pet_id in new_pet_ids if pet_id not in existing_pets))
+            added = tuple(
+                sorted(
+                    pet_id
+                    for pet_id in new_pet_ids
+                    if pet_id not in existing_pets
+                    and pet_id not in old_pet_ids
+                    and pet_id not in contract_replacement_pet_ids
+                )
+            )
             removed = tuple(sorted(old_pet_ids - surviving_pet_ids))
             updated = tuple(
                 sorted(((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed)))
@@ -477,14 +540,17 @@ class PetRepository:
             self._write_runtime_commit(conn, effective_operation_id, commit_payload)
             conn.commit()
 
-        self.complete_runtime_state_sync(effective_operation_id)
-        if embedding_contract is not None:
+        if contract_replacement_pet_ids:
+            self._invalidate_profile_indexes()
+        elif embedding_contract is not None:
             self._update_profile_indexes(
                 embedding_contract,
                 affected_pet_ids=affected_pet_ids,
                 rebuilt_pets=rebuilt_pets,
             )
+        self.complete_runtime_state_sync(effective_operation_id)
         return PetIncrementalCommitResult(
+            changed_asset_ids=changed_asset_ids,
             previous_thumbnail_paths=previous_thumbnail_paths,
             added_pet_ids=added,
             updated_pet_ids=updated,
@@ -750,10 +816,11 @@ class PetRepository:
         existing_pets: dict[str, PetRecord],
         candidate_index: _ProfileCandidateIndex | None = None,
         match_context: _ProfileMatchContext | None = None,
+        excluded_asset_ids: set[str],
         distance_threshold: float,
-    ) -> list[PetDetectionRecord]:
+    ) -> _IncrementalPetAssignment:
         if not detections:
-            return []
+            return _IncrementalPetAssignment()
         redirects = (
             self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}
         )
@@ -792,10 +859,10 @@ class PetRepository:
             }
         )
         member_samples = match_context.member_samples if match_context is not None else {}
-        replaced_asset_ids = {detection.asset_id for detection in detections}
         candidate_index = candidate_index or _ProfileCandidateIndex(centers, species)
         staged_samples: dict[str, list[np.ndarray]] = {}
         assigned_by_detection_id: dict[str, PetDetectionRecord] = {}
+        contract_replacement_pet_ids: set[str] = set()
         unmatched: list[PetDetectionRecord] = []
 
         # Resolve durable/manual keys before embedding matches. Sorting makes the
@@ -825,6 +892,11 @@ class PetRepository:
             elif candidate_id and candidate_id not in existing_pets and durable_profile is None:
                 candidate_id = ""
             if candidate_id:
+                candidate_profile = existing_pets.get(candidate_id) or durable_profile
+                if candidate_profile is not None and EmbeddingContract.from_profile(
+                    candidate_profile
+                ) != EmbeddingContract.from_detection(detection):
+                    contract_replacement_pet_ids.add(candidate_id)
                 assigned_by_detection_id[detection.detection_id] = replace(
                     detection, pet_id=candidate_id
                 )
@@ -840,7 +912,7 @@ class PetRepository:
                 detection,
                 member_samples=member_samples,
                 staged_samples=staged_samples,
-                excluded_asset_ids=replaced_asset_ids,
+                excluded_asset_ids=excluded_asset_ids,
                 candidate_index=candidate_index,
                 distance_threshold=distance_threshold,
             )
@@ -864,7 +936,12 @@ class PetRepository:
             assigned_by_detection_id.update(
                 {detection.detection_id: detection for detection in clustered}
             )
-        return [assigned_by_detection_id[detection.detection_id] for detection in detections]
+        return _IncrementalPetAssignment(
+            detections=tuple(
+                assigned_by_detection_id[detection.detection_id] for detection in detections
+            ),
+            contract_replacement_pet_ids=tuple(sorted(contract_replacement_pet_ids)),
+        )
 
     def _profiles_for_contract(
         self,
@@ -952,38 +1029,54 @@ class PetRepository:
         distance_threshold: float,
     ) -> str:
         detection_species = _normalize_species_label(detection.species_label)
-        candidates = candidate_index.search(
-            detection.embedding,
-            species_label=detection_species,
-            limit=8,
-        )
-        shortlisted = [
-            pet_id
-            for center_distance, pet_id in sorted(candidates)[:8]
-            if center_distance <= distance_threshold
-        ]
-        missing = tuple(pet_id for pet_id in shortlisted if pet_id not in member_samples)
-        if missing:
-            member_samples.update(self._load_complete_link_samples_for_pets(missing))
-        for center_distance, pet_id in sorted(candidates)[:8]:
-            if center_distance > distance_threshold:
-                continue
-            samples = (
-                *(
-                    sample
-                    for asset_id, sample in member_samples.get(pet_id, ())
-                    if asset_id not in excluded_asset_ids
-                ),
-                *staged_samples.get(pet_id, ()),
+        limit = 8
+        seen: set[str] = set()
+        while True:
+            candidates = sorted(
+                candidate_index.search(
+                    detection.embedding,
+                    species_label=detection_species,
+                    limit=limit,
+                )
             )
-            if (
-                samples
-                and max(cosine_distance(detection.embedding, sample) for sample in samples)
-                > distance_threshold
-            ):
-                continue
-            return pet_id
-        return ""
+            within_threshold: list[tuple[float, str]] = []
+            threshold_exhausted = False
+            for center_distance, pet_id in candidates:
+                if pet_id in seen:
+                    continue
+                seen.add(pet_id)
+                if center_distance > distance_threshold:
+                    threshold_exhausted = True
+                    break
+                within_threshold.append((center_distance, pet_id))
+
+            missing = tuple(
+                pet_id
+                for _center_distance, pet_id in within_threshold
+                if pet_id not in member_samples
+            )
+            if missing:
+                member_samples.update(self._load_complete_link_samples_for_pets(missing))
+            for _center_distance, pet_id in within_threshold:
+                samples = (
+                    *(
+                        sample
+                        for asset_id, sample in member_samples.get(pet_id, ())
+                        if asset_id not in excluded_asset_ids
+                    ),
+                    *staged_samples.get(pet_id, ()),
+                )
+                if (
+                    samples
+                    and max(cosine_distance(detection.embedding, sample) for sample in samples)
+                    > distance_threshold
+                ):
+                    continue
+                return pet_id
+
+            if threshold_exhausted or len(candidates) < limit:
+                return ""
+            limit *= 2
 
     def _load_complete_link_samples_for_pets(
         self,

@@ -10,6 +10,7 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -140,7 +141,7 @@ def _integrity_ok(database_path: Path) -> bool:
     if not database_path.is_file():
         return False
     try:
-        with sqlite3.connect(database_path, timeout=0.5) as connection:
+        with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
             row = connection.execute("PRAGMA integrity_check").fetchone()
         return bool(row and str(row[0]).casefold() == "ok")
     except sqlite3.OperationalError as exc:
@@ -155,8 +156,8 @@ def _integrity_ok(database_path: Path) -> bool:
 def _online_backup(source_path: Path, destination_path: Path) -> None:
     destination_path.unlink(missing_ok=True)
     try:
-        with sqlite3.connect(source_path, timeout=0.5) as source:
-            with sqlite3.connect(destination_path) as destination:
+        with closing(sqlite3.connect(source_path, timeout=0.5)) as source:
+            with closing(sqlite3.connect(destination_path)) as destination:
                 source.backup(destination)
     except sqlite3.OperationalError as exc:
         message = str(exc).casefold()
@@ -392,7 +393,7 @@ class SchemaMigrator:
             current_ok = _integrity_ok(database_path)
             current_version = -1
             if current_ok:
-                with sqlite3.connect(database_path, timeout=0.5) as connection:
+                with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
                     current_version = int(
                         connection.execute("PRAGMA user_version").fetchone()[0]
                     )
@@ -421,7 +422,7 @@ class SchemaMigrator:
 
         existed = database_path.is_file() and database_path.stat().st_size > 0
         try:
-            with sqlite3.connect(database_path, timeout=0.5) as connection:
+            with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
                 source_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         except sqlite3.OperationalError as exc:
             code = _classify_sqlite_operational_error(exc, fallback="db_corrupt")
@@ -469,9 +470,10 @@ class SchemaMigrator:
             _atomic_write_state(state_path, state)
 
         try:
-            with sqlite3.connect(database_path, timeout=0.5) as connection:
-                SchemaMigrator.initialize_schema(connection)
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
+                with connection:
+                    SchemaMigrator.initialize_schema(connection)
+                    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         except SchemaPreparationError:
             raise
         except sqlite3.OperationalError as exc:

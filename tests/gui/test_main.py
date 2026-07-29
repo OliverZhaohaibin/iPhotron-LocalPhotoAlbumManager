@@ -701,7 +701,18 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     class _FakeWindow:
         def __init__(self, _context):
-            self.ui = type("FakeUi", (), {"sidebar": type("FakeSidebar", (), {"select_all_photos": lambda *a, **k: None})()})()
+            self.ui = type(
+                "FakeUi",
+                (),
+                {
+                    "sidebar": type(
+                        "FakeSidebar",
+                        (),
+                        {"select_all_photos": lambda *a, **k: None},
+                    )(),
+                    "ensure_feature": lambda *a, **k: None,
+                },
+            )()
             self.firstPainted = type("FakeSignal", (), {"connect": lambda *a, **k: None})()
 
         def show(self) -> None:

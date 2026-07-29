@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="AppImage packaging contracts require a Linux host",
+)
 
 
 def _executable(path: Path, contents: str) -> None:

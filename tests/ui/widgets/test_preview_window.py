@@ -10,7 +10,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for preview window te
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets.preview_window import (
     PreviewWindow,
@@ -107,8 +107,28 @@ def test_show_preview_keeps_plain_media_path_for_unedited_video_off_macos() -> N
     window.hide.assert_not_called()
 
 
-def test_rhi_popup_resize_preview_includes_shadow_padding(qapp) -> None:
+class _FakePopupVideoArea(QWidget):
+    """Preserve popup layout behavior without starting QtMultimedia."""
+
+    def set_transparent_preview_enabled(
+        self,
+        enabled: bool,
+        *,
+        corner_radius: float,
+    ) -> None:
+        self.transparent_preview = (enabled, corner_radius)
+
+    def stop(self) -> None:
+        pass
+
+
+def test_rhi_popup_resize_preview_includes_shadow_padding(qapp, monkeypatch) -> None:
     del qapp
+    monkeypatch.setattr(
+        _RhiPreviewPopup,
+        "_create_video_area",
+        lambda popup: _FakePopupVideoArea(popup._content_frame),
+    )
     popup = _RhiPreviewPopup()
 
     try:
@@ -121,6 +141,7 @@ def test_rhi_popup_resize_preview_includes_shadow_padding(qapp) -> None:
         assert popup._content_frame.geometry() == content_rect
         assert not popup._content_frame.mask().isEmpty()
         assert popup._video_area.geometry() == QRect(0, 0, 320, 180)
+        assert popup._video_area.parent() is popup._content_frame
         assert popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         assert popup.mask().isEmpty()
     finally:

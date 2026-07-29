@@ -109,7 +109,9 @@ recovery before the snapshot event is dispatched. Until each retired asset is
 processed, a target-contract migration record lets only that asset fuzzy-match
 the anchored identity even while its new profile has fewer than two samples.
 Processing the asset consumes the record, so ordinary one-sample profiles never
-become general embedding candidates.
+become general embedding candidates. Outstanding records follow explicit Pet
+merges and advance to the newest target contract if another embedding upgrade
+starts before the previous drain finishes.
 
 ## Scan Scheduling And Status
 

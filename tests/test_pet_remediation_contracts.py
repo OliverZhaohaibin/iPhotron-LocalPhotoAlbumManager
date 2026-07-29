@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from iPhoto.gui.ui.widgets.recognition_annotations import pet_annotation_adapter
 from iPhoto.people.repository import FaceRepository
 from iPhoto.people.status import is_face_scan_candidate
 from iPhoto.pets import pipeline as pet_pipeline
+from iPhoto.pets import repository as pet_repository
 from iPhoto.pets.index_coordinator import PetIndexCoordinator, PetSnapshotCommittedError
 from iPhoto.pets.pipeline import DetectedAssetPets, PetClusterPipeline, build_pet_key
 from iPhoto.pets.records import (
@@ -805,6 +807,106 @@ def test_cross_generation_anchor_absorbs_changed_key_in_later_batch_after_restar
     assert remaining == (0,)
 
 
+def test_contract_migration_assets_follow_pet_merge(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    target = replace(
+        _detection(
+            "target",
+            asset_id="asset-c",
+            embedding=np.asarray([1.0, 0.0]),
+            pet_id="pet-b",
+        ),
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    repository.replace_all(
+        [first, second, target],
+        [
+            replace(_pet("pet-a", first), detection_count=2, sample_count=2),
+            _pet("pet-b", target),
+        ],
+    )
+    anchored = replace(
+        _detection("new-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    repository.replace_assets_incrementally(
+        ["asset-a"],
+        [anchored],
+        distance_threshold=0.05,
+    )
+
+    assert repository.merge_pets("pet-a", "pet-b") is not None
+    with sqlite3.connect(repository.db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT pet_id, asset_id
+            FROM pet_contract_migration_assets
+            """
+        ).fetchall()
+    assert rows == [("pet-b", "asset-b")]
+
+
+def test_unfinished_migration_assets_advance_to_next_contract(tmp_path: Path) -> None:
+    index_path = tmp_path / "pet_index.db"
+    state_path = tmp_path / "pet_state.db"
+    repository = PetRepository(index_path, state_path)
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    repository.replace_all(
+        [first, second],
+        [replace(_pet("pet-a", first), detection_count=2, sample_count=2)],
+    )
+    v2_anchor = replace(
+        _detection("v2-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    repository.replace_assets_incrementally(
+        ["asset-a"],
+        [v2_anchor],
+        distance_threshold=0.05,
+    )
+    v3_anchor = replace(
+        _detection("v3-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v3",
+        generation_id=2,
+    )
+    repository.replace_assets_incrementally(
+        ["asset-a"],
+        [v3_anchor],
+        distance_threshold=0.05,
+    )
+
+    with sqlite3.connect(index_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT asset_id, embedding_pipeline_version, generation_id
+            FROM pet_contract_migration_assets
+            """
+        ).fetchall()
+    assert rows == [("asset-b", "embedding-v3", 2)]
+
+    reopened = PetRepository(index_path, state_path)
+    moved_box = replace(
+        _detection("v3-b", asset_id="asset-b", embedding=np.asarray([0.999, 0.001])),
+        embedding_pipeline_version="embedding-v3",
+        generation_id=2,
+    )
+    reopened.replace_assets_incrementally(
+        ["asset-b"],
+        [moved_box],
+        distance_threshold=0.05,
+    )
+    assert reopened.get_detection("v3-b").pet_id == "pet-a"  # type: ignore[union-attr]
+
+
 def test_contract_retirement_marks_unscanned_assets_pending(tmp_path: Path) -> None:
     store = _AssetStatusStore("asset-a", "asset-b")
     coordinator = PetIndexCoordinator(tmp_path, asset_repository=store)  # type: ignore[arg-type]
@@ -935,6 +1037,69 @@ def test_generation_contract_rejects_cross_space_merge_and_move(tmp_path: Path) 
 
     assert repository.merge_pets("pet-a", "pet-b") is None
     assert repository.move_detection_to_pet("first", "pet-b") is None
+
+
+def test_cross_species_move_is_rejected_and_journal_is_finalized(tmp_path: Path) -> None:
+    repository = PetRepository(
+        tmp_path / ".iPhoto" / "pets" / "pet_index.db",
+        tmp_path / ".iPhoto" / "pets" / "pet_state.db",
+    )
+    cat = replace(_detection("cat", pet_id="pet-cat"), species_label="cat")
+    dog = _detection("dog", asset_id="asset-dog", pet_id="pet-dog")
+    repository.replace_all([cat, dog], [_pet("pet-cat", cat), _pet("pet-dog", dog)])
+    coordinator = PetIndexCoordinator(tmp_path)
+    coordinator._repository = lambda: repository  # type: ignore[method-assign]
+
+    assert coordinator.move_detection_to_pet("cat", "pet-dog") is None
+    assert repository.get_detection("cat").pet_id == "pet-cat"  # type: ignore[union-attr]
+    assert repository.get_detection("dog").pet_id == "pet-dog"  # type: ignore[union-attr]
+    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {
+        "pet-cat",
+        "pet-dog",
+    }
+    assert coordinator._journal.unfinished() == ()
+
+
+def test_profile_candidate_index_has_strict_species_parity_with_usearch(
+    monkeypatch,
+) -> None:
+    pytest.importorskip("usearch.index")
+    vector = normalize_vector(np.asarray([1.0, 0.0, 0.0]))
+    centers = {
+        "pet-cat": vector,
+        "pet-dog": vector,
+        "pet-unknown": vector,
+    }
+    species = {"pet-cat": "cat", "pet-dog": "dog", "pet-unknown": None}
+    accelerated = pet_repository._ProfileCandidateIndex(dict(centers), dict(species))
+
+    with monkeypatch.context() as context:
+        context.setitem(sys.modules, "usearch", None)
+        context.setitem(sys.modules, "usearch.index", None)
+        fallback = pet_repository._ProfileCandidateIndex(dict(centers), dict(species))
+
+    expected = {
+        "cat": [(0.0, "pet-cat")],
+        "dog": [(0.0, "pet-dog")],
+        None: [(0.0, "pet-unknown")],
+    }
+    for species_label, matches in expected.items():
+        accelerated_matches = accelerated.search(
+            vector,
+            species_label=species_label,
+            limit=8,
+        )
+        fallback_matches = fallback.search(
+            vector,
+            species_label=species_label,
+            limit=8,
+        )
+        assert [pet_id for _distance, pet_id in accelerated_matches] == [
+            pet_id for _distance, pet_id in matches
+        ]
+        assert [pet_id for _distance, pet_id in fallback_matches] == [
+            pet_id for _distance, pet_id in matches
+        ]
 
 
 def test_generation_contract_is_reused_and_activated_in_one_transaction(

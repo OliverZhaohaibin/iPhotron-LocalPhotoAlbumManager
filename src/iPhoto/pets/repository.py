@@ -419,6 +419,43 @@ class PetRepository:
                     chunk,
                 )
             if embedding_contract is not None and retired_rows:
+                replacement_ids = tuple(contract_replacement_pet_ids)
+                for chunk in _chunked(replacement_ids, 500):
+                    placeholders = ", ".join("?" for _ in chunk)
+                    conn.execute(
+                        f"""
+                        INSERT OR IGNORE INTO pet_contract_migration_assets (
+                            pet_id, asset_id, embedding_pipeline_version,
+                            embedding_dimension, generation_id
+                        )
+                        SELECT pet_id, asset_id, ?, ?, ?
+                        FROM pet_contract_migration_assets
+                        WHERE pet_id IN ({placeholders})
+                        """,
+                        (
+                            embedding_contract.pipeline_version,
+                            embedding_contract.dimension,
+                            embedding_contract.generation_id,
+                            *chunk,
+                        ),
+                    )
+                    conn.execute(
+                        f"""
+                        DELETE FROM pet_contract_migration_assets
+                        WHERE pet_id IN ({placeholders})
+                          AND NOT (
+                              embedding_pipeline_version = ?
+                              AND embedding_dimension = ?
+                              AND generation_id = ?
+                          )
+                        """,
+                        (
+                            *chunk,
+                            embedding_contract.pipeline_version,
+                            embedding_contract.dimension,
+                            embedding_contract.generation_id,
+                        ),
+                    )
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO pet_contract_migration_assets (
@@ -2103,6 +2140,23 @@ class PetRepository:
                 "UPDATE pet_detections SET pet_id = ? WHERE pet_id = ?",
                 (target_pet_id, source_pet_id),
             )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO pet_contract_migration_assets (
+                    pet_id, asset_id, embedding_pipeline_version,
+                    embedding_dimension, generation_id
+                )
+                SELECT ?, asset_id, embedding_pipeline_version,
+                       embedding_dimension, generation_id
+                FROM pet_contract_migration_assets
+                WHERE pet_id = ?
+                """,
+                (target_pet_id, source_pet_id),
+            )
+            conn.execute(
+                "DELETE FROM pet_contract_migration_assets WHERE pet_id = ?",
+                (source_pet_id,),
+            )
             self._rebuild_pet_records_in_connection(conn)
             changed_asset_ids = tuple(str(row["asset_id"]) for row in asset_rows if row["asset_id"])
             self._write_runtime_commit(
@@ -2119,6 +2173,7 @@ class PetRepository:
                 },
             )
             conn.commit()
+        self._invalidate_profile_indexes()
         self.complete_runtime_state_sync(effective_operation_id)
         self._remap_people_groups_for_pet_merge(source_pet_id, target_pet_id)
         return PetMutationResult(
@@ -2233,7 +2288,8 @@ class PetRepository:
         with closing(self._connect()) as conn:
             target = conn.execute(
                 """
-                SELECT pet_id, embedding_pipeline_version, embedding_dim, generation_id
+                SELECT pet_id, species_label,
+                       embedding_pipeline_version, embedding_dim, generation_id
                 FROM pets WHERE pet_id = ?
                 """,
                 (target_pet_id,),
@@ -2246,6 +2302,10 @@ class PetRepository:
                 generation_id=int(target["generation_id"] or 0),
             )
             if EmbeddingContract.from_detection(detection) != target_contract:
+                return None
+            if _normalize_species_label(detection.species_label) != _normalize_species_label(
+                target["species_label"]
+            ):
                 return None
             conn.execute(
                 "UPDATE pet_detections SET pet_id = ? WHERE detection_id = ?",
@@ -2875,22 +2935,24 @@ class _ProfileCandidateIndex:
                 ),
                 key=lambda item: (item[0], item[1]),
             )[:limit]
-        labels = (
-            {label for dim, label in self._indexes if dim == vector.size}
-            if species_label is None
-            else {species_label, None}
-        )
+        labels = {species_label}
         matches: list[tuple[float, str]] = []
         for label in labels:
             entry = self._indexes.get((int(vector.size), label))
             if entry is None:
                 continue
             index, key_to_pet, _pet_to_key = entry
+            if not key_to_pet:
+                continue
             result = index.search(vector, min(limit, len(key_to_pet)))
             matches.extend(
                 (float(distance), key_to_pet[int(key)])
                 for key, distance in zip(result.keys, result.distances, strict=True)
                 if int(key) in key_to_pet
+                and _species_compatible(
+                    species_label,
+                    self._species.get(key_to_pet[int(key)]),
+                )
             )
         return sorted(matches, key=lambda item: (item[0], item[1]))[:limit]
 

@@ -423,8 +423,19 @@ def _keep_test_qapplication_alive():
         yield
         return
 
-    _test_qapplication()
-    yield
+    global _TEST_QAPPLICATION
+
+    app = _test_qapplication()
+    try:
+        yield
+    finally:
+        # PySide otherwise destroys QApplication from its interpreter-shutdown
+        # hook, after Python-owned Qt callbacks and module globals have already
+        # begun disappearing.  Shut the binding down while pytest's fixture
+        # graph is still intact so native QRhi resources are released in Qt's
+        # normal application teardown order.
+        app.shutdown()
+        _TEST_QAPPLICATION = None
 
 
 @pytest.fixture()

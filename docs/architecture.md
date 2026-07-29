@@ -14,11 +14,16 @@ For completed migration records and verification history, see
 The vNext architecture cleanup is complete for production source code.
 
 - Production runtime code no longer imports `iPhoto.legacy` or `iPhoto.models.*`.
-- Compatibility and old domain-repository code is quarantined under
-  `src/iPhoto/legacy/` for explicit historical behavior tests only.
+- The compatibility application tree and old domain-repository implementation
+  under `src/iPhoto/legacy/` have been removed.
 - `RuntimeContext -> LibrarySession` is the active library entry path.
 - Application ports and services define the boundary used by GUI, CLI, workers,
   People, Maps, Edit, thumbnails, and lifecycle operations.
+- Library session changes advance an immutable binding epoch; asynchronous
+  Detail/Playback results must match that epoch, asset generation, asset id,
+  source path, and source revision before they may reach the GUI.
+- Gallery-to-Detail still/video presentation uses generation-safe transactions,
+  bounded neutral surface caches, and a shared Detail/Edit render session.
 - Architecture guardrails are enforced by `tools/check_architecture.py` and
   `tests/architecture`.
 
@@ -306,6 +311,15 @@ coordinators, menus, shortcuts, Qt workers, and signal adapters. GUI code calls
 session/application surfaces and does not directly write durable state or call
 concrete repository singletons.
 
+The Detail rendering boundary separates transaction visibility from individual
+surface presentation. A Live Photo motion frame may make a transaction visible,
+while a later still surface for the same transaction still completes state,
+overlay, and neighbor-prefetch work. `PlaybackAsyncToken` rejects video,
+location, overlay, and other worker results from a previous library epoch or
+asset generation. `PhotoRenderSessionHandle` lets Detail and Edit share source
+surfaces; same-library tree refresh does not invalidate it, while a real library
+switch is preflighted and blocked until the user finishes or cancels editing.
+
 User-visible GUI text goes through the Qt translation boundary. New strings
 should use `iPhoto.gui.i18n.tr(context, source_text)` or
 `QCoreApplication.translate(...)` with a stable context. Long-lived widgets
@@ -357,6 +371,7 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, independent `face_status`/`pet_status`, and related library state. |
 | `.iPhoto/links.json` | Derived Live Photo compatibility materialization; repository/session Live Photo role state remains authoritative for runtime behavior. |
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
+| `.iPhoto/cache/detail-surfaces/v2/` | Rebuildable neutral Detail surfaces keyed by stable source identity and LOD; legacy identities bypass reusable caches. |
 | `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
 | `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers, and manual faces. |
 | `.iPhoto/faces/thumbnails/` | Rebuildable cropped face thumbnails. |
@@ -527,22 +542,19 @@ and image decoding stay off the GUI thread; only bounded `QPixmap` publication
 runs there. Thumbnail infrastructure may apply edit state, but edit persistence
 remains behind session/edit sidecar services.
 
-## Legacy Quarantine And Removal Policy
+## Removed Legacy Application Tree
 
-`src/iPhoto/legacy/` contains quarantined compatibility modules, including old
-root compatibility paths such as `legacy/app.py` and `legacy/appctx.py`, old
-bootstrap factory shims, old domain-repository use cases, old repository
-adapters, and old model shims.
+The former `src/iPhoto/legacy/` compatibility tree, including app/appctx
+wrappers, bootstrap shims, domain-repository use cases, repository adapters,
+and model shims, has been removed.
 
 Rules:
 
 - Production runtime must not import `iPhoto.legacy`.
 - Production runtime must not import `iPhoto.models.*`.
-- No new functionality goes into quarantine modules.
-- Tests that cover historical behavior must import quarantine modules
-  explicitly.
-- The whole quarantine subtree is planned for deletion in the next major
-  release.
+- Do not restore compatibility modules or tests that target removed interfaces.
+- Historical behavior that remains a product requirement must be covered
+  through current application, session, domain, or infrastructure surfaces.
 
 ## Architecture Guardrails
 
@@ -561,8 +573,7 @@ The guardrails enforce:
 - vNext layer boundaries are respected;
 - `application/` does not import GUI or concrete persistence;
 - `infrastructure/` does not import GUI;
-- production runtime does not import quarantined legacy paths or old model
-  shims.
+- production runtime does not import removed legacy paths or old model shims;
 - high-risk GUI APIs do not receive direct English literals that bypass the
   translation boundary.
 
@@ -634,6 +645,8 @@ The current production source satisfies the vNext architecture criteria when:
 - `infrastructure/` has no GUI imports.
 - production runtime has no `iPhoto.legacy` or `iPhoto.models.*` imports.
 - architecture checks are in CI.
+- Detail/Playback background delivery is guarded by library and asset tokens;
+  static Edit does not re-decode or re-upload the current source.
 - key product behavior remains covered: folder browsing, global indexing, Live
   Photos, People, Pets, Maps fallback, editing, location assignment, trash,
   import/move/delete/restore, and export.

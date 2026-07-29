@@ -2,16 +2,16 @@
 
 This file is the working guide for coding agents and contributors. It reflects
 the current vNext state: the production runtime has converged on
-`RuntimeContext -> LibrarySession -> application ports/services`, and legacy
-compatibility code is quarantined under `src/iPhoto/legacy/`.
+`RuntimeContext -> LibrarySession -> application ports/services`, and the
+legacy compatibility application tree has been removed.
 
 ## 1. Current Architecture Status
 
 - The vNext cleanup is complete for production source code.
 - Production runtime code must not import `iPhoto.legacy` or `iPhoto.models.*`.
-- Legacy compatibility and old domain-repository code live only in
-  `src/iPhoto/legacy/`. That subtree is temporary quarantine for historical
-  behavior tests and is planned for removal in the next major release.
+- The removed `src/iPhoto/legacy/` application tree must not be restored.
+  Historical behavior that remains a product requirement must be tested
+  through current application, session, domain, or infrastructure surfaces.
 - GUI, CLI, file watchers, Qt workers, and future automation entry points must
   enter library behavior through `RuntimeContext`, `LibrarySession`, and
   application-level surfaces.
@@ -74,9 +74,9 @@ Key runtime objects:
 - `LibraryRuntimeController`: GUI/runtime controller bound to the active
   session; it should not re-create standalone compatibility services.
 
-Compatibility code is not a production extension point. Do not add new features
-to `src/iPhoto/legacy/app.py`, `src/iPhoto/legacy/appctx.py`,
-`src/iPhoto/legacy/bootstrap/*`, or other quarantine modules.
+The removed compatibility tree is not a production extension point. Do not
+restore `src/iPhoto/legacy/`; migrate any still-required behavior to current
+application/session surfaces instead.
 
 ## 4. Files And State
 
@@ -154,7 +154,7 @@ State rules:
   adjustment math, geometry, export transforms, filters, raw loading, and
   preview backends.
 - `io/`: metadata extraction, scanner adapters, and sidecar parsing helpers.
-- `legacy/`: quarantine only. No production imports and no new functionality.
+- `legacy/`: removed. Do not recreate it or add compatibility imports.
 
 ## 6. Coding Rules
 

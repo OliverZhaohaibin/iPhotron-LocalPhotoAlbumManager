@@ -142,10 +142,9 @@ jobs:
           NUMBA_DISABLE_JIT: "1"
         run: |
           python tools/check_architecture.py
-          python -m pytest tests/ \
-            --ignore=tests/gui \
-            --ignore=tests/ui \
-            --tb=short -v
+          python -m compileall -q src tools
+          python tools/run_pytest_ci.py tests/ --tb=short -v
+          git diff --check
 
   startup-contracts:
     strategy:
@@ -314,7 +313,6 @@ jobs:
           tests/gui/test_detail_render_session.py
           tests/gui/test_detail_pipeline.py
           tests/application/test_dialog_controller_runtime_binding.py
-          tests/application/test_appctx_runtime_context.py
           tests/application/test_runtime_context.py
           tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py
           tests/gui/coordinators/test_main_coordinator_pending_moves.py

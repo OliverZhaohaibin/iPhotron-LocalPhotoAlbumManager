@@ -61,7 +61,7 @@ workers use application/session surfaces instead of legacy facades.
 *   **Maps Module** (`src/maps/`): Semi-independent offline map runtime with legacy vector tiles, helper-backed OBF rendering, and native OsmAnd widgets.
 
 Production source must not import `iPhoto.legacy` or `iPhoto.models.*`. The
-quarantined compatibility subtree is not an extension point. See
+removed compatibility subtree must not be restored. See
 `docs/architecture.md` and `AGENT.md` for the authoritative dependency rules.
 
 ### Module Responsibilities
@@ -77,7 +77,7 @@ quarantined compatibility subtree is not an extension point. See
 *   `utils/`: General utilities and wrappers for `ExifTool` and `FFmpeg`.
 *   `gui/coordinators/`: MVVM coordinators managing view navigation and business flow.
 *   `gui/viewmodels/`: View models for data binding and presentation logic.
-*   `legacy/`: Quarantined historical compatibility code; no production imports or new features.
+*   `legacy/`: Removed historical compatibility tree; do not recreate it or its old-interface tests.
 
 ## 5. Coding Standards
 

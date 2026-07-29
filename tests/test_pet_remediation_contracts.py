@@ -742,6 +742,69 @@ def test_cross_generation_exact_key_anchor_absorbs_compatible_same_batch_detecti
     ]
 
 
+def test_cross_generation_anchor_absorbs_changed_key_in_later_batch_after_restart(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "pet_index.db"
+    state_path = tmp_path / "pet_state.db"
+    repository = PetRepository(index_path, state_path)
+    first = _detection("old-a", asset_id="asset-a", pet_id="pet-a")
+    second = _detection("old-b", asset_id="asset-b", pet_id="pet-a")
+    repository.replace_all(
+        [first, second],
+        [
+            replace(
+                _pet("pet-a", first),
+                detection_count=2,
+                sample_count=2,
+                profile_state="stable",
+            )
+        ],
+    )
+    anchored = replace(
+        _detection("new-a", asset_id="asset-a", embedding=np.asarray([1.0, 0.0])),
+        pet_key=first.pet_key,
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    repository.replace_assets_incrementally(
+        ["asset-a"],
+        [anchored],
+        distance_threshold=0.05,
+    )
+
+    reopened = PetRepository(index_path, state_path)
+    unrelated = replace(
+        _detection("new-c", asset_id="asset-c", embedding=np.asarray([0.999, 0.001])),
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    reopened.replace_assets_incrementally(
+        ["asset-c"],
+        [unrelated],
+        distance_threshold=0.05,
+    )
+    assert reopened.get_detection("new-c").pet_id != "pet-a"  # type: ignore[union-attr]
+
+    moved_box = replace(
+        _detection("new-b", asset_id="asset-b", embedding=np.asarray([0.999, 0.001])),
+        embedding_pipeline_version="embedding-v2",
+        generation_id=1,
+    )
+    reopened.replace_assets_incrementally(
+        ["asset-b"],
+        [moved_box],
+        distance_threshold=0.05,
+    )
+
+    assert reopened.get_detection("new-b").pet_id == "pet-a"  # type: ignore[union-attr]
+    with sqlite3.connect(index_path) as connection:
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM pet_contract_migration_assets"
+        ).fetchone()
+    assert remaining == (0,)
+
+
 def test_contract_retirement_marks_unscanned_assets_pending(tmp_path: Path) -> None:
     store = _AssetStatusStore("asset-a", "asset-b")
     coordinator = PetIndexCoordinator(tmp_path, asset_repository=store)  # type: ignore[arg-type]

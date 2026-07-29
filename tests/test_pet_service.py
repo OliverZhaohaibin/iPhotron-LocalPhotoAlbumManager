@@ -204,7 +204,7 @@ def test_cluster_pet_records_splits_known_detector_species() -> None:
     assert {pet.species_label for pet in pets} == {"cat", "dog"}
 
 
-def test_cluster_pet_records_keeps_unknown_species_backward_compatible() -> None:
+def test_cluster_pet_records_clusters_same_unknown_species() -> None:
     detections = [
         _detection(detection_id="old-a", embedding=np.asarray([1.0, 0.0])),
         _detection(detection_id="old-b", embedding=np.asarray([0.99, 0.01])),
@@ -217,6 +217,23 @@ def test_cluster_pet_records_keeps_unknown_species_backward_compatible() -> None
 
     assert len(pets) == 1
     assert {item.pet_id for item in clustered} == {pets[0].pet_id}
+
+
+def test_build_pet_records_rejects_mixed_known_species_for_one_identity() -> None:
+    cat = _detection(
+        detection_id="cat",
+        pet_id="pet-a",
+        species_label="cat",
+    )
+    dog = _detection(
+        detection_id="dog",
+        asset_id="asset-b",
+        pet_id="pet-a",
+        species_label="dog",
+    )
+
+    with pytest.raises(ValueError, match="mixes incompatible species labels"):
+        pet_pipeline.build_pet_records_from_detections([cat, dog])
 
 
 def test_cluster_pet_records_default_clusters_small_similar_pet_samples() -> None:
@@ -865,7 +882,7 @@ def test_merge_pets_repairs_legacy_runtime_without_durable_profiles(tmp_path: Pa
     assert [profile.pet_id for profile in repository.state_repository.get_profiles()] == ["pet-b"]
 
 
-def test_manual_pet_merge_survives_incompatible_scan_recluster(tmp_path: Path) -> None:
+def test_manual_pet_merge_rejects_incompatible_species(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     source_detection = _detection(
         detection_id="det-source",
@@ -906,34 +923,11 @@ def test_manual_pet_merge_survives_incompatible_scan_recluster(tmp_path: Path) -
         ),
     ]
     repository.replace_all([source_detection, target_detection], pets)
-    assert repository.merge_pets("pet-source", "pet-target") is not None
-
-    session = PetScanSession()
-    detections, reclustered_pets = session.build_snapshot_from_detections(
-        repository,
-        detections=repository.get_all_detections(),
-        distance_threshold=0.2,
-    )
-    session.commit(repository, detections=detections, pets=reclustered_pets)
-
-    assert {detection.pet_id for detection in repository.get_all_detections()} == {"pet-target"}
-    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
-    assert repository.state_repository is not None
-    assert repository.state_repository.get_pet_key_map(
-        [source_detection.pet_key, target_detection.pet_key]
-    ) == {
-        source_detection.pet_key: "pet-source",
-        target_detection.pet_key: "pet-target",
-    }
-    assert [profile.pet_id for profile in repository.state_repository.get_profiles()] == [
-        "pet-target"
-    ]
-    assert {profile.pet_id for profile in repository.state_repository.get_identity_profiles()} == {
+    assert repository.merge_pets("pet-source", "pet-target") is None
+    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {
         "pet-source",
         "pet-target",
     }
-    assert repository.recluster_detections(distance_threshold=0.2) == 2
-    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
 
 
 def test_redirected_unstable_pet_profile_recognizes_new_key(tmp_path: Path) -> None:

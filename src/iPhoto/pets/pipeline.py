@@ -588,6 +588,15 @@ def build_pet_records_from_detections(
     updated_at = utc_now_iso()
     pets: list[PetRecord] = []
     for pet_id, members in grouped.items():
+        species_labels = {
+            label
+            for label in (_normalize_species_label(member.species_label) for member in members)
+            if label is not None
+        }
+        if len(species_labels) > 1:
+            raise ValueError(
+                f"Pet {pet_id} mixes incompatible species labels: {sorted(species_labels)}"
+            )
         contracts = {
             (
                 str(member.embedding_pipeline_version or ""),
@@ -761,7 +770,7 @@ def resolve_canonical_pet_id(
         if not is_redirect_alias and str(profile.profile_state or "unstable") != "stable":
             continue
         profile_species = _normalize_species_label(profile.species_label)
-        if pet_species and profile_species and pet_species != profile_species:
+        if pet_species != profile_species:
             continue
         if profile.embedding_dim <= 0 or profile.center_embedding.size == 0:
             continue
@@ -874,10 +883,8 @@ def _species_compatible(
     right: Sequence[int],
     species_labels: Sequence[str | None],
 ) -> bool:
-    known = {
-        species_labels[index] for index in [*left, *right] if species_labels[index] is not None
-    }
-    return len(known) <= 1
+    labels = {species_labels[index] for index in [*left, *right]}
+    return len(labels) <= 1
 
 
 def _detection_species_compatible(
@@ -888,8 +895,7 @@ def _detection_species_compatible(
         *(_normalize_species_label(detection.species_label) for detection in left),
         *(_normalize_species_label(detection.species_label) for detection in right),
     ]
-    known = {label for label in labels if label is not None}
-    return len(known) <= 1
+    return len(set(labels)) <= 1
 
 
 def _detection_groups_compatible(

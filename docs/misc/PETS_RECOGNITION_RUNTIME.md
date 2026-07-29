@@ -105,7 +105,11 @@ contract, compatible detections from the same batch may join that staged anchor.
 The runtime switch atomically retires the identity's incompatible old-contract
 detections. Any retired asset outside the committed replacement scope is marked
 `pending`, and the complete changed/retired asset sets are persisted for crash
-recovery before the snapshot event is dispatched.
+recovery before the snapshot event is dispatched. Until each retired asset is
+processed, a target-contract migration record lets only that asset fuzzy-match
+the anchored identity even while its new profile has fewer than two samples.
+Processing the asset consumes the record, so ordinary one-sample profiles never
+become general embedding candidates.
 
 ## Scan Scheduling And Status
 
@@ -125,8 +129,10 @@ a startup metadata scan, startup first warms the gallery, runs that scan, then
 starts both AI workers with closed input so they drain persisted
 `pending`/`retry` rows. This avoids model initialization and competing AI work
 on the first-frame path. If the metadata scan scope is already complete, startup
-does not launch scan workers; use an explicit rescan to process newly pending AI
-rows in that case.
+still starts the Pet backfill worker whenever persisted `pending` or `retry` rows
+need draining. With no metadata scan and no queued AI work, startup does not
+launch scan workers; an explicit rescan is only needed to reset or rediscover
+otherwise completed/failed assets.
 
 The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies/models are runtime-availability failures: pending rows are

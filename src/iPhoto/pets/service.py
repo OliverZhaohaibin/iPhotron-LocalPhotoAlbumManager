@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from iPhoto.application.ports.pets import PetAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
@@ -14,15 +15,19 @@ from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
-from .index_coordinator import (
-    PetIndexCoordinator,
-    PetSnapshotEvent,
-    get_pet_index_coordinator,
+from .records import (
+    AssetPetAnnotation,
+    PetMergeOutcome,
+    PetMutationFailure,
+    PetSummary,
 )
-from .pipeline import default_pet_model_dir
-from .records import AssetPetAnnotation, PetSummary
 from .repository import PetRepository
 from .status import PET_STATUS_RETRY, PET_STATUS_SKIPPED, normalize_pet_status
+
+if TYPE_CHECKING:
+    from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
+
+    from .index_coordinator import PetIndexCoordinator, PetSnapshotEvent
 
 LOGGER = get_logger()
 
@@ -36,7 +41,18 @@ class PetLibraryPaths:
     model_dir: Path
 
 
+@dataclass(frozen=True)
+class _PetReadContext:
+    """Immutable redirect/repository snapshot shared by one logical read request."""
+
+    redirects: tuple[object, ...]
+    redirected_pet_ids: frozenset[str]
+    face_repository: FaceRepository | None
+
+
 def shared_pet_model_dir() -> Path:
+    from .pipeline import default_pet_model_dir
+
     return default_pet_model_dir()
 
 
@@ -58,17 +74,37 @@ class PetService:
         *,
         asset_repository: PetAssetRepositoryPort | None = None,
         coordinator: PetIndexCoordinator | None = None,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
     ) -> None:
         self._library_root = library_root
         self._asset_repository = asset_repository
         self._coordinator = coordinator
+        self._mutation_coordinator = mutation_coordinator
+        self._owns_mutation_coordinator = False
+        self._shutdown = False
+        self._repository: PetRepository | None = None
 
     def set_library_root(self, library_root: Path | None) -> None:
-        if self._library_root == library_root:
+        if self._library_root == library_root and not self._shutdown:
             return
+        self.shutdown()
+        self._shutdown = False
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
+        self._mutation_coordinator = None
+        self._repository = None
+
+    def shutdown(self) -> None:
+        self._shutdown = True
+        coordinator = self._coordinator
+        if coordinator is not None:
+            coordinator.close()
+        if self._owns_mutation_coordinator and self._mutation_coordinator is not None:
+            self._mutation_coordinator.close()
+        self._coordinator = None
+        self._mutation_coordinator = None
+        self._owns_mutation_coordinator = False
 
     def library_root(self) -> Path | None:
         return self._library_root
@@ -80,17 +116,48 @@ class PetService:
     def asset_repository(self) -> PetAssetRepositoryPort | None:
         return self._asset_repository
 
+    def active_thumbnail_staging_dirs(self) -> tuple[Path, ...]:
+        """Return staging directories protected by unfinished journal operations."""
+
+        if self._library_root is None or self._shutdown:
+            return ()
+        coordinator = self._ensure_mutation_coordinator()
+        return tuple(
+            Path(str(value)).resolve()
+            for operation in coordinator.unfinished()
+            if (value := operation.payload.get("staged_thumbnail_dir"))
+        )
+
     @property
     def coordinator(self) -> PetIndexCoordinator | None:
+        if self._shutdown:
+            return None
         if self._coordinator is not None:
             return self._coordinator
         if self._library_root is None:
             return None
-        self._coordinator = get_pet_index_coordinator(
+        from .index_coordinator import PetIndexCoordinator
+
+        self._coordinator = PetIndexCoordinator(
             self._library_root,
             asset_repository=self._asset_repository,
+            mutation_coordinator=self._ensure_mutation_coordinator(),
         )
         return self._coordinator
+
+    def _ensure_mutation_coordinator(self) -> RecognitionMutationCoordinator:
+        if self._shutdown:
+            raise RuntimeError("Pets service is shut down.")
+        if self._mutation_coordinator is None:
+            from iPhoto.recognition.mutation_coordinator import (
+                RecognitionMutationCoordinator,
+            )
+
+            if self._library_root is None:
+                raise RuntimeError("Pets service is not bound to a library.")
+            self._mutation_coordinator = RecognitionMutationCoordinator(self._library_root)
+            self._owns_mutation_coordinator = True
+        return self._mutation_coordinator
 
     def paths(self) -> PetLibraryPaths | None:
         if self._library_root is None:
@@ -98,27 +165,53 @@ class PetService:
         return pet_library_paths(self._library_root)
 
     def repository(self) -> PetRepository | None:
-        paths = self.paths()
-        if paths is None:
+        if self._repository is not None:
+            return self._repository
+        if self._library_root is None:
             return None
-        return PetRepository(paths.index_db_path, paths.state_db_path)
+        root_dir = ensure_work_dir(self._library_root) / "pets"
+        self._repository = PetRepository(
+            root_dir / "pet_index.db",
+            root_dir / "pet_state.db",
+        )
+        return self._repository
 
-    def list_pets(self, *, include_hidden: bool = False) -> list[PetSummary]:
+    def list_pets(
+        self,
+        *,
+        include_hidden: bool = False,
+        _read_context: _PetReadContext | None = None,
+    ) -> list[PetSummary]:
         repository = self.repository()
         if repository is None:
             return []
-        redirected_pets = self._redirected_source_ids("pet")
-        return self._with_valid_pet_asset_counts(
+        context = _read_context or self._new_read_context()
+        summaries = self._with_valid_pet_asset_counts(
             [
                 summary
                 for summary in repository.get_pet_summaries(include_hidden=include_hidden)
-                if summary.pet_id not in redirected_pets
+                if summary.pet_id not in context.redirected_pet_ids
             ],
             repository,
+            redirects=context.redirects,
+            face_repository=context.face_repository,
         )
+        summaries.sort(
+            key=lambda summary: (
+                str(summary.profile_state or "unstable") != "stable",
+                -int(summary.asset_count or 0),
+                summary.created_at,
+                summary.pet_id,
+            )
+        )
+        return summaries
 
     def load_dashboard(self, *, include_hidden: bool = False) -> tuple[list[PetSummary], int]:
-        summaries = self.list_pets(include_hidden=include_hidden)
+        context = self._new_read_context()
+        summaries = self.list_pets(
+            include_hidden=include_hidden,
+            _read_context=context,
+        )
         counts = self.pet_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
         return summaries, pending
@@ -132,13 +225,11 @@ class PetService:
             return {}
         boxes_by_asset_id: dict[str, tuple[tuple[int, int, int, int], ...]] = {}
         try:
-            redirected_people = self._redirected_source_ids("person")
             for asset_id in dict.fromkeys(str(value) for value in asset_ids if value):
-                annotations = [
-                    annotation
-                    for annotation in repository.list_asset_face_annotations(asset_id)
-                    if annotation.person_id not in redirected_people
-                ]
+                # Detector geometry is a rebuildable fact. Identity redirects
+                # may hide a dashboard card, but they never make a face region
+                # stop being authoritative for People-priority suppression.
+                annotations = repository.list_asset_face_annotations(asset_id)
                 if annotations:
                     boxes_by_asset_id[asset_id] = tuple(
                         (
@@ -191,9 +282,11 @@ class PetService:
         coordinator = self.coordinator
         return bool(coordinator and coordinator.set_pet_hidden(pet_id, hidden))
 
-    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> bool:
+    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> PetMergeOutcome:
         coordinator = self.coordinator
-        return bool(coordinator and coordinator.merge_pets(source_pet_id, target_pet_id))
+        if coordinator is None:
+            return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
+        return coordinator.merge_pets(source_pet_id, target_pet_id)
 
     def set_pet_cover(self, pet_id: str, detection_id: str) -> bool:
         coordinator = self.coordinator
@@ -283,13 +376,64 @@ class PetService:
         self,
         summaries: list[PetSummary],
         repository: PetRepository,
+        *,
+        redirects=None,
+        face_repository: FaceRepository | None = None,
     ) -> list[PetSummary]:
         if self._library_root is None or not summaries:
             return summaries
+        assets_by_pet = repository.get_asset_ids_by_pets(summary.pet_id for summary in summaries)
+        redirects = tuple(self._identity_redirects()) if redirects is None else tuple(redirects)
+        source_pet_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "pet"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        source_pet_assets = (
+            repository.get_asset_ids_by_pets(source_pet_ids) if source_pet_ids else {}
+        )
+        source_person_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "person"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        face_repository = face_repository or self._face_repository()
+        source_person_assets = (
+            face_repository.get_asset_ids_by_people(source_person_ids)
+            if face_repository is not None and source_person_ids
+            else {}
+        )
+        for redirect in redirects:
+            if redirect.target_kind != "pet" or redirect.target_id not in assets_by_pet:
+                continue
+            source_assets = (
+                source_person_assets.get(redirect.source_id, ())
+                if redirect.source_kind == "person"
+                else source_pet_assets.get(redirect.source_id, ())
+            )
+            assets_by_pet[redirect.target_id] = list(
+                dict.fromkeys((*assets_by_pet[redirect.target_id], *source_assets))
+            )
+        all_asset_ids = list(
+            dict.fromkeys(
+                asset_id for asset_ids in assets_by_pet.values() for asset_id in asset_ids
+            )
+        )
+        valid_ids = set(self._valid_asset_ids(all_asset_ids))
         return [
             replace(
                 summary,
-                asset_count=len(self._valid_asset_ids(self._asset_ids_with_redirects(summary.pet_id, repository))),
+                asset_count=sum(
+                    asset_id in valid_ids for asset_id in assets_by_pet.get(summary.pet_id, ())
+                ),
             )
             for summary in summaries
         ]
@@ -317,12 +461,20 @@ class PetService:
                 asset_ids.append(asset_id)
         return asset_ids
 
-    def _redirected_source_ids(self, kind: str) -> set[str]:
+    def _redirected_source_ids(self, kind: str, *, redirects=None) -> set[str]:
         return {
             redirect.source_id
-            for redirect in self._identity_redirects()
+            for redirect in (redirects if redirects is not None else self._identity_redirects())
             if redirect.source_kind == kind
         }
+
+    def _new_read_context(self) -> _PetReadContext:
+        redirects = tuple(self._identity_redirects())
+        return _PetReadContext(
+            redirects=redirects,
+            redirected_pet_ids=frozenset(self._redirected_source_ids("pet", redirects=redirects)),
+            face_repository=self._face_repository(),
+        )
 
     def _identity_redirects(self):
         if self._library_root is None:

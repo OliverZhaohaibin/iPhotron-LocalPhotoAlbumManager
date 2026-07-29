@@ -1018,7 +1018,7 @@ def test_pet_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> Non
     same_kind_merge = pet_service.merge_pets("pet-a", "pet-b")
 
     assert cross_merge is not None and cross_merge.merged is True
-    assert same_kind_merge is True
+    assert same_kind_merge.merged is True
     assert set(pet_service.build_pet_query("pet-b").asset_ids) == {
         "asset-person",
         "asset-pet-a",

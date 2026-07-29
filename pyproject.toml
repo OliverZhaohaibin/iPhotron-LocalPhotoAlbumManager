@@ -58,7 +58,7 @@ pets-ai = [
     "onnxruntime>=1.18,<2",
     "torch",
     "torchvision",
-    "hdbscan",
+    "usearch>=2.26,<3",
 ]
 
 [project.scripts]
@@ -88,6 +88,10 @@ line-length = 100
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -p no:pytestqt --ignore=tests/ui --ignore=tests/gui"
+markers = [
+    "pets_model_contract: real official YOLOX model and image contract",
+    "pets_scale_contract: large synthetic Pets incremental-index contract",
+]
 pythonpath = ["src"]
 
 [tool.typer]

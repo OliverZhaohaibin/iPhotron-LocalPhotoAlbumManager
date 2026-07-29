@@ -3,9 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
+
+
+class PetMutationFailure(StrEnum):
+    REJECTED = "rejected"
+    RECOVERY_PENDING = "recovery_pending"
+    SHUTTING_DOWN = "shutting_down"
+
+
+@dataclass(frozen=True, slots=True)
+class PetMergeOutcome:
+    merged: bool
+    failure: PetMutationFailure | None = None
+    operation_id: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.merged
 
 
 @dataclass(frozen=True)
@@ -30,6 +47,12 @@ class PetDetectionRecord:
     image_height: int
     species_label: str | None = None
     quality_score: float | None = None
+    pet_key_version: str = "v2"
+    embedding_pipeline_version: str = "dinov2-vits14-imagenet-normalized-v1"
+    generation_id: int = 0
+    is_stale: bool = False
+    stale_reason: str | None = None
+    source_generation_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +68,9 @@ class PetRecord:
     sample_count: int = 0
     profile_state: str = "unstable"
     species_label: str | None = None
+    embedding_pipeline_version: str = "dinov2-vits14-imagenet-normalized-v1"
+    generation_id: int = 0
+    boundary_embeddings: tuple[np.ndarray, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -58,6 +84,9 @@ class PetProfile:
     sample_count: int = 0
     profile_state: str = "unstable"
     species_label: str | None = None
+    embedding_pipeline_version: str = "dinov2-vits14-imagenet-normalized-v1"
+    generation_id: int = 0
+    boundary_embeddings: tuple[np.ndarray, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +99,8 @@ class PetSummary:
     created_at: str
     is_hidden: bool = False
     asset_count: int = 0
+    profile_state: str = "unstable"
+    species_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,3 +115,11 @@ class AssetPetAnnotation:
     image_width: int
     image_height: int
     thumbnail_path: Path | None = None
+    source_identity_kind: str = "pet"
+    source_identity_id: str | None = None
+    canonical_identity_kind: str = "pet"
+    canonical_identity_id: str | None = None
+    canonical_display_name: str | None = None
+    is_stale: bool = False
+    stale_reason: str | None = None
+    source_generation_id: int | None = None

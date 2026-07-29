@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -14,7 +15,7 @@ from iPhoto.bootstrap.startup_profile import configure as configure_startup_prof
 from iPhoto.bootstrap.startup_profile import mark
 
 mark("module.before_qt_imports")
-from PySide6.QtCore import QEvent, QObject, QTimer, Qt  # noqa: E402, I001
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt, Signal  # noqa: E402, I001
 from PySide6.QtGui import QColor, QPalette, QSurfaceFormat  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -24,6 +25,7 @@ from iPhoto.gui.render_backend import should_configure_global_desktop_opengl  # 
 mark("module.imported")
 
 _logger = logging.getLogger(__name__)
+_QUEUED_CONNECTION = Qt.ConnectionType.QueuedConnection
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _MACOS_EXTERNAL_TOOL_PATHS = (
     Path("/opt/homebrew/bin"),
@@ -66,6 +68,133 @@ class _StartupTimingPlan(NamedTuple):
     first_post_paint_delay_ms: int
     feature_interval_ms: int
     coordinator_ready_delay_ms: int
+
+
+class _StartupImportRegistry:
+    """Publish background import results without leaking across retries."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._values: dict[int, object] = {}
+        self._errors: dict[int, Exception] = {}
+
+    def publish(self, generation: int, value: object) -> None:
+        with self._lock:
+            self._values[generation] = value
+
+    def fail(self, generation: int, error: Exception) -> None:
+        with self._lock:
+            self._errors[generation] = error
+
+    def ready(self, generation: int) -> bool:
+        with self._lock:
+            return generation in self._values or generation in self._errors
+
+    def resolve(self, generation: int) -> object:
+        with self._lock:
+            error = self._errors.get(generation)
+            if error is not None:
+                raise error
+            return self._values[generation]
+
+    def discard(self, generation: int) -> None:
+        with self._lock:
+            self._values.pop(generation, None)
+            self._errors.pop(generation, None)
+
+
+class _StartupModulePreloader(QObject):
+    """Run startup imports off the GUI thread without blocking shutdown."""
+
+    settled = Signal(int)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._registry = _StartupImportRegistry()
+        self._lock = threading.Lock()
+        self._threads: dict[int, threading.Thread] = {}
+        self._cancelled: set[int] = set()
+        self._closed = False
+
+    def start(
+        self,
+        generation: int,
+        loader: Callable[[], object],
+        *,
+        asynchronous: bool = True,
+    ) -> bool:
+        generation = int(generation)
+        with self._lock:
+            if self._closed or generation in self._cancelled:
+                return False
+            existing = self._threads.get(generation)
+            if existing is not None and existing.is_alive():
+                return False
+
+        def _load() -> None:
+            accepted = False
+            try:
+                value = loader()
+            except Exception as exc:  # noqa: BLE001 - import isolation boundary
+                with self._lock:
+                    accepted = not self._closed and generation not in self._cancelled
+                    if accepted:
+                        self._registry.fail(generation, exc)
+            else:
+                with self._lock:
+                    accepted = not self._closed and generation not in self._cancelled
+                    if accepted:
+                        self._registry.publish(generation, value)
+            finally:
+                with self._lock:
+                    self._threads.pop(generation, None)
+                if accepted:
+                    self.settled.emit(generation)
+
+        if not asynchronous:
+            _load()
+            return True
+        thread = threading.Thread(
+            target=_load,
+            name=f"StartupModulePreloader-{generation}",
+            daemon=True,
+        )
+        with self._lock:
+            self._threads[generation] = thread
+        thread.start()
+        return True
+
+    def ready(self, generation: int) -> bool:
+        return self._registry.ready(generation)
+
+    def resolve(self, generation: int) -> object:
+        return self._registry.resolve(generation)
+
+    def cancel_generation(self, generation: int) -> None:
+        generation = int(generation)
+        with self._lock:
+            self._cancelled.add(generation)
+        self._registry.discard(generation)
+
+    def close(self, *, timeout_ms: int = 1500) -> tuple[str, ...]:
+        """Cancel publication and wait for workers only up to ``timeout_ms``."""
+
+        with self._lock:
+            self._closed = True
+            self._cancelled.update(self._threads)
+            threads = tuple(self._threads.values())
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        for thread in threads:
+            if thread is threading.current_thread():
+                continue
+            thread.join(max(0.0, deadline - time.monotonic()))
+        lingering = tuple(thread.name for thread in threads if thread.is_alive())
+        if lingering:
+            _logger.warning(
+                "Startup import workers exceeded the shutdown deadline: %s",
+                ", ".join(lingering),
+            )
+        return lingering
 
 
 class _StartupInputGuard(QObject):
@@ -407,6 +536,13 @@ def main(argv: list[str] | None = None) -> int:
         app if isinstance(app, QObject) else None,
         is_generation_current=startup.is_current,
     )
+    startup_imports = _StartupModulePreloader(
+        app if isinstance(app, QObject) else None,
+    )
+    startup_imports.settled.connect(
+        startup_jobs.wake_for_generation,
+        _QUEUED_CONNECTION,
+    )
 
     def _handle_startup_job_failure(failure) -> None:
         if not startup.is_current(failure.generation):
@@ -522,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
             StartupPhase.CANCELLED,
         }:
             startup_jobs.cancel_generation(snapshot.generation)
+            startup_imports.cancel_generation(snapshot.generation)
         if snapshot.phase in {
             StartupPhase.DEGRADED,
             StartupPhase.FAILED,
@@ -533,6 +670,24 @@ def main(argv: list[str] | None = None) -> int:
 
     pre_show_features, post_show_features = _startup_feature_plan()
     startup_timing = _startup_timing_plan()
+
+    def _preload_startup_modules() -> object:
+        if "detail" in post_show_features:
+            import importlib
+
+            importlib.import_module("iPhoto.gui.ui.widgets.detail_page")
+        from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+
+        return MainCoordinator
+
+    def _start_startup_imports(generation: int) -> None:
+        startup_imports.start(
+            generation,
+            _preload_startup_modules,
+            asynchronous=isinstance(app, QObject),
+        )
+
+    _start_startup_imports(startup.generation)
     for feature in pre_show_features:
         job_name = f"feature.{feature}.pre_show"
         thread_name = threading.current_thread().name
@@ -741,17 +896,16 @@ def main(argv: list[str] | None = None) -> int:
         probe_controller.failed.connect(_probe_failed)
         probe_controller.start(request)
 
-    def _construct_coordinator() -> None:
+    def _construct_coordinator(generation: int) -> None:
         nonlocal coordinator
         mark("post_paint.begin")
-        # Importing the coordinator expands the controller/view-model graph;
-        # keep that work behind the OS-confirmed first paint.
-        from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
-
         mark("main_coordinator.imported")
         if coordinator is None:
             _logger.info("Creating MainCoordinator")
-            coordinator = MainCoordinator(window, context)
+            coordinator_factory = startup_imports.resolve(generation)
+            if not callable(coordinator_factory):
+                raise RuntimeError("startup coordinator import returned no factory")
+            coordinator = coordinator_factory(window, context)
             window.set_coordinator(coordinator)
 
     def _start_coordinator() -> None:
@@ -778,7 +932,8 @@ def main(argv: list[str] | None = None) -> int:
         _enqueue_startup_job(
             "coordinator.construct",
             generation,
-            _construct_coordinator,
+            lambda: _construct_coordinator(generation),
+            prerequisite=lambda: startup_imports.ready(generation),
         )
         _enqueue_startup_job(
             "coordinator.start",
@@ -809,6 +964,7 @@ def main(argv: list[str] | None = None) -> int:
             return
         generation = startup.begin()
         startup.transition(StartupPhase.INTERACTIVE, reason="retry")
+        _start_startup_imports(generation)
         _initialize_features_after_show(generation)
 
     startup.startupDegraded.connect(
@@ -843,7 +999,12 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
     mark("main_window.show_called")
 
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        startup.cancel()
+        startup_jobs.close()
+        startup_imports.close()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual launch

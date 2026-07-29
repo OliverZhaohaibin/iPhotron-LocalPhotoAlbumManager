@@ -403,6 +403,10 @@ def test_main_creates_required_features_in_platform_safe_order(
             return None
 
         def exec(self) -> int:
+            # Model the event loop processing delayed startup work before it
+            # exits. main() cancels pending startup resources afterwards.
+            for callback in list(delayed_callbacks):
+                callback()
             return 0
 
     class _FakeSignal:

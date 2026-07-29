@@ -23,6 +23,14 @@ if TYPE_CHECKING:  # pragma: no cover
 _logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class LibraryBindingToken:
+    """Monotonic identity for the currently published library session."""
+
+    epoch: int
+    root: Path | None
+
+
 def _create_settings_manager() -> "SettingsManager":
     from ..settings.manager import SettingsManager
 
@@ -81,6 +89,7 @@ class RuntimeContext:
     translation: "TranslationManager" = field(init=False)
     theme: "ThemeManager" = field(init=False)
     library_session: "LibrarySession | None" = field(init=False, default=None)
+    _library_epoch: int = field(init=False, default=0, repr=False)
     _facade: "AppFacade | None" = field(init=False, default=None, repr=False)
     _asset_runtime: "LibraryAssetRuntime | None" = field(init=False, default=None, repr=False)
     _container: "DependencyContainer | None" = field(
@@ -111,6 +120,12 @@ class RuntimeContext:
 
         if not self.defer_startup_tasks:
             self.resume_startup_tasks()
+
+    @property
+    def library_binding_token(self) -> LibraryBindingToken:
+        session = self.library_session
+        root = Path(session.library_root) if session is not None else None
+        return LibraryBindingToken(epoch=self._library_epoch, root=root)
 
     @classmethod
     def create(
@@ -404,6 +419,7 @@ class RuntimeContext:
             )
             if callable(bind_map_interaction_service):
                 bind_map_interaction_service(self.library_session.map_interactions)
+        self._library_epoch += 1
         return self.library_session
 
     def close_library(self) -> None:
@@ -489,6 +505,7 @@ class RuntimeContext:
             return
         session.shutdown()
         self.library_session = None
+        self._library_epoch += 1
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""
@@ -503,4 +520,4 @@ class RuntimeContext:
         )
 
 
-__all__ = ["RuntimeContext"]
+__all__ = ["LibraryBindingToken", "RuntimeContext"]

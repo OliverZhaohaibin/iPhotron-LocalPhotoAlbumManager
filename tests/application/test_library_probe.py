@@ -572,7 +572,9 @@ def test_controller_cancel_terminates_then_kills_without_emitting(qapp, tmp_path
 
     assert process.terminated is True
     assert process.killed is False
-    QTest.qWait(300)
+    deadline = time.monotonic() + 1.0
+    while not process.killed and time.monotonic() < deadline:
+        QTest.qWait(25)
     assert process.killed is True
     assert failures == []
 

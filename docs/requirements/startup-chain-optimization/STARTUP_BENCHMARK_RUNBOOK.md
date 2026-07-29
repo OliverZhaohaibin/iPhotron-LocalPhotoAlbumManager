@@ -26,6 +26,24 @@ and the first thumbnail update published to the Qt model. Every generation has
 exactly one terminal event. Sensitive path fields are replaced by a stable,
 per-install salted identifier at the JSONL writer boundary.
 
+## Lifecycle verification before collection
+
+Before collecting formal benchmark samples, run both lifecycle gates:
+
+```bash
+QT_QPA_PLATFORM=offscreen NUMBA_DISABLE_JIT=1 \
+  .venv/bin/python tools/run_pytest_ci.py tests/ --tb=short
+QT_QPA_PLATFORM=offscreen NUMBA_DISABLE_JIT=1 \
+  .venv/bin/python -m pytest -q tests/gui/test_startup_shutdown_smoke.py
+```
+
+The first command is the full mixed-native regression suite and intentionally
+bypasses interpreter finalizers only after pytest teardown. The second command
+must use normal interpreter shutdown and finish within 20 seconds; it is the
+required guard against hiding application lifecycle bugs behind the native
+runner. A benchmark batch is invalid if the packaged process does not close
+normally or leaves a Library probe/importer thread behind.
+
 ## Collection
 
 The command to launch the application follows `--`. Point packaged macOS runs

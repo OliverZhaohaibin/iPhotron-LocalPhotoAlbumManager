@@ -68,6 +68,10 @@ class AppContext:
         return self._runtime.library_session
 
     @property
+    def library_binding_token(self):
+        return self._runtime.library_binding_token
+
+    @property
     def recent_albums(self) -> list[Path]:
         return self._runtime.recent_albums
 

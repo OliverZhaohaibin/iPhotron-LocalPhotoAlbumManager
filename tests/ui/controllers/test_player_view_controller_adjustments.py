@@ -11,14 +11,18 @@ pytest.importorskip("PySide6.QtGui", reason="QtGui is required for GUI tests", e
 
 from PySide6.QtGui import QImage
 
-from iPhoto.gui.detail_pipeline import AssetSourceIdentity, DetailRenderTransaction
+from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailRenderTransaction,
+    PlaybackAsyncToken,
+)
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
     _AdjustedImageWorker,
 )
 
 
-def test_adjusted_image_worker_skips_color_stats_without_sidecar() -> None:
+def test_adjusted_image_worker_collects_shared_stats_without_sidecar() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()
     edit_service = Mock()
@@ -35,7 +39,7 @@ def test_adjusted_image_worker_skips_color_stats_without_sidecar() -> None:
         worker.run()
 
     edit_service.describe_adjustments.assert_not_called()
-    compute_stats.assert_not_called()
+    compute_stats.assert_called_once_with(image)
     signals.completed.emit.assert_called_once_with(source, image, {})
 
 
@@ -92,9 +96,39 @@ def test_deferred_still_keeps_original_live_transaction_until_applied() -> None:
     assert controller._pending_still[3] is transaction
 
     assert PlayerViewController.apply_pending_still(controller)
-    controller._apply_still_frame.assert_called_once_with(
-        source,
-        image,
-        {},
-        transaction=transaction,
+    call = controller._apply_still_frame.call_args
+    assert call.args == (source, image, {})
+    assert call.kwargs["transaction"] is transaction
+
+
+def test_worker_result_from_previous_library_epoch_is_rejected_for_same_path() -> None:
+    source = Path("/shared/photo.jpg")
+    identity = AssetSourceIdentity.create(source, source_mtime_ns=1)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=1,
+        asset_id="asset",
+        source_identity=identity,
     )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=2,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    controller = SimpleNamespace(
+        _loading_source=source,
+        _loading_started_at=None,
+        _active_async_token=new_token,
+        _apply_still_frame=Mock(),
+    )
+
+    PlayerViewController._on_adjusted_image_ready(
+        controller,
+        source,
+        QImage(4, 4, QImage.Format.Format_RGBA8888),
+        {},
+        async_token=old_token,
+    )
+
+    controller._apply_still_frame.assert_not_called()

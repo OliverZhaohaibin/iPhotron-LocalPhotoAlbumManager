@@ -10,6 +10,41 @@ from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 from iPhoto.people.service import PeopleService
 
 
+def test_same_library_tree_refresh_preserves_active_edit_session() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    token = SimpleNamespace(epoch=7, root=Path("/library"))
+    coordinator._context = SimpleNamespace(library_binding_token=token)
+    coordinator._library_binding_token = token
+    coordinator._edit = MagicMock(is_editing=MagicMock(return_value=True))
+    coordinator._playback = MagicMock()
+
+    assert not MainCoordinator._synchronize_library_binding(coordinator)
+
+    coordinator._edit.invalidate_library_binding.assert_not_called()
+    coordinator._playback.rebind_library.assert_called_once_with(
+        token,
+        session_change=False,
+    )
+
+
+def test_external_library_session_change_safely_invalidates_edit() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    previous = SimpleNamespace(epoch=7, root=Path("/library-a"))
+    current = SimpleNamespace(epoch=8, root=Path("/library-b"))
+    coordinator._context = SimpleNamespace(library_binding_token=current)
+    coordinator._library_binding_token = previous
+    coordinator._edit = MagicMock(is_editing=MagicMock(return_value=True))
+    coordinator._playback = MagicMock()
+
+    assert MainCoordinator._synchronize_library_binding(coordinator)
+
+    coordinator._edit.invalidate_library_binding.assert_called_once_with()
+    coordinator._playback.rebind_library.assert_called_once_with(
+        current,
+        session_change=True,
+    )
+
+
 def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")

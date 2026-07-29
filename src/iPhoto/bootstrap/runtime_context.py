@@ -335,6 +335,9 @@ class RuntimeContext:
                 asset_runtime=self.asset_runtime,
                 bind_asset_runtime=False,
             )
+        # Advance before publishing the new session: synchronous treeUpdated
+        # consumers must observe the new epoch, never the previous binding.
+        self._library_epoch += 1
         bind_library_session = getattr(self.library, "bind_library_session", None)
         used_session_binding = callable(bind_library_session)
         if used_session_binding:
@@ -419,12 +422,16 @@ class RuntimeContext:
             )
             if callable(bind_map_interaction_service):
                 bind_map_interaction_service(self.library_session.map_interactions)
-        self._library_epoch += 1
         return self.library_session
 
     def close_library(self) -> None:
         """Close the active library-scoped session if one exists."""
 
+        session = getattr(self, "library_session", None)
+        if session is not None:
+            # Publish the closed binding before synchronous unbind callbacks.
+            self.library_session = None
+            self._library_epoch += 1
         bind_library_session = getattr(self.library, "bind_library_session", None)
         if callable(bind_library_session):
             bind_library_session(None)
@@ -500,12 +507,9 @@ class RuntimeContext:
             if callable(bind_scan_service):
                 bind_scan_service(None)
 
-        session = getattr(self, "library_session", None)
         if session is None:
             return
         session.shutdown()
-        self.library_session = None
-        self._library_epoch += 1
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""

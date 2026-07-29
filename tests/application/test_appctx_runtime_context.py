@@ -19,6 +19,7 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
         theme=object(),
         asset_runtime=object(),
         library_session=object(),
+        library_binding_token=object(),
         recent_albums=[Path("A")],
         defer_startup_tasks=True,
     )
@@ -64,6 +65,7 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
     assert context.theme is runtime.theme
     assert context.asset_runtime is runtime.asset_runtime
     assert context.library_session is runtime.library_session
+    assert context.library_binding_token is runtime.library_binding_token
     assert context.recent_albums is runtime.recent_albums
 
     context.resume_startup_tasks()

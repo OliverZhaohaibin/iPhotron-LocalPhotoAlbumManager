@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 from PySide6.QtCore import QObject, Signal
 
@@ -26,12 +27,15 @@ _TERMINAL_STATES = {
     DetailRenderState.CANCELLED,
 }
 
+DetailSurfaceKind = Literal["still", "video_frame", "live_motion_frame", "live_still"]
+
 
 @dataclass(frozen=True, slots=True)
 class DetailRenderSnapshot:
     transaction: DetailRenderTransaction
     state: DetailRenderState
     message: str = ""
+    presented_surfaces: tuple[DetailSurfaceKind, ...] = ()
 
 
 class DetailRenderCoordinator(QObject):
@@ -41,6 +45,7 @@ class DetailRenderCoordinator(QObject):
     presented = Signal(object)
     failed = Signal(object)
     cancelled = Signal(object)
+    surfacePresented = Signal(object, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -63,17 +68,70 @@ class DetailRenderCoordinator(QObject):
             and snapshot.state not in _TERMINAL_STATES
         )
 
+    def owns_generation(self, generation: int) -> bool:
+        """Return whether the transaction still owns follow-on surface delivery."""
+
+        snapshot = self._snapshot
+        return bool(
+            snapshot is not None
+            and snapshot.transaction.generation == int(generation)
+            and snapshot.state not in {DetailRenderState.FAILED, DetailRenderState.CANCELLED}
+        )
+
     def begin(self, transaction: DetailRenderTransaction) -> bool:
         if transaction.generation <= 0:
             raise ValueError("Detail render transaction generation must be positive")
         current = self._snapshot
         if current is not None:
-            if current.transaction == transaction and current.state not in _TERMINAL_STATES:
+            if current.transaction == transaction:
                 return False
             if current.state not in _TERMINAL_STATES:
                 self._transition(DetailRenderState.CANCELLED)
         self._snapshot = DetailRenderSnapshot(transaction, DetailRenderState.CREATED)
         self.stateChanged.emit(self._snapshot)
+        return True
+
+    def mark_surface_presented(
+        self,
+        generation: int,
+        surface_kind: DetailSurfaceKind,
+    ) -> bool:
+        """Record a visible surface without reopening a completed transaction.
+
+        A Live Photo transaction becomes visible on its motion first frame but
+        continues to own the later still restoration.  That still is a second
+        surface presentation, not a second transaction terminal transition.
+        """
+
+        snapshot = self._snapshot
+        if snapshot is None or snapshot.transaction.generation != int(generation):
+            return False
+        if snapshot.state in {DetailRenderState.FAILED, DetailRenderState.CANCELLED}:
+            return False
+        if snapshot.state is DetailRenderState.PRESENTED:
+            if snapshot.transaction.media_kind != "live_motion" or surface_kind not in {
+                "live_motion_frame",
+                "live_still",
+            }:
+                return False
+        self._snapshot = DetailRenderSnapshot(
+            transaction=snapshot.transaction,
+            state=snapshot.state,
+            message=snapshot.message,
+            presented_surfaces=(*snapshot.presented_surfaces, surface_kind),
+        )
+        emit_detail_event(
+            "surface_presented",
+            generation=int(generation),
+            media_type=snapshot.transaction.media_kind,
+            surface_kind=surface_kind,
+        )
+        if snapshot.state is not DetailRenderState.PRESENTED:
+            if not self.mark_presented(generation):
+                return False
+        current = self._snapshot
+        if current is not None:
+            self.surfacePresented.emit(current, surface_kind)
         return True
 
     def mark_routed(self, generation: int, *, row: int) -> bool:
@@ -153,7 +211,12 @@ class DetailRenderCoordinator(QObject):
         snapshot = self._snapshot
         if snapshot is None:
             return
-        self._snapshot = DetailRenderSnapshot(snapshot.transaction, state, message)
+        self._snapshot = DetailRenderSnapshot(
+            snapshot.transaction,
+            state,
+            message,
+            snapshot.presented_surfaces,
+        )
         emit = {
             DetailRenderState.PRESENTED: self.presented,
             DetailRenderState.FAILED: self.failed,
@@ -170,5 +233,5 @@ __all__ = [
     "DetailRenderCoordinator",
     "DetailRenderSnapshot",
     "DetailRenderState",
+    "DetailSurfaceKind",
 ]
-

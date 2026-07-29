@@ -23,6 +23,8 @@ from iPhoto.infrastructure.repositories.location_assignment_repository import (
     IndexStoreLocationAssignmentRepository,
 )
 from iPhoto.gui.detail_profile import log_detail_profile
+from iPhoto.gui.detail_pipeline import AssetSourceIdentity, DetailRenderTransaction
+from iPhoto.gui.detail_render_coordinator import DetailRenderCoordinator
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.services.location_file_write_queue import (
@@ -168,6 +170,9 @@ class PlaybackCoordinator(QObject):
         self._info_panel: InfoPanel | None = None
         self._active_live_motion: Path | None = None
         self._active_live_still: Path | None = None
+        self._detail_render_lifecycle = DetailRenderCoordinator(self)
+        self._detail_generation = 0
+        self._live_transaction: DetailRenderTransaction | None = None
         self._resume_after_transition = False
         self._trim_in_ms = 0
         self._trim_out_ms = 0
@@ -330,6 +335,12 @@ class PlaybackCoordinator(QObject):
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
         self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
         self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
+        still_presented = getattr(self._player_view, "stillFramePresented", None)
+        if still_presented is not None:
+            still_presented.connect(self._handle_live_still_presented)
+        video_presented = getattr(self._player_view, "videoFramePresented", None)
+        if video_presented is not None:
+            video_presented.connect(self._handle_live_motion_first_frame)
         self._player_view.video_area.durationChanged.connect(self._on_video_duration_changed)
         self._player_view.video_area.positionChanged.connect(self._on_video_position_changed)
 
@@ -578,6 +589,13 @@ class PlaybackCoordinator(QObject):
         source = presentation.path
         self._active_live_motion = None
         self._active_live_still = None
+        live_transaction = (
+            self._begin_or_reuse_live_transaction(presentation)
+            if presentation.is_live and not presentation.is_video
+            else None
+        )
+        if live_transaction is None:
+            self._retire_live_transaction()
 
         self._favorite_button.setEnabled(presentation.can_toggle_favorite)
         self._info_button.setEnabled(True)
@@ -633,7 +651,13 @@ class PlaybackCoordinator(QObject):
                 self._player_view.video_area.stop()
             self._player_view.show_image_surface()
             display_started = time.perf_counter()
-            self._player_view.display_image(source)
+            if live_transaction is None:
+                self._player_view.display_image(source)
+            else:
+                self._player_view.display_image(
+                    source,
+                    transaction=live_transaction,
+                )
             log_detail_profile(
                 "playback",
                 "image.display_image",
@@ -711,6 +735,7 @@ class PlaybackCoordinator(QObject):
         if motion_path is None:
             self._refresh_face_name_overlay_for_presentation(presentation)
             return
+        transaction = self._begin_or_reuse_live_transaction(presentation)
         self._active_live_motion = motion_path
         self._active_live_still = presentation.path
         self._hide_face_name_overlay(clear_annotations=False)
@@ -727,20 +752,106 @@ class PlaybackCoordinator(QObject):
         self._player_view.video_area.play()
         self._player_bar.setEnabled(False)
         self._is_playing = True
+        self._detail_render_lifecycle.mark_preparing(transaction.generation)
 
     def _handle_playback_finished(self) -> None:
         if not self._active_live_motion or not self._active_live_still:
             return
         still = self._active_live_still
         self._active_live_motion = None
+        transaction = getattr(self, "_live_transaction", None)
+        applied_pending = self._player_view.apply_pending_still()
         self._player_view.defer_still_updates(False)
-        if not self._player_view.apply_pending_still():
-            self._player_view.display_image(still)
+        if not applied_pending:
+            if transaction is None:
+                self._player_view.display_image(still)
+            else:
+                self._player_view.display_image(still, transaction=transaction)
         self._player_bar.setEnabled(False)
         self._player_view.show_live_badge()
         self._player_view.set_live_replay_enabled(True)
         self._is_playing = False
+
+    def _begin_or_reuse_live_transaction(
+        self,
+        presentation: DetailPresentation,
+    ) -> DetailRenderTransaction:
+        current = getattr(self, "_live_transaction", None)
+        if (
+            current is not None
+            and current.asset_id == presentation.asset_id
+            and current.source_identity.path == presentation.path
+        ):
+            return current
+        lifecycle = getattr(self, "_detail_render_lifecycle", None)
+        if lifecycle is None:
+            lifecycle = DetailRenderCoordinator()
+            self._detail_render_lifecycle = lifecycle
+        lifecycle.cancel_current()
+        self._detail_generation = max(0, int(getattr(self, "_detail_generation", 0))) + 1
+        transaction = DetailRenderTransaction(
+            generation=self._detail_generation,
+            asset_id=presentation.asset_id or presentation.path.name,
+            media_kind="live_motion",
+            source_identity=AssetSourceIdentity.from_info(
+                presentation.path,
+                presentation.info,
+            ),
+            reason="click",
+        )
+        lifecycle.begin(transaction)
+        lifecycle.mark_routed(transaction.generation, row=presentation.row)
+        self._live_transaction = transaction
+        return transaction
+
+    def _retire_live_transaction(self) -> None:
+        transaction = getattr(self, "_live_transaction", None)
+        if transaction is None:
+            return
+        lifecycle = getattr(self, "_detail_render_lifecycle", None)
+        if lifecycle is not None:
+            lifecycle.cancel_current()
+        self._live_transaction = None
+
+    @Slot(int)
+    def _handle_live_motion_first_frame(self, generation: int) -> None:
+        transaction = getattr(self, "_live_transaction", None)
+        if (
+            transaction is None
+            or transaction.generation != int(generation)
+            or getattr(self, "_active_live_motion", None) is None
+        ):
+            return
+        self._detail_render_lifecycle.mark_surface_presented(
+            transaction.generation,
+            "live_motion_frame",
+        )
+
+    @Slot(Path, int)
+    def _handle_live_still_presented(self, source: Path, generation: int) -> None:
+        transaction = getattr(self, "_live_transaction", None)
+        if (
+            transaction is None
+            or transaction.generation != int(generation)
+            or transaction.source_identity.path != Path(source)
+        ):
+            return
+        if not self._detail_render_lifecycle.mark_surface_presented(
+            transaction.generation,
+            "live_still",
+        ):
+            return
         self._refresh_face_name_overlay_for_current_presentation()
+        self._prefetch_neighbor_rows()
+
+    def _prefetch_neighbor_rows(self) -> None:
+        row = self.current_row()
+        count = self._asset_model.rowCount()
+        if row < 0 or count <= 1:
+            return
+        first = max(0, row - 1)
+        last = min(count - 1, row + 1)
+        self._asset_model.prioritize_rows(first, last)
 
     def _hide_face_name_overlay(self, *, clear_annotations: bool) -> None:
         overlay = getattr(self, "_face_name_overlay", None)
@@ -1098,6 +1209,7 @@ class PlaybackCoordinator(QObject):
 
     def reset_for_gallery(self) -> None:
         self._clear_play_request_state()
+        self._retire_live_transaction()
         self._reset_location_search_service(clear_cache=True)
         video_area = self._player_view.video_area
         has_video = False
@@ -1145,6 +1257,7 @@ class PlaybackCoordinator(QObject):
 
     def shutdown(self) -> None:
         self._clear_play_request_state()
+        self._retire_live_transaction()
         location_search_controller = getattr(self, "_location_search_controller", None)
         if location_search_controller is not None:
             location_search_controller.shutdown()

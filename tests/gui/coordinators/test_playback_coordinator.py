@@ -12,6 +12,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for playback coordina
 from iPhoto.application.ports import LocationWriteJobRecord
 from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+from iPhoto.gui.detail_render_coordinator import DetailRenderCoordinator, DetailRenderState
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
@@ -410,6 +411,133 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
     assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
     player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
+
+
+def _live_lifecycle_coordinator(
+    tmp_path: Path,
+) -> tuple[PlaybackCoordinator, DetailPresentation, Path, Path]:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = tmp_path / "photo.heic"
+    motion = tmp_path / "motion.mov"
+    still.write_bytes(b"still")
+    motion.write_bytes(b"motion")
+    presentation = replace(
+        _make_presentation(
+            path=str(still),
+            is_video=False,
+            is_live=True,
+        ),
+        live_motion_rel=Path("motion.mov"),
+        live_motion_abs=motion,
+    )
+    coordinator._detail_render_lifecycle = DetailRenderCoordinator()
+    coordinator._detail_generation = 0
+    coordinator._live_transaction = None
+    coordinator._current_presentation = presentation
+    coordinator._active_live_motion = motion
+    coordinator._active_live_still = still
+    coordinator._detail_vm = SimpleNamespace(current_row=SimpleNamespace(value=1))
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=3), prioritize_rows=Mock())
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._player_view = Mock(
+        apply_pending_still=Mock(),
+        defer_still_updates=Mock(),
+        display_image=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = True
+    return coordinator, presentation, still, motion
+
+
+def test_live_pending_still_completes_same_transaction_before_overlay_and_prefetch(
+    tmp_path: Path,
+) -> None:
+    coordinator, presentation, still, _motion = _live_lifecycle_coordinator(tmp_path)
+    transaction = PlaybackCoordinator._begin_or_reuse_live_transaction(
+        coordinator,
+        presentation,
+    )
+    PlaybackCoordinator._handle_live_motion_first_frame(
+        coordinator,
+        transaction.generation,
+    )
+    coordinator._player_view.apply_pending_still.return_value = True
+    order = Mock()
+    order.attach_mock(
+        coordinator._refresh_face_name_overlay_for_current_presentation,
+        "overlay",
+    )
+    order.attach_mock(coordinator._asset_model.prioritize_rows, "prefetch")
+
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._handle_live_still_presented(
+        coordinator,
+        still,
+        transaction.generation,
+    )
+    reused = PlaybackCoordinator._begin_or_reuse_live_transaction(
+        coordinator,
+        presentation,
+    )
+
+    assert reused is transaction
+    assert coordinator._detail_generation == transaction.generation
+    assert coordinator._detail_render_lifecycle.snapshot is not None
+    assert coordinator._detail_render_lifecycle.snapshot.state is DetailRenderState.PRESENTED
+    assert coordinator._detail_render_lifecycle.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+    coordinator._player_view.display_image.assert_not_called()
+    assert order.mock_calls == [call.overlay(), call.prefetch(0, 2)]
+
+
+def test_live_redecode_restores_still_with_original_transaction(
+    tmp_path: Path,
+) -> None:
+    coordinator, presentation, still, _motion = _live_lifecycle_coordinator(tmp_path)
+    transaction = PlaybackCoordinator._begin_or_reuse_live_transaction(
+        coordinator,
+        presentation,
+    )
+    PlaybackCoordinator._handle_live_motion_first_frame(
+        coordinator,
+        transaction.generation,
+    )
+    coordinator._player_view.apply_pending_still.return_value = False
+
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+
+    coordinator._player_view.display_image.assert_called_once_with(
+        still,
+        transaction=transaction,
+    )
+    PlaybackCoordinator._handle_live_still_presented(
+        coordinator,
+        still,
+        transaction.generation,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._asset_model.prioritize_rows.assert_called_once_with(0, 2)
+
+
+def test_live_still_rejects_previous_generation(tmp_path: Path) -> None:
+    coordinator, presentation, still, _motion = _live_lifecycle_coordinator(tmp_path)
+    transaction = PlaybackCoordinator._begin_or_reuse_live_transaction(
+        coordinator,
+        presentation,
+    )
+
+    PlaybackCoordinator._handle_live_still_presented(
+        coordinator,
+        still,
+        transaction.generation - 1,
+    )
+
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_not_called()
+    coordinator._asset_model.prioritize_rows.assert_not_called()
 
 
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:

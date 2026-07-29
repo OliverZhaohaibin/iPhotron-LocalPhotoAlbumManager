@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QLabel, QStackedWidget, QWidget
 
 from ....application.ports import EditServicePort
 from ....core.color_resolver import compute_color_statistics
+from ....gui.detail_pipeline import DetailRenderTransaction
 from ....gui.detail_profile import log_detail_profile
 from ....gui.i18n import tr
 from ....utils import image_loader
@@ -115,6 +116,12 @@ class PlayerViewController(QObject):
     imageLoadingFailed = Signal(Path, str)
     """Emitted when a still image fails to load or post-process."""
 
+    stillFramePresented = Signal(Path, int)
+    """Emitted when a transaction-owned still has actually rendered."""
+
+    videoFramePresented = Signal(int)
+    """Emitted when a transaction-owned video surface renders its first frame."""
+
     def __init__(
         self,
         player_stack: QStackedWidget,
@@ -145,8 +152,14 @@ class PlayerViewController(QObject):
         self._active_workers: Set[_AdjustedImageWorker] = set()
         self._loading_source: Optional[Path] = None
         self._loading_started_at: float | None = None
+        self._active_transaction: DetailRenderTransaction | None = None
+        self._loading_transaction: DetailRenderTransaction | None = None
+        self._current_still_source: Path | None = None
+        self._current_still_generation = 0
         self._defer_still_updates = False
-        self._pending_still: Optional[tuple[Path, QImage, dict]] = None
+        self._pending_still: Optional[
+            tuple[Path, QImage, dict, DetailRenderTransaction | None]
+        ] = None
 
         # Per-widget first-render tracking.  QRhiWidget backing textures are
         # uninitialised (transparent) until the first ``render()`` call fills
@@ -159,7 +172,13 @@ class PlayerViewController(QObject):
         self._video_renderer_rendered = False
 
         self._image_viewer.firstFrameReady.connect(self._on_image_first_render)
+        still_presented = getattr(self._image_viewer, "stillFramePresented", None)
+        if still_presented is not None:
+            still_presented.connect(self._on_still_surface_presented)
         self._video_area.firstFrameReady.connect(self._on_video_first_render)
+        video_presented = getattr(self._video_area, "framePresented", None)
+        if video_presented is not None:
+            video_presented.connect(self._on_video_surface_presented)
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -175,11 +194,27 @@ class PlayerViewController(QObject):
         if self._player_stack.currentWidget() is self._image_viewer:
             self._hide_detail_init_cover()
 
+    def _on_still_surface_presented(self, source: object) -> None:
+        if self._current_still_generation <= 0:
+            return
+        presented_source = Path(source)
+        if self._current_still_source != presented_source:
+            return
+        self.stillFramePresented.emit(
+            presented_source,
+            self._current_still_generation,
+        )
+
     def _on_video_first_render(self) -> None:
         """Mark video renderer as initialised; hide cover if it is visible."""
         self._video_renderer_rendered = True
         if self._player_stack.currentWidget() is self._video_area:
             self._hide_detail_init_cover()
+
+    def _on_video_surface_presented(self, _source: Path) -> None:
+        transaction = self._active_transaction
+        if transaction is not None and transaction.media_kind == "live_motion":
+            self.videoFramePresented.emit(transaction.generation)
 
     def _hide_detail_init_cover(self) -> None:
         """Walk up to ``DetailPageWidget`` and hide the init cover."""
@@ -281,10 +316,18 @@ class PlayerViewController(QObject):
     # ------------------------------------------------------------------
     # Content helpers
     # ------------------------------------------------------------------
-    def display_image(self, source: Path, *, placeholder: Optional[QPixmap] = None) -> bool:
+    def display_image(
+        self,
+        source: Path,
+        *,
+        placeholder: Optional[QPixmap] = None,
+        transaction: DetailRenderTransaction | None = None,
+    ) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         self._loading_source = source
         self._loading_started_at = time.perf_counter()
+        self._active_transaction = transaction
+        self._loading_transaction = transaction
 
         # 1) 先切到 GL 视图，保证有有效的 GL 上下文
         self.show_image_surface()
@@ -320,6 +363,7 @@ class PlayerViewController(QObject):
             self._release_worker(worker)
             self._loading_source = None
             self._loading_started_at = None
+            self._loading_transaction = None
             self.imageLoadingFailed.emit(source, str(exc))
             return False
         return True
@@ -334,9 +378,9 @@ class PlayerViewController(QObject):
         """Apply any deferred still frame if available."""
         if self._pending_still is None:
             return False
-        source, image, adjustments = self._pending_still
+        source, image, adjustments, transaction = self._pending_still
         self._pending_still = None
-        self._apply_still_frame(source, image, adjustments)
+        self._apply_still_frame(source, image, adjustments, transaction=transaction)
         return True
 
     def clear_image(self) -> None:
@@ -419,18 +463,30 @@ class PlayerViewController(QObject):
             if self._loading_source == source:
                 self._loading_source = None
                 self._loading_started_at = None
+                self._loading_transaction = None
             self._image_viewer.set_image(None, {})
             self.imageLoadingFailed.emit(source, "Image decoder returned an empty frame")
             return
 
         if self._defer_still_updates and self._player_stack.currentWidget() is self._video_area:
-            self._pending_still = (source, image, adjustments)
+            self._pending_still = (
+                source,
+                image,
+                adjustments,
+                self._loading_transaction,
+            )
         else:
-            self._apply_still_frame(source, image, adjustments)
+            self._apply_still_frame(
+                source,
+                image,
+                adjustments,
+                transaction=self._loading_transaction,
+            )
 
         if self._loading_source == source:
             self._loading_source = None
             self._loading_started_at = None
+            self._loading_transaction = None
 
     def _on_adjusted_image_failed(self, source: Path, message: str) -> None:
         """Propagate worker failures while ensuring stale results are ignored."""
@@ -441,12 +497,25 @@ class PlayerViewController(QObject):
         if self._loading_source == source:
             self._loading_source = None
             self._loading_started_at = None
+            self._loading_transaction = None
         self._image_viewer.set_image(None)
         self.imageLoadingFailed.emit(source, message)
 
-    def _apply_still_frame(self, source: Path, image: QImage, adjustments: dict) -> None:
+    def _apply_still_frame(
+        self,
+        source: Path,
+        image: QImage,
+        adjustments: dict,
+        *,
+        transaction: DetailRenderTransaction | None = None,
+    ) -> None:
         """Render the still image on the GL viewer."""
         apply_started = time.perf_counter()
+        self._active_transaction = transaction
+        self._current_still_source = source
+        self._current_still_generation = (
+            transaction.generation if transaction is not None else 0
+        )
         self.show_image_surface()
         self._image_viewer.set_image(
             image,

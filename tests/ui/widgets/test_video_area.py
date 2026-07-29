@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import struct
+import sys
 from unittest.mock import Mock, call, patch
 
 import pytest
@@ -60,6 +61,9 @@ class _FakeSignal:
     def emit(self, *args) -> None:
         for callback in tuple(self._callbacks):
             callback(*args)
+
+    def clear(self) -> None:
+        self._callbacks.clear()
 
 
 class _FakeMediaPlayer:
@@ -138,13 +142,46 @@ class _FakeVideoSink:
         self.videoFrameChanged = _FakeSignal()
 
 
+_RETIRED_VIDEO_AREAS: list[VideoArea] = []
+
+
 @pytest.fixture(autouse=True)
 def _isolate_platform_multimedia_backend(monkeypatch):
-    """Keep VideoArea unit tests out of Linux's offscreen media plugins."""
+    """Keep VideoArea unit tests out of Linux's offscreen media plugins.
 
+    Track every constructed area so Python signal closures cannot defer native
+    QRhiWidget destruction until interpreter shutdown.
+    """
+
+    created_areas: list[VideoArea] = []
+    original_init = VideoArea.__init__
+
+    def tracked_init(area, *args, **kwargs) -> None:
+        original_init(area, *args, **kwargs)
+        created_areas.append(area)
+
+    monkeypatch.setattr(VideoArea, "__init__", tracked_init)
     monkeypatch.setattr(video_area_module, "QMediaPlayer", _FakeMediaPlayer)
     monkeypatch.setattr(video_area_module, "QAudioOutput", _FakeAudioOutput)
     monkeypatch.setattr(video_area_module, "QVideoSink", _FakeVideoSink)
+    try:
+        yield
+    finally:
+        if sys.platform.startswith("linux"):
+            for area in reversed(created_areas):
+                area._video_sink.videoFrameChanged.clear()
+                area._player.positionChanged.clear()
+                area._player.durationChanged.clear()
+                area._player.playbackStateChanged.clear()
+                area._player.mediaStatusChanged.clear()
+                area._player.errorOccurred.clear()
+                area._video_frame_handler = None
+                area.close()
+            # Keep the closed QRhiWidget tree alive until the session-level Qt
+            # drain. Deleting it during an individual test can race platform
+            # render teardown, while interpreter shutdown crashes Linux.
+            _RETIRED_VIDEO_AREAS.extend(created_areas)
+        created_areas.clear()
 
 
 def _set_rotation_180(fmt: QVideoFrameFormat) -> None:

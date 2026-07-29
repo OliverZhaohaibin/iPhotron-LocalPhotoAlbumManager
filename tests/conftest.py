@@ -1,5 +1,6 @@
-import sys
+import gc
 import os
+import sys
 from types import ModuleType
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, Mock, call, patch
@@ -406,6 +407,32 @@ def _test_qapplication():
     return app
 
 
+def _drain_test_qt_runtime(app) -> None:
+    """Destroy Linux test-owned Qt resources while QApplication is valid."""
+
+    if not sys.platform.startswith("linux"):
+        return
+
+    from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool
+
+    thread_pool = QThreadPool.globalInstance()
+    thread_pool.clear()
+    thread_pool.waitForDone(5000)
+
+    for widget in tuple(app.topLevelWidgets()):
+        try:
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:
+            pass
+
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _keep_test_qapplication_alive():
     """Keep one QApplication alive for the complete pytest process.
@@ -423,8 +450,11 @@ def _keep_test_qapplication_alive():
         yield
         return
 
-    _test_qapplication()
-    yield
+    app = _test_qapplication()
+    try:
+        yield
+    finally:
+        _drain_test_qt_runtime(app)
 
 
 @pytest.fixture()

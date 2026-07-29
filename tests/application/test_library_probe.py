@@ -24,6 +24,7 @@ from iPhoto.bootstrap.library_probe import (
     LibraryProbeRequest,
     PreparedLibrary,
     _main,
+    _storage_kind,
     probe_library,
 )
 from iPhoto.cache.index_store.migrations import (
@@ -55,7 +56,12 @@ def test_probe_returns_two_level_album_snapshot_without_creating_work_dir(
         ("Trips", 1, "Travel"),
         ("Berlin", 2, "Berlin"),
     ]
-    assert prepared.storage_kind == "local"
+    assert prepared.storage_kind in {"local", "slow"}
+
+
+def test_storage_kind_uses_a_deterministic_latency_threshold(tmp_path: Path) -> None:
+    assert _storage_kind(tmp_path, 499.999) == "local"
+    assert _storage_kind(tmp_path, 500.0) == "slow"
 
 
 def test_probe_reads_schema_and_completed_scan_without_writing(tmp_path: Path) -> None:

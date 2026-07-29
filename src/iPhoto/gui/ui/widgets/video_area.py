@@ -99,6 +99,8 @@ class VideoArea(QWidget):
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
+    framePresented = Signal(Path)
+    """Emitted once per load when the first decoded frame reaches the GPU surface."""
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
@@ -166,6 +168,7 @@ class VideoArea(QWidget):
         self._profile_load_started_at: float | None = None
         self._profile_load_source: Path | None = None
         self._profile_first_frame_logged = False
+        self._surface_first_frame_pending = False
         self._resize_refit_pending = False
         self._resize_refit_timer = QTimer(self)
         self._resize_refit_timer.setSingleShot(True)
@@ -655,6 +658,7 @@ class VideoArea(QWidget):
         self._profile_load_started_at = load_started
         self._profile_load_source = path
         self._profile_first_frame_logged = False
+        self._surface_first_frame_pending = True
         self._current_source = path
         self._current_adjustments = dict(adjustments or {})
         self._pending_video_frame = None
@@ -1298,6 +1302,15 @@ class VideoArea(QWidget):
         self._edit_viewer.colorPicked.connect(self.colorPicked.emit)
         self._edit_viewer.firstFrameReady.connect(self.firstFrameReady.emit)
         self._renderer.firstFrameReady.connect(self.firstFrameReady.emit)
+        self._renderer.framePresented.connect(self._on_renderer_frame_presented)
+
+    def _on_renderer_frame_presented(self) -> None:
+        """Publish the first GPU-presented frame for the current media load."""
+
+        if not self._surface_first_frame_pending or self._current_source is None:
+            return
+        self._surface_first_frame_pending = False
+        self.framePresented.emit(self._current_source)
 
     def _on_edit_viewer_zoom_changed(self, factor: float) -> None:
         """Forward zoom changes from _edit_viewer only when it is the active surface."""

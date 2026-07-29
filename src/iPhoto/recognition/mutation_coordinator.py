@@ -35,24 +35,42 @@ class RecognitionMutationOutcome[T]:
     operation_id: str | None = None
 
 
+@dataclass(slots=True)
+class _ExecutionLease:
+    lock: threading.RLock
+    references: int = 0
+
+
 RecoveryHandler = Callable[[RecognitionOperation], bool]
 EventSubscriber = Callable[[RecognitionOutboxEvent], None]
 
 
-_EXECUTION_LOCKS: dict[Path, threading.RLock] = {}
+_EXECUTION_LOCKS: dict[Path, _ExecutionLease] = {}
 _EXECUTION_LOCKS_GUARD = threading.Lock()
 
 
-def _execution_lock_for(library_root: Path) -> threading.RLock:
+def _acquire_execution_lease(library_root: Path) -> threading.RLock:
     """Return the process-wide lifecycle lease for one recognition library."""
 
     resolved = Path(library_root).resolve()
     with _EXECUTION_LOCKS_GUARD:
-        lock = _EXECUTION_LOCKS.get(resolved)
-        if lock is None:
-            lock = threading.RLock()
-            _EXECUTION_LOCKS[resolved] = lock
-        return lock
+        lease = _EXECUTION_LOCKS.get(resolved)
+        if lease is None:
+            lease = _ExecutionLease(threading.RLock())
+            _EXECUTION_LOCKS[resolved] = lease
+        lease.references += 1
+        return lease.lock
+
+
+def _release_execution_lease(library_root: Path) -> None:
+    resolved = Path(library_root).resolve()
+    with _EXECUTION_LOCKS_GUARD:
+        lease = _EXECUTION_LOCKS.get(resolved)
+        if lease is None:
+            return
+        lease.references -= 1
+        if lease.references <= 0:
+            _EXECUTION_LOCKS.pop(resolved, None)
 
 
 class RecognitionMutationCoordinator:
@@ -68,7 +86,8 @@ class RecognitionMutationCoordinator:
         self._journal = RecognitionOperationJournal(
             ensure_work_dir(self._library_root) / "recognition" / "operations.db"
         )
-        self._execution_lock = _execution_lock_for(self._library_root)
+        self._execution_lock = _acquire_execution_lease(self._library_root)
+        self._closed = False
         self._lock = threading.RLock()
         self._handlers: dict[str, list[RecoveryHandler]] = {}
         self._subscribers: list[EventSubscriber] = []
@@ -103,6 +122,8 @@ class RecognitionMutationCoordinator:
         """
 
         with self._execution_lock:
+            if self._closed:
+                raise RuntimeError("Recognition mutation coordinator is closed.")
             yield
 
     def register_recovery_handler(
@@ -111,6 +132,8 @@ class RecognitionMutationCoordinator:
         handler: RecoveryHandler,
     ) -> None:
         with self._lock:
+            if self._closed:
+                raise RuntimeError("Recognition mutation coordinator is closed.")
             for kind in kinds:
                 normalized = str(kind)
                 handlers = self._handlers.setdefault(normalized, [])
@@ -119,6 +142,8 @@ class RecognitionMutationCoordinator:
 
     def subscribe(self, subscriber: EventSubscriber) -> None:
         with self._lock:
+            if self._closed:
+                raise RuntimeError("Recognition mutation coordinator is closed.")
             if subscriber not in self._subscribers:
                 self._subscribers.append(subscriber)
         self.dispatch_pending()
@@ -127,6 +152,19 @@ class RecognitionMutationCoordinator:
         with self._lock:
             if subscriber in self._subscribers:
                 self._subscribers.remove(subscriber)
+
+    def close(self) -> None:
+        """Release session-owned handlers, subscribers, and the root lease."""
+
+        if self._closed:
+            return
+        with self._execution_lock, self._lock:
+            if self._closed:
+                return
+            self._handlers.clear()
+            self._subscribers.clear()
+            self._closed = True
+        _release_execution_lease(self._library_root)
 
     def recover_pending(self) -> bool:
         with self.mutation_scope(), self._lock:
@@ -256,25 +294,16 @@ class RecognitionMutationCoordinator:
             return True
 
 
-_COORDINATORS: dict[Path, RecognitionMutationCoordinator] = {}
-_COORDINATORS_LOCK = threading.Lock()
-
-
 def get_recognition_mutation_coordinator(
     library_root: Path,
 ) -> RecognitionMutationCoordinator:
-    resolved = Path(library_root).resolve()
-    with _COORDINATORS_LOCK:
-        coordinator = _COORDINATORS.get(resolved)
-        if coordinator is None:
-            coordinator = RecognitionMutationCoordinator(resolved)
-            _COORDINATORS[resolved] = coordinator
-        return coordinator
+    """Compatibility factory; production sessions inject their owned instance."""
+
+    return RecognitionMutationCoordinator(Path(library_root).resolve())
 
 
 def reset_recognition_mutation_coordinators() -> None:
-    with _COORDINATORS_LOCK:
-        _COORDINATORS.clear()
+    """Compatibility no-op retained for older tests."""
 
 
 __all__ = [

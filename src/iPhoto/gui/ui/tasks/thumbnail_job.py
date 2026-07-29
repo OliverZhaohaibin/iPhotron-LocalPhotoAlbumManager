@@ -18,6 +18,7 @@ from PySide6.QtGui import QImage
 import numpy as np
 
 from ....io import sidecar
+from ....utils.image_loader import load_qimage
 from .thumbnail_cache import safe_unlink, stat_mtime_ns, generate_cache_path, write_cache
 from .thumbnail_renderer import render_image, render_video, seek_targets
 
@@ -129,8 +130,8 @@ class ThumbnailJob(QRunnable):
         except OSError:
             cache_exists = False
         if cache_exists:
-            image = QImage(str(cache_path))
-            if not image.isNull():
+            image = load_qimage(cache_path)
+            if image is not None and not image.isNull():
                 loaded_from_cache = True
             else:
                 safe_unlink(cache_path)

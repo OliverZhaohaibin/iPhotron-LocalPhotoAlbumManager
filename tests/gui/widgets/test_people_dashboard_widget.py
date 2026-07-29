@@ -154,16 +154,12 @@ def test_person_and_pet_with_same_raw_id_remain_distinct(
     widget._board.resize(800, 500)
     person = people_dashboard_cards.PeopleCard(
         board=widget._board,
-        summary=PersonSummary(
-            "same-id", "Alice", "face-a", 1, None, "2024-01-01T00:00:00Z"
-        ),
+        summary=PersonSummary("same-id", "Alice", "face-a", 1, None, "2024-01-01T00:00:00Z"),
         seed_index=0,
     )
     pet = people_dashboard_cards.PetCard(
         board=widget._board,
-        summary=PetSummary(
-            "same-id", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z"
-        ),
+        summary=PetSummary("same-id", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z"),
         seed_index=1,
     )
     widget._board.set_cards([person, pet])
@@ -315,7 +311,9 @@ def test_drag_reorder_persists_cluster_order(monkeypatch, qapp: QApplication) ->
     widget._populate_cards()
 
     persisted: list[list[str]] = []
-    monkeypatch.setattr(widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids)))
+    monkeypatch.setattr(
+        widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids))
+    )
     monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
@@ -327,7 +325,9 @@ def test_drag_reorder_persists_cluster_order(monkeypatch, qapp: QApplication) ->
     assert persisted == [["person-b", "person-a"]]
 
 
-def test_drag_reorder_skips_persist_when_order_is_unchanged(monkeypatch, qapp: QApplication) -> None:
+def test_drag_reorder_skips_persist_when_order_is_unchanged(
+    monkeypatch, qapp: QApplication
+) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
@@ -336,7 +336,9 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(monkeypatch, qapp: Q
     widget._populate_cards()
 
     persisted: list[list[str]] = []
-    monkeypatch.setattr(widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids)))
+    monkeypatch.setattr(
+        widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids))
+    )
     monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
@@ -375,7 +377,9 @@ def test_drag_reorder_persists_group_order(monkeypatch, qapp: QApplication) -> N
     widget._populate_groups()
 
     persisted: list[list[str]] = []
-    monkeypatch.setattr(widget._service, "set_group_order", lambda group_ids: persisted.append(list(group_ids)))
+    monkeypatch.setattr(
+        widget._service, "set_group_order", lambda group_ids: persisted.append(list(group_ids))
+    )
     monkeypatch.setattr(widget._groups_board, "animate_to_layout", lambda: None)
 
     cards = widget._groups_board.visible_cards()
@@ -732,9 +736,7 @@ def test_merge_confirm_dialog_respects_light_theme_context(qapp: QApplication) -
             return "light"
 
     shell = QWidget()
-    shell.coordinator = SimpleNamespace(
-        _context=SimpleNamespace(theme=Theme(), settings=None)
-    )
+    shell.coordinator = SimpleNamespace(_context=SimpleNamespace(theme=Theme(), settings=None))
     widget = PeopleDashboardWidget(parent=shell)
     dialog = MergeConfirmDialog(
         1,
@@ -817,9 +819,7 @@ def test_group_and_people_cards_share_same_left_alignment(qapp: QApplication) ->
     widget.close()
 
 
-def test_status_message_updates_without_reloading_cards(
-    tmp_path: Path, qapp: QApplication
-) -> None:
+def test_status_message_updates_without_reloading_cards(tmp_path: Path, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._service.set_library_root(tmp_path)
     widget._summaries = [
@@ -883,7 +883,9 @@ def test_people_dashboard_retranslate_keeps_unbound_message_after_unbind(
     widget.retranslate_ui()
 
     assert widget._message.text() == "XX:Bind a Basic Library to see People & Pets clusters."
-    assert widget._empty.text() == "XX:People & Pets appear here after a library is bound and scanned."
+    assert (
+        widget._empty.text() == "XX:People & Pets appear here after a library is bound and scanned."
+    )
 
 
 def test_set_services_uses_injected_library_scoped_services(
@@ -956,9 +958,7 @@ def test_people_dashboard_loader_reports_locked_database_without_raising(
     assert failures[0][3] is True
 
 
-def test_people_dashboard_locked_load_schedules_retry(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_people_dashboard_locked_load_schedules_retry(monkeypatch, qapp: QApplication) -> None:
     del qapp
     widget = PeopleDashboardWidget()
     widget._load_generation = 4
@@ -1006,7 +1006,9 @@ def test_pin_unnamed_person_prompts_for_name_and_persists_pin(
     summary = PersonSummary("person-a", None, "face-a", 3, None, "2024-01-01T00:00:00Z")
 
     renamed: list[tuple[str, str | None]] = []
-    monkeypatch.setattr(widget._service, "rename_cluster", lambda person_id, name: renamed.append((person_id, name)))
+    monkeypatch.setattr(
+        widget._service, "rename_cluster", lambda person_id, name: renamed.append((person_id, name))
+    )
     monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
     monkeypatch.setattr(
         PeopleDashboardWidget,
@@ -1036,8 +1038,14 @@ def test_hidden_person_pin_shows_warning_and_does_not_persist(
     summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
 
     warnings: list[str] = []
-    monkeypatch.setattr(widget._service, "pin_block_reason", lambda _person_id: "Pinned is blocked.")
-    monkeypatch.setattr(people_dashboard_widget.dialogs, "show_warning", lambda _parent, message, title="iPhoto": warnings.append(message))
+    monkeypatch.setattr(
+        widget._service, "pin_block_reason", lambda _person_id: "Pinned is blocked."
+    )
+    monkeypatch.setattr(
+        people_dashboard_widget.dialogs,
+        "show_warning",
+        lambda _parent, message, title="iPhoto": warnings.append(message),
+    )
 
     widget._toggle_person_pin(summary)
 
@@ -1088,9 +1096,7 @@ def test_merge_person_shows_warning_when_hidden_state_differs(
     ]
 
 
-def test_merge_person_reuses_group_people_dialog(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_merge_person_reuses_group_people_dialog(monkeypatch, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
@@ -1114,7 +1120,9 @@ def test_merge_person_reuses_group_people_dialog(
     monkeypatch.setattr(
         widget,
         "_confirm_merge",
-        lambda source_person_id, target_person_id: confirmed.append((source_person_id, target_person_id)) or True,
+        lambda source_person_id, target_person_id: (
+            confirmed.append((source_person_id, target_person_id)) or True
+        ),
     )
 
     widget._merge_person(widget._summaries[0])
@@ -1136,9 +1144,7 @@ def test_cross_identity_merge_invalidates_query_cache_before_reload(
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
     ]
-    widget._pet_summaries = [
-        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z")
-    ]
+    widget._pet_summaries = [PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z")]
     widget._query_service = Mock()
     merge_result = IdentityMergeOutcome(
         True,
@@ -1173,9 +1179,7 @@ def test_merge_recovery_pending_uses_distinct_information_message(
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 1, None, "2024-01-01T00:00:00Z")
     ]
-    widget._pet_summaries = [
-        PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z")
-    ]
+    widget._pet_summaries = [PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:01Z")]
     outcome = IdentityMergeOutcome(
         False,
         IdentityRef("person", "person-a"),
@@ -1228,9 +1232,7 @@ def test_merge_person_dialog_includes_same_hidden_people_and_pets(
     assert dialog_calls == [["person:person-b", "pet:pet-a"]]
 
 
-def test_merge_pet_dialog_includes_all_same_hidden_pets(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_merge_pet_dialog_includes_all_same_hidden_pets(monkeypatch, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._pet_summaries = [
         PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:00Z"),
@@ -1321,20 +1323,41 @@ def test_merge_pet_shows_warning_when_only_hidden_mismatch_exists(
     ]
 
 
-def test_pet_card_does_not_use_species_fallback_label(qapp: QApplication) -> None:
+@pytest.mark.parametrize(
+    ("name", "species", "expected"),
+    [
+        (None, "cat", "Unconfirmed Cat"),
+        (None, "dog", "Unconfirmed Dog"),
+        (None, None, "Unconfirmed Pet"),
+        ("Miso", "cat", "Miso"),
+    ],
+)
+def test_pet_card_uses_unconfirmed_species_fallback_label(
+    qapp: QApplication,
+    name: str | None,
+    species: str | None,
+    expected: str,
+) -> None:
     widget = PeopleDashboardWidget()
     card = people_dashboard_cards.PetCard(
         board=widget._board,
-        summary=PetSummary("pet-a", None, "det-a", 1, None, "2024-01-01T00:00:00Z"),
+        summary=PetSummary(
+            "pet-a",
+            name,
+            "det-a",
+            1,
+            None,
+            "2024-01-01T00:00:00Z",
+            profile_state="unstable",
+            species_label=species,
+        ),
         seed_index=0,
     )
 
-    assert card.display_name() == ""
+    assert card.display_name() == expected
 
 
-def test_toggle_person_hidden_updates_service_and_reloads(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_toggle_person_hidden_updates_service_and_reloads(monkeypatch, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._query_service = Mock()
     summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
@@ -1364,9 +1387,7 @@ def test_toggle_person_hidden_updates_service_and_reloads(
     assert reloads == [False]
 
 
-def test_toggle_person_hidden_uses_confirmation_popup(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_toggle_person_hidden_uses_confirmation_popup(monkeypatch, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
 
@@ -1376,10 +1397,9 @@ def test_toggle_person_hidden_uses_confirmation_popup(
         MergeConfirmDialog,
         "confirm_action",
         classmethod(
-            lambda cls, *, item_count, parent=None, title_text, body_text, confirm_text: confirms.append(
-                (title_text, body_text, confirm_text)
+            lambda cls, *, item_count, parent=None, title_text, body_text, confirm_text: (
+                confirms.append((title_text, body_text, confirm_text)) or True
             )
-            or True
         ),
     )
     monkeypatch.setattr(
@@ -1401,9 +1421,7 @@ def test_toggle_person_hidden_uses_confirmation_popup(
     assert toggles == [("person-a", True)]
 
 
-def test_disband_group_uses_confirmation_popup_and_deletes(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_disband_group_uses_confirmation_popup_and_deletes(monkeypatch, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     summary = PeopleGroupSummary(
         group_id="group-a",
@@ -1423,10 +1441,9 @@ def test_disband_group_uses_confirmation_popup_and_deletes(
         MergeConfirmDialog,
         "confirm_action",
         classmethod(
-            lambda cls, *, item_count, parent=None, title_text, body_text, confirm_text: confirms.append(
-                (title_text, body_text, confirm_text)
+            lambda cls, *, item_count, parent=None, title_text, body_text, confirm_text: (
+                confirms.append((title_text, body_text, confirm_text)) or True
             )
-            or True
         ),
     )
     monkeypatch.setattr(

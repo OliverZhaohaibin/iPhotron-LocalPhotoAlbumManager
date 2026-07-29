@@ -99,6 +99,8 @@ class PetSummary:
     created_at: str
     is_hidden: bool = False
     asset_count: int = 0
+    profile_state: str = "unstable"
+    species_label: str | None = None
 
 
 @dataclass(frozen=True)

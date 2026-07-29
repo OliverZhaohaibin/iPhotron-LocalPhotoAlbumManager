@@ -235,9 +235,12 @@ YOLOX release asset and can be overridden with:
 export IPHOTO_PET_DETECTOR_MODEL_URL="https://example.invalid/yolox_nano.onnx"
 ```
 
-When the DINOv2 TorchScript cache is missing, iPhotron loads `dinov2_vits14`
-through Torch Hub from a pinned, immutable `facebookresearch/dinov2` revision
-and then attempts to cache a TorchScript copy under `extension/models/pets`.
+Production never executes Torch Hub. It loads a packaged DINOv2 TorchScript model,
+or downloads the fixed HTTPS artifact declared by SHA-256 and exact byte size in
+`src/iPhoto/pets/model_manifest.json`. Release engineering may regenerate the
+artifact from the pinned source revision with
+`tools/convert_dinov2_torchscript.py`; that tool also checks eager/TorchScript
+numeric equivalence before publishing.
 
 For offline or packaged validation, disable first-use downloads with:
 

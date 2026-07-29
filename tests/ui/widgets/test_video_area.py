@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gc
 import struct
+import weakref
 from unittest.mock import Mock, call, patch
 
 import pytest
@@ -18,6 +20,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
+import iPhoto.gui.ui.widgets.video_area as video_area_module
 import iPhoto.gui.ui.widgets.gl_texture_manager as gl_texture_manager_module
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
@@ -40,6 +43,145 @@ from iPhoto.gui.ui.widgets.video_renderer_widget import (
     _resolve_frame_rotation_cw,
 )
 from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
+
+
+class _FakeSignal:
+    """Small signal seam for the platform multimedia objects used by VideoArea."""
+
+    def __init__(self) -> None:
+        self._callbacks: list[object] = []
+
+    def connect(self, callback, *connection_options) -> None:
+        del connection_options
+        self._callbacks.append(callback)
+
+    def disconnect(self, callback) -> None:
+        self._callbacks.remove(callback)
+
+    def emit(self, *args) -> None:
+        for callback in tuple(self._callbacks):
+            callback(*args)
+
+    def clear(self) -> None:
+        self._callbacks.clear()
+
+
+class _FakeMediaPlayer:
+    """Stateful QMediaPlayer contract without loading a native media backend."""
+
+    MediaStatus = QMediaPlayer.MediaStatus
+    PlaybackState = QMediaPlayer.PlaybackState
+
+    def __init__(self, parent=None) -> None:
+        del parent
+        self.positionChanged = _FakeSignal()
+        self.durationChanged = _FakeSignal()
+        self.playbackStateChanged = _FakeSignal()
+        self.mediaStatusChanged = _FakeSignal()
+        self.errorOccurred = _FakeSignal()
+        self._position = 0
+        self._duration = 0
+        self._state = QMediaPlayer.PlaybackState.StoppedState
+        self._source = None
+        self._audio_output = None
+        self._video_output = None
+
+    def setAudioOutput(self, output) -> None:
+        self._audio_output = output
+
+    def setVideoOutput(self, output) -> None:
+        self._video_output = output
+
+    def setSource(self, source) -> None:
+        self._source = source
+
+    def setPosition(self, position: int) -> None:
+        self._position = int(position)
+
+    def position(self) -> int:
+        return self._position
+
+    def duration(self) -> int:
+        return self._duration
+
+    def playbackState(self):
+        return self._state
+
+    def play(self) -> None:
+        self._state = QMediaPlayer.PlaybackState.PlayingState
+
+    def pause(self) -> None:
+        self._state = QMediaPlayer.PlaybackState.PausedState
+
+    def stop(self) -> None:
+        self._state = QMediaPlayer.PlaybackState.StoppedState
+
+
+class _FakeAudioOutput:
+    def __init__(self, parent=None) -> None:
+        del parent
+        self._volume = 1.0
+        self._muted = False
+
+    def setVolume(self, volume: float) -> None:
+        self._volume = float(volume)
+
+    def volume(self) -> float:
+        return self._volume
+
+    def setMuted(self, muted: bool) -> None:
+        self._muted = bool(muted)
+
+    def isMuted(self) -> bool:
+        return self._muted
+
+
+class _FakeVideoSink:
+    def __init__(self, parent=None) -> None:
+        del parent
+        self.videoFrameChanged = _FakeSignal()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_platform_multimedia_backend(monkeypatch, qapp):
+    """Keep VideoArea unit tests out of Linux's offscreen media plugins.
+
+    Track every constructed area so Python signal closures cannot defer native
+    QRhiWidget destruction until interpreter shutdown.
+    """
+
+    created_areas: list[VideoArea] = []
+    original_init = VideoArea.__init__
+
+    def tracked_init(area, *args, **kwargs) -> None:
+        original_init(area, *args, **kwargs)
+        created_areas.append(area)
+
+    monkeypatch.setattr(VideoArea, "__init__", tracked_init)
+    monkeypatch.setattr(video_area_module, "QMediaPlayer", _FakeMediaPlayer)
+    monkeypatch.setattr(video_area_module, "QAudioOutput", _FakeAudioOutput)
+    monkeypatch.setattr(video_area_module, "QVideoSink", _FakeVideoSink)
+    try:
+        yield
+    finally:
+        area_refs = [weakref.ref(area) for area in created_areas]
+        for area in reversed(created_areas):
+            area._video_sink.videoFrameChanged.clear()
+            area._player.positionChanged.clear()
+            area._player.durationChanged.clear()
+            area._player.playbackStateChanged.clear()
+            area._player.mediaStatusChanged.clear()
+            area._player.errorOccurred.clear()
+            area._video_frame_handler = None
+            area.close()
+        created_areas.clear()
+        if area_refs:
+            del area
+        gc.collect()
+        qapp.processEvents()
+        assert all(area_ref() is None for area_ref in area_refs), (
+            "VideoArea unit test leaked a native widget into process teardown"
+        )
 
 
 def _set_rotation_180(fmt: QVideoFrameFormat) -> None:
@@ -75,6 +217,8 @@ def qapp():
     if app is None:
         app = QApplication([])
     yield app
+    gc.collect()
+    app.processEvents()
 
 
 # ------------------------------------------------------------------
@@ -484,6 +628,9 @@ class TestVideoArea:
         va = VideoArea()
         assert va._renderer is not None
         assert isinstance(va._renderer, VideoRendererWidget)
+        assert isinstance(va._player, _FakeMediaPlayer)
+        assert isinstance(va._audio_output, _FakeAudioOutput)
+        assert isinstance(va._video_sink, _FakeVideoSink)
 
     def test_renderer_is_child(self, qapp):
         """The renderer should live inside VideoArea's surface stack."""

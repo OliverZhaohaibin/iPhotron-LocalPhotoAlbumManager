@@ -20,7 +20,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QImage, QImageReader, QPainter, QPixmap
+from PySide6.QtGui import QImage, QPainter, QPixmap
 
 from iPhoto.application.ports import EditServicePort
 from iPhoto.infrastructure.services.performance_events import (
@@ -43,13 +43,10 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
     speculative_thread_background_mode,
     windows_low_memory_resource_active,
 )
+from iPhoto.utils.image_loader import load_qimage
 
 _LOGGER = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-_QIMAGE_READER_FILE_NOT_FOUND_ERROR = QImageReader.ImageReaderError.FileNotFoundError
-_QIMAGE_READER_DEVICE_ERROR = QImageReader.ImageReaderError.DeviceError
-
-
 def _startup_hang_diag_enabled() -> bool:
     return os.environ.get("IPHOTO_STARTUP_HANG_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
 
@@ -2969,27 +2966,26 @@ class ThumbnailCacheService(QObject):
         if cancellation is not None and cancellation.cancelled():
             outcome = "cancelled"
         else:
-            # Give QImageReader the native filename instead of a PySide QFile
-            # wrapper. Image plugins may query a QIODevice's virtual methods
-            # while holding Qt's process-wide decoder lock; re-entering Python
-            # there can deadlock with another decoder thread that holds the GIL.
-            reader = QImageReader(str(disk_file))
-            reader.setAutoTransform(True)
-            if target_size is not None and target_size.isValid() and not target_size.isEmpty():
-                reader.setScaledSize(target_size)
             open_finished = monotonic_ms()
-            image = reader.read()
+            try:
+                if not disk_file.is_file():
+                    outcome = "miss"
+                else:
+                    # L2 artifacts are JPEG files.  Route them through the
+                    # shared Pillow-first loader: Qt's native JPEG reader can
+                    # terminate a long-lived headless process instead of
+                    # returning a decode error.
+                    outcome = "decode_error"
+                    image = load_qimage(disk_file, target_size)
+            except FileNotFoundError:
+                outcome = "miss"
+            except OSError:
+                outcome = "read_error"
             decode_finished = monotonic_ms()
             if image is not None and not image.isNull():
                 outcome = "hit"
-            else:
-                error = reader.error()
-                if error == _QIMAGE_READER_FILE_NOT_FOUND_ERROR:
-                    outcome = "miss"
-                elif error == _QIMAGE_READER_DEVICE_ERROR:
-                    outcome = "read_error"
-                else:
-                    outcome = "decode_error"
+            elif outcome not in {"miss", "read_error"}:
+                outcome = "decode_error"
                 image = None
         if cancellation is not None and cancellation.cancelled():
             outcome = "cancelled"

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QCompleter, QLineEdit, QListView, QT
 from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.utils.image_loader import load_qpixmap
 
 from .recognition_annotations import RecognitionIdentitySuggestion
 
@@ -228,12 +229,18 @@ class FaceNameOverlayWidget(QWidget):
         self._drag_origin_center = QPointF()
         self._saved_hover_sync_queued = False
         self._saved_hover_sync_generation = 0
+        self._queued_saved_hover_reason = ""
+        self._queued_saved_hover_generation = 0
         self._saved_hover_app_filter_installed = False
+        self._saved_hover_sync_timer = QTimer(self)
+        self._saved_hover_sync_timer.setSingleShot(True)
+        self._saved_hover_sync_timer.setInterval(0)
+        self._saved_hover_sync_timer.timeout.connect(
+            self._flush_queued_saved_hover_sync
+        )
         self._saved_hover_poll_timer = QTimer(self)
         self._saved_hover_poll_timer.setInterval(40)
-        self._saved_hover_poll_timer.timeout.connect(
-            lambda: self._sync_saved_hover_from_cursor("poll")
-        )
+        self._saved_hover_poll_timer.timeout.connect(self._poll_saved_hover_from_cursor)
         self._saved_press_face_id: str | None = None
         self._cursor_override_active = False
         self._cursor_guard_widgets: dict[QWidget, QCursor | None] = {}
@@ -1029,27 +1036,30 @@ class FaceNameOverlayWidget(QWidget):
         if getattr(self, "_saved_hover_sync_queued", False):
             return
         self._saved_hover_sync_queued = True
-        generation = getattr(self, "_saved_hover_sync_generation", 0)
-        QTimer.singleShot(
+        self._queued_saved_hover_reason = reason
+        self._queued_saved_hover_generation = getattr(
+            self,
+            "_saved_hover_sync_generation",
             0,
-            lambda: self._flush_queued_saved_hover_sync(
-                reason,
-                generation,
-            ),
         )
+        self._saved_hover_sync_timer.start()
 
-    def _flush_queued_saved_hover_sync(
-        self,
-        reason: str,
-        generation: int,
-    ) -> None:
+    def _flush_queued_saved_hover_sync(self) -> None:
         self._saved_hover_sync_queued = False
+        generation = self._queued_saved_hover_generation
         if generation != getattr(self, "_saved_hover_sync_generation", 0):
             return
-        self._sync_saved_hover_from_global_pos(QCursor.pos(), reason, queued=True)
+        self._sync_saved_hover_from_global_pos(
+            QCursor.pos(),
+            self._queued_saved_hover_reason,
+            queued=True,
+        )
 
     def _prune_stale_hover(self) -> None:
         self._sync_saved_hover_from_cursor("prune")
+
+    def _poll_saved_hover_from_cursor(self) -> None:
+        self._sync_saved_hover_from_cursor("poll")
 
     def _set_saved_hover_tracking_enabled(self, enabled: bool) -> None:
         app = QApplication.instance()
@@ -1068,6 +1078,7 @@ class FaceNameOverlayWidget(QWidget):
                 self._saved_hover_poll_timer.start()
         else:
             self._saved_hover_poll_timer.stop()
+            self._saved_hover_sync_timer.stop()
             self._saved_hover_sync_queued = False
             self._saved_press_face_id = None
             self._apply_saved_hover_cursor(False)
@@ -1281,8 +1292,8 @@ def _distance(left: QPointF, right: QPointF) -> float:
 
 
 def _icon_for_thumbnail(path: Path) -> QIcon:
-    pixmap = QPixmap(str(path))
-    if pixmap.isNull():
+    pixmap = load_qpixmap(path)
+    if pixmap is None or pixmap.isNull():
         return QIcon()
     size = 34
     scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)

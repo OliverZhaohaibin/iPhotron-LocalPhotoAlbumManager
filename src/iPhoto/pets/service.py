@@ -80,16 +80,31 @@ class PetService:
         self._asset_repository = asset_repository
         self._coordinator = coordinator
         self._mutation_coordinator = mutation_coordinator
+        self._owns_mutation_coordinator = False
+        self._shutdown = False
         self._repository: PetRepository | None = None
 
     def set_library_root(self, library_root: Path | None) -> None:
-        if self._library_root == library_root:
+        if self._library_root == library_root and not self._shutdown:
             return
+        self.shutdown()
+        self._shutdown = False
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
         self._mutation_coordinator = None
         self._repository = None
+
+    def shutdown(self) -> None:
+        self._shutdown = True
+        coordinator = self._coordinator
+        if coordinator is not None:
+            coordinator.close()
+        if self._owns_mutation_coordinator and self._mutation_coordinator is not None:
+            self._mutation_coordinator.close()
+        self._coordinator = None
+        self._mutation_coordinator = None
+        self._owns_mutation_coordinator = False
 
     def library_root(self) -> Path | None:
         return self._library_root
@@ -104,15 +119,9 @@ class PetService:
     def active_thumbnail_staging_dirs(self) -> tuple[Path, ...]:
         """Return staging directories protected by unfinished journal operations."""
 
-        if self._library_root is None:
+        if self._library_root is None or self._shutdown:
             return ()
-        from iPhoto.recognition.mutation_coordinator import (
-            get_recognition_mutation_coordinator,
-        )
-
-        coordinator = self._mutation_coordinator or get_recognition_mutation_coordinator(
-            self._library_root
-        )
+        coordinator = self._ensure_mutation_coordinator()
         return tuple(
             Path(str(value)).resolve()
             for operation in coordinator.unfinished()
@@ -121,18 +130,34 @@ class PetService:
 
     @property
     def coordinator(self) -> PetIndexCoordinator | None:
+        if self._shutdown:
+            return None
         if self._coordinator is not None:
             return self._coordinator
         if self._library_root is None:
             return None
-        from .index_coordinator import get_pet_index_coordinator
+        from .index_coordinator import PetIndexCoordinator
 
-        self._coordinator = get_pet_index_coordinator(
+        self._coordinator = PetIndexCoordinator(
             self._library_root,
             asset_repository=self._asset_repository,
-            mutation_coordinator=self._mutation_coordinator,
+            mutation_coordinator=self._ensure_mutation_coordinator(),
         )
         return self._coordinator
+
+    def _ensure_mutation_coordinator(self) -> RecognitionMutationCoordinator:
+        if self._shutdown:
+            raise RuntimeError("Pets service is shut down.")
+        if self._mutation_coordinator is None:
+            from iPhoto.recognition.mutation_coordinator import (
+                RecognitionMutationCoordinator,
+            )
+
+            if self._library_root is None:
+                raise RuntimeError("Pets service is not bound to a library.")
+            self._mutation_coordinator = RecognitionMutationCoordinator(self._library_root)
+            self._owns_mutation_coordinator = True
+        return self._mutation_coordinator
 
     def paths(self) -> PetLibraryPaths | None:
         if self._library_root is None:
@@ -161,7 +186,7 @@ class PetService:
         if repository is None:
             return []
         context = _read_context or self._new_read_context()
-        return self._with_valid_pet_asset_counts(
+        summaries = self._with_valid_pet_asset_counts(
             [
                 summary
                 for summary in repository.get_pet_summaries(include_hidden=include_hidden)
@@ -171,6 +196,15 @@ class PetService:
             redirects=context.redirects,
             face_repository=context.face_repository,
         )
+        summaries.sort(
+            key=lambda summary: (
+                str(summary.profile_state or "unstable") != "stable",
+                -int(summary.asset_count or 0),
+                summary.created_at,
+                summary.pet_id,
+            )
+        )
+        return summaries
 
     def load_dashboard(self, *, include_hidden: bool = False) -> tuple[list[PetSummary], int]:
         context = self._new_read_context()
@@ -348,14 +382,8 @@ class PetService:
     ) -> list[PetSummary]:
         if self._library_root is None or not summaries:
             return summaries
-        assets_by_pet = repository.get_asset_ids_by_pets(
-            summary.pet_id for summary in summaries
-        )
-        redirects = (
-            tuple(self._identity_redirects())
-            if redirects is None
-            else tuple(redirects)
-        )
+        assets_by_pet = repository.get_asset_ids_by_pets(summary.pet_id for summary in summaries)
+        redirects = tuple(self._identity_redirects()) if redirects is None else tuple(redirects)
         source_pet_ids = tuple(
             dict.fromkeys(
                 redirect.source_id
@@ -396,9 +424,7 @@ class PetService:
             )
         all_asset_ids = list(
             dict.fromkeys(
-                asset_id
-                for asset_ids in assets_by_pet.values()
-                for asset_id in asset_ids
+                asset_id for asset_ids in assets_by_pet.values() for asset_id in asset_ids
             )
         )
         valid_ids = set(self._valid_asset_ids(all_asset_ids))
@@ -406,8 +432,7 @@ class PetService:
             replace(
                 summary,
                 asset_count=sum(
-                    asset_id in valid_ids
-                    for asset_id in assets_by_pet.get(summary.pet_id, ())
+                    asset_id in valid_ids for asset_id in assets_by_pet.get(summary.pet_id, ())
                 ),
             )
             for summary in summaries
@@ -447,9 +472,7 @@ class PetService:
         redirects = tuple(self._identity_redirects())
         return _PetReadContext(
             redirects=redirects,
-            redirected_pet_ids=frozenset(
-                self._redirected_source_ids("pet", redirects=redirects)
-            ),
+            redirected_pet_ids=frozenset(self._redirected_source_ids("pet", redirects=redirects)),
             face_repository=self._face_repository(),
         )
 

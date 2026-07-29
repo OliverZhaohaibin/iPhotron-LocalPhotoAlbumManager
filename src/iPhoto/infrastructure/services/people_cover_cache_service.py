@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
 
 from iPhoto.people.image_utils import create_cover_thumbnail, load_image_rgb
+from iPhoto.utils.image_loader import load_qimage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,11 +39,9 @@ class PeopleCoverRenderTask(QRunnable):
     def run(self) -> None:
         should_write = False
         try:
-            image = (
-                QImage(str(self._disk_file))
-                if self._disk_file is not None and self._disk_file.is_file()
-                else QImage()
-            )
+            image = QImage()
+            if self._disk_file is not None and self._disk_file.is_file():
+                image = load_qimage(self._disk_file) or QImage()
             if image.isNull():
                 image = self._renderer()
                 should_write = (

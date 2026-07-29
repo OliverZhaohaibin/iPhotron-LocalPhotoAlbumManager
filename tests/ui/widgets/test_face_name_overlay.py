@@ -33,10 +33,16 @@ def qapp():
 
 @pytest.fixture(autouse=True)
 def close_qt_widgets_after_test(qapp):
+    existing_widgets = set(QApplication.topLevelWidgets())
     yield
-    for widget in QApplication.topLevelWidgets():
+    created_widgets = [
+        widget
+        for widget in QApplication.topLevelWidgets()
+        if widget not in existing_widgets
+    ]
+    for widget in reversed(created_widgets):
+        widget.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         widget.close()
-        widget.deleteLater()
     while QApplication.overrideCursor() is not None:
         QApplication.restoreOverrideCursor()
     qapp.processEvents()

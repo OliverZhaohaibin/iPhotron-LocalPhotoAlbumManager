@@ -145,7 +145,7 @@ jobs:
         run: |
           python tools/check_architecture.py
           python -m compileall -q src tools
-          python -m pytest tests/ --tb=short -v
+          python tools/run_pytest_ci.py tests/ --tb=short -v
           git diff --check
 
   startup-contracts:

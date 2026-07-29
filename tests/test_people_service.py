@@ -1171,12 +1171,10 @@ def test_cross_merge_recovery_refreshes_cache_after_state_commit(
         original_refresh(repository)
 
     monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", count_refresh)
-    recovered_outcome = merge_service.merge("pet:pet-a", "person:person-a")
-
-    assert recovered_outcome.merged is True
-    assert refresh_calls == 1
     assert merge_service._journal is not None
-    assert merge_service._journal.unfinished() == ()
+    assert [operation.kind for operation in merge_service._journal.unfinished()] == [
+        "recognition_merge"
+    ]
 
     recovered = RecognitionMergeService(
         create_people_service(library_root),
@@ -1186,6 +1184,9 @@ def test_cross_merge_recovery_refreshes_cache_after_state_commit(
     assert refresh_calls == 1
     assert recovered._journal is not None
     assert recovered._journal.unfinished() == ()
+    recovered_outcome = recovered.merge("pet:pet-a", "person:person-a")
+    assert recovered_outcome.merged is True
+    assert refresh_calls == 1
 
 
 def test_cross_kind_single_detection_assignment_preserves_source_and_identity(

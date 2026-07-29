@@ -9,9 +9,11 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
+from PIL import Image as PILImage
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QPainter
 
 from iPhoto.application.ports import EditServicePort
@@ -139,17 +141,8 @@ def encode_micro_thumbnail(image: QImage) -> bytes | None:
         QSize(16, 16),
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
-    ).convertToFormat(QImage.Format.Format_RGB888)
-    payload = QByteArray()
-    buffer = QBuffer(payload)
-    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
-        return None
-    try:
-        if not micro.save(buffer, "JPEG", 75):
-            return None
-        return bytes(payload)
-    finally:
-        buffer.close()
+    )
+    return _encode_qimage_jpeg(micro, quality=75)
 
 
 def publish_thumbnail_artifact(
@@ -178,14 +171,16 @@ def publish_thumbnail_artifact(
     micro = encode_micro_thumbnail(image)
     if micro is None:
         return None
+    encoded_image = _encode_qimage_jpeg(image)
+    if encoded_image is None:
+        return None
     cache_file = thumbnail_cache_file(cache_dir, source, size)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     temporary = cache_file.with_name(
         f".{cache_file.name}.{threading.get_ident()}.{time.monotonic_ns()}.tmp"
     )
     try:
-        if not image.save(str(temporary), "JPEG"):
-            return None
+        temporary.write_bytes(encoded_image)
         with thumbnail_artifact_lock(source):
             if thumbnail_revision(source) != expected_revision:
                 return None
@@ -204,6 +199,34 @@ def publish_thumbnail_artifact(
         image=image,
         micro_thumbnail=micro,
     )
+
+
+def _encode_qimage_jpeg(image: QImage, *, quality: int = 75) -> bytes | None:
+    """Encode a QImage without entering Qt's process-global image plugins."""
+
+    if image.isNull():
+        return None
+    try:
+        rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        width = rgba.width()
+        height = rgba.height()
+        if width <= 0 or height <= 0:
+            return None
+        pixels = bytes(rgba.bits())
+        pil_image = PILImage.frombytes(
+            "RGBA",
+            (width, height),
+            pixels,
+            "raw",
+            "RGBA",
+            rgba.bytesPerLine(),
+            1,
+        ).convert("RGB")
+        payload = BytesIO()
+        pil_image.save(payload, format="JPEG", quality=quality)
+        return payload.getvalue()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
 
 
 def _replace_cache_file(temporary: Path, cache_file: Path) -> bool:

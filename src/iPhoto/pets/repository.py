@@ -20,7 +20,7 @@ from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
-from .records import AssetPetAnnotation, PetDetectionRecord, PetRecord, PetSummary
+from .records import AssetPetAnnotation, PetDetectionRecord, PetProfile, PetRecord, PetSummary
 from .repository_utils import (
     cosine_distance,
     deserialize_embedding,
@@ -58,15 +58,21 @@ class EmbeddingContract:
 
     @classmethod
     def from_pet(cls, pet: PetRecord) -> "EmbeddingContract":
+        return cls.from_profile(pet)
+
+    @classmethod
+    def from_profile(cls, profile: PetProfile | PetRecord) -> "EmbeddingContract":
         return cls(
-            pipeline_version=str(pet.embedding_pipeline_version or ""),
-            dimension=int(pet.embedding_dim),
-            generation_id=int(pet.generation_id),
+            pipeline_version=str(profile.embedding_pipeline_version or ""),
+            dimension=int(profile.embedding_dim),
+            generation_id=int(profile.generation_id),
         )
 
 
 @dataclass(frozen=True)
 class PetIncrementalCommitResult:
+    changed_asset_ids: tuple[str, ...] = ()
+    retired_asset_ids: tuple[str, ...] = ()
     previous_thumbnail_paths: tuple[str, ...] = ()
     added_pet_ids: tuple[str, ...] = ()
     updated_pet_ids: tuple[str, ...] = ()
@@ -75,9 +81,7 @@ class PetIncrementalCommitResult:
     @property
     def changed_pet_ids(self) -> tuple[str, ...]:
         return tuple(
-            dict.fromkeys(
-                self.added_pet_ids + self.updated_pet_ids + self.removed_pet_ids
-            )
+            dict.fromkeys(self.added_pet_ids + self.updated_pet_ids + self.removed_pet_ids)
         )
 
 
@@ -85,10 +89,16 @@ class PetIncrementalCommitResult:
 class _ProfileMatchContext:
     profiles: dict[str, PetRecord]
     centers: dict[str, np.ndarray]
-    sample_counts: dict[str, int]
     species: dict[str, str | None]
-    boundary_samples: dict[str, tuple[np.ndarray, ...]]
+    member_samples: dict[str, tuple[tuple[str, np.ndarray], ...]]
+    migration_candidates_by_asset: dict[str, tuple[str, ...]]
     candidate_index: "_ProfileCandidateIndex"
+
+
+@dataclass(frozen=True)
+class _IncrementalPetAssignment:
+    detections: tuple[PetDetectionRecord, ...] = ()
+    contract_replacement_pet_ids: tuple[str, ...] = ()
 
 
 class PetRepository:
@@ -221,6 +231,7 @@ class PetRepository:
             )
             conn.execute("DELETE FROM pets")
             conn.execute("DELETE FROM pet_detections")
+            conn.execute("DELETE FROM pet_contract_migration_assets")
             conn.executemany(
                 """
                 INSERT INTO pet_detections (
@@ -265,17 +276,13 @@ class PetRepository:
                     "operation_kind": operation_kind,
                     "asset_ids": list(
                         dict.fromkeys(
-                            detection.asset_id
-                            for detection in detections
-                            if detection.asset_id
+                            detection.asset_id for detection in detections if detection.asset_id
                         )
                     ),
                     "affected_pet_ids": sorted(previous_pet_ids | current_pet_ids),
                     "changed_asset_ids": list(
                         dict.fromkeys(
-                            detection.asset_id
-                            for detection in detections
-                            if detection.asset_id
+                            detection.asset_id for detection in detections if detection.asset_id
                         )
                     ),
                     "changed_pet_ids": sorted(previous_pet_ids | current_pet_ids),
@@ -303,18 +310,14 @@ class PetRepository:
         """Replace detections for a bounded asset set without rewriting the index."""
 
         self.initialize()
-        replaced_asset_ids = tuple(
-            dict.fromkeys(str(value) for value in asset_ids if value)
-        )
+        replaced_asset_ids = tuple(dict.fromkeys(str(value) for value in asset_ids if value))
         retry_ids = tuple(
             value
-            for value in dict.fromkeys(
-                str(value) for value in retry_asset_ids if value
-            )
+            for value in dict.fromkeys(str(value) for value in retry_asset_ids if value)
             if value not in set(replaced_asset_ids)
         )
-        changed_asset_ids = tuple(dict.fromkeys((*replaced_asset_ids, *retry_ids)))
-        if not changed_asset_ids:
+        requested_changed_asset_ids = tuple(dict.fromkeys((*replaced_asset_ids, *retry_ids)))
+        if not requested_changed_asset_ids:
             return PetIncrementalCommitResult()
 
         staged = list(detections)
@@ -348,42 +351,158 @@ class PetRepository:
             match_context = self._profiles_for_contract(embedding_contract)
             existing_pets = match_context.profiles
             candidate_index = match_context.candidate_index
-        assigned = self._assign_incremental_pet_ids(
+        assignment = self._assign_incremental_pet_ids(
             staged,
             existing_pets=existing_pets,
             candidate_index=candidate_index,
             match_context=match_context,
+            excluded_asset_ids=set(replaced_asset_ids),
             distance_threshold=distance_threshold,
         )
+        assigned = list(assignment.detections)
+        contract_replacement_pet_ids = assignment.contract_replacement_pet_ids
 
         effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
+        consumed_migration_candidate = False
         with closing(self._connect()) as conn:
-            previous_rows = self._select_detections_by_asset_ids(
+            replaced_rows = self._select_detections_by_asset_ids(
                 conn,
                 replaced_asset_ids,
             )
+            retired_rows: list[sqlite3.Row] = []
+            if embedding_contract is not None and contract_replacement_pet_ids:
+                candidate_rows = self._select_detections_by_pet_ids(
+                    conn,
+                    contract_replacement_pet_ids,
+                )
+                retired_rows = [
+                    row
+                    for row in candidate_rows
+                    if EmbeddingContract(
+                        pipeline_version=str(row["embedding_pipeline_version"] or ""),
+                        dimension=int(row["embedding_dim"] or 0),
+                        generation_id=int(row["generation_id"] or 0),
+                    )
+                    != embedding_contract
+                ]
+            previous_rows_by_id = {
+                str(row["detection_id"]): row for row in (*replaced_rows, *retired_rows)
+            }
+            previous_rows = list(previous_rows_by_id.values())
+            replaced_asset_id_set = set(replaced_asset_ids)
+            retired_asset_ids = tuple(
+                dict.fromkeys(
+                    str(row["asset_id"])
+                    for row in retired_rows
+                    if row["asset_id"] and str(row["asset_id"]) not in replaced_asset_id_set
+                )
+            )
+            for chunk in _chunked(replaced_asset_ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                consumed_migration_candidate = bool(
+                    consumed_migration_candidate
+                    or conn.execute(
+                        f"""
+                        SELECT 1
+                        FROM pet_contract_migration_assets
+                        WHERE asset_id IN ({placeholders})
+                        LIMIT 1
+                        """,
+                        chunk,
+                    ).fetchone()
+                )
+                conn.execute(
+                    f"""
+                    DELETE FROM pet_contract_migration_assets
+                    WHERE asset_id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+            if embedding_contract is not None and retired_rows:
+                replacement_ids = tuple(contract_replacement_pet_ids)
+                for chunk in _chunked(replacement_ids, 500):
+                    placeholders = ", ".join("?" for _ in chunk)
+                    conn.execute(
+                        f"""
+                        INSERT OR IGNORE INTO pet_contract_migration_assets (
+                            pet_id, asset_id, embedding_pipeline_version,
+                            embedding_dimension, generation_id
+                        )
+                        SELECT pet_id, asset_id, ?, ?, ?
+                        FROM pet_contract_migration_assets
+                        WHERE pet_id IN ({placeholders})
+                        """,
+                        (
+                            embedding_contract.pipeline_version,
+                            embedding_contract.dimension,
+                            embedding_contract.generation_id,
+                            *chunk,
+                        ),
+                    )
+                    conn.execute(
+                        f"""
+                        DELETE FROM pet_contract_migration_assets
+                        WHERE pet_id IN ({placeholders})
+                          AND NOT (
+                              embedding_pipeline_version = ?
+                              AND embedding_dimension = ?
+                              AND generation_id = ?
+                          )
+                        """,
+                        (
+                            *chunk,
+                            embedding_contract.pipeline_version,
+                            embedding_contract.dimension,
+                            embedding_contract.generation_id,
+                        ),
+                    )
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO pet_contract_migration_assets (
+                        pet_id, asset_id, embedding_pipeline_version,
+                        embedding_dimension, generation_id
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            str(row["pet_id"]),
+                            str(row["asset_id"]),
+                            embedding_contract.pipeline_version,
+                            embedding_contract.dimension,
+                            embedding_contract.generation_id,
+                        )
+                        for row in retired_rows
+                        if row["pet_id"]
+                        and row["asset_id"]
+                        and str(row["asset_id"]) not in replaced_asset_id_set
+                    ],
+                )
             previous_detections = [self._detection_from_row(row) for row in previous_rows]
+            changed_asset_ids = tuple(
+                dict.fromkeys(
+                    (
+                        *requested_changed_asset_ids,
+                        *(
+                            detection.asset_id
+                            for detection in previous_detections
+                            if detection.asset_id
+                        ),
+                    )
+                )
+            )
             previous_thumbnail_paths = tuple(
                 str(detection.thumbnail_path)
                 for detection in previous_detections
                 if detection.thumbnail_path
             )
             old_pet_ids = {
-                str(detection.pet_id)
-                for detection in previous_detections
-                if detection.pet_id
+                str(detection.pet_id) for detection in previous_detections if detection.pet_id
             }
-            new_pet_ids = {
-                str(detection.pet_id) for detection in assigned if detection.pet_id
-            }
+            new_pet_ids = {str(detection.pet_id) for detection in assigned if detection.pet_id}
             stale_pet_ids: set[str] = set()
             if retry_ids:
                 retry_rows = self._select_detections_by_asset_ids(conn, retry_ids)
-                stale_pet_ids.update(
-                    str(row["pet_id"])
-                    for row in retry_rows
-                    if row["pet_id"]
-                )
+                stale_pet_ids.update(str(row["pet_id"]) for row in retry_rows if row["pet_id"])
                 for chunk in _chunked(retry_ids, 500):
                     placeholders = ", ".join("?" for _ in chunk)
                     conn.execute(
@@ -396,14 +515,21 @@ class PetRepository:
                         """,
                         (str(stale_reason), *chunk),
                     )
-            affected_pet_ids = tuple(
-                sorted(old_pet_ids | new_pet_ids | stale_pet_ids)
-            )
+            affected_pet_ids = tuple(sorted(old_pet_ids | new_pet_ids | stale_pet_ids))
 
             for chunk in _chunked(replaced_asset_ids, 500):
                 placeholders = ", ".join("?" for _ in chunk)
                 conn.execute(
                     f"DELETE FROM pet_detections WHERE asset_id IN ({placeholders})",
+                    chunk,
+                )
+            retired_detection_ids = tuple(
+                dict.fromkeys(str(row["detection_id"]) for row in retired_rows)
+            )
+            for chunk in _chunked(retired_detection_ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM pet_detections WHERE detection_id IN ({placeholders})",
                     chunk,
                 )
             if assigned:
@@ -438,13 +564,9 @@ class PetRepository:
             }
             if self._state_repo is not None:
                 durable_profiles = self._state_repo.get_profiles_by_ids(affected_pet_ids)
-                names.update(
-                    (pet_id, profile.name)
-                    for pet_id, profile in durable_profiles.items()
-                )
+                names.update((pet_id, profile.name) for pet_id, profile in durable_profiles.items())
                 created_at.update(
-                    (pet_id, profile.created_at)
-                    for pet_id, profile in durable_profiles.items()
+                    (pet_id, profile.created_at) for pet_id, profile in durable_profiles.items()
                 )
             from .pipeline import build_pet_records_from_detections
 
@@ -479,13 +601,17 @@ class PetRepository:
             )
             surviving_pet_ids = {pet.pet_id for pet in rebuilt_pets}
             added = tuple(
-                sorted(pet_id for pet_id in new_pet_ids if pet_id not in existing_pets)
+                sorted(
+                    pet_id
+                    for pet_id in new_pet_ids
+                    if pet_id not in existing_pets
+                    and pet_id not in old_pet_ids
+                    and pet_id not in contract_replacement_pet_ids
+                )
             )
             removed = tuple(sorted(old_pet_ids - surviving_pet_ids))
             updated = tuple(
-                sorted(
-                    ((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed))
-                )
+                sorted(((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed)))
             )
             commit_payload = {
                 "operation_kind": operation_kind,
@@ -493,6 +619,7 @@ class PetRepository:
                 "done_asset_ids": list(replaced_asset_ids),
                 "retry_asset_ids": list(retry_ids),
                 "changed_asset_ids": list(changed_asset_ids),
+                "retired_asset_ids": list(retired_asset_ids),
                 "affected_pet_ids": list(affected_pet_ids),
                 "changed_pet_ids": list(affected_pet_ids),
                 "previous_thumbnail_paths": list(previous_thumbnail_paths),
@@ -506,14 +633,18 @@ class PetRepository:
             self._write_runtime_commit(conn, effective_operation_id, commit_payload)
             conn.commit()
 
-        self.complete_runtime_state_sync(effective_operation_id)
-        if embedding_contract is not None:
+        if contract_replacement_pet_ids or consumed_migration_candidate:
+            self._invalidate_profile_indexes()
+        elif embedding_contract is not None:
             self._update_profile_indexes(
                 embedding_contract,
                 affected_pet_ids=affected_pet_ids,
                 rebuilt_pets=rebuilt_pets,
             )
+        self.complete_runtime_state_sync(effective_operation_id)
         return PetIncrementalCommitResult(
+            changed_asset_ids=changed_asset_ids,
+            retired_asset_ids=retired_asset_ids,
             previous_thumbnail_paths=previous_thumbnail_paths,
             added_pet_ids=added,
             updated_pet_ids=updated,
@@ -732,9 +863,7 @@ class PetRepository:
     ) -> int:
         """Bound synced commit history while retaining unfinished journal owners."""
 
-        protected = tuple(
-            dict.fromkeys(str(value) for value in protected_operation_ids if value)
-        )
+        protected = tuple(dict.fromkeys(str(value) for value in protected_operation_ids if value))
         deleted = 0
         with closing(self._connect()) as conn:
             where = "state_synced = 1"
@@ -781,10 +910,11 @@ class PetRepository:
         existing_pets: dict[str, PetRecord],
         candidate_index: _ProfileCandidateIndex | None = None,
         match_context: _ProfileMatchContext | None = None,
+        excluded_asset_ids: set[str],
         distance_threshold: float,
-    ) -> list[PetDetectionRecord]:
+    ) -> _IncrementalPetAssignment:
         if not detections:
-            return []
+            return _IncrementalPetAssignment()
         redirects = (
             self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}
         )
@@ -795,150 +925,131 @@ class PetRepository:
         )
         mapped_ids = tuple(
             dict.fromkeys(
-                redirects.get(mapped_id, mapped_id)
-                for mapped_id in key_map.values()
-                if mapped_id
+                redirects.get(mapped_id, mapped_id) for mapped_id in key_map.values() if mapped_id
             )
         )
         durable_profiles = (
-            self._state_repo.get_profiles_by_ids(mapped_ids)
-            if self._state_repo is not None
-            else {}
+            self._state_repo.get_profiles_by_ids(mapped_ids) if self._state_repo is not None else {}
         )
-        base_centers = (
+        stable_profiles = {
+            pet_id: pet
+            for pet_id, pet in existing_pets.items()
+            if str(pet.profile_state or "unstable") == "stable"
+        }
+        centers = (
             match_context.centers
             if match_context is not None
             else {
                 pet_id: normalize_vector(pet.center_embedding)
-                for pet_id, pet in existing_pets.items()
+                for pet_id, pet in stable_profiles.items()
             }
         )
-        base_sample_counts = (
-            match_context.sample_counts
-            if match_context is not None
-            else {
-                pet_id: max(int(pet.sample_count), int(pet.detection_count), 1)
-                for pet_id, pet in existing_pets.items()
-            }
-        )
-        base_species = (
+        species = (
             match_context.species
             if match_context is not None
             else {
                 pet_id: _normalize_species_label(pet.species_label)
-                for pet_id, pet in existing_pets.items()
+                for pet_id, pet in stable_profiles.items()
             }
         )
-        base_boundaries = (
-            match_context.boundary_samples
-            if match_context is not None
-            else {
-                pet_id: tuple(
-                    normalize_vector(sample)
-                    for sample in pet.boundary_embeddings
-                    if int(np.asarray(sample).size) == int(pet.embedding_dim)
-                )
-                for pet_id, pet in existing_pets.items()
-            }
-        )
-        centers: dict[str, np.ndarray] = {}
-        sample_counts: dict[str, int] = {}
-        species: dict[str, str | None] = {}
-        boundary_samples: dict[str, tuple[np.ndarray, ...]] = {}
+        member_samples = match_context.member_samples if match_context is not None else {}
         candidate_index = candidate_index or _ProfileCandidateIndex(centers, species)
-        new_pet_ids: set[str] = set()
-        assigned: list[PetDetectionRecord] = []
-        for detection in detections:
+        staged_samples: dict[str, list[np.ndarray]] = {}
+        assigned_by_detection_id: dict[str, PetDetectionRecord] = {}
+        contract_replacement_pet_ids: set[str] = set()
+        staged_candidate_species: dict[str, str | None] = {}
+        unmatched: list[PetDetectionRecord] = []
+
+        # Resolve durable/manual keys before embedding matches. Sorting makes the
+        # incremental result independent of the caller's detection order.
+        ordered = sorted(
+            detections,
+            key=lambda value: (value.asset_id, value.pet_key, value.detection_id),
+        )
+        for detection in ordered:
             detection_species = _normalize_species_label(detection.species_label)
             mapped_id = key_map.get(detection.pet_key, "")
             candidate_id = redirects.get(mapped_id, mapped_id)
             durable_profile = durable_profiles.get(candidate_id)
             known_species = (
-                species.get(candidate_id, base_species.get(candidate_id))
-                if candidate_id in species or candidate_id in base_species
+                species.get(candidate_id)
+                if candidate_id in species
                 else _normalize_species_label(
-                    durable_profile.species_label if durable_profile is not None else None
+                    existing_pets[candidate_id].species_label
+                    if candidate_id in existing_pets
+                    else durable_profile.species_label
+                    if durable_profile is not None
+                    else None
                 )
             )
             if candidate_id and not _species_compatible(detection_species, known_species):
                 candidate_id = ""
-            elif (
-                candidate_id
-                and candidate_id not in centers
-                and candidate_id not in base_centers
-            ):
-                if durable_profile is None:
-                    candidate_id = ""
-                else:
-                    compatible_contract = (
-                        durable_profile.embedding_pipeline_version
-                        == detection.embedding_pipeline_version
-                        and int(durable_profile.embedding_dim) == detection.embedding_dim
-                        and int(durable_profile.generation_id) == detection.generation_id
-                    )
-                    centers[candidate_id] = normalize_vector(
-                        durable_profile.center_embedding
-                        if compatible_contract
-                        else detection.embedding
-                    )
-                    sample_counts[candidate_id] = (
-                        max(int(durable_profile.sample_count), 1)
-                        if compatible_contract
-                        else 0
-                    )
-                    species[candidate_id] = detection_species or known_species
-                    boundary_samples[candidate_id] = (
-                        tuple(
-                            normalize_vector(sample)
-                            for sample in durable_profile.boundary_embeddings
-                            if int(np.asarray(sample).size) == detection.embedding_dim
-                        )
-                        if compatible_contract
-                        else ()
-                    )
-            elif candidate_id and candidate_id not in centers:
-                centers[candidate_id] = base_centers[candidate_id]
-                sample_counts[candidate_id] = base_sample_counts[candidate_id]
-                species[candidate_id] = base_species.get(candidate_id)
-                boundary_samples[candidate_id] = base_boundaries.get(candidate_id, ())
-            if not candidate_id:
-                candidate_id = self._nearest_compatible_pet_id(
-                    detection,
-                    centers=centers,
-                    species=species,
-                    boundary_samples=boundary_samples,
-                    base_boundary_samples=base_boundaries,
-                    candidate_index=candidate_index,
-                    new_pet_ids=new_pet_ids,
-                    distance_threshold=distance_threshold,
+            elif candidate_id and candidate_id not in existing_pets and durable_profile is None:
+                candidate_id = ""
+            if candidate_id:
+                candidate_profile = existing_pets.get(candidate_id) or durable_profile
+                if candidate_profile is not None and EmbeddingContract.from_profile(
+                    candidate_profile
+                ) != EmbeddingContract.from_detection(detection):
+                    contract_replacement_pet_ids.add(candidate_id)
+                    if str(candidate_profile.profile_state or "unstable") == "stable":
+                        staged_candidate_species[candidate_id] = known_species
+                assigned_by_detection_id[detection.detection_id] = replace(
+                    detection, pet_id=candidate_id
                 )
-            if not candidate_id:
-                candidate_id = str(uuid.uuid4())
-                centers[candidate_id] = normalize_vector(detection.embedding)
-                sample_counts[candidate_id] = 0
-                species[candidate_id] = detection_species
-                boundary_samples[candidate_id] = ()
-                new_pet_ids.add(candidate_id)
-            count = sample_counts.get(
-                candidate_id,
-                base_sample_counts.get(candidate_id, 0),
+                staged_samples.setdefault(candidate_id, []).append(
+                    normalize_vector(detection.embedding)
+                )
+            else:
+                unmatched.append(detection)
+
+        still_unmatched: list[PetDetectionRecord] = []
+        for detection in unmatched:
+            migration_profiles = {
+                pet_id: existing_pets[pet_id]
+                for pet_id in (
+                    match_context.migration_candidates_by_asset.get(detection.asset_id, ())
+                    if match_context is not None
+                    else ()
+                )
+                if pet_id in existing_pets
+            }
+            candidate_id = self._nearest_compatible_pet_id(
+                detection,
+                member_samples=member_samples,
+                staged_samples=staged_samples,
+                excluded_asset_ids=excluded_asset_ids,
+                candidate_index=candidate_index,
+                staged_candidate_species=staged_candidate_species,
+                migration_profiles=migration_profiles,
+                distance_threshold=distance_threshold,
             )
-            center = centers.get(
-                candidate_id,
-                base_centers.get(candidate_id, normalize_vector(detection.embedding)),
+            if candidate_id:
+                assigned_by_detection_id[detection.detection_id] = replace(
+                    detection, pet_id=candidate_id
+                )
+                staged_samples.setdefault(candidate_id, []).append(
+                    normalize_vector(detection.embedding)
+                )
+            else:
+                still_unmatched.append(detection)
+
+        if still_unmatched:
+            from .pipeline import cluster_pet_records
+
+            clustered, _ = cluster_pet_records(
+                still_unmatched,
+                distance_threshold=distance_threshold,
             )
-            centers[candidate_id] = normalize_vector(
-                (center * float(count) + normalize_vector(detection.embedding))
-                / float(count + 1)
+            assigned_by_detection_id.update(
+                {detection.detection_id: detection for detection in clustered}
             )
-            sample_counts[candidate_id] = count + 1
-            samples = boundary_samples.get(candidate_id, ())
-            boundary_samples[candidate_id] = (
-                *samples,
-                normalize_vector(detection.embedding),
-            )[-8:]
-            assigned.append(replace(detection, pet_id=candidate_id))
-        return assigned
+        return _IncrementalPetAssignment(
+            detections=tuple(
+                assigned_by_detection_id[detection.detection_id] for detection in detections
+            ),
+            contract_replacement_pet_ids=tuple(sorted(contract_replacement_pet_ids)),
+        )
 
     def _profiles_for_contract(
         self,
@@ -952,42 +1063,26 @@ class PetRepository:
                     for pet in self.get_all_pet_records()
                     if EmbeddingContract.from_pet(pet) == contract
                 }
+                stable_profiles = {
+                    pet_id: pet
+                    for pet_id, pet in profiles.items()
+                    if str(pet.profile_state or "unstable") == "stable"
+                }
                 centers = {
                     pet_id: normalize_vector(pet.center_embedding)
-                    for pet_id, pet in profiles.items()
+                    for pet_id, pet in stable_profiles.items()
                 }
                 species = {
                     pet_id: _normalize_species_label(pet.species_label)
-                    for pet_id, pet in profiles.items()
+                    for pet_id, pet in stable_profiles.items()
                 }
-                boundaries = {
-                    pet_id: tuple(
-                        normalize_vector(value) for value in pet.boundary_embeddings
-                    )
-                    for pet_id, pet in profiles.items()
-                }
-                missing = tuple(
-                    pet_id for pet_id in profiles if not boundaries.get(pet_id)
-                )
-                if missing:
-                    boundaries.update(
-                        self._load_boundary_samples_for_pets(
-                            missing,
-                            centers=centers,
-                            limit=8,
-                        )
-                    )
+                migration_candidates_by_asset = self._migration_candidates_for_contract(contract)
                 context = _ProfileMatchContext(
                     profiles=profiles,
                     centers=centers,
-                    sample_counts={
-                        pet_id: max(
-                            int(pet.sample_count), int(pet.detection_count), 1
-                        )
-                        for pet_id, pet in profiles.items()
-                    },
                     species=species,
-                    boundary_samples=boundaries,
+                    member_samples={},
+                    migration_candidates_by_asset=migration_candidates_by_asset,
                     candidate_index=_ProfileCandidateIndex(centers, species),
                 )
                 self._match_contexts[contract] = context
@@ -1007,19 +1102,17 @@ class PetRepository:
             for pet_id in affected_pet_ids:
                 context.candidate_index.remove(pet_id)
                 context.profiles.pop(pet_id, None)
-                context.sample_counts.pop(pet_id, None)
-                context.boundary_samples.pop(pet_id, None)
+                context.member_samples.pop(pet_id, None)
+                context.centers.pop(pet_id, None)
+                context.species.pop(pet_id, None)
             for pet in rebuilt_pets:
                 pet_contract = EmbeddingContract.from_pet(pet)
                 if pet_contract != contract:
                     continue
                 context.profiles[pet.pet_id] = pet
-                context.sample_counts[pet.pet_id] = max(
-                    int(pet.sample_count), int(pet.detection_count), 1
-                )
-                context.boundary_samples[pet.pet_id] = tuple(
-                    normalize_vector(value) for value in pet.boundary_embeddings
-                )
+                if str(pet.profile_state or "unstable") == "stable":
+                    context.centers[pet.pet_id] = normalize_vector(pet.center_embedding)
+                    context.species[pet.pet_id] = _normalize_species_label(pet.species_label)
             context.candidate_index.upsert_many(
                 (
                     pet.pet_id,
@@ -1028,6 +1121,7 @@ class PetRepository:
                 )
                 for pet in rebuilt_pets
                 if EmbeddingContract.from_pet(pet) == contract
+                and str(pet.profile_state or "unstable") == "stable"
             )
 
     def _invalidate_profile_indexes(self) -> None:
@@ -1038,50 +1132,121 @@ class PetRepository:
         self,
         detection: PetDetectionRecord,
         *,
-        centers: dict[str, np.ndarray],
-        species: dict[str, str | None],
-        boundary_samples: dict[str, tuple[np.ndarray, ...]],
-        base_boundary_samples: dict[str, tuple[np.ndarray, ...]],
+        member_samples: dict[str, tuple[tuple[str, np.ndarray], ...]],
+        staged_samples: dict[str, list[np.ndarray]],
+        excluded_asset_ids: set[str],
         candidate_index: _ProfileCandidateIndex,
-        new_pet_ids: set[str],
+        staged_candidate_species: dict[str, str | None],
         distance_threshold: float,
+        migration_profiles: dict[str, PetRecord] | None = None,
     ) -> str:
+        migration_profiles = migration_profiles or {}
         detection_species = _normalize_species_label(detection.species_label)
-        candidates = candidate_index.search(
-            detection.embedding,
-            species_label=detection_species,
-            limit=8,
-        )
-        candidates.extend(
-            (cosine_distance(detection.embedding, centers[pet_id]), pet_id)
-            for pet_id in new_pet_ids
-            if centers[pet_id].size == detection.embedding_dim
-            and _species_compatible(detection_species, species.get(pet_id))
-        )
-        for center_distance, pet_id in sorted(candidates)[:8]:
-            if center_distance > distance_threshold:
-                continue
-            samples = boundary_samples.get(
-                pet_id,
-                base_boundary_samples.get(pet_id, ()),
+        limit = 8
+        seen: set[str] = set()
+        while True:
+            indexed_candidates = candidate_index.search(
+                detection.embedding,
+                species_label=detection_species,
+                limit=limit,
             )
-            if samples and max(
-                cosine_distance(detection.embedding, sample) for sample in samples
-            ) > distance_threshold:
-                continue
-            return pet_id
-        return ""
+            staged_candidates = [
+                (
+                    cosine_distance(
+                        detection.embedding,
+                        normalize_vector(np.mean(samples, axis=0)),
+                    ),
+                    pet_id,
+                )
+                for pet_id, samples in staged_samples.items()
+                if pet_id in staged_candidate_species
+                and samples
+                and _species_compatible(
+                    detection_species,
+                    staged_candidate_species.get(pet_id),
+                )
+            ]
+            migration_candidates = [
+                (
+                    cosine_distance(detection.embedding, profile.center_embedding),
+                    pet_id,
+                )
+                for pet_id, profile in migration_profiles.items()
+                if profile.center_embedding.size
+                and profile.center_embedding.shape == detection.embedding.shape
+                and _species_compatible(
+                    detection_species,
+                    _normalize_species_label(profile.species_label),
+                )
+            ]
+            candidates = sorted((*indexed_candidates, *staged_candidates, *migration_candidates))
+            within_threshold: list[tuple[float, str]] = []
+            for center_distance, pet_id in candidates:
+                if pet_id in seen:
+                    continue
+                seen.add(pet_id)
+                if center_distance > distance_threshold:
+                    break
+                within_threshold.append((center_distance, pet_id))
 
-    def _load_boundary_samples_for_pets(
+            missing = tuple(
+                pet_id
+                for _center_distance, pet_id in within_threshold
+                if pet_id not in member_samples and pet_id not in staged_candidate_species
+            )
+            if missing:
+                member_samples.update(self._load_complete_link_samples_for_pets(missing))
+            for _center_distance, pet_id in within_threshold:
+                samples = (
+                    *(
+                        sample
+                        for asset_id, sample in member_samples.get(pet_id, ())
+                        if pet_id not in staged_candidate_species
+                        and asset_id not in excluded_asset_ids
+                    ),
+                    *staged_samples.get(pet_id, ()),
+                )
+                if (
+                    samples
+                    and max(cosine_distance(detection.embedding, sample) for sample in samples)
+                    > distance_threshold
+                ):
+                    continue
+                return pet_id
+
+            indexed_threshold_exhausted = bool(
+                indexed_candidates and indexed_candidates[-1][0] > distance_threshold
+            )
+            if indexed_threshold_exhausted or len(indexed_candidates) < limit:
+                return ""
+            limit *= 2
+
+    def _migration_candidates_for_contract(
+        self,
+        contract: EmbeddingContract,
+    ) -> dict[str, tuple[str, ...]]:
+        grouped: dict[str, list[str]] = {}
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT asset_id, pet_id
+                FROM pet_contract_migration_assets
+                WHERE embedding_pipeline_version = ?
+                  AND embedding_dimension = ?
+                  AND generation_id = ?
+                ORDER BY asset_id, pet_id
+                """,
+                (contract.pipeline_version, contract.dimension, contract.generation_id),
+            ).fetchall()
+        for row in rows:
+            grouped.setdefault(str(row["asset_id"]), []).append(str(row["pet_id"]))
+        return {asset_id: tuple(dict.fromkeys(pet_ids)) for asset_id, pet_ids in grouped.items()}
+
+    def _load_complete_link_samples_for_pets(
         self,
         pet_ids: tuple[str, ...],
-        *,
-        centers: dict[str, np.ndarray],
-        limit: int,
-    ) -> dict[str, tuple[np.ndarray, ...]]:
-        grouped: dict[str, list[tuple[str, np.ndarray]]] = {
-            pet_id: [] for pet_id in pet_ids
-        }
+    ) -> dict[str, tuple[tuple[str, np.ndarray], ...]]:
+        grouped: dict[str, list[tuple[str, str, np.ndarray]]] = {pet_id: [] for pet_id in pet_ids}
         with closing(self._connect()) as conn:
             rows = self._select_detections_by_pet_ids(conn, pet_ids)
         for row in rows:
@@ -1091,23 +1256,19 @@ class PetRepository:
             grouped[pet_id].append(
                 (
                     str(row["detection_id"]),
-                    deserialize_embedding(row["embedding"], int(row["embedding_dim"] or 0)),
+                    str(row["asset_id"]),
+                    normalize_vector(
+                        deserialize_embedding(row["embedding"], int(row["embedding_dim"] or 0))
+                    ),
                 )
             )
-        selected: dict[str, tuple[np.ndarray, ...]] = {}
-        cap = max(1, min(int(limit), 8))
-        for pet_id, samples in grouped.items():
-            center = centers.get(pet_id, np.asarray([], dtype=np.float32))
-            compatible = [
-                (detection_id, normalize_vector(sample))
-                for detection_id, sample in samples
-                if sample.size == center.size
-            ]
-            compatible.sort(
-                key=lambda item: (-cosine_distance(center, item[1]), item[0])
+        return {
+            pet_id: tuple(
+                (asset_id, sample)
+                for _, asset_id, sample in sorted(samples, key=lambda item: item[0])
             )
-            selected[pet_id] = tuple(sample for _, sample in compatible[:cap])
-        return selected
+            for pet_id, samples in grouped.items()
+        }
 
     def _select_detections_by_asset_ids(
         self, conn: sqlite3.Connection, asset_ids: tuple[str, ...]
@@ -1329,6 +1490,26 @@ class PetRepository:
             )
             conn.commit()
 
+    def set_scan_metadata_many(self, values: dict[str, object]) -> None:
+        """Persist related scan metadata in one SQLite transaction."""
+
+        normalized = [
+            (str(key).strip(), str(value)) for key, value in values.items() if str(key).strip()
+        ]
+        if not normalized:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO scan_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                normalized,
+            )
+            conn.commit()
+
     def sync_runtime_state(self) -> None:
         if self._state_repo is None:
             return
@@ -1390,16 +1571,13 @@ class PetRepository:
         if not all_detections:
             return 0
         active = EmbeddingContract(
-            pipeline_version=str(
-                self.get_scan_metadata("active_embedding_pipeline_version") or ""
-            ),
+            pipeline_version=str(self.get_scan_metadata("active_embedding_pipeline_version") or ""),
             dimension=int(self.get_scan_metadata("active_embedding_dimension") or 0),
             generation_id=int(self.get_scan_metadata("active_generation_id") or 0),
         )
         if not active.pipeline_version or active.dimension <= 0:
             contracts = {
-                EmbeddingContract.from_detection(detection)
-                for detection in all_detections
+                EmbeddingContract.from_detection(detection) for detection in all_detections
             }
             if len(contracts) != 1:
                 return 0
@@ -1428,9 +1606,7 @@ class PetRepository:
             if EmbeddingContract.from_detection(detection) != active
         ]
         retained_pets = [
-            pet
-            for pet in self.get_all_pet_records()
-            if EmbeddingContract.from_pet(pet) != active
+            pet for pet in self.get_all_pet_records() if EmbeddingContract.from_pet(pet) != active
         ]
         self.replace_all(
             retained_detections + clustered_detections,
@@ -1478,11 +1654,7 @@ class PetRepository:
             if self._state_repo is not None
             else set()
         )
-        return [
-            self._detection_from_row(row)
-            for row in rows
-            if row["pet_key"] not in rejected
-        ]
+        return [self._detection_from_row(row) for row in rows if row["pet_key"] not in rejected]
 
     def get_all_pet_records(self) -> list[PetRecord]:
         self.initialize()
@@ -1515,6 +1687,8 @@ class PetRepository:
                     pets.key_detection_id,
                     pets.detection_count,
                     pets.created_at,
+                    pets.profile_state,
+                    pets.species_label,
                     pet_detections.thumbnail_path
                 FROM pets
                 LEFT JOIN pet_detections
@@ -1533,9 +1707,7 @@ class PetRepository:
         cover_paths: dict[str, str] = {}
         profile_names: dict[str, str | None] = {}
         if self._state_repo is not None:
-            hidden_map, cover_paths, profile_names = (
-                self._state_repo.get_summary_state_maps()
-            )
+            hidden_map, cover_paths, profile_names = self._state_repo.get_summary_state_maps()
         effective_asset_sets: dict[str, set[str]] = {}
         for asset_row in asset_rows:
             runtime_pet_id = str(asset_row["pet_id"])
@@ -1545,8 +1717,7 @@ class PetRepository:
                     str(asset_row["asset_id"])
                 )
         effective_assets: dict[str, list[str]] = {
-            pet_id: sorted(asset_ids)
-            for pet_id, asset_ids in effective_asset_sets.items()
+            pet_id: sorted(asset_ids) for pet_id, asset_ids in effective_asset_sets.items()
         }
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         if face_state_path.exists():
@@ -1576,6 +1747,8 @@ class PetRepository:
                     created_at=str(row["created_at"] or ""),
                     is_hidden=bool(hidden_map.get(pet_id, False)),
                     asset_count=len(effective_assets.get(pet_id, ())),
+                    profile_state=str(row["profile_state"] or "unstable"),
+                    species_label=_normalize_species_label(row["species_label"]),
                 )
             )
         if not include_hidden:
@@ -1588,10 +1761,14 @@ class PetRepository:
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         if face_state_path.exists():
             face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
-            return FaceRepository(
-                face_index_path,
-                face_state_path,
-            ).get_asset_ids_by_pets_effective((pet_id,)).get(pet_id, [])
+            return (
+                FaceRepository(
+                    face_index_path,
+                    face_state_path,
+                )
+                .get_asset_ids_by_pets_effective((pet_id,))
+                .get(pet_id, [])
+            )
         self.initialize()
         runtime_pet_ids = [pet_id]
         if self._state_repo is not None:
@@ -1615,9 +1792,7 @@ class PetRepository:
                         chunk,
                     ).fetchall()
                 )
-        return list(
-            dict.fromkeys(str(row["asset_id"]) for row in rows if row["asset_id"])
-        )
+        return list(dict.fromkeys(str(row["asset_id"]) for row in rows if row["asset_id"]))
 
     def get_asset_ids_by_pets(
         self,
@@ -1699,12 +1874,8 @@ class PetRepository:
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         assignments: dict[tuple[str, str], tuple[str, str]] = {}
         if face_state_path.exists():
-            assignments = FaceStateRepository(
-                face_state_path
-            ).get_annotation_identity_assignments(
-                ("pet", str(row["detection_id"]))
-                for row in rows
-                if row["detection_id"]
+            assignments = FaceStateRepository(face_state_path).get_annotation_identity_assignments(
+                ("pet", str(row["detection_id"])) for row in rows if row["detection_id"]
             )
         assigned_canonical = self._canonical_identity_refs(assignments.values())
         annotations: list[AssetPetAnnotation] = []
@@ -1732,28 +1903,25 @@ class PetRepository:
                     ),
                     source_identity_id=runtime_pet_id,
                     canonical_identity_kind=(
-                        assigned_canonical[
-                            assignments[("pet", str(row["detection_id"]))]
-                        ][0]
+                        assigned_canonical[assignments[("pet", str(row["detection_id"]))]][0]
                         if ("pet", str(row["detection_id"])) in assignments
                         else canonical_identities[runtime_pet_id][0]
-                        if runtime_pet_id else "pet"
+                        if runtime_pet_id
+                        else "pet"
                     ),
                     canonical_identity_id=(
-                        assigned_canonical[
-                            assignments[("pet", str(row["detection_id"]))]
-                        ][1]
+                        assigned_canonical[assignments[("pet", str(row["detection_id"]))]][1]
                         if ("pet", str(row["detection_id"])) in assignments
                         else canonical_identities[runtime_pet_id][1]
-                        if runtime_pet_id else None
+                        if runtime_pet_id
+                        else None
                     ),
                     canonical_display_name=(
-                        assigned_canonical[
-                            assignments[("pet", str(row["detection_id"]))]
-                        ][2]
+                        assigned_canonical[assignments[("pet", str(row["detection_id"]))]][2]
                         if ("pet", str(row["detection_id"])) in assignments
                         else canonical_identities[runtime_pet_id][2]
-                        if runtime_pet_id else None
+                        if runtime_pet_id
+                        else None
                     ),
                     is_stale=bool(row["is_stale"]),
                     stale_reason=row["stale_reason"],
@@ -1773,9 +1941,7 @@ class PetRepository:
         source_ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
         if not source_ids:
             return {}
-        resolved = self._canonical_identity_refs(
-            ("pet", source_id) for source_id in source_ids
-        )
+        resolved = self._canonical_identity_refs(("pet", source_id) for source_id in source_ids)
         return {source_id: resolved[("pet", source_id)] for source_id in source_ids}
 
     def _canonical_identity_refs(
@@ -1795,8 +1961,7 @@ class PetRepository:
             self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}
         )
         redirect_map: dict[tuple[str, str], tuple[str, str]] = {
-            ("pet", source_id): ("pet", target_id)
-            for source_id, target_id in pet_redirects.items()
+            ("pet", source_id): ("pet", target_id) for source_id, target_id in pet_redirects.items()
         }
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
         face_state = None
@@ -1821,9 +1986,7 @@ class PetRepository:
             if self._state_repo is not None
             else {}
         )
-        person_targets = [
-            entity_id for kind, entity_id in resolved.values() if kind == "person"
-        ]
+        person_targets = [entity_id for kind, entity_id in resolved.values() if kind == "person"]
         person_names: dict[str, str | None] = {}
         if face_state is not None and person_targets:
             person_names = face_state.get_profile_name_map(person_targets)
@@ -1882,9 +2045,10 @@ class PetRepository:
                 (normalize_name(name_or_none), utc_now_iso(), canonical_pet_id),
             )
             conn.commit()
-        return int(cursor.rowcount or 0) > 0 or self._state_repo.get_profile(
-            canonical_pet_id
-        ) is not None
+        return (
+            int(cursor.rowcount or 0) > 0
+            or self._state_repo.get_profile(canonical_pet_id) is not None
+        )
 
     def set_pet_hidden(self, pet_id: str, hidden: bool) -> bool:
         if self._state_repo is None:
@@ -1944,6 +2108,18 @@ class PetRepository:
             for detection in self.get_all_detections()
             if detection.pet_id in {source_pet_id, target_pet_id}
         ]
+        durable_profiles = self._state_repo.get_profiles_by_ids((source_pet_id, target_pet_id))
+        species_labels = {
+            label
+            for value in (
+                *(detection.species_label for detection in runtime_detections),
+                *(pet.species_label for pet in runtime_pets),
+                *(profile.species_label for profile in durable_profiles.values()),
+            )
+            if (label := _normalize_species_label(value)) is not None
+        }
+        if len(species_labels) > 1:
+            return None
         self._state_repo.ensure_runtime_candidates(runtime_pets, runtime_detections)
         durable_merged = self._state_repo.merge_pets(source_pet_id, target_pet_id)
         if not durable_merged:
@@ -1964,10 +2140,25 @@ class PetRepository:
                 "UPDATE pet_detections SET pet_id = ? WHERE pet_id = ?",
                 (target_pet_id, source_pet_id),
             )
-            self._rebuild_pet_records_in_connection(conn)
-            changed_asset_ids = tuple(
-                str(row["asset_id"]) for row in asset_rows if row["asset_id"]
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO pet_contract_migration_assets (
+                    pet_id, asset_id, embedding_pipeline_version,
+                    embedding_dimension, generation_id
+                )
+                SELECT ?, asset_id, embedding_pipeline_version,
+                       embedding_dimension, generation_id
+                FROM pet_contract_migration_assets
+                WHERE pet_id = ?
+                """,
+                (target_pet_id, source_pet_id),
             )
+            conn.execute(
+                "DELETE FROM pet_contract_migration_assets WHERE pet_id = ?",
+                (source_pet_id,),
+            )
+            self._rebuild_pet_records_in_connection(conn)
+            changed_asset_ids = tuple(str(row["asset_id"]) for row in asset_rows if row["asset_id"])
             self._write_runtime_commit(
                 conn,
                 effective_operation_id,
@@ -1982,6 +2173,7 @@ class PetRepository:
                 },
             )
             conn.commit()
+        self._invalidate_profile_indexes()
         self.complete_runtime_state_sync(effective_operation_id)
         self._remap_people_groups_for_pet_merge(source_pet_id, target_pet_id)
         return PetMutationResult(
@@ -2096,7 +2288,8 @@ class PetRepository:
         with closing(self._connect()) as conn:
             target = conn.execute(
                 """
-                SELECT pet_id, embedding_pipeline_version, embedding_dim, generation_id
+                SELECT pet_id, species_label,
+                       embedding_pipeline_version, embedding_dim, generation_id
                 FROM pets WHERE pet_id = ?
                 """,
                 (target_pet_id,),
@@ -2109,6 +2302,10 @@ class PetRepository:
                 generation_id=int(target["generation_id"] or 0),
             )
             if EmbeddingContract.from_detection(detection) != target_contract:
+                return None
+            if _normalize_species_label(detection.species_label) != _normalize_species_label(
+                target["species_label"]
+            ):
                 return None
             conn.execute(
                 "UPDATE pet_detections SET pet_id = ? WHERE detection_id = ?",
@@ -2157,9 +2354,7 @@ class PetRepository:
                 (new_pet_id, detection_id),
             )
             self._rebuild_pet_records_in_connection(conn)
-            changed_pet_ids = tuple(
-                pet_id for pet_id in (detection.pet_id, new_pet_id) if pet_id
-            )
+            changed_pet_ids = tuple(pet_id for pet_id in (detection.pet_id, new_pet_id) if pet_id)
             self._write_runtime_commit(
                 conn,
                 effective_operation_id,
@@ -2211,20 +2406,14 @@ class PetRepository:
                 row["pet_key"] for row in rows if row["pet_key"]
             )
         detections = [
-            self._detection_from_row(row)
-            for row in rows
-            if row["pet_key"] not in rejected
+            self._detection_from_row(row) for row in rows if row["pet_key"] not in rejected
         ]
         names: dict[str, str | None] = {}
         created_at: dict[str, str] = {}
         if self._state_repo is not None:
-            profiles = {
-                profile.pet_id: profile for profile in self._state_repo.get_profiles()
-            }
+            profiles = {profile.pet_id: profile for profile in self._state_repo.get_profiles()}
             names = {pet_id: profile.name for pet_id, profile in profiles.items()}
-            created_at = {
-                pet_id: profile.created_at for pet_id, profile in profiles.items()
-            }
+            created_at = {pet_id: profile.created_at for pet_id, profile in profiles.items()}
         pets = build_pet_records_from_detections(
             detections,
             names_by_pet_id=names,
@@ -2363,6 +2552,30 @@ class PetRepository:
             """
         )
         conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_contract_migration_assets (
+                pet_id TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                embedding_pipeline_version TEXT NOT NULL,
+                embedding_dimension INTEGER NOT NULL,
+                generation_id INTEGER NOT NULL,
+                PRIMARY KEY (
+                    pet_id, asset_id, embedding_pipeline_version,
+                    embedding_dimension, generation_id
+                )
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pet_contract_migration_asset
+            ON pet_contract_migration_assets (
+                asset_id, embedding_pipeline_version,
+                embedding_dimension, generation_id
+            )
+            """
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pet_detections_pet_id ON pet_detections (pet_id)"
         )
         conn.execute(
@@ -2463,9 +2676,7 @@ class PetRepository:
                 float(row["quality_score"]) if row["quality_score"] is not None else None
             ),
             pet_key_version=str(_row_value(row, "pet_key_version", "v1") or "v1"),
-            embedding_pipeline_version=str(
-                _row_value(row, "embedding_pipeline_version", "") or ""
-            ),
+            embedding_pipeline_version=str(_row_value(row, "embedding_pipeline_version", "") or ""),
             generation_id=int(_row_value(row, "generation_id", 0) or 0),
             is_stale=bool(_row_value(row, "is_stale", 0)),
             stale_reason=_row_value(row, "stale_reason", None),
@@ -2492,9 +2703,7 @@ class PetRepository:
             sample_count=int(row["sample_count"] or 0),
             profile_state=str(row["profile_state"] or "unstable"),
             species_label=_normalize_species_label(row["species_label"]),
-            embedding_pipeline_version=str(
-                _row_value(row, "embedding_pipeline_version", "") or ""
-            ),
+            embedding_pipeline_version=str(_row_value(row, "embedding_pipeline_version", "") or ""),
             generation_id=int(_row_value(row, "generation_id", 0) or 0),
             boundary_embeddings=_deserialize_boundary_embeddings(
                 _row_value(row, "boundary_embeddings", None),
@@ -2512,7 +2721,7 @@ def _normalize_species_label(value: object) -> str | None:
 
 
 def _species_compatible(left: str | None, right: str | None) -> bool:
-    return left is None or right is None or left == right
+    return left == right
 
 
 def _chunked(values: tuple[str, ...], size: int) -> Iterable[tuple[str, ...]]:
@@ -2630,9 +2839,7 @@ class _ProfileCandidateIndex:
             list[tuple[str, np.ndarray]],
         ] = {}
         for pet_id, vector, species_label in staged:
-            grouped.setdefault((int(vector.size), species_label), []).append(
-                (pet_id, vector)
-            )
+            grouped.setdefault((int(vector.size), species_label), []).append((pet_id, vector))
         for group, members in grouped.items():
             entry = self._indexes.get(group)
             if entry is None:
@@ -2663,9 +2870,7 @@ class _ProfileCandidateIndex:
         if center is not None and center.size:
             self._remove_from_group((int(center.size), species_label), pet_id)
 
-    def _remove_from_group(
-        self, group: tuple[int, str | None], pet_id: str
-    ) -> None:
+    def _remove_from_group(self, group: tuple[int, str | None], pet_id: str) -> None:
         entry = self._indexes.get(group)
         if entry is None:
             return
@@ -2730,22 +2935,24 @@ class _ProfileCandidateIndex:
                 ),
                 key=lambda item: (item[0], item[1]),
             )[:limit]
-        labels = (
-            {label for dim, label in self._indexes if dim == vector.size}
-            if species_label is None
-            else {species_label, None}
-        )
+        labels = {species_label}
         matches: list[tuple[float, str]] = []
         for label in labels:
             entry = self._indexes.get((int(vector.size), label))
             if entry is None:
                 continue
             index, key_to_pet, _pet_to_key = entry
+            if not key_to_pet:
+                continue
             result = index.search(vector, min(limit, len(key_to_pet)))
             matches.extend(
                 (float(distance), key_to_pet[int(key)])
                 for key, distance in zip(result.keys, result.distances, strict=True)
                 if int(key) in key_to_pet
+                and _species_compatible(
+                    species_label,
+                    self._species.get(key_to_pet[int(key)]),
+                )
             )
         return sorted(matches, key=lambda item: (item[0], item[1]))[:limit]
 

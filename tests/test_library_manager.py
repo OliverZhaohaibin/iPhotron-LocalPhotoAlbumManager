@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication
 from iPhoto.bootstrap.library_session import LibrarySession
 from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.runtime_controller import LibraryRuntimeController
+from iPhoto.pets.pipeline import PET_DETECTOR_PIPELINE_VERSION
 
 
 @pytest.fixture(scope="module")
@@ -617,6 +618,8 @@ def test_upgraded_library_schedules_closed_input_pet_backfill_after_bind(
     repository.get_scan_metadata.side_effect = lambda key: {
         "pet_backfill_required": None,
         "detector_pipeline_version": "legacy-detector",
+        "detector_migration_target": None,
+        "detector_migration_state": None,
     }[key]
     asset_repository = Mock()
     asset_repository.count_by_pet_status.return_value = {"done": 3}
@@ -632,8 +635,12 @@ def test_upgraded_library_schedules_closed_input_pet_backfill_after_bind(
         single_shot.assert_called_once()
         single_shot.call_args.args[1]()
 
-    repository.set_scan_metadata.assert_called_once_with(
-        "pet_backfill_required", "1"
+    repository.set_scan_metadata_many.assert_called_once_with(
+        {
+            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_state": "pending",
+            "pet_backfill_required": "1",
+        }
     )
     start_backfill.assert_called_once_with(root)
 
@@ -661,6 +668,39 @@ def test_new_library_does_not_schedule_pet_backfill_until_feature_use(
     repository.set_scan_metadata.assert_not_called()
 
 
+def test_current_library_schedules_ordinary_pending_retry_drain_after_bind(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.side_effect = lambda key: {
+        "pet_backfill_required": None,
+        "detector_pipeline_version": PET_DETECTOR_PIPELINE_VERSION,
+        "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+        "detector_migration_state": "complete",
+    }[key]
+    asset_repository = Mock()
+    asset_repository.count_by_pet_status.return_value = {"pending": 2, "retry": 1}
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = asset_repository
+
+    with (
+        patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot,
+        patch.object(manager, "_start_pet_backfill_worker") as start_drain,
+    ):
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_called_once()
+        single_shot.call_args.args[1]()
+
+    start_drain.assert_called_once_with(root)
+    repository.set_scan_metadata_many.assert_not_called()
+
+
 def test_pet_backfill_event_does_not_block_face_activation(
     tmp_path: Path,
     qapp: QApplication,
@@ -674,6 +714,8 @@ def test_pet_backfill_event_does_not_block_face_activation(
     repository.get_scan_metadata.side_effect = lambda key: {
         "pet_backfill_required": "1",
         "detector_pipeline_version": "legacy-detector",
+        "detector_migration_target": None,
+        "detector_migration_state": None,
     }[key]
     pet_service = Mock()
     pet_service.repository.return_value = repository

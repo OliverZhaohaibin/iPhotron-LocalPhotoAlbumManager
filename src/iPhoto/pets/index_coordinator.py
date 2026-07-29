@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -21,15 +20,20 @@ from iPhoto.recognition.mutation_coordinator import (
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
+from .errors import PetStateCommitError
 from .pipeline import (
     DEFAULT_PET_DISTANCE_THRESHOLD,
+    PET_PEOPLE_IOU_THRESHOLD,
+    PET_PEOPLE_LARGER_PET_RATIO,
+    PET_PEOPLE_MURAL_IMAGE_COVERAGE_THRESHOLD,
+    PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD,
     DetectedAssetPets,
-    _pet_box_overlaps_people_boxes,
+    _pet_people_overlap_decision,
 )
 from .records import PetMergeOutcome, PetMutationFailure
 from .repository import PetRepository
 from .scan_session import PetScanSession
-from .status import PET_STATUS_DONE, PET_STATUS_RETRY
+from .status import PET_STATUS_DONE, PET_STATUS_FAILED, PET_STATUS_PENDING, PET_STATUS_RETRY
 
 LOGGER = get_logger()
 
@@ -49,7 +53,7 @@ _PET_JOURNAL_KINDS = {
 }
 
 
-class PetSnapshotCommittedError(RuntimeError):
+class PetSnapshotCommittedError(PetStateCommitError):
     """Raised when the Pets snapshot committed but bookkeeping failed."""
 
 
@@ -89,6 +93,7 @@ class PetIndexCoordinator(QObject):
         self._journal = mutation_coordinator or get_recognition_mutation_coordinator(
             self._library_root
         )
+        self._owns_journal = mutation_coordinator is None
         self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PET_JOURNAL_KINDS,
@@ -99,6 +104,7 @@ class PetIndexCoordinator(QObject):
             pets_root / "pet_index.db",
             pets_root / "pet_state.db",
         )
+        self._pet_repository.initialize()
         self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
         self._recovery_error: Exception | None = None
         try:
@@ -145,6 +151,7 @@ class PetIndexCoordinator(QObject):
         | None = None,
         staged_thumbnail_dir: Path | None = None,
         published_thumbnail_dir: Path | None = None,
+        failed_asset_ids: Iterable[str] = (),
     ) -> PetSnapshotEvent | None:
         detected_batch = list(detected_results)
         if not detected_batch:
@@ -166,7 +173,7 @@ class PetIndexCoordinator(QObject):
                 for result in detected_batch:
                     retained_detections = []
                     for detection in result.detections:
-                        if _pet_box_overlaps_people_boxes(
+                        overlap_decision = _pet_people_overlap_decision(
                             (
                                 detection.box_x,
                                 detection.box_y,
@@ -174,7 +181,28 @@ class PetIndexCoordinator(QObject):
                                 detection.box_h,
                             ),
                             people_boxes.get(result.asset_id, ()),
-                        ):
+                            image_dimensions=(
+                                detection.image_width,
+                                detection.image_height,
+                            ),
+                        )
+                        if overlap_decision.suppressed:
+                            LOGGER.info(
+                                "Suppressed committed pet detection %s for asset %s: "
+                                "reason=%s pet_to_face_area_ratio=%.3f "
+                                "pet_image_coverage=%.3f iou_threshold=%.2f "
+                                "smaller_box_coverage_threshold=%.2f larger_pet_ratio=%.2f "
+                                "mural_image_coverage_threshold=%.2f",
+                                detection.detection_id,
+                                result.asset_id,
+                                overlap_decision.reason,
+                                overlap_decision.pet_to_face_area_ratio,
+                                overlap_decision.pet_image_coverage,
+                                PET_PEOPLE_IOU_THRESHOLD,
+                                PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD,
+                                PET_PEOPLE_LARGER_PET_RATIO,
+                                PET_PEOPLE_MURAL_IMAGE_COVERAGE_THRESHOLD,
+                            )
                             if detection.thumbnail_path:
                                 filtered_thumbnail_paths.append(detection.thumbnail_path)
                             continue
@@ -188,19 +216,24 @@ class PetIndexCoordinator(QObject):
                         )
                     )
                 detected_batch = revalidated_batch
+            terminal_failed_ids = list(
+                dict.fromkeys(str(value) for value in failed_asset_ids if value)
+            )
             session = PetScanSession()
             done_ids, retry_ids = session.stage_detection_results(detected_batch)
+            terminal_failed_set = set(terminal_failed_ids)
+            done_ids = [value for value in done_ids if value not in terminal_failed_set]
+            retry_ids = [value for value in retry_ids if value not in terminal_failed_set]
             operation_payload = {
                 "done_asset_ids": list(done_ids),
                 "retry_asset_ids": list(retry_ids),
+                "failed_asset_ids": list(terminal_failed_ids),
                 "index_applied": False,
                 "staged_thumbnail_dir": (
                     str(staged_thumbnail_dir) if staged_thumbnail_dir is not None else None
                 ),
             }
-            operation_id = self._try_prepare_operation_locked(
-                "pet_scan_commit", operation_payload
-            )
+            operation_id = self._try_prepare_operation_locked("pet_scan_commit", operation_payload)
             if operation_id is None:
                 return None
 
@@ -217,9 +250,7 @@ class PetIndexCoordinator(QObject):
                 {
                     "generation_id": generation_id,
                     "embedding_pipeline_version": (
-                        staged_detections[0].embedding_pipeline_version
-                        if staged_detections
-                        else ""
+                        staged_detections[0].embedding_pipeline_version if staged_detections else ""
                     ),
                     "embedding_dimension": (
                         staged_detections[0].embedding_dim if staged_detections else 0
@@ -257,7 +288,7 @@ class PetIndexCoordinator(QObject):
                 commit_result = repository.replace_assets_incrementally(
                     done_ids,
                     staged_detections,
-                    retry_asset_ids=retry_ids,
+                    retry_asset_ids=[*retry_ids, *terminal_failed_ids],
                     distance_threshold=distance_threshold,
                     operation_id=operation_id,
                 )
@@ -287,6 +318,8 @@ class PetIndexCoordinator(QObject):
                 {
                     "index_applied": True,
                     "generation_id": generation_id,
+                    "changed_asset_ids": list(commit_result.changed_asset_ids),
+                    "retired_asset_ids": list(commit_result.retired_asset_ids),
                     "added_pet_ids": list(commit_result.added_pet_ids),
                     "updated_pet_ids": list(commit_result.updated_pet_ids),
                     "removed_pet_ids": list(commit_result.removed_pet_ids),
@@ -300,24 +333,25 @@ class PetIndexCoordinator(QObject):
             if staged_detections:
                 repository.activate_embedding_generation(
                     generation_id=generation_id,
-                    embedding_pipeline_version=(
-                        staged_detections[0].embedding_pipeline_version
-                    ),
+                    embedding_pipeline_version=(staged_detections[0].embedding_pipeline_version),
                     embedding_dimension=staged_detections[0].embedding_dim,
-                    detector_pipeline_version=detector_pipeline_version,
                     clustering_pipeline_version=clustering_pipeline_version,
                 )
             else:
-                if detector_pipeline_version:
-                    repository.set_scan_metadata(
-                        "detector_pipeline_version", detector_pipeline_version
-                    )
                 if clustering_pipeline_version:
                     repository.set_scan_metadata(
                         "clustering_pipeline_version", clustering_pipeline_version
                     )
+            explicit_status_ids = set(done_ids) | set(retry_ids) | set(terminal_failed_ids)
+            retired_pending_ids = [
+                asset_id
+                for asset_id in commit_result.retired_asset_ids
+                if asset_id not in explicit_status_ids
+            ]
             try:
+                self._mark_pending_asset_ids(retired_pending_ids)
                 self._mark_retry_asset_ids(retry_ids)
+                self._mark_failed_asset_ids(terminal_failed_ids)
                 self._mark_done_asset_ids(done_ids)
             except Exception as exc:
                 LOGGER.error(
@@ -329,9 +363,12 @@ class PetIndexCoordinator(QObject):
                 raise PetSnapshotCommittedError(
                     "Pet scan committed, but updating scan bookkeeping failed."
                 ) from exc
+            changed_asset_ids = commit_result.changed_asset_ids or tuple(
+                done_ids + retry_ids + terminal_failed_ids
+            )
             outbox_payload = {
                 "generation_id": generation_id,
-                "changed_asset_ids": list(done_ids + retry_ids),
+                "changed_asset_ids": list(changed_asset_ids),
                 "added_pet_ids": list(commit_result.added_pet_ids),
                 "updated_pet_ids": list(commit_result.updated_pet_ids),
                 "removed_pet_ids": list(commit_result.removed_pet_ids),
@@ -339,15 +376,13 @@ class PetIndexCoordinator(QObject):
             event = self._emit_snapshot(
                 operation_id=operation_id,
                 generation_id=generation_id,
-                changed_asset_ids=tuple(done_ids + retry_ids),
+                changed_asset_ids=changed_asset_ids,
                 added_pet_ids=commit_result.added_pet_ids,
                 updated_pet_ids=commit_result.updated_pet_ids,
                 removed_pet_ids=commit_result.removed_pet_ids,
                 dispatch=False,
             )
-            repository.prune_unreferenced_thumbnails(
-                commit_result.previous_thumbnail_paths
-            )
+            repository.prune_unreferenced_thumbnails(commit_result.previous_thumbnail_paths)
             repository.prune_unreferenced_thumbnails(filtered_thumbnail_paths)
             self._journal.commit_and_dispatch(
                 operation_id,
@@ -495,9 +530,7 @@ class PetIndexCoordinator(QObject):
             if not self._ensure_recovered_locked():
                 return 0
             repository = self._repository()
-            previous_version = repository.get_scan_metadata(
-                "clustering_pipeline_version"
-            )
+            previous_version = repository.get_scan_metadata("clustering_pipeline_version")
             if previous_version == clustering_pipeline_version:
                 return 0
             previous_detections = repository.get_all_detections()
@@ -512,9 +545,7 @@ class PetIndexCoordinator(QObject):
                     )
                 ),
             }
-            operation_id = self._try_prepare_operation_locked(
-                "pet_recluster", operation_payload
-            )
+            operation_id = self._try_prepare_operation_locked("pet_recluster", operation_payload)
             if operation_id is None:
                 return 0
             reclustered_count = repository.recluster_detections(
@@ -535,13 +566,10 @@ class PetIndexCoordinator(QObject):
                             if detection.asset_id
                         )
                     ),
-                    changed_pet_ids=tuple(
-                        pet.pet_id for pet in repository.get_all_pet_records()
-                    ),
+                    changed_pet_ids=tuple(pet.pet_id for pet in repository.get_all_pet_records()),
                 )
                 LOGGER.info(
-                    "Reclustered %d pet detections for clustering pipeline upgrade "
-                    "%s -> %s in %s",
+                    "Reclustered %d pet detections for clustering pipeline upgrade %s -> %s in %s",
                     reclustered_count,
                     previous_version or "<missing>",
                     clustering_pipeline_version,
@@ -598,13 +626,10 @@ class PetIndexCoordinator(QObject):
                 return None
             repository = self._repository()
             scoped_asset_ids = tuple(people_boxes_by_asset_id)
-            previous_detections = repository.get_detections_by_asset_ids(
-                scoped_asset_ids
-            )
-            removed = [
-                detection
-                for detection in previous_detections
-                if _pet_box_overlaps_people_boxes(
+            previous_detections = repository.get_detections_by_asset_ids(scoped_asset_ids)
+            removed = []
+            for detection in previous_detections:
+                overlap_decision = _pet_people_overlap_decision(
                     (
                         detection.box_x,
                         detection.box_y,
@@ -612,8 +637,29 @@ class PetIndexCoordinator(QObject):
                         detection.box_h,
                     ),
                     people_boxes_by_asset_id.get(detection.asset_id, ()),
+                    image_dimensions=(
+                        detection.image_width,
+                        detection.image_height,
+                    ),
                 )
-            ]
+                if not overlap_decision.suppressed:
+                    continue
+                LOGGER.info(
+                    "Reconciled pet detection %s for asset %s: reason=%s "
+                    "pet_to_face_area_ratio=%.3f pet_image_coverage=%.3f "
+                    "iou_threshold=%.2f smaller_box_coverage_threshold=%.2f "
+                    "larger_pet_ratio=%.2f mural_image_coverage_threshold=%.2f",
+                    detection.detection_id,
+                    detection.asset_id,
+                    overlap_decision.reason,
+                    overlap_decision.pet_to_face_area_ratio,
+                    overlap_decision.pet_image_coverage,
+                    PET_PEOPLE_IOU_THRESHOLD,
+                    PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD,
+                    PET_PEOPLE_LARGER_PET_RATIO,
+                    PET_PEOPLE_MURAL_IMAGE_COVERAGE_THRESHOLD,
+                )
+                removed.append(detection)
             if not removed:
                 return None
 
@@ -635,9 +681,7 @@ class PetIndexCoordinator(QObject):
                 operation_id=operation_id,
                 operation_kind="pet_overlap_reconcile",
             )
-            repository.prune_unreferenced_thumbnails(
-                commit_result.previous_thumbnail_paths
-            )
+            repository.prune_unreferenced_thumbnails(commit_result.previous_thumbnail_paths)
             return self._emit_journaled_snapshot(
                 operation_id,
                 changed_asset_ids=changed_asset_ids,
@@ -730,6 +774,13 @@ class PetIndexCoordinator(QObject):
         with self._lock:
             self._shutdown_requested = False
 
+    def close(self) -> None:
+        """Permanently release resources owned by this coordinator."""
+
+        self.begin_shutdown()
+        if self._owns_journal:
+            self._journal.close()
+
     def _repository(self) -> PetRepository:
         return self._pet_repository
 
@@ -748,12 +799,7 @@ class PetIndexCoordinator(QObject):
     ) -> PetSnapshotEvent:
         self._revision += 1
         changed_pet_ids = tuple(
-            dict.fromkeys(
-                changed_pet_ids
-                + added_pet_ids
-                + updated_pet_ids
-                + removed_pet_ids
-            )
+            dict.fromkeys(changed_pet_ids + added_pet_ids + updated_pet_ids + removed_pet_ids)
         )
         event = PetSnapshotEvent(
             library_root=self._library_root,
@@ -795,9 +841,7 @@ class PetIndexCoordinator(QObject):
         return event
 
     def _prune_runtime_commits_locked(self) -> None:
-        protected = tuple(
-            operation.operation_id for operation in self._journal.unfinished()
-        )
+        protected = tuple(operation.operation_id for operation in self._journal.unfinished())
         self._repository().prune_runtime_commits(
             protected_operation_ids=protected,
         )
@@ -818,8 +862,14 @@ class PetIndexCoordinator(QObject):
     def _mark_done_asset_ids(self, done_ids: list[str]) -> None:
         self._mark_asset_ids_with_status(done_ids, PET_STATUS_DONE)
 
+    def _mark_pending_asset_ids(self, pending_ids: list[str]) -> None:
+        self._mark_asset_ids_with_status(pending_ids, PET_STATUS_PENDING)
+
     def _mark_retry_asset_ids(self, retry_ids: list[str]) -> None:
         self._mark_asset_ids_with_status(retry_ids, PET_STATUS_RETRY)
+
+    def _mark_failed_asset_ids(self, failed_ids: list[str]) -> None:
+        self._mark_asset_ids_with_status(failed_ids, PET_STATUS_FAILED)
 
     def _mark_asset_ids_with_status(self, asset_ids: list[str], status: str) -> None:
         if not asset_ids:
@@ -848,15 +898,12 @@ class PetIndexCoordinator(QObject):
             return False
         self._recover_operations_locked(operation)
         return all(
-            pending.operation_id != operation.operation_id
-            for pending in self._journal.unfinished()
+            pending.operation_id != operation.operation_id for pending in self._journal.unfinished()
         )
 
     def _recover_operations_locked(self, only_operation=None) -> None:
         repository = self._repository()
-        operations = (
-            (only_operation,) if only_operation is not None else self._journal.unfinished()
-        )
+        operations = (only_operation,) if only_operation is not None else self._journal.unfinished()
         for operation in operations:
             if operation.kind != "pet_scan_commit":
                 if operation.kind == "recognition_merge":
@@ -926,28 +973,30 @@ class PetIndexCoordinator(QObject):
                     generation_id=generation_id,
                     embedding_pipeline_version=embedding_version,
                     embedding_dimension=embedding_dimension,
-                    detector_pipeline_version=(
-                        str(payload.get("detector_pipeline_version") or "") or None
-                    ),
                     clustering_pipeline_version=(
                         str(payload.get("clustering_pipeline_version") or "") or None
                     ),
                 )
             done_ids = [str(value) for value in payload.get("done_asset_ids", ()) if value]
-            retry_ids = [
-                str(value) for value in payload.get("retry_asset_ids", ()) if value
+            retry_ids = [str(value) for value in payload.get("retry_asset_ids", ()) if value]
+            failed_ids = [str(value) for value in payload.get("failed_asset_ids", ()) if value]
+            explicit_status_ids = set(done_ids) | set(retry_ids) | set(failed_ids)
+            retired_pending_ids = [
+                str(value)
+                for value in payload.get("retired_asset_ids", ())
+                if value and str(value) not in explicit_status_ids
             ]
+            self._mark_pending_asset_ids(retired_pending_ids)
             self._mark_retry_asset_ids(retry_ids)
+            self._mark_failed_asset_ids(failed_ids)
             self._mark_done_asset_ids(done_ids)
+            changed_asset_ids = tuple(
+                str(value) for value in payload.get("changed_asset_ids", ()) if value
+            )
+            if not changed_asset_ids:
+                changed_asset_ids = tuple(dict.fromkeys((*done_ids, *retry_ids, *failed_ids)))
             event_payload = {
-                "changed_asset_ids": [
-                    *done_ids,
-                    *[
-                        str(value)
-                        for value in payload.get("retry_asset_ids", ())
-                        if value
-                    ],
-                ],
+                "changed_asset_ids": list(changed_asset_ids),
                 "added_pet_ids": list(payload.get("added_pet_ids", ())),
                 "updated_pet_ids": list(payload.get("updated_pet_ids", ())),
                 "removed_pet_ids": list(payload.get("removed_pet_ids", ())),
@@ -1010,9 +1059,7 @@ class PetIndexCoordinator(QObject):
 
     def _finish_runtime_backed_recovery(self, repository, operation, payload) -> None:
         if operation.kind == "pet_recluster":
-            clustering_version = str(
-                operation.payload.get("clustering_pipeline_version") or ""
-            )
+            clustering_version = str(operation.payload.get("clustering_pipeline_version") or "")
             if clustering_version:
                 repository.set_scan_metadata(
                     "clustering_pipeline_version",
@@ -1031,10 +1078,7 @@ class PetIndexCoordinator(QObject):
         }:
             repository.refresh_people_group_assets_for_pets(
                 str(value)
-                for value in (
-                    payload.get("affected_pet_ids")
-                    or payload.get("changed_pet_ids", ())
-                )
+                for value in (payload.get("affected_pet_ids") or payload.get("changed_pet_ids", ()))
                 if value
             )
 
@@ -1264,42 +1308,25 @@ def _legacy_pet_identity_id(value: object) -> str | None:
     return entity_id.strip()
 
 
-_COORDINATORS: dict[Path, PetIndexCoordinator] = {}
-_COORDINATORS_LOCK = threading.Lock()
-
-
 def get_pet_index_coordinator(
     library_root: Path,
     *,
     asset_repository: PetAssetRepositoryPort | None = None,
     mutation_coordinator: RecognitionMutationCoordinator | None = None,
 ) -> PetIndexCoordinator:
-    resolved = Path(library_root).resolve()
-    with _COORDINATORS_LOCK:
-        coordinator = _COORDINATORS.get(resolved)
-        if coordinator is None or (
-            mutation_coordinator is not None
-            and coordinator._journal is not mutation_coordinator
-        ):
-            coordinator = PetIndexCoordinator(
-                resolved,
-                asset_repository=asset_repository,
-                mutation_coordinator=mutation_coordinator,
-            )
-            app = QCoreApplication.instance()
-            if app is not None:
-                coordinator.moveToThread(app.thread())
-            _COORDINATORS[resolved] = coordinator
-        else:
-            if asset_repository is not None:
-                coordinator.set_asset_repository(asset_repository)
-            coordinator.resume()
-        return coordinator
+    coordinator = PetIndexCoordinator(
+        Path(library_root).resolve(),
+        asset_repository=asset_repository,
+        mutation_coordinator=mutation_coordinator,
+    )
+    app = QCoreApplication.instance()
+    if app is not None:
+        coordinator.moveToThread(app.thread())
+    return coordinator
 
 
 def reset_pet_index_coordinators() -> None:
-    with _COORDINATORS_LOCK:
-        _COORDINATORS.clear()
+    """Compatibility no-op; coordinators are session-owned."""
 
 
 __all__ = [

@@ -57,6 +57,35 @@ def _make_presentation(
     )
 
 
+def test_constructor_initializes_detail_controls(qapp) -> None:
+    location_search = SimpleNamespace(
+        suggestionsReady=Mock(connect=Mock()),
+        searchFailed=Mock(connect=Mock()),
+    )
+    arguments = [Mock() for _ in range(18)]
+
+    with patch.object(PlaybackCoordinator, "_connect_signals"), patch.object(
+        PlaybackCoordinator,
+        "_setup_zoom_handler",
+    ) as setup_zoom, patch.object(
+        PlaybackCoordinator,
+        "_restore_filmstrip_preference",
+    ) as restore_filmstrip, patch.object(
+        playback_coordinator_module,
+        "LocationSearchController",
+        return_value=location_search,
+    ):
+        coordinator = PlaybackCoordinator(
+            *arguments,
+            people_service=Mock(),
+            pet_service=Mock(),
+        )
+
+    setup_zoom.assert_called_once_with()
+    restore_filmstrip.assert_called_once_with()
+    coordinator.shutdown = Mock()
+
+
 def test_play_asset_dispatches_immediately_when_idle() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._asset_model = Mock(rowCount=Mock(return_value=3))
@@ -412,6 +441,60 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
     assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
     player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
+
+
+def test_render_live_presentation_keeps_motion_playback_active(tmp_path: Path) -> None:
+    still = tmp_path / "photo.heic"
+    motion = tmp_path / "motion.mov"
+    still.write_bytes(b"still")
+    motion.write_bytes(b"motion")
+    presentation = replace(
+        _make_presentation(path=str(still), is_video=False, is_live=True),
+        live_motion_rel=Path("motion.mov"),
+        live_motion_abs=motion,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._detail_render_lifecycle = DetailRenderCoordinator()
+    coordinator._detail_generation = 0
+    coordinator._live_transaction = None
+    coordinator._active_async_token = None
+    coordinator._player_view = Mock(
+        video_area=Mock(
+            has_video=Mock(return_value=False),
+            load_video=Mock(),
+            play=Mock(),
+        ),
+        image_viewer=Mock(reset_zoom=Mock()),
+    )
+    coordinator._favorite_button = Mock(setEnabled=Mock())
+    coordinator._info_button = Mock(setEnabled=Mock())
+    coordinator._share_button = Mock(setEnabled=Mock())
+    coordinator._edit_button = Mock(setEnabled=Mock())
+    coordinator._rotate_button = Mock(setEnabled=Mock())
+    coordinator._update_favorite_icon = Mock()
+    coordinator._zoom_slider = Mock(blockSignals=Mock(), setValue=Mock())
+    coordinator._player_bar = Mock(
+        setEnabled=Mock(),
+        set_playback_state=Mock(),
+        set_position=Mock(),
+    )
+    coordinator._zoom_handler = Mock(set_viewer=Mock())
+    coordinator._zoom_widget = Mock(show=Mock())
+    coordinator._info_panel = None
+    coordinator._clear_play_profile = Mock()
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._is_playing = False
+
+    PlaybackCoordinator._render_presentation(coordinator, presentation)
+
+    coordinator._player_view.video_area.load_video.assert_called_once_with(
+        motion,
+        adjustments=None,
+        trim_range_ms=None,
+        adjusted_preview=False,
+    )
+    coordinator._player_view.video_area.play.assert_called_once_with()
+    assert coordinator._is_playing is True
 
 
 def _live_lifecycle_coordinator(

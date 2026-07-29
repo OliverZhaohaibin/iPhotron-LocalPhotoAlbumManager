@@ -1,0 +1,242 @@
+# 启动链路第二、第三阶段交接文档
+
+更新日期：2026-07-13
+
+## 1. 交接结论
+
+第二、第三阶段都已经完成了核心代码改造，但尚未达到“所有平台与异常介质均完成生产验收”的关闭条件。
+
+- 第二阶段当前状态：**核心链路、迁移恢复协议和 probe P0 加固已落地，慢存储策略和 packaged 验证待闭环**。
+- 第三阶段当前状态：**主要重对象已懒加载，GUI job 时间片观测层和 100 ms 超预算诊断已落地，热点拆分与跨平台性能门禁待闭环**。
+- 第一阶段状态机、首帧 watchdog、输入释放、取消与异常降级已经完成，可作为后续工作的稳定基线。
+
+因此，后续不应重新设计启动架构；应沿用现有接口，根据 job 观测结果拆分真实热点并补齐平台证据。
+
+## 2. 已完成的基础能力
+
+### 2.1 第一阶段基线
+
+- `StartupOrchestrator` 已提供显式启动阶段、generation、首帧/watchdog 竞争消歧、取消、降级和完成信号。
+- 首帧信号缺失时，约 1.8 秒 watchdog 仍会释放输入并继续最小初始化。
+- 启动回调异常不会再直接逃逸到 Qt event loop；窗口关闭会取消 orchestrator 和正在进行的库探测。
+- 启动完成后会取消 `faulthandler.dump_traceback_later()`。
+- 主窗口已有非模态恢复面板，支持重试、暂不打开库和查看诊断。
+
+主要入口：
+
+- `src/iPhoto/bootstrap/startup_orchestrator.py`
+- `src/iPhoto/gui/main.py`
+- `src/iPhoto/gui/ui/main_window.py`
+
+### 2.2 第二阶段已完成部分
+
+- 已增加 `LibraryProbeController`，使用 `QProcess` 隔离路径解析、目录快照和 SQLite schema 准备。
+- 默认探测超时为 3 秒；超时会终止 helper，GUI 不等待慢盘或离线 NAS。
+- 请求和结果带 `request_id`，迟到结果不会覆盖当前会话。
+- 已增加不可变 `PreparedLibrary`、`PreparedAlbum`、`LibraryProbeRequest` 和 `LibraryProbeFailure`。
+- `RuntimeContext` 已拆出 `request_startup_library_probe()`、`commit_prepared_library()`、`open_initial_collection()`、`schedule_idle_startup_jobs()`。
+- `LibrarySession` 可以从 `PreparedLibrary` 构造，主线程提交时不再重复遍历 album tree。
+- SQLite 使用 `PRAGMA user_version`；历史全表修复只在版本升级时执行，当前版本重开不再重复执行全表 `UPDATE`。
+- 无库状态使用 `UnboundAssetRepository`，不再创建 `~/.iPhoto/global_index.db`。
+- helper 返回的两层 album 快照可直接发布；被判定为 slow/network 的库不会在启动提交阶段注册文件 watcher。
+
+主要入口：
+
+- `src/iPhoto/bootstrap/library_probe.py`
+- `src/iPhoto/bootstrap/runtime_context.py`
+- `src/iPhoto/bootstrap/library_session.py`
+- `src/iPhoto/cache/index_store/migrations.py`
+- `src/iPhoto/cache/index_store/repository.py`
+- `src/iPhoto/infrastructure/services/library_asset_runtime.py`
+- `src/iPhoto/library/runtime_controller.py`
+
+### 2.3 第三阶段已完成部分
+
+- QApplication 创建前使用轻量 bootstrap settings 读取；完整校验延迟到应用创建后。
+- 损坏 settings 会备份为带时间戳的 `corrupt` 文件并使用默认值继续启动。
+- shader cache 固定使用本机用户缓存路径，不再为启动缓存探测保存库。
+- Linux 不再为可选地图强制全局 XCB；Wayland 下原生地图不兼容时降级。
+- Preview、People、InfoPanel、EditCoordinator、地图能力探测、部分 facade 服务及图像/地理编码重依赖已经改为首次使用时创建或导入。
+- 地图扩展提示已经改为非模态。
+- 已增加 `GuiStartupJobQueue`：每个 event-loop tick 最多执行一个带名称、generation、前置条件和 100 ms 预算的 GUI 启动 job。
+- Detail post-show 创建、`MainCoordinator` 构造/启动、library probe、prepared commit、初始图库选择和 idle startup jobs 已进入统一队列；Windows/Linux 的 pre-show Detail 顺序保持不变并增加同步耗时观测。
+- job 异常会取消当前 generation 并进入现有降级协议；关闭、失败、降级和重试会拒绝旧 generation 及 probe 迟到结果，重试不会重复构造 coordinator。
+- startup JSONL 已增加 `startup.gui_job.started`、`startup.gui_job.finished` 和超预算 `startup.gui_stall`，字段不包含用户库路径。
+- 当前本地冷导入测量中，`iPhoto.gui.main` 累计导入时间相对改造前约下降 74%，`MainCoordinator` 约下降 27%。这些数字只用于定位趋势，不能替代 packaged P50/P95。
+
+主要入口：
+
+- `src/iPhoto/bootstrap/bootstrap_settings.py`
+- `src/iPhoto/bootstrap/gui_startup_job_queue.py`
+- `src/iPhoto/bootstrap/qt_shader_cache.py`
+- `src/iPhoto/gui/coordinators/main_coordinator.py`
+- `src/iPhoto/gui/facade.py`
+- `src/iPhoto/gui/ui/ui_main_window.py`
+- `src/iPhoto/infrastructure/services/map_runtime_service.py`
+- `src/maps/map_sources.py`
+
+## 3. 第二阶段剩余改造
+
+### P0：数据库迁移的可恢复事务协议（已完成）
+
+已实现原子迁移状态、SQLite online backup、逐版本事务、遗留状态检测、完整性校验和已验证备份自动恢复。当前 schema 的常规重开不会执行全库完整性扫描。
+
+实现内容：
+
+1. 在 work 目录记录迁移状态，至少包含源版本、目标版本、开始时间和唯一迁移 ID。
+2. 迁移前执行可恢复备份或 SQLite online backup；不要直接复制一个仍在 WAL 模式写入的数据库文件。
+3. 每个迁移版本在单独事务内完成，成功提交后才提升 `user_version`。
+4. helper 启动时检测遗留迁移状态，执行完整性检查并选择继续、回滚备份或返回可恢复失败。
+5. 把 `busy/locked`、`corrupt/not a database`、只读和磁盘空间不足映射为稳定的错误码，恢复面板按错误码展示动作。
+
+验收：迁移中 kill helper 后再次启动，不冻结、不丢失原库，可明确重试或从备份恢复。
+
+### P0：probe 协议健壮性（已完成）
+
+已完成协议版本、结构化失败、stdout/stderr/album 上限、脱敏诊断、独立进程错误分类、异步 terminate→kill、规范化 root 与数据库归属校验。
+
+- 协议版本和应用 schema 版本兼容检查。
+- stdout 最大长度与 album 数量上限，防止异常目录造成无界内存占用。
+- stderr 截断和脱敏，诊断日志不得写入完整用户路径。
+- helper `FailedToStart`、`Crashed`、启动超时、协议损坏和非零退出码的独立错误分类。
+- 超时后先 `terminate`，短暂等待后再 `kill`；Windows packaged 下验证不会遗留子进程。
+- 校验返回的规范化 root 与请求目标属于同一库，不能只依赖 `request_id`。
+
+### P0：异常存储自动化测试（核心自动化已完成）
+
+已增加迁移事务回滚、真实子进程中断后恢复、损坏主库/备份、future schema、busy/locked、只读和磁盘满映射、helper 超时/崩溃、错误 JSON、输出截断与超限、断开符号链接、迟到结果和真实 QProcess 往返测试。
+
+仍需在 packaged 平台矩阵验证权限拒绝、被拔出的移动盘、真实离线 NAS、切库/关窗竞态和 Windows 子进程清理。
+
+真实 NAS/移动盘无法完全由单元测试替代，应另保留 packaged 手工矩阵。
+
+### P1：慢盘识别与刷新策略
+
+当前 `storage_kind` 主要依据 Windows UNC 或单次探测耗时，仍比较粗糙。建议：
+
+- Windows 使用 drive type，macOS/Linux 使用 mount 信息补充 removable/network 判断；平台 API 失败时回退到耗时启发式。
+- watcher 注册也放入可取消的后台批次，不能假设“本地盘注册 watcher 永远很快”。
+- slow/network 库增加低频后台轮询或明确的手动刷新状态；轮询必须带 generation，切库后立即失效。
+- album snapshot 设置数量和时间预算；超过预算返回部分结果和 warning，图库仍可进入可交互状态。
+
+### P1：数据库打开生命周期收口
+
+目前 prepared-root 标记避免了常规 UI 提交路径重复迁移，但还应审计所有 repository 构造入口：
+
+- 禁止未经过 prepare 的保存库在 GUI 线程隐式初始化 schema。
+- prepared 凭证至少包含规范化 root、database path、schema version 和探测生成时间。
+- commit 前检查凭证仍匹配文件身份；若数据库在 probe 后被替换，应重新 probe。
+- 为 CLI、测试工具和非 GUI 调用保留显式同步 `prepare` API，不要恢复构造函数隐式 I/O。
+
+## 4. 第三阶段剩余改造
+
+### P0：GUI event-loop 时间片门禁（观测层已完成，性能闭环待完成）
+
+统一调度和超预算观测已经完成：
+
+- `GuiStartupJobQueue` 使用不可变 job 描述名称、generation、回调、前置条件和目标预算。
+- 每次 event-loop tick 最多执行一个 job；当前 job 完成后才在下一 tick 调度后续 job。
+- job 使用单调时钟计时；超过 100 ms 时记录唯一 `startup.gui_stall` 并输出 warning，生产运行不会因此强制失败。
+- job 的 started/finished 事件统一记录 job、generation、duration、budget、over-budget、线程和结果状态。
+- 窗口关闭、启动失败、进入降级状态或重试时会取消过期 generation；probe ready 必须同时匹配 request ID 和 generation 才能重新入队 commit。
+- 回调异常只上报一次并停止当前 generation 的剩余 job，仍由 `StartupOrchestrator` 和非模态恢复面板负责用户可见降级。
+
+自动化已覆盖单 tick 单 job、严格顺序、前置条件、100 ms 阈值、stall 唯一性、异常、关闭、旧 generation、回调中追加 job，以及主启动链的跨平台 Detail 顺序、probe ready→commit、gallery warmup 和 deferred scan 竞争。
+
+剩余工作不是继续增加 `singleShot(0, ...)`，而是采集真实源码运行和 packaged 样本，根据 `startup.gui_stall` 继续拆分对象内部工作或移到 worker。优先剖析 Gallery 核心协调器装配、初始 collection 查询、首批 model publish 和缩略图请求提交。
+
+### P0：packaged 性能基线与门禁
+
+必须在打包产物上采集，而不是只测源码解释器导入：
+
+- Windows：Defender 开启，冷启动/热启动，本地 SSD、离线移动盘、模拟高延迟共享盘。
+- Linux：XCB、Wayland、无 XWayland，至少覆盖 AppImage 或 Flatpak 的实际交付格式。
+- macOS：Intel/Apple Silicon，Metal 默认路径和 OpenGL 兼容路径。
+
+每组至少记录：
+
+- `process_start -> app_created`
+- `show -> interactive`
+- `interactive -> library_ready`
+- `library_ready -> first_gallery_visible`
+- `first_gallery_visible -> first_usable_thumbnail`
+- GUI event-loop 最大停顿、probe 耗时和降级原因
+- P50/P95，以及冷/热样本数
+
+门禁：`show()` 后 2 秒内进入 interactive 或 degraded；interactive 后单次 GUI 停顿不超过 100 ms；本地已有索引的首批图库/缩略图 P50 相对旧 packaged baseline 改善至少 30%，P95 不退化。
+
+### P1：继续缩小 MainCoordinator 首用成本
+
+现有改造已延迟 Edit、Preview、People 和部分服务，但仍需以 profiler 结果决定下一批，不应凭模块大小猜测。重点检查：
+
+- `MainCoordinator` 构造期间的信号连接和页面对象访问是否触发隐式 feature 创建。
+- Playback/Detail 在 Windows/Linux 为稳定原生宿主保留的最小对象，是否仍构造了解码器或编辑依赖。
+- 初始 Gallery 是否通过 facade 属性触发 import/move/delete/restoration 服务创建。
+- `controllers/__init__.py`、`tasks/__init__.py` 之外是否还有聚合模块导致重型递归导入。
+
+原则：只有 profiler 证明处于关键路径且拆分不会破坏平台窗口稳定性时才继续改造。
+
+### P1：地图和可选能力的真实降级验证
+
+- Wayland 且无 XWayland 时，主程序必须启动，地图入口应显示可恢复的不可用状态。
+- XCB/GLX 可用时仍能启用原生地图；native helper 崩溃不得结束主进程。
+- capability 探测只能在首次访问地图或首屏空闲后发生。
+- 扩展提示不得抢焦点或阻塞输入 guard。
+
+### P2：启动日志与隐私收口
+
+现有阶段事件已写入 startup profile，但应补齐并统一字段：
+
+- 阶段开始/结束和持续时间。
+- 当前线程、Qt 平台后端、probe 错误码、storage kind、首次图库和首个可用缩略图时间。
+- 终止事件必须恰好一个：`startup.completed`、`startup.degraded`、`startup.failed` 或 `startup.cancelled`。
+- 路径只写稳定的脱敏 ID；不得在 JSONL 中记录完整库路径。
+
+## 5. 推荐接手顺序
+
+1. probe/SQLite 故障协议和中断恢复测试已完成，作为后续工作的稳定基线。
+2. GUI job 时间片观测已经完成；下一步在本地真实库和 packaged 产物中采集 job 耗时，列出超过 100 ms 的准确调用点。
+3. 根据 profiler 和 `startup.gui_stall` 结果继续拆 Gallery/Detail/Playback 的实际热点，不凭模块大小猜测。
+4. 建立 packaged 平台基线，逐平台修复 P95 和降级路径。
+5. 最后收口日志字段、隐私检查和交付文档；所有门禁通过后再把本目录移动到 `docs/finished/requirements`。
+
+不要并行进行数据库恢复协议和大范围 coordinator 重构；两者同时变化会显著增加竞态问题定位成本。
+
+## 6. 测试与验证命令
+
+当前改造完成时已验证：
+
+- 全量测试：2588 passed，11 skipped。
+- 架构测试：23 passed。
+- GUI 启动队列与主链定向测试：36 passed。
+- `python tools/check_architecture.py`：通过。
+- `.venv/bin/python -m compileall -q src`：通过。
+- `git diff --check`：通过。
+- 使用临时 profile 输出验证：七个关键 job 均生成成对 started/finished JSONL 记录，且这些 job 记录没有写入库路径。
+
+接手后至少运行：
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q tests/gui/test_gui_startup_job_queue.py tests/gui/test_main.py tests/gui/test_startup_orchestrator.py
+.venv/bin/python -m pytest -q tests/application/test_library_probe.py tests/application/test_bootstrap_settings.py
+.venv/bin/python -m pytest -q tests/architecture
+.venv/bin/python tools/check_architecture.py
+.venv/bin/python -m compileall -q src
+git diff --check
+```
+
+新增平台性能工具时，应把原始 JSONL 和聚合报告放在构建产物目录或专用 benchmark 输出目录，不要提交包含用户真实路径的日志。
+
+## 7. 完成定义
+
+只有同时满足以下条件，第二、第三阶段才可标记完成：
+
+- 所有 probe、迁移、关闭窗口和切库竞态都有自动化测试。
+- 离线 NAS、拔出移动盘、SQLite lock/corrupt 下 GUI 可响应且约 3 秒进入可重试状态。
+- 中断迁移可以明确恢复，不会静默使用半迁移数据库。
+- Windows 只有一个稳定顶层窗口；Linux Wayland/XCB 均可启动；macOS 保持 Metal 默认路径。
+- packaged P50/P95 达到性能门禁，且 interactive 后没有超过 100 ms 的未解释 GUI 长任务。
+- 每次启动都有唯一终止诊断事件，输入 guard、spinner、helper 和 timer 均无泄漏。
+
+在这些条件完成前，当前实现可以进入下一轮集成测试，但不应宣称第二、第三阶段已经完全关闭。

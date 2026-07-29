@@ -11,6 +11,23 @@ from ...utils.pathutils import ensure_work_dir
 from .thumbnail_cache_service import ThumbnailCacheService
 
 
+class UnboundAssetRepository:
+    """Sentinel used before a real library session is available.
+
+    It intentionally performs no filesystem work.  GUI startup may hold this
+    object briefly, but collection services are rebound before issuing queries.
+    """
+
+    library_root: Path | None = None
+    path: Path | None = None
+
+    def close(self) -> None:
+        return None
+
+    def __getattr__(self, name: str):
+        raise RuntimeError(f"Asset repository is unbound; cannot use {name}")
+
+
 class LibraryAssetRuntime:
     """Own library-bound asset services so GUI code only rebinds roots."""
 
@@ -41,6 +58,10 @@ class LibraryAssetRuntime:
     def bind_library_root(self, library_root: Path | None) -> None:
         """Rebuild the asset repository and cache path for *library_root*."""
 
+        if library_root is None:
+            self._assets = UnboundAssetRepository()  # type: ignore[assignment]
+            self._thumbnail_service.set_disk_cache_path(self._cache_root(None))
+            return
         next_assets = get_global_repository(self._repository_root(library_root))
         self._assets = next_assets
         self._thumbnail_service.set_disk_cache_path(self._cache_root(library_root))
@@ -53,10 +74,13 @@ class LibraryAssetRuntime:
 
     def _repository_root(self, library_root: Path | None) -> Path:
         if library_root is None:
-            return Path.home()
+            raise RuntimeError("Cannot resolve a repository root without a library")
         return Path(library_root)
 
     def _cache_root(self, library_root: Path | None) -> Path:
         if library_root is None:
             return Path.home() / WORK_DIR_NAME / "cache" / "thumbs"
         return ensure_work_dir(library_root) / "cache" / "thumbs"
+
+
+__all__ = ["LibraryAssetRuntime", "UnboundAssetRepository"]

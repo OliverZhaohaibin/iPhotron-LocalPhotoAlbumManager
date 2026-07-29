@@ -23,7 +23,6 @@ from PySide6.QtGui import QAction
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.events.asset_events import AssetMetadataUpdated
-from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.coordinators.view_router import ViewRouter
@@ -57,6 +56,7 @@ from iPhoto.pets.service import PetService
 from maps.map_sources import supports_map_extension_download
 
 if TYPE_CHECKING:
+    from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
     from iPhoto.gui.ui.main_window import MainWindow
 
 
@@ -90,6 +90,7 @@ class MainCoordinator(QObject):
 
         self._event_bus = context.event_bus
         edit_service_getter = self._edit_service
+        self._edit_service_getter = edit_service_getter
         asset_state_service = self._asset_state_service()
 
         # --- ViewModels Setup ---
@@ -230,7 +231,7 @@ class MainCoordinator(QObject):
             face_name_overlay=window.ui.face_name_overlay,
             people_service=self._playback_people_service,
             pet_service=self._playback_pet_service,
-            people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
+            people_dashboard_refresh_callback=self._schedule_people_dashboard_refresh,
             library_manager=context.library,
             location_session_invalidator=self._gallery_vm.invalidate_location_session,
             map_runtime=self._map_runtime(),
@@ -262,19 +263,9 @@ class MainCoordinator(QObject):
         # 4. Theme Controller
         self._theme_controller = WindowThemeController(window.ui, window, context.theme)
 
-        # 5. Edit Coordinator
-        self._edit = EditCoordinator(
-            window.ui,  # Pass UI root for access to sidebar/header/viewer
-            self._view_router,
-            self._event_bus,
-            self._asset_list_vm,  # Injected for invalidation
-            window,
-            self._theme_controller,
-            self._navigation,
-            self._media_session,
-            self._adjustment_committer,
-            edit_service_getter,
-        )
+        # The edit graph imports CPU/JIT rendering backends.  Construct it on
+        # first edit/fullscreen use, never in the Gallery startup turn.
+        self._edit: "EditCoordinator | None" = None
 
         # --- Legacy Controllers ---
         self._dialog = DialogController(window, context, window.ui.status_bar)
@@ -337,8 +328,8 @@ class MainCoordinator(QObject):
         window.ui.filmstrip_view.setItemDelegate(self._filmstrip_delegate)
 
         self._preview_controller = PreviewController(
-            window.ui.preview_window,
             edit_service_getter=edit_service_getter,
+            preview_window_provider=self._ensure_preview_window,
         )
         self._preview_controller.bind_view(window.ui.grid_view)
 
@@ -380,7 +371,6 @@ class MainCoordinator(QObject):
             parent=self,
         )
         self._shortcut_manager.set_video_area(window.ui.video_area)
-        self._shortcut_manager.set_edit_coordinator(self._edit)
 
         self._connect_signals()
         window.ui.featureCreated.connect(self._on_feature_created)
@@ -402,7 +392,30 @@ class MainCoordinator(QObject):
     def edit_controller(self) -> EditCoordinator:
         """Expose the edit coordinator for immersive mode hooks."""
 
+        return self._ensure_edit_coordinator()
+
+    def _ensure_edit_coordinator(self) -> "EditCoordinator":
+        if self._edit is not None:
+            return self._edit
+        from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
+
+        self._edit = EditCoordinator(
+            self._window.ui,
+            self._view_router,
+            self._event_bus,
+            self._asset_list_vm,
+            self._window,
+            self._theme_controller,
+            self._navigation,
+            self._media_session,
+            self._adjustment_committer,
+            self._edit_service_getter,
+        )
+        self._shortcut_manager.set_edit_coordinator(self._edit)
         return self._edit
+
+    def _enter_edit_mode(self, *args) -> None:
+        self._ensure_edit_coordinator().enter_edit_mode(*args)
 
     def suspend_playback_for_transition(self) -> bool:
         """Pause playback before a chrome transition."""
@@ -578,7 +591,7 @@ class MainCoordinator(QObject):
 
         # Info Button
         if hasattr(ui, "info_button"):
-            ui.info_button.clicked.connect(self._playback.toggle_info_panel)
+            ui.info_button.clicked.connect(self._toggle_info_panel)
 
         # Back Button (detail page)
         if hasattr(ui, "back_button"):
@@ -619,7 +632,7 @@ class MainCoordinator(QObject):
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
         ui.bind_library_action.triggered.connect(self._dialog.bind_library_dialog)
-        self._detail_vm.edit_requested.connect(self._edit.enter_edit_mode)
+        self._detail_vm.edit_requested.connect(self._enter_edit_mode)
 
         # Preferences (Wheel, Volume) - Filmstrip handled in PlaybackCoordinator
         self._restore_preferences()
@@ -641,18 +654,16 @@ class MainCoordinator(QObject):
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)
         self._facade.loadFinished.connect(self._status_bar.handle_load_finished)
 
-        import_service = self._facade.import_service
-        import_service.importStarted.connect(self._status_bar.handle_import_started)
-        import_service.importProgress.connect(self._status_bar.handle_import_progress)
-        import_service.importFinished.connect(self._status_bar.handle_import_finished)
+        self._facade.importStarted.connect(self._status_bar.handle_import_started)
+        self._facade.importProgress.connect(self._status_bar.handle_import_progress)
+        self._facade.importFinished.connect(self._status_bar.handle_import_finished)
 
-        move_service = self._facade.move_service
-        move_service.moveStarted.connect(self._status_bar.handle_move_started)
-        move_service.moveProgress.connect(self._status_bar.handle_move_progress)
-        move_service.moveFinished.connect(self._status_bar.handle_move_finished)
-        move_service.moveFinished.connect(self._handle_move_finished_toast)
-        move_service.moveFinished.connect(self._handle_move_finished_pending_cleanup)
-        move_service.moveCompletedDetailed.connect(self._handle_move_completed_pending_cleanup)
+        self._facade.moveStarted.connect(self._status_bar.handle_move_started)
+        self._facade.moveProgress.connect(self._status_bar.handle_move_progress)
+        self._facade.moveFinished.connect(self._status_bar.handle_move_finished)
+        self._facade.moveFinished.connect(self._handle_move_finished_toast)
+        self._facade.moveFinished.connect(self._handle_move_finished_pending_cleanup)
+        self._facade.moveCompletedDetailed.connect(self._handle_move_completed_pending_cleanup)
 
         # Error Reporting
         self._facade.errorRaised.connect(self._dialog.show_error)
@@ -699,6 +710,62 @@ class MainCoordinator(QObject):
             dashboard.set_pinned_service(self._pinned_items_service)
             dashboard.albumSelected.connect(self.open_album_from_path)
             self._facade.albumCoverUpdated.connect(dashboard.update_album_cover)
+            return
+
+        if feature == "people":
+            self._bind_people_feature(widget)
+
+    def _toggle_info_panel(self) -> None:
+        ui = self._window.ui
+        panel = getattr(ui, "info_panel", None)
+        if panel is None:
+            panel = ui.ensure_info_panel()
+            panel.set_map_runtime(self._map_runtime())
+            self._playback.set_info_panel(panel)
+            panel.downloadMapExtensionRequested.connect(
+                lambda: self._map_extension_download.start_download(source="info_panel")
+            )
+        self._playback.toggle_info_panel()
+
+    def _ensure_preview_window(self):
+        self._window.ui.ensure_feature("preview")
+        return self._window.ui.preview_window
+
+    def _schedule_people_dashboard_refresh(self) -> None:
+        people_page = getattr(self._window.ui, "people_page", None)
+        if people_page is not None:
+            people_page.schedule_index_refresh()
+
+    def _bind_people_feature(self, people_page: object) -> None:
+        """Attach the People dashboard only when the user first opens it."""
+
+        root = self._library_root()
+        people_service = self._people_service(library_root=root)
+        pet_service = self._pet_service(library_root=root)
+        if people_service is not None and hasattr(people_page, "set_people_service"):
+            people_page.set_people_service(people_service)
+        elif hasattr(people_page, "set_library_root"):
+            people_page.set_library_root(root)
+        if hasattr(people_page, "set_pet_service"):
+            people_page.set_pet_service(pet_service or PetService())
+        if hasattr(people_page, "set_pinned_service"):
+            people_page.set_pinned_service(self._pinned_items_service)
+        people_page.set_status_message(self._context.library.face_scan_status_message())
+        if hasattr(people_page, "set_pet_status_message"):
+            people_page.set_pet_status_message(
+                self._context.library.pet_scan_status_message()
+            )
+        people_page.clusterActivated.connect(self._on_people_cluster_activated)
+        people_page.groupActivated.connect(self._on_people_group_activated)
+        if hasattr(people_page, "petActivated"):
+            people_page.petActivated.connect(self._on_pet_activated)
+        self._context.library.peopleIndexUpdated.connect(people_page.schedule_index_refresh)
+        self._context.library.petIndexUpdated.connect(people_page.schedule_index_refresh)
+        self._context.library.faceScanStatusChanged.connect(people_page.set_status_message)
+        if hasattr(people_page, "set_pet_status_message"):
+            self._context.library.petScanStatusChanged.connect(
+                people_page.set_pet_status_message
+            )
 
     def _on_library_tree_updated(self) -> None:
         root = self._library_root()

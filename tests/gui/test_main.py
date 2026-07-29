@@ -208,7 +208,7 @@ def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_d
     assert attributes == []
 
 
-def test_prepare_qt_runtime_for_maps_sets_xcb_glx_on_linux_when_native_widget_exists(monkeypatch) -> None:
+def test_prepare_qt_runtime_for_maps_does_not_force_xcb_for_native_widget(monkeypatch) -> None:
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
     monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: False)
     monkeypatch.setattr("maps.map_sources.has_usable_osmand_native_widget", lambda root: True)
@@ -219,9 +219,9 @@ def test_prepare_qt_runtime_for_maps_sets_xcb_glx_on_linux_when_native_widget_ex
 
     _prepare_qt_runtime_for_maps()
 
-    assert os.environ["QT_QPA_PLATFORM"] == "xcb"
-    assert os.environ["QT_OPENGL"] == "desktop"
-    assert os.environ["QT_XCB_GL_INTEGRATION"] == "xcb_glx"
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
 def test_prepare_qt_runtime_for_maps_skips_when_native_widget_is_unavailable(monkeypatch) -> None:
@@ -240,7 +240,7 @@ def test_prepare_qt_runtime_for_maps_skips_when_native_widget_is_unavailable(mon
     assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
-def test_prepare_qt_runtime_for_maps_forces_xcb_glx_in_packaged_linux_builds(monkeypatch) -> None:
+def test_prepare_qt_runtime_for_maps_preserves_wayland_in_packaged_linux_builds(monkeypatch) -> None:
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
     monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: True)
     monkeypatch.delenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", raising=False)
@@ -251,9 +251,9 @@ def test_prepare_qt_runtime_for_maps_forces_xcb_glx_in_packaged_linux_builds(mon
 
     _prepare_qt_runtime_for_maps()
 
-    assert os.environ["QT_QPA_PLATFORM"] == "xcb"
-    assert os.environ["QT_OPENGL"] == "desktop"
-    assert os.environ["QT_XCB_GL_INTEGRATION"] == "xcb_glx"
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
 def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monkeypatch) -> None:
@@ -275,9 +275,9 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
 @pytest.mark.parametrize(
     ("platform", "expected"),
     (
-        ("win32", (("detail",), ("preview", "people"))),
-        ("darwin", ((), ("detail", "preview", "people"))),
-        ("linux", (("detail",), ("preview", "people"))),
+        ("win32", (("detail",), ())),
+        ("darwin", ((), ("detail",))),
+        ("linux", (("detail",), ())),
     ),
 )
 def test_startup_feature_plan_keeps_opengl_rhi_detail_before_show(
@@ -403,6 +403,10 @@ def test_main_creates_required_features_in_platform_safe_order(
             return None
 
         def exec(self) -> int:
+            # Model the event loop processing delayed startup work before it
+            # exits. main() cancels pending startup resources afterwards.
+            for callback in list(delayed_callbacks):
+                callback()
             return 0
 
     class _FakeSignal:
@@ -412,9 +416,9 @@ def test_main_creates_required_features_in_platform_safe_order(
         def connect(self, callback) -> None:
             self._callback = callback
 
-        def emit(self) -> None:
+        def emit(self, *args) -> None:
             assert self._callback is not None
-            self._callback()
+            self._callback(*args)
 
     startup_ready_signal = _FakeSignal()
 
@@ -439,6 +443,7 @@ def test_main_creates_required_features_in_platform_safe_order(
             self.firstPainted = _FakeSignal()
 
         def show(self) -> None:
+            assert profile_marks[-1] == "startup.show"
             call_order.append("show")
             self.firstPainted.emit()
 
@@ -452,6 +457,14 @@ def test_main_creates_required_features_in_platform_safe_order(
                 "FakeContext",
                 (),
                 {
+                    "request_startup_library_probe": (
+                        lambda self: SimpleNamespace(request_id="startup-request")
+                    ),
+                    "commit_prepared_library": (
+                        lambda self, prepared, *, defer_scan=False: call_order.append(
+                            f"commit:{prepared.request_id}:{defer_scan}"
+                        )
+                    ),
                     "resume_startup_tasks": (
                         lambda self, *, defer_scan=False: call_order.append(
                             f"resume:{defer_scan}"
@@ -462,6 +475,23 @@ def test_main_creates_required_features_in_platform_safe_order(
                     ),
                 },
             )()
+
+    class _FakeProbeController:
+        def __init__(self, _parent=None) -> None:
+            self.ready = _FakeSignal()
+            self.failed = _FakeSignal()
+
+        def start(self, request) -> None:
+            call_order.append(f"probe:{request.request_id}")
+            self.ready.emit(
+                SimpleNamespace(
+                    request_id=request.request_id,
+                    warnings=(),
+                )
+            )
+
+        def cancel(self) -> None:
+            call_order.append("probe:cancel")
 
     class _FakeCoordinator:
         def __init__(self, _window, _context) -> None:
@@ -542,6 +572,11 @@ def test_main_creates_required_features_in_platform_safe_order(
     )
     monkeypatch.setitem(
         __import__("sys").modules,
+        "iPhoto.bootstrap.library_probe",
+        type("Mod", (), {"LibraryProbeController": _FakeProbeController})(),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
         "iPhoto.gui.coordinators.main_coordinator",
         type("Mod", (), {"MainCoordinator": _FakeCoordinator})(),
     )
@@ -557,8 +592,6 @@ def test_main_creates_required_features_in_platform_safe_order(
 
     detail_index = call_order.index("feature:detail")
     show_index = call_order.index("show")
-    preview_index = call_order.index("feature:preview")
-    people_index = call_order.index("feature:people")
     coordinator_index = call_order.index("coordinator:create")
 
     if platform in {"win32", "linux"}:
@@ -571,8 +604,20 @@ def test_main_creates_required_features_in_platform_safe_order(
         assert "rhi_detail.created" not in profile_marks
     assert "windows_detail.before_create" not in profile_marks
     assert "windows_detail.created" not in profile_marks
-    assert show_index < preview_index < people_index < coordinator_index
-    assert call_order.index("resume:True") < call_order.index("guard:release")
+    assert "feature:preview" not in call_order
+    assert "feature:people" not in call_order
+    if platform == "darwin":
+        assert show_index < detail_index < coordinator_index
+    else:
+        assert detail_index < show_index < coordinator_index
+    # The shell becomes interactive immediately after the first-paint/watchdog
+    # boundary; library probing and hidden feature creation must not retain the
+    # global input filter.
+    assert call_order.index("guard:release") < call_order.index("probe:startup-request")
+    assert call_order.index("probe:startup-request") < call_order.index(
+        "commit:startup-request:True"
+    )
+    assert call_order.index("commit:startup-request:True") < call_order.index("select")
     assert call_order.index("guard:release") < call_order.index("select")
     assert call_order.index("warmup") < call_order.index("select")
     assert len(delayed_callbacks) == 1
@@ -656,7 +701,18 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     class _FakeWindow:
         def __init__(self, _context):
-            self.ui = type("FakeUi", (), {"sidebar": type("FakeSidebar", (), {"select_all_photos": lambda *a, **k: None})()})()
+            self.ui = type(
+                "FakeUi",
+                (),
+                {
+                    "sidebar": type(
+                        "FakeSidebar",
+                        (),
+                        {"select_all_photos": lambda *a, **k: None},
+                    )(),
+                    "ensure_feature": lambda *a, **k: None,
+                },
+            )()
             self.firstPainted = type("FakeSignal", (), {"connect": lambda *a, **k: None})()
 
         def show(self) -> None:

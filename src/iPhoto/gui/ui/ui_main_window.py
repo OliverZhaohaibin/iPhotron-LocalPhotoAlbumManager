@@ -250,7 +250,6 @@ class Ui_MainWindow(QObject):
     def _create_detail_feature(self) -> object:
         from .widgets.detail_page import DetailPageWidget
         from .widgets.gl_image_viewer import GLImageViewer
-        from .widgets.info_panel import InfoPanel
 
         assert self._main_window is not None
         shared_image_viewer = GLImageViewer()
@@ -274,11 +273,22 @@ class Ui_MainWindow(QObject):
         self.image_viewer = shared_image_viewer
         self.edit_image_viewer = shared_image_viewer
         self.view_stack.addWidget(self.detail_page)
-        self.info_panel = InfoPanel(self._main_window)
-        self.info_panel.set_map_runtime(getattr(self._library, "map_runtime", None))
         self.player_container.installEventFilter(self._main_window)
         self.retranslateUi(self._main_window)
         return self.detail_page
+
+    def ensure_info_panel(self):
+        """Create the metadata/location panel on first explicit use."""
+
+        existing = getattr(self, "info_panel", None)
+        if existing is not None:
+            return existing
+        from .widgets.info_panel import InfoPanel
+
+        assert self._main_window is not None
+        self.info_panel = InfoPanel(self._main_window)
+        self.info_panel.set_map_runtime(getattr(self._library, "map_runtime", None))
+        return self.info_panel
 
     def _create_preview_feature(self) -> object:
         from .widgets.preview_window import PreviewWindow

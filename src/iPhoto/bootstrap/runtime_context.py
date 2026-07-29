@@ -17,9 +17,18 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
     from ..library.runtime_controller import LibraryRuntimeController
     from ..settings.manager import SettingsManager
+    from .library_probe import LibraryProbeRequest, PreparedLibrary
     from .library_session import LibrarySession
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryBindingToken:
+    """Monotonic identity for the currently published library session."""
+
+    epoch: int
+    root: Path | None
 
 
 def _create_settings_manager() -> "SettingsManager":
@@ -80,6 +89,7 @@ class RuntimeContext:
     translation: "TranslationManager" = field(init=False)
     theme: "ThemeManager" = field(init=False)
     library_session: "LibrarySession | None" = field(init=False, default=None)
+    _library_epoch: int = field(init=False, default=0, repr=False)
     _facade: "AppFacade | None" = field(init=False, default=None, repr=False)
     _asset_runtime: "LibraryAssetRuntime | None" = field(init=False, default=None, repr=False)
     _container: "DependencyContainer | None" = field(
@@ -110,6 +120,12 @@ class RuntimeContext:
 
         if not self.defer_startup_tasks:
             self.resume_startup_tasks()
+
+    @property
+    def library_binding_token(self) -> LibraryBindingToken:
+        session = self.library_session
+        root = Path(session.library_root) if session is not None else None
+        return LibraryBindingToken(epoch=self._library_epoch, root=root)
 
     @classmethod
     def create(
@@ -217,6 +233,44 @@ class RuntimeContext:
             )
             self.library.errorRaised.emit(f"Basic Library path is unavailable: {candidate}")
 
+    def request_startup_library_probe(
+        self,
+        *,
+        timeout_ms: int = 3000,
+    ) -> "LibraryProbeRequest | None":
+        """Return a child-process request without touching the saved path."""
+
+        from .library_probe import LibraryProbeRequest
+
+        candidate = self._pending_basic_library_path
+        if candidate is None:
+            return None
+        return LibraryProbeRequest.create(candidate, timeout_ms=timeout_ms)
+
+    def commit_prepared_library(
+        self,
+        prepared: "PreparedLibrary",
+        *,
+        defer_scan: bool = True,
+    ) -> "LibrarySession":
+        """Bind a library after its slow path and database were probed."""
+
+        session = self.open_library(prepared.root, prepared=prepared)
+        self._pending_basic_library_path = None
+        if not prepared.scan_complete and not self.library.is_scanning_path(prepared.root):
+            if defer_scan:
+                self._deferred_startup_scan_root = prepared.root
+            else:
+                self._deferred_startup_scan_root = prepared.root
+                self.start_deferred_startup_scan()
+        return session
+
+    def open_initial_collection(self) -> Path | None:
+        return self.library.root()
+
+    def schedule_idle_startup_jobs(self) -> None:
+        self.start_deferred_startup_scan()
+
     def start_deferred_startup_scan(self) -> None:
         """Start a scan that was intentionally delayed until after first gallery load."""
 
@@ -248,23 +302,39 @@ class RuntimeContext:
             startup=True,
         )
 
-    def open_library(self, root: Path) -> "LibrarySession":
+    def open_library(
+        self,
+        root: Path,
+        *,
+        prepared: "PreparedLibrary | None" = None,
+    ) -> "LibrarySession":
         """Bind *root* as the active library and rebuild library-scoped adapters."""
 
         from .library_session import LibrarySession
         from ..errors import LibraryUnavailableError
 
-        normalized = Path(root).expanduser().resolve()
+        normalized = (
+            Path(prepared.root)
+            if prepared is not None
+            else Path(root).expanduser().resolve()
+        )
         self.close_library()
 
-        if not normalized.exists() or not normalized.is_dir():
+        if prepared is None and (not normalized.exists() or not normalized.is_dir()):
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
 
-        self.library_session = LibrarySession(
-            normalized,
-            asset_runtime=self.asset_runtime,
-            bind_asset_runtime=False,
-        )
+        if prepared is None:
+            self.library_session = LibrarySession(
+                normalized,
+                asset_runtime=self.asset_runtime,
+                bind_asset_runtime=False,
+            )
+        else:
+            self.library_session = LibrarySession.from_prepared(
+                prepared,
+                asset_runtime=self.asset_runtime,
+                bind_asset_runtime=False,
+            )
         bind_library_session = getattr(self.library, "bind_library_session", None)
         used_session_binding = callable(bind_library_session)
         if used_session_binding:
@@ -302,8 +372,11 @@ class RuntimeContext:
                 bind_edit_service(self.library_session.edit)
 
         try:
+            bind_prepared_library = getattr(self.library, "bind_prepared_library", None)
             bind_path_from_session = getattr(self.library, "bind_path_from_session", None)
-            if callable(bind_path_from_session):
+            if prepared is not None and callable(bind_prepared_library):
+                bind_prepared_library(prepared)
+            elif callable(bind_path_from_session):
                 bind_path_from_session(normalized)
             else:
                 self.library.bind_path(normalized)
@@ -346,6 +419,7 @@ class RuntimeContext:
             )
             if callable(bind_map_interaction_service):
                 bind_map_interaction_service(self.library_session.map_interactions)
+        self._library_epoch += 1
         return self.library_session
 
     def close_library(self) -> None:
@@ -431,6 +505,7 @@ class RuntimeContext:
             return
         session.shutdown()
         self.library_session = None
+        self._library_epoch += 1
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""
@@ -445,4 +520,4 @@ class RuntimeContext:
         )
 
 
-__all__ = ["RuntimeContext"]
+__all__ = ["LibraryBindingToken", "RuntimeContext"]

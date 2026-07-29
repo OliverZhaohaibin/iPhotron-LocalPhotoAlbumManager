@@ -19,7 +19,6 @@ from iPhoto.application.services.location_assignment_service import (
     LocationAssignment,
     LocationAssignmentService,
 )
-from iPhoto.infrastructure.services.map_runtime_service import SessionMapRuntimeService
 from iPhoto.infrastructure.repositories.location_assignment_repository import (
     IndexStoreLocationAssignmentRepository,
 )
@@ -40,7 +39,6 @@ from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
 )
 from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets import dialogs
-from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.ui.widgets.recognition_annotations import (
     RecognitionIdentitySuggestion,
     pet_annotation_adapter,
@@ -53,6 +51,7 @@ from iPhoto.pets.service import PetService
 from maps.osmand_search import SearchSuggestion
 
 if TYPE_CHECKING:
+    from iPhoto.gui.ui.widgets.info_panel import InfoPanel
     from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
@@ -66,6 +65,14 @@ if TYPE_CHECKING:
     from iPhoto.events.bus import EventBus
 
 LOGGER = logging.getLogger(__name__)
+
+
+def SessionMapRuntimeService():  # noqa: N802 - compatibility factory name
+    from iPhoto.infrastructure.services.map_runtime_service import (
+        SessionMapRuntimeService as RuntimeService,
+    )
+
+    return RuntimeService()
 
 _INFO_PANEL_METADATA_CACHE_MAX = 200
 _LOCATION_EXTENSION_PROMPT = "Install the map extension to use Assign a Location."

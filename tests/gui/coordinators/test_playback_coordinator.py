@@ -12,6 +12,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for playback coordina
 from iPhoto.application.ports import LocationWriteJobRecord
 from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+from iPhoto.gui.detail_pipeline import AssetSourceIdentity, PlaybackAsyncToken
 from iPhoto.gui.detail_render_coordinator import DetailRenderCoordinator, DetailRenderState
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
@@ -538,6 +539,106 @@ def test_live_still_rejects_previous_generation(tmp_path: Path) -> None:
 
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_not_called()
     coordinator._asset_model.prioritize_rows.assert_not_called()
+
+
+def test_previous_library_metadata_result_is_rejected_even_for_same_path() -> None:
+    path = Path("/shared/photo.jpg")
+    identity = AssetSourceIdentity.create(path, source_mtime_ns=11, size_bytes=22)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._active_async_token = new_token
+    coordinator._library_binding_token_getter = lambda: SimpleNamespace(epoch=2)
+    coordinator._info_panel_metadata_cache = {}
+    coordinator._info_panel_metadata_inflight = set()
+    coordinator._info_panel_metadata_attempted = set()
+
+    PlaybackCoordinator._handle_info_panel_metadata_ready(
+        coordinator,
+        InfoPanelMetadataResult(path=path, metadata={"iso": 100}),
+        async_token=old_token,
+    )
+
+    assert coordinator._info_panel_metadata_cache == {}
+
+
+def test_previous_library_location_result_cannot_update_current_panel() -> None:
+    path = Path("/shared/photo.jpg")
+    identity = AssetSourceIdentity.create(path, source_mtime_ns=11, size_bytes=22)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._active_async_token = new_token
+    coordinator._library_binding_token_getter = lambda: SimpleNamespace(epoch=2)
+    coordinator._location_search_async_tokens = {17: old_token}
+    coordinator._location_search_dispatch_token = None
+    coordinator._info_panel = Mock()
+    coordinator._current_presentation = _make_presentation(path=str(path))
+    coordinator._location_assign_inflight = False
+
+    PlaybackCoordinator._handle_location_suggestions_ready(
+        coordinator,
+        17,
+        path,
+        "Berlin",
+        [object()],
+    )
+
+    coordinator._info_panel.set_location_suggestions.assert_not_called()
+
+
+def test_previous_library_location_write_result_cannot_touch_new_video() -> None:
+    path = Path("/shared/video.mov")
+    identity = AssetSourceIdentity.create(path, source_mtime_ns=11, size_bytes=22)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._active_async_token = new_token
+    coordinator._library_binding_token_getter = lambda: SimpleNamespace(epoch=2)
+    coordinator._location_write_tokens_by_job = {"old-job": old_token}
+    coordinator._location_write_jobs_by_path = {path: "old-job"}
+    coordinator._complete_location_video_file_write = Mock()
+    result = LocationFileWriteResult(
+        job_id="old-job",
+        asset_path=path,
+        gps={},
+        location="Berlin",
+    )
+
+    PlaybackCoordinator._handle_location_file_write_verified(coordinator, result)
+
+    coordinator._complete_location_video_file_write.assert_not_called()
+    assert coordinator._location_write_jobs_by_path[path] == "old-job"
 
 
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:

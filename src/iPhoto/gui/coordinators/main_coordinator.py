@@ -74,6 +74,7 @@ class MainCoordinator(QObject):
         super().__init__(window)
         self._window = window
         self._context = context
+        self._library_binding_token = getattr(context, "library_binding_token", None)
         self._is_shutting_down = False
         self._shutdown_complete = False
         # facade reference kept for signal wiring as some systems still emit through it
@@ -237,6 +238,11 @@ class MainCoordinator(QObject):
             map_runtime=self._map_runtime(),
             event_bus=self._event_bus,
             location_write_queue=self._location_write_queue,
+            library_binding_token_getter=lambda: getattr(
+                self._context,
+                "library_binding_token",
+                None,
+            ),
         )
 
         # Inject optional dependencies into Playback
@@ -268,7 +274,12 @@ class MainCoordinator(QObject):
         self._edit: "EditCoordinator | None" = None
 
         # --- Legacy Controllers ---
-        self._dialog = DialogController(window, context, window.ui.status_bar)
+        self._dialog = DialogController(
+            window,
+            context,
+            window.ui.status_bar,
+            library_rebind_preflight=self._library_rebind_preflight,
+        )
         self._facade.register_restore_prompt(self._dialog.prompt_restore_to_root)
         self._status_bar = StatusBarController(
             window.ui.status_bar,
@@ -410,6 +421,7 @@ class MainCoordinator(QObject):
             self._media_session,
             self._adjustment_committer,
             self._edit_service_getter,
+            self._player_view_controller,
         )
         self._shortcut_manager.set_edit_coordinator(self._edit)
         return self._edit
@@ -770,6 +782,7 @@ class MainCoordinator(QObject):
     def _on_library_tree_updated(self) -> None:
         root = self._library_root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
+        MainCoordinator._synchronize_library_binding(self)
         self._context.asset_runtime.bind_library_root(root)
         location_queue = getattr(self, "_location_write_queue", None)
         if location_queue is not None:
@@ -820,6 +833,28 @@ class MainCoordinator(QObject):
                 playback.set_people_library_root(root)
             if bound_pet_service is not None and hasattr(playback, "set_pet_service"):
                 playback.set_pet_service(bound_pet_service)
+
+    def _synchronize_library_binding(self) -> bool:
+        """Differentiate a same-session tree refresh from an actual rebind."""
+
+        binding_token = getattr(self._context, "library_binding_token", None)
+        previous_token = getattr(self, "_library_binding_token", None)
+        session_changed = (
+            previous_token is not None
+            and binding_token is not None
+            and binding_token != previous_token
+        )
+        if session_changed:
+            edit = getattr(self, "_edit", None)
+            if edit is not None and edit.is_editing():
+                edit.invalidate_library_binding()
+        if binding_token is not None:
+            self._library_binding_token = binding_token
+        playback = getattr(self, "_playback", None)
+        rebind_playback = getattr(playback, "rebind_library", None)
+        if callable(rebind_playback):
+            rebind_playback(binding_token, session_change=session_changed)
+        return session_changed
 
     def _active_session(self):
         return getattr(self._context, "library_session", None)
@@ -1142,6 +1177,12 @@ class MainCoordinator(QObject):
         open_library = getattr(self._context, "open_library", None)
         if not callable(open_library):
             return True
+        if not self._library_rebind_preflight():
+            self._facade.errorRaised.emit(
+                "Finish the current edit with Done, or press Escape to cancel it, "
+                "before switching libraries."
+            )
+            return False
 
         try:
             open_library(path)
@@ -1151,6 +1192,13 @@ class MainCoordinator(QObject):
 
         self._on_library_tree_updated()
         return True
+
+    def _library_rebind_preflight(self) -> bool:
+        edit = getattr(self, "_edit", None)
+        if edit is None:
+            return True
+        preflight = getattr(edit, "preflight_library_rebind", None)
+        return bool(preflight()) if callable(preflight) else not edit.is_editing()
 
     @staticmethod
     def _path_is_descendant(path: Path, root: Path) -> bool:

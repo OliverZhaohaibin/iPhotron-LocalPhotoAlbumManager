@@ -106,6 +106,49 @@ class AssetSourceIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class PlaybackAsyncToken:
+    """Complete delivery identity for library-scoped playback work."""
+
+    library_epoch: int
+    asset_generation: int
+    asset_id: str
+    source_path: Path
+    source_revision: tuple[str, int, int]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        library_epoch: int,
+        asset_generation: int,
+        asset_id: str,
+        source_identity: AssetSourceIdentity,
+    ) -> "PlaybackAsyncToken":
+        return cls(
+            library_epoch=max(0, int(library_epoch)),
+            asset_generation=max(0, int(asset_generation)),
+            asset_id=str(asset_id).strip() or source_identity.path.name,
+            source_path=source_identity.path,
+            source_revision=source_identity.revision,
+        )
+
+    def matches(
+        self,
+        *,
+        library_epoch: int,
+        asset_generation: int,
+        asset_id: str,
+        source_identity: AssetSourceIdentity,
+    ) -> bool:
+        return self == PlaybackAsyncToken.create(
+            library_epoch=library_epoch,
+            asset_generation=asset_generation,
+            asset_id=asset_id,
+            source_identity=source_identity,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DetailRenderTransaction:
     """Immutable identity shared by still and video Detail render work."""
 
@@ -419,6 +462,7 @@ __all__ = [
     "DetailMediaPreparation",
     "DetailOpenTrace",
     "DetailPrefetchDescriptor",
+    "PlaybackAsyncToken",
     "DetailRenderTransaction",
     "DetailRenderRequest",
     "DetailResidencySlot",

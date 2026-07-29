@@ -67,6 +67,19 @@ def test_apply_screen_change_fix_rescales_and_repositions() -> None:
     assert manager._last_screen_dpr == 2.0
 
 
+def test_escape_cancels_active_edit_before_window_fullscreen_logic() -> None:
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    edit = MagicMock()
+    edit.is_editing.return_value = True
+    edit.is_in_fullscreen.return_value = False
+    manager._edit_controller = MagicMock(return_value=edit)
+    manager._immersive_active = False
+
+    FramelessWindowManager.exit_fullscreen(manager)
+
+    edit.cancel_edit_mode.assert_called_once_with()
+
+
 # ---------------------------------------------------------------------------
 # _is_wayland helper
 # ---------------------------------------------------------------------------

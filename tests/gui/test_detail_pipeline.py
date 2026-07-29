@@ -10,6 +10,7 @@ from iPhoto.gui.detail_pipeline import (
     DetailDecodeKey,
     DetailGeometryState,
     DetailRenderRequest,
+    PlaybackAsyncToken,
     select_detail_decode_level,
 )
 
@@ -88,6 +89,38 @@ def test_source_identity_remains_unstable_when_stat_fails(tmp_path: Path) -> Non
 
     assert legacy.repair_revision_from_stat() is legacy
     assert legacy.revision[0] == "legacy"
+
+
+def test_playback_async_token_checks_every_delivery_identity_field(tmp_path: Path) -> None:
+    first = AssetSourceIdentity.create(
+        tmp_path / "photo.jpg",
+        size_bytes=10,
+        source_mtime_ns=20,
+    )
+    replaced = AssetSourceIdentity.create(
+        tmp_path / "photo.jpg",
+        size_bytes=11,
+        source_mtime_ns=21,
+    )
+    token = PlaybackAsyncToken.create(
+        library_epoch=3,
+        asset_generation=4,
+        asset_id="asset",
+        source_identity=first,
+    )
+
+    assert token.matches(
+        library_epoch=3,
+        asset_generation=4,
+        asset_id="asset",
+        source_identity=first,
+    )
+    assert not token.matches(
+        library_epoch=3,
+        asset_generation=4,
+        asset_id="asset",
+        source_identity=replaced,
+    )
 
 
 def test_decode_key_distinguishes_source_orientation(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ...library.runtime_controller import LibraryRuntimeController
     from ...settings.manager import SettingsManager
     from ...bootstrap.library_session import LibrarySession
+    from ...bootstrap.runtime_context import LibraryBindingToken
 
 
 @runtime_checkable
@@ -30,6 +31,7 @@ class RuntimeEntryContract(Protocol):
     container: "DependencyContainer"
     asset_runtime: "LibraryAssetRuntime"
     library_session: "LibrarySession | None"
+    library_binding_token: "LibraryBindingToken"
     recent_albums: list[Path]
     defer_startup_tasks: bool
 

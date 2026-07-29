@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import gc
 import struct
-import sys
+import weakref
 from unittest.mock import Mock, call, patch
 
 import pytest
@@ -142,11 +142,8 @@ class _FakeVideoSink:
         self.videoFrameChanged = _FakeSignal()
 
 
-_RETIRED_VIDEO_AREAS: list[VideoArea] = []
-
-
 @pytest.fixture(autouse=True)
-def _isolate_platform_multimedia_backend(monkeypatch):
+def _isolate_platform_multimedia_backend(monkeypatch, qapp):
     """Keep VideoArea unit tests out of Linux's offscreen media plugins.
 
     Track every constructed area so Python signal closures cannot defer native
@@ -167,21 +164,24 @@ def _isolate_platform_multimedia_backend(monkeypatch):
     try:
         yield
     finally:
-        if sys.platform.startswith("linux"):
-            for area in reversed(created_areas):
-                area._video_sink.videoFrameChanged.clear()
-                area._player.positionChanged.clear()
-                area._player.durationChanged.clear()
-                area._player.playbackStateChanged.clear()
-                area._player.mediaStatusChanged.clear()
-                area._player.errorOccurred.clear()
-                area._video_frame_handler = None
-                area.close()
-            # Keep the closed QRhiWidget tree alive until the session-level Qt
-            # drain. Deleting it during an individual test can race platform
-            # render teardown, while interpreter shutdown crashes Linux.
-            _RETIRED_VIDEO_AREAS.extend(created_areas)
+        area_refs = [weakref.ref(area) for area in created_areas]
+        for area in reversed(created_areas):
+            area._video_sink.videoFrameChanged.clear()
+            area._player.positionChanged.clear()
+            area._player.durationChanged.clear()
+            area._player.playbackStateChanged.clear()
+            area._player.mediaStatusChanged.clear()
+            area._player.errorOccurred.clear()
+            area._video_frame_handler = None
+            area.close()
         created_areas.clear()
+        if area_refs:
+            del area
+        gc.collect()
+        qapp.processEvents()
+        assert all(area_ref() is None for area_ref in area_refs), (
+            "VideoArea unit test leaked a native widget into process teardown"
+        )
 
 
 def _set_rotation_180(fmt: QVideoFrameFormat) -> None:

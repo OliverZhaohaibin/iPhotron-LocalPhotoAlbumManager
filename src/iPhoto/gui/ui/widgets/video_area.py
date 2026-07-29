@@ -1410,9 +1410,12 @@ class VideoArea(QWidget):
             self._player_bar.scrubFinished,
         ):
             signal.connect(self._on_mouse_activity)
-        self._player_bar.seekRequested.connect(lambda _value: self._on_mouse_activity())
+        self._player_bar.seekRequested.connect(self._on_seek_activity_requested)
         self._player_bar.volumeChanged.connect(self._on_volume_changed)
         self._player_bar.muteToggled.connect(self._on_mute_toggled)
+
+    def _on_seek_activity_requested(self, _value: int) -> None:
+        self._on_mouse_activity()
 
     def _wire_edit_viewer(self) -> None:
         """Forward image-viewer style signals from the adjusted preview surface."""

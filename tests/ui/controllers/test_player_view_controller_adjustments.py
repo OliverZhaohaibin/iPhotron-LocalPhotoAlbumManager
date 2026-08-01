@@ -22,7 +22,7 @@ from iPhoto.gui.ui.controllers.player_view_controller import (
 )
 
 
-def test_adjusted_image_worker_collects_shared_stats_without_sidecar() -> None:
+def test_adjusted_image_worker_skips_color_stats_without_sidecar() -> None:
     source = Path("/tmp/photo.jpg")
     signals = Mock()
     edit_service = Mock()
@@ -39,7 +39,7 @@ def test_adjusted_image_worker_collects_shared_stats_without_sidecar() -> None:
         worker.run()
 
     edit_service.describe_adjustments.assert_not_called()
-    compute_stats.assert_called_once_with(image)
+    compute_stats.assert_not_called()
     signals.completed.emit.assert_called_once_with(source, image, {})
 
 

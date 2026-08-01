@@ -91,9 +91,9 @@ class _AdjustedImageWorker(QRunnable):
         try:
             adjustments_started = time.perf_counter()
             adjustments = {}
-            self.color_stats = compute_color_statistics(image)
             self.source_identity = self.source_identity.repair_revision_from_stat()
             if self._edit_service is not None and self._edit_service.sidecar_exists(self._source):
+                self.color_stats = compute_color_statistics(image)
                 adjustments = self._edit_service.describe_adjustments(
                     self._source,
                     color_stats=self.color_stats,
@@ -109,7 +109,6 @@ class _AdjustedImageWorker(QRunnable):
             self._signals.failed.emit(self._source, str(exc))
             return
 
-        # Pass the raw image and adjustments to the main thread. The GL viewer
         # Pass the raw image and adjustments to the main thread. The GL viewer
         # will apply the adjustments on the GPU.
         log_detail_profile(

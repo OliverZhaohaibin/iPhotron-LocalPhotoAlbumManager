@@ -237,6 +237,8 @@ class PlaybackCoordinator(QObject):
         self._play_debounce.timeout.connect(self._execute_pending_play)
 
         self._connect_signals()
+        self._setup_zoom_handler()
+        self._restore_filmstrip_preference()
 
     def rebind_library(
         self,
@@ -285,8 +287,6 @@ class PlaybackCoordinator(QObject):
             token == getattr(self, "_active_async_token", None)
             and token.library_epoch == self._current_library_epoch()
         )
-        self._setup_zoom_handler()
-        self._restore_filmstrip_preference()
 
     def set_navigation_coordinator(self, nav: NavigationCoordinator) -> None:
         self._navigation = nav
@@ -691,6 +691,10 @@ class PlaybackCoordinator(QObject):
         self._zoom_slider.setValue(100)
         self._zoom_slider.blockSignals(False)
 
+        self._is_playing = False
+        self._player_bar.set_playback_state(False)
+        self._player_bar.set_position(0)
+
         if presentation.is_video:
             self._hide_face_name_overlay(clear_annotations=True)
             if self._is_location_video_write_inflight(source):
@@ -725,6 +729,7 @@ class PlaybackCoordinator(QObject):
                     has_trim=has_trim,
                 )
                 self._player_view.video_area.play()
+                self._is_playing = True
                 self._player_bar.setEnabled(True)
                 self._zoom_handler.set_viewer(self._player_view.video_area)
                 self._player_view.video_area.reset_zoom()
@@ -765,10 +770,6 @@ class PlaybackCoordinator(QObject):
                 self._player_view.hide_live_badge()
                 self._player_view.set_live_replay_enabled(False)
                 self._refresh_face_name_overlay_for_presentation(presentation)
-
-        self._is_playing = False
-        self._player_bar.set_playback_state(False)
-        self._player_bar.set_position(0)
 
         if self._info_panel and presentation.info_panel_visible:
             self._refresh_info_panel(presentation.info)

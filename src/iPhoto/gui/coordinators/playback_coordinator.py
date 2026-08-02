@@ -205,6 +205,7 @@ class PlaybackCoordinator(QObject):
         self._current_presentation: DetailPresentation | None = None
         self._info_panel_metadata_cache: dict[str, dict[str, Any]] = {}
         self._info_panel_metadata_inflight: set[str] = set()
+        self._info_panel_metadata_tokens: dict[str, PlaybackAsyncToken | None] = {}
         self._info_panel_metadata_attempted: set[str] = set()
         self._play_profile_started_at: float | None = None
         self._play_profile_row: int | None = None
@@ -2278,6 +2279,8 @@ class PlaybackCoordinator(QObject):
             self._info_panel_metadata_cache = {}
         if not hasattr(self, "_info_panel_metadata_inflight"):
             self._info_panel_metadata_inflight = set()
+        if not hasattr(self, "_info_panel_metadata_tokens"):
+            self._info_panel_metadata_tokens = {}
         if not hasattr(self, "_info_panel_metadata_attempted"):
             self._info_panel_metadata_attempted = set()
 
@@ -2285,6 +2288,7 @@ class PlaybackCoordinator(QObject):
         self._ensure_info_panel_metadata_state()
         self._info_panel_metadata_cache.clear()
         self._info_panel_metadata_inflight.clear()
+        self._info_panel_metadata_tokens.clear()
         self._info_panel_metadata_attempted.clear()
 
     def _info_panel_path_key(self, path: object) -> str | None:
@@ -2319,6 +2323,7 @@ class PlaybackCoordinator(QObject):
             return
         self._info_panel_metadata_inflight.add(path_key)
         async_token = getattr(self, "_active_async_token", None)
+        self._info_panel_metadata_tokens[path_key] = async_token
 
         worker = InfoPanelMetadataWorker(path, is_video=is_video)
         worker.signals.ready.connect(
@@ -2344,8 +2349,10 @@ class PlaybackCoordinator(QObject):
             QThreadPool.globalInstance().start(worker, -1)
         except Exception:  # noqa: BLE001
             LOGGER.warning("Failed to start metadata enrichment worker for %s", path_key, exc_info=True)
-            self._info_panel_metadata_inflight.discard(path_key)
-            self._info_panel_metadata_attempted.discard(path_key)
+            self._handle_info_panel_metadata_finished(
+                path_key,
+                async_token=async_token,
+            )
 
     def _handle_info_panel_metadata_ready(
         self,
@@ -2405,11 +2412,29 @@ class PlaybackCoordinator(QObject):
         *,
         async_token: PlaybackAsyncToken | None = None,
     ) -> None:
+        self._ensure_info_panel_metadata_state()
+        owner_token = self._info_panel_metadata_tokens.get(path_key)
+        if path_key in self._info_panel_metadata_tokens and owner_token != async_token:
+            return
+        self._info_panel_metadata_inflight.discard(path_key)
+        self._info_panel_metadata_tokens.pop(path_key, None)
         if not self._is_async_token_current(async_token):
             return
-        self._ensure_info_panel_metadata_state()
-        self._info_panel_metadata_inflight.discard(path_key)
         self._info_panel_metadata_attempted.add(path_key)
+
+        info_panel = getattr(self, "_info_panel", None)
+        presentation = getattr(self, "_current_presentation", None)
+        if (
+            info_panel is None
+            or not info_panel.isVisible()
+            or presentation is None
+            or str(presentation.path) != path_key
+        ):
+            return
+        # ``ready`` may not be emitted when metadata extraction fails. Refresh
+        # after leaving the inflight state so the panel replaces its loading
+        # placeholder with the cached metadata or the unavailable fallback.
+        self._refresh_info_panel(presentation.info)
 
     @Slot()
     def _handle_manual_face_add_requested(self) -> None:

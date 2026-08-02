@@ -1552,6 +1552,43 @@ def test_stale_finished_enrichment_releases_its_inflight_path() -> None:
     assert str(path) not in coordinator._info_panel_metadata_attempted
 
 
+def test_stale_finished_enrichment_requeues_when_same_path_is_still_visible() -> None:
+    path = Path("/fake/current.jpg")
+    identity = AssetSourceIdentity.create(path, source_mtime_ns=11, size_bytes=22)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=5,
+        asset_id="asset",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._active_async_token = new_token
+    coordinator._library_binding_token_getter = lambda: SimpleNamespace(epoch=1)
+    coordinator._info_panel = Mock(isVisible=Mock(return_value=True))
+    coordinator._current_presentation = _make_presentation(path=str(path))
+    coordinator._info_panel_metadata_cache = {}
+    coordinator._info_panel_metadata_inflight = {str(path)}
+    coordinator._info_panel_metadata_tokens = {str(path): old_token}
+    coordinator._info_panel_metadata_attempted = set()
+    coordinator._refresh_info_panel = Mock()
+
+    PlaybackCoordinator._handle_info_panel_metadata_finished(
+        coordinator,
+        str(path),
+        async_token=old_token,
+    )
+
+    assert str(path) not in coordinator._info_panel_metadata_inflight
+    assert str(path) not in coordinator._info_panel_metadata_attempted
+    coordinator._refresh_info_panel.assert_called_once_with(coordinator._current_presentation.info)
+
+
 def test_stale_finished_enrichment_cannot_release_new_same_path_request() -> None:
     path = Path("/shared/image.jpg")
     identity = AssetSourceIdentity.create(path, source_mtime_ns=11, size_bytes=22)

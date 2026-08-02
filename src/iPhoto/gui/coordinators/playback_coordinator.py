@@ -2418,9 +2418,9 @@ class PlaybackCoordinator(QObject):
             return
         self._info_panel_metadata_inflight.discard(path_key)
         self._info_panel_metadata_tokens.pop(path_key, None)
-        if not self._is_async_token_current(async_token):
-            return
-        self._info_panel_metadata_attempted.add(path_key)
+        token_is_current = self._is_async_token_current(async_token)
+        if token_is_current:
+            self._info_panel_metadata_attempted.add(path_key)
 
         info_panel = getattr(self, "_info_panel", None)
         presentation = getattr(self, "_current_presentation", None)
@@ -2433,7 +2433,9 @@ class PlaybackCoordinator(QObject):
             return
         # ``ready`` may not be emitted when metadata extraction fails. Refresh
         # after leaving the inflight state so the panel replaces its loading
-        # placeholder with the cached metadata or the unavailable fallback.
+        # placeholder with the cached metadata or the unavailable fallback. If
+        # the same asset acquired a newer async token while the worker ran,
+        # refreshing also queues one replacement request owned by that token.
         self._refresh_info_panel(presentation.info)
 
     @Slot()

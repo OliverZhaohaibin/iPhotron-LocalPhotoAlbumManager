@@ -18,8 +18,8 @@ from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResul
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
-from iPhoto.people.service import ManualFaceAddResult
 from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.people.service import ManualFaceAddResult
 from maps.osmand_search import SearchSuggestion
 
 
@@ -32,6 +32,7 @@ def _make_presentation(
     is_favorite: bool = False,
     info_panel_visible: bool = False,
     reload_token: int = 0,
+    request_generation: int = 0,
 ):
     return DetailPresentation(
         row=0,
@@ -54,6 +55,7 @@ def _make_presentation(
         video_trim_range_ms=(1000, 3000) if is_video else None,
         video_adjusted_preview=is_video,
         reload_token=reload_token,
+        request_generation=request_generation,
     )
 
 
@@ -153,6 +155,30 @@ def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     coordinator._update_header.assert_called_once_with(presentation)
     coordinator._sync_filmstrip_selection.assert_called_once_with(0)
     coordinator._render_presentation.assert_called_once_with(presentation)
+    assert coordinator._detail_render_transaction.media_kind == "video"
+    assert coordinator._detail_render_transaction.generation == 1
+
+
+def test_handle_presentation_changed_rerenders_same_asset_for_new_generation() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = _make_presentation(request_generation=1)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(set_current_row=Mock())
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._render_presentation = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = None
+
+    presentation = _make_presentation(request_generation=2)
+    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    coordinator._render_presentation.assert_called_once_with(presentation)
+    assert coordinator._detail_render_transaction.generation == 2
+    assert coordinator._detail_render_lifecycle.snapshot is not None
+    assert coordinator._detail_render_lifecycle.snapshot.state is DetailRenderState.ROUTED
 
 
 def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> None:
@@ -439,7 +465,10 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
     PlaybackCoordinator._render_presentation(coordinator, presentation)
 
     assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
-    player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
+    display_call = player_view.display_image.call_args
+    assert display_call.args == (Path("/fake/photo.heic"),)
+    assert display_call.kwargs["asset_id"] == "asset-1"
+    assert display_call.kwargs["source_identity"].path == Path("/fake/photo.heic")
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
 
 

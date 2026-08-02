@@ -83,7 +83,10 @@ class DetailRenderCoordinator(QObject):
             raise ValueError("Detail render transaction generation must be positive")
         current = self._snapshot
         if current is not None:
-            if current.transaction == transaction:
+            if current.transaction == transaction and (
+                current.state not in _TERMINAL_STATES
+                or transaction.media_kind == "live_motion"
+            ):
                 return False
             if current.state not in _TERMINAL_STATES:
                 self._transition(DetailRenderState.CANCELLED)

@@ -12,21 +12,23 @@ from PySide6.QtCore import QRectF
 
 def has_valid_crop(crop_w: float, crop_h: float) -> bool:
     """Return ``True`` when the adjustments describe a cropped image.
-    
+
     Parameters
     ----------
     crop_w:
-        Crop width as a fraction [0, 1]
+        Crop width in logical image coordinates.
     crop_h:
-        Crop height as a fraction [0, 1]
-        
+        Crop height in logical image coordinates.
+
     Returns
     -------
     bool
         True if the crop dimensions indicate an actual crop (not full image)
     """
     epsilon = 1e-3
-    return (crop_w < 1.0 - epsilon or crop_h < 1.0 - epsilon) and crop_w > 0.0 and crop_h > 0.0
+    tolerance = epsilon + 1e-9
+    differs_from_full = abs(crop_w - 1.0) > tolerance or abs(crop_h - 1.0) > tolerance
+    return differs_from_full and crop_w > 0.0 and crop_h > 0.0
 
 
 def compute_crop_rect_pixels(
@@ -38,10 +40,11 @@ def compute_crop_rect_pixels(
     tex_h: int,
 ) -> QRectF | None:
     """Return the crop rectangle expressed in texture pixels.
-    
-    Converts normalized crop coordinates (0-1 range) into pixel coordinates
-    for the given texture dimensions.
-    
+
+    Converts logical crop coordinates into the viewer's image-plane pixels.
+    Valid perspective-corrected coordinates may extend beyond the original
+    texture rectangle.
+
     Parameters
     ----------
     crop_cx:
@@ -56,7 +59,7 @@ def compute_crop_rect_pixels(
         Texture width in pixels
     tex_h:
         Texture height in pixels
-        
+
     Returns
     -------
     QRectF | None
@@ -64,29 +67,26 @@ def compute_crop_rect_pixels(
     """
     if tex_w <= 0 or tex_h <= 0:
         return None
-    
+
     if not has_valid_crop(crop_w, crop_h):
         return None
 
     tex_w_f = float(tex_w)
     tex_h_f = float(tex_h)
-    width_px = max(1.0, min(tex_w_f, crop_w * tex_w_f))
-    height_px = max(1.0, min(tex_h_f, crop_h * tex_h_f))
+    width_px = max(1.0, crop_w * tex_w_f)
+    height_px = max(1.0, crop_h * tex_h_f)
 
-    center_x = max(0.0, min(tex_w_f, crop_cx * tex_w_f))
-    center_y = max(0.0, min(tex_h_f, crop_cy * tex_h_f))
+    center_x = crop_cx * tex_w_f
+    center_y = crop_cy * tex_h_f
 
     half_w = width_px * 0.5
     half_h = height_px * 0.5
 
-    left = max(0.0, center_x - half_w)
-    top = max(0.0, center_y - half_h)
-    right = min(tex_w_f, center_x + half_w)
-    bottom = min(tex_h_f, center_y + half_h)
+    left = center_x - half_w
+    top = center_y - half_h
+    right = center_x + half_w
+    bottom = center_y + half_h
 
     rect_width = max(1.0, right - left)
     rect_height = max(1.0, bottom - top)
-    epsilon = 1e-6
-    if rect_width >= tex_w_f - epsilon and rect_height >= tex_h_f - epsilon:
-        return None
     return QRectF(left, top, rect_width, rect_height)

@@ -4,8 +4,13 @@ import json
 from pathlib import Path
 from threading import current_thread
 from threading import enumerate as enumerate_threads
+from unittest.mock import patch
 
-from iPhoto.gui.detail_profile import emit_detail_event, shutdown_detail_profile
+from iPhoto.gui.detail_profile import (
+    emit_detail_event,
+    log_detail_profile,
+    shutdown_detail_profile,
+)
 
 
 def test_profile_jsonl_is_opened_only_by_background_writer(
@@ -79,3 +84,22 @@ def test_disabled_profile_creates_neither_writer_nor_file(
         for thread in enumerate_threads()
     )
 
+
+def test_human_profile_log_is_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("IPHOTO_DETAIL_PROFILE", "1")
+    monkeypatch.delenv("IPHOTO_DETAIL_PROFILE_LOG", raising=False)
+
+    with patch("iPhoto.gui.detail_profile.LOGGER.info") as info:
+        log_detail_profile("decode", "complete", 12.0, generation=4)
+
+    info.assert_not_called()
+
+
+def test_human_profile_log_can_be_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("IPHOTO_DETAIL_PROFILE", "1")
+    monkeypatch.setenv("IPHOTO_DETAIL_PROFILE_LOG", "1")
+
+    with patch("iPhoto.gui.detail_profile.LOGGER.info") as info:
+        log_detail_profile("decode", "complete", 12.0, generation=4)
+
+    info.assert_called_once()

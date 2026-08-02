@@ -6,13 +6,10 @@ import sys
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Iterable, Iterator, cast
 
-from PySide6.QtCore import Property, QCoreApplication, QEvent, QObject, QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QMouseEvent,
-    QPainter,
-    QPainterPath,
-    QPaintEvent,
     QPalette,
 )
 from PySide6.QtWidgets import (
@@ -371,6 +368,9 @@ class FramelessWindowManager(QObject):
 
         if self._controller is None:
             return None
+        active_accessor = getattr(self._controller, "active_edit_controller", None)
+        if callable(active_accessor):
+            return active_accessor()
         accessor = getattr(self._controller, "edit_controller", None)
         if callable(accessor):
             return accessor()

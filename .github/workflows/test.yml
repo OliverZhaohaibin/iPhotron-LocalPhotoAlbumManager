@@ -194,7 +194,7 @@ jobs:
           tests/test_appimage_packaging.py
           tests/test_macos_detection_report.py
 
-  detail-core-contracts:
+  detail-production-integration-contracts:
     strategy:
       fail-fast: false
       matrix:
@@ -222,7 +222,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
 
-      - name: Run Detail core contracts
+      - name: Run Detail production integration contracts
         env:
           QT_QPA_PLATFORM: offscreen
           NUMBA_DISABLE_JIT: "1"
@@ -234,6 +234,17 @@ jobs:
           tests/gui/test_detail_decode_backend.py
           tests/gui/test_detail_surface_cache.py
           tests/gui/test_detail_render_coordinator.py
+          tests/gui/test_detail_render_session.py
+          tests/gui/test_detail_benchmark_harness.py
+          tests/gui/test_detail_production_integration.py
+          tests/gui/coordinators/test_playback_coordinator.py
+          tests/ui/controllers/test_player_view_controller_adjustments.py
+          tests/ui/controllers/test_player_view_init_cover.py
+          tests/ui/widgets/test_gl_image_viewer_post_load_signal.py
+          tests/ui/widgets/test_gl_image_texture_resources.py
+          tests/ui/widgets/test_rhi_image_renderer.py
+          tests/test_detail_benchmark.py
+          tests/test_detail_packaged_benchmark_runner.py
 
   live-photo-contracts:
     strategy:

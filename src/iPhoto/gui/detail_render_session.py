@@ -13,7 +13,6 @@ from iPhoto.core.color_resolver import ColorStats
 from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_pipeline import AssetSourceIdentity, DetailDecodeKey
 
-
 EditRevisionKind = Literal["index", "session", "commit"]
 
 
@@ -148,6 +147,35 @@ class PhotoRenderSessionHandle:
     def finish_upload(self) -> None:
         self.upload_fallback = None
 
+    def retain_surface(self, surface: DecodedSurface) -> bool:
+        """Retain one non-current LOD as the bounded upload/warm fallback."""
+
+        if not self.valid:
+            return False
+        if (
+            self.current_surface is not None
+            and self.current_surface.decode_key == surface.decode_key
+        ):
+            self.current_surface = surface
+            return True
+        self.upload_fallback = surface
+        return True
+
+    def activate_surface(self, key: DetailDecodeKey) -> bool:
+        """Activate a retained current/fallback surface without another decode."""
+
+        if not self.valid:
+            return False
+        if self.current_surface is not None and self.current_surface.decode_key == key:
+            return True
+        fallback = self.upload_fallback
+        if fallback is None or fallback.decode_key != key:
+            return False
+        previous = self.current_surface
+        self.current_surface = fallback
+        self.upload_fallback = previous
+        return True
+
     def surface_for_key(self, key: DetailDecodeKey) -> DecodedSurface | None:
         if not self.valid:
             return None
@@ -178,6 +206,14 @@ class PhotoRenderSessionHandle:
             return None
         self.edit_state = self.baseline_state
         return self.edit_state
+
+    def commit_current_state(self) -> EditRenderState | None:
+        """Commit the current immutable edit state as the new baseline."""
+
+        state = self.next_state(self.edit_state.raw_adjustments, kind="commit")
+        if state is not None:
+            self.baseline_state = state
+        return state
 
     def invalidate(self) -> None:
         """Make all late consumers harmless and release strong surfaces."""

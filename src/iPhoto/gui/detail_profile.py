@@ -25,6 +25,12 @@ def detail_profile_enabled() -> bool:
     return os.environ.get("IPHOTO_DETAIL_PROFILE", "").strip().lower() in _TRUTHY
 
 
+def detail_profile_log_enabled() -> bool:
+    """Return whether verbose human-readable profiling logs are enabled."""
+
+    return os.environ.get("IPHOTO_DETAIL_PROFILE_LOG", "").strip().lower() in _TRUTHY
+
+
 def log_detail_profile(
     component: str,
     stage: str,
@@ -33,7 +39,7 @@ def log_detail_profile(
 ) -> None:
     """Emit a human-readable diagnostic line when profiling is enabled."""
 
-    if not detail_profile_enabled():
+    if not detail_profile_enabled() or not detail_profile_log_enabled():
         return
 
     suffix = ""
@@ -135,11 +141,12 @@ class _AsyncDetailEventWriter:
                 if not batch:
                     continue
                 for payload in batch:
-                    LOGGER.info(
-                        "[detail_profile][open] %s generation=%s",
-                        payload["stage"],
-                        payload["generation"],
-                    )
+                    if detail_profile_log_enabled():
+                        LOGGER.info(
+                            "[detail_profile][open] %s generation=%s",
+                            payload["stage"],
+                            payload["generation"],
+                        )
                     if stream is not None:
                         stream.write(
                             json.dumps(payload, ensure_ascii=False, default=str) + "\n"
@@ -203,6 +210,7 @@ def shutdown_detail_profile(*, timeout_ms: int = 1000) -> None:
 
 __all__ = [
     "detail_profile_enabled",
+    "detail_profile_log_enabled",
     "emit_detail_event",
     "log_detail_profile",
     "shutdown_detail_profile",

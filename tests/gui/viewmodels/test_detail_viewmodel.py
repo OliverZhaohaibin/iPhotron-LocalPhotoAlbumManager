@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import Mock
 
-from iPhoto.application.ports import EditRenderingState
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
+from iPhoto.application.ports import EditRenderingState
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.signal import Signal
 
@@ -63,6 +63,28 @@ def test_show_row_builds_presentation_and_requests_detail_route():
     assert received[0].asset_id == dto.id
     assert received[0].path == dto.abs_path
     assert received[0].is_favorite is True
+
+
+def test_show_row_assigns_monotonic_generation_and_indexed_source_identity() -> None:
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    dto.width = 6000
+    dto.height = 4000
+    dto.size_bytes = 123
+    dto.metadata.update({"source_mtime_ns": 456, "index_revision": 9})
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+    first = vm.presentation.value
+    vm.show_row(0)
+    second = vm.presentation.value
+
+    assert first.request_generation == 1
+    assert second.request_generation == 2
+    assert second.source_identity is not None
+    assert second.source_identity.revision == ("mtime", 123, 456)
+    assert (second.source_identity.width, second.source_identity.height) == (6000, 4000)
 
 
 def test_next_and_previous_delegate_to_session():

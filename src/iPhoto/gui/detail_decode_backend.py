@@ -116,6 +116,7 @@ class FallbackStillDecodeBackend:
                 decode_level=surface.decode_level,
                 backend=surface.backend,
                 color_stats=surface.color_stats,
+                color_stats_computed=surface.color_stats_computed,
                 fallback=self._fallback_name,
                 pixel_format=surface.pixel_format,
                 color_space=surface.color_space,
@@ -136,6 +137,7 @@ class DecodedSurface:
     decode_level: DetailDecodeLevel
     backend: str
     color_stats: ColorStats = ColorStats()
+    color_stats_computed: bool = False
     fallback: str | None = None
     pixel_format: str = "rgba8888"
     color_space: str = "srgb"

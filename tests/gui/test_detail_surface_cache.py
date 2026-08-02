@@ -104,6 +104,18 @@ def test_disk_store_round_trip_returns_mmap_backed_rgba_surface(tmp_path: Path) 
     assert bytes(loaded.image.constBits()[:4]) == bytes(original.image.constBits()[:4])
 
 
+def test_disk_store_preserves_color_stats_computation_marker(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    original = replace(_surface(request), color_stats_computed=True)
+
+    assert store.write(request, original)
+    loaded = store.load(request)
+
+    assert loaded is not None
+    assert loaded.color_stats_computed is True
+
+
 def test_disk_store_source_revision_changes_key_but_sidecar_is_not_an_input(tmp_path: Path) -> None:
     store = NeutralSurfaceStore(tmp_path)
     request = _request(tmp_path / "photo.jpg", revision=11)
@@ -293,8 +305,14 @@ def test_prune_is_batched_across_repeated_writes(tmp_path: Path) -> None:
 
 
 def test_color_stats_are_computed_once_across_lod_decodes(tmp_path: Path) -> None:
-    first = _request(tmp_path / "photo.jpg", level=1024)
-    second = _request(tmp_path / "photo.jpg", level=2048)
+    first = replace(
+        _request(tmp_path / "photo.jpg", level=1024),
+        raw_adjustments={"Exposure": 0.5},
+    )
+    second = replace(
+        _request(tmp_path / "photo.jpg", level=2048),
+        raw_adjustments={"Exposure": 0.5},
+    )
     delegate = Mock()
     delegate.decode.side_effect = [_surface(first), _surface(second)]
     backend = CachedStillDecodeBackend(delegate, store=NeutralSurfaceStore(None))
@@ -311,3 +329,76 @@ def test_color_stats_are_computed_once_across_lod_decodes(tmp_path: Path) -> Non
     assert compute.call_count == 1
     assert decoded_first.color_stats is stats
     assert decoded_second.color_stats is stats
+
+
+def test_color_stats_are_skipped_until_sidecar_adjustments_require_them(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    adjusted = replace(request, raw_adjustments={"Exposure": 0.5})
+    delegate = Mock()
+    delegate.decode.side_effect = lambda prepared, _token: _surface(prepared)
+    backend = CachedStillDecodeBackend(delegate, store=NeutralSurfaceStore(None))
+    stats = ColorStats(saturation_mean=0.91)
+
+    with patch(
+        "iPhoto.gui.detail_surface_cache.compute_color_statistics",
+        return_value=stats,
+    ) as compute:
+        neutral = backend.decode(request, _Token())
+        resolved = backend.decode(adjusted, _Token())
+
+    backend.shutdown()
+    assert neutral.color_stats_computed is False
+    assert resolved.color_stats_computed is True
+    assert resolved.color_stats is stats
+    compute.assert_called_once()
+
+
+def test_production_persistence_waits_until_surface_is_presented(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    delegate = Mock()
+    delegate.decode.side_effect = lambda prepared, _token: _surface(prepared)
+    backend = CachedStillDecodeBackend(
+        delegate,
+        store=store,
+        defer_persistence_until_presented=True,
+    )
+
+    surface = backend.decode(request, _Token())
+    path = store.entry_path(request)
+
+    assert path is not None
+    assert not path.exists()
+    assert backend.persist_surface(surface.decode_key)
+    backend.shutdown()
+    assert path.is_file()
+    assert backend.has_persisted_surface(surface.decode_key)
+
+
+def test_missing_disk_entry_forgets_prior_persistence_observation(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    surface = _surface(request)
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, surface)
+    delegate = Mock()
+    delegate.decode.side_effect = lambda prepared, _token: _surface(prepared)
+    backend = CachedStillDecodeBackend(
+        delegate,
+        store=store,
+        defer_persistence_until_presented=True,
+    )
+
+    loaded = backend.decode(request, _Token())
+    assert backend.has_persisted_surface(loaded.decode_key)
+    path = store.entry_path(request)
+    assert path is not None
+    path.unlink()
+    backend.memory_cache.clear()
+
+    decoded = backend.decode(request, _Token())
+
+    assert decoded.cache_tier == "decode"
+    assert not backend.has_persisted_surface(decoded.decode_key)
+    backend.shutdown()

@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Protocol
 
+from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.ports import (
     AssetStateServicePort,
     EditRenderingState,
     EditServicePort,
 )
-from iPhoto.application.dtos import AssetDTO
+from iPhoto.gui.detail_pipeline import AssetSourceIdentity
+from iPhoto.gui.detail_profile import emit_detail_event
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.utils.geocoding import resolve_location_name
 
@@ -25,12 +28,12 @@ class AdjustmentCommitPort(Protocol):
 
 
 class MediaSelectionPort(Protocol):
-    def set_current_row(self, row: int) -> Optional[Path]: ...
+    def set_current_row(self, row: int) -> Path | None: ...
     def set_current_by_path(self, path: Path) -> bool: ...
     def current_row(self) -> int: ...
-    def current_source(self) -> Optional[Path]: ...
-    def next_row(self) -> Optional[int]: ...
-    def previous_row(self) -> Optional[int]: ...
+    def current_source(self) -> Path | None: ...
+    def next_row(self) -> int | None: ...
+    def previous_row(self) -> int | None: ...
 
 
 @dataclass(frozen=True)
@@ -42,19 +45,21 @@ class DetailPresentation:
     is_live: bool
     is_favorite: bool
     info: dict[str, Any]
-    location: Optional[str]
+    location: str | None
     timestamp: object
     can_edit: bool
     can_rotate: bool
     can_share: bool
     can_toggle_favorite: bool
     info_panel_visible: bool
-    live_motion_rel: Optional[Path]
-    live_motion_abs: Optional[Path]
-    video_adjustments: Optional[dict[str, Any]]
-    video_trim_range_ms: Optional[tuple[int, int]]
+    live_motion_rel: Path | None
+    live_motion_abs: Path | None
+    video_adjustments: dict[str, Any] | None
+    video_trim_range_ms: tuple[int, int] | None
     video_adjusted_preview: bool
     reload_token: int
+    request_generation: int = 0
+    source_identity: AssetSourceIdentity | None = None
 
 
 class DetailViewModel(BaseViewModel):
@@ -80,6 +85,7 @@ class DetailViewModel(BaseViewModel):
         self._pending_restore_requests: dict[Path, MediaRestoreRequest] = {}
         self._video_presentation_cache: dict | None = None
         self._pending_show_row: int | None = None
+        self._request_generation = 0
         self._store.data_changed.connect(self._handle_store_changed)
         self._store.row_changed.connect(self._handle_row_changed)
         row_loaded = getattr(self._store, "row_loaded", None)
@@ -109,6 +115,8 @@ class DetailViewModel(BaseViewModel):
         self._refresh_presentation()
 
     def show_row(self, row: int) -> None:
+        self._request_generation += 1
+        request_generation = self._request_generation
         source = self._media_session.set_current_row(row)
         if source is None:
             self._pending_show_row = row if 0 <= row < self._store.count() else None
@@ -120,9 +128,20 @@ class DetailViewModel(BaseViewModel):
             return
         self.current_row.value = row
         self.current_path.value = source
-        presentation = self._build_presentation(row, dto)
-        self.presentation.value = presentation
+        emit_detail_event(
+            "click_received",
+            generation=request_generation,
+            row=row,
+            media_type="video" if dto.is_video else "image",
+        )
+        # Route the opaque loading surface before any media preparation.
         self.route_requested.emit("detail")
+        presentation = self._build_presentation(
+            row,
+            dto,
+            request_generation=request_generation,
+        )
+        self.presentation.value = presentation
         self.presentation_changed.emit(presentation)
 
     def show_current(self) -> None:
@@ -200,13 +219,13 @@ class DetailViewModel(BaseViewModel):
             self.show_current()
             return
 
-    def info_for_current(self) -> Optional[dict[str, Any]]:
+    def info_for_current(self) -> dict[str, Any] | None:
         presentation = self.presentation.value
         if presentation is None:
             return None
         return dict(presentation.info)
 
-    def current_asset_path(self) -> Optional[Path]:
+    def current_asset_path(self) -> Path | None:
         path = self.current_path.value
         return path if isinstance(path, Path) else None
 
@@ -220,7 +239,11 @@ class DetailViewModel(BaseViewModel):
         dto = self._store.asset_at(row)
         if dto is None:
             return
-        presentation = self._build_presentation(row, dto)
+        presentation = self._build_presentation(
+            row,
+            dto,
+            request_generation=self._request_generation,
+        )
         self.presentation.value = presentation
         self.presentation_changed.emit(presentation)
 
@@ -256,7 +279,13 @@ class DetailViewModel(BaseViewModel):
             return
         self.restore_after_adjustment(path, reason)
 
-    def _build_presentation(self, row: int, dto: AssetDTO) -> DetailPresentation:
+    def _build_presentation(
+        self,
+        row: int,
+        dto: AssetDTO,
+        *,
+        request_generation: int | None = None,
+    ) -> DetailPresentation:
         info = dto.metadata.copy() if dto.metadata else {}
         info.update(
             {
@@ -329,6 +358,12 @@ class DetailViewModel(BaseViewModel):
             video_trim_range_ms=video_trim_range_ms,
             video_adjusted_preview=video_adjusted_preview,
             reload_token=self._presentation_reload_token,
+            request_generation=(
+                self._request_generation
+                if request_generation is None
+                else int(request_generation)
+            ),
+            source_identity=AssetSourceIdentity.from_info(dto.abs_path, info),
         )
 
     def _resolve_video_duration(
@@ -369,7 +404,7 @@ class DetailViewModel(BaseViewModel):
             duration_hint=duration_hint,
         )
 
-    def _resolve_location(self, dto: AssetDTO) -> Optional[str]:
+    def _resolve_location(self, dto: AssetDTO) -> str | None:
         metadata = dto.metadata or {}
         location = metadata.get("location") or metadata.get("place")
         if isinstance(location, str) and location.strip():
@@ -384,7 +419,7 @@ class DetailViewModel(BaseViewModel):
         normalized = [str(item).strip() for item in components if item]
         return ", ".join(normalized) if normalized else None
 
-    def _resolve_live_motion(self, dto: AssetDTO) -> tuple[Optional[Path], Optional[Path]]:
+    def _resolve_live_motion(self, dto: AssetDTO) -> tuple[Path | None, Path | None]:
         metadata = dto.metadata or {}
         live_partner_rel = metadata.get("live_partner_rel")
         live_role = metadata.get("live_role")

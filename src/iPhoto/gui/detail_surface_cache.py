@@ -252,10 +252,6 @@ class NeutralSurfaceStore:
             # Payload validation is deliberately asynchronous.  Header, key,
             # and geometry checks are enough to construct the mapped surface;
             # a background verifier evicts a corrupt payload before reuse.
-            try:
-                os.utime(path, None)
-            except OSError:
-                pass
             owner = MappedSurfaceOwner(file, mapping, payload)
             image = QImage(payload, width, height, stride, QImage.Format.Format_RGBA8888)
             if image.isNull():
@@ -271,6 +267,7 @@ class NeutralSurfaceStore:
                 decode_level=request.with_decode_level().decode_level or "full",
                 backend=str(metadata.get("backend") or "cache"),
                 color_stats=color_stats,
+                color_stats_computed=bool(metadata.get("color_stats_computed", False)),
                 fallback=metadata.get("fallback") or None,
                 cache_tier="disk",
                 backing_owner=owner,
@@ -323,6 +320,17 @@ class NeutralSurfaceStore:
         except (FileNotFoundError, OSError) as exc:
             raise SurfaceCacheCorruptError(str(exc)) from exc
 
+    def touch(self, request: DetailRenderRequest) -> None:
+        """Refresh disk-LRU metadata away from the foreground mmap path."""
+
+        path = self.entry_path(request)
+        if path is None:
+            return
+        try:
+            os.utime(path, None)
+        except OSError:
+            return
+
     def write(self, request: DetailRenderRequest, surface: DecodedSurface) -> bool:
         path = self.entry_path(request)
         if path is None or surface.image.isNull():
@@ -351,6 +359,7 @@ class NeutralSurfaceStore:
                     "white_balance_gain_g": surface.color_stats.white_balance_gain[1],
                     "white_balance_gain_b": surface.color_stats.white_balance_gain[2],
                 },
+                "color_stats_computed": bool(surface.color_stats_computed),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -450,6 +459,7 @@ class CachedStillDecodeBackend:
         *,
         memory_cache: MappedSurfaceCache | None = None,
         store: NeutralSurfaceStore | None = None,
+        defer_persistence_until_presented: bool = False,
     ) -> None:
         self._delegate = delegate
         self.memory_cache = memory_cache or MappedSurfaceCache()
@@ -458,12 +468,21 @@ class CachedStillDecodeBackend:
         self._futures: set[Future] = set()
         self._lock = RLock()
         self._shutting_down = False
+        self._defer_persistence_until_presented = bool(
+            defer_persistence_until_presented
+        )
+        self._pending_writes: OrderedDict[
+            DetailDecodeKey,
+            tuple[DetailRenderRequest, DecodedSurface],
+        ] = OrderedDict()
+        self._persisted_surface_keys: set[DetailDecodeKey] = set()
         self._color_stats_by_source: OrderedDict[tuple, ColorStats] = OrderedDict()
 
     def bind_library(self, library_root: Path | None) -> None:
         self.memory_cache.clear()
         with self._lock:
             self._color_stats_by_source.clear()
+            self._pending_writes.clear()
         self.store.bind_library(library_root)
 
     @staticmethod
@@ -493,6 +512,44 @@ class CachedStillDecodeBackend:
                 self._color_stats_by_source[key] = stats
             return stats
 
+    def _ensure_color_stats(
+        self,
+        request: DetailRenderRequest,
+        surface: DecodedSurface,
+    ) -> DecodedSurface:
+        """Resolve statistics only for sidecar-backed adjustment requests."""
+
+        if surface.color_stats_computed:
+            self._remember_color_stats(request, surface.color_stats)
+            return surface
+        cached = self._cached_color_stats(request)
+        if cached is not None:
+            return replace(
+                surface,
+                color_stats=cached,
+                color_stats_computed=True,
+            )
+        if not request.raw_adjustments:
+            return surface
+        started = time.perf_counter()
+        stats = self._remember_color_stats(
+            request,
+            compute_color_statistics(surface.image),
+        )
+        emit_detail_event(
+            "color_stats",
+            generation=request.generation,
+            asset_id=request.asset_id,
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+            width=surface.decoded_size[0],
+            height=surface.decoded_size[1],
+        )
+        return replace(
+            surface,
+            color_stats=stats,
+            color_stats_computed=True,
+        )
+
     def decode(self, request: DetailRenderRequest, cancellation: CancellationToken) -> DecodedSurface:
         prepared = request.with_decode_level()
         repaired_identity = prepared.source_identity.repair_revision_from_stat()
@@ -509,45 +566,67 @@ class CachedStillDecodeBackend:
                 reason="unstable_source_revision",
             )
             surface = self._delegate.decode(prepared, cancellation)
-            return replace(surface, color_stats=compute_color_statistics(surface.image))
+            return self._ensure_color_stats(prepared, surface)
         surface = self.memory_cache.get(key)
         if surface is not None:
-            self._remember_color_stats(prepared, surface.color_stats)
+            surface = self._ensure_color_stats(prepared, surface)
+            self.memory_cache.put(surface)
             emit_detail_event("surface_cache_hit", generation=prepared.generation, asset_id=key.asset_id, tier="memory")
             return surface
         try:
             surface = self.store.load(prepared)
         except SurfaceCacheCorruptError:
             emit_detail_event("surface_cache_corrupt", generation=prepared.generation, asset_id=key.asset_id)
+            with self._lock:
+                self._persisted_surface_keys.discard(key)
             self._submit(self.store.discard, prepared)
             surface = None
         if surface is not None:
             if cancellation.is_cancelled():
                 raise DecodeCancelledError("Still-image decode cancelled")
+            surface = self._ensure_color_stats(prepared, surface)
             self.memory_cache.put(surface)
-            self._remember_color_stats(prepared, surface.color_stats)
+            with self._lock:
+                self._persisted_surface_keys.add(key)
             self._submit(self._validate_disk_surface, prepared, key)
+            self._submit(self.store.touch, prepared)
             emit_detail_event("surface_cache_hit", generation=prepared.generation, asset_id=key.asset_id, tier="disk")
             return surface
+        with self._lock:
+            # The store may have been pruned or explicitly cleared since this
+            # process last observed the key.  Do not let benchmark/readiness
+            # introspection treat that historical observation as durable.
+            self._persisted_surface_keys.discard(key)
         emit_detail_event("surface_cache_miss", generation=prepared.generation, asset_id=key.asset_id)
         surface = self._delegate.decode(prepared, cancellation)
-        stats = self._cached_color_stats(prepared)
-        if stats is None:
-            started = time.perf_counter()
-            stats = compute_color_statistics(surface.image)
-            emit_detail_event(
-                "color_stats",
-                generation=prepared.generation,
-                asset_id=prepared.asset_id,
-                duration_ms=(time.perf_counter() - started) * 1000.0,
-                width=surface.decoded_size[0],
-                height=surface.decoded_size[1],
-            )
-        stats = self._remember_color_stats(prepared, stats)
-        surface = replace(surface, color_stats=stats)
+        surface = self._ensure_color_stats(prepared, surface)
         self.memory_cache.put(surface)
-        self._submit(self._write_surface, prepared, surface)
+        if self._defer_persistence_until_presented:
+            with self._lock:
+                self._pending_writes.pop(surface.decode_key, None)
+                self._pending_writes[surface.decode_key] = (prepared, surface)
+                while len(self._pending_writes) > 16:
+                    self._pending_writes.popitem(last=False)
+        else:
+            self._submit(self._write_surface, prepared, surface)
         return surface
+
+    def persist_surface(self, key: DetailDecodeKey) -> bool:
+        """Persist a decoded surface only after its first GPU use is safe."""
+
+        with self._lock:
+            pending = self._pending_writes.pop(key, None)
+            shutting_down = self._shutting_down
+        if pending is None or shutting_down:
+            return False
+        self._submit(self._write_surface, *pending)
+        return True
+
+    def has_persisted_surface(self, key: DetailDecodeKey) -> bool:
+        """Return whether this backend has observed *key* safely on disk."""
+
+        with self._lock:
+            return key in self._persisted_surface_keys
 
     def _validate_disk_surface(
         self,
@@ -567,7 +646,14 @@ class CachedStillDecodeBackend:
             )
 
     def _write_surface(self, request: DetailRenderRequest, surface: DecodedSurface) -> None:
-        if self.store.write(request, surface) and not self._shutting_down:
+        written = self.store.write(request, surface)
+        if written:
+            with self._lock:
+                self._persisted_surface_keys.add(surface.decode_key)
+        else:
+            with self._lock:
+                self._persisted_surface_keys.discard(surface.decode_key)
+        if written and not self._shutting_down:
             emit_detail_event(
                 "surface_cache_write",
                 generation=request.generation,
@@ -594,6 +680,7 @@ class CachedStillDecodeBackend:
     def shutdown(self, *, timeout_ms: int = 1000) -> None:
         with self._lock:
             self._shutting_down = True
+            self._pending_writes.clear()
             futures = tuple(self._futures)
         if futures:
             wait(futures, timeout=max(0, int(timeout_ms)) / 1000.0)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import struct
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -46,7 +47,7 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from ....core.selective_color_resolver import NUM_RANGES, SAT_GATE_HI, SAT_GATE_LO
-
+from ....gui.detail_profile import emit_detail_event
 from .perspective_math import build_perspective_matrix
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,7 +122,9 @@ def _classify_video_frame_format(
         transfer = _TF_SDR
 
     cr = fmt.colorRange()
-    color_range = _RANGE_FULL if cr == QVideoFrameFormat.ColorRange.ColorRange_Full else _RANGE_LIMITED
+    color_range = (
+        _RANGE_FULL if cr == QVideoFrameFormat.ColorRange.ColorRange_Full else _RANGE_LIMITED
+    )
     return (pixel_fmt, color_space, transfer, color_range)
 
 
@@ -155,6 +158,7 @@ class RhiImageRenderer:
         self._texture_height = 0
         self._has_rgba_texture = False
         self._has_video_texture = False
+        self._texture_uses_mipmaps = False
         self._last_video_upload_pre_rotated = False
         self._video_format = _VIDEO_FMT_NONE
         self._video_colorspace = _CS_BT709
@@ -164,6 +168,11 @@ class RhiImageRenderer:
         self._tex_uv_fmt: QRhiTexture.Format | None = None
 
         self._pending_rgba_image: QImage | None = None
+        self._pending_still: tuple[object, QImage, bool] | None = None
+        self._last_still_upload_result: dict[str, object] | None = None
+        self._still_textures: OrderedDict[object, tuple[QRhiTexture, int]] = OrderedDict()
+        self._active_still_key: object | None = None
+        self._still_budget_bytes = 192 * 1024 * 1024
         self._pending_video_planes: dict[str, Any] | None = None
         self._pending_curve_lut: np.ndarray | None = None
         self._pending_levels_lut: np.ndarray | None = None
@@ -183,12 +192,30 @@ class RhiImageRenderer:
         overlay_frag_shader = _load_shader(_OVERLAY_FRAG_QSB)
 
         vertices = [
-            -1.0, -1.0, 0.0, 1.0,
-            1.0, -1.0, 1.0, 1.0,
-            -1.0, 1.0, 0.0, 0.0,
-            1.0, -1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 0.0,
-            -1.0, 1.0, 0.0, 0.0,
+            -1.0,
+            -1.0,
+            0.0,
+            1.0,
+            1.0,
+            -1.0,
+            1.0,
+            1.0,
+            -1.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            -1.0,
+            1.0,
+            0.0,
+            0.0,
         ]
         vertex_data = struct.pack(f"{len(vertices)}f", *vertices)
 
@@ -230,10 +257,12 @@ class RhiImageRenderer:
         self._rebuild_srb()
 
         self._pipeline = rhi.newGraphicsPipeline()
-        self._pipeline.setShaderStages([
-            QRhiShaderStage(QRhiShaderStage.Type.Vertex, vert_shader),
-            QRhiShaderStage(QRhiShaderStage.Type.Fragment, frag_shader),
-        ])
+        self._pipeline.setShaderStages(
+            [
+                QRhiShaderStage(QRhiShaderStage.Type.Vertex, vert_shader),
+                QRhiShaderStage(QRhiShaderStage.Type.Fragment, frag_shader),
+            ]
+        )
         target_blend = QRhiGraphicsPipeline.TargetBlend()
         target_blend.enable = False
         self._pipeline.setTargetBlends([target_blend])
@@ -256,10 +285,12 @@ class RhiImageRenderer:
                 pass
             self._overlay_srb = None
 
-        self._overlay_pipeline.setShaderStages([
-            QRhiShaderStage(QRhiShaderStage.Type.Vertex, overlay_vert_shader),
-            QRhiShaderStage(QRhiShaderStage.Type.Fragment, overlay_frag_shader),
-        ])
+        self._overlay_pipeline.setShaderStages(
+            [
+                QRhiShaderStage(QRhiShaderStage.Type.Vertex, overlay_vert_shader),
+                QRhiShaderStage(QRhiShaderStage.Type.Fragment, overlay_frag_shader),
+            ]
+        )
         overlay_blend = QRhiGraphicsPipeline.TargetBlend()
         overlay_blend.enable = True
         try:
@@ -307,6 +338,7 @@ class RhiImageRenderer:
             self._placeholder_y_texture,
             self._placeholder_uv_texture,
             self._placeholder_lut_texture,
+            *(entry[0] for entry in self._still_textures.values()),
         ):
             if resource is None or id(resource) in seen:
                 continue
@@ -324,15 +356,102 @@ class RhiImageRenderer:
     def upload_texture(self, image: QImage) -> tuple[int, int, int]:
         if image.isNull():
             raise ValueError("Cannot upload a null QImage")
+        if self._still_textures:
+            self.clear_still_residency()
         qimage = _qimage_to_rgba(image)
         self._pending_rgba_image = qimage
         self._pending_video_planes = None
         self._has_rgba_texture = True
         self._has_video_texture = False
+        self._texture_uses_mipmaps = True
         self._texture_width = qimage.width()
         self._texture_height = qimage.height()
         self._video_format = _VIDEO_FMT_NONE
         return 0, self._texture_width, self._texture_height
+
+    def upload_still_texture(self, key: object, image: QImage) -> tuple[int, int, int]:
+        if self.activate_still_texture(key):
+            return 0, self._texture_width, self._texture_height
+        if image.isNull():
+            raise ValueError("Cannot upload a null QImage")
+        qimage = _qimage_to_rgba(image)
+        self._pending_still = (key, qimage, True)
+        self._pending_rgba_image = None
+        self._pending_video_planes = None
+        self._has_rgba_texture = True
+        self._has_video_texture = False
+        self._texture_uses_mipmaps = False
+        self._texture_width = qimage.width()
+        self._texture_height = qimage.height()
+        return 0, self._texture_width, self._texture_height
+
+    def warm_still_texture(self, key: object, image: QImage) -> bool:
+        if self.touch_still_texture(key):
+            return False
+        if image.isNull():
+            return False
+        if self._pending_still is not None and self._pending_still[2]:
+            emit_detail_event("gpu_prefetch_dropped", generation=0, reason="foreground_pending")
+            return False
+        self._pending_still = (key, _qimage_to_rgba(image), False)
+        return True
+
+    def take_still_upload_result(self) -> dict[str, object] | None:
+        """Return and clear the most recent render-thread still upload result."""
+
+        result = self._last_still_upload_result
+        self._last_still_upload_result = None
+        return result
+
+    def activate_still_texture(self, key: object) -> bool:
+        entry = self._still_textures.pop(key, None)
+        if entry is None:
+            return False
+        self._still_textures[key] = entry
+        texture, _size = entry
+        self._tex_rgba = texture
+        self._active_still_key = key
+        size = texture.pixelSize()
+        self._texture_width, self._texture_height = size.width(), size.height()
+        self._has_rgba_texture = True
+        self._has_video_texture = False
+        self._texture_uses_mipmaps = False
+        if self._srb is not None:
+            self._rebuild_srb()
+        return True
+
+    def touch_still_texture(self, key: object) -> bool:
+        entry = self._still_textures.pop(key, None)
+        if entry is None:
+            return False
+        self._still_textures[key] = entry
+        return True
+
+    def has_still_texture(self, key: object) -> bool:
+        return key in self._still_textures
+
+    def clear_still_residency(self) -> None:
+        for texture, _size in self._still_textures.values():
+            try:
+                texture.destroy()
+            except RuntimeError:
+                pass
+        self._still_textures.clear()
+        self._active_still_key = None
+        self._pending_still = None
+        self._tex_rgba = self._placeholder_texture
+        self._has_rgba_texture = False
+        self._texture_uses_mipmaps = False
+        if self._srb is not None:
+            self._rebuild_srb()
+
+    def trim_still_residency(self) -> None:
+        for key in tuple(self._still_textures):
+            if key == self._active_still_key:
+                continue
+            texture, size = self._still_textures.pop(key)
+            texture.destroy()
+            emit_detail_event("gpu_evict", generation=0, key=str(key), bytes=size, pressure=True)
 
     def upload_video_frame(self, frame: "QVideoFrame") -> tuple[int, int]:
         if QVideoFrame is None or QVideoFrameFormat is None:
@@ -392,6 +511,7 @@ class RhiImageRenderer:
         self._pending_rgba_image = None
         self._has_rgba_texture = False
         self._has_video_texture = True
+        self._texture_uses_mipmaps = True
         self._texture_width = width
         self._texture_height = height
         self._video_format = pixel_fmt
@@ -404,10 +524,12 @@ class RhiImageRenderer:
         return self._last_video_upload_pre_rotated
 
     def delete_texture(self) -> None:
+        self.clear_still_residency()
         self._pending_rgba_image = None
         self._pending_video_planes = None
         self._has_rgba_texture = False
         self._has_video_texture = False
+        self._texture_uses_mipmaps = False
         self._texture_width = 0
         self._texture_height = 0
         self._video_format = _VIDEO_FMT_NONE
@@ -504,7 +626,10 @@ class RhiImageRenderer:
             )
             overlay_vertex_count = len(overlay_data) // 6
             if overlay_vertex_count:
-                if self._ensure_overlay_buffer(len(overlay_data) * 4) and self._overlay_vbuf is not None:
+                if (
+                    self._ensure_overlay_buffer(len(overlay_data) * 4)
+                    and self._overlay_vbuf is not None
+                ):
                     ru.updateDynamicBuffer(
                         self._overlay_vbuf,
                         0,
@@ -526,7 +651,11 @@ class RhiImageRenderer:
             overlay_pipeline = self._overlay_pipeline
             overlay_vbuf = self._overlay_vbuf
             overlay_srb = self._overlay_srb
-            if overlay_pipeline is not None and overlay_vbuf is not None and overlay_srb is not None:
+            if (
+                overlay_pipeline is not None
+                and overlay_vbuf is not None
+                and overlay_srb is not None
+            ):
                 cb.setGraphicsPipeline(overlay_pipeline)
                 cb.setShaderResources(overlay_srb)
                 cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
@@ -576,7 +705,12 @@ class RhiImageRenderer:
                 texture = self._rhi.newTexture(fmt, size)
         else:
             texture = self._rhi.newTexture(fmt, size)
-        texture.create()
+        if texture.create() is False:
+            try:
+                texture.destroy()
+            except RuntimeError:
+                pass
+            raise RuntimeError("QRhi texture allocation failed")
         return texture
 
     def _upload_placeholder_textures(self, ru) -> None:
@@ -600,7 +734,9 @@ class RhiImageRenderer:
             ru.uploadTexture(
                 self._placeholder_uv_texture,
                 QRhiTextureUploadDescription(
-                    QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(bytes([128, 128])))
+                    QRhiTextureUploadEntry(
+                        0, 0, QRhiTextureSubresourceUploadDescription(bytes([128, 128]))
+                    )
                 ),
             )
         if self._placeholder_lut_texture is not None:
@@ -618,67 +754,75 @@ class RhiImageRenderer:
     def _main_vertex_layout() -> QRhiVertexInputLayout:
         input_layout = QRhiVertexInputLayout()
         input_layout.setBindings([QRhiVertexInputBinding(4 * 4)])
-        input_layout.setAttributes([
-            QRhiVertexInputAttribute(0, 0, QRhiVertexInputAttribute.Format.Float2, 0),
-            QRhiVertexInputAttribute(0, 1, QRhiVertexInputAttribute.Format.Float2, 2 * 4),
-        ])
+        input_layout.setAttributes(
+            [
+                QRhiVertexInputAttribute(0, 0, QRhiVertexInputAttribute.Format.Float2, 0),
+                QRhiVertexInputAttribute(0, 1, QRhiVertexInputAttribute.Format.Float2, 2 * 4),
+            ]
+        )
         return input_layout
 
     @staticmethod
     def _overlay_vertex_layout() -> QRhiVertexInputLayout:
         input_layout = QRhiVertexInputLayout()
         input_layout.setBindings([QRhiVertexInputBinding(_OVERLAY_VERTEX_STRIDE)])
-        input_layout.setAttributes([
-            QRhiVertexInputAttribute(0, 0, QRhiVertexInputAttribute.Format.Float2, 0),
-            QRhiVertexInputAttribute(0, 1, QRhiVertexInputAttribute.Format.Float4, 2 * 4),
-        ])
+        input_layout.setAttributes(
+            [
+                QRhiVertexInputAttribute(0, 0, QRhiVertexInputAttribute.Format.Float2, 0),
+                QRhiVertexInputAttribute(0, 1, QRhiVertexInputAttribute.Format.Float4, 2 * 4),
+            ]
+        )
         return input_layout
 
     def _rebuild_srb(self) -> None:
         if self._rhi is None or self._srb is None or self._ubuf is None or self._sampler is None:
             return
-        self._srb.setBindings([
-            QRhiShaderResourceBinding.uniformBuffer(
-                0,
-                QRhiShaderResourceBinding.StageFlag.FragmentStage,
-                self._ubuf,
-            ),
-            QRhiShaderResourceBinding.sampledTexture(
-                1,
-                QRhiShaderResourceBinding.StageFlag.FragmentStage,
-                self._tex_rgba or self._placeholder_texture,
-                self._sampler,
-            ),
-            QRhiShaderResourceBinding.sampledTexture(
-                2,
-                QRhiShaderResourceBinding.StageFlag.FragmentStage,
-                self._tex_y or self._placeholder_y_texture,
-                self._sampler,
-            ),
-            QRhiShaderResourceBinding.sampledTexture(
-                3,
-                QRhiShaderResourceBinding.StageFlag.FragmentStage,
-                self._tex_uv or self._placeholder_uv_texture,
-                self._sampler,
-            ),
-            QRhiShaderResourceBinding.sampledTexture(
-                4,
-                QRhiShaderResourceBinding.StageFlag.FragmentStage,
-                self._curve_lut_texture or self._placeholder_lut_texture,
-                self._sampler,
-            ),
-            QRhiShaderResourceBinding.sampledTexture(
-                5,
-                QRhiShaderResourceBinding.StageFlag.FragmentStage,
-                self._levels_lut_texture or self._placeholder_lut_texture,
-                self._sampler,
-            ),
-        ])
+        self._srb.setBindings(
+            [
+                QRhiShaderResourceBinding.uniformBuffer(
+                    0,
+                    QRhiShaderResourceBinding.StageFlag.FragmentStage,
+                    self._ubuf,
+                ),
+                QRhiShaderResourceBinding.sampledTexture(
+                    1,
+                    QRhiShaderResourceBinding.StageFlag.FragmentStage,
+                    self._tex_rgba or self._placeholder_texture,
+                    self._sampler,
+                ),
+                QRhiShaderResourceBinding.sampledTexture(
+                    2,
+                    QRhiShaderResourceBinding.StageFlag.FragmentStage,
+                    self._tex_y or self._placeholder_y_texture,
+                    self._sampler,
+                ),
+                QRhiShaderResourceBinding.sampledTexture(
+                    3,
+                    QRhiShaderResourceBinding.StageFlag.FragmentStage,
+                    self._tex_uv or self._placeholder_uv_texture,
+                    self._sampler,
+                ),
+                QRhiShaderResourceBinding.sampledTexture(
+                    4,
+                    QRhiShaderResourceBinding.StageFlag.FragmentStage,
+                    self._curve_lut_texture or self._placeholder_lut_texture,
+                    self._sampler,
+                ),
+                QRhiShaderResourceBinding.sampledTexture(
+                    5,
+                    QRhiShaderResourceBinding.StageFlag.FragmentStage,
+                    self._levels_lut_texture or self._placeholder_lut_texture,
+                    self._sampler,
+                ),
+            ]
+        )
         self._srb.create()
 
     def _flush_pending_texture_uploads(self, ru) -> None:
         if self._rhi is None:
             return
+        if self._pending_still is not None:
+            self._flush_pending_still_texture(ru)
         if self._pending_rgba_image is not None:
             image = self._pending_rgba_image
             size = QSize(image.width(), image.height())
@@ -689,7 +833,9 @@ class RhiImageRenderer:
             ):
                 if self._tex_rgba is not None and self._tex_rgba is not self._placeholder_texture:
                     self._tex_rgba.destroy()
-                self._tex_rgba = self._create_texture(QRhiTexture.Format.RGBA8, size, mipmapped=True)
+                self._tex_rgba = self._create_texture(
+                    QRhiTexture.Format.RGBA8, size, mipmapped=True
+                )
                 self._rebuild_srb()
             ru.uploadTexture(
                 self._tex_rgba,
@@ -707,17 +853,31 @@ class RhiImageRenderer:
         if self._pending_video_planes is not None:
             planes = self._pending_video_planes
             pixel_fmt = int(planes["format"])
-            y_fmt = QRhiTexture.Format.R8 if pixel_fmt == _VIDEO_FMT_NV12 else QRhiTexture.Format.R16
-            uv_fmt = QRhiTexture.Format.RG8 if pixel_fmt == _VIDEO_FMT_NV12 else QRhiTexture.Format.RG16
+            y_fmt = (
+                QRhiTexture.Format.R8 if pixel_fmt == _VIDEO_FMT_NV12 else QRhiTexture.Format.R16
+            )
+            uv_fmt = (
+                QRhiTexture.Format.RG8 if pixel_fmt == _VIDEO_FMT_NV12 else QRhiTexture.Format.RG16
+            )
             y_size = QSize(int(planes["width"]), int(planes["height"]))
             uv_size = QSize(int(planes["uv_width"]), int(planes["uv_height"]))
-            if self._tex_y is self._placeholder_y_texture or self._tex_y is None or self._tex_y.pixelSize() != y_size or self._tex_y_fmt != y_fmt:
+            if (
+                self._tex_y is self._placeholder_y_texture
+                or self._tex_y is None
+                or self._tex_y.pixelSize() != y_size
+                or self._tex_y_fmt != y_fmt
+            ):
                 if self._tex_y is not None and self._tex_y is not self._placeholder_y_texture:
                     self._tex_y.destroy()
                 self._tex_y = self._create_texture(y_fmt, y_size, mipmapped=True)
                 self._tex_y_fmt = y_fmt
                 self._rebuild_srb()
-            if self._tex_uv is self._placeholder_uv_texture or self._tex_uv is None or self._tex_uv.pixelSize() != uv_size or self._tex_uv_fmt != uv_fmt:
+            if (
+                self._tex_uv is self._placeholder_uv_texture
+                or self._tex_uv is None
+                or self._tex_uv.pixelSize() != uv_size
+                or self._tex_uv_fmt != uv_fmt
+            ):
                 if self._tex_uv is not None and self._tex_uv is not self._placeholder_uv_texture:
                     self._tex_uv.destroy()
                 self._tex_uv = self._create_texture(uv_fmt, uv_size, mipmapped=True)
@@ -725,10 +885,14 @@ class RhiImageRenderer:
                 self._rebuild_srb()
             y_sub = QRhiTextureSubresourceUploadDescription(planes["y_data"])
             y_sub.setDataStride(int(planes["y_stride"]))
-            ru.uploadTexture(self._tex_y, QRhiTextureUploadDescription(QRhiTextureUploadEntry(0, 0, y_sub)))
+            ru.uploadTexture(
+                self._tex_y, QRhiTextureUploadDescription(QRhiTextureUploadEntry(0, 0, y_sub))
+            )
             uv_sub = QRhiTextureSubresourceUploadDescription(planes["uv_data"])
             uv_sub.setDataStride(int(planes["uv_stride"]))
-            ru.uploadTexture(self._tex_uv, QRhiTextureUploadDescription(QRhiTextureUploadEntry(0, 0, uv_sub)))
+            ru.uploadTexture(
+                self._tex_uv, QRhiTextureUploadDescription(QRhiTextureUploadEntry(0, 0, uv_sub))
+            )
             if hasattr(ru, "generateMips"):
                 for texture in (self._tex_y, self._tex_uv):
                     try:
@@ -745,6 +909,7 @@ class RhiImageRenderer:
             )
             self._pending_curve_lut = None
             self._rebuild_srb()
+
         if self._pending_levels_lut is not None:
             self._levels_lut_texture = self._upload_lut_texture(
                 ru,
@@ -753,6 +918,180 @@ class RhiImageRenderer:
             )
             self._pending_levels_lut = None
             self._rebuild_srb()
+
+    def _evict_before_still_allocation(
+        self,
+        *,
+        incoming_bytes: int,
+        resident_bytes: int,
+    ) -> None:
+        """Destroy non-active QRhi textures before allocating new storage."""
+
+        while (
+            len(self._still_textures) >= 3
+            or resident_bytes + incoming_bytes > self._still_budget_bytes
+        ):
+            victim = next(
+                (
+                    candidate
+                    for candidate in self._still_textures
+                    if candidate != self._active_still_key
+                ),
+                None,
+            )
+            if victim is None:
+                break
+            texture, size = self._still_textures.pop(victim)
+            texture.destroy()
+            resident_bytes -= size
+            emit_detail_event(
+                "gpu_evict",
+                generation=0,
+                key=str(victim),
+                bytes=size,
+                before_allocate=True,
+            )
+
+    def _flush_pending_still_texture(self, ru) -> None:
+        """Upload one still while keeping the current texture valid on failure."""
+
+        pending = self._pending_still
+        self._pending_still = None
+        if pending is None:
+            return
+        key, image, activate = pending
+        size = QSize(image.width(), image.height())
+        byte_count = max(0, int(image.bytesPerLine()) * int(image.height()))
+        resident_bytes = sum(entry[1] for entry in self._still_textures.values())
+        replacement_required = bool(
+            len(self._still_textures) >= 3 or resident_bytes + byte_count > self._still_budget_bytes
+        )
+        reusable_key = None
+        if replacement_required:
+            reusable_key = next(
+                (
+                    candidate
+                    for candidate, entry in self._still_textures.items()
+                    if candidate != self._active_still_key and entry[0].pixelSize() == size
+                ),
+                None,
+            )
+        texture = None
+        old_entry: tuple[QRhiTexture, int] | None = None
+        created = False
+        if reusable_key is not None:
+            old_entry = self._still_textures.pop(reusable_key)
+            texture = old_entry[0]
+        else:
+            self._evict_before_still_allocation(
+                incoming_bytes=byte_count,
+                resident_bytes=resident_bytes,
+            )
+            resident_bytes = sum(entry[1] for entry in self._still_textures.values())
+            over_budget = resident_bytes + byte_count > self._still_budget_bytes
+            over_count = len(self._still_textures) >= 3
+            if over_budget or over_count:
+                event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
+                emit_detail_event(
+                    event,
+                    generation=0,
+                    width=size.width(),
+                    height=size.height(),
+                    bytes=byte_count,
+                    reason="residency_budget",
+                )
+                self._last_still_upload_result = {
+                    "key": key,
+                    "activate": bool(activate),
+                    "success": False,
+                    "reason": "residency_budget",
+                }
+                self._has_rgba_texture = self._active_still_key in self._still_textures
+                return
+            try:
+                texture = self._create_texture(
+                    QRhiTexture.Format.RGBA8,
+                    size,
+                    mipmapped=False,
+                )
+                created = True
+            except (MemoryError, RuntimeError):
+                event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
+                emit_detail_event(
+                    event,
+                    generation=0,
+                    width=size.width(),
+                    height=size.height(),
+                    bytes=byte_count,
+                    foreground=bool(activate),
+                    reason="create_failed",
+                )
+                self._last_still_upload_result = {
+                    "key": key,
+                    "activate": bool(activate),
+                    "success": False,
+                    "reason": "create_failed",
+                }
+                self._has_rgba_texture = self._active_still_key in self._still_textures
+                return
+
+        try:
+            ru.uploadTexture(
+                texture,
+                QRhiTextureUploadDescription(
+                    QRhiTextureUploadEntry(
+                        0,
+                        0,
+                        QRhiTextureSubresourceUploadDescription(image),
+                    )
+                ),
+            )
+        except (MemoryError, RuntimeError):
+            if created and texture is not None:
+                texture.destroy()
+            elif reusable_key is not None and old_entry is not None:
+                # Do not return potentially modified reused storage to the
+                # residency map after a failed upload submission.
+                old_entry[0].destroy()
+            event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
+            emit_detail_event(
+                event,
+                generation=0,
+                width=size.width(),
+                height=size.height(),
+                bytes=byte_count,
+                foreground=bool(activate),
+                reason="upload_failed",
+            )
+            self._last_still_upload_result = {
+                "key": key,
+                "activate": bool(activate),
+                "success": False,
+                "reason": "upload_failed",
+            }
+            self._has_rgba_texture = self._active_still_key in self._still_textures
+            return
+
+        if reusable_key is not None:
+            emit_detail_event(
+                "gpu_evict",
+                generation=0,
+                bytes=old_entry[1] if old_entry is not None else 0,
+                reused=True,
+            )
+        self._still_textures[key] = (texture, byte_count)
+        if activate:
+            self._tex_rgba = texture
+            self._active_still_key = key
+            self._texture_width, self._texture_height = image.width(), image.height()
+            self._has_rgba_texture = True
+            self._rebuild_srb()
+        self._last_still_upload_result = {
+            "key": key,
+            "activate": bool(activate),
+            "success": True,
+            "reason": "uploaded",
+        }
 
     def _upload_lut_texture(self, ru, current: QRhiTexture | None, lut: np.ndarray) -> QRhiTexture:
         lut_format = _texture_format("RGBA32F", QRhiTexture.Format.RGBA8)
@@ -795,7 +1134,9 @@ class RhiImageRenderer:
 
         data = bytearray(_UBO_SIZE)
         video_format, video_colorspace, video_transfer, video_range = (
-            self.video_metadata() if self._has_video_texture else (_VIDEO_FMT_NONE, _CS_BT709, _TF_SDR, _RANGE_LIMITED)
+            self.video_metadata()
+            if self._has_video_texture
+            else (_VIDEO_FMT_NONE, _CS_BT709, _TF_SDR, _RANGE_LIMITED)
         )
         ints = [
             1 if self._has_video_texture else 0,
@@ -852,8 +1193,7 @@ class RhiImageRenderer:
             124: float(adjustments.get("Vignette_Radius", 0.50))
             if bool(adjustments.get("Vignette_Enabled", False))
             else 0.50,
-            128: 0.1
-            + max(0.0, min(1.0, float(adjustments.get("Vignette_Softness", 0.0)))) * 0.9
+            128: 0.1 + max(0.0, min(1.0, float(adjustments.get("Vignette_Softness", 0.0)))) * 0.9
             if bool(adjustments.get("Vignette_Enabled", False))
             else 0.1,
             132: max(float(scale), 1e-6),
@@ -896,7 +1236,9 @@ class RhiImageRenderer:
         struct.pack_into("2f", data, 208, float(pan.x()), float(pan.y()))
         struct.pack_into("2f", data, 216, float(offset_value.x()), float(offset_value.y()))
 
-        logical_aspect_ratio = float(logical_w) / float(logical_h) if float(logical_h) > 0.0 else 1.0
+        logical_aspect_ratio = (
+            float(logical_w) / float(logical_h) if float(logical_h) > 0.0 else 1.0
+        )
         if not math.isfinite(logical_aspect_ratio) or logical_aspect_ratio <= 1e-6:
             logical_aspect_ratio = 1.0
         perspective_matrix = build_perspective_matrix(
@@ -927,6 +1269,7 @@ class RhiImageRenderer:
             struct.pack_into("4f", data, 272 + idx * 16, *selective_color_u0[idx])
             struct.pack_into("4f", data, 368 + idx * 16, *selective_color_u1[idx])
         struct.pack_into("i", data, 464, 1)
+        struct.pack_into("i", data, 468, 1 if self._texture_uses_mipmaps else 0)
 
         ru.updateDynamicBuffer(self._ubuf, 0, len(data), bytes(data))
 
@@ -1007,7 +1350,9 @@ class RhiImageRenderer:
         border_colour = (1.0, 0.85, 0.2, 1.0)
         vertices: list[float] = []
 
-        def add_rect(rect: tuple[float, float, float, float], colour: tuple[float, float, float, float]) -> None:
+        def add_rect(
+            rect: tuple[float, float, float, float], colour: tuple[float, float, float, float]
+        ) -> None:
             l_px, t_px, r_px, b_px = rect
             l_px = min(max(l_px, 0.0), vw)
             r_px = min(max(r_px, 0.0), vw)

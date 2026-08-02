@@ -735,6 +735,7 @@ def main(argv: list[str] | None = None) -> int:
     # Coordinator needs Window, Context, and Container
     coordinator = None
     coordinator_started = False
+    detail_benchmark_harness = None
 
     def _enqueue_startup_job(
         name: str,
@@ -909,11 +910,15 @@ def main(argv: list[str] | None = None) -> int:
             window.set_coordinator(coordinator)
 
     def _start_coordinator() -> None:
-        nonlocal coordinator_started
+        nonlocal coordinator_started, detail_benchmark_harness
         if coordinator is None or coordinator_started:
             return
         coordinator.start()
         coordinator_started = True
+        if os.environ.get("IPHOTO_DETAIL_BENCHMARK_PLAN", "").strip():
+            from iPhoto.gui.detail_benchmark_harness import maybe_start_detail_benchmark
+
+            detail_benchmark_harness = maybe_start_detail_benchmark(app, coordinator)
         mark("main_coordinator.started")
 
     def _initialize_features_after_show(generation: int) -> None:

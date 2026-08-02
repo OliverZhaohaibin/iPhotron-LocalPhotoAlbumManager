@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtCore import Qt
 
 from iPhoto.gui.ui.window_manager import FramelessWindowManager, _is_wayland
 
@@ -78,6 +78,21 @@ def test_escape_cancels_active_edit_before_window_fullscreen_logic() -> None:
     FramelessWindowManager.exit_fullscreen(manager)
 
     edit.cancel_edit_mode.assert_called_once_with()
+
+
+def test_fullscreen_edit_check_does_not_materialise_lazy_edit_runtime() -> None:
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    active_accessor = MagicMock(return_value=None)
+    compatibility_accessor = MagicMock()
+    manager._controller = SimpleNamespace(
+        active_edit_controller=active_accessor,
+        edit_controller=compatibility_accessor,
+    )
+
+    assert FramelessWindowManager._edit_controller(manager) is None
+
+    active_accessor.assert_called_once_with()
+    compatibility_accessor.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "samples": [
+    {"path": "9/DSCF5639.JPG", "category": "jpeg-cold", "cache_group": "cold"},
+    {"path": "9/DSCF5639.JPG", "category": "jpeg-hot-gpu", "cache_group": "gpu", "scenario": "lod"},
+    {"path": "live photo/IMG_3702.PNG", "category": "png-cold", "cache_group": "cold", "scenario": "fullscreen"},
+    {"path": "live photo/IMG_3781.HEIC", "category": "heic-hot-disk", "cache_group": "disk", "scenario": "open"},
+    {"path": "15/DSC_0291.NEF", "category": "raw-heavy", "cache_group": "cold"},
+    {"path": "11/DJI_20250613154422_0146_D-2.mp4", "category": "video-mp4", "scenario": "edit-cancel"},
+    {"path": "live photo/IMG_3789.MOV", "category": "video-live-motion", "scenario": "open"},
+    {"path": "9/DSCF5639.JPG", "category": "jpeg-rapid-switch", "scenario": "rapid-switch", "switch_paths": ["live photo/IMG_3702.PNG", "9/DSCF5639.JPG"]}
+  ],
+  "interval_ms": 50,
+  "timeout_ms": 30000
+}

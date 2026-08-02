@@ -29,6 +29,7 @@ dependencies = [
   "PyOpenGL>=3.1.7",
   "PyOpenGL_accelerate>=3.1.7",
   "rawpy>=0.23",
+  "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

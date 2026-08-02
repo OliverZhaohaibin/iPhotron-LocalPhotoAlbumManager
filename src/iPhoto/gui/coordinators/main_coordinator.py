@@ -26,10 +26,10 @@ from iPhoto.events.asset_events import AssetMetadataUpdated
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.services.location_file_write_queue import LocationFileWriteQueue
 from iPhoto.gui.services.location_trash_navigation_service import (
     LocationTrashNavigationService,
 )
-from iPhoto.gui.services.location_file_write_queue import LocationFileWriteQueue
 from iPhoto.gui.services.people_service_resolver import resolve_people_service
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
@@ -203,6 +203,7 @@ class MainCoordinator(QObject):
             window.ui.player_placeholder,
             window.ui.live_badge,
             edit_service_getter=edit_service_getter,
+            library_root_getter=self._library_root,
         )
         self._header_controller = HeaderController(
             window.ui.location_label,
@@ -404,6 +405,11 @@ class MainCoordinator(QObject):
         """Expose the edit coordinator for immersive mode hooks."""
 
         return self._ensure_edit_coordinator()
+
+    def active_edit_controller(self) -> "EditCoordinator | None":
+        """Return the existing edit runtime without materialising it."""
+
+        return self._edit
 
     def _ensure_edit_coordinator(self) -> "EditCoordinator":
         if self._edit is not None:

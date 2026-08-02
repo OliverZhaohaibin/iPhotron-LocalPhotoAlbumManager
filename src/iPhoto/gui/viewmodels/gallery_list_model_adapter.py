@@ -25,6 +25,7 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.ports import EditServicePort
 from iPhoto.bootstrap.startup_profile import mark
 from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.detail_pipeline import AssetSourceIdentity, DetailPrefetchDescriptor
 from iPhoto.gui.gallery_demand import GalleryViewportDemand
 from iPhoto.gui.ui.models.roles import Roles, role_names
 from iPhoto.infrastructure.services.performance_events import (
@@ -199,6 +200,28 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     def columnCount(self, parent=QModelIndex()) -> int:  # type: ignore[override]
         return 1
+
+    def detail_prefetch_descriptor(self, row: int) -> DetailPrefetchDescriptor | None:
+        """Return an in-memory full-source descriptor without filesystem I/O."""
+
+        asset = self._store.asset_at(int(row))
+        if asset is None:
+            return None
+        return DetailPrefetchDescriptor(
+            row=int(row),
+            asset_id=str(asset.id),
+            path=asset.abs_path,
+            is_video=bool(asset.is_video),
+            source_identity=AssetSourceIdentity.from_info(
+                asset.abs_path,
+                {
+                    **dict(asset.metadata or {}),
+                    "bytes": asset.size_bytes,
+                    "w": asset.width,
+                    "h": asset.height,
+                },
+            ),
+        )
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:  # type: ignore[override]
         if not index.isValid():

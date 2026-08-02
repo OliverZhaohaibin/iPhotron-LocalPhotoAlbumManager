@@ -394,11 +394,15 @@ def test_missing_disk_entry_forgets_prior_persistence_observation(tmp_path: Path
     assert backend.has_persisted_surface(loaded.decode_key)
     path = store.entry_path(request)
     assert path is not None
-    path.unlink()
+    # Windows cannot remove a file while its mmap-backed QImage is resident.
+    # Release the mapped surface and let validation/touch finish before
+    # simulating external cache eviction.
     backend.memory_cache.clear()
+    del loaded
+    backend.shutdown()
+    path.unlink()
 
     decoded = backend.decode(request, _Token())
 
     assert decoded.cache_tier == "decode"
     assert not backend.has_persisted_surface(decoded.decode_key)
-    backend.shutdown()

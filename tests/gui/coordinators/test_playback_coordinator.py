@@ -468,7 +468,7 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
     display_call = player_view.display_image.call_args
     assert display_call.args == (Path("/fake/photo.heic"),)
     assert display_call.kwargs["asset_id"] == "asset-1"
-    assert display_call.kwargs["source_identity"].path == Path("/fake/photo.heic")
+    assert display_call.kwargs["source_identity"].path == Path("/fake/photo.heic").absolute()
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
 
 

@@ -166,6 +166,33 @@ def test_final_transaction_is_bound_from_real_lifecycle_generation() -> None:
     )
 
 
+def test_instrumentation_only_baseline_finishes_from_real_still_draw() -> None:
+    expected = Path("/benchmark/a.jpg")
+    harness = PackagedDetailBenchmarkHarness.__new__(PackagedDetailBenchmarkHarness)
+    harness._active = _BenchmarkItem(path=expected, category="jpeg-cold")
+    harness._active_final_transaction = (expected, 8)
+    harness._timeout = Mock()
+    harness._stop_gui_task_measurement = Mock()
+    harness._start_post_present_scenario = Mock()
+
+    with (
+        patch.object(harness_module, "emit_detail_event") as emit_event,
+        patch.object(harness_module.QTimer, "singleShot") as single_shot,
+    ):
+        harness._on_legacy_still_presented(expected)
+
+    harness._timeout.stop.assert_called_once_with()
+    harness._stop_gui_task_measurement.assert_called_once_with()
+    assert harness._active_final_transaction is None  # noqa: S101
+    assert [call.args[0] for call in emit_event.call_args_list] == [  # noqa: S101
+        "surface_presented",
+        "presented",
+    ]
+    _, callback = single_shot.call_args.args
+    callback()
+    harness._start_post_present_scenario.assert_called_once_with(harness._active)
+
+
 def test_initial_scan_completion_defers_dispatch_until_store_refresh(tmp_path) -> None:
     library = tmp_path / "library"
     library.mkdir()

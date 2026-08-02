@@ -56,6 +56,8 @@ class PackagedDetailBenchmarkHarness(QObject):
         self._disk_warmup_item: _BenchmarkItem | None = None
         self._disk_warmup_key: object | None = None
         self._disk_warmup_deadline = 0.0
+        self._production_detail_pipeline = False
+        self._legacy_generation = 0
         self._measure_gui_tasks = False
         self._attempts = 0
         self._completed = 0
@@ -123,11 +125,28 @@ class PackagedDetailBenchmarkHarness(QObject):
         else:
             self._gallery_ready = True
         self._runtime._gallery_vm.rescan_current()
-        coordinator = self._runtime._playback._detail_render_lifecycle
-        coordinator.stateChanged.connect(self._on_transaction_state_changed)
-        coordinator.presented.connect(self._on_presented)
-        coordinator.failed.connect(self._on_failed)
-        coordinator.cancelled.connect(self._on_cancelled)
+        player = getattr(self._runtime._playback, "_player_view", None)
+        self._production_detail_pipeline = player is None or (
+            callable(getattr(player, "clear_frame_cache", None))
+            and getattr(player, "_decode_backend", None) is not None
+        )
+        if self._production_detail_pipeline:
+            coordinator = self._runtime._playback._detail_render_lifecycle
+            coordinator.stateChanged.connect(self._on_transaction_state_changed)
+            coordinator.presented.connect(self._on_presented)
+            coordinator.failed.connect(self._on_failed)
+            coordinator.cancelled.connect(self._on_cancelled)
+        else:
+            # Instrumentation-only baseline compatibility. The pre-integration
+            # runtime has no transaction for ordinary still/video opens, so
+            # observe the same final draw signals without adding a decoder,
+            # cache, scheduler, or residency implementation to that build.
+            player.image_viewer.stillFramePresented.connect(  # type: ignore[union-attr]
+                self._on_legacy_still_presented
+            )
+            player.video_area.framePresented.connect(  # type: ignore[union-attr]
+                self._on_legacy_video_presented
+            )
         dispatcher = QAbstractEventDispatcher.instance()
         if dispatcher is not None:
             dispatcher.awake.connect(self._on_dispatcher_awake)
@@ -298,7 +317,9 @@ class PackagedDetailBenchmarkHarness(QObject):
         except OSError as exc:
             self._finish(f"cache_prepare_failed:{exc}", exit_code=2)
             return
-        is_disk_warmup = item.cache_group == "disk"
+        is_disk_warmup = (
+            self._production_detail_pipeline and item.cache_group == "disk"
+        )
         self._disk_warmup_item = item if is_disk_warmup else None
         if is_disk_warmup:
             self._stop_gui_task_measurement()
@@ -333,11 +354,36 @@ class PackagedDetailBenchmarkHarness(QObject):
             self._finish(f"asset_not_indexed:{path.name}", exit_code=2)
             return
         row, transaction_source = target
-        if is_final:
+        if is_final and not self._production_detail_pipeline:
+            self._legacy_generation += 1
+            generation = self._legacy_generation
+            self._active_final_transaction = (transaction_source, generation)
+            emit_detail_event(
+                "click_received",
+                generation=generation,
+                media_type=(
+                    "video"
+                    if path.suffix.lower() in {".mov", ".mp4", ".mkv"}
+                    else "image"
+                ),
+            )
+            emit_detail_event(
+                "benchmark_sample_started",
+                generation=generation,
+                category=category,
+            )
+        elif is_final:
             self._pending_final_source = transaction_source
             self._pending_final_category = category
             self._pending_final_is_warmup = bool(is_warmup)
         self._runtime._gallery_vm.open_row(row)
+        if not self._production_detail_pipeline:
+            if is_final:
+                emit_detail_event(
+                    "route_visible",
+                    generation=self._legacy_generation,
+                )
+            return
         lifecycle = self._runtime._playback._detail_render_lifecycle
         self._bind_pending_final_transaction(getattr(lifecycle, "snapshot", None))
 
@@ -374,6 +420,20 @@ class PackagedDetailBenchmarkHarness(QObject):
 
     def _prepare_cache_group(self, item: _BenchmarkItem) -> None:
         player = self._runtime._playback._player_view
+        production_pipeline = getattr(
+            self,
+            "_production_detail_pipeline",
+            callable(getattr(player, "clear_frame_cache", None))
+            and getattr(player, "_decode_backend", None) is not None,
+        )
+        if not production_pipeline:
+            if item.cache_group not in {"cold", "disk", "memory", "gpu", "preserve"}:
+                raise OSError(f"unknown cache group: {item.cache_group}")
+            # The baseline has no reusable surface cache and display_image()
+            # clears its texture before every legacy worker request. A cache
+            # group is therefore intentionally a no-op: adding a substitute
+            # cache would no longer be instrumentation-only.
+            return
         if item.cache_group == "cold":
             player.clear_frame_cache()
             root = player._decode_backend.store.root
@@ -413,6 +473,42 @@ class PackagedDetailBenchmarkHarness(QObject):
             self._disk_warmup_deadline = time.monotonic() + 5.0
             QTimer.singleShot(0, self._wait_for_disk_warmup)
             return
+        QTimer.singleShot(0, lambda: self._start_post_present_scenario(item))
+
+    def _on_legacy_still_presented(self, source: object) -> None:
+        self._finish_legacy_presentation(Path(source), video=False)
+
+    def _on_legacy_video_presented(self, source: object) -> None:
+        self._finish_legacy_presentation(Path(source), video=True)
+
+    def _finish_legacy_presentation(self, source: Path, *, video: bool) -> None:
+        expected = self._active_final_transaction
+        item = self._active
+        if expected is None or item is None:
+            return
+        expected_source, generation = expected
+        allowed_sources = {_canonical_path(expected_source), _canonical_path(item.path)}
+        if _canonical_path(source) not in allowed_sources:
+            return
+        self._active_final_transaction = None
+        self._timeout.stop()
+        self._stop_gui_task_measurement()
+        emit_detail_event(
+            "surface_presented",
+            generation=generation,
+            surface_kind="video_frame" if video else "still",
+        )
+        if video:
+            emit_detail_event(
+                "video_first_frame_presented",
+                generation=generation,
+                media_type="video",
+            )
+        emit_detail_event(
+            "presented",
+            generation=generation,
+            media_type="video" if video else "image",
+        )
         QTimer.singleShot(0, lambda: self._start_post_present_scenario(item))
 
     def _wait_for_disk_warmup(self) -> None:
@@ -545,6 +641,8 @@ class PackagedDetailBenchmarkHarness(QObject):
         QTimer.singleShot(self._interval_ms, self._dispatch_next)
 
     def _current_generation(self) -> int:
+        if not self._production_detail_pipeline:
+            return self._legacy_generation
         lifecycle = self._runtime._playback._detail_render_lifecycle
         return int(lifecycle.current_generation)
 

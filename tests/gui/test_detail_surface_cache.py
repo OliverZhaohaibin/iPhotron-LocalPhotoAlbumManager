@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -101,6 +103,155 @@ def test_disk_store_round_trip_returns_mmap_backed_rgba_surface(tmp_path: Path) 
     assert loaded.decoded_size == original.decoded_size
     assert loaded.color_stats == original.color_stats
     assert bytes(loaded.image.constBits()[:4]) == bytes(original.image.constBits()[:4])
+
+
+def test_disk_store_uses_v3_sqlite_index(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+
+    assert store.write(request, _surface(request))
+    assert store.root is not None
+    assert store.root.name == "v3"
+    assert (store.root / "index.sqlite3").is_file()
+
+
+def test_trusted_disk_hit_does_not_scan_payload_checksum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+
+    def fail_checksum(_payload) -> int:
+        raise AssertionError("trusted cache hit must not hash the payload")
+
+    monkeypatch.setattr(surface_cache_module, "_checksum", fail_checksum)
+    assert store.load(request) is not None
+
+
+def test_sampled_audit_discards_same_size_corruption_with_restored_mtime(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    assert path is not None
+    stat = path.stat()
+    with path.open("r+b") as stream:
+        stream.seek(-1, os.SEEK_END)
+        original = stream.read(1)
+        stream.seek(-1, os.SEEK_END)
+        stream.write(bytes([original[0] ^ 0xFF]))
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    store._disk_hit_count = surface_cache_module._ACCESS_AUDIT_INTERVAL - 1
+
+    assert store.load(request) is not None
+    assert path.exists()
+
+    store.run_pending_audits()
+    assert not path.exists()
+    assert store.load(request) is None
+
+
+def test_writes_below_maintenance_watermark_do_not_traverse_payload_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = NeutralSurfaceStore(tmp_path, budget_bytes=64 * 1024 * 1024)
+    request = _request(tmp_path / "photo.jpg")
+
+    def fail_glob(_self: Path, _pattern: str):
+        raise AssertionError("ordinary writes must not traverse the payload directory")
+
+    monkeypatch.setattr(Path, "glob", fail_glob)
+    assert store.write(request, _surface(request))
+
+
+def test_indexed_prune_uses_lru_and_low_watermark(tmp_path: Path) -> None:
+    first = _request(tmp_path / "first.jpg", revision=1)
+    second = _request(tmp_path / "second.jpg", revision=2)
+    third = _request(tmp_path / "third.jpg", revision=3)
+    probe = NeutralSurfaceStore(tmp_path, budget_bytes=1 << 30)
+    assert probe.write(first, _surface(first))
+    first_path = probe.entry_path(first)
+    assert first_path is not None
+    file_bytes = first_path.stat().st_size
+    probe.close()
+    shutil.rmtree(tmp_path / ".iPhoto")
+
+    store = NeutralSurfaceStore(tmp_path, budget_bytes=1 << 30)
+    assert store.write(first, _surface(first))
+    assert store.write(second, _surface(second))
+    assert store.write(third, _surface(third))
+    assert store.load(first) is not None
+    store._budget_override = file_bytes * 2 + 64
+    store.prune()
+
+    assert store.entry_path(first).exists()  # type: ignore[union-attr]
+    assert not store.entry_path(second).exists()  # type: ignore[union-attr]
+    assert not store.entry_path(third).exists()  # type: ignore[union-attr]
+
+
+def test_dirty_recovery_indexes_orphan_payload_and_removes_temp(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    index.remove(surface_cache_module._key_digest(request))
+    temporary = path.parent / ".orphan.ipsurface.crash.tmp"
+    temporary.write_bytes(b"partial")
+
+    recovered = NeutralSurfaceStore(tmp_path)
+    loaded = recovered.load(request)
+
+    assert loaded is not None
+    assert loaded.cache_tier == "disk"
+    assert not temporary.exists()
+
+
+def test_missing_payload_removes_stale_metadata_row(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    path.unlink()
+
+    assert store.load(request) is None
+    assert index.get(surface_cache_module._key_digest(request)) is None
+
+
+def test_corrupt_sqlite_index_is_rebuilt_from_untrusted_payload(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    root = store.root
+    assert root is not None
+    store.close()
+    (root / "index.sqlite3").write_bytes(b"not a sqlite database")
+
+    recovered = NeutralSurfaceStore(tmp_path)
+    loaded = recovered.load(request)
+
+    assert loaded is not None
+    assert loaded.decoded_size == (8, 4)
+    assert tuple(root.glob("index.sqlite3.corrupt-*"))
+
+
+def test_first_v3_write_removes_rebuildable_v2_namespace(tmp_path: Path) -> None:
+    legacy = tmp_path / ".iPhoto" / "cache" / "detail-surfaces" / "v2"
+    legacy.mkdir(parents=True)
+    (legacy / "stale.cache").write_bytes(b"rebuildable")
+    request = _request(tmp_path / "photo.jpg")
+
+    assert NeutralSurfaceStore(tmp_path).write(request, _surface(request))
+
+    assert not legacy.exists()
 
 
 def test_disk_store_source_revision_changes_key_but_sidecar_is_not_an_input(tmp_path: Path) -> None:

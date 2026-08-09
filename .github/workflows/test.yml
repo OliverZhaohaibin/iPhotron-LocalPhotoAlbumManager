@@ -232,14 +232,71 @@ jobs:
           tests/gui/test_detail_decode_backend.py
           tests/gui/test_detail_request_scheduler.py
           tests/gui/test_detail_surface_cache.py
+          tests/gui/test_detail_surface_residency.py
           tests/gui/test_detail_render_session.py
           tests/ui/controllers/test_player_view_controller_adjustments.py
           tests/ui/widgets/test_still_texture_residency.py
           tests/test_detail_benchmark.py
+          tests/test_detail_surface_cache_benchmark.py
 
       - name: Run static gates
         run: |
           python tools/check_architecture.py
           python -m compileall -q src tools
-          python -m ruff check --select F,E9 src/iPhoto/gui/detail_pipeline.py src/iPhoto/gui/detail_render_coordinator.py src/iPhoto/gui/detail_decode_backend.py src/iPhoto/gui/detail_decode_macos.py src/iPhoto/gui/detail_decode_windows.py src/iPhoto/gui/detail_benchmark_harness.py tools/detail_benchmark.py tools/run_detail_packaged_benchmark.py
+          python -m ruff check --select F,E9 src/iPhoto/gui/detail_pipeline.py src/iPhoto/gui/detail_render_coordinator.py src/iPhoto/gui/detail_decode_backend.py src/iPhoto/gui/detail_decode_macos.py src/iPhoto/gui/detail_decode_windows.py src/iPhoto/gui/detail_benchmark_harness.py src/iPhoto/gui/detail_surface_cache.py src/iPhoto/gui/detail_surface_cache_index.py src/iPhoto/gui/detail_surface_residency.py tools/detail_benchmark.py tools/detail_surface_cache_benchmark.py tools/run_detail_packaged_benchmark.py
           git diff --check
+
+  detail-surface-cache-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out fixed v2 baseline
+        uses: actions/checkout@v4
+        with:
+          ref: fe623e68d101048751fd9acb85ddb5d08c564c83
+          path: baseline
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: candidate/pyproject.toml
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libpulse0
+
+      - name: Install benchmark dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "candidate[test]"
+
+      - name: Run fixed baseline and candidate cache benchmarks
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          mkdir -p metrics
+          PYTHONPATH="${{ github.workspace }}/baseline/src" python candidate/tools/detail_surface_cache_benchmark.py run --label baseline --repo-root baseline --output metrics/baseline.json
+          PYTHONPATH="${{ github.workspace }}/candidate/src" python candidate/tools/detail_surface_cache_benchmark.py run --label candidate --repo-root candidate --output metrics/candidate.json
+          python candidate/tools/detail_surface_cache_benchmark.py compare --baseline metrics/baseline.json --candidate metrics/candidate.json --output metrics/comparison.json
+
+      - name: Upload cache benchmark metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detail-surface-cache-${{ matrix.os }}
+          path: metrics/*.json

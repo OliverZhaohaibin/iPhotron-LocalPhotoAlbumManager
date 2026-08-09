@@ -21,7 +21,7 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 
 | ID | 优先级 | 债务 | 当前风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | v3/SQLite 实现与三平台 benchmark 门禁已提交，等待 PR head CI 证据 | `in_progress` |
+| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | v3/SQLite 与固定基线 benchmark 已在三平台通过 | `automated_pass` |
 | TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
 | TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
 | TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
@@ -80,8 +80,9 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 - 写入改为 4 MiB buffer 分块、增量 xxhash、fsync 和原子 replace，不再创建完整
   Python payload 副本；last-access、异常恢复、抽样审计和低水位 prune 均有独立合同。
 - `detail-surface-cache-contract` 在同一 runner checkout 固定 `fe623e68` 基线与候选
-  head，覆盖 16/64/180 MiB 并上传原始 JSON。三平台 head run 成功前本项保持
-  `in_progress`，不得提前改为 `automated_pass`。
+  head，覆盖 16/64/180 MiB 并上传原始 JSON。[Actions run 31339926157](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31339926157)
+  已对实现 SHA `034df643` 在 Ubuntu、macOS 和 Windows 全部通过，因此本项更新为
+  `automated_pass`。
 
 ## TD-890-02：统一 surface/RAW 内存所有权
 

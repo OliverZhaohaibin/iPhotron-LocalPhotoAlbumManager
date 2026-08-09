@@ -23,6 +23,7 @@ def test_surface_cache_benchmark_records_candidate_contract(tmp_path: Path) -> N
     assert row["checksum_calls"] == 0
     assert row["fresh_process_checksum_calls"] == 0
     assert row["fresh_process_load_to_consumed_p95_ms"] > 0
+    assert row["fresh_process_store_initialization_p95_ms"] > 0
     assert row["warm_load_to_consumed_p95_ms"] > 0
     assert row["consumption_digest"]
     assert len(row["fresh_process_samples"]) == 40

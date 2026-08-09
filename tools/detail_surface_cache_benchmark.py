@@ -223,6 +223,12 @@ def _load_and_consume(
     checksum_calls = 0
     original_checksum = cache_module._checksum
 
+    initialization_started = time.perf_counter()
+    maintenance = getattr(store, "maintenance", None)
+    if callable(maintenance):
+        maintenance()
+    store_initialization_ms = (time.perf_counter() - initialization_started) * 1000.0
+
     def counted_checksum(payload, checksum=original_checksum) -> int:
         nonlocal checksum_calls
         checksum_calls += 1
@@ -232,6 +238,7 @@ def _load_and_consume(
     try:
         result = _measure_store_hit(store, request, size_mib=size_mib)
         result["checksum_calls"] = checksum_calls
+        result["store_initialization_ms"] = store_initialization_ms
         return result
     finally:
         cache_module._checksum = original_checksum
@@ -369,6 +376,9 @@ def benchmark(
             fresh_total = [
                 float(probe["load_to_consumed_ms"]) for probe in fresh_probes
             ]
+            fresh_initialization = [
+                float(probe["store_initialization_ms"]) for probe in fresh_probes
+            ]
             warm_load = [float(probe["load_ms"]) for probe in warm_probes]
             warm_consume = [float(probe["consume_ms"]) for probe in warm_probes]
             warm_total = [
@@ -423,6 +433,14 @@ def benchmark(
                     ),
                     "fresh_process_load_to_consumed_p95_ms": round(
                         _percentile(fresh_total, 0.95),
+                        3,
+                    ),
+                    "fresh_process_store_initialization_p50_ms": round(
+                        statistics.median(fresh_initialization),
+                        3,
+                    ),
+                    "fresh_process_store_initialization_p95_ms": round(
+                        _percentile(fresh_initialization, 0.95),
                         3,
                     ),
                     "fresh_process_page_faults_p95": int(

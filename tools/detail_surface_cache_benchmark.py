@@ -39,6 +39,7 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
 )
 
 _MIB = 1024 * 1024
+_P95_MIN_SAMPLES = 20
 
 try:
     import xxhash as benchmark_xxhash
@@ -287,6 +288,8 @@ def benchmark(
     consume_samples: int = 3,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
+    warm_sample_count = max(_P95_MIN_SAMPLES, int(warm_samples))
+    consume_sample_count = max(_P95_MIN_SAMPLES, int(consume_samples))
     with tempfile.TemporaryDirectory(prefix="iphoto-surface-cache-") as temporary:
         base = Path(temporary)
         for revision, size_mib in enumerate(sizes_mib, start=1):
@@ -324,7 +327,7 @@ def benchmark(
                     size_mib=size_mib,
                     revision=revision,
                 )
-                for _sample in range(max(1, consume_samples))
+                for _sample in range(consume_sample_count)
             ]
 
             checksum_calls = 0
@@ -340,7 +343,7 @@ def benchmark(
             try:
                 first_probe = _measure_store_hit(store, request, size_mib=size_mib)
                 warm_probes: list[dict[str, Any]] = []
-                for _sample in range(max(1, warm_samples)):
+                for _sample in range(warm_sample_count):
                     warm_probes.append(
                         _measure_store_hit(store, request, size_mib=size_mib)
                     )
@@ -447,6 +450,8 @@ def benchmark(
                         )
                     ),
                     "consumption_digest": digests.pop(),
+                    "fresh_process_samples": fresh_probes,
+                    "warm_process_samples": warm_probes,
                     "checksum_calls": checksum_calls,
                     "fresh_process_checksum_calls": sum(
                         int(probe["checksum_calls"]) for probe in fresh_probes
@@ -468,8 +473,8 @@ def benchmark(
         "python": platform.python_version(),
         "pyside": pyside_version,
         "qt": qVersion(),
-        "warm_samples": max(1, warm_samples),
-        "consume_samples": max(1, consume_samples),
+        "warm_samples": warm_sample_count,
+        "consume_samples": consume_sample_count,
         "results": results,
     }
 
@@ -554,8 +559,8 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     run_parser.add_argument("--label", default="candidate")
     run_parser.add_argument("--sizes-mib", default="16,64,180")
-    run_parser.add_argument("--warm-samples", type=int, default=3)
-    run_parser.add_argument("--consume-samples", type=int, default=3)
+    run_parser.add_argument("--warm-samples", type=int, default=_P95_MIN_SAMPLES)
+    run_parser.add_argument("--consume-samples", type=int, default=_P95_MIN_SAMPLES)
     probe_parser = subparsers.add_parser("probe")
     probe_parser.add_argument("--library", required=True, type=Path)
     probe_parser.add_argument("--size-mib", required=True, type=int)

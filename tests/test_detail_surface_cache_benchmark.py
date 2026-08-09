@@ -16,6 +16,8 @@ def test_surface_cache_benchmark_records_candidate_contract(tmp_path: Path) -> N
 
     row = result["results"][0]
     assert result["schema"] == 2
+    assert result["warm_samples"] == 20
+    assert result["consume_samples"] == 20
     assert row["namespace"] == "v3"
     assert row["payload_bytes"] == 1024 * 1024
     assert row["checksum_calls"] == 0
@@ -23,6 +25,8 @@ def test_surface_cache_benchmark_records_candidate_contract(tmp_path: Path) -> N
     assert row["fresh_process_load_to_consumed_p95_ms"] > 0
     assert row["warm_load_to_consumed_p95_ms"] > 0
     assert row["consumption_digest"]
+    assert len(row["fresh_process_samples"]) == 20
+    assert len(row["warm_process_samples"]) == 20
     assert row["python_peak_bytes"] <= 8 * 1024 * 1024 + 4096
 
 

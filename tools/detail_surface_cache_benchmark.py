@@ -39,7 +39,7 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
 )
 
 _MIB = 1024 * 1024
-_P95_MIN_SAMPLES = 20
+_P95_MIN_SAMPLES = 40
 
 try:
     import xxhash as benchmark_xxhash
@@ -187,6 +187,7 @@ def _measure_store_hit(
 ) -> dict[str, Any]:
     rss_before, faults_before = _process_metrics()
     total_started = time.perf_counter()
+    cpu_started = time.process_time()
     load_started = total_started
     loaded = store.load(request)
     load_ms = (time.perf_counter() - load_started) * 1000.0
@@ -196,6 +197,7 @@ def _measure_store_hit(
     digest = _consume_image(loaded.image)
     consume_ms = (time.perf_counter() - consume_started) * 1000.0
     total_ms = (time.perf_counter() - total_started) * 1000.0
+    cpu_ms = (time.process_time() - cpu_started) * 1000.0
     rss_after, faults_after = _process_metrics()
     del loaded
     gc.collect()
@@ -203,6 +205,7 @@ def _measure_store_hit(
         "load_ms": load_ms,
         "consume_ms": consume_ms,
         "load_to_consumed_ms": total_ms,
+        "process_cpu_ms": cpu_ms,
         "rss_delta_bytes": max(0, rss_after - rss_before),
         "page_faults": max(0, faults_after - faults_before),
         "consumption_digest": digest,

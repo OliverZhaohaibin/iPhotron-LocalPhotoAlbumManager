@@ -21,7 +21,7 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 
 | ID | 优先级 | 债务 | 当前风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 recovery/lifecycle 收口已完成本地验证，最终 head 三平台证据待补 | `in_progress` |
+| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 recovery/lifecycle、三平台 cache benchmark 与既有 renderer/startup 合同均已通过 | `automated_pass` |
 | TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
 | TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
 | TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
@@ -80,13 +80,15 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 - 写入改为 4 MiB buffer 分块、增量 xxhash、fsync 和原子 replace，不再创建完整
   Python payload 副本；last-access、异常恢复、抽样审计和低水位 prune 均有独立合同。
 - `detail-surface-cache-contract` 在同一 runner checkout 固定 `fe623e68` 基线与候选
-  head，覆盖 16/64/180 MiB 并上传原始 JSON。此前实现 SHA `034df643` 的
-  [Actions run 31339926157](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31339926157)
-  已在 Ubuntu、macOS 和 Windows 通过；PR #903 当前 head 新增了 generation close
-  barrier、失败恢复合同，以及 fresh-process/warm 的完整 mmap payload CPU 消费门禁。
-- 本地同 runner 的 `fe623e68`/candidate 16/64/180 MiB comparison 已通过；该指标只
-  证明完整 CPU payload 消费，不声明等价于真实 GPU upload。最终 head 三平台 artifact
-  与 GPU-first 合同完成前，本项暂为 `in_progress`。
+  head，覆盖 16/64/180 MiB 并上传原始 JSON。实现 SHA `a0e9ca97` 的
+  [Actions run 31342634841](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31342634841)
+  已在 Ubuntu、macOS 和 Windows 通过该合同；同一 run 的三平台 GPU-first、startup
+  合同及完整 `test` job 也已通过。该 run 当时仍在执行归属 TD-890-03 的 Windows
+  Pets production-shape job，因此这里不把整个 workflow 提前描述为全部完成。
+- generation close barrier、失败恢复合同，以及 fresh-process/warm 的完整 mmap payload
+  CPU 消费门禁均已纳入自动测试；本地同 runner 的 `fe623e68`/candidate
+  16/64/180 MiB comparison 也已通过。该指标只证明完整 CPU payload 消费，不声明
+  等价于真实 GPU upload；renderer 路径继续由现有三平台 GPU-first 合同覆盖。
 - 最后用户版本 v6.6.8 不包含 neutral-surface 持久化格式；兼容路径为“无旧 cache →
   初始化 v3”，不读取或迁移开发阶段 v2。
 

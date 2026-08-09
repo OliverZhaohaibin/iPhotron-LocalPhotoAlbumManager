@@ -921,12 +921,12 @@ class CachedStillDecodeBackend:
                 height=surface.decoded_size[1],
             )
 
-    def _submit(self, fn, *args) -> None:
+    def _submit(self, fn, *args, **kwargs) -> None:
         with self._lock:
             if self._shutting_down:
                 return
             try:
-                future = self._io.submit(fn, *args)
+                future = self._io.submit(fn, *args, **kwargs)
             except RuntimeError:
                 return
             self._futures.add(future)

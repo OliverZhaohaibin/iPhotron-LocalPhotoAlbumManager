@@ -350,6 +350,33 @@ def test_unbound_store_is_a_disabled_disk_tier(tmp_path: Path) -> None:
     assert store.write(request, _surface(request)) is False
 
 
+def test_backend_bind_library_schedules_keyword_recovery(tmp_path: Path) -> None:
+    store = Mock()
+    backend = CachedStillDecodeBackend(Mock(), store=store)
+
+    backend.bind_library(tmp_path)
+    backend.shutdown()
+
+    store.bind_library.assert_called_once_with(tmp_path)
+    store.maintenance.assert_called_once_with(recover=True)
+
+
+def test_bind_library_without_prior_surface_cache_initializes_v3(tmp_path: Path) -> None:
+    backend = CachedStillDecodeBackend(Mock(), store=NeutralSurfaceStore(None))
+
+    backend.bind_library(tmp_path)
+    backend.shutdown()
+
+    assert (
+        tmp_path
+        / ".iPhoto"
+        / "cache"
+        / "detail-surfaces"
+        / "v3"
+        / "index.sqlite3"
+    ).is_file()
+
+
 def test_unstable_identity_bypasses_reusable_memory_and_disk_cache(
     tmp_path: Path,
 ) -> None:

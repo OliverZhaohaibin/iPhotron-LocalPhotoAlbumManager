@@ -21,6 +21,7 @@ from iPhoto.gui.detail_pipeline import (
 )
 from iPhoto.gui.detail_render_coordinator import (
     DetailRenderCoordinator,
+    DetailRenderState,
     DetailSurfacePresentationResult,
 )
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
@@ -768,6 +769,130 @@ def test_live_photo_fallback_reuses_the_asset_identity() -> None:
     assert coordinator._active_live_asset_id == ""
 
 
+def test_live_photo_motion_preparation_failure_restores_pending_still() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=2,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(motion),
+    )
+    presentation = replace(
+        _make_presentation(
+            path=str(still),
+            asset_id="asset-1",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=motion,
+    )
+    coordinator._pending_video_token = token
+    coordinator._async_token_is_current = Mock(return_value=True)
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._current_presentation = presentation
+    coordinator._active_live_motion = motion
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = "asset-1"
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock()),
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=True),
+        display_image=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+    coordinator._is_playing = True
+
+    PlaybackCoordinator._on_video_preparation_failed(
+        coordinator,
+        token,
+        RuntimeError("broken motion metadata"),
+    )
+
+    assert coordinator._pending_video_token is None
+    assert coordinator._active_live_motion is None
+    assert coordinator._active_live_asset_id == ""
+    assert coordinator._is_playing is False
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.PREPARING
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.defer_still_updates.assert_called_once_with(False)
+    coordinator._player_view.apply_pending_still.assert_called_once_with()
+    coordinator._player_view.display_image.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_not_called()
+    coordinator._player_view.show_live_badge.assert_called_once_with()
+    coordinator._player_view.set_live_replay_enabled.assert_called_once_with(True)
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert lifecycle.snapshot.state is DetailRenderState.PRESENTED
+    assert lifecycle.snapshot.presented_surfaces == ("live_still",)
+    coordinator._schedule_recognition_overlay.assert_called_once_with(presentation, 7)
+    coordinator._prefetch_neighbor_stills.assert_called_once_with(0)
+
+
+def test_regular_video_preparation_failure_remains_terminal() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    video = Path("/fake/video.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="video",
+        source_identity=AssetSourceIdentity.create(video),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=2,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(video),
+    )
+    coordinator._pending_video_token = token
+    coordinator._async_token_is_current = Mock(return_value=True)
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock()),
+        defer_still_updates=Mock(),
+        show_placeholder=Mock(),
+    )
+
+    PlaybackCoordinator._on_video_preparation_failed(
+        coordinator,
+        token,
+        RuntimeError("broken video metadata"),
+    )
+
+    assert coordinator._pending_video_token is None
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.FAILED
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.defer_still_updates.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_called_once_with(
+        "Unable to load this video."
+    )
+
+
 def test_live_motion_first_frame_completes_current_transaction() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     render_coordinator = Mock(
@@ -1025,6 +1150,88 @@ def test_live_photo_second_replay_restores_overlay_without_reopening_transaction
         call(False),
         call(False),
     ]
+
+
+def test_live_photo_replay_preparation_failure_restores_overlay() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    lifecycle.mark_surface_presented(7, "live_motion_frame")
+    lifecycle.mark_surface_presented(7, "live_still")
+    presentation = replace(
+        _make_presentation(
+            path=str(still),
+            asset_id="asset-1",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=motion,
+    )
+    token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=2,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(motion),
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_request_generation = 7
+    coordinator._current_presentation = presentation
+    coordinator._face_name_overlay = Mock()
+    coordinator._player_view = Mock(
+        video_area=Mock(begin_load=Mock(), stop=Mock()),
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=False),
+        display_image=Mock(),
+        show_video_surface=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_video_preparation = Mock()
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+    coordinator._async_token_is_current = Mock(return_value=True)
+    coordinator._active_live_motion = None
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = ""
+    coordinator._is_playing = False
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+    PlaybackCoordinator.replay_live_photo(coordinator)
+    coordinator._pending_video_token = token
+    PlaybackCoordinator._on_video_preparation_failed(
+        coordinator,
+        token,
+        RuntimeError("replay metadata failed"),
+    )
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.PRESENTED
+    assert lifecycle.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.display_image.assert_called_once_with(
+        still,
+        transaction=transaction,
+    )
+    coordinator._player_view.show_placeholder.assert_not_called()
+    assert coordinator._schedule_recognition_overlay.call_count == 2
+    assert coordinator._prefetch_neighbor_stills.call_args_list == [call(0), call(0)]
 
 
 def test_old_video_preparation_result_is_rejected_after_rebind() -> None:

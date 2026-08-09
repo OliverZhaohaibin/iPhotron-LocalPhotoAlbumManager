@@ -1275,6 +1275,25 @@ class PlaybackCoordinator(QObject):
             return
         generation = transaction.generation
         source = token.source_path
+        active_live_motion = getattr(self, "_active_live_motion", None)
+        if (
+            transaction.media_kind == "live_motion"
+            and active_live_motion is not None
+            and Path(active_live_motion) == source
+            and self._restore_live_still(stop_motion=True)
+        ):
+            emit_detail_event(
+                "live_motion_failed",
+                generation=generation,
+                asset_id=transaction.asset_id,
+                message=str(error),
+            )
+            LOGGER.warning(
+                "Live Motion preparation failed for %s; restored still: %s",
+                source.name,
+                error,
+            )
+            return
         self._render_transaction_coordinator().mark_failed(generation, str(error))
         self._player_view.video_area.stop()
         self._player_view.show_placeholder(
@@ -1364,12 +1383,16 @@ class PlaybackCoordinator(QObject):
         self._player_bar.setEnabled(False)
         self._is_playing = True
 
-    def _handle_playback_finished(self) -> None:
+    def _restore_live_still(self, *, stop_motion: bool = False) -> bool:
+        """End one Live Motion attempt and restore its primary still asset."""
+
         if not self._active_live_motion or not self._active_live_still:
-            return
+            return False
         still = self._active_live_still
         asset_id = self._active_live_asset_id
         transaction = getattr(self, "_detail_render_transaction", None)
+        if stop_motion:
+            self._player_view.video_area.stop()
         self._active_live_motion = None
         self._active_live_asset_id = ""
         self._player_view.defer_still_updates(False)
@@ -1389,6 +1412,10 @@ class PlaybackCoordinator(QObject):
         self._player_view.show_live_badge()
         self._player_view.set_live_replay_enabled(True)
         self._is_playing = False
+        return True
+
+    def _handle_playback_finished(self) -> None:
+        self._restore_live_still()
 
     def _hide_face_name_overlay(self, *, clear_annotations: bool) -> None:
         overlay = getattr(self, "_face_name_overlay", None)

@@ -99,7 +99,7 @@ Library workspace:
   global_index.db       # SQLite index and current asset/state repository store
   links.json            # Live Photo compatibility materialization
   cache/thumbs/         # Rebuildable thumbnail cache
-  cache/detail-surfaces/v2/ # Rebuildable neutral RGBA8/sRGB Detail surfaces
+  cache/detail-surfaces/v3/ # SQLite-indexed rebuildable neutral RGBA8/sRGB surfaces
   faces/
     face_index.db       # Rebuildable People runtime snapshot
     face_state.db       # Durable People user decisions

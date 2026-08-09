@@ -21,8 +21,8 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 
 | ID | 优先级 | 债务 | 当前风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | 大 surface 命中仍完整扫描 payload；每次写入复制整块 RGBA 并全目录排序 | `not_started` |
-| TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | LRU 淘汰不能释放 session 强引用；RAW 中间数组不受最终 surface 预算约束 | `not_started` |
+| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | v3/SQLite 实现与三平台 benchmark 门禁已提交，等待 PR head CI 证据 | `in_progress` |
+| TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
 | TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
 | TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
 | TD-890-05 | P3 | 大型跨子系统 PR 的回滚和归因边界不足 | 历史 PR 无法安全追溯拆分；未来同类变更仍可能形成不可独立回滚的组合 | `process_debt` |
@@ -72,6 +72,17 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 - Detail cold/warm benchmark 不退化，跨平台 shutdown 不遗留 cache executor 或
   打开的 mmap/file owner。
 
+### 当前实施证据
+
+- `codex/td-890-surface-cache-index` 将 namespace 提升到 v3，并以 SQLite
+  `index.sqlite3` 持久化 entry、LRU、checksum trust 和维护水位；可信命中不再调用
+  payload checksum。
+- 写入改为 4 MiB buffer 分块、增量 xxhash、fsync 和原子 replace，不再创建完整
+  Python payload 副本；last-access、异常恢复、抽样审计和低水位 prune 均有独立合同。
+- `detail-surface-cache-contract` 在同一 runner checkout 固定 `fe623e68` 基线与候选
+  head，覆盖 16/64/180 MiB 并上传原始 JSON。三平台 head run 成功前本项保持
+  `in_progress`，不得提前改为 `automated_pass`。
+
 ## TD-890-02：统一 surface/RAW 内存所有权
 
 ### 当前证据
@@ -116,6 +127,11 @@ presentation、pending upload 或 GPU staging 间接保留。当前 `budget_byte
 
 不要把四个阶段压入一个不可回滚提交。每个阶段都必须保持现有 generation、
 library epoch、source identity 和 Edit handle 生命周期合同。
+
+当前首批只完成观测阶段：`SurfaceResidencyTracker` 区分唯一资源和 owner 引用，记录
+CPU heap、mmap、upload staging、GPU estimated 与 RAW intermediate 字节；它不拥有资源、
+不拒绝分配，也不改变现有 LRU/session/GPU 行为。后续 CPU/session PR 才引入
+`SurfaceOwner`/`SurfaceLease` 执行合同。
 
 ### 验收门禁
 

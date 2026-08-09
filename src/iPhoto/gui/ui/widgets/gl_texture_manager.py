@@ -455,6 +455,11 @@ class TextureManager:
     def has_still_texture(self, key: object) -> bool:
         return key in self._still_textures
 
+    def still_residency_bytes(self) -> dict[object, int]:
+        """Return diagnostic estimated bytes for resident still textures."""
+
+        return {key: int(entry[3]) for key, entry in self._still_textures.items()}
+
     def texture_uses_mipmaps(self) -> bool:
         return self._texture_uses_mipmaps
 

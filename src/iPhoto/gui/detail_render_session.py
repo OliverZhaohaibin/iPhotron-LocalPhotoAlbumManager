@@ -12,7 +12,10 @@ from iPhoto.core.adjustment_mapping import resolve_adjustment_mapping
 from iPhoto.core.color_resolver import ColorStats
 from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_pipeline import AssetSourceIdentity, DetailDecodeKey
-
+from iPhoto.gui.detail_surface_residency import (
+    SurfaceResidencyTracker,
+    surface_resource_id,
+)
 
 EditRevisionKind = Literal["index", "session", "commit"]
 
@@ -72,12 +75,19 @@ class PhotoRenderSessionHandle:
     baseline_state: EditRenderState
     available_lods: set[int | str] = field(default_factory=set)
     edit_references: int = 0
+    residency_tracker: SurfaceResidencyTracker | None = None
     _revision_counter: int = 0
     _surfaces_by_key: dict[DetailDecodeKey, DecodedSurface] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.available_lods.add(self.current_surface.decode_level)
         self._surfaces_by_key[self.current_surface.decode_key] = self.current_surface
+        if self.residency_tracker is not None:
+            self.residency_tracker.retain_surface(
+                self._residency_owner_id,
+                "render_session",
+                self.current_surface,
+            )
         self._revision_counter = max(
             int(self.source_identity.index_revision),
             int(self.edit_state.revision[1]),
@@ -98,8 +108,20 @@ class PhotoRenderSessionHandle:
     def retain_surface(self, surface: DecodedSurface) -> None:
         """Retain a decoded LOD without making it the presented surface."""
 
+        previous = self._surfaces_by_key.get(surface.decode_key)
+        if previous is not None and self.residency_tracker is not None:
+            self.residency_tracker.release(
+                self._residency_owner_id,
+                surface_resource_id(previous),
+            )
         self._surfaces_by_key[surface.decode_key] = surface
         self.available_lods.add(surface.decode_level)
+        if self.residency_tracker is not None:
+            self.residency_tracker.retain_surface(
+                self._residency_owner_id,
+                "render_session",
+                surface,
+            )
 
     def activate_surface(self, key: DetailDecodeKey) -> bool:
         surface = self._surfaces_by_key.get(key)
@@ -112,6 +134,16 @@ class PhotoRenderSessionHandle:
         """Return a retained LOD surface without changing session state."""
 
         return self._surfaces_by_key.get(key)
+
+    @property
+    def _residency_owner_id(self) -> str:
+        return f"render-session:{self.session_id}"
+
+    def release_residency_observations(self) -> None:
+        """Drop diagnostic owner references without changing surface lifetime."""
+
+        if self.residency_tracker is not None:
+            self.residency_tracker.release(self._residency_owner_id)
 
     def next_state(
         self,

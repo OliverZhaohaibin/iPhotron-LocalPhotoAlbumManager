@@ -37,6 +37,11 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
 
 from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
+from iPhoto.gui.detail_surface_residency import (
+    SurfaceByteBreakdown,
+    SurfaceResidencyTracker,
+    surface_resource_id,
+)
 
 from ..gl_crop_controller import CropInteractionController
 from ..render_backend import is_opengl_api, qrhi_api_name, select_qrhi_widget_api
@@ -164,6 +169,10 @@ class GLImageViewer(QRhiWidget):
 
         # 状态
         self._image: QImage | None = None
+        self._surface_residency_tracker: SurfaceResidencyTracker | None = None
+        self._tracked_surface_resources: dict[object, object] = {}
+        self._tracked_staging_resources: dict[object, object] = {}
+        self._tracked_gpu_resources: dict[object, object] = {}
         self._still_surface_refs: OrderedDict[object, DecodedSurface] = OrderedDict()
         self._pending_warm_surfaces: list[DecodedSurface] = []
         self._still_generation_by_key: dict[object, int] = {}
@@ -541,20 +550,74 @@ class GLImageViewer(QRhiWidget):
         self._pending_resident_activation = None
         self._still_surface_refs.clear()
         self._still_generation_by_key.clear()
+        tracker = self._surface_residency_tracker
+        if tracker is not None:
+            tracker.release("detail-viewer-surfaces")
+            tracker.release("detail-upload-staging")
+        self._tracked_surface_resources.clear()
+        self._tracked_staging_resources.clear()
         self._texture_manager.clear_still_residency()
+        self._sync_gpu_residency()
 
     def trim_still_residency(self) -> None:
         self._pending_warm_surfaces.clear()
         self._texture_manager.trim_still_residency()
+        self._sync_gpu_residency()
 
     def zoom_factor(self) -> float:
         return float(self._transform_controller.get_zoom_factor())
 
     def _remember_still_surface(self, surface: DecodedSurface) -> None:
-        self._still_surface_refs.pop(surface.decode_key, None)
+        previous = self._still_surface_refs.pop(surface.decode_key, None)
+        tracker = self._surface_residency_tracker
+        if previous is not None and tracker is not None:
+            previous_resource = self._tracked_surface_resources.pop(
+                surface.decode_key,
+                surface_resource_id(previous),
+            )
+            tracker.release("detail-viewer-surfaces", previous_resource)
         self._still_surface_refs[surface.decode_key] = surface
+        if tracker is not None:
+            self._tracked_surface_resources[surface.decode_key] = tracker.retain_surface(
+                "detail-viewer-surfaces",
+                "presentation_prefetch",
+                surface,
+                generation=self._still_generation_by_key.get(surface.decode_key, 0),
+            )
         while len(self._still_surface_refs) > 3:
-            self._still_surface_refs.popitem(last=False)
+            evicted_key, evicted = self._still_surface_refs.popitem(last=False)
+            if tracker is not None:
+                evicted_resource = self._tracked_surface_resources.pop(
+                    evicted_key,
+                    surface_resource_id(evicted),
+                )
+                tracker.release("detail-viewer-surfaces", evicted_resource)
+
+    def set_surface_residency_tracker(
+        self,
+        tracker: SurfaceResidencyTracker | None,
+    ) -> None:
+        """Bind the diagnostic-only tracker used by the owning player."""
+
+        previous = self._surface_residency_tracker
+        if previous is tracker:
+            return
+        if previous is not None:
+            previous.release("detail-viewer-surfaces")
+            previous.release("detail-upload-staging")
+            previous.release("detail-gpu-residency")
+        self._surface_residency_tracker = tracker
+        self._tracked_surface_resources.clear()
+        self._tracked_staging_resources.clear()
+        self._tracked_gpu_resources.clear()
+        if tracker is not None:
+            for surface in self._still_surface_refs.values():
+                self._tracked_surface_resources[surface.decode_key] = tracker.retain_surface(
+                    "detail-viewer-surfaces",
+                    "presentation_prefetch",
+                    surface,
+                )
+            self._sync_gpu_residency()
 
     def set_video_frame(
         self,
@@ -1301,6 +1364,11 @@ class GLImageViewer(QRhiWidget):
                 rhi.makeThreadLocalNativeContextCurrent()
             self._renderer.destroy_resources()
         self._texture_manager.mark_texture_lost()
+        self._sync_gpu_residency()
+        tracker = self._surface_residency_tracker
+        if tracker is not None:
+            tracker.release("detail-upload-staging")
+        self._tracked_staging_resources.clear()
         emit_detail_event("context_rebuild", generation=0, state="released")
 
     def render(self, cb) -> None:  # type: ignore[override]
@@ -1417,7 +1485,7 @@ class GLImageViewer(QRhiWidget):
             and self._texture_manager.needs_texture_upload()
         ):
             upload_started = time.perf_counter()
-            self._texture_manager.upload_texture_if_needed(self._image)
+            self._upload_current_still_with_tracking()
             log_detail_profile(
                 "gl_viewer",
                 "still.gpu_upload",
@@ -1435,7 +1503,7 @@ class GLImageViewer(QRhiWidget):
             )
         elif self._pending_warm_surfaces:
             warm = self._pending_warm_surfaces.pop(0)
-            if self._texture_manager.warm_still_texture(warm.decode_key, warm.image):
+            if self._warm_still_with_tracking(warm):
                 emit_detail_event(
                     "gpu_upload",
                     generation=self._still_generation_by_key.get(warm.decode_key, 0),
@@ -1593,7 +1661,7 @@ class GLImageViewer(QRhiWidget):
             and self._texture_manager.needs_texture_upload()
         ):
             upload_started = time.perf_counter()
-            self._texture_manager.upload_texture_if_needed(self._image)
+            self._upload_current_still_with_tracking()
             log_detail_profile(
                 "gl_viewer",
                 "still.gpu_upload",
@@ -1611,7 +1679,7 @@ class GLImageViewer(QRhiWidget):
             )
         elif self._pending_warm_surfaces:
             warm = self._pending_warm_surfaces.pop(0)
-            if self._texture_manager.warm_still_texture(warm.decode_key, warm.image):
+            if self._warm_still_with_tracking(warm):
                 emit_detail_event(
                     "gpu_upload",
                     generation=self._still_generation_by_key.get(warm.decode_key, 0),
@@ -1701,6 +1769,9 @@ class GLImageViewer(QRhiWidget):
         if not callable(take_result):
             return False
         result = take_result()
+        if result is not None:
+            self._release_upload_staging(result.get("key"))
+            self._sync_gpu_residency()
         failed = bool(
             result is not None
             and result.get("activate")
@@ -1716,6 +1787,84 @@ class GLImageViewer(QRhiWidget):
             str(result.get("reason", "allocation_failed")),
         )
         return True
+
+    def _upload_current_still_with_tracking(self) -> None:
+        key = self.current_image_source()
+        image = self._image
+        if image is None:
+            return
+        self._observe_upload_staging(key, image)
+        try:
+            self._texture_manager.upload_texture_if_needed(image)
+        except Exception:
+            self._release_upload_staging(key)
+            raise
+
+    def _warm_still_with_tracking(self, surface: DecodedSurface) -> bool:
+        queued = self._texture_manager.warm_still_texture(
+            surface.decode_key,
+            surface.image,
+        )
+        if queued:
+            self._observe_upload_staging(surface.decode_key, surface.image)
+        return queued
+
+    def _observe_upload_staging(self, key: object, image: QImage) -> None:
+        tracker = self._surface_residency_tracker
+        if tracker is None or key is None or image.isNull():
+            return
+        previous = self._tracked_staging_resources.pop(key, None)
+        if previous is not None:
+            tracker.release("detail-upload-staging", previous)
+        resource_id = ("upload-staging", key, int(image.cacheKey()))
+        self._tracked_staging_resources[key] = resource_id
+        tracker.retain(
+            "detail-upload-staging",
+            "upload_queue",
+            resource_id,
+            SurfaceByteBreakdown(
+                upload_staging=max(
+                    0,
+                    int(image.bytesPerLine()) * int(image.height()),
+                )
+            ),
+            generation=self._still_generation_by_key.get(key, 0),
+        )
+
+    def _release_upload_staging(self, key: object) -> None:
+        tracker = self._surface_residency_tracker
+        resource_id = self._tracked_staging_resources.pop(key, None)
+        if tracker is not None and resource_id is not None:
+            tracker.release(
+                "detail-upload-staging",
+                resource_id,
+                generation=self._still_generation_by_key.get(key, 0),
+            )
+
+    def _sync_gpu_residency(self) -> None:
+        tracker = self._surface_residency_tracker
+        if tracker is None:
+            return
+        getter = getattr(self._renderer, "still_residency_bytes", None)
+        current = dict(getter()) if callable(getter) else {}
+        for key in tuple(self._tracked_gpu_resources):
+            if key in current:
+                continue
+            tracker.release(
+                "detail-gpu-residency",
+                self._tracked_gpu_resources.pop(key),
+                generation=self._still_generation_by_key.get(key, 0),
+            )
+        for key, byte_count in current.items():
+            resource_id = ("gpu-still", key)
+            self._tracked_gpu_resources[key] = resource_id
+            tracker.retain(
+                "detail-gpu-residency",
+                "gpu_residency",
+                resource_id,
+                SurfaceByteBreakdown(gpu_estimated=max(0, int(byte_count))),
+                generation=self._still_generation_by_key.get(key, 0),
+            )
 
     def _emit_first_frame_ready(self) -> None:
         """Notify listeners that the first opaque frame has been rendered."""

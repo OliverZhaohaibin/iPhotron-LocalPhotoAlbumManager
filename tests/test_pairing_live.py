@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from iPhoto.bootstrap.library_scan_service import LibraryScanService
+from iPhoto.legacy import app as backend
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.core.pairing import pair_live
 from iPhoto.utils.jsonio import read_json
@@ -76,10 +76,9 @@ def test_pairing_handles_missing_mime() -> None:
 def test_rescan_pairs_new_live_assets(tmp_path: Path) -> None:
     still = tmp_path / "IMG_5001.JPG"
     _create_image(still)
-    service = LibraryScanService(tmp_path)
 
     # Initial scan without the motion component creates an empty links cache.
-    service.prepare_album_open(tmp_path, hydrate_index=False)
+    backend.open_album(tmp_path)
     links_path = tmp_path / WORK_DIR_NAME / "links.json"
     initial = read_json(links_path)
     assert initial.get("live_groups") == []
@@ -90,7 +89,7 @@ def test_rescan_pairs_new_live_assets(tmp_path: Path) -> None:
     ts = still.stat().st_mtime
     os.utime(motion, (ts, ts))
 
-    service.rescan_album(tmp_path)
+    backend.rescan(tmp_path)
     updated = read_json(links_path)
     assert any(
         group.get("still") == "IMG_5001.JPG" and group.get("motion") == "IMG_5001.MOV"

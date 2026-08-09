@@ -29,7 +29,6 @@ python -m nuitka \
   --include-package=onnxruntime \
   --include-data-dir=src/extension/models=extension/models \
   --include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n \
-  --include-data-file=src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json \
   --include-data-dir=src/maps/tiles=maps/tiles \
   --include-data-file=src/maps/style.json=maps/style.json \
   --include-data-dir=src/maps/map_widget/qml=maps/map_widget/qml \

@@ -271,8 +271,6 @@ class VideoRendererWidget(QRhiWidget):
 
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
-    framePresented = Signal()
-    """Emitted after a decoded frame has completed a GPU render pass."""
     zoomChanged = Signal(float)
 
     _ZOOM_MIN = 0.1
@@ -772,7 +770,6 @@ class VideoRendererWidget(QRhiWidget):
         cb.setVertexInput(0, vbuf_binding)
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
-        self.framePresented.emit()
         self._emit_first_frame_ready()
 
     def _emit_first_frame_ready(self) -> None:

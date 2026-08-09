@@ -29,18 +29,12 @@ Usage:
     
     Both approaches use the same database file, ensuring data consistency.
 """
-from .repository import (
-    GLOBAL_INDEX_DB_NAME,
-    get_global_repository,
-    mark_repository_prepared,
-    reset_global_repository,
-)
+from .repository import GLOBAL_INDEX_DB_NAME, get_global_repository, reset_global_repository
 from .repository import AssetRepository as IndexStore
 
 __all__ = [
     "GLOBAL_INDEX_DB_NAME",
     "IndexStore",
     "get_global_repository",
-    "mark_repository_prepared",
     "reset_global_repository",
 ]

@@ -1,35 +1,31 @@
-"""Lazy background-task exports for startup-safe targeted imports."""
+"""Background tasks and workers."""
 
 from __future__ import annotations
 
-from importlib import import_module
-from typing import Any
+from .asset_loader_worker import AssetLoaderWorker
+from .edit_sidebar_preview_worker import EditSidebarPreviewWorker
+from .image_load_worker import ImageLoadWorker
+from .info_panel_metadata_worker import InfoPanelMetadataWorker
+from .import_worker import ImportSignals, ImportWorker
+from .incremental_refresh_worker import IncrementalRefreshSignals, IncrementalRefreshWorker
+from .move_worker import MoveSignals, MoveWorker
+from .preview_render_worker import PreviewRenderSignals, PreviewRenderWorker
+from .thumbnail_generator_worker import ThumbnailGeneratorWorker
+from .thumbnail_loader import ThumbnailLoader
 
-_EXPORTS = {
-    "AssetLoaderWorker": ("asset_loader_worker", "AssetLoaderWorker"),
-    "EditSidebarPreviewWorker": ("edit_sidebar_preview_worker", "EditSidebarPreviewWorker"),
-    "ImageLoadWorker": ("image_load_worker", "ImageLoadWorker"),
-    "InfoPanelMetadataWorker": ("info_panel_metadata_worker", "InfoPanelMetadataWorker"),
-    "ImportSignals": ("import_worker", "ImportSignals"),
-    "ImportWorker": ("import_worker", "ImportWorker"),
-    "IncrementalRefreshSignals": ("incremental_refresh_worker", "IncrementalRefreshSignals"),
-    "IncrementalRefreshWorker": ("incremental_refresh_worker", "IncrementalRefreshWorker"),
-    "MoveSignals": ("move_worker", "MoveSignals"),
-    "MoveWorker": ("move_worker", "MoveWorker"),
-    "PreviewRenderSignals": ("preview_render_worker", "PreviewRenderSignals"),
-    "PreviewRenderWorker": ("preview_render_worker", "PreviewRenderWorker"),
-    "ThumbnailGeneratorWorker": ("thumbnail_generator_worker", "ThumbnailGeneratorWorker"),
-    "ThumbnailLoader": ("thumbnail_loader", "ThumbnailLoader"),
-}
-
-__all__ = list(_EXPORTS)
-
-
-def __getattr__(name: str) -> Any:
-    target = _EXPORTS.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module_name, attribute = target
-    value = getattr(import_module(f"{__name__}.{module_name}"), attribute)
-    globals()[name] = value
-    return value
+__all__ = [
+    "AssetLoaderWorker",
+    "EditSidebarPreviewWorker",
+    "ImageLoadWorker",
+    "InfoPanelMetadataWorker",
+    "ImportSignals",
+    "ImportWorker",
+    "IncrementalRefreshSignals",
+    "IncrementalRefreshWorker",
+    "MoveSignals",
+    "MoveWorker",
+    "PreviewRenderSignals",
+    "PreviewRenderWorker",
+    "ThumbnailGeneratorWorker",
+    "ThumbnailLoader",
+]

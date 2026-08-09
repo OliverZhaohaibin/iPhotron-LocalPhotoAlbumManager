@@ -8,20 +8,7 @@ import pytest
 
 from iPhoto.cache.index_store import reset_global_repository
 from iPhoto.cache.index_store.repository import AssetRepository
-from iPhoto.infrastructure.services.library_asset_runtime import (
-    LibraryAssetRuntime,
-    UnboundAssetRepository,
-)
-
-
-def test_unbound_runtime_does_not_create_home_repository(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-
-    runtime = LibraryAssetRuntime()
-
-    assert isinstance(runtime.repository, UnboundAssetRepository)
-    assert not (tmp_path / ".iPhoto" / "global_index.db").exists()
-    runtime.shutdown()
+from iPhoto.infrastructure.services.library_asset_runtime import LibraryAssetRuntime
 
 
 @pytest.fixture(autouse=True)

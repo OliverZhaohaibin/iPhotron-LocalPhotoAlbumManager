@@ -11,16 +11,17 @@ from ..errors import IPhotoError
 from ..application.services.album_manifest_service import Album
 from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
+from .services import (
+    AlbumMetadataService,
+    AssetImportService,
+    AssetMoveService,
+    DeletionService,
+    LibraryUpdateService,
+    RestorationService,
+)
+
 if TYPE_CHECKING:
     from ..library.runtime_controller import LibraryRuntimeController
-    from .services import (
-        AlbumMetadataService,
-        AssetImportService,
-        AssetMoveService,
-        DeletionService,
-        LibraryUpdateService,
-        RestorationService,
-    )
 
 import logging
 logger = logging.getLogger(__name__)
@@ -43,19 +44,9 @@ class AppFacade(QObject):
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
     activeModelChanged = Signal(object)
-    importStarted = Signal(Path)
-    importProgress = Signal(Path, int, int)
-    importFinished = Signal(Path, bool, str)
-    moveStarted = Signal(Path, Path)
-    moveProgress = Signal(Path, int, int)
-    moveFinished = Signal(Path, Path, bool, str)
-    moveCompletedDetailed = Signal(Path, Path, list, bool, bool, bool, bool)
 
     def __init__(self) -> None:
         super().__init__()
-        from .services.album_metadata_service import AlbumMetadataService
-        from .services.library_update_service import LibraryUpdateService
-
         self._logger = get_logger()
         self._current_album: Optional[Album] = None
         self._pending_index_announcements: Set[Path] = set()
@@ -111,10 +102,43 @@ class AppFacade(QObject):
         )
         self._library_update_service.errorRaised.connect(self._on_service_error)
 
-        self._import_service: "AssetImportService | None" = None
-        self._move_service: "AssetMoveService | None" = None
-        self._deletion_service: "DeletionService | None" = None
-        self._restoration_service: "RestorationService | None" = None
+        self._import_service = AssetImportService(
+            task_manager=self._task_manager,
+            current_album_root=self._current_album_root,
+            update_service=self._library_update_service,
+            metadata_service=self._metadata_service,
+            library_manager_getter=self._get_library_manager,
+            parent=self,
+        )
+        self._import_service.errorRaised.connect(self._on_service_error)
+
+        self._move_service = AssetMoveService(
+            task_manager=self._task_manager,
+            current_album_getter=lambda: self._current_album,
+            library_manager_getter=self._get_library_manager,
+            parent=self,
+        )
+        self._move_service.errorRaised.connect(self._on_service_error)
+        self._move_service.moveCompletedDetailed.connect(
+            self._library_update_service.handle_move_operation_completed
+        )
+
+        self._deletion_service = DeletionService(
+            move_service=self._move_service,
+            library_manager_getter=self._get_library_manager,
+            model_provider_getter=lambda: self._model_provider,
+            parent=self,
+        )
+        self._deletion_service.errorRaised.connect(self._on_service_error)
+
+        self._restoration_service = RestorationService(
+            move_service=self._move_service,
+            library_manager_getter=self._get_library_manager,
+            model_provider_getter=lambda: self._model_provider,
+            restore_prompt_getter=lambda: self._restore_prompt_handler,
+            parent=self,
+        )
+        self._restoration_service.errorRaised.connect(self._on_service_error)
 
     def set_model_provider(self, provider: Callable[[], Any]):
         """Inject the new ViewModel provider for legacy operations."""
@@ -133,46 +157,12 @@ class AppFacade(QObject):
     def import_service(self) -> AssetImportService:
         """Expose the import service so controllers can observe its signals."""
 
-        if self._import_service is None:
-            from .services.asset_import_service import AssetImportService
-
-            service = AssetImportService(
-                task_manager=self._task_manager,
-                current_album_root=self._current_album_root,
-                update_service=self._library_update_service,
-                metadata_service=self._metadata_service,
-                library_manager_getter=self._get_library_manager,
-                parent=self,
-            )
-            service.errorRaised.connect(self._on_service_error)
-            service.importStarted.connect(self.importStarted)
-            service.importProgress.connect(self.importProgress)
-            service.importFinished.connect(self.importFinished)
-            self._import_service = service
         return self._import_service
 
     @property
     def move_service(self) -> AssetMoveService:
         """Expose the move service so controllers can observe its signals."""
 
-        if self._move_service is None:
-            from .services.asset_move_service import AssetMoveService
-
-            service = AssetMoveService(
-                task_manager=self._task_manager,
-                current_album_getter=lambda: self._current_album,
-                library_manager_getter=self._get_library_manager,
-                parent=self,
-            )
-            service.errorRaised.connect(self._on_service_error)
-            service.moveCompletedDetailed.connect(
-                self._library_update_service.handle_move_operation_completed
-            )
-            service.moveStarted.connect(self.moveStarted)
-            service.moveProgress.connect(self.moveProgress)
-            service.moveFinished.connect(self.moveFinished)
-            service.moveCompletedDetailed.connect(self.moveCompletedDetailed)
-            self._move_service = service
         return self._move_service
 
     @property
@@ -362,7 +352,7 @@ class AppFacade(QObject):
     ) -> None:
         """Import *sources* asynchronously and refresh the destination album."""
 
-        self.import_service.import_files(
+        self._import_service.import_files(
             sources,
             destination=destination,
             mark_featured=mark_featured,
@@ -371,46 +361,22 @@ class AppFacade(QObject):
     def move_assets(self, sources: Iterable[Path], destination: Path) -> bool:
         """Move *sources* into *destination* and refresh the relevant albums."""
 
-        return self.move_service.move_assets(sources, destination)
+        return self._move_service.move_assets(sources, destination)
 
     def delete_assets(self, sources: Iterable[Path]) -> bool:
         """Move *sources* into the dedicated deleted-items folder."""
 
-        if self._deletion_service is None:
-            from .services.deletion_service import DeletionService
-
-            self._deletion_service = DeletionService(
-                move_service=self.move_service,
-                library_manager_getter=self._get_library_manager,
-                model_provider_getter=lambda: self._model_provider,
-                parent=self,
-            )
-            self._deletion_service.errorRaised.connect(self._on_service_error)
         return self._deletion_service.delete_assets(sources)
 
     def restore_assets(self, sources: Iterable[Path]) -> bool:
         """Return ``True`` when at least one trashed asset restore is scheduled."""
 
-        return self._ensure_restoration_service().restore_assets(sources)
+        return self._restoration_service.restore_assets(sources)
 
     def restore_assets_with_plan(self, sources: Iterable[Path]):
         """Schedule restores and return accepted source/destination batches."""
 
-        return self._ensure_restoration_service().restore_assets_with_plan(sources)
-
-    def _ensure_restoration_service(self) -> "RestorationService":
-        if self._restoration_service is None:
-            from .services.restoration_service import RestorationService
-
-            self._restoration_service = RestorationService(
-                move_service=self.move_service,
-                library_manager_getter=self._get_library_manager,
-                model_provider_getter=lambda: self._model_provider,
-                restore_prompt_getter=lambda: self._restore_prompt_handler,
-                parent=self,
-            )
-            self._restoration_service.errorRaised.connect(self._on_service_error)
-        return self._restoration_service
+        return self._restoration_service.restore_assets_with_plan(sources)
 
     def toggle_featured(self, ref: str) -> bool:
         """Toggle *ref* in the active album and mirror the change in the library."""

@@ -26,9 +26,6 @@ class PetAssetRepositoryPort(Protocol):
     def update_pet_statuses(self, asset_ids: Iterable[str], status: str) -> None:
         """Persist the same pet status for many asset rows."""
 
-    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
-        """Reset every eligible done asset without materializing all IDs."""
-
     def count_by_pet_status(self) -> dict[str, int]:
         """Return pet-status counts from the asset index."""
 

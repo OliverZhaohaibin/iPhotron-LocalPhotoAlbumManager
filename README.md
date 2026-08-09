@@ -279,7 +279,7 @@ For deeper technical details, see the following docs:
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/architecture.md) | Current vNext library-scoped modular monolith architecture, module boundaries, legacy removal policy, data flow, and key design decisions |
+| [Architecture](docs/architecture.md) | Current vNext library-scoped modular monolith architecture, module boundaries, legacy quarantine policy, data flow, and key design decisions |
 | [Development](docs/development.md) | Dev environment, dependencies, debugging, and the side-project-based maps extension workflow for Windows, Linux, and macOS |
 | [Pets Runtime](docs/misc/PETS_RECOGNITION_RUNTIME.md) | Current Pets models, scan scheduling, persistence, mutation safety, and People & Pets composition contract |
 | [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, QRhi shader assets, maps extension sync, and platform runtime notes |

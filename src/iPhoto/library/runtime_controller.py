@@ -53,7 +53,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
     from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
     from ..bootstrap.library_session import LibrarySession
-    from ..bootstrap.library_probe import PreparedLibrary
     from ..bootstrap.library_scan_service import LibraryScanService
     from ..application.ports import LibraryStateRepositoryPort
 
@@ -166,49 +165,6 @@ class LibraryRuntimeController(
         """Bind *root* without creating a headless compatibility session."""
 
         self._bind_path(root, bind_session_if_needed=False)
-
-    def bind_prepared_library(self, prepared: "PreparedLibrary") -> None:
-        """Publish a helper-produced tree without probing storage on the GUI thread."""
-
-        self._clear_watches_for_rebind()
-        self.stop_scanning()
-        self._pending_watch_paths.clear()
-        self._watch_scan_queue.clear()
-        self._root = Path(prepared.root)
-        self._deleted_dir = None
-        self._geotagged_assets_cache = None
-        self._geotagged_assets_cache_root = None
-
-        albums: list[AlbumNode] = []
-        children: Dict[Path, list[AlbumNode]] = {}
-        nodes: Dict[Path, AlbumNode] = {}
-        for item in prepared.albums:
-            path = Path(item.path)
-            node = AlbumNode(path, int(item.level), str(item.title), bool(item.has_manifest))
-            nodes[path] = node
-            if node.level == 1:
-                albums.append(node)
-                children.setdefault(path, [])
-            elif node.level == 2:
-                children.setdefault(path.parent, []).append(node)
-        self._albums = sorted(albums, key=lambda item: item.title.casefold())
-        self._children = {
-            parent: sorted(items, key=lambda item: item.title.casefold())
-            for parent, items in children.items()
-        }
-        self._nodes = nodes
-        # Probe latency is only a startup scheduling hint.  A large local
-        # library can exceed the ``slow`` threshold during its first schema
-        # migration, and network libraries still need live filesystem updates.
-        # Keep the normal watcher contract for every successfully bound root.
-        self._rebuild_watches()
-        LOGGER.info(
-            "bind_prepared_library: root=%s albums=%d storage=%s",
-            self._root,
-            len(self._albums),
-            prepared.storage_kind,
-        )
-        self.treeUpdated.emit()
 
     def _bind_path(self, root: Path, *, bind_session_if_needed: bool) -> None:
         LOGGER.info("bind_path: binding to %s", root)

@@ -59,7 +59,6 @@ _OMIT_METADATA_VALUE = object()
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
 _global_lock = threading.Lock()
-_prepared_roots: set[Path] = set()
 
 
 def _coerce_json_metadata_value(value: Any) -> Any:
@@ -131,19 +130,8 @@ def get_global_repository(library_root: Path) -> "AssetRepository":
             )
             _global_instance.close()
         
-        skip_initialization = resolved_root in _prepared_roots
-        _global_instance = AssetRepository(
-            resolved_root,
-            initialize=not skip_initialization,
-        )
+        _global_instance = AssetRepository(resolved_root)
         return _global_instance
-
-
-def mark_repository_prepared(library_root: Path) -> None:
-    """Trust a successful out-of-process schema preparation for this process."""
-
-    with _global_lock:
-        _prepared_roots.add(Path(library_root))
 
 
 def reset_global_repository() -> None:
@@ -157,7 +145,6 @@ def reset_global_repository() -> None:
         if _global_instance is not None:
             _global_instance.close()
             _global_instance = None
-        _prepared_roots.clear()
 
 
 class AssetRepository:
@@ -175,7 +162,7 @@ class AssetRepository:
     Note: For the global database singleton, use `get_global_repository()`.
     """
 
-    def __init__(self, library_root: Path, *, initialize: bool = True):
+    def __init__(self, library_root: Path):
         """Initialize the asset repository.
         
         Args:
@@ -192,8 +179,7 @@ class AssetRepository:
             dict[int, PageCursor | None],
         ] = {}
         self._collection_meta_cache: dict[CollectionQuery, tuple[int, int]] = {}
-        if initialize:
-            self._init_db()
+        self._init_db()
 
     def _init_db(self) -> None:
         """Initialize the database schema."""
@@ -441,16 +427,9 @@ class AssetRepository:
         if normalized is None or not ids_list:
             return
 
-        for start in range(0, len(ids_list), 500):
-            chunk = ids_list[start : start + 500]
-            placeholders = ", ".join(["?"] * len(chunk))
-            query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
-            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
-
-    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
-        """Reset eligible completed assets after a People contract upgrade."""
-
-        return self._reset_ai_statuses_for_pipeline_upgrade("face_status")
+        placeholders = ", ".join(["?"] * len(ids_list))
+        query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
+        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
 
     def count_by_face_status(self) -> Dict[str, int]:
         """Return a status-to-count mapping for ``assets.face_status``."""
@@ -527,38 +506,9 @@ class AssetRepository:
         if normalized is None or not ids_list:
             return
 
-        for start in range(0, len(ids_list), 500):
-            chunk = ids_list[start : start + 500]
-            placeholders = ", ".join(["?"] * len(chunk))
-            query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
-            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
-
-    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
-        """Reset eligible completed assets after a Pets contract upgrade."""
-
-        return self._reset_ai_statuses_for_pipeline_upgrade("pet_status")
-
-    def _reset_ai_statuses_for_pipeline_upgrade(self, column: str) -> int:
-        if column not in {"face_status", "pet_status"}:
-            raise ValueError("Unsupported AI status column")
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
-        try:
-            cursor = conn.execute(
-                f"""
-                UPDATE assets
-                SET {column} = 'pending'
-                WHERE {column} = 'done'
-                  AND COALESCE(CAST(media_type AS TEXT), '0') NOT IN ('1', 'video')
-                  AND COALESCE(CAST(live_role AS INTEGER), 0) = 0
-                  AND COALESCE(mime, '') NOT LIKE 'video/%'
-                """
-            )
-            conn.commit()
-            return int(cursor.rowcount or 0)
-        finally:
-            if should_close:
-                conn.close()
+        placeholders = ", ".join(["?"] * len(ids_list))
+        query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
+        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
 
     def count_by_pet_status(self) -> Dict[str, int]:
         """Return a status-to-count mapping for ``assets.pet_status``."""

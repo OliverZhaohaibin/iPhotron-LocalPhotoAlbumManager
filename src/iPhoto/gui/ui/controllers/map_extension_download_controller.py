@@ -114,7 +114,6 @@ class MapExtensionDownloadController:
         self._latest_result: MapExtensionDownloadResult | None = None
         self._active_worker: MapExtensionDownloadWorker | None = None
         self._temporarily_hidden_windows: list[QWidget] = []
-        self._startup_prompt: QMessageBox | None = None
 
     def _tr(self, source_text: str) -> str:
         return QCoreApplication.translate("MapExtension", source_text, None)
@@ -144,20 +143,14 @@ class MapExtensionDownloadController:
         message_box.addButton(self._tr("Not Now"), QMessageBox.ButtonRole.RejectRole)
         do_not_show_checkbox = QCheckBox(self._tr("Do not show again"), message_box)
         message_box.setCheckBox(do_not_show_checkbox)
-        self._startup_prompt = message_box
+        message_box.exec()
 
-        def _finished(_result: int) -> None:
-            try:
-                if message_box.clickedButton() is download_button:
-                    self.start_download(source="startup")
-                elif do_not_show_checkbox.isChecked():
-                    self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
-            finally:
-                self._startup_prompt = None
-                message_box.deleteLater()
+        if message_box.clickedButton() is download_button:
+            self.start_download(source="startup")
+            return
 
-        message_box.finished.connect(_finished)
-        message_box.open()
+        if do_not_show_checkbox.isChecked():
+            self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
 
     def set_package_root(self, package_root: Path | None) -> None:
         """Update the active maps package root used for prompt/download checks."""

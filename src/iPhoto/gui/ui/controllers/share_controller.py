@@ -23,6 +23,7 @@ from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QImage
 from PySide6.QtWidgets import QPushButton
 
 from ....application.ports import EditServicePort
+from ....core.export import probe_duration_seconds, render_image, render_video
 from ....errors import ExternalToolError
 from ....media_classifier import VIDEO_EXTENSIONS
 from ....utils.ffmpeg import probe_media
@@ -31,24 +32,6 @@ from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _export_api(name: str):
-    from ....core import export
-
-    return getattr(export, name)
-
-
-def render_image(*args, **kwargs):
-    return _export_api("render_image")(*args, **kwargs)
-
-
-def render_video(*args, **kwargs):
-    return _export_api("render_video")(*args, **kwargs)
-
-
-def probe_duration_seconds(*args, **kwargs):
-    return _export_api("probe_duration_seconds")(*args, **kwargs)
 
 
 class RenderClipboardSignals(QObject):
@@ -78,10 +61,7 @@ class RenderClipboardWorker(QRunnable):
             self.signals.failed.emit(str(exc))
 
     def _do_work(self) -> None:
-        image = render_image(
-            self._path,
-            edit_service=self._edit_service,
-        )
+        image = render_image(self._path, edit_service=self._edit_service)
         if image is None or image.isNull():
             self.signals.failed.emit("No adjustments found")
             return
@@ -125,11 +105,7 @@ class RenderVideoClipboardWorker(QRunnable):
             _prune_share_dir(output_dir)
             path_hash = hashlib.sha256(str(self._path.resolve()).encode()).hexdigest()[:12]
             destination = output_dir / f"{self._path.stem}_{path_hash}.mp4"
-            if render_video(
-                self._path,
-                destination,
-                edit_service=self._edit_service,
-            ):
+            if render_video(self._path, destination, edit_service=self._edit_service):
                 self.signals.success.emit(str(destination))
             else:
                 self.signals.failed.emit("Failed to render edited video")
@@ -236,9 +212,7 @@ class ShareController(QObject):
                 # treated as an edit even when it equals the clip duration.
                 video_duration: float | None = None
                 try:
-                    video_duration = probe_duration_seconds(
-                        probe_media(path)
-                    )
+                    video_duration = probe_duration_seconds(probe_media(path))
                 except ExternalToolError:
                     pass
                 if edit_service.describe_adjustments(

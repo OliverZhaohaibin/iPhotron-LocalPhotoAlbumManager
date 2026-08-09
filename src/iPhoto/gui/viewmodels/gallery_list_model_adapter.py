@@ -100,8 +100,6 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_diag_logged_viewport = False
         self._startup_diag_logged_window = False
         self._startup_diag_logged_thumbnail_ready = False
-        self._startup_gallery_visible_logged = False
-        self._startup_usable_thumbnail_logged = False
         self._startup_gallery_warmup_active = False
         self._startup_gallery_ready_emitted = False
         self._startup_gallery_window_seen = False
@@ -349,8 +347,6 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_gallery_viewport_seen = False
         self._startup_gallery_thumbnail_seen = False
         self._startup_gallery_heartbeat_count = 0
-        self._startup_gallery_visible_logged = False
-        self._startup_usable_thumbnail_logged = False
         if _startup_hang_diag_enabled():
             self._startup_gallery_heartbeat_timer.start()
         else:
@@ -422,9 +418,6 @@ class GalleryListModelAdapter(QAbstractListModel):
             if self._startup_gallery_warmup_active:
                 self._startup_gallery_window_seen = True
                 mark("gallery_startup_warmup.first_window_applied")
-                if not self._startup_gallery_visible_logged:
-                    self._startup_gallery_visible_logged = True
-                    mark("startup.first_gallery_visible")
             if not self._startup_diag_logged_window:
                 self._startup_diag_logged_window = True
                 _LOGGER.info(
@@ -815,42 +808,18 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._pending_thumbnail_rows.clear()
         if not rows:
             return
-        demand = self._viewport_demand
-        track_startup_milestone = (
-            self._startup_gallery_warmup_active
-            and self._startup_gallery_window_seen
-            and self._startup_gallery_viewport_seen
-            and demand is not None
-        )
-        usable_startup_thumbnail_updated = False
-
-        def _emit_range(first: int, last: int) -> None:
-            nonlocal usable_startup_thumbnail_updated
-            emitted = self._emit_thumbnail_range(first, last)
-            if (
-                emitted
-                and track_startup_milestone
-                and demand is not None
-                and first <= demand.visible_last
-                and last >= demand.visible_first
-            ):
-                usable_startup_thumbnail_updated = True
-
         range_first = rows[0]
         range_last = rows[0]
         for row in rows[1:]:
             if row == range_last + 1:
                 range_last = row
                 continue
-            _emit_range(range_first, range_last)
+            self._emit_thumbnail_range(range_first, range_last)
             range_first = range_last = row
-        _emit_range(range_first, range_last)
-        if usable_startup_thumbnail_updated and not self._startup_usable_thumbnail_logged:
-            self._startup_usable_thumbnail_logged = True
-            mark("startup.first_usable_thumbnail")
+        self._emit_thumbnail_range(range_first, range_last)
         self._maybe_finish_startup_gallery_warmup("thumbnail_ready")
 
-    def _emit_thumbnail_range(self, first: int, last: int) -> bool:
+    def _emit_thumbnail_range(self, first: int, last: int) -> None:
         top = self.index(first, 0)
         bottom = self.index(last, 0)
         if top.isValid() and bottom.isValid():
@@ -859,8 +828,6 @@ class GalleryListModelAdapter(QAbstractListModel):
                 bottom,
                 [Qt.DecorationRole, Roles.TILE_SNAPSHOT],
             )
-            return True
-        return False
 
     def _finish_startup_gallery_warmup(self, reason: str) -> None:
         if not self._startup_gallery_warmup_active and self._startup_gallery_ready_emitted:

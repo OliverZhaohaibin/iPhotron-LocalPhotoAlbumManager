@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ..application.ports import (
     AssetRepositoryPort,
@@ -33,9 +32,6 @@ from .library_location_service import LibraryLocationService
 from .library_people_service import create_people_service
 from .library_pet_service import create_pet_service
 from .library_scan_service import LibraryScanService
-
-if TYPE_CHECKING:
-    from .library_probe import PreparedLibrary
 
 
 @dataclass
@@ -133,25 +129,6 @@ class LibrarySession:
         if callable(bind_edit_service):
             bind_edit_service(None)
         self.asset_runtime.shutdown()
-
-    @classmethod
-    def from_prepared(
-        cls,
-        prepared: "PreparedLibrary",
-        *,
-        asset_runtime: LibraryAssetRuntime,
-        bind_asset_runtime: bool = False,
-    ) -> "LibrarySession":
-        """Compose services after an out-of-process library probe succeeded."""
-
-        from ..cache.index_store import mark_repository_prepared
-
-        mark_repository_prepared(prepared.root)
-        return cls(
-            prepared.root,
-            asset_runtime=asset_runtime,
-            bind_asset_runtime=bind_asset_runtime,
-        )
 
 
 def create_headless_library_session(root: Path) -> LibrarySession:

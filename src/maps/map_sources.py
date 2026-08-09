@@ -165,12 +165,6 @@ def prefer_osmand_native_widget() -> bool:
     ``IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0`` to force the Python OBF path.
     """
 
-    if sys.platform == "linux":
-        qpa = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
-        session = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
-        if qpa.startswith("wayland") or (not qpa and session == "wayland"):
-            return False
-
     raw_value = os.environ.get(ENV_PREFER_OSMAND_NATIVE_WIDGET, "").strip().lower()
     if raw_value in _TRUE_ENV_VALUES:
         return True

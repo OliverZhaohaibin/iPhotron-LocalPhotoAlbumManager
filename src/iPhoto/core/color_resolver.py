@@ -6,32 +6,16 @@ from dataclasses import dataclass
 from typing import Any, Mapping, MutableMapping
 
 import math
-from functools import wraps
 
 import numpy as np
+try:
+    from numba import jit
+except ImportError:
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
 
-
-def _lazy_jit(*jit_args: Any, **jit_kwargs: Any):
-    """Compile on first edit use instead of importing Numba during startup."""
-
-    def decorator(func):
-        compiled = None
-
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            nonlocal compiled
-            if compiled is None:
-                try:
-                    from numba import jit
-
-                    compiled = jit(*jit_args, **jit_kwargs)(func)
-                except ImportError:
-                    compiled = func
-            return compiled(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
+        return decorator
 
 from PySide6.QtCore import Qt
 
@@ -333,7 +317,7 @@ def _smoothstep(edge0: float, edge1: float, x: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-@_lazy_jit(nopython=True, inline="always")
+@jit(nopython=True, inline="always")
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     if value < minimum:
         return minimum

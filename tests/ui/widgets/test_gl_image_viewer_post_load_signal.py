@@ -5,7 +5,6 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GL image viewer tests")
 
 import os
-from pathlib import Path
 
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QImage
@@ -70,15 +69,3 @@ def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None
     )
     assert image_point.x() == pytest.approx(210.0)
     assert image_point.y() == pytest.approx(160.0)
-
-
-def test_gl_image_viewer_reports_each_presented_still_source(qapp) -> None:
-    viewer = GLImageViewer()
-    image = QImage(16, 16, QImage.Format.Format_RGBA8888)
-    viewer.set_image(image, {}, image_source=Path("/tmp/live.heic"))
-    presented = []
-    viewer.stillFramePresented.connect(presented.append)
-
-    viewer._emit_still_frame_presented()
-
-    assert presented == [Path("/tmp/live.heic")]

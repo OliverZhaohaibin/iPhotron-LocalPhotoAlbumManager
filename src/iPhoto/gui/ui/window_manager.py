@@ -317,11 +317,6 @@ class FramelessWindowManager(QObject):
         ):
             edit_controller.exit_fullscreen_preview()
             return
-        if edit_controller is not None and edit_controller.is_editing():
-            cancel_edit = getattr(edit_controller, "cancel_edit_mode", None)
-            if callable(cancel_edit):
-                cancel_edit()
-            return
 
         if not self._immersive_active:
             return

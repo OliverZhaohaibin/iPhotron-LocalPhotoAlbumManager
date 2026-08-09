@@ -94,9 +94,6 @@ class ViewRouter(QObject):
 
     def show_people(self):
         """Switch to the People dashboard."""
-        if self._people_idx == -1:
-            people_page = self._ui.ensure_feature("people")
-            self._people_idx = self._stack.indexOf(people_page)
         if self._people_idx != -1 and self._stack.currentIndex() != self._people_idx:
             self._stack.setCurrentIndex(self._people_idx)
             self.peopleViewShown.emit()

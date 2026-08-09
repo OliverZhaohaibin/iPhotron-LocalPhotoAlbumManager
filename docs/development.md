@@ -51,8 +51,6 @@ Current production development follows the vNext runtime boundary:
 - GUI, CLI, file watchers, and Qt workers must use session/application
   surfaces instead of legacy compatibility facades.
 - Production source must not import `iPhoto.legacy` or `iPhoto.models.*`.
-- The removed `src/iPhoto/legacy/` tree and tests for its interfaces must not be
-  restored; preserve required behavior through current surfaces.
 - New business behavior belongs in application use cases/services, session
   services, domain values/pure services, or infrastructure adapters.
 - GUI code should remain presentation and Qt transport.
@@ -992,7 +990,7 @@ widgets after the window is visible can recreate the native window.
 python3 tools/check_architecture.py
 
 # Run all tests
-python tools/run_pytest_ci.py tests/
+python -m pytest
 
 # Run with verbose output
 python -m pytest -v
@@ -1008,18 +1006,8 @@ python -m pytest tests/architecture -q
 ```
 
 Test configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`:
-
 - Test paths: `tests/`
-- The `pytest-qt` plugin is disabled; GUI tests remain in normal discovery and
-  provide their own Qt fixtures/offscreen setup.
-
-The full mixed native suite uses `tools/run_pytest_ci.py`. It returns pytest's
-real status after fixture/session teardown, flushes output, and then bypasses
-only process-global native finalizers that are unsafe after PySide6, multimedia,
-PyAV, OpenGL, Numba, and Torch have shared one process. This runner is not proof
-of application shutdown. `tests/gui/test_startup_shutdown_smoke.py` launches the
-real entrypoint in a separate subprocess and must exit normally within 20
-seconds without calling `os._exit`.
+- GUI tests (`tests/ui`, `tests/gui`) are excluded by default.
 
 Use the project virtual environment explicitly when the shell does not have
 `pytest` on `PATH`:

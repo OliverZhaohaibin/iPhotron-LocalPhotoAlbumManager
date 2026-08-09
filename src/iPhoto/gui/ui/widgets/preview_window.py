@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+import importlib.util
 from pathlib import Path
 import sys
 from typing import Callable, Mapping, Optional
@@ -29,9 +30,9 @@ from ....utils.ffmpeg import probe_video_rotation
 from ..media import MediaController, require_multimedia
 from .video_area import VideoArea
 
-try:
+if importlib.util.find_spec("PySide6.QtMultimediaWidgets") is not None:
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
-except (ImportError, AttributeError):  # pragma: no cover - optional Qt module
+else:  # pragma: no cover - requires optional Qt module
     QGraphicsVideoItem = None  # type: ignore[assignment]
 
 

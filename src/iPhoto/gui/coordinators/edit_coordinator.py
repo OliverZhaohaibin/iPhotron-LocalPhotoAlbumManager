@@ -81,7 +81,6 @@ class EditCoordinator(QObject):
         media_session: "MediaSelectionSession | None" = None,
         adjustment_committer: "MediaAdjustmentCommitter | None" = None,
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
-        render_session_controller: object | None = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -94,8 +93,6 @@ class EditCoordinator(QObject):
         self._media_session = media_session
         self._adjustment_committer = adjustment_committer
         self._edit_service_getter = edit_service_getter
-        self._render_session_controller = render_session_controller
-        self._render_session_handle = None
 
         self._transition_manager = EditViewTransitionManager(
             self._ui,
@@ -302,28 +299,6 @@ class EditCoordinator(QObject):
 
         return self._session is not None
 
-    def preflight_library_rebind(self) -> bool:
-        """Refuse a user-initiated library switch while edits are unresolved."""
-
-        return self._session is None
-
-    def invalidate_library_binding(self) -> None:
-        """Safely abandon an edit after an unexpected external session switch."""
-
-        handle = getattr(self, "_render_session_handle", None)
-        if handle is not None:
-            invalidate = getattr(handle, "invalidate", None)
-            if callable(invalidate):
-                invalidate()
-        if self._session is not None:
-            self.leave_edit_mode(restore_reason="library_invalidated", restore_detail=False)
-
-    def cancel_edit_mode(self) -> None:
-        """Discard the active in-memory session without writing its adjustments."""
-
-        if self._session is not None:
-            self.leave_edit_mode(restore_reason="edit_cancel")
-
     # ------------------------------------------------------------------
     # Public transport API (used by AppShortcutManager)
     # ------------------------------------------------------------------
@@ -384,34 +359,17 @@ class EditCoordinator(QObject):
             is_video=asset_path.suffix.lower() in VIDEO_EXTENSIONS,
         )
 
-        render_handle = None
-        if asset_path.suffix.lower() not in VIDEO_EXTENSIONS:
-            acquire = getattr(
-                getattr(self, "_render_session_controller", None),
-                "acquire_render_session",
-                None,
-            )
-            if callable(acquire):
-                render_handle = acquire(asset_path)
-        self._render_session_handle = render_handle
-
-        # Prefer the exact state already displayed by Detail.  Falling back to
-        # the library edit service keeps direct Edit entry compatible.
-        if render_handle is not None:
-            adjustments = dict(render_handle.edit_state.raw_adjustments)
-        else:
-            edit_service = self._edit_service()
-            adjustments = (
-                edit_service.read_adjustments(asset_path)
-                if edit_service is not None
-                else {}
-            )
+        # Load Adjustments
+        edit_service = self._edit_service()
+        adjustments = (
+            edit_service.read_adjustments(asset_path)
+            if edit_service is not None
+            else {}
+        )
 
         # Setup Session
         session = EditSession(self)
         session.set_values(adjustments, emit_individual=False)
-        if render_handle is not None:
-            session.set_color_stats(render_handle.edit_state.color_stats)
         session.valuesChanged.connect(self._handle_session_changed)
         self._session = session
         self._history_manager.set_session(session)
@@ -461,22 +419,7 @@ class EditCoordinator(QObject):
 
         # Start Loading High-Res Image / Video
         if not self._is_video_source():
-            sidebar_input = getattr(
-                getattr(self, "_render_session_controller", None),
-                "render_session_sidebar_input",
-                None,
-            )
-            shared = (
-                sidebar_input(render_handle)
-                if render_handle is not None and callable(sidebar_input)
-                else None
-            )
-            if shared is None:
-                self._start_async_edit_load(asset_path)
-            else:
-                image, color_stats = shared
-                session.set_color_stats(color_stats)
-                self._install_edit_image(asset_path, image)
+            self._start_async_edit_load(asset_path)
 
     def _start_async_edit_load(self, source: Path):
         if self._session is None: return
@@ -532,14 +475,6 @@ class EditCoordinator(QObject):
     def _on_edit_image_loaded(self, path: Path, image: QImage):
         if self._session is None or self._current_source != path: return
 
-        self._install_edit_image(path, image)
-
-    def _install_edit_image(self, path: Path, image: QImage) -> None:
-        """Install either a shared Detail surface or a fallback Edit decode."""
-
-        if self._session is None or self._current_source != path:
-            return
-
         try:
             self._preview_manager.start_session(image, self._session.values())
         except Exception:
@@ -574,12 +509,7 @@ class EditCoordinator(QObject):
             self._ui.edit_sidebar.set_light_preview_image(result.image, color_stats=result.stats)
             self._ui.edit_sidebar.refresh()
 
-    def leave_edit_mode(
-        self,
-        *,
-        restore_reason: str = "edit_exit",
-        restore_detail: bool = True,
-    ):
+    def leave_edit_mode(self, *, restore_reason: str = "edit_exit"):
         """Returns to detail view."""
         source = self._current_source
         is_video_source = (
@@ -587,8 +517,7 @@ class EditCoordinator(QObject):
             and source.suffix.lower() in VIDEO_EXTENSIONS
         )
         should_restore_detail = (
-            restore_detail
-            and source is not None
+            source is not None
             and self._media_session is not None
         )
         _LOGGER.debug(
@@ -611,18 +540,6 @@ class EditCoordinator(QObject):
         self._active_edit_viewport().set_eyedropper_mode(False)
         self._current_source = None
         self._session = None
-        render_handle = getattr(self, "_render_session_handle", None)
-        self._render_session_handle = None
-        finish_render_session = getattr(
-            getattr(self, "_render_session_controller", None),
-            "finish_render_session",
-            None,
-        )
-        if render_handle is not None and callable(finish_render_session):
-            finish_render_session(
-                render_handle,
-                committed=restore_reason == "edit_done",
-            )
         self._preview_manager.stop_session()
         self._zoom_handler.disconnect_controls()
         self._header_controller.restore_detail_mode()
@@ -688,7 +605,6 @@ class EditCoordinator(QObject):
             self._active_edit_viewport().crop_values(),
             emit_individual=False,
         )
-        self._flush_render_session_state()
         if self._adjustment_committer is None:
             navigation = self._navigation
             if navigation:
@@ -711,18 +627,6 @@ class EditCoordinator(QObject):
         if self._session:
             self.push_undo_state()
             self._session.reset()
-
-    def _flush_render_session_state(self) -> None:
-        session = self._session
-        handle = getattr(self, "_render_session_handle", None)
-        update = getattr(
-            getattr(self, "_render_session_controller", None),
-            "update_render_session",
-            None,
-        )
-        if session is not None and handle is not None and callable(update):
-            update(handle, session.values())
-        self._pending_session_values = None
 
     def _handle_rotate_left_clicked(self):
         if self._session:
@@ -779,23 +683,7 @@ class EditCoordinator(QObject):
 
     def _apply_session_adjustments_to_viewer(self):
         if self._session and not self._compare_active:
-            state = None
-            update_render_session = getattr(
-                getattr(self, "_render_session_controller", None),
-                "update_render_session",
-                None,
-            )
-            render_handle = getattr(self, "_render_session_handle", None)
-            if render_handle is not None and callable(update_render_session):
-                state = update_render_session(
-                    render_handle,
-                    self._session.values(),
-                )
-            adj = (
-                dict(state.shader_adjustments)
-                if state is not None
-                else self._resolve_session_adjustments()
-            )
+            adj = self._resolve_session_adjustments()
             self._active_adjustments = adj
             self._active_edit_viewport().set_adjustments(adj)
             if self._is_video_source():

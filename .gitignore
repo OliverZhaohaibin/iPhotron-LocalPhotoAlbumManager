@@ -213,12 +213,9 @@ marimo/_lsp/
 __marimo__/
 /maps/.idea/
 /build_output_debug/
-/benchmark-output/
 
 # Test artifacts
 /tmp/
-macos-detection-report.json
-macos-detection-report.md
 
 .idea/
 /tools/osmand_render_helper_native/qt6-msvc-importlibs/

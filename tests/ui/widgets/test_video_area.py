@@ -67,27 +67,6 @@ def _set_rotation_180(fmt: QVideoFrameFormat) -> None:
     raise RuntimeError("Could not resolve a Qt-compatible 180° rotation enum")
 
 
-def test_video_area_reports_first_presented_frame_for_each_load(qapp) -> None:
-    area = VideoArea()
-    source = Path("/tmp/live.mov")
-    area._current_source = source
-    area._surface_first_frame_pending = True
-    area._profile_load_started_at = None
-    area._adjusted_preview_enabled = False
-    area._renderer.update_frame = Mock()
-    presented = []
-    area.framePresented.connect(presented.append)
-    frame = QVideoFrame(QImage(4, 4, QImage.Format.Format_RGBA8888))
-
-    area._present_video_frame(frame)
-    area._present_video_frame(frame)
-    assert presented == []
-    area._renderer.framePresented.emit()
-    area._renderer.framePresented.emit()
-
-    assert presented == [source]
-
-
 @pytest.fixture
 def qapp():
     """Create QApplication instance for Qt tests."""

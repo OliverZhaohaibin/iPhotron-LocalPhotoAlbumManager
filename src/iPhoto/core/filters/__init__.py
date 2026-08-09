@@ -9,11 +9,7 @@ of concerns:
 
 from __future__ import annotations
 
-def apply_adjustments(*args, **kwargs):
-    """Import executors lazily so browsing startup never imports Numba."""
-
-    from .facade import apply_adjustments as implementation
-
-    return implementation(*args, **kwargs)
+# Re-export the main API for backwards compatibility
+from .facade import apply_adjustments
 
 __all__ = ["apply_adjustments"]

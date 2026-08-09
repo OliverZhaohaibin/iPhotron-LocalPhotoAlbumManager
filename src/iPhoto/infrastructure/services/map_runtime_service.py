@@ -6,47 +6,18 @@ import os
 from pathlib import Path
 
 from PySide6.QtGui import QGuiApplication
+from maps.main import check_opengl_support, choose_default_map_source
+from maps.map_sources import (
+    has_usable_osmand_native_widget,
+    has_usable_osmand_search_extension,
+    prefer_osmand_native_widget,
+)
+from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
 
 from ...application.ports import MapRuntimeCapabilities, MapRuntimePort
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "maps"
-
-
-def check_opengl_support():
-    from maps.main import check_opengl_support as implementation
-
-    return implementation()
-
-
-def choose_default_map_source(*args, **kwargs):
-    from maps.main import choose_default_map_source as implementation
-
-    return implementation(*args, **kwargs)
-
-
-def has_usable_osmand_native_widget(*args, **kwargs):
-    from maps.map_sources import has_usable_osmand_native_widget as implementation
-
-    return implementation(*args, **kwargs)
-
-
-def has_usable_osmand_search_extension(*args, **kwargs):
-    from maps.map_sources import has_usable_osmand_search_extension as implementation
-
-    return implementation(*args, **kwargs)
-
-
-def prefer_osmand_native_widget():
-    from maps.map_sources import prefer_osmand_native_widget as implementation
-
-    return implementation()
-
-
-def probe_native_widget_runtime(*args, **kwargs):
-    from maps.map_widget.native_osmand_widget import probe_native_widget_runtime as implementation
-
-    return implementation(*args, **kwargs)
 
 
 def _opengl_explicitly_disabled() -> bool:
@@ -64,14 +35,12 @@ class SessionMapRuntimeService(MapRuntimePort):
         self._package_root = (
             Path(package_root).resolve() if package_root is not None else _MAPS_PACKAGE_ROOT
         )
-        self._capabilities: MapRuntimeCapabilities | None = None
+        self._capabilities = self._detect_capabilities()
 
     def is_available(self) -> bool:
-        return self.capabilities().display_available
+        return self._capabilities.display_available
 
     def capabilities(self) -> MapRuntimeCapabilities:
-        if self._capabilities is None:
-            self._capabilities = self._detect_capabilities()
         return self._capabilities
 
     def package_root(self) -> Path:

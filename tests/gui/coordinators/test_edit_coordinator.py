@@ -28,30 +28,6 @@ def qapp():
     yield app
 
 
-def test_library_rebind_preflight_blocks_only_active_edit() -> None:
-    coordinator = EditCoordinator.__new__(EditCoordinator)
-    coordinator._session = object()
-    assert not EditCoordinator.preflight_library_rebind(coordinator)
-    coordinator._session = None
-    assert EditCoordinator.preflight_library_rebind(coordinator)
-
-
-def test_external_library_invalidation_exits_without_stale_handle_error() -> None:
-    coordinator = EditCoordinator.__new__(EditCoordinator)
-    handle = Mock()
-    coordinator._render_session_handle = handle
-    coordinator._session = object()
-    coordinator.leave_edit_mode = Mock()
-
-    EditCoordinator.invalidate_library_binding(coordinator)
-
-    handle.invalidate.assert_called_once_with()
-    coordinator.leave_edit_mode.assert_called_once_with(
-        restore_reason="library_invalidated",
-        restore_detail=False,
-    )
-
-
 def test_handle_done_clicked_delegates_to_adjustment_committer() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     session = SimpleNamespace(

@@ -5,13 +5,10 @@
 from __future__ import annotations
 
 import sqlite3
-import threading
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-
-import numpy as np
 
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
@@ -38,32 +35,19 @@ class PetCoverRecord:
 class PetStateRepository:
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
-        self._initialized = False
-        self._initialize_lock = threading.Lock()
 
     @property
     def db_path(self) -> Path:
         return self._db_path
 
     def initialize(self) -> None:
-        if self._initialized:
-            return
-        with self._initialize_lock:
-            if self._initialized:
-                return
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            with closing(self._connect()) as conn:
-                self._create_schema(conn)
-            self._initialized = True
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as conn:
+            self._create_schema(conn)
 
-    def get_profiles(self, *, include_redirected: bool = False) -> list[PetProfile]:
+    def get_profiles(self) -> list[PetProfile]:
         self.initialize()
         with closing(self._connect()) as conn:
-            redirected_ids = {
-                str(row["source_pet_id"])
-                for row in conn.execute("SELECT source_pet_id FROM merge_redirects").fetchall()
-                if row["source_pet_id"]
-            }
             inferred_counts = {
                 str(row["pet_id"]): int(row["sample_count"] or 0)
                 for row in conn.execute(
@@ -78,17 +62,13 @@ class PetStateRepository:
                 """
                 SELECT
                     pet_id, name, center_embedding, embedding_dim,
-                    created_at, updated_at, sample_count, profile_state, species_label,
-                    embedding_pipeline_version, generation_id,
-                    boundary_embeddings, boundary_sample_count
+                    created_at, updated_at, sample_count, profile_state, species_label
                 FROM pet_profiles
                 """
             ).fetchall()
         profiles: list[PetProfile] = []
         for row in rows:
             pet_id = str(row["pet_id"])
-            if not include_redirected and pet_id in redirected_ids:
-                continue
             sample_count = int(row["sample_count"] or 0)
             if sample_count <= 0:
                 sample_count = inferred_counts.get(pet_id, 0)
@@ -106,71 +86,31 @@ class PetStateRepository:
                     sample_count=sample_count,
                     profile_state=profile_state_for_sample_count(sample_count),
                     species_label=_normalize_species_label(row["species_label"]),
-                    embedding_pipeline_version=str(row["embedding_pipeline_version"] or ""),
-                    generation_id=int(row["generation_id"] or 0),
-                    boundary_embeddings=_deserialize_boundary_embeddings(
-                        row["boundary_embeddings"],
-                        embedding_dim=int(row["embedding_dim"] or 0),
-                        sample_count=int(row["boundary_sample_count"] or 0),
-                    ),
                 )
             )
         return profiles
 
-    def get_identity_profiles(self) -> list[PetProfile]:
-        """Return active profiles and redirected profiles used as aliases."""
-
-        return self.get_profiles(include_redirected=True)
-
     def get_profile(self, pet_id: str) -> PetProfile | None:
         if not pet_id:
             return None
-        return self.get_profiles_by_ids((pet_id,)).get(pet_id)
-
-    def get_profiles_by_ids(self, pet_ids: Iterable[str]) -> dict[str, PetProfile]:
-        unique_ids = tuple(str(value) for value in dict.fromkeys(pet_ids) if value)
-        if not unique_ids:
-            return {}
-        self.initialize()
-        rows: list[sqlite3.Row] = []
-        with closing(self._connect()) as conn:
-            for chunk in _chunked(unique_ids, 500):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT
-                            pet_id, name, center_embedding, embedding_dim,
-                            created_at, updated_at, sample_count, profile_state,
-                            species_label, embedding_pipeline_version, generation_id,
-                            boundary_embeddings, boundary_sample_count
-                        FROM pet_profiles
-                        WHERE pet_id IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-                )
-        return {str(row["pet_id"]): _profile_from_row(row) for row in rows if row["pet_id"]}
+        profiles = [profile for profile in self.get_profiles() if profile.pet_id == pet_id]
+        return profiles[0] if profiles else None
 
     def get_profile_name_map(self, pet_ids: Iterable[str]) -> dict[str, str | None]:
         unique_ids = [str(pet_id) for pet_id in dict.fromkeys(pet_ids) if pet_id]
         if not unique_ids:
             return {}
         self.initialize()
-        rows: list[sqlite3.Row] = []
+        placeholders = ", ".join(["?"] * len(unique_ids))
         with closing(self._connect()) as conn:
-            for chunk in _chunked(tuple(unique_ids), 500):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT pet_id, name
-                        FROM pet_profiles
-                        WHERE pet_id IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-                )
+            rows = conn.execute(
+                f"""
+                SELECT pet_id, name
+                FROM pet_profiles
+                WHERE pet_id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
         return {str(row["pet_id"]): row["name"] for row in rows if row["pet_id"]}
 
     def get_pet_key_map(self, pet_keys: Iterable[str]) -> dict[str, str]:
@@ -178,20 +118,16 @@ class PetStateRepository:
         if not unique_keys:
             return {}
         self.initialize()
-        rows: list[sqlite3.Row] = []
+        placeholders = ", ".join(["?"] * len(unique_keys))
         with closing(self._connect()) as conn:
-            for chunk in _chunked(tuple(unique_keys), 500):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT pet_key, pet_id
-                        FROM pet_keys
-                        WHERE pet_key IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-                )
+            rows = conn.execute(
+                f"""
+                SELECT pet_key, pet_id
+                FROM pet_keys
+                WHERE pet_key IN ({placeholders})
+                """,
+                unique_keys,
+            ).fetchall()
         return {str(row["pet_key"]): str(row["pet_id"]) for row in rows if row["pet_key"]}
 
     def get_rejected_pet_keys(self, pet_keys: Iterable[str]) -> set[str]:
@@ -199,20 +135,16 @@ class PetStateRepository:
         if not unique_keys:
             return set()
         self.initialize()
-        rows: list[sqlite3.Row] = []
+        placeholders = ", ".join(["?"] * len(unique_keys))
         with closing(self._connect()) as conn:
-            for chunk in _chunked(tuple(unique_keys), 500):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT pet_key
-                        FROM rejected_pet_keys
-                        WHERE pet_key IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-                )
+            rows = conn.execute(
+                f"""
+                SELECT pet_key
+                FROM rejected_pet_keys
+                WHERE pet_key IN ({placeholders})
+                """,
+                unique_keys,
+            ).fetchall()
         return {str(row["pet_key"]) for row in rows if row["pet_key"]}
 
     def add_rejected_pet_key(self, pet_key: str) -> None:
@@ -229,54 +161,17 @@ class PetStateRepository:
             )
             conn.commit()
 
-    def migrate_pet_keys(self, mappings: Iterable[tuple[str, str]]) -> None:
-        """Add replacement keys without copying any rejection decisions."""
-
-        normalized = tuple(
-            (str(pet_key), str(pet_id)) for pet_key, pet_id in mappings if pet_key and pet_id
-        )
-        if not normalized:
-            return
-        self.initialize()
-        timestamp = utc_now_iso()
-        with closing(self._connect()) as conn:
-            conn.executemany(
-                """
-                INSERT INTO pet_keys (pet_key, pet_id, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(pet_key) DO UPDATE SET
-                    pet_id = excluded.pet_id,
-                    updated_at = excluded.updated_at
-                """,
-                [(pet_key, pet_id, timestamp) for pet_key, pet_id in normalized],
-            )
-            conn.commit()
-
     def sync_scan_results(
         self,
         pets: list[PetRecord],
         detections: list[PetDetectionRecord],
-        *,
-        replaced_pet_ids: Iterable[str] = (),
     ) -> None:
         self.initialize()
         names = self.get_profile_name_map(pet.pet_id for pet in pets)
         timestamp = utc_now_iso()
         detection_by_id = {detection.detection_id: detection for detection in detections}
         with closing(self._connect()) as conn:
-            redirect_rows = conn.execute(
-                "SELECT source_pet_id, target_pet_id FROM merge_redirects"
-            ).fetchall()
-            redirects = _canonical_redirect_map(
-                {
-                    str(row["source_pet_id"]): str(row["target_pet_id"])
-                    for row in redirect_rows
-                    if row["source_pet_id"] and row["target_pet_id"]
-                }
-            )
             for pet in pets:
-                if pet.pet_id in redirects:
-                    continue
                 sample_count = max(int(pet.sample_count), int(pet.detection_count))
                 existing = conn.execute(
                     "SELECT created_at, name FROM pet_profiles WHERE pet_id = ?",
@@ -296,10 +191,8 @@ class PetStateRepository:
                     """
                     INSERT INTO pet_profiles (
                         pet_id, name, center_embedding, embedding_dim,
-                        created_at, updated_at, sample_count, profile_state, species_label,
-                        embedding_pipeline_version, generation_id,
-                        boundary_embeddings, boundary_sample_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, sample_count, profile_state, species_label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pet_id) DO UPDATE SET
                         name = COALESCE(pet_profiles.name, excluded.name),
                         center_embedding = excluded.center_embedding,
@@ -307,11 +200,7 @@ class PetStateRepository:
                         updated_at = excluded.updated_at,
                         sample_count = excluded.sample_count,
                         profile_state = excluded.profile_state,
-                        species_label = excluded.species_label,
-                        embedding_pipeline_version = excluded.embedding_pipeline_version,
-                        generation_id = excluded.generation_id
-                        , boundary_embeddings = excluded.boundary_embeddings
-                        , boundary_sample_count = excluded.boundary_sample_count
+                        species_label = excluded.species_label
                     """,
                     (
                         pet.pet_id,
@@ -323,29 +212,12 @@ class PetStateRepository:
                         sample_count,
                         profile_state_for_sample_count(sample_count),
                         _normalize_species_label(pet.species_label),
-                        pet.embedding_pipeline_version,
-                        pet.generation_id,
-                        _serialize_boundary_embeddings(
-                            pet.boundary_embeddings,
-                            pet.embedding_dim,
-                        ),
-                        min(len(pet.boundary_embeddings), 8),
                     ),
                 )
 
             for detection in detections:
                 if not detection.pet_id:
                     continue
-                canonical_pet_id = redirects.get(detection.pet_id, detection.pet_id)
-                existing_key = conn.execute(
-                    "SELECT pet_id FROM pet_keys WHERE pet_key = ?",
-                    (detection.pet_key,),
-                ).fetchone()
-                durable_pet_id = canonical_pet_id
-                if existing_key is not None and existing_key["pet_id"]:
-                    raw_pet_id = str(existing_key["pet_id"])
-                    if redirects.get(raw_pet_id, raw_pet_id) == canonical_pet_id:
-                        durable_pet_id = raw_pet_id
                 conn.execute(
                     """
                     INSERT INTO pet_keys (pet_key, pet_id, updated_at)
@@ -354,7 +226,7 @@ class PetStateRepository:
                         pet_id = excluded.pet_id,
                         updated_at = excluded.updated_at
                     """,
-                    (detection.pet_key, durable_pet_id, timestamp),
+                    (detection.pet_key, detection.pet_id, timestamp),
                 )
 
             for pet in pets:
@@ -362,35 +234,10 @@ class PetStateRepository:
                 if key_detection is None:
                     continue
                 custom = conn.execute(
-                    "SELECT is_custom, pet_key FROM pet_covers WHERE pet_id = ?",
+                    "SELECT is_custom FROM pet_covers WHERE pet_id = ?",
                     (pet.pet_id,),
                 ).fetchone()
                 if custom is not None and int(custom["is_custom"] or 0) == 1:
-                    custom_key = str(custom["pet_key"] or "")
-                    replacement = next(
-                        (
-                            detection
-                            for detection in detections
-                            if detection.pet_id == pet.pet_id and detection.pet_key == custom_key
-                        ),
-                        None,
-                    )
-                    if replacement is not None:
-                        conn.execute(
-                            """
-                            UPDATE pet_covers
-                            SET detection_id = ?, asset_id = ?, thumbnail_path = ?,
-                                updated_at = ?
-                            WHERE pet_id = ?
-                            """,
-                            (
-                                replacement.detection_id,
-                                replacement.asset_id,
-                                replacement.thumbnail_path,
-                                timestamp,
-                                pet.pet_id,
-                            ),
-                        )
                     continue
                 conn.execute(
                     """
@@ -416,90 +263,19 @@ class PetStateRepository:
                 )
 
             current_pet_ids = {pet.pet_id for pet in pets if pet.pet_id}
-            replaced_ids = {str(pet_id) for pet_id in replaced_pet_ids if pet_id}
-            stale_automatic_cover_ids = sorted(replaced_ids - current_pet_ids)
+            automatic_cover_rows = conn.execute(
+                "SELECT pet_id FROM pet_covers WHERE is_custom = 0"
+            ).fetchall()
+            stale_automatic_cover_ids = [
+                str(row["pet_id"])
+                for row in automatic_cover_rows
+                if row["pet_id"] and str(row["pet_id"]) not in current_pet_ids
+            ]
             conn.executemany(
                 "DELETE FROM pet_covers WHERE pet_id = ? AND is_custom = 0",
                 [(pet_id,) for pet_id in stale_automatic_cover_ids],
             )
             conn.commit()
-
-    def ensure_runtime_candidates(
-        self,
-        pets: Iterable[PetRecord],
-        detections: Iterable[PetDetectionRecord],
-    ) -> None:
-        """Backfill missing durable rows from a legacy runtime snapshot.
-
-        This is deliberately insert-only: names, covers, hidden state and
-        existing key assignments are user state and must never be overwritten
-        by compatibility repair.
-        """
-
-        self.initialize()
-        timestamp = utc_now_iso()
-        with closing(self._connect()) as conn:
-            redirect_rows = conn.execute(
-                "SELECT source_pet_id, target_pet_id FROM merge_redirects"
-            ).fetchall()
-            redirects = _canonical_redirect_map(
-                {
-                    str(row["source_pet_id"]): str(row["target_pet_id"])
-                    for row in redirect_rows
-                    if row["source_pet_id"] and row["target_pet_id"]
-                }
-            )
-            for pet in pets:
-                if pet.pet_id in redirects:
-                    continue
-                sample_count = max(int(pet.sample_count), int(pet.detection_count))
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO pet_profiles (
-                        pet_id, name, center_embedding, embedding_dim,
-                        created_at, updated_at, sample_count, profile_state, species_label
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        pet.pet_id,
-                        normalize_name(pet.name),
-                        serialize_embedding(pet.center_embedding),
-                        pet.embedding_dim,
-                        pet.created_at,
-                        timestamp,
-                        sample_count,
-                        profile_state_for_sample_count(sample_count),
-                        _normalize_species_label(pet.species_label),
-                    ),
-                )
-            for detection in detections:
-                if not detection.pet_id:
-                    continue
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO pet_keys (pet_key, pet_id, updated_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    (detection.pet_key, detection.pet_id, timestamp),
-                )
-            conn.commit()
-
-    def get_merge_redirect_map(self) -> dict[str, str]:
-        self.initialize()
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                """
-                SELECT source_pet_id, target_pet_id
-                FROM merge_redirects
-                ORDER BY updated_at ASC, source_pet_id ASC
-                """
-            ).fetchall()
-        redirects = {
-            str(row["source_pet_id"]): str(row["target_pet_id"])
-            for row in rows
-            if row["source_pet_id"] and row["target_pet_id"]
-        }
-        return _canonical_redirect_map(redirects)
 
     def rename_pet(self, pet_id: str, name_or_none: str | None) -> None:
         if not pet_id:
@@ -549,20 +325,16 @@ class PetStateRepository:
         if not unique_ids:
             return {}
         self.initialize()
-        rows: list[sqlite3.Row] = []
+        placeholders = ", ".join(["?"] * len(unique_ids))
         with closing(self._connect()) as conn:
-            for chunk in _chunked(tuple(unique_ids), 500):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT pet_id
-                        FROM hidden_pets
-                        WHERE pet_id IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-                )
+            rows = conn.execute(
+                f"""
+                SELECT pet_id
+                FROM hidden_pets
+                WHERE pet_id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
         hidden = {str(row["pet_id"]) for row in rows if row["pet_id"]}
         return {pet_id: pet_id in hidden for pet_id in unique_ids}
 
@@ -601,20 +373,16 @@ class PetStateRepository:
         if not unique_ids:
             return {}
         self.initialize()
-        rows: list[sqlite3.Row] = []
+        placeholders = ", ".join(["?"] * len(unique_ids))
         with closing(self._connect()) as conn:
-            for chunk in _chunked(tuple(unique_ids), 500):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT pet_id, thumbnail_path
-                        FROM pet_covers
-                        WHERE pet_id IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-                )
+            rows = conn.execute(
+                f"""
+                SELECT pet_id, thumbnail_path
+                FROM pet_covers
+                WHERE pet_id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
         return {
             str(row["pet_id"]): str(row["thumbnail_path"])
             for row in rows
@@ -630,45 +398,6 @@ class PetStateRepository:
                 "SELECT thumbnail_path FROM pet_covers WHERE thumbnail_path IS NOT NULL"
             ).fetchall()
         return {str(row["thumbnail_path"]) for row in rows if row["thumbnail_path"]}
-
-    def get_cover(self, pet_id: str) -> PetCoverRecord | None:
-        if not pet_id:
-            return None
-        self.initialize()
-        with closing(self._connect()) as conn:
-            row = conn.execute(
-                "SELECT * FROM pet_covers WHERE pet_id = ?",
-                (pet_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return PetCoverRecord(
-            pet_id=str(row["pet_id"]),
-            detection_id=str(row["detection_id"]) if row["detection_id"] else None,
-            pet_key=str(row["pet_key"]) if row["pet_key"] else None,
-            asset_id=str(row["asset_id"]) if row["asset_id"] else None,
-            thumbnail_path=(str(row["thumbnail_path"]) if row["thumbnail_path"] else None),
-            is_custom=bool(row["is_custom"]),
-        )
-
-    def get_summary_state_maps(
-        self,
-    ) -> tuple[dict[str, bool], dict[str, str], dict[str, str | None]]:
-        """Load dashboard state with a fixed query budget independent of pet count."""
-
-        self.initialize()
-        with closing(self._connect()) as conn:
-            hidden_rows = conn.execute("SELECT pet_id FROM hidden_pets").fetchall()
-            cover_rows = conn.execute("SELECT pet_id, thumbnail_path FROM pet_covers").fetchall()
-            profile_rows = conn.execute("SELECT pet_id, name FROM pet_profiles").fetchall()
-        hidden = {str(row["pet_id"]): True for row in hidden_rows if row["pet_id"]}
-        covers = {
-            str(row["pet_id"]): str(row["thumbnail_path"])
-            for row in cover_rows
-            if row["pet_id"] and row["thumbnail_path"]
-        }
-        names = {str(row["pet_id"]): row["name"] for row in profile_rows if row["pet_id"]}
-        return hidden, covers, names
 
     def clear_cover_for_detection(self, detection_id: str) -> bool:
         """Remove a cover choice that points at a detection being deleted."""
@@ -691,78 +420,24 @@ class PetStateRepository:
         timestamp = utc_now_iso()
         with closing(self._connect()) as conn:
             source = conn.execute(
-                "SELECT pet_id, name FROM pet_profiles WHERE pet_id = ?",
+                "SELECT pet_id FROM pet_profiles WHERE pet_id = ?",
                 (source_pet_id,),
             ).fetchone()
             target = conn.execute(
-                "SELECT pet_id, name FROM pet_profiles WHERE pet_id = ?",
+                "SELECT pet_id FROM pet_profiles WHERE pet_id = ?",
                 (target_pet_id,),
             ).fetchone()
             if source is None or target is None:
-                return False
-            redirects = {
-                str(row["source_pet_id"]): str(row["target_pet_id"])
-                for row in conn.execute(
-                    "SELECT source_pet_id, target_pet_id FROM merge_redirects"
-                ).fetchall()
-            }
-            if source_pet_id in redirects:
-                return False
-            cursor = target_pet_id
-            visited = {source_pet_id}
-            while cursor in redirects:
-                if cursor in visited:
-                    return False
-                visited.add(cursor)
-                cursor = redirects[cursor]
-            if cursor != target_pet_id:
                 return False
             hidden_map = self.get_pet_hidden_map((source_pet_id, target_pet_id))
             if bool(hidden_map.get(source_pet_id, False)) != bool(
                 hidden_map.get(target_pet_id, False)
             ):
                 return False
-            if target["name"] is None and source["name"] is not None:
-                conn.execute(
-                    "UPDATE pet_profiles SET name = ?, updated_at = ? WHERE pet_id = ?",
-                    (source["name"], timestamp, target_pet_id),
-                )
-            source_cover = conn.execute(
-                "SELECT * FROM pet_covers WHERE pet_id = ?",
-                (source_pet_id,),
-            ).fetchone()
-            target_cover = conn.execute(
-                "SELECT is_custom FROM pet_covers WHERE pet_id = ?",
-                (target_pet_id,),
-            ).fetchone()
-            if (
-                source_cover is not None
-                and int(source_cover["is_custom"] or 0) == 1
-                and (target_cover is None or int(target_cover["is_custom"] or 0) == 0)
-            ):
-                conn.execute(
-                    """
-                    INSERT INTO pet_covers (
-                        pet_id, detection_id, pet_key, asset_id, thumbnail_path,
-                        is_custom, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 1, ?)
-                    ON CONFLICT(pet_id) DO UPDATE SET
-                        detection_id = excluded.detection_id,
-                        pet_key = excluded.pet_key,
-                        asset_id = excluded.asset_id,
-                        thumbnail_path = excluded.thumbnail_path,
-                        is_custom = 1,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        target_pet_id,
-                        source_cover["detection_id"],
-                        source_cover["pet_key"],
-                        source_cover["asset_id"],
-                        source_cover["thumbnail_path"],
-                        timestamp,
-                    ),
-                )
+            conn.execute(
+                "UPDATE pet_keys SET pet_id = ?, updated_at = ? WHERE pet_id = ?",
+                (target_pet_id, timestamp, source_pet_id),
+            )
             conn.execute(
                 """
                 INSERT INTO merge_redirects (source_pet_id, target_pet_id, updated_at)
@@ -773,14 +448,7 @@ class PetStateRepository:
                 """,
                 (source_pet_id, target_pet_id, timestamp),
             )
-            conn.execute(
-                """
-                UPDATE merge_redirects
-                SET target_pet_id = ?, updated_at = ?
-                WHERE target_pet_id = ? AND source_pet_id != ?
-                """,
-                (target_pet_id, timestamp, source_pet_id, source_pet_id),
-            )
+            conn.execute("DELETE FROM pet_profiles WHERE pet_id = ?", (source_pet_id,))
             conn.execute("DELETE FROM pet_covers WHERE pet_id = ?", (source_pet_id,))
             conn.execute("DELETE FROM hidden_pets WHERE pet_id = ?", (source_pet_id,))
             conn.commit()
@@ -804,11 +472,7 @@ class PetStateRepository:
                 updated_at TEXT NOT NULL,
                 sample_count INTEGER DEFAULT 0,
                 profile_state TEXT DEFAULT 'unstable',
-                species_label TEXT,
-                embedding_pipeline_version TEXT NOT NULL DEFAULT '',
-                generation_id INTEGER NOT NULL DEFAULT 0,
-                boundary_embeddings BLOB,
-                boundary_sample_count INTEGER NOT NULL DEFAULT 0
+                species_label TEXT
             )
             """
         )
@@ -860,25 +524,6 @@ class PetStateRepository:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pet_keys_pet_id ON pet_keys (pet_id)")
-        _ensure_column(
-            conn,
-            "pet_profiles",
-            "embedding_pipeline_version",
-            "TEXT NOT NULL DEFAULT ''",
-        )
-        _ensure_column(
-            conn,
-            "pet_profiles",
-            "generation_id",
-            "INTEGER NOT NULL DEFAULT 0",
-        )
-        _ensure_column(conn, "pet_profiles", "boundary_embeddings", "BLOB")
-        _ensure_column(
-            conn,
-            "pet_profiles",
-            "boundary_sample_count",
-            "INTEGER NOT NULL DEFAULT 0",
-        )
         conn.commit()
 
 
@@ -887,88 +532,3 @@ def _normalize_species_label(value: object) -> str | None:
         return None
     label = str(value).strip().lower()
     return label or None
-
-
-def _canonical_redirect_map(redirects: dict[str, str]) -> dict[str, str]:
-    canonical: dict[str, str] = {}
-    for source in redirects:
-        cursor = source
-        visited: set[str] = set()
-        while cursor in redirects:
-            if cursor in visited:
-                break
-            visited.add(cursor)
-            cursor = redirects[cursor]
-        if cursor not in visited and cursor != source:
-            canonical[source] = cursor
-    return canonical
-
-
-def _chunked(values: tuple[str, ...], size: int) -> Iterable[tuple[str, ...]]:
-    for start in range(0, len(values), size):
-        yield values[start : start + size]
-
-
-def _profile_from_row(row: sqlite3.Row) -> PetProfile:
-    sample_count = int(row["sample_count"] or 0)
-    return PetProfile(
-        pet_id=str(row["pet_id"]),
-        name=row["name"],
-        center_embedding=deserialize_embedding(
-            row["center_embedding"], int(row["embedding_dim"] or 0)
-        ),
-        embedding_dim=int(row["embedding_dim"] or 0),
-        created_at=str(row["created_at"] or ""),
-        updated_at=str(row["updated_at"] or ""),
-        sample_count=sample_count,
-        profile_state=profile_state_for_sample_count(sample_count),
-        species_label=_normalize_species_label(row["species_label"]),
-        embedding_pipeline_version=str(row["embedding_pipeline_version"] or ""),
-        generation_id=int(row["generation_id"] or 0),
-        boundary_embeddings=_deserialize_boundary_embeddings(
-            row["boundary_embeddings"],
-            embedding_dim=int(row["embedding_dim"] or 0),
-            sample_count=int(row["boundary_sample_count"] or 0),
-        ),
-    )
-
-
-def _ensure_column(
-    conn: sqlite3.Connection,
-    table: str,
-    column: str,
-    declaration: str,
-) -> None:
-    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
-
-
-def _serialize_boundary_embeddings(
-    embeddings: tuple[np.ndarray, ...],
-    embedding_dim: int,
-) -> sqlite3.Binary | None:
-    selected = [
-        np.asarray(embedding, dtype=np.float32).reshape(-1)
-        for embedding in embeddings[:8]
-        if int(np.asarray(embedding).size) == int(embedding_dim)
-    ]
-    if not selected:
-        return None
-    return sqlite3.Binary(np.stack(selected, axis=0).tobytes())
-
-
-def _deserialize_boundary_embeddings(
-    blob: bytes | None,
-    *,
-    embedding_dim: int,
-    sample_count: int,
-) -> tuple[np.ndarray, ...]:
-    count = max(0, min(int(sample_count), 8))
-    if not blob or embedding_dim <= 0 or count <= 0:
-        return ()
-    matrix = np.frombuffer(blob, dtype=np.float32, count=count * embedding_dim).reshape(
-        count,
-        embedding_dim,
-    )
-    return tuple(row.copy() for row in matrix)

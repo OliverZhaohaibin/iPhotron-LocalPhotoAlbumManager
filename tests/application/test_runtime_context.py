@@ -198,7 +198,6 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     context.asset_runtime = asset_runtime
     context._container = None
     context._pending_basic_library_path = root
-    context._library_epoch = 0
     return context, library, asset_runtime
 
 
@@ -315,69 +314,3 @@ def test_close_library_unbinds_map_interaction_service(tmp_path: Path) -> None:
     context.close_library()
 
     assert library.bound_map_interaction_services[-1] is None
-
-
-def test_library_binding_token_changes_for_open_and_close(tmp_path: Path) -> None:
-    first_root = tmp_path / "first"
-    second_root = tmp_path / "second"
-    first_root.mkdir()
-    second_root.mkdir()
-    context, _library, _asset_runtime = _runtime_context(first_root)
-
-    assert context.library_binding_token.epoch == 0
-    assert context.library_binding_token.root is None
-
-    context.open_library(first_root)
-    first = context.library_binding_token
-    context.open_library(second_root)
-    second = context.library_binding_token
-    context.close_library()
-    closed = context.library_binding_token
-
-    assert first.root == first_root
-    assert second.root == second_root
-    assert first.epoch < second.epoch < closed.epoch
-    assert closed.root is None
-
-
-def test_new_library_epoch_is_visible_before_session_is_published(tmp_path: Path) -> None:
-    library_root = tmp_path / "library"
-    library_root.mkdir()
-    context, library, _asset_runtime = _runtime_context(library_root)
-    observed = []
-    original_bind = library.bind_library_session
-
-    def _observe_bind(session: object | None) -> None:
-        if session is not None:
-            observed.append(context.library_binding_token)
-        original_bind(session)
-
-    library.bind_library_session = _observe_bind  # type: ignore[method-assign]
-
-    context.open_library(library_root)
-
-    assert observed == [context.library_binding_token]
-    assert observed[0].epoch == 1
-    assert observed[0].root == library_root
-
-
-def test_closed_library_epoch_is_visible_before_session_is_unbound(tmp_path: Path) -> None:
-    library_root = tmp_path / "library"
-    library_root.mkdir()
-    context, library, _asset_runtime = _runtime_context(library_root)
-    context.open_library(library_root)
-    observed = []
-    original_bind = library.bind_library_session
-
-    def _observe_unbind(session: object | None) -> None:
-        if session is None:
-            observed.append(context.library_binding_token)
-        original_bind(session)
-
-    library.bind_library_session = _observe_unbind  # type: ignore[method-assign]
-
-    context.close_library()
-
-    assert observed == [context.library_binding_token]
-    assert observed[0].epoch == 2
-    assert observed[0].root is None

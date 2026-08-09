@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from iPhoto.utils.pathutils import tolerant_int
-
 PET_STATUS_PENDING = "pending"
 PET_STATUS_DONE = "done"
 PET_STATUS_FAILED = "failed"
@@ -44,8 +42,8 @@ def is_pet_scan_candidate(row: dict[str, Any]) -> bool:
     if normalized_media in {"1", "video"}:
         return False
 
-    live_role = tolerant_int(row.get("live_role"))
-    if live_role is not None and live_role != 0:
+    live_role = row.get("live_role")
+    if isinstance(live_role, (int, float)) and int(live_role) != 0:
         return False
 
     mime = row.get("mime")

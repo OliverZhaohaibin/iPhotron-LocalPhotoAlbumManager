@@ -99,8 +99,6 @@ class GLImageViewer(QRhiWidget):
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
     """Emitted once after the first opaque frame has been rendered."""
-    stillFramePresented = Signal(object)
-    """Emitted after each newly uploaded still texture is drawn."""
 
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
@@ -1291,7 +1289,6 @@ class GLImageViewer(QRhiWidget):
         cb.endPass()
         self._emit_first_frame_ready()
         if uploaded_new_still_texture:
-            self._emit_still_frame_presented()
             self._schedule_post_load_view_transform()
 
     def _render_rhi(self, cb) -> None:
@@ -1396,13 +1393,7 @@ class GLImageViewer(QRhiWidget):
 
         self._emit_first_frame_ready()
         if uploaded_new_still_texture:
-            self._emit_still_frame_presented()
             self._schedule_post_load_view_transform()
-
-    def _emit_still_frame_presented(self) -> None:
-        source = self.current_image_source()
-        if source is not None:
-            self.stillFramePresented.emit(source)
 
     def _emit_first_frame_ready(self) -> None:
         """Notify listeners that the first opaque frame has been rendered."""

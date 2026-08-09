@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import math
 import os
@@ -38,6 +39,11 @@ from iPhoto.infrastructure.services.thumbnail_runtime_policy import (
 )
 
 _MIB = 1024 * 1024
+
+try:
+    import xxhash as benchmark_xxhash
+except ImportError:  # pragma: no cover - production dependency
+    benchmark_xxhash = None
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -93,7 +99,7 @@ def _store(root: Path) -> NeutralSurfaceStore:
         return NeutralSurfaceStore(root)
 
 
-def _rss_bytes() -> int:
+def _process_metrics() -> tuple[int, int]:
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -126,22 +132,134 @@ def _rss_bytes() -> int:
         psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
         process = kernel32.GetCurrentProcess()
         if psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
-            return int(counters.WorkingSetSize)
-        return 0
+            return int(counters.WorkingSetSize), int(counters.PageFaultCount)
+        return 0, 0
+    page_faults = 0
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        page_faults = int(usage.ru_minflt) + int(usage.ru_majflt)
+    except (ImportError, OSError, ValueError):
+        pass
     if sys.platform.startswith("linux"):
         try:
             for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
                 if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) * 1024
+                    return int(line.split()[1]) * 1024, page_faults
         except (OSError, ValueError):
-            return 0
+            return 0, page_faults
     try:
         import resource
 
         value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        return value if sys.platform == "darwin" else value * 1024
+        rss = value if sys.platform == "darwin" else value * 1024
+        return rss, page_faults
     except (ImportError, OSError, ValueError):
-        return 0
+        return 0, page_faults
+
+
+def _rss_bytes() -> int:
+    return _process_metrics()[0]
+
+
+def _consume_image(image: QImage) -> str:
+    """Traverse every mapped pixel without calling the store checksum helper."""
+
+    payload = memoryview(image.constBits())[: int(image.sizeInBytes())]
+    try:
+        if benchmark_xxhash is not None:
+            return str(benchmark_xxhash.xxh64(payload).hexdigest())
+        return hashlib.blake2b(payload, digest_size=8).hexdigest()
+    finally:
+        try:
+            payload.release()
+        except (BufferError, ValueError):
+            pass
+
+
+def _measure_store_hit(
+    store: NeutralSurfaceStore,
+    request: DetailRenderRequest,
+    *,
+    size_mib: int,
+) -> dict[str, Any]:
+    rss_before, faults_before = _process_metrics()
+    total_started = time.perf_counter()
+    load_started = total_started
+    loaded = store.load(request)
+    load_ms = (time.perf_counter() - load_started) * 1000.0
+    if loaded is None:
+        raise RuntimeError(f"surface cache hit failed for {size_mib} MiB")
+    consume_started = time.perf_counter()
+    digest = _consume_image(loaded.image)
+    consume_ms = (time.perf_counter() - consume_started) * 1000.0
+    total_ms = (time.perf_counter() - total_started) * 1000.0
+    rss_after, faults_after = _process_metrics()
+    del loaded
+    gc.collect()
+    return {
+        "load_ms": load_ms,
+        "consume_ms": consume_ms,
+        "load_to_consumed_ms": total_ms,
+        "rss_delta_bytes": max(0, rss_after - rss_before),
+        "page_faults": max(0, faults_after - faults_before),
+        "consumption_digest": digest,
+    }
+
+
+def _load_and_consume(
+    library: Path,
+    *,
+    size_mib: int,
+    revision: int,
+) -> dict[str, Any]:
+    request = _request(library, size_mib=size_mib, revision=revision)
+    store = _store(library)
+    checksum_calls = 0
+    original_checksum = cache_module._checksum
+
+    def counted_checksum(payload, checksum=original_checksum) -> int:
+        nonlocal checksum_calls
+        checksum_calls += 1
+        return checksum(payload)
+
+    cache_module._checksum = counted_checksum
+    try:
+        result = _measure_store_hit(store, request, size_mib=size_mib)
+        result["checksum_calls"] = checksum_calls
+        return result
+    finally:
+        cache_module._checksum = original_checksum
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()
+
+
+def _fresh_process_probe(
+    library: Path,
+    *,
+    size_mib: int,
+    revision: int,
+) -> dict[str, Any]:
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter and local tool
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "probe",
+            "--library",
+            str(library),
+            "--size-mib",
+            str(size_mib),
+            "--revision",
+            str(revision),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+    return dict(json.loads(completed.stdout))
 
 
 def _git_sha(repo_root: Path) -> str:
@@ -149,7 +267,7 @@ def _git_sha(repo_root: Path) -> str:
     if executable is None:
         return "unknown"
     try:
-        return subprocess.run(
+        return subprocess.run(  # noqa: S603 - resolved git executable only
             [executable, "rev-parse", "HEAD"],
             cwd=repo_root,
             check=True,
@@ -166,6 +284,7 @@ def benchmark(
     warm_samples: int,
     repo_root: Path,
     label: str,
+    consume_samples: int = 3,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="iphoto-surface-cache-") as temporary:
@@ -177,15 +296,6 @@ def benchmark(
             surface = _surface(request)
             store = _store(library)
 
-            checksum_calls = 0
-            original_checksum = cache_module._checksum
-
-            def counted_checksum(payload, checksum=original_checksum) -> int:
-                nonlocal checksum_calls
-                checksum_calls += 1
-                return checksum(payload)
-
-            cache_module._checksum = counted_checksum
             rss_before = _rss_bytes()
             tracemalloc.start()
             write_started = time.perf_counter()
@@ -197,55 +307,158 @@ def benchmark(
             if not wrote:
                 raise RuntimeError(f"surface cache write failed for {size_mib} MiB")
 
-            close = getattr(store, "close", None)
-            if callable(close):
-                close()
-            store = _store(library)
-            first_started = time.perf_counter()
-            loaded = store.load(request)
-            first_hit_ms = (time.perf_counter() - first_started) * 1000.0
-            if loaded is None:
-                raise RuntimeError(f"surface cache first hit failed for {size_mib} MiB")
-            del loaded
-            gc.collect()
-
-            warm_values: list[float] = []
-            for _sample in range(max(1, warm_samples)):
-                started = time.perf_counter()
-                loaded = store.load(request)
-                warm_values.append((time.perf_counter() - started) * 1000.0)
-                if loaded is None:
-                    raise RuntimeError(f"surface cache warm hit failed for {size_mib} MiB")
-                del loaded
-            gc.collect()
-            cache_module._checksum = original_checksum
-            close = getattr(store, "close", None)
-            if callable(close):
-                close()
-
+            payload_bytes = int(surface.image.sizeInBytes())
             namespace = "unknown"
             root = getattr(store, "root", None)
             if isinstance(root, Path):
                 namespace = root.name
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+            del surface
+            gc.collect()
+
+            fresh_probes = [
+                _fresh_process_probe(
+                    library,
+                    size_mib=size_mib,
+                    revision=revision,
+                )
+                for _sample in range(max(1, consume_samples))
+            ]
+
+            checksum_calls = 0
+            original_checksum = cache_module._checksum
+
+            def counted_checksum(payload, checksum=original_checksum) -> int:
+                nonlocal checksum_calls
+                checksum_calls += 1
+                return checksum(payload)
+
+            store = _store(library)
+            cache_module._checksum = counted_checksum
+            try:
+                first_probe = _measure_store_hit(store, request, size_mib=size_mib)
+                warm_probes: list[dict[str, Any]] = []
+                for _sample in range(max(1, warm_samples)):
+                    warm_probes.append(
+                        _measure_store_hit(store, request, size_mib=size_mib)
+                    )
+            finally:
+                cache_module._checksum = original_checksum
+                close = getattr(store, "close", None)
+                if callable(close):
+                    close()
+
+            digests = {
+                str(probe["consumption_digest"])
+                for probe in [*fresh_probes, first_probe, *warm_probes]
+            }
+            if len(digests) != 1:
+                raise RuntimeError(
+                    f"surface consumption digest changed for {size_mib} MiB"
+                )
+            fresh_load = [float(probe["load_ms"]) for probe in fresh_probes]
+            fresh_consume = [float(probe["consume_ms"]) for probe in fresh_probes]
+            fresh_total = [
+                float(probe["load_to_consumed_ms"]) for probe in fresh_probes
+            ]
+            warm_load = [float(probe["load_ms"]) for probe in warm_probes]
+            warm_consume = [float(probe["consume_ms"]) for probe in warm_probes]
+            warm_total = [
+                float(probe["load_to_consumed_ms"]) for probe in warm_probes
+            ]
             results.append(
                 {
                     "size_mib": size_mib,
-                    "payload_bytes": surface.image.sizeInBytes(),
+                    "payload_bytes": payload_bytes,
                     "namespace": namespace,
                     "write_ms": round(write_ms, 3),
-                    "first_hit_ms": round(first_hit_ms, 3),
-                    "warm_hit_p50_ms": round(statistics.median(warm_values), 3),
-                    "warm_hit_p95_ms": round(_percentile(warm_values, 0.95), 3),
+                    "first_hit_ms": round(float(first_probe["load_ms"]), 3),
+                    "first_consume_ms": round(float(first_probe["consume_ms"]), 3),
+                    "first_load_to_consumed_ms": round(
+                        float(first_probe["load_to_consumed_ms"]),
+                        3,
+                    ),
+                    "warm_hit_p50_ms": round(statistics.median(warm_load), 3),
+                    "warm_hit_p95_ms": round(_percentile(warm_load, 0.95), 3),
+                    "warm_consume_p50_ms": round(statistics.median(warm_consume), 3),
+                    "warm_consume_p95_ms": round(
+                        _percentile(warm_consume, 0.95),
+                        3,
+                    ),
+                    "warm_load_to_consumed_p50_ms": round(
+                        statistics.median(warm_total),
+                        3,
+                    ),
+                    "warm_load_to_consumed_p95_ms": round(
+                        _percentile(warm_total, 0.95),
+                        3,
+                    ),
+                    "fresh_process_load_p50_ms": round(
+                        statistics.median(fresh_load),
+                        3,
+                    ),
+                    "fresh_process_load_p95_ms": round(
+                        _percentile(fresh_load, 0.95),
+                        3,
+                    ),
+                    "fresh_process_consume_p50_ms": round(
+                        statistics.median(fresh_consume),
+                        3,
+                    ),
+                    "fresh_process_consume_p95_ms": round(
+                        _percentile(fresh_consume, 0.95),
+                        3,
+                    ),
+                    "fresh_process_load_to_consumed_p50_ms": round(
+                        statistics.median(fresh_total),
+                        3,
+                    ),
+                    "fresh_process_load_to_consumed_p95_ms": round(
+                        _percentile(fresh_total, 0.95),
+                        3,
+                    ),
+                    "fresh_process_page_faults_p95": int(
+                        _percentile(
+                            [float(probe["page_faults"]) for probe in fresh_probes],
+                            0.95,
+                        )
+                    ),
+                    "fresh_process_rss_delta_bytes_p95": int(
+                        _percentile(
+                            [
+                                float(probe["rss_delta_bytes"])
+                                for probe in fresh_probes
+                            ],
+                            0.95,
+                        )
+                    ),
+                    "warm_page_faults_p95": int(
+                        _percentile(
+                            [float(probe["page_faults"]) for probe in warm_probes],
+                            0.95,
+                        )
+                    ),
+                    "warm_rss_delta_bytes_p95": int(
+                        _percentile(
+                            [float(probe["rss_delta_bytes"]) for probe in warm_probes],
+                            0.95,
+                        )
+                    ),
+                    "consumption_digest": digests.pop(),
                     "checksum_calls": checksum_calls,
+                    "fresh_process_checksum_calls": sum(
+                        int(probe["checksum_calls"]) for probe in fresh_probes
+                    ),
                     "python_peak_bytes": int(python_peak),
                     "rss_write_delta_bytes": max(0, rss_after_write - rss_before),
                 }
             )
-            del surface
             gc.collect()
 
     return {
-        "schema": 1,
+        "schema": 2,
         "label": label,
         "commit_sha": _git_sha(repo_root),
         "platform": platform.platform(),
@@ -256,6 +469,7 @@ def benchmark(
         "pyside": pyside_version,
         "qt": qVersion(),
         "warm_samples": max(1, warm_samples),
+        "consume_samples": max(1, consume_samples),
         "results": results,
     }
 
@@ -268,14 +482,20 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, An
         old = baseline_by_size[size]
         tolerance = max(float(old["warm_hit_p95_ms"]) * 0.05, 10.0)
         warm_limit = float(old["warm_hit_p95_ms"]) + tolerance
+        cold_consumed = float(old["fresh_process_load_to_consumed_p95_ms"])
+        cold_consumed_limit = cold_consumed + max(cold_consumed * 0.05, 10.0)
+        warm_consumed = float(old["warm_load_to_consumed_p95_ms"])
+        warm_consumed_limit = warm_consumed + max(warm_consumed * 0.05, 10.0)
         payload = int(row["payload_bytes"])
         checks.extend(
             [
                 {
                     "name": f"{size}MiB.trusted_hit_checksum_calls",
-                    "actual": int(row["checksum_calls"]),
+                    "actual": int(row["checksum_calls"])
+                    + int(row["fresh_process_checksum_calls"]),
                     "limit": 0,
-                    "passed": int(row["checksum_calls"]) == 0,
+                    "passed": int(row["checksum_calls"]) == 0
+                    and int(row["fresh_process_checksum_calls"]) == 0,
                 },
                 {
                     "name": f"{size}MiB.python_peak_bytes",
@@ -296,10 +516,24 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, An
                     "limit": round(warm_limit, 3),
                     "passed": float(row["warm_hit_p95_ms"]) <= warm_limit,
                 },
+                {
+                    "name": f"{size}MiB.fresh_process_load_to_consumed_p95_ms",
+                    "actual": float(row["fresh_process_load_to_consumed_p95_ms"]),
+                    "limit": round(cold_consumed_limit, 3),
+                    "passed": float(row["fresh_process_load_to_consumed_p95_ms"])
+                    <= cold_consumed_limit,
+                },
+                {
+                    "name": f"{size}MiB.warm_load_to_consumed_p95_ms",
+                    "actual": float(row["warm_load_to_consumed_p95_ms"]),
+                    "limit": round(warm_consumed_limit, 3),
+                    "passed": float(row["warm_load_to_consumed_p95_ms"])
+                    <= warm_consumed_limit,
+                },
             ]
         )
     return {
-        "schema": 1,
+        "schema": 2,
         "baseline_sha": baseline.get("commit_sha"),
         "candidate_sha": candidate.get("commit_sha"),
         "passed": all(check["passed"] for check in checks),
@@ -321,6 +555,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--label", default="candidate")
     run_parser.add_argument("--sizes-mib", default="16,64,180")
     run_parser.add_argument("--warm-samples", type=int, default=3)
+    run_parser.add_argument("--consume-samples", type=int, default=3)
+    probe_parser = subparsers.add_parser("probe")
+    probe_parser.add_argument("--library", required=True, type=Path)
+    probe_parser.add_argument("--size-mib", required=True, type=int)
+    probe_parser.add_argument("--revision", required=True, type=int)
     compare_parser = subparsers.add_parser("compare")
     compare_parser.add_argument("--baseline", required=True, type=Path)
     compare_parser.add_argument("--candidate", required=True, type=Path)
@@ -338,8 +577,18 @@ def main(argv: list[str] | None = None) -> int:
             warm_samples=max(1, int(args.warm_samples)),
             repo_root=args.repo_root,
             label=str(args.label),
+            consume_samples=max(1, int(args.consume_samples)),
         )
         _write_json(args.output, payload)
+        return 0
+
+    if args.command == "probe":
+        payload = _load_and_consume(
+            args.library,
+            size_mib=max(1, int(args.size_mib)),
+            revision=max(1, int(args.revision)),
+        )
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False))
         return 0
 
     baseline = json.loads(args.baseline.read_text(encoding="utf-8"))

@@ -30,6 +30,14 @@ _TERMINAL_STATES = {
 DetailSurfaceKind = Literal["still", "video_frame", "live_motion_frame", "live_still"]
 
 
+class DetailSurfacePresentationResult(str, Enum):
+    """Classify lifecycle bookkeeping for one visible surface delivery."""
+
+    REJECTED_STALE = "rejected_stale"
+    NEW_SURFACE = "new_surface"
+    DUPLICATE_CURRENT_SURFACE = "duplicate_current_surface"
+
+
 @dataclass(frozen=True, slots=True)
 class DetailRenderSnapshot:
     transaction: DetailRenderTransaction
@@ -96,21 +104,28 @@ class DetailRenderCoordinator(QObject):
         self,
         generation: int,
         surface_kind: DetailSurfaceKind,
-    ) -> bool:
+    ) -> DetailSurfacePresentationResult:
         """Record one visible surface while keeping one terminal transaction."""
 
         snapshot = self._snapshot
         if snapshot is None or snapshot.transaction.generation != int(generation):
-            return False
+            return DetailSurfacePresentationResult.REJECTED_STALE
         if snapshot.state in {DetailRenderState.FAILED, DetailRenderState.CANCELLED}:
-            return False
+            return DetailSurfacePresentationResult.REJECTED_STALE
+        allowed_surfaces = {
+            "image": {"still"},
+            "video": {"video_frame"},
+            "live_motion": {"live_motion_frame", "live_still"},
+        }.get(snapshot.transaction.media_kind, set())
+        if surface_kind not in allowed_surfaces:
+            return DetailSurfacePresentationResult.REJECTED_STALE
         if surface_kind in snapshot.presented_surfaces:
-            return False
+            return DetailSurfacePresentationResult.DUPLICATE_CURRENT_SURFACE
         if snapshot.state is DetailRenderState.PRESENTED and (
             snapshot.transaction.media_kind != "live_motion"
             or surface_kind not in {"live_motion_frame", "live_still"}
         ):
-            return False
+            return DetailSurfacePresentationResult.REJECTED_STALE
         self._snapshot = DetailRenderSnapshot(
             transaction=snapshot.transaction,
             state=snapshot.state,
@@ -125,11 +140,11 @@ class DetailRenderCoordinator(QObject):
         )
         if snapshot.state is not DetailRenderState.PRESENTED:
             if not self.mark_presented(generation):
-                return False
+                return DetailSurfacePresentationResult.REJECTED_STALE
         current = self._snapshot
         if current is not None:
             self.surfacePresented.emit(current, surface_kind)
-        return True
+        return DetailSurfacePresentationResult.NEW_SURFACE
 
     def mark_routed(self, generation: int, *, row: int) -> bool:
         if not self._can_transition(generation, {DetailRenderState.CREATED}):
@@ -237,4 +252,5 @@ __all__ = [
     "DetailRenderSnapshot",
     "DetailRenderState",
     "DetailSurfaceKind",
+    "DetailSurfacePresentationResult",
 ]

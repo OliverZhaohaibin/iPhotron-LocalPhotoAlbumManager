@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from iPhoto.gui.detail_pipeline import AssetSourceIdentity, DetailRenderTransaction
-from iPhoto.gui.detail_render_coordinator import DetailRenderCoordinator, DetailRenderState
+from iPhoto.gui.detail_render_coordinator import (
+    DetailRenderCoordinator,
+    DetailRenderState,
+    DetailSurfacePresentationResult,
+)
 
 
 def _transaction(generation: int, *, media_kind: str = "image") -> DetailRenderTransaction:
@@ -61,9 +65,22 @@ def test_live_motion_and_restored_still_are_distinct_surfaces(qapp) -> None:
     coordinator.begin(_transaction(7, media_kind="live_motion"))
     coordinator.mark_preparing(7)
 
-    assert coordinator.mark_surface_presented(7, "live_motion_frame")
-    assert coordinator.mark_surface_presented(7, "live_still")
-    assert not coordinator.mark_surface_presented(7, "live_still")
+    assert (
+        coordinator.mark_surface_presented(7, "live_motion_frame")
+        is DetailSurfacePresentationResult.NEW_SURFACE
+    )
+    assert (
+        coordinator.mark_surface_presented(7, "live_still")
+        is DetailSurfacePresentationResult.NEW_SURFACE
+    )
+    assert (
+        coordinator.mark_surface_presented(7, "live_motion_frame")
+        is DetailSurfacePresentationResult.DUPLICATE_CURRENT_SURFACE
+    )
+    assert (
+        coordinator.mark_surface_presented(7, "live_still")
+        is DetailSurfacePresentationResult.DUPLICATE_CURRENT_SURFACE
+    )
     assert coordinator.owns_generation(7)
     assert len(terminals) == 1
     assert [kind for _snapshot, kind in surfaces] == [
@@ -74,6 +91,32 @@ def test_live_motion_and_restored_still_are_distinct_surfaces(qapp) -> None:
     assert coordinator.snapshot.presented_surfaces == (
         "live_motion_frame",
         "live_still",
+    )
+
+
+def test_surface_presentation_rejects_stale_failed_and_cancelled_transactions(qapp) -> None:
+    coordinator = DetailRenderCoordinator()
+
+    coordinator.begin(_transaction(7, media_kind="live_motion"))
+    assert (
+        coordinator.mark_surface_presented(6, "live_motion_frame")
+        is DetailSurfacePresentationResult.REJECTED_STALE
+    )
+    assert (
+        coordinator.mark_surface_presented(7, "still")
+        is DetailSurfacePresentationResult.REJECTED_STALE
+    )
+    assert coordinator.mark_failed(7, "decode failed")
+    assert (
+        coordinator.mark_surface_presented(7, "live_motion_frame")
+        is DetailSurfacePresentationResult.REJECTED_STALE
+    )
+
+    coordinator.begin(_transaction(8, media_kind="live_motion"))
+    assert coordinator.cancel_current()
+    assert (
+        coordinator.mark_surface_presented(8, "live_motion_frame")
+        is DetailSurfacePresentationResult.REJECTED_STALE
     )
 
 

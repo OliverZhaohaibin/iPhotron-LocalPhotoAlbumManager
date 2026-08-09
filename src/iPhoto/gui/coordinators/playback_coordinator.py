@@ -36,7 +36,10 @@ from iPhoto.gui.detail_pipeline import (
     VideoPresentationState,
 )
 from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
-from iPhoto.gui.detail_render_coordinator import DetailRenderCoordinator
+from iPhoto.gui.detail_render_coordinator import (
+    DetailRenderCoordinator,
+    DetailSurfacePresentationResult,
+)
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
@@ -1288,10 +1291,11 @@ class PlaybackCoordinator(QObject):
         if presentation is None or (not presentation.is_video and not is_live_motion):
             return
         surface_kind = "live_motion_frame" if is_live_motion else "video_frame"
-        if not self._render_transaction_coordinator().mark_surface_presented(
+        result = self._render_transaction_coordinator().mark_surface_presented(
             generation,
             surface_kind,
-        ):
+        )
+        if result is DetailSurfacePresentationResult.REJECTED_STALE:
             return
         self._player_view.show_video_surface(interactive=not is_live_motion)
         # Do not reclaim the user's scroll position when decoding completes.
@@ -1430,10 +1434,11 @@ class PlaybackCoordinator(QObject):
         surface_kind = (
             "live_still" if transaction.media_kind == "live_motion" else "still"
         )
-        if not self._render_transaction_coordinator().mark_surface_presented(
+        result = self._render_transaction_coordinator().mark_surface_presented(
             int(generation),
             surface_kind,
-        ):
+        )
+        if result is DetailSurfacePresentationResult.REJECTED_STALE:
             return
         self._presented_still_source = presented_source
         self._presented_still_generation = int(generation)

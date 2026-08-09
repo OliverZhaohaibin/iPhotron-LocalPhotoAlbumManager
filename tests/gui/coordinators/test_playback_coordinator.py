@@ -19,7 +19,10 @@ from iPhoto.gui.detail_pipeline import (
     PlaybackAsyncToken,
     VideoPresentationState,
 )
-from iPhoto.gui.detail_render_coordinator import DetailRenderCoordinator
+from iPhoto.gui.detail_render_coordinator import (
+    DetailRenderCoordinator,
+    DetailSurfacePresentationResult,
+)
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
@@ -767,7 +770,11 @@ def test_live_photo_fallback_reuses_the_asset_identity() -> None:
 
 def test_live_motion_first_frame_completes_current_transaction() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    render_coordinator = Mock(mark_surface_presented=Mock(return_value=True))
+    render_coordinator = Mock(
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.NEW_SURFACE
+        )
+    )
     coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
     coordinator._detail_request_generation = 7
     coordinator._active_live_motion = Path("/fake/photo.mov")
@@ -793,7 +800,11 @@ def test_live_motion_first_frame_completes_current_transaction() -> None:
 
 def test_regular_video_first_frame_enables_interactive_controls() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    render_coordinator = Mock(mark_surface_presented=Mock(return_value=True))
+    render_coordinator = Mock(
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.NEW_SURFACE
+        )
+    )
     coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
     coordinator._detail_request_generation = 7
     coordinator._active_live_motion = None
@@ -811,7 +822,11 @@ def test_regular_video_first_frame_enables_interactive_controls() -> None:
 
 def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    render_coordinator = Mock(mark_surface_presented=Mock(return_value=True))
+    render_coordinator = Mock(
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.NEW_SURFACE
+        )
+    )
     coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
     still = Path("/fake/photo.heic")
     coordinator._active_live_motion = Path("/fake/photo.mov")
@@ -825,6 +840,44 @@ def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> Non
     PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
 
     render_coordinator.mark_surface_presented.assert_not_called()
+
+
+def test_rejected_still_surface_does_not_refresh_overlay_or_prefetch() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    render_coordinator = Mock(
+        owns_generation=Mock(return_value=True),
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.REJECTED_STALE
+        ),
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    coordinator._detail_render_transaction = transaction
+    coordinator._active_live_motion = None
+    coordinator._current_presentation = _make_presentation(
+        path=str(still),
+        asset_id="asset-1",
+        is_video=False,
+        is_live=True,
+        request_generation=7,
+    )
+    coordinator._presented_still_source = Path("/fake/previous.heic")
+    coordinator._presented_still_generation = 6
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert coordinator._presented_still_source == Path("/fake/previous.heic")
+    assert coordinator._presented_still_generation == 6
+    coordinator._schedule_recognition_overlay.assert_not_called()
+    coordinator._prefetch_neighbor_stills.assert_not_called()
 
 
 @pytest.mark.parametrize("has_pending_still", [False, True])
@@ -890,6 +943,88 @@ def test_live_photo_motion_to_still_runs_overlay_and_prefetch(
         7,
     )
     coordinator._prefetch_neighbor_stills.assert_called_once_with(0)
+
+
+def test_live_photo_second_replay_restores_overlay_without_reopening_transaction(
+    qapp,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    terminal_presentations = []
+    lifecycle_surfaces = []
+    lifecycle.presented.connect(terminal_presentations.append)
+    lifecycle.surfacePresented.connect(
+        lambda _snapshot, kind: lifecycle_surfaces.append(kind)
+    )
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    presentation = replace(
+        _make_presentation(
+            path=str(still),
+            asset_id="asset-1",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=motion,
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_request_generation = 7
+    coordinator._current_presentation = presentation
+    coordinator._face_name_overlay = Mock()
+    coordinator._player_view = Mock(
+        video_area=Mock(begin_load=Mock()),
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=False),
+        display_image=Mock(),
+        show_video_surface=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_video_preparation = Mock()
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+    coordinator._is_playing = False
+
+    PlaybackCoordinator._autoplay_live_motion(coordinator, presentation)
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    PlaybackCoordinator.replay_live_photo(coordinator)
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert len(terminal_presentations) == 1
+    assert lifecycle_surfaces == ["live_motion_frame", "live_still"]
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+    assert coordinator._presented_still_source == still
+    assert coordinator._presented_still_generation == 7
+    assert coordinator._schedule_recognition_overlay.call_count == 2
+    assert coordinator._prefetch_neighbor_stills.call_args_list == [call(0), call(0)]
+    assert coordinator._player_view.display_image.call_args_list == [
+        call(still, transaction=transaction),
+        call(still, transaction=transaction),
+    ]
+    assert coordinator._face_name_overlay.set_overlay_active.call_args_list == [
+        call(False),
+        call(False),
+    ]
 
 
 def test_old_video_preparation_result_is_rejected_after_rebind() -> None:

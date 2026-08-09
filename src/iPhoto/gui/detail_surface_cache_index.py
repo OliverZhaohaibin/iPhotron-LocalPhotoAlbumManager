@@ -41,14 +41,22 @@ class SurfaceCacheIndex:
         self._pending_access: dict[str, int] = {}
         self._last_access_flush_ns = time.time_ns()
         self._needs_recovery = False
+        self._closed = False
 
     @property
     def needs_recovery(self) -> bool:
         with self._lock:
             return self._needs_recovery
 
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
     def ensure_open(self) -> bool:
         with self._lock:
+            if self._closed:
+                return False
             if self._connection is not None:
                 return True
             try:
@@ -319,6 +327,8 @@ class SurfaceCacheIndex:
 
     def close(self, *, clean: bool = True) -> None:
         with self._lock:
+            if self._closed:
+                return
             self.flush_accesses(force=True)
             if self._connection is not None and clean:
                 try:
@@ -327,6 +337,7 @@ class SurfaceCacheIndex:
                 except sqlite3.DatabaseError:
                     pass
             self._close_connection_locked()
+            self._closed = True
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

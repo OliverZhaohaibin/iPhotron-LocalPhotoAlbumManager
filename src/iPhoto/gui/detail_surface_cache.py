@@ -11,10 +11,11 @@ import struct
 import tempfile
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 from typing import Final
 
 from PySide6.QtGui import QColorSpace, QImage
@@ -217,6 +218,7 @@ class NeutralSurfaceStore:
     ) -> None:
         self._root: Path | None = None
         self._index: SurfaceCacheIndex | None = None
+        self._closed = False
         self._budget_override = (
             max(0, int(budget_bytes)) if budget_bytes is not None else None
         )
@@ -232,6 +234,21 @@ class NeutralSurfaceStore:
         with self._lock:
             return self._root
 
+    @property
+    def library_root(self) -> Path | None:
+        root = self.root
+        if root is None:
+            return None
+        try:
+            return root.parents[3]
+        except IndexError:
+            return None
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
     def bind_library(self, library_root: Path | None) -> None:
         root = None
         if library_root is not None:
@@ -246,6 +263,7 @@ class NeutralSurfaceStore:
             previous = self._index
             self._index = None
             self._root = root
+            self._closed = False
             self._disk_hit_count = 0
             self._pending_audits.clear()
             self._legacy_cleanup_done = False
@@ -257,6 +275,8 @@ class NeutralSurfaceStore:
         if root is None:
             return None
         with self._lock:
+            if self._closed:
+                return None
             index = self._index
             if index is None or index.root != root:
                 index = SurfaceCacheIndex(root)
@@ -266,9 +286,12 @@ class NeutralSurfaceStore:
     def entry_path(self, request: DetailRenderRequest) -> Path | None:
         if not request.source_identity.has_stable_revision:
             return None
-        root = self.root
-        if root is None:
-            return None
+        with self._lock:
+            if self._closed:
+                return None
+            root = self._root
+            if root is None:
+                return None
         try:
             library_root = root.parents[3]
             request.source_identity.path.relative_to(library_root)
@@ -613,6 +636,9 @@ class NeutralSurfaceStore:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             index = self._index
             self._index = None
             self._pending_audits.clear()
@@ -783,6 +809,26 @@ class NeutralSurfaceStore:
                 self._legacy_cleanup_done = False
 
 
+@dataclass(slots=True)
+class _SurfaceStoreGeneration:
+    epoch: int
+    library_root: Path | None
+    store: NeutralSurfaceStore
+    retired: bool = False
+    close_submitted: bool = False
+    active_calls: int = 0
+    drained: Event = field(default_factory=Event)
+
+    def __post_init__(self) -> None:
+        self.drained.set()
+
+
+def _normalise_library_root(library_root: Path | None) -> Path | None:
+    if library_root is None:
+        return None
+    return Path(library_root).expanduser().absolute()
+
+
 class CachedStillDecodeBackend:
     """Memory/disk/decode lookup chain with asynchronous persistence."""
 
@@ -792,6 +838,7 @@ class CachedStillDecodeBackend:
         *,
         memory_cache: MappedSurfaceCache | None = None,
         store: NeutralSurfaceStore | None = None,
+        store_factory: Callable[[Path | None], NeutralSurfaceStore] | None = None,
         residency_tracker: SurfaceResidencyTracker | None = None,
     ) -> None:
         self._delegate = delegate
@@ -799,19 +846,52 @@ class CachedStillDecodeBackend:
         self.memory_cache = memory_cache or MappedSurfaceCache(
             residency_tracker=self.residency_tracker
         )
-        self.store = store or NeutralSurfaceStore()
+        self._store_factory = store_factory or NeutralSurfaceStore
+        initial_store = store or self._store_factory(None)
+        initial_root = getattr(initial_store, "library_root", None)
+        if not isinstance(initial_root, Path):
+            initial_root = None
+        self._store_epoch = 0
+        self._active_store_generation = _SurfaceStoreGeneration(
+            epoch=self._store_epoch,
+            library_root=initial_root,
+            store=initial_store,
+        )
         self._io = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iPhoto-surface-cache")
         self._futures: set[Future] = set()
         self._lock = RLock()
         self._shutting_down = False
+        self._shutdown_barrier: Future | None = None
+        self._executor_shutdown = False
         self._color_stats_by_source: OrderedDict[tuple, ColorStats] = OrderedDict()
+
+    @property
+    def store(self) -> NeutralSurfaceStore:
+        with self._lock:
+            return self._active_store_generation.store
 
     def bind_library(self, library_root: Path | None) -> None:
         self.memory_cache.clear()
+        normalised_root = _normalise_library_root(library_root)
         with self._lock:
+            if self._shutting_down:
+                return
             self._color_stats_by_source.clear()
-        self.store.bind_library(library_root)
-        self._submit(self.store.maintenance)
+            current = self._active_store_generation
+            if current.library_root == normalised_root:
+                self._submit_generation_locked(current, current.store.maintenance)
+                return
+            replacement = self._store_factory(normalised_root)
+            self._store_epoch += 1
+            generation = _SurfaceStoreGeneration(
+                epoch=self._store_epoch,
+                library_root=normalised_root,
+                store=replacement,
+            )
+            current.retired = True
+            self._active_store_generation = generation
+            self._queue_store_close_locked(current)
+            self._submit_generation_locked(generation, replacement.maintenance)
 
     @staticmethod
     def _source_stats_key(request: DetailRenderRequest) -> tuple:
@@ -845,6 +925,18 @@ class CachedStillDecodeBackend:
         request: DetailRenderRequest,
         cancellation: CancellationToken,
     ) -> DecodedSurface:
+        generation = self._acquire_store_generation(cancellation)
+        try:
+            return self._decode_for_generation(request, cancellation, generation)
+        finally:
+            self._release_store_generation(generation)
+
+    def _decode_for_generation(
+        self,
+        request: DetailRenderRequest,
+        cancellation: CancellationToken,
+        generation: _SurfaceStoreGeneration,
+    ) -> DecodedSurface:
         prepared = request.with_decode_level()
         key = DetailDecodeKey.from_request(prepared)
         cacheable = prepared.source_identity.has_stable_revision
@@ -852,7 +944,9 @@ class CachedStillDecodeBackend:
             raise DecodeCancelledError("Still-image decode cancelled")
         surface = self.memory_cache.get(key) if cacheable else None
         if surface is not None:
-            self._remember_color_stats(prepared, surface.color_stats)
+            with self._lock:
+                self._raise_if_generation_stale_locked(generation, cancellation)
+                self._remember_color_stats(prepared, surface.color_stats)
             emit_detail_event(
                 "surface_cache_hit",
                 generation=prepared.generation,
@@ -862,22 +956,32 @@ class CachedStillDecodeBackend:
             return surface
         if cacheable:
             try:
-                surface = self.store.load(prepared)
+                surface = generation.store.load(prepared)
             except SurfaceCacheCorruptError:
                 emit_detail_event(
                     "surface_cache_corrupt",
                     generation=prepared.generation,
                     asset_id=key.asset_id,
                 )
-                self._submit(self.store.discard, prepared)
+                self._submit_for_generation(
+                    generation,
+                    generation.store.discard,
+                    prepared,
+                )
                 surface = None
         if surface is not None:
-            if cancellation.is_cancelled():
-                raise DecodeCancelledError("Still-image decode cancelled")
-            self.memory_cache.put(surface)
-            self._remember_color_stats(prepared, surface.color_stats)
-            self._submit(self.store.flush_accesses_if_due)
-            self._submit(self.store.run_pending_audits)
+            with self._lock:
+                self._raise_if_generation_stale_locked(generation, cancellation)
+                self.memory_cache.put(surface)
+                self._remember_color_stats(prepared, surface.color_stats)
+                self._submit_generation_locked(
+                    generation,
+                    generation.store.flush_accesses_if_due,
+                )
+                self._submit_generation_locked(
+                    generation,
+                    generation.store.run_pending_audits,
+                )
             emit_detail_event(
                 "surface_cache_hit",
                 generation=prepared.generation,
@@ -885,13 +989,17 @@ class CachedStillDecodeBackend:
                 tier="disk",
             )
             return surface
+        with self._lock:
+            self._raise_if_generation_stale_locked(generation, cancellation)
         emit_detail_event(
             "surface_cache_miss",
             generation=prepared.generation,
             asset_id=key.asset_id,
         )
         surface = self._delegate.decode(prepared, cancellation)
-        stats = self._cached_color_stats(prepared) if cacheable else None
+        with self._lock:
+            self._raise_if_generation_stale_locked(generation, cancellation)
+            stats = self._cached_color_stats(prepared) if cacheable else None
         if stats is None:
             started = time.perf_counter()
             stats = compute_color_statistics(surface.image)
@@ -903,16 +1011,51 @@ class CachedStillDecodeBackend:
                 width=surface.decoded_size[0],
                 height=surface.decoded_size[1],
             )
-        if cacheable:
-            stats = self._remember_color_stats(prepared, stats)
         surface = replace(surface, color_stats=stats)
-        if cacheable:
-            self.memory_cache.put(surface)
-            self._submit(self._write_surface, prepared, surface)
+        with self._lock:
+            self._raise_if_generation_stale_locked(generation, cancellation)
+            if cacheable:
+                stats = self._remember_color_stats(prepared, stats)
+                surface = replace(surface, color_stats=stats)
+                self.memory_cache.put(surface)
+                self._submit_generation_locked(
+                    generation,
+                    self._write_surface,
+                    generation,
+                    prepared,
+                    surface,
+                )
         return surface
 
-    def _write_surface(self, request: DetailRenderRequest, surface: DecodedSurface) -> None:
-        if self.store.write(request, surface) and not self._shutting_down:
+    def _acquire_store_generation(
+        self,
+        cancellation: CancellationToken,
+    ) -> _SurfaceStoreGeneration:
+        with self._lock:
+            generation = self._active_store_generation
+            self._raise_if_generation_stale_locked(generation, cancellation)
+            generation.active_calls += 1
+            generation.drained.clear()
+            return generation
+
+    def _release_store_generation(
+        self,
+        generation: _SurfaceStoreGeneration,
+    ) -> None:
+        with self._lock:
+            generation.active_calls = max(0, generation.active_calls - 1)
+            if generation.active_calls == 0:
+                generation.drained.set()
+
+    def _write_surface(
+        self,
+        generation: _SurfaceStoreGeneration,
+        request: DetailRenderRequest,
+        surface: DecodedSurface,
+    ) -> None:
+        if generation.store.write(request, surface) and self._generation_is_current(
+            generation
+        ):
             emit_detail_event(
                 "surface_cache_write",
                 generation=request.generation,
@@ -921,16 +1064,93 @@ class CachedStillDecodeBackend:
                 height=surface.decoded_size[1],
             )
 
-    def _submit(self, fn, *args, **kwargs) -> None:
+    def _raise_if_generation_stale_locked(
+        self,
+        generation: _SurfaceStoreGeneration,
+        cancellation: CancellationToken,
+    ) -> None:
+        if (
+            cancellation.is_cancelled()
+            or self._shutting_down
+            or generation.retired
+            or generation is not self._active_store_generation
+        ):
+            raise DecodeCancelledError("Still-image decode generation was retired")
+
+    def _generation_is_current(self, generation: _SurfaceStoreGeneration) -> bool:
         with self._lock:
-            if self._shutting_down:
-                return
-            try:
-                future = self._io.submit(fn, *args, **kwargs)
-            except RuntimeError:
-                return
-            self._futures.add(future)
-            future.add_done_callback(self._forget_future)
+            return bool(
+                not self._shutting_down
+                and not generation.retired
+                and generation is self._active_store_generation
+            )
+
+    def _submit_for_generation(
+        self,
+        generation: _SurfaceStoreGeneration,
+        fn,
+        *args,
+        **kwargs,
+    ) -> Future | None:
+        with self._lock:
+            return self._submit_generation_locked(generation, fn, *args, **kwargs)
+
+    def _submit_generation_locked(
+        self,
+        generation: _SurfaceStoreGeneration,
+        fn,
+        *args,
+        **kwargs,
+    ) -> Future | None:
+        if (
+            self._shutting_down
+            or generation.retired
+            or generation is not self._active_store_generation
+        ):
+            return None
+        return self._submit_raw_locked(
+            self._run_generation_task,
+            generation,
+            fn,
+            args,
+            kwargs,
+        )
+
+    def _run_generation_task(
+        self,
+        generation: _SurfaceStoreGeneration,
+        fn,
+        args: tuple,
+        kwargs: dict,
+    ):
+        # Submission is the ownership boundary. Once accepted, work remains
+        # ordered ahead of that generation's close barrier even if a rebind or
+        # shutdown retires the generation before the worker reaches it.
+        _ = generation
+        return fn(*args, **kwargs)
+
+    def _queue_store_close_locked(
+        self,
+        generation: _SurfaceStoreGeneration,
+    ) -> Future | None:
+        if generation.close_submitted:
+            return None
+        generation.close_submitted = True
+        return self._submit_raw_locked(self._close_generation_store, generation)
+
+    @staticmethod
+    def _close_generation_store(generation: _SurfaceStoreGeneration) -> None:
+        generation.drained.wait()
+        generation.store.close()
+
+    def _submit_raw_locked(self, fn, *args, **kwargs) -> Future | None:
+        try:
+            future = self._io.submit(fn, *args, **kwargs)
+        except RuntimeError:
+            return None
+        self._futures.add(future)
+        future.add_done_callback(self._forget_future)
+        return future
 
     def _forget_future(self, future: Future) -> None:
         with self._lock:
@@ -938,15 +1158,34 @@ class CachedStillDecodeBackend:
 
     def shutdown(self, *, timeout_ms: int = 1000) -> None:
         with self._lock:
-            self._shutting_down = True
-            futures = tuple(self._futures)
-        if futures:
-            wait(futures, timeout=max(0, int(timeout_ms)) / 1000.0)
+            if not self._shutting_down:
+                self._shutting_down = True
+                generation = self._active_store_generation
+                generation.retired = True
+                self._queue_store_close_locked(generation)
+                self._shutdown_barrier = self._submit_raw_locked(lambda: None)
+            barrier = self._shutdown_barrier
+        completed = not bool(barrier)
+        if barrier is not None:
+            done, _pending = wait(
+                (barrier,),
+                timeout=max(0, int(timeout_ms)) / 1000.0,
+            )
+            completed = barrier in done
+        if not completed:
+            with self._lock:
+                pending_count = len(self._futures)
+            emit_detail_event(
+                "surface_cache_shutdown_timeout",
+                generation=0,
+                pending=pending_count,
+            )
         self.memory_cache.clear()
-        close_store = getattr(self.store, "close", None)
-        if callable(close_store):
-            close_store()
-        self._io.shutdown(wait=False, cancel_futures=True)
+        with self._lock:
+            if self._executor_shutdown:
+                return
+            self._executor_shutdown = True
+        self._io.shutdown(wait=False, cancel_futures=False)
 
 
 __all__ = [

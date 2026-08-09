@@ -4,6 +4,7 @@ import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import Mock, patch
 
 import pytest
@@ -12,7 +13,7 @@ from PySide6.QtGui import QImage
 import iPhoto.gui.detail_surface_cache as surface_cache_module
 import iPhoto.gui.detail_surface_cache_index as surface_cache_index_module
 from iPhoto.core.color_resolver import ColorStats
-from iPhoto.gui.detail_decode_backend import DecodedSurface
+from iPhoto.gui.detail_decode_backend import DecodeCancelledError, DecodedSurface
 from iPhoto.gui.detail_pipeline import (
     AssetSourceIdentity,
     DetailDecodeKey,
@@ -318,7 +319,7 @@ def test_live_photo_decoder_contract_rejects_legacy_wrong_orientation_surface(
     assert decoded.decoded_size == (4, 8)
     assert current_path.exists()
 
-    reloaded = store.load(request)
+    reloaded = NeutralSurfaceStore(tmp_path).load(request)
     assert reloaded is not None
     assert reloaded.cache_tier == "disk"
     assert reloaded.decoded_size == (4, 8)
@@ -352,13 +353,178 @@ def test_unbound_store_is_a_disabled_disk_tier(tmp_path: Path) -> None:
 
 def test_backend_bind_library_schedules_normal_maintenance(tmp_path: Path) -> None:
     store = Mock()
+    store.library_root = tmp_path.absolute()
     backend = CachedStillDecodeBackend(Mock(), store=store)
 
     backend.bind_library(tmp_path)
     backend.shutdown()
 
-    store.bind_library.assert_called_once_with(tmp_path)
     store.maintenance.assert_called_once_with()
+    store.close.assert_called_once_with()
+
+
+def test_cross_library_bind_uses_a_new_store_generation(tmp_path: Path) -> None:
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_store = Mock()
+    old_store.library_root = old_root.absolute()
+    new_store = Mock()
+    new_store.library_root = new_root.absolute()
+    factory = Mock(return_value=new_store)
+    backend = CachedStillDecodeBackend(
+        Mock(),
+        store=old_store,
+        store_factory=factory,
+    )
+
+    backend.bind_library(new_root)
+    backend.shutdown()
+
+    factory.assert_called_once_with(new_root.absolute())
+    old_store.bind_library.assert_not_called()
+    old_store.close.assert_called_once_with()
+    new_store.maintenance.assert_called_once_with()
+    new_store.close.assert_called_once_with()
+
+
+def test_rebind_returns_before_old_store_io_drains(tmp_path: Path) -> None:
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    started = Event()
+    release = Event()
+    old_closed = Event()
+    old_store = Mock()
+    old_store.library_root = old_root.absolute()
+    old_store.close.side_effect = old_closed.set
+    new_store = Mock()
+    new_store.library_root = new_root.absolute()
+    backend = CachedStillDecodeBackend(
+        Mock(),
+        store=old_store,
+        store_factory=Mock(return_value=new_store),
+    )
+    generation = backend._active_store_generation
+
+    def slow_io() -> None:
+        started.set()
+        assert release.wait(5)
+
+    backend._submit_for_generation(generation, slow_io)
+    assert started.wait(5)
+
+    backend.bind_library(new_root)
+
+    assert not old_closed.is_set()
+    release.set()
+    backend.shutdown(timeout_ms=5000)
+    assert old_closed.is_set()
+
+
+def test_shutdown_timeout_closes_store_after_active_decode_finishes(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    started = Event()
+    release = Event()
+    closed = Event()
+    store = Mock()
+    store.library_root = tmp_path.absolute()
+
+    def slow_load(_request: DetailRenderRequest) -> None:
+        started.set()
+        assert release.wait(5)
+        return None
+
+    store.load.side_effect = slow_load
+    store.close.side_effect = closed.set
+    delegate = Mock()
+    delegate.decode.side_effect = lambda prepared, _token: _surface(prepared)
+    backend = CachedStillDecodeBackend(delegate, store=store)
+    failures: list[BaseException] = []
+
+    def decode() -> None:
+        try:
+            backend.decode(request, _Token())
+        except DecodeCancelledError as exc:
+            failures.append(exc)
+
+    worker = Thread(target=decode)
+    worker.start()
+    assert started.wait(5)
+
+    backend.shutdown(timeout_ms=1)
+
+    assert not closed.is_set()
+    release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert closed.wait(5)
+    assert len(failures) == 1
+    assert isinstance(failures[0], DecodeCancelledError)
+
+
+def test_rebind_rejects_old_decode_without_repopulating_memory_cache(
+    tmp_path: Path,
+) -> None:
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    request = _request(old_root / "photo.jpg")
+    started = Event()
+    release = Event()
+    old_store = Mock()
+    old_store.library_root = old_root.absolute()
+
+    def slow_load(_request: DetailRenderRequest) -> DecodedSurface:
+        started.set()
+        assert release.wait(5)
+        return _surface(request)
+
+    old_store.load.side_effect = slow_load
+    new_store = Mock()
+    new_store.library_root = new_root.absolute()
+    backend = CachedStillDecodeBackend(
+        Mock(),
+        store=old_store,
+        store_factory=Mock(return_value=new_store),
+    )
+    failures: list[BaseException] = []
+
+    def decode() -> None:
+        try:
+            backend.decode(request, _Token())
+        except DecodeCancelledError as exc:
+            failures.append(exc)
+
+    worker = Thread(target=decode)
+    worker.start()
+    assert started.wait(5)
+    backend.bind_library(new_root)
+    release.set()
+    worker.join(timeout=5)
+    backend.shutdown(timeout_ms=5000)
+
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], DecodeCancelledError)
+    assert backend.memory_cache.used_bytes == 0
+    old_store.close.assert_called_once_with()
+    new_store.close.assert_called_once_with()
+
+
+def test_closed_store_and_index_cannot_reopen(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    index = store._index_for_root()
+    assert index is not None
+
+    store.close()
+
+    assert store.closed
+    assert index.closed
+    assert not index.ensure_open()
+    assert store.load(request) is None
+    assert not store.write(request, _surface(request))
 
 
 def test_clean_library_bind_does_not_traverse_payload_directory(

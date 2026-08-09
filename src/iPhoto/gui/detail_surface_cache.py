@@ -471,7 +471,10 @@ class NeutralSurfaceStore:
         index = self._index_for_root()
         if index is None or not index.ensure_open():
             return False
+        digest = _key_digest(request)
         temporary: Path | None = None
+        replaced = False
+        metadata_committed = False
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             payload = memoryview(image.constBits())[:payload_size]
@@ -511,11 +514,13 @@ class NeutralSurfaceStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
+            replaced = True
+            temporary = None
             stat = path.stat()
             now = time.time_ns()
             indexed = index.upsert(
                 SurfaceCacheIndexEntry(
-                    digest=_key_digest(request),
+                    digest=digest,
                     relative_path=path.relative_to(index.root).as_posix(),
                     container_schema=_SCHEMA,
                     decoder_contract=_DECODE_SEMANTICS_CONTRACT,
@@ -530,7 +535,9 @@ class NeutralSurfaceStore:
                 )
             )
             if not indexed:
+                self._cleanup_failed_write(index, digest, path)
                 return False
+            metadata_committed = True
             if index.maintenance_due(
                 self._budget_bytes(),
                 byte_interval=_MAINTENANCE_WRITE_BYTES,
@@ -540,12 +547,29 @@ class NeutralSurfaceStore:
             self._cleanup_legacy_cache()
             return True
         except (BufferError, OSError, ValueError):
-            try:
-                if temporary is not None:
+            if replaced and not metadata_committed:
+                self._cleanup_failed_write(index, digest, path)
+            elif temporary is not None:
+                try:
                     temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+                except OSError:
+                    index.mark_recovery_required()
             return False
+
+    @staticmethod
+    def _cleanup_failed_write(
+        index: SurfaceCacheIndex,
+        digest: str,
+        path: Path,
+    ) -> None:
+        payload_removed = True
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            payload_removed = False
+        row_removed = index.remove(digest)
+        if not payload_removed or not row_removed:
+            index.mark_recovery_required()
 
     def discard(self, request: DetailRenderRequest) -> None:
         path = self.entry_path(request)
@@ -601,6 +625,8 @@ class NeutralSurfaceStore:
                 return
             if recover or index.needs_recovery:
                 self._recover_index(index)
+                if index.needs_recovery:
+                    return
             index.flush_accesses(force=True)
             budget = self._budget_bytes()
             due = force_prune or index.maintenance_due(
@@ -611,9 +637,11 @@ class NeutralSurfaceStore:
             if not due:
                 return
             target = int(budget * 0.9)
+            maintenance_failed = False
             while index.indexed_bytes > target:
                 victims = index.lru_victims(limit=_PRUNE_BATCH)
                 if not victims:
+                    maintenance_failed = True
                     break
                 removed = 0
                 for victim in victims:
@@ -621,18 +649,30 @@ class NeutralSurfaceStore:
                         break
                     path = self._indexed_path(index, victim.relative_path)
                     if path is None:
-                        index.remove(victim.digest)
+                        if not index.remove(victim.digest):
+                            index.mark_recovery_required()
+                            maintenance_failed = True
+                            break
                         removed += 1
                         continue
                     try:
                         path.unlink(missing_ok=True)
                     except OSError:
+                        index.mark_recovery_required()
+                        maintenance_failed = True
                         continue
-                    index.remove(victim.digest)
+                    if not index.remove(victim.digest):
+                        index.mark_recovery_required()
+                        maintenance_failed = True
+                        break
                     removed += 1
-                if removed == 0:
+                if maintenance_failed:
                     break
-            index.finish_maintenance()
+                if removed == 0:
+                    maintenance_failed = True
+                    break
+            if not maintenance_failed:
+                index.finish_maintenance()
 
     def close(self) -> None:
         with self._lock:
@@ -660,11 +700,12 @@ class NeutralSurfaceStore:
     def _recover_index(self, index: SurfaceCacheIndex) -> None:
         indexed = {entry.digest: entry for entry in index.all_entries()}
         seen: set[str] = set()
+        recovered = True
         for temporary in index.root.glob("*/*.tmp"):
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
-                pass
+                recovered = False
         for path in index.root.glob("*/*.ipsurface"):
             mapping: mmap.mmap | None = None
             file = None
@@ -679,7 +720,7 @@ class NeutralSurfaceStore:
                 now = time.time_ns()
                 previous = indexed.get(digest)
                 seen.add(digest)
-                index.upsert(
+                if not index.upsert(
                     SurfaceCacheIndexEntry(
                         digest=digest,
                         relative_path=path.relative_to(index.root).as_posix(),
@@ -694,12 +735,13 @@ class NeutralSurfaceStore:
                         last_access_ns=previous.last_access_ns if previous is not None else now,
                         last_verified_ns=0,
                     )
-                )
+                ):
+                    recovered = False
             except (KeyError, OSError, SurfaceCacheCorruptError, ValueError):
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
-                    pass
+                    recovered = False
             finally:
                 try:
                     if mapping is not None:
@@ -710,10 +752,13 @@ class NeutralSurfaceStore:
                     file.close()
         for digest in indexed:
             if digest not in seen:
-                index.remove(digest)
+                recovered = index.remove(digest) and recovered
         index.recalculate_indexed_bytes()
-        index.mark_recovered()
-        index.finish_maintenance()
+        if recovered:
+            index.mark_recovered()
+            index.finish_maintenance()
+        else:
+            index.mark_recovery_required()
 
     @staticmethod
     def _read_header(mapping: mmap.mmap) -> tuple[dict, int, int]:
@@ -771,13 +816,15 @@ class NeutralSurfaceStore:
                 file.close()
 
     def _discard_digest(self, digest: str, path: Path) -> None:
+        index = self._index_for_root()
         try:
             path.unlink(missing_ok=True)
         except OSError:
+            if index is not None:
+                index.mark_recovery_required()
             return
-        index = self._index_for_root()
-        if index is not None:
-            index.remove(digest)
+        if index is not None and not index.remove(digest):
+            index.mark_recovery_required()
 
     @staticmethod
     def _indexed_path(index: SurfaceCacheIndex, relative_path: str) -> Path | None:

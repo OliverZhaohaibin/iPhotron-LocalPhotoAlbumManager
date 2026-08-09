@@ -27,6 +27,7 @@ from iPhoto.gui.detail_surface_cache import (
     SurfaceCacheCorruptError,
     surface_memory_budget_bytes,
 )
+from iPhoto.gui.detail_surface_cache_index import SurfaceCacheIndex
 
 
 class _Token:
@@ -234,6 +235,54 @@ def test_missing_payload_removes_stale_metadata_row(tmp_path: Path) -> None:
     assert index.get(surface_cache_module._key_digest(request)) is None
 
 
+def test_replace_followed_by_upsert_failure_removes_orphan_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    monkeypatch.setattr(index, "upsert", lambda _entry: False)
+
+    assert not store.write(request, _surface(request))
+
+    assert not path.exists()
+    assert index.remove(surface_cache_module._key_digest(request))
+    assert not index.needs_recovery
+
+
+def test_failed_write_cleanup_marks_recovery_when_row_cannot_be_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    monkeypatch.setattr(index, "upsert", lambda _entry: False)
+    monkeypatch.setattr(index, "remove", lambda _digest: False)
+
+    assert not store.write(request, _surface(request))
+
+    assert not path.exists()
+    assert index.needs_recovery
+
+
+def test_recovery_required_index_does_not_close_clean(tmp_path: Path) -> None:
+    index = SurfaceCacheIndex(tmp_path)
+    assert index.ensure_open()
+    index.mark_recovery_required()
+
+    index.close()
+    reopened = SurfaceCacheIndex(tmp_path)
+
+    assert reopened.ensure_open()
+    assert reopened.needs_recovery
+
+
 def test_corrupt_sqlite_index_is_rebuilt_from_untrusted_payload(tmp_path: Path) -> None:
     request = _request(tmp_path / "photo.jpg")
     store = NeutralSurfaceStore(tmp_path)
@@ -249,6 +298,58 @@ def test_corrupt_sqlite_index_is_rebuilt_from_untrusted_payload(tmp_path: Path) 
     assert loaded is not None
     assert loaded.decoded_size == (8, 4)
     assert tuple(root.glob("index.sqlite3.corrupt-*"))
+
+
+def test_prune_remove_failure_is_bounded_and_keeps_maintenance_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path, budget_bytes=1)
+    store._budget_override = 1 << 30
+    assert store.write(request, _surface(request))
+    index = store._index_for_root()
+    assert index is not None
+    store._budget_override = 1
+    remove = Mock(return_value=False)
+    monkeypatch.setattr(index, "remove", remove)
+
+    store.maintenance(force_prune=True)
+
+    remove.assert_called_once()
+    assert index.needs_recovery
+    assert index.maintenance_due(
+        1,
+        byte_interval=surface_cache_module._MAINTENANCE_WRITE_BYTES,
+        time_interval_ns=surface_cache_module._MAINTENANCE_INTERVAL_NS,
+    )
+
+
+def test_prune_unlink_failure_keeps_row_and_marks_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path, budget_bytes=1 << 30)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    original_unlink = Path.unlink
+
+    def fail_payload_unlink(candidate: Path, *, missing_ok: bool = False) -> None:
+        if candidate == path:
+            raise OSError("injected payload unlink failure")
+        original_unlink(candidate, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_payload_unlink)
+    store._budget_override = 1
+
+    store.maintenance(force_prune=True)
+
+    assert path.exists()
+    assert index.get(surface_cache_module._key_digest(request)) is not None
+    assert index.needs_recovery
 
 
 def test_first_v3_write_removes_rebuildable_v2_namespace(tmp_path: Path) -> None:

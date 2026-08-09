@@ -172,10 +172,10 @@ class SurfaceCacheIndex:
                 connection.rollback()  # type: ignore[union-attr]
                 return False
 
-    def remove(self, digest: str) -> None:
+    def remove(self, digest: str) -> bool:
         with self._lock:
             if not self.ensure_open():
-                return
+                return False
             connection = self._connection
             try:
                 row = connection.execute(  # type: ignore[union-attr]
@@ -183,15 +183,18 @@ class SurfaceCacheIndex:
                     (str(digest),),
                 ).fetchone()
                 if row is None:
-                    return
+                    return True
                 connection.execute("DELETE FROM entries WHERE digest = ?", (str(digest),))  # type: ignore[union-attr]
                 self._set_meta_locked(
                     "indexed_bytes",
                     max(0, self._meta_int_locked("indexed_bytes") - int(row[0])),
                 )
                 connection.commit()  # type: ignore[union-attr]
+                return True
             except sqlite3.DatabaseError:
                 connection.rollback()  # type: ignore[union-attr]
+                self._mark_recovery_required_locked()
+                return False
 
     def mark_checksum_state(
         self,
@@ -325,17 +328,21 @@ class SurfaceCacheIndex:
         with self._lock:
             self._needs_recovery = False
 
+    def mark_recovery_required(self) -> None:
+        with self._lock:
+            self._mark_recovery_required_locked()
+
     def close(self, *, clean: bool = True) -> None:
         with self._lock:
             if self._closed:
                 return
             self.flush_accesses(force=True)
-            if self._connection is not None and clean:
+            if self._connection is not None and clean and not self._needs_recovery:
                 try:
                     self._set_meta_locked("clean_shutdown", 1)
                     self._connection.commit()
                 except sqlite3.DatabaseError:
-                    pass
+                    self._needs_recovery = True
             self._close_connection_locked()
             self._closed = True
 
@@ -412,6 +419,19 @@ class SurfaceCacheIndex:
             """,
             (str(key), int(value)),
         )
+
+    def _mark_recovery_required_locked(self) -> None:
+        self._needs_recovery = True
+        if self._connection is None:
+            return
+        try:
+            self._set_meta_locked("clean_shutdown", 0)
+            self._connection.commit()
+        except sqlite3.DatabaseError:
+            try:
+                self._connection.rollback()
+            except sqlite3.DatabaseError:
+                pass
 
     @staticmethod
     def _entry_from_row(row: sqlite3.Row) -> SurfaceCacheIndexEntry:

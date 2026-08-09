@@ -350,7 +350,7 @@ def test_unbound_store_is_a_disabled_disk_tier(tmp_path: Path) -> None:
     assert store.write(request, _surface(request)) is False
 
 
-def test_backend_bind_library_schedules_keyword_recovery(tmp_path: Path) -> None:
+def test_backend_bind_library_schedules_normal_maintenance(tmp_path: Path) -> None:
     store = Mock()
     backend = CachedStillDecodeBackend(Mock(), store=store)
 
@@ -358,7 +358,25 @@ def test_backend_bind_library_schedules_keyword_recovery(tmp_path: Path) -> None
     backend.shutdown()
 
     store.bind_library.assert_called_once_with(tmp_path)
-    store.maintenance.assert_called_once_with(recover=True)
+    store.maintenance.assert_called_once_with()
+
+
+def test_clean_library_bind_does_not_traverse_payload_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    populated = NeutralSurfaceStore(tmp_path)
+    assert populated.write(request, _surface(request))
+    populated.close()
+    backend = CachedStillDecodeBackend(Mock(), store=NeutralSurfaceStore(None))
+
+    def fail_glob(_self: Path, _pattern: str):
+        raise AssertionError("clean library bind must not scan cache payloads")
+
+    monkeypatch.setattr(Path, "glob", fail_glob)
+    backend.bind_library(tmp_path)
+    backend.shutdown()
 
 
 def test_bind_library_without_prior_surface_cache_initializes_v3(tmp_path: Path) -> None:

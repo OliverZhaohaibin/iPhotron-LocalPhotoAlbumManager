@@ -811,7 +811,7 @@ class CachedStillDecodeBackend:
         with self._lock:
             self._color_stats_by_source.clear()
         self.store.bind_library(library_root)
-        self._submit(self.store.maintenance, recover=True)
+        self._submit(self.store.maintenance)
 
     @staticmethod
     def _source_stats_key(request: DetailRenderRequest) -> tuple:

@@ -10,6 +10,7 @@ import pytest
 from PySide6.QtGui import QImage
 
 import iPhoto.gui.detail_surface_cache as surface_cache_module
+import iPhoto.gui.detail_surface_cache_index as surface_cache_index_module
 from iPhoto.core.color_resolver import ColorStats
 from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_pipeline import (
@@ -169,7 +170,13 @@ def test_writes_below_maintenance_watermark_do_not_traverse_payload_directory(
     assert store.write(request, _surface(request))
 
 
-def test_indexed_prune_uses_lru_and_low_watermark(tmp_path: Path) -> None:
+def test_indexed_prune_uses_lru_and_low_watermark(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Windows can return the same time_ns() value for adjacent writes. Access
+    # updates must still become strictly newer than the persisted row.
+    monkeypatch.setattr(surface_cache_index_module.time, "time_ns", lambda: 100)
     first = _request(tmp_path / "first.jpg", revision=1)
     second = _request(tmp_path / "second.jpg", revision=2)
     third = _request(tmp_path / "third.jpg", revision=3)

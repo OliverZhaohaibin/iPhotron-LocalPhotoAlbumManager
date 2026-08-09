@@ -232,7 +232,11 @@ class SurfaceCacheIndex:
             pending = tuple(self._pending_access.items())
             try:
                 self._connection.executemany(  # type: ignore[union-attr]
-                    "UPDATE entries SET last_access_ns = ? WHERE digest = ?",
+                    """
+                    UPDATE entries
+                    SET last_access_ns = MAX(last_access_ns + 1, ?)
+                    WHERE digest = ?
+                    """,
                     ((accessed_ns, digest) for digest, accessed_ns in pending),
                 )
                 self._connection.commit()  # type: ignore[union-attr]
@@ -330,10 +334,16 @@ class SurfaceCacheIndex:
             timeout=5.0,
             check_same_thread=False,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA temp_store=MEMORY")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute("PRAGMA temp_store=MEMORY")
+        except sqlite3.DatabaseError:
+            # On Windows, an unclosed connection keeps the corrupt database
+            # locked and prevents the quarantine rename in ensure_open().
+            connection.close()
+            raise
         return connection
 
     @staticmethod

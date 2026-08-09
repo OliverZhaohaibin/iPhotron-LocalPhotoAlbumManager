@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from .startup_profile import mark
 
@@ -90,10 +90,17 @@ class GuiStartupJobQueue(QObject):
     def wake(self) -> None:
         """Re-check the head job after an external prerequisite changes."""
 
+        self._assert_owner_thread()
         if self._closed or self._scheduled or self._running or not self._jobs:
             return
         self._scheduled = True
         self._scheduler(self._run_one)
+
+    @Slot(int)
+    def wake_for_generation(self, _generation: int) -> None:
+        """Queued signal target used when a worker satisfies a prerequisite."""
+
+        self.wake()
 
     def cancel_generation(self, generation: int) -> None:
         """Invalidate queued and future work for one startup generation."""
@@ -119,6 +126,7 @@ class GuiStartupJobQueue(QObject):
         )
 
     def _run_one(self) -> None:
+        self._assert_owner_thread()
         self._scheduled = False
         if self._closed or self._running:
             return
@@ -190,6 +198,10 @@ class GuiStartupJobQueue(QObject):
                 exception=error,
             )
         )
+
+    def _assert_owner_thread(self) -> None:
+        if QThread.currentThread() is not self.thread():
+            raise RuntimeError("GUI startup jobs must run on their QObject owner thread")
 
 
 __all__ = [

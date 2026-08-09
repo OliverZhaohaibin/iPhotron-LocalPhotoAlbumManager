@@ -232,7 +232,7 @@ class _AdjustmentPreparationWorker(QRunnable):
         try:
             if self._cancelled:
                 return
-            identity = self.source_identity
+            identity = self.source_identity.repair_revision_from_stat()
             if (
                 is_raw_extension(identity.path.suffix)
                 and (identity.width <= 0 or identity.height <= 0)

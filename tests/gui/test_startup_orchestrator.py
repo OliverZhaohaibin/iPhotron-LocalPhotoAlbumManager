@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -30,6 +31,28 @@ def test_startup_import_registry_isolates_retry_generations() -> None:
     else:
         raise AssertionError("first startup generation unexpectedly resolved")
     assert registry.resolve(2) is second_value
+
+
+def test_startup_module_preloader_close_is_bounded(qapp) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    preloader = _StartupModulePreloader()
+
+    def blocked_loader() -> object:
+        started.set()
+        release.wait(timeout=2.0)
+        return object()
+
+    assert preloader.start(1, blocked_loader)
+    assert started.wait(timeout=1.0)
+    before = time.monotonic()
+    lingering = preloader.close(timeout_ms=10)
+    elapsed = time.monotonic() - before
+    release.set()
+
+    assert elapsed < 0.5
+    assert lingering == ("StartupModulePreloader-1",)
+    assert preloader.ready(1) is False
 
 
 def test_startup_module_preloader_rejects_cancelled_late_result(qapp) -> None:

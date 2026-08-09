@@ -36,7 +36,10 @@ def test_on_library_tree_updated_rebinds_core_domains_only() -> None:
     coordinator._on_library_tree_updated()
 
     coordinator.gallery.rebind_library.assert_called_once_with()
-    coordinator.detail.rebind_library.assert_called_once_with()
+    coordinator.detail.rebind_library.assert_called_once_with(
+        0,
+        session_changed=False,
+    )
     coordinator._map_extension_download.set_package_root.assert_called_once_with(
         Path("/session/maps").resolve()
     )
@@ -144,6 +147,28 @@ def test_open_album_from_path_reuses_session_for_album_inside_library(
     coordinator._navigation.open_album.assert_called_once_with(album_root)
 
 
+def test_open_album_from_path_blocks_cross_library_switch_during_edit(
+    tmp_path: Path,
+) -> None:
+    coordinator = GalleryCoordinator.__new__(GalleryCoordinator)
+    old_root = tmp_path / "Old"
+    new_root = tmp_path / "New"
+    old_root.mkdir()
+    new_root.mkdir()
+    coordinator._context = MagicMock()
+    coordinator._context.library_session = None
+    coordinator._context.library.root.return_value = old_root
+    coordinator._facade = MagicMock()
+    coordinator._navigation = MagicMock()
+    coordinator._library_rebind_preflight = lambda: False
+
+    GalleryCoordinator.open_album_from_path(coordinator, new_root)
+
+    coordinator._context.open_library.assert_not_called()
+    coordinator._navigation.open_album.assert_not_called()
+    coordinator._facade.errorRaised.emit.assert_called_once()
+
+
 def test_on_library_tree_updated_rebinds_created_optional_domains() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
@@ -164,11 +189,38 @@ def test_on_library_tree_updated_rebinds_created_optional_domains() -> None:
     coordinator._on_library_tree_updated()
 
     coordinator.gallery.rebind_library.assert_called_once_with()
-    coordinator.detail.rebind_library.assert_called_once_with()
+    coordinator.detail.rebind_library.assert_called_once_with(
+        0,
+        session_changed=False,
+    )
     coordinator._recognition.rebind_library.assert_called_once_with()
     coordinator._location_info.rebind_library.assert_called_once_with()
     coordinator._map_extension_download.set_package_root.assert_called_once_with(
         Path("/session/maps").resolve()
+    )
+
+
+def test_external_library_epoch_change_safely_invalidates_edit_first() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    coordinator._context = MagicMock(library_epoch=8)
+    coordinator._context.library_session = None
+    coordinator._context.library.root.return_value = Path("/library-b")
+    coordinator._observed_library_epoch = 7
+    coordinator._edit = MagicMock()
+    coordinator.gallery = MagicMock()
+    coordinator.detail = MagicMock()
+    coordinator._recognition = None
+    coordinator._location_info = None
+    coordinator._logger = MagicMock()
+    coordinator._map_extension_download = MagicMock()
+    coordinator._window = MagicMock(ui=SimpleNamespace())
+
+    coordinator._on_library_tree_updated()
+
+    coordinator._edit.invalidate_library_binding.assert_called_once_with()
+    coordinator.detail.rebind_library.assert_called_once_with(
+        8,
+        session_changed=True,
     )
 
 

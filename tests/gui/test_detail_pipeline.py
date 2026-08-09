@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -68,6 +70,40 @@ def test_source_identity_creation_never_stats_on_the_calling_thread(tmp_path: Pa
             height=3000,
         )
     assert identity.revision == ("mtime", 100, 200)
+
+
+def test_source_identity_repairs_missing_revision_from_stat(tmp_path: Path) -> None:
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"first")
+    legacy = AssetSourceIdentity.create(source)
+
+    repaired = legacy.repair_revision_from_stat()
+
+    assert legacy.has_stable_revision is False
+    assert repaired.has_stable_revision is True
+    assert repaired.size_bytes == len(b"first")
+    assert repaired.revision[0] == "mtime"
+
+
+def test_same_path_replacement_changes_repaired_decode_key(tmp_path: Path) -> None:
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"first")
+    first_stat = source.stat()
+    first_identity = AssetSourceIdentity.create(source).repair_revision_from_stat()
+    first_request = replace(_request(tmp_path), source_identity=first_identity)
+
+    source.write_bytes(b"replacement-is-larger")
+    os.utime(
+        source,
+        ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns + 1_000_000_000),
+    )
+    second_identity = AssetSourceIdentity.create(source).repair_revision_from_stat()
+    second_request = replace(_request(tmp_path), source_identity=second_identity)
+
+    assert first_identity.revision != second_identity.revision
+    assert DetailDecodeKey.from_request(first_request) != DetailDecodeKey.from_request(
+        second_request
+    )
 
 
 def test_decode_key_distinguishes_source_orientation(tmp_path: Path) -> None:

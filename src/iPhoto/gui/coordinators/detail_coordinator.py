@@ -37,11 +37,16 @@ class DetailCoordinator(QObject):
     def reset_for_gallery(self) -> None:
         self._playback.reset_for_gallery()
 
-    def rebind_library(self) -> None:
+    def rebind_library(
+        self,
+        library_epoch: int | None = None,
+        *,
+        session_changed: bool = True,
+    ) -> None:
         """Rebind Detail state without touching optional recognition/location domains."""
         rebind_playback = getattr(self._playback, "rebind_library", None)
         if callable(rebind_playback):
-            rebind_playback()
+            rebind_playback(library_epoch, session_changed=session_changed)
         if self._detail_viewmodel is None or self._asset_state_service_getter is None:
             return
         self._detail_viewmodel.bind_asset_state_service(

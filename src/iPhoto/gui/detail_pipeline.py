@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -75,6 +75,58 @@ class AssetSourceIdentity:
         if self.index_revision > 0:
             return ("index", self.size_bytes, self.index_revision)
         return ("legacy", self.size_bytes, 0)
+
+    @property
+    def has_stable_revision(self) -> bool:
+        """Whether this identity can safely participate in a reusable cache."""
+
+        return self.source_mtime_ns > 0 or self.index_revision > 0
+
+    def repair_revision_from_stat(self) -> AssetSourceIdentity:
+        """Repair an unversioned identity from a worker-thread stat call."""
+
+        if self.has_stable_revision:
+            return self
+        try:
+            source_stat = self.path.stat()
+        except OSError:
+            return self
+        mtime_ns = max(0, int(getattr(source_stat, "st_mtime_ns", 0) or 0))
+        if mtime_ns <= 0:
+            return self
+        return replace(
+            self,
+            size_bytes=max(0, int(source_stat.st_size)),
+            source_mtime_ns=mtime_ns,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackAsyncToken:
+    """Complete delivery identity for library-scoped playback work."""
+
+    library_epoch: int
+    asset_generation: int
+    asset_id: str
+    source_path: Path
+    source_revision: tuple[str, int, int]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        library_epoch: int,
+        asset_generation: int,
+        asset_id: str,
+        source_identity: AssetSourceIdentity,
+    ) -> PlaybackAsyncToken:
+        return cls(
+            library_epoch=max(0, int(library_epoch)),
+            asset_generation=max(0, int(asset_generation)),
+            asset_id=str(asset_id).strip() or source_identity.path.name,
+            source_path=source_identity.path,
+            source_revision=source_identity.revision,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +443,7 @@ __all__ = [
     "DetailMediaPreparation",
     "DetailOpenTrace",
     "DetailPrefetchDescriptor",
+    "PlaybackAsyncToken",
     "DetailRenderTransaction",
     "DetailRenderRequest",
     "DetailResidencySlot",

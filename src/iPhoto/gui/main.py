@@ -38,6 +38,7 @@ _MACOS_EXTERNAL_TOOL_PATHS = (
 _STARTUP_GALLERY_WARMUP_FALLBACK_MS = 3000
 _STARTUP_HANG_DIAG_ENV = "IPHOTO_STARTUP_HANG_DIAG"
 _STARTUP_HANG_DIAG_TIMEOUT_SECONDS = 15
+_QUEUED_CONNECTION = Qt.ConnectionType.QueuedConnection
 _STARTUP_INPUT_EVENT_TYPES = frozenset(
     event_type
     for name in (
@@ -157,7 +158,7 @@ class _StartupModulePreloader(QObject):
         thread = threading.Thread(
             target=_load,
             name=f"StartupModulePreloader-{generation}",
-            daemon=False,
+            daemon=True,
         )
         with self._lock:
             self._threads[generation] = thread
@@ -176,16 +177,25 @@ class _StartupModulePreloader(QObject):
             self._cancelled.add(generation)
         self._registry.discard(generation)
 
-    def close(self) -> None:
+    def close(self, *, timeout_ms: int = 1500) -> tuple[str, ...]:
+        """Cancel publication and wait for workers only up to ``timeout_ms``."""
+
         with self._lock:
             self._closed = True
             self._cancelled.update(self._threads)
             threads = tuple(self._threads.values())
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
         for thread in threads:
-            if thread is not threading.current_thread():
-                thread.join()
-        with self._lock:
-            self._threads.clear()
+            if thread is threading.current_thread():
+                continue
+            thread.join(max(0.0, deadline - time.monotonic()))
+        lingering = tuple(thread.name for thread in threads if thread.is_alive())
+        if lingering:
+            _logger.warning(
+                "Startup import workers exceeded the shutdown deadline: %s",
+                ", ".join(lingering),
+            )
+        return lingering
 
 
 class _StartupInputGuard(QObject):
@@ -554,7 +564,10 @@ def main(argv: list[str] | None = None) -> int:
     startup_imports = _StartupModulePreloader(
         app if isinstance(app, QObject) else None,
     )
-    startup_imports.settled.connect(lambda _generation: startup_jobs.wake())
+    startup_imports.settled.connect(
+        startup_jobs.wake_for_generation,
+        _QUEUED_CONNECTION,
+    )
     startup.begin()
     startup.transition(StartupPhase.APP_CREATED)
 

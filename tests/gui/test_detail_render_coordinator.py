@@ -49,6 +49,34 @@ def test_new_transaction_cancels_old_and_rejects_stale_result(qapp) -> None:
     assert coordinator.mark_presented(2)
 
 
+def test_live_motion_and_restored_still_are_distinct_surfaces(qapp) -> None:
+    coordinator = DetailRenderCoordinator()
+    terminals = []
+    surfaces = []
+    coordinator.presented.connect(terminals.append)
+    coordinator.surfacePresented.connect(
+        lambda snapshot, kind: surfaces.append((snapshot, kind))
+    )
+
+    coordinator.begin(_transaction(7, media_kind="live_motion"))
+    coordinator.mark_preparing(7)
+
+    assert coordinator.mark_surface_presented(7, "live_motion_frame")
+    assert coordinator.mark_surface_presented(7, "live_still")
+    assert not coordinator.mark_surface_presented(7, "live_still")
+    assert coordinator.owns_generation(7)
+    assert len(terminals) == 1
+    assert [kind for _snapshot, kind in surfaces] == [
+        "live_motion_frame",
+        "live_still",
+    ]
+    assert coordinator.snapshot is not None
+    assert coordinator.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+
+
 def test_still_request_is_derived_from_transaction(tmp_path: Path) -> None:
     from iPhoto.gui.detail_pipeline import DetailGeometryState, DetailRenderRequest
 

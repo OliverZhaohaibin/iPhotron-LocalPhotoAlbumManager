@@ -73,6 +73,7 @@ class DesktopCoordinatorRuntime(QObject):
         super().__init__(window)
         self._window = window
         self._context = context
+        self._observed_library_epoch = self._context_library_epoch()
         self._is_shutting_down = False
         self._shutdown_complete = False
         # facade reference kept for signal wiring as some systems still emit through it
@@ -227,6 +228,7 @@ class DesktopCoordinatorRuntime(QObject):
             event_bus=self._event_bus,
             location_write_queue=None,
             edit_service_getter=edit_service_getter,
+            library_epoch_getter=self._context_library_epoch,
         )
 
         # Inject optional dependencies into Playback
@@ -258,7 +260,12 @@ class DesktopCoordinatorRuntime(QObject):
         self._edit: EditCoordinator | None = None
 
         # --- Legacy Controllers ---
-        self._dialog = DialogController(window, context, window.ui.status_bar)
+        self._dialog = DialogController(
+            window,
+            context,
+            window.ui.status_bar,
+            library_rebind_preflight=self._library_rebind_preflight,
+        )
         self._facade.register_restore_prompt(self._dialog.prompt_restore_to_root)
         self._status_bar = StatusBarController(
             window.ui.status_bar,
@@ -383,6 +390,7 @@ class DesktopCoordinatorRuntime(QObject):
             library_root_getter=self._library_root,
             asset_query_service_getter=self._asset_query_service,
             asset_state_service_getter=self._asset_state_service,
+            library_rebind_preflight=self._library_rebind_preflight,
             parent=self,
         )
         self.detail = DetailCoordinator(
@@ -436,6 +444,13 @@ class DesktopCoordinatorRuntime(QObject):
 
     def _enter_edit_mode(self, *args) -> None:
         self._ensure_edit_coordinator().enter_edit_mode(*args)
+
+    def _library_rebind_preflight(self) -> bool:
+        edit = getattr(self, "_edit", None)
+        if edit is None:
+            return True
+        preflight = getattr(edit, "preflight_library_rebind", None)
+        return bool(preflight()) if callable(preflight) else not edit.is_editing()
 
     def _handle_asset_metadata_updated(self, event: AssetMetadataUpdated) -> None:
         asset_path = event.asset_path
@@ -825,8 +840,20 @@ class DesktopCoordinatorRuntime(QObject):
     def _on_library_tree_updated(self) -> None:
         root = self._library_root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
+        library_epoch = DesktopCoordinatorRuntime._context_library_epoch(self)
+        previous_epoch = getattr(self, "_observed_library_epoch", library_epoch)
+        session_changed = library_epoch != previous_epoch
+        self._observed_library_epoch = library_epoch
+        if session_changed:
+            edit = getattr(self, "_edit", None)
+            invalidate = getattr(edit, "invalidate_library_binding", None)
+            if callable(invalidate):
+                invalidate()
         self.gallery.rebind_library()
-        self.detail.rebind_library()
+        self.detail.rebind_library(
+            library_epoch,
+            session_changed=session_changed,
+        )
         window = getattr(self, "_window", None)
         ui = getattr(window, "ui", None)
         map_feature_active = ui is not None and hasattr(ui, "map_view")
@@ -851,6 +878,14 @@ class DesktopCoordinatorRuntime(QObject):
 
     def _active_session(self):
         return getattr(self._context, "library_session", None)
+
+    def _context_library_epoch(self) -> int:
+        value = getattr(self._context, "library_epoch", 0)
+        if isinstance(value, bool):
+            return int(value)
+        if not isinstance(value, int):
+            return 0
+        return max(0, value)
 
     def _library_root(self) -> Path | None:
         session = self._active_session()

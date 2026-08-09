@@ -96,6 +96,8 @@ class MappedSurfaceCache:
             return self._used_bytes
 
     def get(self, key: DetailDecodeKey) -> DecodedSurface | None:
+        if key.source_revision[0] == "legacy":
+            return None
         with self._lock:
             value = self._entries.pop(key, None)
             if value is None:
@@ -106,7 +108,12 @@ class MappedSurfaceCache:
 
     def put(self, surface: DecodedSurface) -> bool:
         size = _surface_bytes(surface)
-        if surface.image.isNull() or size <= 0 or size > self._budget_bytes:
+        if (
+            surface.decode_key.source_revision[0] == "legacy"
+            or surface.image.isNull()
+            or size <= 0
+            or size > self._budget_bytes
+        ):
             return False
         with self._lock:
             previous = self._entries.pop(surface.decode_key, None)
@@ -179,6 +186,8 @@ class NeutralSurfaceStore:
             self._root = root
 
     def entry_path(self, request: DetailRenderRequest) -> Path | None:
+        if not request.source_identity.has_stable_revision:
+            return None
         root = self.root
         if root is None:
             return None
@@ -412,19 +421,21 @@ class CachedStillDecodeBackend:
     def decode(self, request: DetailRenderRequest, cancellation: CancellationToken) -> DecodedSurface:
         prepared = request.with_decode_level()
         key = DetailDecodeKey.from_request(prepared)
+        cacheable = prepared.source_identity.has_stable_revision
         if cancellation.is_cancelled():
             raise DecodeCancelledError("Still-image decode cancelled")
-        surface = self.memory_cache.get(key)
+        surface = self.memory_cache.get(key) if cacheable else None
         if surface is not None:
             self._remember_color_stats(prepared, surface.color_stats)
             emit_detail_event("surface_cache_hit", generation=prepared.generation, asset_id=key.asset_id, tier="memory")
             return surface
-        try:
-            surface = self.store.load(prepared)
-        except SurfaceCacheCorruptError:
-            emit_detail_event("surface_cache_corrupt", generation=prepared.generation, asset_id=key.asset_id)
-            self._submit(self.store.discard, prepared)
-            surface = None
+        if cacheable:
+            try:
+                surface = self.store.load(prepared)
+            except SurfaceCacheCorruptError:
+                emit_detail_event("surface_cache_corrupt", generation=prepared.generation, asset_id=key.asset_id)
+                self._submit(self.store.discard, prepared)
+                surface = None
         if surface is not None:
             if cancellation.is_cancelled():
                 raise DecodeCancelledError("Still-image decode cancelled")
@@ -434,7 +445,7 @@ class CachedStillDecodeBackend:
             return surface
         emit_detail_event("surface_cache_miss", generation=prepared.generation, asset_id=key.asset_id)
         surface = self._delegate.decode(prepared, cancellation)
-        stats = self._cached_color_stats(prepared)
+        stats = self._cached_color_stats(prepared) if cacheable else None
         if stats is None:
             started = time.perf_counter()
             stats = compute_color_statistics(surface.image)
@@ -446,10 +457,12 @@ class CachedStillDecodeBackend:
                 width=surface.decoded_size[0],
                 height=surface.decoded_size[1],
             )
-        stats = self._remember_color_stats(prepared, stats)
+        if cacheable:
+            stats = self._remember_color_stats(prepared, stats)
         surface = replace(surface, color_stats=stats)
-        self.memory_cache.put(surface)
-        self._submit(self._write_surface, prepared, surface)
+        if cacheable:
+            self.memory_cache.put(surface)
+            self._submit(self._write_surface, prepared, surface)
         return surface
 
     def _write_surface(self, request: DetailRenderRequest, surface: DecodedSurface) -> None:

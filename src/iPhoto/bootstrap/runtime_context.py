@@ -81,6 +81,7 @@ class RuntimeContext:
     translation: "TranslationManager" = field(init=False)
     theme: "ThemeManager" = field(init=False)
     library_session: "LibrarySession | None" = field(init=False, default=None)
+    _library_epoch: int = field(init=False, default=0, repr=False)
     _facade: "AppFacade | None" = field(init=False, default=None, repr=False)
     _asset_runtime: "LibraryAssetRuntime | None" = field(init=False, default=None, repr=False)
     _container: "DependencyContainer | None" = field(
@@ -133,6 +134,12 @@ class RuntimeContext:
             self._facade = _create_facade()
             self._facade.bind_library(self.library)
         return self._facade
+
+    @property
+    def library_epoch(self) -> int:
+        """Monotonic identity for the currently published library binding."""
+
+        return self._library_epoch
 
     @facade.setter
     def facade(self, value: "AppFacade") -> None:
@@ -338,6 +345,8 @@ class RuntimeContext:
                 asset_runtime=self.asset_runtime,
                 bind_asset_runtime=False,
             )
+        # Advance before synchronous bind callbacks publish the new session.
+        self._library_epoch += 1
         bind_library_session = getattr(self.library, "bind_library_session", None)
         used_session_binding = callable(bind_library_session)
         if used_session_binding:
@@ -405,6 +414,11 @@ class RuntimeContext:
     def close_library(self) -> None:
         """Close the active library-scoped session if one exists."""
 
+        session = getattr(self, "library_session", None)
+        if session is not None:
+            # Publish invalidation before synchronous unbind callbacks.
+            self.library_session = None
+            self._library_epoch += 1
         bind_library_session = getattr(self.library, "bind_library_session", None)
         if callable(bind_library_session):
             bind_library_session(None)
@@ -480,11 +494,9 @@ class RuntimeContext:
             if callable(bind_scan_service):
                 bind_scan_service(None)
 
-        session = getattr(self, "library_session", None)
         if session is None:
             return
         session.shutdown()
-        self.library_session = None
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""

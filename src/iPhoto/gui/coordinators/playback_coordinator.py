@@ -32,6 +32,7 @@ from iPhoto.gui.detail_pipeline import (
     AssetSourceIdentity,
     DetailPrefetchDescriptor,
     DetailRenderTransaction,
+    PlaybackAsyncToken,
     VideoPresentationState,
 )
 from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
@@ -138,8 +139,8 @@ class _RecognitionOverlayWorker(QRunnable):
 
 
 class _VideoPreparationSignals(QObject):
-    ready = Signal(int, object)
-    failed = Signal(int, Path, object)
+    ready = Signal(object, object)
+    failed = Signal(object, object)
 
 
 class _VideoPreparationWorker(QRunnable):
@@ -149,11 +150,13 @@ class _VideoPreparationWorker(QRunnable):
         self,
         *,
         presentation: DetailPresentation,
+        token: PlaybackAsyncToken,
         edit_service_getter: Callable[[], EditServicePort | None] | None,
         signals: _VideoPreparationSignals,
     ) -> None:
         super().__init__()
         self._presentation = presentation
+        self._token = token
         self._edit_service_getter = edit_service_getter
         self._signals = signals
 
@@ -212,27 +215,26 @@ class _VideoPreparationWorker(QRunnable):
                 linux_180_hint=linux_hint,
             )
         except Exception as exc:  # noqa: BLE001 - codec/sidecar boundary
-            self._signals.failed.emit(generation, presentation.path, exc)
+            self._signals.failed.emit(self._token, exc)
             return
-        self._signals.ready.emit(generation, state)
+        self._signals.ready.emit(self._token, state)
 
 
 class _DeferredLocationSignals(QObject):
-    ready = Signal(int, Path, str)
+    ready = Signal(object, str)
 
 
 class _DeferredLocationWorker(QRunnable):
-    def __init__(self, generation: int, path: Path, gps: dict, signals) -> None:
+    def __init__(self, token: PlaybackAsyncToken, gps: dict, signals) -> None:
         super().__init__()
-        self._generation = generation
-        self._path = path
+        self._token = token
         self._gps = dict(gps)
         self._signals = signals
 
     def run(self) -> None:  # pragma: no cover - worker thread
         location = resolve_location_name(self._gps)
         if location:
-            self._signals.ready.emit(self._generation, self._path, location)
+            self._signals.ready.emit(self._token, location)
 
 
 class PlaybackCoordinator(QObject):
@@ -271,6 +273,7 @@ class PlaybackCoordinator(QObject):
         event_bus: EventBus | None = None,
         location_write_queue: LocationFileWriteQueue | None = None,
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
+        library_epoch_getter: Callable[[], int] | None = None,
     ) -> None:
         super().__init__()
         self._player_bar = player_bar
@@ -315,6 +318,12 @@ class PlaybackCoordinator(QObject):
         self._event_bus = event_bus
         self._location_write_queue = location_write_queue
         self._edit_service_getter = edit_service_getter
+        self._library_epoch_getter = library_epoch_getter
+        self._library_epoch = self._read_library_epoch()
+        self._asset_generation = 0
+        self._active_async_token: PlaybackAsyncToken | None = None
+        self._pending_video_token: PlaybackAsyncToken | None = None
+        self._pending_location_token: PlaybackAsyncToken | None = None
 
         self._is_playing = False
         self._navigation: NavigationCoordinator | None = None
@@ -418,9 +427,28 @@ class PlaybackCoordinator(QObject):
     def set_recognition_merge_service(self, service: object | None) -> None:
         self._recognition_merge_service = service
 
-    def rebind_library(self) -> None:
+    def rebind_library(
+        self,
+        library_epoch: int | None = None,
+        *,
+        session_changed: bool = True,
+    ) -> None:
         """Invalidate library-scoped media preparation and decoded-frame caches."""
 
+        if not session_changed:
+            return
+        self._library_epoch = (
+            self._read_library_epoch()
+            if library_epoch is None
+            else max(0, int(library_epoch))
+        )
+        self._asset_generation = int(getattr(self, "_asset_generation", 0)) + 1
+        self._detail_request_generation = int(
+            getattr(self, "_detail_request_generation", 0)
+        ) + 1
+        self._active_async_token = None
+        self._pending_video_token = None
+        self._pending_location_token = None
         self._invalidate_overlay_requests(clear=True)
         for pool_name in ("_video_prepare_pool", "_deferred_location_pool"):
             pool = getattr(self, pool_name, None)
@@ -429,9 +457,86 @@ class PlaybackCoordinator(QObject):
         deferred_locations = getattr(self, "_deferred_locations", None)
         if deferred_locations is not None:
             deferred_locations.clear()
+        render_coordinator = self._render_transaction_coordinator()
+        render_coordinator.reset()
+        self._detail_render_transaction = None
+        self._current_presentation = None
+        self._active_live_motion = None
+        self._active_live_still = None
+        self._active_live_asset_id = ""
+        self._presented_still_generation = 0
+        self._presented_still_source = None
+        video_area = self._player_view.video_area
+        video_area.stop()
+        self._player_view.defer_still_updates(False)
+        cancel_stills = getattr(self._player_view, "cancel_pending_image_requests", None)
+        if callable(cancel_stills):
+            cancel_stills()
         clear_frames = getattr(self._player_view, "clear_frame_cache", None)
         if callable(clear_frames):
             clear_frames()
+        self._player_view.show_placeholder()
+        self._player_bar.setEnabled(False)
+        self._is_playing = False
+        self._update_header(None)
+        info_panel = getattr(self, "_info_panel", None)
+        if info_panel is not None:
+            info_panel.close()
+        self._clear_info_panel_metadata_state()
+        self._clear_confirmed_location_metadata()
+
+    def _read_library_epoch(self) -> int:
+        getter = getattr(self, "_library_epoch_getter", None)
+        if getter is None:
+            return max(0, int(getattr(self, "_library_epoch", 0)))
+        try:
+            return max(0, int(getter()))
+        except (TypeError, ValueError):
+            return max(0, int(getattr(self, "_library_epoch", 0)))
+
+    def _token_for_presentation(
+        self,
+        presentation: DetailPresentation,
+    ) -> PlaybackAsyncToken:
+        identity = presentation.source_identity
+        if identity is None or identity.path != presentation.path:
+            identity = AssetSourceIdentity.from_info(
+                presentation.path,
+                presentation.info if identity is None else None,
+            )
+        return PlaybackAsyncToken.create(
+            library_epoch=int(getattr(self, "_library_epoch", 0)),
+            asset_generation=int(getattr(self, "_asset_generation", 0)),
+            asset_id=presentation.asset_id,
+            source_identity=identity,
+        )
+
+    def _async_token_is_current(
+        self,
+        token: object,
+        *,
+        expected_path: Path | None = None,
+    ) -> bool:
+        if not isinstance(token, PlaybackAsyncToken):
+            return False
+        active = getattr(self, "_active_async_token", None)
+        if active is None:
+            return False
+        if self._read_library_epoch() != int(getattr(self, "_library_epoch", -1)):
+            return False
+        if token.library_epoch != active.library_epoch:
+            return False
+        if token.asset_generation != active.asset_generation:
+            return False
+        if token.asset_id != active.asset_id:
+            return False
+        if expected_path is not None and token.source_path != Path(expected_path):
+            return False
+        if token.source_path == active.source_path and (
+            token.source_revision != active.source_revision
+        ):
+            return False
+        return True
 
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
@@ -867,6 +972,11 @@ class PlaybackCoordinator(QObject):
             source_identity=identity,
         )
         self._detail_render_transaction = transaction
+        self._asset_generation = int(getattr(self, "_asset_generation", 0)) + 1
+        self._library_epoch = self._read_library_epoch()
+        self._active_async_token = self._token_for_presentation(presentation)
+        self._pending_video_token = None
+        self._pending_location_token = None
         self._render_transaction_coordinator().begin(transaction)
         self._select_filmstrip_row(row)
         self._player_view.show_placeholder("")
@@ -879,19 +989,23 @@ class PlaybackCoordinator(QObject):
         # paints before decoding, sidecar reads or media backend preparation.
         QTimer.singleShot(
             0,
-            lambda candidate=presentation, generation=self._detail_request_generation:
-            self._render_if_current(candidate, generation),
+            lambda candidate=presentation, generation=self._detail_request_generation,
+            token=self._active_async_token:
+            self._render_if_current(candidate, generation, token),
         )
 
     def _render_if_current(
         self,
         presentation: DetailPresentation,
         generation: int,
+        token: PlaybackAsyncToken | None = None,
     ) -> None:
         if generation != self._detail_request_generation:
             return
         current = self._current_presentation
         if current is None or current.path != presentation.path:
+            return
+        if token is not None and token != getattr(self, "_active_async_token", None):
             return
         if not self._render_transaction_coordinator().mark_routed(
             generation,
@@ -1065,22 +1179,25 @@ class PlaybackCoordinator(QObject):
         self._deferred_location_pool.clear()
         self._deferred_location_pool.start(
             _DeferredLocationWorker(
-                presentation.request_generation,
-                presentation.path,
+                self._active_async_token,
                 gps,
                 self._deferred_location_signals,
             )
         )
+        self._pending_location_token = self._active_async_token
 
-    @Slot(int, Path, str)
+    @Slot(object, str)
     def _on_deferred_location_ready(
         self,
-        generation: int,
-        path: Path,
+        token: object,
         location: str,
     ) -> None:
-        if generation != getattr(self, "_detail_request_generation", 0):
+        if token != getattr(self, "_pending_location_token", None):
             return
+        if not self._async_token_is_current(token):
+            return
+        self._pending_location_token = None
+        path = token.source_path
         presentation = getattr(self, "_current_presentation", None)
         if presentation is None or presentation.path != path:
             return
@@ -1094,32 +1211,41 @@ class PlaybackCoordinator(QObject):
         self._update_header(presentation)
 
     def _schedule_video_preparation(self, presentation: DetailPresentation) -> None:
+        token = self._token_for_presentation(presentation)
+        self._pending_video_token = token
         self._video_prepare_pool.clear()
         self._video_prepare_pool.start(
             _VideoPreparationWorker(
                 presentation=presentation,
+                token=token,
                 edit_service_getter=self._edit_service_getter,
                 signals=self._video_prepare_signals,
             )
         )
 
-    @Slot(int, object)
+    @Slot(object, object)
     def _on_video_preparation_ready(
         self,
-        generation: int,
+        token: object,
         state: object,
     ) -> None:
-        if generation != getattr(self, "_detail_request_generation", 0):
+        if token != getattr(self, "_pending_video_token", None):
             return
         presentation = getattr(self, "_current_presentation", None)
         is_live_motion = bool(getattr(self, "_active_live_motion", None))
         if presentation is None or (not presentation.is_video and not is_live_motion):
             return
+        expected_path = (
+            self._active_live_motion if is_live_motion else presentation.path
+        )
+        if not self._async_token_is_current(token, expected_path=expected_path):
+            return
         if not isinstance(state, VideoPresentationState):
             return
         transaction = self._detail_render_transaction
-        if transaction is None or transaction.generation != generation:
+        if transaction is None or transaction.generation != state.request_generation:
             return
+        self._pending_video_token = None
         state = replace(state, transaction=transaction)
         if not self._player_view.video_area.commit_presentation(state):
             return
@@ -1130,15 +1256,22 @@ class PlaybackCoordinator(QObject):
             self._trim_out_ms = 0
         self._player_view.video_area.play()
 
-    @Slot(int, Path, object)
+    @Slot(object, object)
     def _on_video_preparation_failed(
         self,
-        generation: int,
-        source: Path,
+        token: object,
         error: object,
     ) -> None:
-        if generation != getattr(self, "_detail_request_generation", 0):
+        if token != getattr(self, "_pending_video_token", None):
             return
+        if not self._async_token_is_current(token):
+            return
+        self._pending_video_token = None
+        transaction = getattr(self, "_detail_render_transaction", None)
+        if transaction is None:
+            return
+        generation = transaction.generation
+        source = token.source_path
         self._render_transaction_coordinator().mark_failed(generation, str(error))
         self._player_view.video_area.stop()
         self._player_view.show_placeholder(
@@ -1154,7 +1287,11 @@ class PlaybackCoordinator(QObject):
         is_live_motion = bool(getattr(self, "_active_live_motion", None))
         if presentation is None or (not presentation.is_video and not is_live_motion):
             return
-        if not self._render_transaction_coordinator().mark_presented(generation):
+        surface_kind = "live_motion_frame" if is_live_motion else "video_frame"
+        if not self._render_transaction_coordinator().mark_surface_presented(
+            generation,
+            surface_kind,
+        ):
             return
         self._player_view.show_video_surface(interactive=not is_live_motion)
         # Do not reclaim the user's scroll position when decoding completes.
@@ -1228,20 +1365,26 @@ class PlaybackCoordinator(QObject):
             return
         still = self._active_live_still
         asset_id = self._active_live_asset_id
+        transaction = getattr(self, "_detail_render_transaction", None)
         self._active_live_motion = None
         self._active_live_asset_id = ""
         self._player_view.defer_still_updates(False)
         if not self._player_view.apply_pending_still():
-            presentation = getattr(self, "_current_presentation", None)
-            kwargs = {}
-            if presentation is not None and presentation.path == still:
-                kwargs["source_identity"] = presentation.source_identity
-            self._player_view.display_image(still, asset_id=asset_id, **kwargs)
+            if (
+                transaction is not None
+                and transaction.media_kind == "live_motion"
+                and transaction.source_identity.path == still
+                and self._render_transaction_coordinator().owns_generation(
+                    transaction.generation
+                )
+            ):
+                self._player_view.display_image(still, transaction=transaction)
+            else:
+                self._player_view.display_image(still, asset_id=asset_id)
         self._player_bar.setEnabled(False)
         self._player_view.show_live_badge()
         self._player_view.set_live_replay_enabled(True)
         self._is_playing = False
-        self._refresh_face_name_overlay_for_current_presentation()
 
     def _hide_face_name_overlay(self, *, clear_annotations: bool) -> None:
         overlay = getattr(self, "_face_name_overlay", None)
@@ -1274,7 +1417,23 @@ class PlaybackCoordinator(QObject):
             return
         if getattr(self, "_active_live_motion", None):
             return
-        if not self._render_transaction_coordinator().mark_presented(int(generation)):
+        transaction = getattr(self, "_detail_render_transaction", None)
+        if (
+            transaction is None
+            or transaction.generation != int(generation)
+            or transaction.source_identity.path != presented_source
+            or not self._render_transaction_coordinator().owns_generation(
+                int(generation)
+            )
+        ):
+            return
+        surface_kind = (
+            "live_still" if transaction.media_kind == "live_motion" else "still"
+        )
+        if not self._render_transaction_coordinator().mark_surface_presented(
+            int(generation),
+            surface_kind,
+        ):
             return
         self._presented_still_source = presented_source
         self._presented_still_generation = int(generation)

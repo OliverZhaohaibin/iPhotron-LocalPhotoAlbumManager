@@ -21,9 +21,35 @@ from iPhoto.gui.detail_pipeline import (
 from iPhoto.gui.detail_render_session import EditRenderState, PhotoRenderSessionHandle
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
+    _AdjustmentPreparationSignals,
+    _AdjustmentPreparationWorker,
     _PreparedRequestIntent,
     _StillSurfaceDecodeWorker,
 )
+
+
+def test_adjustment_preparation_repairs_legacy_source_revision(
+    qapp,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"source")
+    signals = _AdjustmentPreparationSignals()
+    prepared = []
+    signals.ready.connect(lambda _key, state: prepared.append(state))
+    worker = _AdjustmentPreparationWorker(
+        ("asset-1", source),
+        AssetSourceIdentity.create(source),
+        signals,
+        None,
+        generation=3,
+    )
+
+    worker.run()
+
+    assert len(prepared) == 1
+    assert prepared[0].source_identity.has_stable_revision
+    assert prepared[0].source_identity.revision[0] == "mtime"
 
 
 def _request(source: Path, adjustments: dict | None = None) -> DetailRenderRequest:

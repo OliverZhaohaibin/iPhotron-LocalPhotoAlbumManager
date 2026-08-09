@@ -3,7 +3,7 @@ name: Tests
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, codex/startup-chain-optimization]
   pull_request:
     branches: [main, codex/startup-chain-optimization, codex/pets-review-remediation]
 
@@ -154,6 +154,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -188,6 +189,7 @@ jobs:
           tests/gui/test_startup_orchestrator.py
           tests/gui/test_gui_startup_job_queue.py
           tests/gui/test_startup_import_boundary.py
+          tests/gui/test_startup_shutdown_smoke.py
           tests/test_library_bind_double_scan.py
           tests/test_startup_benchmark.py
 

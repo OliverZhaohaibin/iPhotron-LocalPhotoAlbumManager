@@ -192,6 +192,28 @@ def test_unbound_store_is_a_disabled_disk_tier(tmp_path: Path) -> None:
     assert store.write(request, _surface(request)) is False
 
 
+def test_unstable_identity_bypasses_reusable_memory_and_disk_cache(
+    tmp_path: Path,
+) -> None:
+    request = replace(
+        _request(tmp_path / "missing.jpg"),
+        source_identity=AssetSourceIdentity.create(tmp_path / "missing.jpg"),
+    )
+    delegate = Mock()
+    delegate.decode.side_effect = lambda prepared, _token: _surface(prepared)
+    store = Mock()
+    backend = CachedStillDecodeBackend(delegate, store=store)
+
+    backend.decode(request, _Token())
+    backend.decode(request, _Token())
+    backend.shutdown()
+
+    assert delegate.decode.call_count == 2
+    assert backend.memory_cache.used_bytes == 0
+    store.load.assert_not_called()
+    store.write.assert_not_called()
+
+
 def test_color_stats_are_computed_once_across_lod_decodes(tmp_path: Path) -> None:
     first = _request(tmp_path / "photo.jpg", level=1024)
     second = _request(tmp_path / "photo.jpg", level=2048)

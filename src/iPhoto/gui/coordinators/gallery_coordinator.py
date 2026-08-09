@@ -24,6 +24,7 @@ class GalleryCoordinator(QObject):
         library_root_getter: Callable[[], Path | None] | None = None,
         asset_query_service_getter: Callable[[], object | None] | None = None,
         asset_state_service_getter: Callable[[], object | None] | None = None,
+        library_rebind_preflight: Callable[[], bool] | None = None,
         rebind_library: Callable[[], None] | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -36,6 +37,7 @@ class GalleryCoordinator(QObject):
         self._library_root_getter = library_root_getter
         self._asset_query_service_getter = asset_query_service_getter
         self._asset_state_service_getter = asset_state_service_getter
+        self._library_rebind_preflight = library_rebind_preflight
         self._legacy_rebind_library = rebind_library
 
     @property
@@ -90,6 +92,12 @@ class GalleryCoordinator(QObject):
         open_library = getattr(self._context, "open_library", None)
         if not callable(open_library):
             return True
+        preflight = getattr(self, "_library_rebind_preflight", None)
+        if preflight is not None and not preflight():
+            self._facade.errorRaised.emit(
+                "Finish the current edit with Done or Cancel before switching libraries."
+            )
+            return False
         try:
             open_library(path)
         except Exception as exc:  # noqa: BLE001 - GUI error boundary

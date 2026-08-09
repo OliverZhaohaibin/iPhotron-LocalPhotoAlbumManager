@@ -224,6 +224,19 @@ def test_leave_edit_mode_still_does_not_request_detail_reload() -> None:
     coordinator._media_session.request_restore.assert_not_called()
 
 
+def test_unexpected_library_rebind_safely_leaves_active_edit() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    coordinator._session = object()
+    coordinator.leave_edit_mode = Mock()
+
+    EditCoordinator.invalidate_library_binding(coordinator)
+
+    coordinator.leave_edit_mode.assert_called_once_with(
+        restore_reason="library_invalidated",
+        restore_detail=False,
+    )
+
+
 def test_leave_edit_mode_can_emit_edit_done_restore_reason() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     source = Path("/fake/video.mp4")

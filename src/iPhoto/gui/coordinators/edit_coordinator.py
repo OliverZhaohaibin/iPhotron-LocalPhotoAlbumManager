@@ -309,6 +309,20 @@ class EditCoordinator(QObject):
 
         return self._session is not None
 
+    def preflight_library_rebind(self) -> bool:
+        """Refuse a user-initiated library switch while edits are unresolved."""
+
+        return self._session is None
+
+    def invalidate_library_binding(self) -> None:
+        """Safely abandon Edit before an unexpected session invalidates its handle."""
+
+        if self._session is not None:
+            self.leave_edit_mode(
+                restore_reason="library_invalidated",
+                restore_detail=False,
+            )
+
     # ------------------------------------------------------------------
     # Public transport API (used by AppShortcutManager)
     # ------------------------------------------------------------------
@@ -492,7 +506,12 @@ class EditCoordinator(QObject):
             self._ui.edit_sidebar.set_light_preview_image(result.image, color_stats=result.stats)
             self._ui.edit_sidebar.refresh()
 
-    def leave_edit_mode(self, *, restore_reason: str = "edit_exit"):
+    def leave_edit_mode(
+        self,
+        *,
+        restore_reason: str = "edit_exit",
+        restore_detail: bool = True,
+    ):
         """Returns to detail view."""
         source = self._current_source
         is_video_source = (
@@ -500,7 +519,8 @@ class EditCoordinator(QObject):
             and source.suffix.lower() in VIDEO_EXTENSIONS
         )
         should_restore_detail = (
-            source is not None
+            restore_detail
+            and source is not None
             and self._media_session is not None
         )
         _LOGGER.debug(
@@ -574,7 +594,7 @@ class EditCoordinator(QObject):
                     duration_sec=pending_duration_sec if is_video_source else None,
                 )
             )
-        elif source is not None and not is_video_source:
+        elif should_restore_detail and source is not None and not is_video_source:
             try:
                 self.stillEditFinished.emit(source, restore_reason)
             except RuntimeError:

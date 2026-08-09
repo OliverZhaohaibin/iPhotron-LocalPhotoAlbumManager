@@ -12,7 +12,14 @@ pytest.importorskip("PySide6", reason="PySide6 is required for playback coordina
 from iPhoto.application.ports import LocationWriteJobRecord
 from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
-from iPhoto.gui.detail_pipeline import DetailPrefetchDescriptor
+from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailPrefetchDescriptor,
+    DetailRenderTransaction,
+    PlaybackAsyncToken,
+    VideoPresentationState,
+)
+from iPhoto.gui.detail_render_coordinator import DetailRenderCoordinator
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
@@ -730,6 +737,15 @@ def test_live_photo_fallback_reuses_the_asset_identity() -> None:
     coordinator._active_live_motion = Path("/fake/photo.mov")
     coordinator._active_live_still = still
     coordinator._active_live_asset_id = "asset-1"
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    coordinator._detail_render_transaction = transaction
+    render_coordinator = Mock(owns_generation=Mock(return_value=True))
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
     coordinator._player_view = Mock(
         defer_still_updates=Mock(),
         apply_pending_still=Mock(return_value=False),
@@ -744,14 +760,14 @@ def test_live_photo_fallback_reuses_the_asset_identity() -> None:
 
     coordinator._player_view.display_image.assert_called_once_with(
         still,
-        asset_id="asset-1",
+        transaction=transaction,
     )
     assert coordinator._active_live_asset_id == ""
 
 
 def test_live_motion_first_frame_completes_current_transaction() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    render_coordinator = Mock(mark_presented=Mock(return_value=True))
+    render_coordinator = Mock(mark_surface_presented=Mock(return_value=True))
     coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
     coordinator._detail_request_generation = 7
     coordinator._active_live_motion = Path("/fake/photo.mov")
@@ -768,13 +784,16 @@ def test_live_motion_first_frame_completes_current_transaction() -> None:
 
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
 
-    render_coordinator.mark_presented.assert_called_once_with(7)
+    render_coordinator.mark_surface_presented.assert_called_once_with(
+        7,
+        "live_motion_frame",
+    )
     coordinator._player_view.show_video_surface.assert_called_once_with(interactive=False)
 
 
 def test_regular_video_first_frame_enables_interactive_controls() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    render_coordinator = Mock(mark_presented=Mock(return_value=True))
+    render_coordinator = Mock(mark_surface_presented=Mock(return_value=True))
     coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
     coordinator._detail_request_generation = 7
     coordinator._active_live_motion = None
@@ -783,13 +802,16 @@ def test_regular_video_first_frame_enables_interactive_controls() -> None:
 
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
 
-    render_coordinator.mark_presented.assert_called_once_with(7)
+    render_coordinator.mark_surface_presented.assert_called_once_with(
+        7,
+        "video_frame",
+    )
     coordinator._player_view.show_video_surface.assert_called_once_with(interactive=True)
 
 
 def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    render_coordinator = Mock(mark_presented=Mock(return_value=True))
+    render_coordinator = Mock(mark_surface_presented=Mock(return_value=True))
     coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
     still = Path("/fake/photo.heic")
     coordinator._active_live_motion = Path("/fake/photo.mov")
@@ -802,7 +824,284 @@ def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> Non
 
     PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
 
-    render_coordinator.mark_presented.assert_not_called()
+    render_coordinator.mark_surface_presented.assert_not_called()
+
+
+@pytest.mark.parametrize("has_pending_still", [False, True])
+def test_live_photo_motion_to_still_runs_overlay_and_prefetch(
+    qapp,
+    has_pending_still: bool,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = motion
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = "asset-1"
+    coordinator._current_presentation = _make_presentation(
+        path=str(still),
+        asset_id="asset-1",
+        is_video=False,
+        is_live=True,
+        request_generation=7,
+    )
+    coordinator._player_view = Mock(
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=has_pending_still),
+        display_image=Mock(),
+        show_video_surface=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    if has_pending_still:
+        coordinator._player_view.display_image.assert_not_called()
+    else:
+        coordinator._player_view.display_image.assert_called_once_with(
+            still,
+            transaction=transaction,
+        )
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+    coordinator._schedule_recognition_overlay.assert_called_once_with(
+        coordinator._current_presentation,
+        7,
+    )
+    coordinator._prefetch_neighbor_stills.assert_called_once_with(0)
+
+
+def test_old_video_preparation_result_is_rejected_after_rebind() -> None:
+    path = Path("/shared/video.mov")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = new_token
+    coordinator._pending_video_token = old_token
+    coordinator._current_presentation = _make_presentation(path=str(path))
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(video_area=Mock(commit_presentation=Mock()))
+
+    PlaybackCoordinator._on_video_preparation_ready(
+        coordinator,
+        old_token,
+        object(),
+    )
+
+    coordinator._player_view.video_area.commit_presentation.assert_not_called()
+
+
+def test_current_video_preparation_token_commits_result() -> None:
+    path = Path("/shared/video.mov")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="video",
+        source_identity=identity,
+    )
+    state = VideoPresentationState(
+        request_generation=7,
+        adjustments={},
+        trim_range_ms=None,
+        adjusted_preview=False,
+        rotation_cw=0,
+        raw_width=1920,
+        raw_height=1080,
+        linux_180_hint=False,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = token
+    coordinator._pending_video_token = token
+    coordinator._current_presentation = _make_presentation(
+        path=str(path),
+        request_generation=7,
+    )
+    coordinator._active_live_motion = None
+    coordinator._detail_render_transaction = transaction
+    coordinator._player_view = Mock(
+        video_area=Mock(commit_presentation=Mock(return_value=True), play=Mock())
+    )
+
+    PlaybackCoordinator._on_video_preparation_ready(coordinator, token, state)
+
+    committed = coordinator._player_view.video_area.commit_presentation.call_args.args[0]
+    assert committed.transaction is transaction
+    coordinator._player_view.video_area.play.assert_called_once_with()
+
+
+def test_old_deferred_geocode_result_is_rejected_after_rebind() -> None:
+    path = Path("/shared/photo.jpg")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = new_token
+    coordinator._pending_location_token = old_token
+    coordinator._deferred_locations = {}
+    coordinator._current_presentation = _make_presentation(
+        path=str(path),
+        is_video=False,
+    )
+    coordinator._update_header = Mock()
+
+    PlaybackCoordinator._on_deferred_location_ready(
+        coordinator,
+        old_token,
+        "Berlin",
+    )
+
+    assert coordinator._deferred_locations == {}
+    coordinator._update_header.assert_not_called()
+
+
+def test_current_deferred_geocode_token_updates_current_header() -> None:
+    path = Path("/shared/photo.jpg")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = token
+    coordinator._pending_location_token = token
+    coordinator._deferred_locations = {}
+    coordinator._current_presentation = _make_presentation(
+        path=str(path),
+        is_video=False,
+    )
+    coordinator._update_header = Mock()
+
+    PlaybackCoordinator._on_deferred_location_ready(coordinator, token, "Berlin")
+
+    assert coordinator._deferred_locations == {path: "Berlin"}
+    assert coordinator._current_presentation.location == "Berlin"
+    coordinator._update_header.assert_called_once_with(
+        coordinator._current_presentation
+    )
+
+
+def test_same_library_tree_refresh_does_not_clear_render_session() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(clear_frame_cache=Mock())
+    coordinator._invalidate_overlay_requests = Mock()
+
+    PlaybackCoordinator.rebind_library(
+        coordinator,
+        7,
+        session_changed=False,
+    )
+
+    coordinator._player_view.clear_frame_cache.assert_not_called()
+    coordinator._invalidate_overlay_requests.assert_not_called()
+
+
+def test_session_rebind_invalidates_tokens_and_render_state() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 1
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._asset_generation = 4
+    coordinator._detail_request_generation = 9
+    coordinator._active_async_token = object()
+    coordinator._pending_video_token = object()
+    coordinator._pending_location_token = object()
+    coordinator._invalidate_overlay_requests = Mock()
+    coordinator._video_prepare_pool = Mock(clear=Mock())
+    coordinator._deferred_location_pool = Mock(clear=Mock())
+    coordinator._deferred_locations = {Path("/old.jpg"): "Old"}
+    lifecycle = Mock(reset=Mock())
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = object()
+    coordinator._current_presentation = object()
+    coordinator._active_live_motion = Path("/old.mov")
+    coordinator._active_live_still = Path("/old.jpg")
+    coordinator._active_live_asset_id = "old"
+    coordinator._presented_still_generation = 9
+    coordinator._presented_still_source = Path("/old.jpg")
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock()),
+        defer_still_updates=Mock(),
+        cancel_pending_image_requests=Mock(),
+        clear_frame_cache=Mock(),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = True
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._clear_info_panel_metadata_state = Mock()
+    coordinator._clear_confirmed_location_metadata = Mock()
+
+    PlaybackCoordinator.rebind_library(coordinator, 2, session_changed=True)
+
+    assert coordinator._library_epoch == 2
+    assert coordinator._asset_generation == 5
+    assert coordinator._detail_request_generation == 10
+    assert coordinator._active_async_token is None
+    assert coordinator._pending_video_token is None
+    assert coordinator._pending_location_token is None
+    assert coordinator._current_presentation is None
+    lifecycle.reset.assert_called_once_with()
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.clear_frame_cache.assert_called_once_with()
 
 
 def test_neighbor_prefetch_preserves_asset_descriptors() -> None:

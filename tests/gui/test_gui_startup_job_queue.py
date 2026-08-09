@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import time
+
+from PySide6.QtCore import QThread, Qt
+
 from iPhoto.bootstrap import gui_startup_job_queue as queue_module
 from iPhoto.bootstrap.gui_startup_job_queue import GuiStartupJobQueue
+from iPhoto.gui.main import _StartupModulePreloader
 
 
 class _ManualScheduler:
@@ -49,6 +54,31 @@ def test_prerequisite_preserves_order_until_woken(qapp) -> None:
     scheduler.tick()
     scheduler.tick()
     assert calls == ["blocked", "after"]
+
+
+def test_worker_settled_wakes_queue_on_qapplication_thread(qapp) -> None:
+    queue = GuiStartupJobQueue()
+    preloader = _StartupModulePreloader()
+    callback_threads: list[QThread] = []
+    preloader.settled.connect(
+        queue.wake_for_generation,
+        Qt.ConnectionType.QueuedConnection,
+    )
+    queue.enqueue(
+        "import-dependent",
+        1,
+        lambda: callback_threads.append(QThread.currentThread()),
+        prerequisite=lambda: preloader.ready(1),
+    )
+
+    assert preloader.start(1, lambda: object())
+    deadline = time.monotonic() + 2.0
+    while not callback_threads and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    preloader.close()
+
+    assert callback_threads == [qapp.thread()]
 
 
 def test_records_one_stall_only_when_budget_is_exceeded(qapp, monkeypatch) -> None:

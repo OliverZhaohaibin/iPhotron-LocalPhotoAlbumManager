@@ -627,23 +627,30 @@ class NeutralSurfaceStore:
         index = self._index_for_root()
         if index is None:
             return
-        for digest in digests:
-            entry = index.get(digest)
-            if entry is None:
-                continue
-            path = self._indexed_path(index, entry.relative_path)
-            if path is None:
-                index.remove(digest)
-                continue
-            if self._entry_checksum_is_valid(entry, path):
-                index.mark_checksum_state(digest, "trusted", verified_ns=time.time_ns())
-                continue
-            self._discard_digest(digest, path)
-            emit_detail_event(
-                "surface_cache_audit_failed",
-                generation=0,
-                digest_prefix=digest[:12],
-            )
+        try:
+            for digest in digests:
+                entry = index.get(digest)
+                if entry is None:
+                    continue
+                path = self._indexed_path(index, entry.relative_path)
+                if path is None:
+                    index.remove(digest)
+                    continue
+                if self._entry_checksum_is_valid(entry, path):
+                    index.mark_checksum_state(
+                        digest,
+                        "trusted",
+                        verified_ns=time.time_ns(),
+                    )
+                    continue
+                self._discard_digest(digest, path)
+                emit_detail_event(
+                    "surface_cache_audit_failed",
+                    generation=0,
+                    digest_prefix=digest[:12],
+                )
+        except SurfaceCacheIndexUnavailableError:
+            return
 
     def maintenance(
         self,
@@ -654,61 +661,67 @@ class NeutralSurfaceStore:
         """Recover if needed, flush access metadata, and prune from the SQL LRU."""
 
         with self._maintenance_lock:
-            index = self._index_for_root()
-            if index is None or not index.ensure_open():
+            try:
+                self._maintain_index(recover=recover, force_prune=force_prune)
+            except SurfaceCacheIndexUnavailableError:
                 return
-            if recover or index.needs_recovery:
-                self._recover_index(index)
-                if index.needs_recovery:
-                    return
-            index.flush_accesses(force=True)
-            budget = self._budget_bytes()
-            if budget is None:
+
+    def _maintain_index(self, *, recover: bool, force_prune: bool) -> None:
+        index = self._index_for_root()
+        if index is None or not index.ensure_open():
+            return
+        if recover or index.needs_recovery:
+            self._recover_index(index)
+            if index.needs_recovery:
                 return
-            due = force_prune or index.maintenance_due(
-                budget,
-                byte_interval=_MAINTENANCE_WRITE_BYTES,
-                time_interval_ns=_MAINTENANCE_INTERVAL_NS,
-            )
-            if not due:
-                return
-            target = int(budget * 0.9)
-            maintenance_failed = False
-            while index.indexed_bytes > target:
-                victims = index.lru_victims(limit=_PRUNE_BATCH)
-                if not victims:
-                    maintenance_failed = True
+        index.flush_accesses(force=True)
+        budget = self._budget_bytes()
+        if budget is None:
+            return
+        due = force_prune or index.maintenance_due(
+            budget,
+            byte_interval=_MAINTENANCE_WRITE_BYTES,
+            time_interval_ns=_MAINTENANCE_INTERVAL_NS,
+        )
+        if not due:
+            return
+        target = int(budget * 0.9)
+        maintenance_failed = False
+        while index.indexed_bytes > target:
+            victims = index.lru_victims(limit=_PRUNE_BATCH)
+            if not victims:
+                maintenance_failed = True
+                break
+            removed = 0
+            for victim in victims:
+                if index.indexed_bytes <= target:
                     break
-                removed = 0
-                for victim in victims:
-                    if index.indexed_bytes <= target:
-                        break
-                    path = self._indexed_path(index, victim.relative_path)
-                    if path is None:
-                        if not index.remove(victim.digest):
-                            index.mark_recovery_required()
-                            maintenance_failed = True
-                            break
-                        removed += 1
-                        continue
-                    try:
-                        path.unlink(missing_ok=True)
-                    except OSError:
-                        index.mark_recovery_required()
-                        maintenance_failed = True
-                        continue
+                path = self._indexed_path(index, victim.relative_path)
+                if path is None:
                     if not index.remove(victim.digest):
                         index.mark_recovery_required()
                         maintenance_failed = True
                         break
                     removed += 1
-                if maintenance_failed:
-                    break
-                if removed == 0:
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    index.mark_recovery_required()
+                    maintenance_failed = True
+                    continue
+                if not index.remove(victim.digest):
+                    index.mark_recovery_required()
                     maintenance_failed = True
                     break
-            if not maintenance_failed:
-                index.finish_maintenance()
+                removed += 1
+            if maintenance_failed:
+                break
+            if removed == 0:
+                maintenance_failed = True
+                break
+        if not maintenance_failed:
+            index.finish_maintenance()
 
     def close(self) -> None:
         with self._lock:
@@ -791,8 +804,8 @@ class NeutralSurfaceStore:
                 recovered = index.remove(digest) and recovered
         index.recalculate_indexed_bytes()
         if recovered:
-            index.mark_recovered()
             index.finish_maintenance()
+            index.mark_recovered()
         else:
             index.mark_recovery_required()
 
@@ -859,8 +872,13 @@ class NeutralSurfaceStore:
             if index is not None:
                 index.mark_recovery_required()
             return
-        if index is not None and not index.remove(digest):
-            index.mark_recovery_required()
+        if index is not None:
+            try:
+                removed = index.remove(digest)
+            except SurfaceCacheIndexUnavailableError:
+                removed = False
+            if not removed:
+                index.mark_recovery_required()
 
     @staticmethod
     def _indexed_path(index: SurfaceCacheIndex, relative_path: str) -> Path | None:

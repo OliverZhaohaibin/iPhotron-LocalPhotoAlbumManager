@@ -21,7 +21,7 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 
 | ID | 优先级 | 债务 | 当前风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 multi-generation clean-marker lease ownership 正在验证 | `in_progress` |
+| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 已完成 multi-generation clean-marker lease ownership，并通过全部非 Windows 长尾门禁 | `automated_pass` |
 | TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
 | TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
 | TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
@@ -100,6 +100,14 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
   或提交 clean 状态，后续恢复会先隔离损坏数据库、重建 metadata、扫描 payload、重算
   字节和提交维护状态，最后才标记 recovered。真实 connection fault-injection 已覆盖
   lookup、checksum、upsert、LRU 和 recovery 枚举失败。
+- 同 root 的多 generation 现在以 SQLite `owner_session`、`active_leases` 和
+  `recovery_required` 管理 clean marker；同进程 A→B→A 不会假触发 payload scan，旧 A1
+  close 只释放自身 lease，最终 A2 clean close 才能写 `clean_shutdown=1`。实现 SHA
+  `15b15653` 的
+  [Actions run 31374649564](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31374649564)
+  已通过三平台 surface-cache、GPU-first、startup、完整 `test` 等共 14 个非 Windows
+  长尾 job，三平台原始 cache JSON artifacts 均存在；归属 TD-890-03 的 Windows Pets
+  production-shape 在记录时仍运行，不作为本轮自动通过判定的阻塞项。
 - 最后用户版本 v6.6.8 不包含 neutral-surface 持久化格式；兼容路径为“无旧 cache →
   初始化 v3”，不读取或迁移开发阶段 v2。
 

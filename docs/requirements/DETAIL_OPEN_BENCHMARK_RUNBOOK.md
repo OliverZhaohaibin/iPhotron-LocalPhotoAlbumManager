@@ -73,7 +73,7 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
 
 - cold decode：清空 Detail surface/GPU cache 后打开，必须出现 `surface_cache_miss` 和
   `backend_selected`。
-- hot disk/mapped surface：保留 `<library>/.iPhoto/cache/detail-surfaces/v2`，重启或清空内存层；
+- hot disk/mapped surface：保留 `<library>/.iPhoto/cache/detail-surfaces/v3` 及其 `index.sqlite3`，重启或清空内存层；
   必须出现 tier=`disk`/`memory` 的 `surface_cache_hit`。
 - hot GPU：不离开当前图库并重访 current/previous/next；必须出现 `gpu_cache_hit`，同 key 不得新增
   `gpu_upload`。
@@ -96,7 +96,7 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
 - Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
   stale/failed upgrade 不得替换 current texture。
 
-同时保留 `render_session_created/acquired/released` 和 `edit_state_updated`。ColorStats 从 surface cache v2 header
+同时保留 `render_session_created/acquired/released`、`edit_state_updated` 和 `surface_owner_*` 诊断事件。ColorStats 从 surface cache v3 header
 复用；同 source revision 跨 LOD 的统计计算次数必须为 1。packaged 日志只能证明实际运行结果，不能以
 session 单测或 shader compile 代替三平台数据。
 

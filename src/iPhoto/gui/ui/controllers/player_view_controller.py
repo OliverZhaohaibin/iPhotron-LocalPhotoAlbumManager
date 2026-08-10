@@ -46,6 +46,7 @@ from ....gui.detail_profile import (
 from ....gui.detail_render_session import EditRenderState, PhotoRenderSessionHandle
 from ....gui.detail_request_scheduler import DetailStillRequestScheduler
 from ....gui.detail_surface_cache import CachedStillDecodeBackend
+from ....gui.detail_surface_residency import SurfaceResidencyTracker
 from ....gui.i18n import tr
 from ..widgets.gl_image_viewer import GLImageViewer
 from ..widgets.live_badge import LiveBadge
@@ -370,7 +371,20 @@ class PlayerViewController(QObject):
         self._image_viewer_index = player_stack.indexOf(image_viewer)
         self._image_viewer.replayRequested.connect(self.liveReplayRequested)
         self._pool = StillImageDecodeScheduler(self)
-        self._decode_backend = CachedStillDecodeBackend(DefaultStillDecodeBackend())
+        self._surface_residency_tracker = SurfaceResidencyTracker()
+        bind_residency_tracker = getattr(
+            self._image_viewer,
+            "set_surface_residency_tracker",
+            None,
+        )
+        if callable(bind_residency_tracker):
+            bind_residency_tracker(self._surface_residency_tracker)
+        self._decode_backend = CachedStillDecodeBackend(
+            DefaultStillDecodeBackend(
+                residency_tracker=self._surface_residency_tracker
+            ),
+            residency_tracker=self._surface_residency_tracker,
+        )
         if self._library_root_getter is not None:
             self._decode_backend.bind_library(self._library_root_getter())
         self._still_scheduler = DetailStillRequestScheduler(
@@ -1275,6 +1289,13 @@ class PlayerViewController(QObject):
         self._preparation_pool.waitForDone(max(0, int(timeout_ms)))
         self._still_scheduler.shutdown(timeout_ms=timeout_ms)
         self._decode_backend.shutdown(timeout_ms=min(max(0, int(timeout_ms)), 1000))
+        clear_residency = getattr(self._image_viewer, "clear_still_residency", None)
+        if callable(clear_residency):
+            clear_residency()
+        for session in tuple({id(item): item for item in self._render_sessions.values()}.values()):
+            release_observations = getattr(session, "release_residency_observations", None)
+            if callable(release_observations):
+                release_observations()
         shutdown_detail_profile(timeout_ms=min(max(0, int(timeout_ms)), 1000))
 
     def clear_frame_cache(self) -> None:
@@ -1293,6 +1314,10 @@ class PlayerViewController(QObject):
         clear_residency = getattr(self._image_viewer, "clear_still_residency", None)
         if callable(clear_residency):
             clear_residency()
+        for session in tuple({id(item): item for item in self._render_sessions.values()}.values()):
+            release_observations = getattr(session, "release_residency_observations", None)
+            if callable(release_observations):
+                release_observations()
         self._render_sessions.clear()
         self._current_render_session = None
         self._render_session_interaction_depth.clear()
@@ -1308,6 +1333,11 @@ class PlayerViewController(QObject):
         if callable(trim_residency):
             trim_residency()
         current = self._current_render_session
+        for session in tuple({id(item): item for item in self._render_sessions.values()}.values()):
+            if session is not current:
+                release_observations = getattr(session, "release_residency_observations", None)
+                if callable(release_observations):
+                    release_observations()
         self._render_sessions.clear()
         if current is not None:
             self._render_sessions[self._render_session_key_for_surface(current.current_surface)] = current
@@ -1577,6 +1607,7 @@ class PlayerViewController(QObject):
                 current_surface=surface,
                 edit_state=state,
                 baseline_state=state,
+                residency_tracker=self._surface_residency_tracker,
             )
             self._next_render_session_id += 1
             emit_detail_event(
@@ -1607,7 +1638,8 @@ class PlayerViewController(QObject):
                 if all(item.edit_references > 0 or item is self._current_render_session for item in self._render_sessions.values()):
                     break
                 continue
-            self._render_sessions.pop(oldest_key)
+            evicted = self._render_sessions.pop(oldest_key)
+            evicted.release_residency_observations()
         if make_current:
             self._current_render_session = session
         return session

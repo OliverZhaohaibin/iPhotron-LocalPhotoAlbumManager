@@ -20,6 +20,10 @@ from iPhoto.gui.detail_pipeline import (
     DetailRenderRequest,
 )
 from iPhoto.gui.detail_profile import emit_detail_event
+from iPhoto.gui.detail_surface_residency import (
+    SurfaceByteBreakdown,
+    SurfaceResidencyTracker,
+)
 from iPhoto.utils.deps import load_pillow
 
 _MAX_DETAIL_SURFACE_BYTES = 192 * 1024 * 1024
@@ -52,10 +56,13 @@ class StillDecodeBackendRegistry:
         windows_backend: StillDecodeBackend | None = None,
         qt_backend: StillDecodeBackend | None = None,
         raw_backend: StillDecodeBackend | None = None,
+        residency_tracker: SurfaceResidencyTracker | None = None,
     ) -> None:
         self._platform = sys.platform if platform is None else platform
         self._qt = qt_backend or QtStillDecodeBackend()
-        self._raw = raw_backend or RawStillDecodeBackend()
+        self._raw = raw_backend or RawStillDecodeBackend(
+            residency_tracker=residency_tracker
+        )
         self._macos = macos_backend or (
             _load_macos_imageio_backend() if self._platform == "darwin" else None
         )
@@ -278,6 +285,13 @@ class RawStillDecodeBackend:
 
     name = "rawpy"
 
+    def __init__(
+        self,
+        *,
+        residency_tracker: SurfaceResidencyTracker | None = None,
+    ) -> None:
+        self._residency_tracker = residency_tracker
+
     def decode(
         self,
         request: DetailRenderRequest,
@@ -361,7 +375,32 @@ class RawStillDecodeBackend:
                 )
                 _check_cancelled(cancellation)
                 started = time.perf_counter()
-                image = _qimage_from_array(rgb)
+                raw_resource_id = (
+                    "raw-intermediate",
+                    prepared.asset_id,
+                    prepared.generation,
+                    id(rgb),
+                )
+                raw_owner_id = f"raw-decoder:{prepared.generation}:{prepared.asset_id}"
+                if self._residency_tracker is not None:
+                    self._residency_tracker.retain(
+                        raw_owner_id,
+                        "raw_decoder",
+                        raw_resource_id,
+                        SurfaceByteBreakdown(
+                            raw_intermediate=max(0, int(getattr(rgb, "nbytes", 0)))
+                        ),
+                        generation=prepared.generation,
+                    )
+                try:
+                    image = _qimage_from_array(rgb)
+                finally:
+                    if self._residency_tracker is not None:
+                        self._residency_tracker.release(
+                            raw_owner_id,
+                            raw_resource_id,
+                            generation=prepared.generation,
+                        )
                 emit_detail_event(
                     "raw_surface_convert",
                     generation=prepared.generation,
@@ -406,8 +445,15 @@ class RawStillDecodeBackend:
 class DefaultStillDecodeBackend:
     """Route RAW formats to rawpy and all other stills to Qt."""
 
-    def __init__(self, registry: StillDecodeBackendRegistry | None = None) -> None:
-        self._registry = registry or StillDecodeBackendRegistry()
+    def __init__(
+        self,
+        registry: StillDecodeBackendRegistry | None = None,
+        *,
+        residency_tracker: SurfaceResidencyTracker | None = None,
+    ) -> None:
+        self._registry = registry or StillDecodeBackendRegistry(
+            residency_tracker=residency_tracker
+        )
 
     def decode(
         self,

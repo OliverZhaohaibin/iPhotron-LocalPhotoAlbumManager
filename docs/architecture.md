@@ -370,7 +370,7 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, independent `face_status`/`pet_status`, and related library state. |
 | `.iPhoto/links.json` | Derived Live Photo compatibility materialization; repository/session Live Photo role state remains authoritative for runtime behavior. |
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
-| `.iPhoto/cache/detail-surfaces/v2/` | Rebuildable, versioned neutral RGBA8/sRGB Detail surfaces keyed by source identity, orientation, and LOD; sidecar revision is excluded. |
+| `.iPhoto/cache/detail-surfaces/v3/` | SQLite-indexed, rebuildable neutral RGBA8/sRGB Detail surfaces keyed by source identity, decoder contract, orientation, and LOD; trusted hits validate indexed header/stat metadata without scanning the full payload, and sidecar revision is excluded. |
 | `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
 | `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers, and manual faces. |
 | `.iPhoto/faces/thumbnails/` | Rebuildable cropped face thumbnails. |

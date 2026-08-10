@@ -1,6 +1,6 @@
 # PR #890 延期技术债务台账
 
-更新日期：2026-08-09
+更新日期：2026-08-10
 
 ## 状态与范围
 
@@ -21,8 +21,8 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 
 | ID | 优先级 | 债务 | 当前风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | 大 surface 命中仍完整扫描 payload；每次写入复制整块 RGBA 并全目录排序 | `not_started` |
-| TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | LRU 淘汰不能释放 session 强引用；RAW 中间数组不受最终 surface 预算约束 | `not_started` |
+| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 已完成跨进程 cache namespace ownership，并通过全部非 Windows 长尾门禁 | `automated_pass` |
+| TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
 | TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
 | TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
 | TD-890-05 | P3 | 大型跨子系统 PR 的回滚和归因边界不足 | 历史 PR 无法安全追溯拆分；未来同类变更仍可能形成不可独立回滚的组合 | `process_debt` |
@@ -72,6 +72,56 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 - Detail cold/warm benchmark 不退化，跨平台 shutdown 不遗留 cache executor 或
   打开的 mmap/file owner。
 
+### 当前实施证据
+
+- `codex/td-890-surface-cache-index` 将 namespace 提升到 v3，并以 SQLite
+  `index.sqlite3` 持久化 entry、LRU、checksum trust 和维护水位；可信命中不再调用
+  payload checksum。
+- 写入改为 4 MiB buffer 分块、增量 xxhash、fsync 和原子 replace，不再创建完整
+  Python payload 副本；last-access、异常恢复、抽样审计和低水位 prune 均有独立合同。
+- `detail-surface-cache-contract` 在同一 runner checkout 固定 `fe623e68` 基线与候选
+  head，覆盖 16/64/180 MiB 并上传原始 JSON。edge-case 文档 head `0d7b9331` 的
+  [Actions run 31364282777](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31364282777)
+  已完整成功；SQLite 运行期故障实现 SHA `a744fde2` 的
+  [Actions run 31368415703](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31368415703)
+  也已完整成功，15 个 job 包括三平台 surface-cache、GPU-first、startup、Pets
+  production-shape 和完整 `test`。后一个 run 的 Ubuntu、macOS、Windows 原始
+  surface-cache JSON artifacts 均已确认存在。
+- 磁盘容量查询失败现在会跳过 prune 并保留维护水位，显式零预算仍保持清空语义；
+  跨库 generation retire/swap 与 shared memory-cache clear 已在同一 backend lock 内
+  原子执行；closed store 拒绝重新 bind，且三项均有独立回归合同。
+- generation close barrier、失败恢复合同，以及 fresh-process/warm 的完整 mmap payload
+  CPU 消费门禁均已纳入自动测试；本地同 runner 的 `fe623e68`/candidate
+  16/64/180 MiB comparison 也已通过。该指标只证明完整 CPU payload 消费，不声明
+  等价于真实 GPU upload；renderer 路径继续由现有三平台 GPU-first 合同覆盖。
+- 任意运行期 SQLite `DatabaseError` 现在统一关闭当前 connection，并将 index 标记为
+  `needs_recovery`/`rebuild_required`；lookup 和 checksum-state 故障在 cache 边界转为
+  miss，图片请求回退 delegate decode。maintenance/recovery 故障不会删除健康 payload
+  或提交 clean 状态，后续恢复会先隔离损坏数据库、重建 metadata、扫描 payload、重算
+  字节和提交维护状态，最后才标记 recovered。真实 connection fault-injection 已覆盖
+  lookup、checksum、upsert、LRU 和 recovery 枚举失败。
+- 同 root 的多 generation 现在以 SQLite `owner_session`、`active_leases` 和
+  `recovery_required` 管理 clean marker；同进程 A→B→A 不会假触发 payload scan，旧 A1
+  close 只释放自身 lease，最终 A2 clean close 才能写 `clean_shutdown=1`。实现 SHA
+  `15b15653` 的
+  [Actions run 31374649564](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31374649564)
+  已通过三平台 surface-cache、GPU-first、startup、完整 `test` 等共 14 个非 Windows
+  长尾 job，三平台原始 cache JSON artifacts 均存在；归属 TD-890-03 的 Windows Pets
+  production-shape 在记录时仍运行，不作为本轮自动通过判定的阻塞项。
+- 跨进程 ownership 收口在 cache namespace 上增加 canonical `QLockFile` 独占锁；第二个
+  进程无法取得锁时只禁用该图库的 surface disk tier，lookup/write/maintenance 均在
+  SQLite 和 payload 边界前 fail-open，原图 decode 与 memory cache 继续可用。锁释放后
+  以 30 秒 monotonic cooldown 自动重试；clean owner handoff 不扫描目录，crashed owner
+  则沿既有 dirty recovery 扫描。实现/合同 SHA 为 `b839950a`、`f1aac226`、`50b46215`；
+  本地 cache+benchmark 59 项、Detail/GPU-first 137 项、startup 108 项、完整 pytest
+  2928 项以及架构、compileall、Ruff、diff check 已通过。实现/验证 head `6bb3bdbc` 的
+  [Actions run 31379327676](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31379327676)
+  已通过三平台 surface-cache、GPU-first、startup、完整 `test` 等全部 14 个非 Windows
+  长尾 job，并确认 Ubuntu、macOS、Windows 三份原始 cache JSON artifacts 均存在；归属
+  TD-890-03 的 Windows Pets production-shape 在记录时仍运行，不作为本轮阻塞项。
+- 最后用户版本 v6.6.8 不包含 neutral-surface 持久化格式；兼容路径为“无旧 cache →
+  初始化 v3”，不读取或迁移开发阶段 v2。
+
 ## TD-890-02：统一 surface/RAW 内存所有权
 
 ### 当前证据
@@ -116,6 +166,11 @@ presentation、pending upload 或 GPU staging 间接保留。当前 `budget_byte
 
 不要把四个阶段压入一个不可回滚提交。每个阶段都必须保持现有 generation、
 library epoch、source identity 和 Edit handle 生命周期合同。
+
+当前首批只完成观测阶段：`SurfaceResidencyTracker` 区分唯一资源和 owner 引用，记录
+CPU heap、mmap、upload staging、GPU estimated 与 RAW intermediate 字节；它不拥有资源、
+不拒绝分配，也不改变现有 LRU/session/GPU 行为。后续 CPU/session PR 才引入
+`SurfaceOwner`/`SurfaceLease` 执行合同。
 
 ### 验收门禁
 

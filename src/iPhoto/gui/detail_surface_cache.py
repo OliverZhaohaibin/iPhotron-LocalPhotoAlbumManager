@@ -12,8 +12,8 @@ import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field, replace
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, RLock
 from typing import Final
@@ -938,12 +938,13 @@ class _SurfaceStoreGeneration:
     library_root: Path | None
     store: NeutralSurfaceStore
     retired: bool = False
+    retirement_started: bool = False
+    io_drained: bool = False
     close_submitted: bool = False
+    closed: bool = False
     active_calls: int = 0
-    drained: Event = field(default_factory=Event)
-
-    def __post_init__(self) -> None:
-        self.drained.set()
+    retire_barrier: Future | None = None
+    close_future: Future | None = None
 
 
 def _normalise_library_root(library_root: Path | None) -> Path | None:
@@ -980,11 +981,14 @@ class CachedStillDecodeBackend:
             library_root=initial_root,
             store=initial_store,
         )
+        self._store_generations: dict[int, _SurfaceStoreGeneration] = {
+            self._store_epoch: self._active_store_generation
+        }
         self._io = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iPhoto-surface-cache")
         self._futures: set[Future] = set()
         self._lock = RLock()
         self._shutting_down = False
-        self._shutdown_barrier: Future | None = None
+        self._shutdown_complete = Event()
         self._executor_shutdown = False
         self._color_stats_by_source: OrderedDict[tuple, ColorStats] = OrderedDict()
 
@@ -1011,11 +1015,12 @@ class CachedStillDecodeBackend:
                 library_root=normalised_root,
                 store=replacement,
             )
+            self._store_generations[generation.epoch] = generation
             current.retired = True
             self._active_store_generation = generation
             self._color_stats_by_source.clear()
             self.memory_cache.clear()
-            self._queue_store_close_locked(current)
+            self._begin_generation_retirement_locked(current)
             self._submit_generation_locked(generation, replacement.maintenance)
 
     @staticmethod
@@ -1160,7 +1165,6 @@ class CachedStillDecodeBackend:
             generation = self._active_store_generation
             self._raise_if_generation_stale_locked(generation, cancellation)
             generation.active_calls += 1
-            generation.drained.clear()
             return generation
 
     def _release_store_generation(
@@ -1170,7 +1174,7 @@ class CachedStillDecodeBackend:
         with self._lock:
             generation.active_calls = max(0, generation.active_calls - 1)
             if generation.active_calls == 0:
-                generation.drained.set()
+                self._maybe_submit_generation_close_locked(generation)
 
     def _write_surface(
         self,
@@ -1254,19 +1258,102 @@ class CachedStillDecodeBackend:
         _ = generation
         return fn(*args, **kwargs)
 
-    def _queue_store_close_locked(
+    def _begin_generation_retirement_locked(
         self,
         generation: _SurfaceStoreGeneration,
     ) -> Future | None:
-        if generation.close_submitted:
+        if generation.retirement_started:
+            self._maybe_submit_generation_close_locked(generation)
+            return generation.retire_barrier
+        generation.retirement_started = True
+        barrier = self._submit_raw_locked(lambda: None)
+        generation.retire_barrier = barrier
+        if barrier is None:
+            generation.io_drained = True
+            self._maybe_submit_generation_close_locked(generation)
             return None
+        barrier.add_done_callback(
+            lambda completed, active=generation: self._on_generation_io_drained(
+                active,
+                completed,
+            )
+        )
+        return barrier
+
+    def _on_generation_io_drained(
+        self,
+        generation: _SurfaceStoreGeneration,
+        barrier: Future,
+    ) -> None:
+        with self._lock:
+            if generation.retire_barrier is not barrier:
+                return
+            generation.io_drained = True
+            self._maybe_submit_generation_close_locked(generation)
+
+    def _maybe_submit_generation_close_locked(
+        self,
+        generation: _SurfaceStoreGeneration,
+    ) -> Future | None:
+        if (
+            not generation.retired
+            or not generation.retirement_started
+            or not generation.io_drained
+            or generation.active_calls > 0
+            or generation.close_submitted
+            or generation.closed
+        ):
+            return generation.close_future
         generation.close_submitted = True
-        return self._submit_raw_locked(self._close_generation_store, generation)
+        future = self._submit_raw_locked(self._close_generation_store, generation)
+        if future is None:
+            generation.close_submitted = False
+            return None
+        generation.close_future = future
+        future.add_done_callback(
+            lambda completed, active=generation: self._on_generation_closed(
+                active,
+                completed,
+            )
+        )
+        return future
 
     @staticmethod
     def _close_generation_store(generation: _SurfaceStoreGeneration) -> None:
-        generation.drained.wait()
         generation.store.close()
+
+    def _on_generation_closed(
+        self,
+        generation: _SurfaceStoreGeneration,
+        future: Future,
+    ) -> None:
+        error: Exception | None = None
+        try:
+            future.result()
+        except Exception as exc:  # noqa: BLE001 - cache close is best-effort at shutdown
+            error = exc
+        with self._lock:
+            generation.closed = True
+            self._store_generations.pop(generation.epoch, None)
+            finish_shutdown = self._shutting_down and not self._store_generations
+        if error is not None:
+            emit_detail_event(
+                "surface_cache_close_failed",
+                generation=0,
+                store_epoch=generation.epoch,
+                error=str(error),
+            )
+        if finish_shutdown:
+            self._finish_executor_shutdown()
+
+    def _finish_executor_shutdown(self) -> None:
+        with self._lock:
+            if self._executor_shutdown:
+                self._shutdown_complete.set()
+                return
+            self._executor_shutdown = True
+        self._io.shutdown(wait=False, cancel_futures=False)
+        self._shutdown_complete.set()
 
     def _submit_raw_locked(self, fn, *args, **kwargs) -> Future | None:
         try:
@@ -1282,21 +1369,19 @@ class CachedStillDecodeBackend:
             self._futures.discard(future)
 
     def shutdown(self, *, timeout_ms: int = 1000) -> None:
+        finish_shutdown = False
         with self._lock:
             if not self._shutting_down:
                 self._shutting_down = True
                 generation = self._active_store_generation
                 generation.retired = True
-                self._queue_store_close_locked(generation)
-                self._shutdown_barrier = self._submit_raw_locked(lambda: None)
-            barrier = self._shutdown_barrier
-        completed = not bool(barrier)
-        if barrier is not None:
-            done, _pending = wait(
-                (barrier,),
-                timeout=max(0, int(timeout_ms)) / 1000.0,
-            )
-            completed = barrier in done
+                self._begin_generation_retirement_locked(generation)
+            finish_shutdown = not self._store_generations
+        if finish_shutdown:
+            self._finish_executor_shutdown()
+        completed = self._shutdown_complete.wait(
+            timeout=max(0, int(timeout_ms)) / 1000.0,
+        )
         if not completed:
             with self._lock:
                 pending_count = len(self._futures)
@@ -1306,11 +1391,6 @@ class CachedStillDecodeBackend:
                 pending=pending_count,
             )
         self.memory_cache.clear()
-        with self._lock:
-            if self._executor_shutdown:
-                return
-            self._executor_shutdown = True
-        self._io.shutdown(wait=False, cancel_futures=False)
 
 
 __all__ = [

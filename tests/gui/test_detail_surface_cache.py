@@ -1157,6 +1157,68 @@ def test_rebind_returns_before_old_store_io_drains(tmp_path: Path) -> None:
     assert old_closed.is_set()
 
 
+def test_rebind_new_generation_io_progresses_while_old_decode_is_active(
+    tmp_path: Path,
+) -> None:
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    request = _request(old_root / "photo.jpg")
+    decode_started = Event()
+    release_decode = Event()
+    new_maintenance = Event()
+    new_io_progress = Event()
+    old_closed = Event()
+    old_store = Mock()
+    old_store.library_root = old_root.absolute()
+
+    def slow_load(_request: DetailRenderRequest) -> None:
+        decode_started.set()
+        assert release_decode.wait(5)
+        return None
+
+    old_store.load.side_effect = slow_load
+    old_store.close.side_effect = old_closed.set
+    new_store = Mock()
+    new_store.library_root = new_root.absolute()
+    new_store.maintenance.side_effect = new_maintenance.set
+    backend = CachedStillDecodeBackend(
+        Mock(),
+        store=old_store,
+        store_factory=Mock(return_value=new_store),
+    )
+    failures: list[BaseException] = []
+
+    def decode() -> None:
+        try:
+            backend.decode(request, _Token())
+        except DecodeCancelledError as exc:
+            failures.append(exc)
+
+    worker = Thread(target=decode)
+    worker.start()
+    assert decode_started.wait(5)
+
+    try:
+        backend.bind_library(new_root)
+        new_generation = backend._active_store_generation
+        backend._submit_for_generation(new_generation, new_io_progress.set)
+
+        assert new_maintenance.wait(5)
+        assert new_io_progress.wait(5)
+        assert not old_closed.is_set()
+    finally:
+        release_decode.set()
+        worker.join(timeout=5)
+        backend.shutdown(timeout_ms=5000)
+
+    assert not worker.is_alive()
+    assert old_closed.is_set()
+    assert len(failures) == 1
+    assert isinstance(failures[0], DecodeCancelledError)
+    old_store.close.assert_called_once_with()
+    new_store.close.assert_called_once_with()
+
+
 def test_a_b_a_rebind_keeps_latest_library_lease_dirty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1275,6 +1337,8 @@ def test_shutdown_timeout_closes_store_after_active_decode_finishes(
     worker.join(timeout=5)
     assert not worker.is_alive()
     assert closed.wait(5)
+    assert backend._shutdown_complete.wait(5)
+    assert backend._executor_shutdown
     assert len(failures) == 1
     assert isinstance(failures[0], DecodeCancelledError)
 

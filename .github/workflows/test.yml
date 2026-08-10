@@ -3,9 +3,9 @@ name: Tests
 on:
   workflow_dispatch:
   push:
-    branches: [main, codex/startup-chain-optimization]
+    branches: [main, edit-base]
   pull_request:
-    branches: [main, codex/startup-chain-optimization, codex/pets-review-remediation]
+    branches: [main, edit-base, codex/startup-chain-optimization]
 
 permissions:
   contents: read

@@ -317,13 +317,14 @@ class _PreparationEntry:
 
 
 class StillImageDecodeScheduler(QThreadPool):
-    """Two-lane latest-wins scheduler for non-cancellable native decoders."""
+    """Two-lane latest-only queue with one-stuck-worker bypass."""
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         # One native decoder may be stuck in an uninterruptible codec call. A
         # second lane lets the newest request bypass it; queued middle requests
-        # are removed by ``tryTake`` and running stale results are discarded.
+        # are removed by ``tryTake`` and running stale workers are cooperatively
+        # cancelled so they stop at the first checkpoint after native work.
         self.setMaxThreadCount(2)
         self.setThreadPriority(QThread.Priority.HighPriority)
 

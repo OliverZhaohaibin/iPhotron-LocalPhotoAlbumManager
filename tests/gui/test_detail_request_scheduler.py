@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from threading import Event
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage
 
 from iPhoto.gui.detail_decode_backend import DecodedSurface
@@ -86,6 +88,57 @@ class _FakePool:
     def waitForDone(self, timeout_ms: int) -> bool:
         self.wait_timeout = timeout_ms
         return self.wait_result
+
+
+class _BlockingWorker(QRunnable):
+    def __init__(self, request: DetailRenderRequest, release: Event) -> None:
+        super().__init__()
+        self.setAutoDelete(False)
+        self.request = request.with_decode_level()
+        self.source = request.source_identity.path
+        self.signals = _WorkerSignals()
+        self.release = release
+        self.started = Event()
+        self.cancelled = Event()
+        self.cache_hit = False
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+    def update_request(self, request: DetailRenderRequest) -> None:
+        self.request = request.with_decode_level()
+
+    def run(self) -> None:
+        self.signals.started.emit(self)
+        self.started.set()
+        try:
+            if not self.release.wait(5) or self.cancelled.is_set():
+                return
+            image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+            image.fill(0xFF112233)
+            self.signals.completed.emit(
+                DecodedSurface(
+                    image=image,
+                    decode_key=DetailDecodeKey.from_request(self.request),
+                    source_size=(8, 8),
+                    decoded_size=(8, 8),
+                    decode_level=self.request.decode_level or "full",
+                    backend="blocking-fake",
+                )
+            )
+        finally:
+            self.signals.finished.emit(self)
+
+
+def _spin_until(qapp, predicate, *, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    qapp.processEvents()
+    return bool(predicate())
 
 
 def _harness() -> tuple[
@@ -218,10 +271,85 @@ def test_new_asset_bypasses_running_stale_decoder_and_stale_never_presents(
 
     # B has started on the second lane before uninterruptible A completes.
     assert len(pool.starts) == 2
+    assert worker_a.cancelled
     pool.complete(worker_a)
     pool.complete(worker_b)
 
     assert presented == [(2, source_b)]
+
+
+def test_real_two_lane_pool_cancels_stale_workers_and_starts_latest_next(
+    qapp,
+    tmp_path: Path,
+) -> None:
+    pool = QThreadPool()
+    pool.setMaxThreadCount(2)
+    workers: dict[str, _BlockingWorker] = {}
+    releases: dict[str, Event] = {}
+
+    def factory(request: DetailRenderRequest) -> _BlockingWorker:
+        release = Event()
+        worker = _BlockingWorker(request, release)
+        workers[request.asset_id] = worker
+        releases[request.asset_id] = release
+        return worker
+
+    scheduler = DetailStillRequestScheduler(pool=pool, worker_factory=factory)
+    presented: list[tuple[int, Path]] = []
+    scheduler.ready.connect(
+        lambda generation, surface: presented.append(
+            (generation, surface.decode_key.source)
+        )
+    )
+    source_a = tmp_path / "a.raw"
+    source_b = tmp_path / "b.raw"
+    source_c = tmp_path / "c.jpg"
+
+    try:
+        assert scheduler.request(_request(source_a, asset_id="A", generation=1))
+        assert workers["A"].started.wait(5)
+        assert _spin_until(
+            qapp,
+            lambda: scheduler._inflight_by_key[
+                DetailDecodeKey.from_request(
+                    _request(source_a, asset_id="A", generation=1)
+                )
+            ].state
+            == "running",
+        )
+
+        assert scheduler.request(_request(source_b, asset_id="B", generation=2))
+        assert workers["B"].started.wait(5)
+        assert _spin_until(
+            qapp,
+            lambda: scheduler._inflight_by_key[
+                DetailDecodeKey.from_request(
+                    _request(source_b, asset_id="B", generation=2)
+                )
+            ].state
+            == "running",
+        )
+
+        assert scheduler.request(_request(source_c, asset_id="C", generation=3))
+
+        assert workers["A"].cancelled.is_set()
+        assert workers["B"].cancelled.is_set()
+        assert not workers["C"].started.is_set()
+
+        releases["B"].set()
+        assert workers["C"].started.wait(5)
+        assert not releases["A"].is_set()
+
+        releases["C"].set()
+        assert _spin_until(qapp, lambda: presented == [(3, source_c)])
+    finally:
+        for release in releases.values():
+            release.set()
+        assert pool.waitForDone(5000)
+        qapp.processEvents()
+        scheduler.shutdown(timeout_ms=1000)
+
+    assert presented == [(3, source_c)]
 
 
 def test_repeated_click_updates_generation_without_parallel_same_key_decoder(
@@ -241,6 +369,30 @@ def test_repeated_click_updates_generation_without_parallel_same_key_decoder(
 
     assert len(workers) == 1
     assert presented == [2]
+
+
+def test_cancelled_running_key_is_not_reused_after_a_b_a_navigation(
+    tmp_path: Path,
+) -> None:
+    scheduler, pool, workers = _harness()
+    source_a = tmp_path / "a.raw"
+    source_b = tmp_path / "b.raw"
+
+    assert scheduler.request(_request(source_a, asset_id="A", generation=1))
+    first_a = workers[0]
+    pool.mark_running(first_a)
+
+    assert scheduler.request(_request(source_b, asset_id="B", generation=2))
+    worker_b = workers[1]
+    pool.mark_running(worker_b)
+    assert first_a.cancelled
+
+    assert scheduler.request(_request(source_a, asset_id="A", generation=3))
+
+    assert worker_b.cancelled
+    assert len(workers) == 3
+    assert workers[2] is not first_a
+    assert workers[2].request.generation == 3
 
 
 def test_different_decode_levels_do_not_reuse_the_same_worker(tmp_path: Path) -> None:

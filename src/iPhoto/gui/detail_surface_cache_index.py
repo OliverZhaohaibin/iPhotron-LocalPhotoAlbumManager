@@ -14,6 +14,10 @@ _ACCESS_BATCH: Final = 128
 _ACCESS_INTERVAL_NS: Final = 30 * 1_000_000_000
 
 
+class SurfaceCacheIndexUnavailableError(RuntimeError):
+    """Raised internally after a runtime SQLite control-plane failure."""
+
+
 @dataclass(frozen=True, slots=True)
 class SurfaceCacheIndexEntry:
     digest: str
@@ -41,6 +45,7 @@ class SurfaceCacheIndex:
         self._pending_access: dict[str, int] = {}
         self._last_access_flush_ns = time.time_ns()
         self._needs_recovery = False
+        self._rebuild_required = False
         self._closed = False
 
     @property
@@ -59,57 +64,58 @@ class SurfaceCacheIndex:
                 return False
             if self._connection is not None:
                 return True
+            rebuilding = self._rebuild_required
+            if rebuilding:
+                self._discard_broken_index_locked()
             try:
-                self.root.mkdir(parents=True, exist_ok=True)
-                self._connection = self._connect()
-                self._create_schema(self._connection)
-            except (OSError, sqlite3.DatabaseError):
+                self._open_connection_locked()
+            except (OSError, sqlite3.DatabaseError) as first_error:
                 self._discard_broken_index_locked()
                 try:
-                    self.root.mkdir(parents=True, exist_ok=True)
-                    self._connection = self._connect()
-                    self._create_schema(self._connection)
+                    self._open_connection_locked()
                     self._needs_recovery = True
-                except (OSError, sqlite3.DatabaseError):
-                    self._close_connection_locked()
+                except (OSError, sqlite3.DatabaseError) as second_error:
+                    self._database_failure_locked(second_error or first_error)
                     return False
-            connection = self._connection
-            if connection is None:
-                return False
-            prior_clean = self._meta_int_locked("clean_shutdown", default=1)
-            self._needs_recovery = self._needs_recovery or prior_clean != 1
-            self._set_meta_locked("clean_shutdown", 0)
-            connection.commit()
+            if rebuilding:
+                self._needs_recovery = True
+            self._rebuild_required = False
             return True
 
     def get(self, digest: str) -> SurfaceCacheIndexEntry | None:
         with self._lock:
             if not self.ensure_open():
                 return None
-            row = self._connection.execute(  # type: ignore[union-attr]
-                """
-                SELECT digest, relative_path, container_schema, decoder_contract,
-                       payload_bytes, file_bytes, checksum, checksum_state,
-                       file_mtime_ns, created_ns, last_access_ns, last_verified_ns
-                FROM entries
-                WHERE digest = ?
-                """,
-                (str(digest),),
-            ).fetchone()
+            try:
+                row = self._connection.execute(  # type: ignore[union-attr]
+                    """
+                    SELECT digest, relative_path, container_schema, decoder_contract,
+                           payload_bytes, file_bytes, checksum, checksum_state,
+                           file_mtime_ns, created_ns, last_access_ns, last_verified_ns
+                    FROM entries
+                    WHERE digest = ?
+                    """,
+                    (str(digest),),
+                ).fetchone()
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
             return self._entry_from_row(row) if row is not None else None
 
     def all_entries(self) -> tuple[SurfaceCacheIndexEntry, ...]:
         with self._lock:
             if not self.ensure_open():
                 return ()
-            rows = self._connection.execute(  # type: ignore[union-attr]
-                """
-                SELECT digest, relative_path, container_schema, decoder_contract,
-                       payload_bytes, file_bytes, checksum, checksum_state,
-                       file_mtime_ns, created_ns, last_access_ns, last_verified_ns
-                FROM entries
-                """
-            ).fetchall()
+            try:
+                rows = self._connection.execute(  # type: ignore[union-attr]
+                    """
+                    SELECT digest, relative_path, container_schema, decoder_contract,
+                           payload_bytes, file_bytes, checksum, checksum_state,
+                           file_mtime_ns, created_ns, last_access_ns, last_verified_ns
+                    FROM entries
+                    """
+                ).fetchall()
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
             return tuple(self._entry_from_row(row) for row in rows)
 
     def upsert(self, entry: SurfaceCacheIndexEntry) -> bool:
@@ -168,9 +174,9 @@ class SurfaceCacheIndex:
                 )
                 connection.commit()  # type: ignore[union-attr]
                 return True
-            except sqlite3.DatabaseError:
-                connection.rollback()  # type: ignore[union-attr]
-                return False
+            except sqlite3.DatabaseError as exc:
+                self._rollback_quietly(connection)
+                raise self._database_failure_locked(exc) from exc
 
     def remove(self, digest: str) -> bool:
         with self._lock:
@@ -191,10 +197,9 @@ class SurfaceCacheIndex:
                 )
                 connection.commit()  # type: ignore[union-attr]
                 return True
-            except sqlite3.DatabaseError:
-                connection.rollback()  # type: ignore[union-attr]
-                self._mark_recovery_required_locked()
-                return False
+            except sqlite3.DatabaseError as exc:
+                self._rollback_quietly(connection)
+                raise self._database_failure_locked(exc) from exc
 
     def mark_checksum_state(
         self,
@@ -207,16 +212,19 @@ class SurfaceCacheIndex:
             if not self.ensure_open():
                 return
             when = int(verified_ns or 0)
-            self._connection.execute(  # type: ignore[union-attr]
-                """
-                UPDATE entries
-                SET checksum_state = ?,
-                    last_verified_ns = CASE WHEN ? > 0 THEN ? ELSE last_verified_ns END
-                WHERE digest = ?
-                """,
-                (str(state), when, when, str(digest)),
-            )
-            self._connection.commit()  # type: ignore[union-attr]
+            try:
+                self._connection.execute(  # type: ignore[union-attr]
+                    """
+                    UPDATE entries
+                    SET checksum_state = ?,
+                        last_verified_ns = CASE WHEN ? > 0 THEN ? ELSE last_verified_ns END
+                    WHERE digest = ?
+                    """,
+                    (str(state), when, when, str(digest)),
+                )
+                self._connection.commit()  # type: ignore[union-attr]
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
 
     def queue_access(self, digest: str, *, accessed_ns: int | None = None) -> bool:
         now = int(accessed_ns or time.time_ns())
@@ -251,9 +259,9 @@ class SurfaceCacheIndex:
                     ((accessed_ns, digest) for digest, accessed_ns in pending),
                 )
                 self._connection.commit()  # type: ignore[union-attr]
-            except sqlite3.DatabaseError:
-                self._connection.rollback()  # type: ignore[union-attr]
-                return False
+            except sqlite3.DatabaseError as exc:
+                self._rollback_quietly(self._connection)
+                raise self._database_failure_locked(exc) from exc
             for digest, accessed_ns in pending:
                 if self._pending_access.get(digest) == accessed_ns:
                     self._pending_access.pop(digest, None)
@@ -271,28 +279,35 @@ class SurfaceCacheIndex:
             if not self.ensure_open():
                 return False
             now = time.time_ns()
-            return (
-                self._meta_int_locked("indexed_bytes") > max(0, int(budget_bytes))
-                or self._meta_int_locked("bytes_since_maintenance") >= int(byte_interval)
-                or now - self._meta_int_locked("last_maintenance_ns", default=now)
-                >= int(time_interval_ns)
-            )
+            try:
+                return (
+                    self._needs_recovery
+                    or self._meta_int_locked("indexed_bytes") > max(0, int(budget_bytes))
+                    or self._meta_int_locked("bytes_since_maintenance") >= int(byte_interval)
+                    or now - self._meta_int_locked("last_maintenance_ns", default=now)
+                    >= int(time_interval_ns)
+                )
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
 
     def lru_victims(self, *, limit: int) -> tuple[SurfaceCacheIndexEntry, ...]:
         with self._lock:
             if not self.ensure_open():
                 return ()
-            rows = self._connection.execute(  # type: ignore[union-attr]
-                """
-                SELECT digest, relative_path, container_schema, decoder_contract,
-                       payload_bytes, file_bytes, checksum, checksum_state,
-                       file_mtime_ns, created_ns, last_access_ns, last_verified_ns
-                FROM entries
-                ORDER BY last_access_ns ASC, created_ns ASC, digest ASC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
+            try:
+                rows = self._connection.execute(  # type: ignore[union-attr]
+                    """
+                    SELECT digest, relative_path, container_schema, decoder_contract,
+                           payload_bytes, file_bytes, checksum, checksum_state,
+                           file_mtime_ns, created_ns, last_access_ns, last_verified_ns
+                    FROM entries
+                    ORDER BY last_access_ns ASC, created_ns ASC, digest ASC
+                    LIMIT ?
+                    """,
+                    (max(1, int(limit)),),
+                ).fetchall()
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
             return tuple(self._entry_from_row(row) for row in rows)
 
     @property
@@ -300,15 +315,21 @@ class SurfaceCacheIndex:
         with self._lock:
             if not self.ensure_open():
                 return 0
-            return self._meta_int_locked("indexed_bytes")
+            try:
+                return self._meta_int_locked("indexed_bytes")
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
 
     def finish_maintenance(self) -> None:
         with self._lock:
             if not self.ensure_open():
                 return
-            self._set_meta_locked("bytes_since_maintenance", 0)
-            self._set_meta_locked("last_maintenance_ns", time.time_ns())
-            self._connection.commit()  # type: ignore[union-attr]
+            try:
+                self._set_meta_locked("bytes_since_maintenance", 0)
+                self._set_meta_locked("last_maintenance_ns", time.time_ns())
+                self._connection.commit()  # type: ignore[union-attr]
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
 
     def recalculate_indexed_bytes(self) -> int:
         """Repair the cached byte total after an exceptional recovery scan."""
@@ -316,17 +337,21 @@ class SurfaceCacheIndex:
         with self._lock:
             if not self.ensure_open():
                 return 0
-            row = self._connection.execute(  # type: ignore[union-attr]
-                "SELECT COALESCE(SUM(file_bytes), 0) FROM entries"
-            ).fetchone()
-            total = max(0, int(row[0]) if row is not None else 0)
-            self._set_meta_locked("indexed_bytes", total)
-            self._connection.commit()  # type: ignore[union-attr]
+            try:
+                row = self._connection.execute(  # type: ignore[union-attr]
+                    "SELECT COALESCE(SUM(file_bytes), 0) FROM entries"
+                ).fetchone()
+                total = max(0, int(row[0]) if row is not None else 0)
+                self._set_meta_locked("indexed_bytes", total)
+                self._connection.commit()  # type: ignore[union-attr]
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
             return total
 
     def mark_recovered(self) -> None:
         with self._lock:
-            self._needs_recovery = False
+            if self._connection is not None and not self._rebuild_required:
+                self._needs_recovery = False
 
     def mark_recovery_required(self) -> None:
         with self._lock:
@@ -336,15 +361,32 @@ class SurfaceCacheIndex:
         with self._lock:
             if self._closed:
                 return
-            self.flush_accesses(force=True)
+            try:
+                self.flush_accesses(force=True)
+            except SurfaceCacheIndexUnavailableError:
+                pass
             if self._connection is not None and clean and not self._needs_recovery:
                 try:
                     self._set_meta_locked("clean_shutdown", 1)
                     self._connection.commit()
-                except sqlite3.DatabaseError:
-                    self._needs_recovery = True
+                except sqlite3.DatabaseError as exc:
+                    self._database_failure_locked(exc)
             self._close_connection_locked()
             self._closed = True
+
+    def _open_connection_locked(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        connection = self._connect()
+        self._connection = connection
+        try:
+            self._create_schema(connection)
+            prior_clean = self._meta_int_locked("clean_shutdown", default=1)
+            self._needs_recovery = self._needs_recovery or prior_clean != 1
+            self._set_meta_locked("clean_shutdown", 0)
+            connection.commit()
+        except sqlite3.DatabaseError:
+            self._close_connection_locked()
+            raise
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -427,11 +469,28 @@ class SurfaceCacheIndex:
         try:
             self._set_meta_locked("clean_shutdown", 0)
             self._connection.commit()
+        except sqlite3.DatabaseError as exc:
+            self._database_failure_locked(exc)
+
+    def _database_failure_locked(
+        self,
+        exc: sqlite3.DatabaseError,
+    ) -> SurfaceCacheIndexUnavailableError:
+        self._needs_recovery = True
+        self._rebuild_required = True
+        self._close_connection_locked()
+        return SurfaceCacheIndexUnavailableError(
+            f"surface cache index unavailable: {exc}"
+        )
+
+    @staticmethod
+    def _rollback_quietly(connection: sqlite3.Connection | None) -> None:
+        if connection is None:
+            return
+        try:
+            connection.rollback()
         except sqlite3.DatabaseError:
-            try:
-                self._connection.rollback()
-            except sqlite3.DatabaseError:
-                pass
+            pass
 
     @staticmethod
     def _entry_from_row(row: sqlite3.Row) -> SurfaceCacheIndexEntry:
@@ -479,4 +538,8 @@ class SurfaceCacheIndex:
                 pass
 
 
-__all__ = ["SurfaceCacheIndex", "SurfaceCacheIndexEntry"]
+__all__ = [
+    "SurfaceCacheIndex",
+    "SurfaceCacheIndexEntry",
+    "SurfaceCacheIndexUnavailableError",
+]

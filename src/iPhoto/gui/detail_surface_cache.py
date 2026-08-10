@@ -32,6 +32,7 @@ from iPhoto.gui.detail_profile import emit_detail_event
 from iPhoto.gui.detail_surface_cache_index import (
     SurfaceCacheIndex,
     SurfaceCacheIndexEntry,
+    SurfaceCacheIndexUnavailableError,
 )
 from iPhoto.gui.detail_surface_residency import (
     SurfaceResidencyTracker,
@@ -312,10 +313,15 @@ class NeutralSurfaceStore:
         index = self._index_for_root()
         if index is None or not index.ensure_open():
             return None
-        if index.needs_recovery:
-            self.maintenance(recover=True)
         digest = _key_digest(request)
-        entry = index.get(digest)
+        try:
+            if index.needs_recovery:
+                self.maintenance(recover=True)
+                if index.needs_recovery:
+                    return None
+            entry = index.get(digest)
+        except SurfaceCacheIndexUnavailableError:
+            return None
         if entry is None:
             return None
         if (
@@ -327,7 +333,10 @@ class NeutralSurfaceStore:
         try:
             file = path.open("rb")
         except FileNotFoundError:
-            index.remove(digest)
+            try:
+                index.remove(digest)
+            except SurfaceCacheIndexUnavailableError:
+                pass
             return None
         except OSError as exc:
             raise SurfaceCacheCorruptError(str(exc)) from exc
@@ -429,6 +438,8 @@ class NeutralSurfaceStore:
             except (BufferError, OSError):
                 pass
             file.close()
+            if isinstance(exc, SurfaceCacheIndexUnavailableError):
+                return None
             if isinstance(exc, SurfaceCacheCorruptError):
                 raise
             raise SurfaceCacheCorruptError(str(exc)) from exc
@@ -474,6 +485,10 @@ class NeutralSurfaceStore:
         index = self._index_for_root()
         if index is None or not index.ensure_open():
             return False
+        if index.needs_recovery:
+            self.maintenance(recover=True)
+            if index.needs_recovery:
+                return False
         digest = _key_digest(request)
         temporary: Path | None = None
         replaced = False
@@ -550,6 +565,15 @@ class NeutralSurfaceStore:
                 self.maintenance()
             self._cleanup_legacy_cache()
             return True
+        except SurfaceCacheIndexUnavailableError:
+            if replaced and not metadata_committed:
+                self._cleanup_failed_write(index, digest, path)
+            elif temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    index.mark_recovery_required()
+            return metadata_committed
         except (BufferError, OSError, ValueError):
             if replaced and not metadata_committed:
                 self._cleanup_failed_write(index, digest, path)
@@ -571,7 +595,10 @@ class NeutralSurfaceStore:
             path.unlink(missing_ok=True)
         except OSError:
             payload_removed = False
-        row_removed = index.remove(digest)
+        try:
+            row_removed = index.remove(digest)
+        except SurfaceCacheIndexUnavailableError:
+            row_removed = False
         if not payload_removed or not row_removed:
             index.mark_recovery_required()
 
@@ -588,7 +615,10 @@ class NeutralSurfaceStore:
 
     def flush_accesses_if_due(self, *, force: bool = False) -> bool:
         index = self._index_for_root()
-        return bool(index is not None and index.flush_accesses(force=force))
+        try:
+            return bool(index is not None and index.flush_accesses(force=force))
+        except SurfaceCacheIndexUnavailableError:
+            return False
 
     def run_pending_audits(self) -> None:
         with self._lock:

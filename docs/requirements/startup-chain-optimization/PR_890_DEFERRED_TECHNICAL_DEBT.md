@@ -21,7 +21,7 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 
 | ID | 优先级 | 债务 | 当前风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 已完成 multi-generation clean-marker lease ownership，并通过全部非 Windows 长尾门禁 | `automated_pass` |
+| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 正在收口跨进程 cache namespace ownership | `in_progress` |
 | TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
 | TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
 | TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
@@ -108,6 +108,14 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
   已通过三平台 surface-cache、GPU-first、startup、完整 `test` 等共 14 个非 Windows
   长尾 job，三平台原始 cache JSON artifacts 均存在；归属 TD-890-03 的 Windows Pets
   production-shape 在记录时仍运行，不作为本轮自动通过判定的阻塞项。
+- 跨进程 ownership 收口在 cache namespace 上增加 canonical `QLockFile` 独占锁；第二个
+  进程无法取得锁时只禁用该图库的 surface disk tier，lookup/write/maintenance 均在
+  SQLite 和 payload 边界前 fail-open，原图 decode 与 memory cache 继续可用。锁释放后
+  以 30 秒 monotonic cooldown 自动重试；clean owner handoff 不扫描目录，crashed owner
+  则沿既有 dirty recovery 扫描。实现/合同 SHA 为 `b839950a`、`f1aac226`、`50b46215`；
+  本地 cache+benchmark 59 项、Detail/GPU-first 137 项、startup 108 项、完整 pytest
+  2928 项以及架构、compileall、Ruff、diff check 已通过，TD 状态暂保持 `in_progress`
+  等待该实现 head 的三平台证据。
 - 最后用户版本 v6.6.8 不包含 neutral-surface 持久化格式；兼容路径为“无旧 cache →
   初始化 v3”，不读取或迁移开发阶段 v2。
 

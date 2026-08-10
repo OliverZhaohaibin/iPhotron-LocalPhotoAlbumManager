@@ -3,12 +3,17 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import subprocess
+import sys
+import textwrap
+import time
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import Mock, patch
 
 import pytest
+from PySide6.QtCore import QLockFile
 from PySide6.QtGui import QImage
 
 import iPhoto.gui.detail_surface_cache as surface_cache_module
@@ -68,6 +73,67 @@ def _index_metadata(root: Path) -> dict[str, int]:
         }
     finally:
         connection.close()
+
+
+_HOLD_INDEX_SCRIPT = textwrap.dedent(
+    """
+    import sys
+    import time
+    from pathlib import Path
+
+    from iPhoto.gui.detail_surface_cache_index import SurfaceCacheIndex
+
+    index = SurfaceCacheIndex(Path(sys.argv[1]))
+    if not index.ensure_open():
+        raise SystemExit(2)
+    Path(sys.argv[2]).write_text("ready", encoding="utf-8")
+    release = Path(sys.argv[3])
+    while not release.exists():
+        time.sleep(0.01)
+    index.close()
+    """
+)
+
+
+def _start_index_holder(
+    root: Path,
+    ready: Path,
+    release: Path,
+) -> subprocess.Popen[str]:
+    env = os.environ.copy()
+    project_root = Path(__file__).resolve().parents[2]
+    env["PYTHONPATH"] = str(project_root / "src")
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_INDEX_SCRIPT, str(root), str(ready), str(release)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 10.0
+    while not ready.exists() and time.monotonic() < deadline:
+        if child.poll() is not None:
+            stdout, stderr = child.communicate()
+            pytest.fail(
+                f"surface index holder exited early ({child.returncode}): {stdout}\n{stderr}"
+            )
+        time.sleep(0.01)
+    if not ready.exists():
+        child.kill()
+        stdout, stderr = child.communicate()
+        pytest.fail(f"surface index holder did not become ready: {stdout}\n{stderr}")
+    return child
+
+
+def _release_index_holder(child: subprocess.Popen[str], release: Path) -> None:
+    release.write_text("release", encoding="utf-8")
+    try:
+        stdout, stderr = child.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        stdout, stderr = child.communicate()
+        pytest.fail(f"surface index holder did not close: {stdout}\n{stderr}")
+    assert child.returncode == 0, (stdout, stderr)
 
 
 def _request(source: Path, *, revision: int = 11, level: int = 1024) -> DetailRenderRequest:
@@ -366,6 +432,271 @@ def test_new_process_session_recovers_stale_active_lease(
     assert metadata["active_leases"] == 1
     assert metadata["recovery_required"] == 1
     recovered.close(clean=False)
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    (
+        (QLockFile.LockError.LockFailedError, "owned_by_other_process"),
+        (QLockFile.LockError.PermissionError, "lock_permission_error"),
+        (QLockFile.LockError.UnknownError, "lock_io_error"),
+    ),
+)
+def test_namespace_lock_failure_is_throttled_without_opening_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: QLockFile.LockError,
+    reason: str,
+) -> None:
+    lock_file = Mock()
+    lock_file.tryLock.return_value = False
+    lock_file.error.return_value = error
+    factory = Mock(return_value=lock_file)
+    monkeypatch.setattr(
+        surface_cache_index_module,
+        "_NAMESPACE_LOCK_FILE_FACTORY",
+        factory,
+    )
+    index = SurfaceCacheIndex(tmp_path / "cache")
+
+    assert not index.ensure_open()
+    assert not index.ensure_open()
+    assert index.open_unavailable_reason == reason
+    assert not index.path.exists()
+    assert not index.needs_recovery
+    factory.assert_called_once_with(str(index.lock_path))
+    lock_file.setStaleLockTime.assert_called_once_with(0)
+    lock_file.tryLock.assert_called_once_with(0)
+
+    index.close()
+    lock_file.unlock.assert_not_called()
+
+
+def test_store_emits_one_namespace_lock_diagnostic_per_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_file = Mock()
+    lock_file.tryLock.return_value = False
+    lock_file.error.return_value = QLockFile.LockError.LockFailedError
+    monkeypatch.setattr(
+        surface_cache_index_module,
+        "_NAMESPACE_LOCK_FILE_FACTORY",
+        Mock(return_value=lock_file),
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        surface_cache_module,
+        "emit_detail_event",
+        lambda stage, **details: events.append((stage, details)),
+    )
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+
+    assert store.load(request) is None
+    assert store.load(request) is None
+    assert not store.write(request, _surface(request))
+    store.maintenance(force_prune=True)
+    store.close()
+
+    assert events == [
+        (
+            "surface_cache_disk_unavailable",
+            {"generation": 0, "reason": "owned_by_other_process"},
+        )
+    ]
+
+
+def test_secondary_process_cache_fails_open_without_changing_owner_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library = tmp_path / "library"
+    request = _request(library / "photo.jpg")
+    populated = NeutralSurfaceStore(library)
+    assert populated.write(request, _surface(request))
+    payload = populated.entry_path(request)
+    index_root = populated.root
+    assert payload is not None and index_root is not None
+    original_payload_mtime_ns = payload.stat().st_mtime_ns
+    populated.close()
+    ready = tmp_path / "holder-ready"
+    release = tmp_path / "holder-release"
+    child = _start_index_holder(index_root, ready, release)
+    original_glob = Path.glob
+
+    def fail_payload_scan(path: Path, pattern: str):
+        if path == index_root:
+            raise AssertionError("secondary process must not scan cache payloads")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", fail_payload_scan)
+    delegate = Mock()
+    delegate.decode.side_effect = lambda prepared, _token: _surface(prepared)
+    contender = NeutralSurfaceStore(library)
+    backend = CachedStillDecodeBackend(delegate, store=contender)
+    try:
+        decoded = backend.decode(request, _Token())
+        backend.store.maintenance(force_prune=True)
+        backend.shutdown(timeout_ms=5000)
+
+        assert decoded is not None
+        delegate.decode.assert_called_once()
+        assert payload.exists()
+        assert payload.stat().st_mtime_ns == original_payload_mtime_ns
+        metadata = _index_metadata(index_root)
+        assert metadata["clean_shutdown"] == 0
+        assert metadata["active_leases"] == 1
+        assert metadata["recovery_required"] == 0
+    finally:
+        if not backend.store.closed:
+            backend.shutdown(timeout_ms=5000)
+        _release_index_holder(child, release)
+
+
+def test_secondary_process_retries_after_clean_owner_close_without_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library = tmp_path / "library"
+    request = _request(library / "photo.jpg")
+    populated = NeutralSurfaceStore(library)
+    assert populated.write(request, _surface(request))
+    index_root = populated.root
+    assert index_root is not None
+    populated.close()
+    ready = tmp_path / "holder-ready"
+    release = tmp_path / "holder-release"
+    child = _start_index_holder(index_root, ready, release)
+    contender = NeutralSurfaceStore(library)
+    contender_index = contender._index_for_root()
+    assert contender_index is not None
+    monotonic_ns = [1]
+    monkeypatch.setattr(
+        surface_cache_index_module.time,
+        "monotonic_ns",
+        lambda: monotonic_ns[0],
+    )
+
+    try:
+        assert contender.load(request) is None
+        assert contender_index.open_unavailable_reason == "owned_by_other_process"
+        _release_index_holder(child, release)
+        monotonic_ns[0] += surface_cache_index_module._NAMESPACE_LOCK_RETRY_NS
+        original_glob = Path.glob
+
+        def fail_payload_scan(path: Path, pattern: str):
+            if path == index_root:
+                raise AssertionError("clean owner handoff must not scan cache payloads")
+            return original_glob(path, pattern)
+
+        monkeypatch.setattr(Path, "glob", fail_payload_scan)
+        loaded = contender.load(request)
+
+        assert loaded is not None
+        assert loaded.cache_tier == "disk"
+        assert contender_index.open_unavailable_reason is None
+        assert not contender_index.needs_recovery
+    finally:
+        if child.poll() is None:
+            _release_index_holder(child, release)
+        contender.close()
+
+    metadata = _index_metadata(index_root)
+    assert metadata["clean_shutdown"] == 1
+    assert metadata["active_leases"] == 0
+    assert metadata["recovery_required"] == 0
+
+
+def test_crashed_namespace_owner_triggers_recovery_before_disk_hit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library = tmp_path / "library"
+    request = _request(library / "photo.jpg")
+    populated = NeutralSurfaceStore(library)
+    assert populated.write(request, _surface(request))
+    index_root = populated.root
+    assert index_root is not None
+    populated.close()
+    ready = tmp_path / "holder-ready"
+    release = tmp_path / "holder-release"
+    child = _start_index_holder(index_root, ready, release)
+    child.kill()
+    child.communicate(timeout=10)
+    scanned: list[str] = []
+    original_glob = Path.glob
+
+    def count_payload_scan(path: Path, pattern: str):
+        if path == index_root:
+            scanned.append(pattern)
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", count_payload_scan)
+    recovered = NeutralSurfaceStore(library)
+
+    loaded = recovered.load(request)
+
+    assert loaded is not None
+    assert loaded.cache_tier == "disk"
+    assert scanned == ["*/*.tmp", "*/*.ipsurface"]
+    recovered.close()
+    metadata = _index_metadata(index_root)
+    assert metadata["clean_shutdown"] == 1
+    assert metadata["active_leases"] == 0
+    assert metadata["recovery_required"] == 0
+
+
+def test_canonical_cache_identity_shares_lock_across_path_aliases(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    alias = tmp_path / "library-alias"
+    try:
+        alias.symlink_to(library, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    first = NeutralSurfaceStore(library)
+    second = NeutralSurfaceStore(alias)
+    first_index = first._index_for_root()
+    second_index = second._index_for_root()
+    assert first_index is not None and second_index is not None
+
+    assert first.root == second.root
+    assert first_index.lock_path == second_index.lock_path
+    assert first_index.ensure_open()
+    assert second_index.ensure_open()
+    first.close()
+
+    metadata = _index_metadata(first_index.root)
+    assert metadata["clean_shutdown"] == 0
+    assert metadata["active_leases"] == 1
+
+    second.close()
+    metadata = _index_metadata(first_index.root)
+    assert metadata["clean_shutdown"] == 1
+    assert metadata["active_leases"] == 0
+
+
+def test_runtime_database_failure_keeps_namespace_lock_until_close(
+    tmp_path: Path,
+) -> None:
+    index = SurfaceCacheIndex(tmp_path)
+    _fail_index_execute(index, lambda sql: "FROM entries" in sql)
+
+    with pytest.raises(
+        surface_cache_index_module.SurfaceCacheIndexUnavailableError,
+    ):
+        index.get("missing")
+
+    assert index._namespace_lock_acquired
+    assert index.lock_path.exists()
+    assert index._namespace_lock_key in surface_cache_index_module._ACTIVE_NAMESPACE_LOCKS
+
+    index.close(clean=False)
+    assert not index._namespace_lock_acquired
+    assert index._namespace_lock_key not in surface_cache_index_module._ACTIVE_NAMESPACE_LOCKS
 
 
 def test_missing_payload_removes_stale_metadata_row(tmp_path: Path) -> None:

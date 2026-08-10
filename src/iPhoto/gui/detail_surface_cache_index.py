@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ from typing import Final
 
 _ACCESS_BATCH: Final = 128
 _ACCESS_INTERVAL_NS: Final = 30 * 1_000_000_000
+_PROCESS_SESSION_TOKEN: Final = secrets.randbits(63) or 1
+_LEASE_REGISTRY_LOCK = RLock()
+_ACTIVE_SESSION_LEASES: dict[str, set[int]] = {}
 
 
 class SurfaceCacheIndexUnavailableError(RuntimeError):
@@ -44,6 +48,10 @@ class SurfaceCacheIndex:
         self._lock = RLock()
         self._pending_access: dict[str, int] = {}
         self._last_access_flush_ns = time.time_ns()
+        self._session_token = _PROCESS_SESSION_TOKEN
+        self._lease_token = secrets.randbits(63) or 1
+        self._lease_registry_key = os.path.normcase(str(self.path.absolute()))
+        self._lease_acquired = False
         self._needs_recovery = False
         self._rebuild_required = False
         self._closed = False
@@ -51,6 +59,12 @@ class SurfaceCacheIndex:
     @property
     def needs_recovery(self) -> bool:
         with self._lock:
+            if self._connection is None or self._rebuild_required:
+                return self._needs_recovery or self._rebuild_required
+            try:
+                self._needs_recovery = self._recovery_required_locked()
+            except sqlite3.DatabaseError as exc:
+                raise self._database_failure_locked(exc) from exc
             return self._needs_recovery
 
     @property
@@ -66,19 +80,18 @@ class SurfaceCacheIndex:
                 return True
             rebuilding = self._rebuild_required
             if rebuilding:
+                self._needs_recovery = True
                 self._discard_broken_index_locked()
             try:
                 self._open_connection_locked()
             except (OSError, sqlite3.DatabaseError) as first_error:
                 self._discard_broken_index_locked()
+                self._needs_recovery = True
                 try:
                     self._open_connection_locked()
-                    self._needs_recovery = True
                 except (OSError, sqlite3.DatabaseError) as second_error:
                     self._database_failure_locked(second_error or first_error)
                     return False
-            if rebuilding:
-                self._needs_recovery = True
             self._rebuild_required = False
             return True
 
@@ -281,7 +294,7 @@ class SurfaceCacheIndex:
             now = time.time_ns()
             try:
                 return (
-                    self._needs_recovery
+                    self._recovery_required_locked()
                     or self._meta_int_locked("indexed_bytes") > max(0, int(budget_bytes))
                     or self._meta_int_locked("bytes_since_maintenance") >= int(byte_interval)
                     or now - self._meta_int_locked("last_maintenance_ns", default=now)
@@ -350,8 +363,24 @@ class SurfaceCacheIndex:
 
     def mark_recovered(self) -> None:
         with self._lock:
-            if self._connection is not None and not self._rebuild_required:
+            if (
+                self._connection is None
+                or self._rebuild_required
+                or not self._lease_acquired
+            ):
+                return
+            connection = self._connection
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._meta_int_locked("owner_session") != self._session_token:
+                    connection.rollback()
+                    return
+                self._set_meta_locked("recovery_required", 0)
+                connection.commit()
                 self._needs_recovery = False
+            except sqlite3.DatabaseError as exc:
+                self._rollback_quietly(connection)
+                raise self._database_failure_locked(exc) from exc
 
     def mark_recovery_required(self) -> None:
         with self._lock:
@@ -364,13 +393,12 @@ class SurfaceCacheIndex:
             try:
                 self.flush_accesses(force=True)
             except SurfaceCacheIndexUnavailableError:
-                pass
-            if self._connection is not None and clean and not self._needs_recovery:
+                clean = False
+            if self._connection is not None:
                 try:
-                    self._set_meta_locked("clean_shutdown", 1)
-                    self._connection.commit()
-                except sqlite3.DatabaseError as exc:
-                    self._database_failure_locked(exc)
+                    self._release_lease_locked(clean=clean)
+                except SurfaceCacheIndexUnavailableError:
+                    pass
             self._close_connection_locked()
             self._closed = True
 
@@ -380,11 +408,35 @@ class SurfaceCacheIndex:
         self._connection = connection
         try:
             self._create_schema(connection)
-            prior_clean = self._meta_int_locked("clean_shutdown", default=1)
-            self._needs_recovery = self._needs_recovery or prior_clean != 1
-            self._set_meta_locked("clean_shutdown", 0)
-            connection.commit()
+            with _LEASE_REGISTRY_LOCK:
+                connection.execute("BEGIN IMMEDIATE")
+                prior_clean = self._meta_int_locked("clean_shutdown", default=1)
+                owner_session = self._meta_int_locked("owner_session")
+                live_leases = len(
+                    _ACTIVE_SESSION_LEASES.get(self._lease_registry_key, ())
+                )
+                same_session_active = (
+                    owner_session == self._session_token and live_leases > 0
+                )
+                recovery_required = self._recovery_required_locked()
+                recovery_required = bool(
+                    recovery_required
+                    or self._needs_recovery
+                    or (prior_clean != 1 and not same_session_active)
+                )
+                self._set_meta_locked("owner_session", self._session_token)
+                self._set_meta_locked("active_leases", live_leases + 1)
+                self._set_meta_locked("recovery_required", int(recovery_required))
+                self._set_meta_locked("clean_shutdown", 0)
+                connection.commit()
+                _ACTIVE_SESSION_LEASES.setdefault(
+                    self._lease_registry_key,
+                    set(),
+                ).add(self._lease_token)
+                self._lease_acquired = True
+                self._needs_recovery = recovery_required
         except sqlite3.DatabaseError:
+            self._rollback_quietly(connection)
             self._close_connection_locked()
             raise
 
@@ -439,6 +491,9 @@ class SurfaceCacheIndex:
             ("bytes_since_maintenance", 0),
             ("last_maintenance_ns", now),
             ("clean_shutdown", 1),
+            ("owner_session", 0),
+            ("active_leases", 0),
+            ("recovery_required", 0),
         ):
             connection.execute(
                 "INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)",
@@ -466,11 +521,59 @@ class SurfaceCacheIndex:
         self._needs_recovery = True
         if self._connection is None:
             return
+        connection = self._connection
         try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._set_meta_locked("recovery_required", 1)
             self._set_meta_locked("clean_shutdown", 0)
-            self._connection.commit()
+            connection.commit()
         except sqlite3.DatabaseError as exc:
+            self._rollback_quietly(connection)
             self._database_failure_locked(exc)
+
+    def _recovery_required_locked(self) -> bool:
+        return self._meta_int_locked("recovery_required") != 0
+
+    def _release_lease_locked(self, *, clean: bool) -> None:
+        connection = self._connection
+        if connection is None or not self._lease_acquired:
+            return
+        try:
+            with _LEASE_REGISTRY_LOCK:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._meta_int_locked("owner_session") != self._session_token:
+                    connection.rollback()
+                    self._forget_live_lease_locked()
+                    return
+                live_leases = _ACTIVE_SESSION_LEASES.get(
+                    self._lease_registry_key,
+                    set(),
+                )
+                remaining = len(live_leases - {self._lease_token})
+                recovery_required = bool(
+                    self._recovery_required_locked()
+                    or self._needs_recovery
+                    or not clean
+                )
+                self._set_meta_locked("active_leases", remaining)
+                self._set_meta_locked("recovery_required", int(recovery_required))
+                self._set_meta_locked(
+                    "clean_shutdown",
+                    int(remaining == 0 and clean and not recovery_required),
+                )
+                connection.commit()
+                self._forget_live_lease_locked()
+        except sqlite3.DatabaseError as exc:
+            self._rollback_quietly(connection)
+            raise self._database_failure_locked(exc) from exc
+
+    def _forget_live_lease_locked(self) -> None:
+        leases = _ACTIVE_SESSION_LEASES.get(self._lease_registry_key)
+        if leases is not None:
+            leases.discard(self._lease_token)
+            if not leases:
+                _ACTIVE_SESSION_LEASES.pop(self._lease_registry_key, None)
+        self._lease_acquired = False
 
     def _database_failure_locked(
         self,
@@ -478,6 +581,17 @@ class SurfaceCacheIndex:
     ) -> SurfaceCacheIndexUnavailableError:
         self._needs_recovery = True
         self._rebuild_required = True
+        connection = self._connection
+        if connection is not None:
+            self._rollback_quietly(connection)
+            try:
+                with _LEASE_REGISTRY_LOCK:
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._set_meta_locked("recovery_required", 1)
+                    self._set_meta_locked("clean_shutdown", 0)
+                    connection.commit()
+            except sqlite3.DatabaseError:
+                self._rollback_quietly(connection)
         self._close_connection_locked()
         return SurfaceCacheIndexUnavailableError(
             f"surface cache index unavailable: {exc}"
@@ -531,6 +645,8 @@ class SurfaceCacheIndex:
     def _close_connection_locked(self) -> None:
         connection = self._connection
         self._connection = None
+        with _LEASE_REGISTRY_LOCK:
+            self._forget_live_lease_locked()
         if connection is not None:
             try:
                 connection.close()

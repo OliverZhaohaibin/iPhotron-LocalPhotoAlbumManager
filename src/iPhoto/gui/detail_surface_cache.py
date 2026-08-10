@@ -485,10 +485,13 @@ class NeutralSurfaceStore:
         index = self._index_for_root()
         if index is None or not index.ensure_open():
             return False
-        if index.needs_recovery:
-            self.maintenance(recover=True)
+        try:
             if index.needs_recovery:
-                return False
+                self.maintenance(recover=True)
+                if index.needs_recovery:
+                    return False
+        except SurfaceCacheIndexUnavailableError:
+            return False
         digest = _key_digest(request)
         temporary: Path | None = None
         replaced = False

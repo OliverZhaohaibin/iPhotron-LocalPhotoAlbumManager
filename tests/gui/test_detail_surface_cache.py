@@ -57,6 +57,19 @@ def _fail_index_execute(index: SurfaceCacheIndex, fail_when) -> None:
     index._connection = _FailingConnection(connection, fail_when)  # type: ignore[assignment]
 
 
+def _index_metadata(root: Path) -> dict[str, int]:
+    connection = sqlite3.connect(root / "index.sqlite3")
+    try:
+        return {
+            str(key): int(value)
+            for key, value in connection.execute(
+                "SELECT key, value FROM metadata"
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+
 def _request(source: Path, *, revision: int = 11, level: int = 1024) -> DetailRenderRequest:
     return DetailRenderRequest(
         generation=1,
@@ -272,6 +285,8 @@ def test_dirty_recovery_indexes_orphan_payload_and_removes_temp(tmp_path: Path) 
     index.remove(surface_cache_module._key_digest(request))
     temporary = path.parent / ".orphan.ipsurface.crash.tmp"
     temporary.write_bytes(b"partial")
+    with index._lock:
+        index._close_connection_locked()
 
     recovered = NeutralSurfaceStore(tmp_path)
     loaded = recovered.load(request)
@@ -279,6 +294,78 @@ def test_dirty_recovery_indexes_orphan_payload_and_removes_temp(tmp_path: Path) 
     assert loaded is not None
     assert loaded.cache_tier == "disk"
     assert not temporary.exists()
+
+
+def test_overlapping_index_leases_keep_marker_dirty_until_last_close(
+    tmp_path: Path,
+) -> None:
+    first = SurfaceCacheIndex(tmp_path)
+    second = SurfaceCacheIndex(tmp_path)
+
+    assert first.ensure_open()
+    assert second.ensure_open()
+    assert not first.needs_recovery
+    assert not second.needs_recovery
+
+    first.close(clean=True)
+
+    metadata = _index_metadata(tmp_path)
+    assert metadata["clean_shutdown"] == 0
+    assert metadata["active_leases"] == 1
+    assert metadata["recovery_required"] == 0
+
+    second.close(clean=True)
+
+    metadata = _index_metadata(tmp_path)
+    assert metadata["clean_shutdown"] == 1
+    assert metadata["active_leases"] == 0
+    assert metadata["recovery_required"] == 0
+
+
+def test_recovery_from_one_lease_survives_other_clean_close(tmp_path: Path) -> None:
+    first = SurfaceCacheIndex(tmp_path)
+    second = SurfaceCacheIndex(tmp_path)
+    assert first.ensure_open()
+    assert second.ensure_open()
+
+    first.mark_recovery_required()
+    first.close(clean=True)
+    second.close(clean=True)
+
+    metadata = _index_metadata(tmp_path)
+    assert metadata["clean_shutdown"] == 0
+    assert metadata["active_leases"] == 0
+    assert metadata["recovery_required"] == 1
+
+    reopened = SurfaceCacheIndex(tmp_path)
+    assert reopened.ensure_open()
+    assert reopened.needs_recovery
+    reopened.close(clean=False)
+
+
+def test_new_process_session_recovers_stale_active_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crashed = SurfaceCacheIndex(tmp_path)
+    assert crashed.ensure_open()
+    with crashed._lock:
+        crashed._close_connection_locked()
+    monkeypatch.setattr(
+        surface_cache_index_module,
+        "_PROCESS_SESSION_TOKEN",
+        crashed._session_token % ((1 << 63) - 1) + 1,
+    )
+
+    recovered = SurfaceCacheIndex(tmp_path)
+
+    assert recovered.ensure_open()
+    assert recovered.needs_recovery
+    metadata = _index_metadata(tmp_path)
+    assert metadata["clean_shutdown"] == 0
+    assert metadata["active_leases"] == 1
+    assert metadata["recovery_required"] == 1
+    recovered.close(clean=False)
 
 
 def test_missing_payload_removes_stale_metadata_row(tmp_path: Path) -> None:
@@ -357,11 +444,39 @@ def test_sqlite_lookup_failure_falls_back_to_delegate_decode(
     assert path.exists()
     assert index.needs_recovery
     assert index._connection is None
+    metadata = _index_metadata(index.root)
+    assert metadata["clean_shutdown"] == 0
+    assert metadata["recovery_required"] == 1
     backend.shutdown(timeout_ms=5000)
 
     reopened = SurfaceCacheIndex(index.root)
     assert reopened.ensure_open()
     assert reopened.needs_recovery
+    reopened.close(clean=False)
+
+
+def test_sqlite_lease_metadata_failure_keeps_index_dirty(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    _fail_index_execute(index, lambda sql: "SELECT value FROM metadata" in sql)
+
+    assert store.load(request) is None
+
+    assert path.exists()
+    assert index._connection is None
+    assert index.needs_recovery
+    metadata = _index_metadata(index.root)
+    assert metadata["clean_shutdown"] == 0
+    assert metadata["recovery_required"] == 1
+
+    reopened = SurfaceCacheIndex(index.root)
+    assert reopened.ensure_open()
+    assert reopened.needs_recovery
+    assert _index_metadata(index.root)["active_leases"] == 1
     reopened.close(clean=False)
 
 
@@ -707,6 +822,85 @@ def test_rebind_returns_before_old_store_io_drains(tmp_path: Path) -> None:
     release.set()
     backend.shutdown(timeout_ms=5000)
     assert old_closed.is_set()
+
+
+def test_a_b_a_rebind_keeps_latest_library_lease_dirty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_a = tmp_path / "library-a"
+    library_b = tmp_path / "library-b"
+    request = _request(library_a / "photo.jpg")
+    started = Event()
+    release = Event()
+    old_closed = Event()
+    old_store = NeutralSurfaceStore(library_a)
+    original_close = old_store.close
+
+    def close_old_store() -> None:
+        original_close()
+        old_closed.set()
+
+    monkeypatch.setattr(old_store, "close", close_old_store)
+    delegate = Mock()
+
+    def slow_decode(
+        prepared: DetailRenderRequest,
+        _token: _Token,
+    ) -> DecodedSurface:
+        started.set()
+        assert release.wait(5)
+        return _surface(prepared)
+
+    delegate.decode.side_effect = slow_decode
+    backend = CachedStillDecodeBackend(delegate, store=old_store)
+    failures: list[BaseException] = []
+
+    def decode() -> None:
+        try:
+            backend.decode(request, _Token())
+        except DecodeCancelledError as exc:
+            failures.append(exc)
+
+    worker = Thread(target=decode)
+    worker.start()
+    assert started.wait(5)
+
+    backend.bind_library(library_b)
+    backend.bind_library(library_a)
+    current_store = backend.store
+    current_index = current_store._index_for_root()
+    assert current_index is not None
+    original_glob = Path.glob
+
+    def fail_a_payload_scan(path: Path, pattern: str):
+        if path == current_index.root:
+            raise AssertionError("same-session A→B→A must not scan payloads")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", fail_a_payload_scan)
+
+    current_store.maintenance()
+
+    assert not current_index.needs_recovery
+    release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert old_closed.wait(5)
+    assert len(failures) == 1
+    assert isinstance(failures[0], DecodeCancelledError)
+    assert backend.memory_cache.used_bytes == 0
+    metadata = _index_metadata(current_index.root)
+    assert metadata["clean_shutdown"] == 0
+    assert metadata["active_leases"] == 1
+    assert metadata["recovery_required"] == 0
+
+    backend.shutdown(timeout_ms=5000)
+
+    metadata = _index_metadata(current_index.root)
+    assert metadata["clean_shutdown"] == 1
+    assert metadata["active_leases"] == 0
+    assert metadata["recovery_required"] == 0
 
 
 def test_shutdown_timeout_closes_store_after_active_decode_finishes(

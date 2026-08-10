@@ -172,6 +172,43 @@ def test_writes_below_maintenance_watermark_do_not_traverse_payload_directory(
     assert store.write(request, _surface(request))
 
 
+def test_disk_usage_failure_does_not_prune_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    disk_usage = Mock(side_effect=OSError("volume unavailable"))
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
+
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    finish_maintenance = Mock(wraps=index.finish_maintenance)
+    monkeypatch.setattr(index, "finish_maintenance", finish_maintenance)
+
+    store.maintenance(force_prune=True)
+
+    assert disk_usage.call_count >= 2
+    assert path.exists()
+    assert index.get(surface_cache_module._key_digest(request)) is not None
+    finish_maintenance.assert_not_called()
+
+
+def test_explicit_zero_budget_prunes_all_indexed_payloads(tmp_path: Path) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path, budget_bytes=0)
+
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+
+    assert not path.exists()
+    assert index.get(surface_cache_module._key_digest(request)) is None
+
+
 def test_indexed_prune_uses_lru_and_low_watermark(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

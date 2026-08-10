@@ -538,8 +538,9 @@ class NeutralSurfaceStore:
                 self._cleanup_failed_write(index, digest, path)
                 return False
             metadata_committed = True
-            if index.maintenance_due(
-                self._budget_bytes(),
+            budget = self._budget_bytes()
+            if budget is not None and index.maintenance_due(
+                budget,
                 byte_interval=_MAINTENANCE_WRITE_BYTES,
                 time_interval_ns=_MAINTENANCE_INTERVAL_NS,
             ):
@@ -629,6 +630,8 @@ class NeutralSurfaceStore:
                     return
             index.flush_accesses(force=True)
             budget = self._budget_bytes()
+            if budget is None:
+                return
             due = force_prune or index.maintenance_due(
                 budget,
                 byte_interval=_MAINTENANCE_WRITE_BYTES,
@@ -685,17 +688,17 @@ class NeutralSurfaceStore:
         if index is not None:
             index.close(clean=True)
 
-    def _budget_bytes(self) -> int:
+    def _budget_bytes(self) -> int | None:
         if self._budget_override is not None:
             return self._budget_override
         root = self.root
         if root is None:
-            return 0
+            return None
         try:
             probe = root if root.exists() else root.parents[3]
             return min(2 * _GIB, max(0, int(shutil.disk_usage(probe).free * 0.02)))
         except (IndexError, OSError):
-            return 0
+            return None
 
     def _recover_index(self, index: SurfaceCacheIndex) -> None:
         indexed = {entry.digest: entry for entry in index.all_entries()}

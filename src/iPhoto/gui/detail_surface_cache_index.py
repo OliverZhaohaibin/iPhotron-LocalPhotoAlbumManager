@@ -11,11 +11,24 @@ from pathlib import Path
 from threading import RLock
 from typing import Final
 
+from PySide6.QtCore import QLockFile
+
 _ACCESS_BATCH: Final = 128
 _ACCESS_INTERVAL_NS: Final = 30 * 1_000_000_000
+_NAMESPACE_LOCK_RETRY_NS: Final = 30 * 1_000_000_000
 _PROCESS_SESSION_TOKEN: Final = secrets.randbits(63) or 1
 _LEASE_REGISTRY_LOCK = RLock()
 _ACTIVE_SESSION_LEASES: dict[str, set[int]] = {}
+
+
+@dataclass(slots=True)
+class _NamespaceLockState:
+    lock_file: QLockFile
+    holders: set[int]
+
+
+_ACTIVE_NAMESPACE_LOCKS: dict[str, _NamespaceLockState] = {}
+_NAMESPACE_LOCK_FILE_FACTORY = QLockFile
 
 
 class SurfaceCacheIndexUnavailableError(RuntimeError):
@@ -42,16 +55,22 @@ class SurfaceCacheIndex:
     """One lock-serialized SQLite connection shared by cache worker threads."""
 
     def __init__(self, root: Path) -> None:
-        self.root = Path(root)
+        self.root = Path(root).expanduser().resolve(strict=False)
         self.path = self.root / "index.sqlite3"
+        self.lock_path = self.root / "index.sqlite3.lock"
         self._connection: sqlite3.Connection | None = None
         self._lock = RLock()
         self._pending_access: dict[str, int] = {}
         self._last_access_flush_ns = time.time_ns()
         self._session_token = _PROCESS_SESSION_TOKEN
         self._lease_token = secrets.randbits(63) or 1
-        self._lease_registry_key = os.path.normcase(str(self.path.absolute()))
+        self._lease_registry_key = os.path.normcase(str(self.path))
         self._lease_acquired = False
+        self._namespace_lock_token = secrets.randbits(63) or 1
+        self._namespace_lock_key = os.path.normcase(str(self.lock_path))
+        self._namespace_lock_acquired = False
+        self._namespace_lock_unavailable_reason: str | None = None
+        self._next_namespace_lock_retry_ns = 0
         self._needs_recovery = False
         self._rebuild_required = False
         self._closed = False
@@ -72,12 +91,21 @@ class SurfaceCacheIndex:
         with self._lock:
             return self._closed
 
+    @property
+    def open_unavailable_reason(self) -> str | None:
+        """Return the latest namespace-lock failure for diagnostics only."""
+
+        with self._lock:
+            return self._namespace_lock_unavailable_reason
+
     def ensure_open(self) -> bool:
         with self._lock:
             if self._closed:
                 return False
             if self._connection is not None:
                 return True
+            if not self._try_acquire_namespace_lock_locked():
+                return False
             rebuilding = self._rebuild_required
             if rebuilding:
                 self._needs_recovery = True
@@ -400,7 +428,69 @@ class SurfaceCacheIndex:
                 except SurfaceCacheIndexUnavailableError:
                     pass
             self._close_connection_locked()
+            self._release_namespace_lock_locked()
             self._closed = True
+
+    def _try_acquire_namespace_lock_locked(self) -> bool:
+        if self._namespace_lock_acquired:
+            return True
+        now = time.monotonic_ns()
+        if now < self._next_namespace_lock_retry_ns:
+            return False
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self._record_namespace_lock_failure_locked("lock_io_error", now)
+            return False
+        with _LEASE_REGISTRY_LOCK:
+            shared = _ACTIVE_NAMESPACE_LOCKS.get(self._namespace_lock_key)
+            if shared is not None:
+                shared.holders.add(self._namespace_lock_token)
+                self._namespace_lock_acquired = True
+                self._namespace_lock_unavailable_reason = None
+                self._next_namespace_lock_retry_ns = 0
+                return True
+            try:
+                lock_file = _NAMESPACE_LOCK_FILE_FACTORY(str(self.lock_path))
+                lock_file.setStaleLockTime(0)
+                acquired = bool(lock_file.tryLock(0))
+            except (OSError, RuntimeError):
+                self._record_namespace_lock_failure_locked("lock_io_error", now)
+                return False
+            if not acquired:
+                error = lock_file.error()
+                if error == QLockFile.LockError.LockFailedError:
+                    reason = "owned_by_other_process"
+                elif error == QLockFile.LockError.PermissionError:
+                    reason = "lock_permission_error"
+                else:
+                    reason = "lock_io_error"
+                self._record_namespace_lock_failure_locked(reason, now)
+                return False
+            _ACTIVE_NAMESPACE_LOCKS[self._namespace_lock_key] = _NamespaceLockState(
+                lock_file=lock_file,
+                holders={self._namespace_lock_token},
+            )
+            self._namespace_lock_acquired = True
+            self._namespace_lock_unavailable_reason = None
+            self._next_namespace_lock_retry_ns = 0
+            return True
+
+    def _record_namespace_lock_failure_locked(self, reason: str, now: int) -> None:
+        self._namespace_lock_unavailable_reason = str(reason)
+        self._next_namespace_lock_retry_ns = int(now) + _NAMESPACE_LOCK_RETRY_NS
+
+    def _release_namespace_lock_locked(self) -> None:
+        if not self._namespace_lock_acquired:
+            return
+        with _LEASE_REGISTRY_LOCK:
+            shared = _ACTIVE_NAMESPACE_LOCKS.get(self._namespace_lock_key)
+            if shared is not None:
+                shared.holders.discard(self._namespace_lock_token)
+                if not shared.holders:
+                    shared.lock_file.unlock()
+                    _ACTIVE_NAMESPACE_LOCKS.pop(self._namespace_lock_key, None)
+        self._namespace_lock_acquired = False
 
     def _open_connection_locked(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

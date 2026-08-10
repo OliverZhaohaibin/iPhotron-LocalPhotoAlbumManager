@@ -227,6 +227,7 @@ class NeutralSurfaceStore:
         self._maintenance_lock = RLock()
         self._disk_hit_count = 0
         self._pending_audits: set[str] = set()
+        self._reported_index_unavailable: set[str] = set()
         self._legacy_cleanup_done = False
         self.bind_library(library_root)
 
@@ -254,7 +255,7 @@ class NeutralSurfaceStore:
         root = None
         if library_root is not None:
             root = (
-                Path(library_root).expanduser().absolute()
+                Path(library_root).expanduser().resolve(strict=False)
                 / ".iPhoto"
                 / "cache"
                 / "detail-surfaces"
@@ -270,6 +271,7 @@ class NeutralSurfaceStore:
             self._root = root
             self._disk_hit_count = 0
             self._pending_audits.clear()
+            self._reported_index_unavailable.clear()
             self._legacy_cleanup_done = False
         if previous is not None:
             previous.close(clean=True)
@@ -286,6 +288,23 @@ class NeutralSurfaceStore:
                 index = SurfaceCacheIndex(root)
                 self._index = index
             return index
+
+    def _ensure_index_open(self, index: SurfaceCacheIndex) -> bool:
+        if index.ensure_open():
+            return True
+        reason = index.open_unavailable_reason
+        if reason is None:
+            return False
+        with self._lock:
+            if reason in self._reported_index_unavailable:
+                return False
+            self._reported_index_unavailable.add(reason)
+        emit_detail_event(
+            "surface_cache_disk_unavailable",
+            generation=0,
+            reason=reason,
+        )
+        return False
 
     def entry_path(self, request: DetailRenderRequest) -> Path | None:
         if not request.source_identity.has_stable_revision:
@@ -311,7 +330,7 @@ class NeutralSurfaceStore:
         if path is None:
             return None
         index = self._index_for_root()
-        if index is None or not index.ensure_open():
+        if index is None or not self._ensure_index_open(index):
             return None
         digest = _key_digest(request)
         try:
@@ -483,7 +502,7 @@ class NeutralSurfaceStore:
         if payload_size <= 0:
             return False
         index = self._index_for_root()
-        if index is None or not index.ensure_open():
+        if index is None or not self._ensure_index_open(index):
             return False
         try:
             if index.needs_recovery:
@@ -624,12 +643,12 @@ class NeutralSurfaceStore:
             return False
 
     def run_pending_audits(self) -> None:
+        index = self._index_for_root()
+        if index is None or not self._ensure_index_open(index):
+            return
         with self._lock:
             digests = tuple(self._pending_audits)
             self._pending_audits.clear()
-        index = self._index_for_root()
-        if index is None:
-            return
         try:
             for digest in digests:
                 entry = index.get(digest)
@@ -671,7 +690,7 @@ class NeutralSurfaceStore:
 
     def _maintain_index(self, *, recover: bool, force_prune: bool) -> None:
         index = self._index_for_root()
-        if index is None or not index.ensure_open():
+        if index is None or not self._ensure_index_open(index):
             return
         if recover or index.needs_recovery:
             self._recover_index(index)
@@ -930,7 +949,7 @@ class _SurfaceStoreGeneration:
 def _normalise_library_root(library_root: Path | None) -> Path | None:
     if library_root is None:
         return None
-    return Path(library_root).expanduser().absolute()
+    return Path(library_root).expanduser().resolve(strict=False)
 
 
 class CachedStillDecodeBackend:

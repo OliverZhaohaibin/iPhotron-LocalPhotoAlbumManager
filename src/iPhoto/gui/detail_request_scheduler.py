@@ -29,8 +29,9 @@ class DetailStillRequestScheduler(QObject):
 
     Native image decoders cannot reliably be interrupted once running.  The
     scheduler therefore promotes or subscribes to an existing same-key task
-    instead of launching a second decoder, while unrelated running stale tasks
-    are allowed to finish without publishing into the active generation.
+    instead of launching a second decoder.  Unrelated running stale tasks are
+    cooperatively cancelled and retained until their terminal signal, while the
+    queue keeps only the latest foreground request.
     """
 
     ready = Signal(int, object)
@@ -198,10 +199,18 @@ class DetailStillRequestScheduler(QObject):
         self._current_generation += 1
         self._prefetch_queue.clear()
         self._active_window_generation += 1
-        for entry in tuple(self._inflight_by_key.values()):
+        for entry in tuple(self._entry_by_worker_id.values()):
             entry.foreground_generation = None
+            cancel = getattr(entry.worker, "cancel", None)
+            if callable(cancel):
+                cancel()
             if entry.state == "queued" and self._pool.tryTake(entry.worker):
-                self._retire_entry(entry, cancel=True)
+                self._retire_entry(entry, cancel=False)
+            elif self._inflight_by_key.get(entry.key) is entry:
+                # A cancelled running worker remains owned through
+                # ``_entry_by_worker_id`` until its terminal signal, but it can
+                # no longer satisfy a later same-key request.
+                self._inflight_by_key.pop(entry.key, None)
 
     def shutdown(self, *, timeout_ms: int = 1500) -> None:
         """Cancel queued/running work and wait for the dedicated pool."""
@@ -211,7 +220,7 @@ class DetailStillRequestScheduler(QObject):
         self._shutting_down = True
         self._current_generation += 1
         self._prefetch_queue.clear()
-        for entry in tuple(self._inflight_by_key.values()):
+        for entry in tuple(self._entry_by_worker_id.values()):
             entry.foreground_generation = None
             cancel = getattr(entry.worker, "cancel", None)
             if callable(cancel):
@@ -221,7 +230,7 @@ class DetailStillRequestScheduler(QObject):
         self._pool.clear()
         completed = self._pool.waitForDone(max(0, int(timeout_ms)))
         if completed:
-            for entry in tuple(self._inflight_by_key.values()):
+            for entry in tuple(self._entry_by_worker_id.values()):
                 self._retire_entry(entry, cancel=False)
 
     def _create_entry(
@@ -275,9 +284,16 @@ class DetailStillRequestScheduler(QObject):
                 self._retire_entry(entry, cancel=True)
 
     def _detach_running_other_keys(self, active_key: DetailDecodeKey) -> None:
-        for entry in self._inflight_by_key.values():
+        for entry in tuple(self._inflight_by_key.values()):
             if entry.key != active_key:
                 entry.foreground_generation = None
+                cancel_worker = getattr(entry.worker, "cancel", None)
+                if callable(cancel_worker):
+                    cancel_worker()
+                if self._inflight_by_key.get(entry.key) is entry:
+                    # Retain lifecycle ownership by worker id, but do not reuse
+                    # a cancellation token that can never become active again.
+                    self._inflight_by_key.pop(entry.key, None)
 
     def _on_worker_started(self, worker: object) -> None:
         entry = self._entry_by_worker_id.get(id(worker))

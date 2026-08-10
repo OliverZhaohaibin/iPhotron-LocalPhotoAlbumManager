@@ -1326,13 +1326,13 @@ def test_merge_pet_shows_warning_when_only_hidden_mismatch_exists(
 @pytest.mark.parametrize(
     ("name", "species", "expected"),
     [
-        (None, "cat", "Unconfirmed Cat"),
-        (None, "dog", "Unconfirmed Dog"),
-        (None, None, "Unconfirmed Pet"),
+        (None, "cat", ""),
+        (None, "dog", ""),
+        (None, None, ""),
         ("Miso", "cat", "Miso"),
     ],
 )
-def test_pet_card_uses_unconfirmed_species_fallback_label(
+def test_pet_card_has_no_unconfirmed_placeholder_label(
     qapp: QApplication,
     name: str | None,
     species: str | None,
@@ -1355,6 +1355,44 @@ def test_pet_card_uses_unconfirmed_species_fallback_label(
     )
 
     assert card.display_name() == expected
+
+
+def test_pet_card_profile_state_does_not_change_rendering(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+
+    def _render_card(profile_state: str) -> QImage:
+        card = people_dashboard_cards.PetCard(
+            board=widget._board,
+            summary=PetSummary(
+                "pet-a",
+                None,
+                "det-a",
+                3,
+                None,
+                "2024-01-01T00:00:00Z",
+                asset_count=3,
+                profile_state=profile_state,
+                species_label="cat",
+            ),
+            seed_index=0,
+        )
+        artwork = QPixmap(card.size())
+        artwork.fill(QColor("#708090"))
+        card._artwork = artwork
+
+        card.show()
+        qapp.processEvents()
+        image = card.grab().toImage()
+        card.close()
+        return image
+
+    stable_image = _render_card("stable")
+    unstable_image = _render_card("unstable")
+
+    assert (
+        stable_image.pixelColor(stable_image.width() // 2, stable_image.height() // 2).alpha() > 0
+    )
+    assert stable_image == unstable_image
 
 
 def test_toggle_person_hidden_updates_service_and_reloads(monkeypatch, qapp: QApplication) -> None:

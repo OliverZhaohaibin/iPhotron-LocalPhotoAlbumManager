@@ -343,38 +343,7 @@ class PetCard(IdentityCard):
         return self.summary.pet_id
 
     def display_name(self) -> str:
-        name = (self.summary.name or "").strip()
-        if name:
-            return name
-        species = str(self.summary.species_label or "").strip().casefold()
-        if species == "cat":
-            return self.tr("Unconfirmed Cat")
-        if species == "dog":
-            return self.tr("Unconfirmed Dog")
-        return self.tr("Unconfirmed Pet")
-
-    def _paint_count_badge(self, painter: QPainter, card_rect: QRectF) -> None:
-        badge_rect = QRectF(card_rect.left() + 12, card_rect.top() + 12, 44, 28)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_qcolor("#111827", 175))
-        painter.drawRoundedRect(badge_rect, 14, 14)
-        painter.setPen(_qcolor("#FFFFFF"))
-        painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
-        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self._badge_count()))
-        if str(self.summary.profile_state or "unstable") != "stable":
-            label = self.tr("Unconfirmed")
-            label_width = max(82, painter.fontMetrics().horizontalAdvance(label) + 22)
-            state_rect = QRectF(
-                card_rect.right() - label_width - 12,
-                card_rect.top() + 12,
-                label_width,
-                28,
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(_qcolor("#B45309", 220))
-            painter.drawRoundedRect(state_rect, 14, 14)
-            painter.setPen(_qcolor("#FFFFFF"))
-            painter.drawText(state_rect, Qt.AlignmentFlag.AlignCenter, label)
+        return (self.summary.name or "").strip()
 
     def _badge_count(self) -> int:
         if hasattr(self.summary, "asset_count"):

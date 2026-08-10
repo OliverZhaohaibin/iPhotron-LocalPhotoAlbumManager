@@ -649,6 +649,54 @@ def test_rebind_rejects_old_decode_without_repopulating_memory_cache(
     new_store.close.assert_called_once_with()
 
 
+def test_rebind_retires_generation_before_shared_memory_cache_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    request = _request(old_root / "photo.jpg")
+    old_store = Mock()
+    old_store.library_root = old_root.absolute()
+    old_store.load.return_value = _surface(request)
+    new_store = Mock()
+    new_store.library_root = new_root.absolute()
+    memory_cache = MappedSurfaceCache()
+    backend = CachedStillDecodeBackend(
+        Mock(),
+        memory_cache=memory_cache,
+        store=old_store,
+        store_factory=Mock(return_value=new_store),
+    )
+    old_generation = backend._active_store_generation
+    original_clear = memory_cache.clear
+    interleaved_result: list[str] = []
+    armed = True
+
+    def clear_with_old_decode_completion() -> None:
+        nonlocal armed
+        original_clear()
+        if not armed:
+            return
+        armed = False
+        try:
+            backend._decode_for_generation(request, _Token(), old_generation)
+        except DecodeCancelledError:
+            interleaved_result.append("stale")
+        else:
+            interleaved_result.append("accepted")
+
+    monkeypatch.setattr(memory_cache, "clear", clear_with_old_decode_completion)
+
+    backend.bind_library(new_root)
+
+    assert interleaved_result == ["stale"]
+    assert backend.memory_cache.used_bytes == 0
+    backend.shutdown(timeout_ms=5000)
+    old_store.close.assert_called_once_with()
+    new_store.close.assert_called_once_with()
+
+
 def test_closed_store_and_index_cannot_reopen(tmp_path: Path) -> None:
     request = _request(tmp_path / "photo.jpg")
     store = NeutralSurfaceStore(tmp_path)

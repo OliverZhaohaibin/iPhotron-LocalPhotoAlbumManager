@@ -921,14 +921,14 @@ class CachedStillDecodeBackend:
             return self._active_store_generation.store
 
     def bind_library(self, library_root: Path | None) -> None:
-        self.memory_cache.clear()
         normalised_root = _normalise_library_root(library_root)
         with self._lock:
             if self._shutting_down:
                 return
-            self._color_stats_by_source.clear()
             current = self._active_store_generation
             if current.library_root == normalised_root:
+                self._color_stats_by_source.clear()
+                self.memory_cache.clear()
                 self._submit_generation_locked(current, current.store.maintenance)
                 return
             replacement = self._store_factory(normalised_root)
@@ -940,6 +940,8 @@ class CachedStillDecodeBackend:
             )
             current.retired = True
             self._active_store_generation = generation
+            self._color_stats_by_source.clear()
+            self.memory_cache.clear()
             self._queue_store_close_locked(current)
             self._submit_generation_locked(generation, replacement.maintenance)
 

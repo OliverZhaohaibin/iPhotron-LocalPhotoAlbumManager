@@ -2,7 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tools.detail_surface_cache_benchmark import benchmark, compare
+from tools.detail_surface_cache_benchmark import (
+    _fresh_probe_orders,
+    _replace_fresh_process_samples,
+    benchmark,
+    compare,
+)
+
+
+def _fresh_probe(sample: int) -> dict[str, object]:
+    return {
+        "load_ms": float(sample),
+        "consume_ms": 1.0,
+        "load_to_consumed_ms": float(sample + 1),
+        "store_initialization_ms": 2.0,
+        "page_faults": 3,
+        "rss_delta_bytes": 4,
+        "checksum_calls": 0,
+        "consumption_digest": "digest",
+    }
 
 
 def test_surface_cache_benchmark_records_candidate_contract(tmp_path: Path) -> None:
@@ -29,6 +47,39 @@ def test_surface_cache_benchmark_records_candidate_contract(tmp_path: Path) -> N
     assert len(row["fresh_process_samples"]) == 40
     assert len(row["warm_process_samples"]) == 40
     assert row["python_peak_bytes"] <= 8 * 1024 * 1024 + 4096
+
+
+def test_surface_cache_fresh_probes_alternate_pair_order() -> None:
+    assert _fresh_probe_orders(4) == [
+        ("baseline", "candidate"),
+        ("candidate", "baseline"),
+        ("baseline", "candidate"),
+        ("candidate", "baseline"),
+    ]
+
+
+def test_surface_cache_replaces_deferred_fresh_metrics() -> None:
+    payload = {
+        "consume_samples": 1,
+        "results": [
+            {
+                "size_mib": 16,
+                "consumption_digest": "digest",
+                "fresh_process_samples": [_fresh_probe(99)],
+            }
+        ],
+    }
+    probes = [_fresh_probe(sample) for sample in range(1, 41)]
+
+    _replace_fresh_process_samples(payload, size_mib=16, probes=probes)
+
+    row = payload["results"][0]
+    assert payload["consume_samples"] == 40
+    assert row["fresh_process_load_p50_ms"] == 20.5
+    assert row["fresh_process_load_p95_ms"] == 38.0
+    assert row["fresh_process_load_to_consumed_p95_ms"] == 39.0
+    assert row["fresh_process_checksum_calls"] == 0
+    assert row["fresh_process_samples"] == probes
 
 
 def test_surface_cache_comparison_applies_memory_and_latency_gates() -> None:

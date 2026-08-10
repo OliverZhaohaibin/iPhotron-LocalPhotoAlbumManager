@@ -290,14 +290,17 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           mkdir -p metrics
-          PYTHONPATH="${{ github.workspace }}/baseline/src" python candidate/tools/detail_surface_cache_benchmark.py run --label baseline --repo-root baseline --sizes-mib 16 --output metrics/baseline-16.json
-          PYTHONPATH="${{ github.workspace }}/candidate/src" python candidate/tools/detail_surface_cache_benchmark.py run --label candidate --repo-root candidate --sizes-mib 16 --output metrics/candidate-16.json
+          PYTHONPATH="${{ github.workspace }}/baseline/src" python candidate/tools/detail_surface_cache_benchmark.py run --label baseline --repo-root baseline --sizes-mib 16 --defer-fresh-probes --output metrics/baseline-16.json
+          PYTHONPATH="${{ github.workspace }}/candidate/src" python candidate/tools/detail_surface_cache_benchmark.py run --label candidate --repo-root candidate --sizes-mib 16 --defer-fresh-probes --output metrics/candidate-16.json
+          python candidate/tools/detail_surface_cache_benchmark.py pair-fresh --baseline metrics/baseline-16.json --candidate metrics/candidate-16.json --baseline-repo baseline --candidate-repo candidate --size-mib 16
           python candidate/tools/detail_surface_cache_benchmark.py compare --baseline metrics/baseline-16.json --candidate metrics/candidate-16.json --output metrics/comparison-16.json
-          PYTHONPATH="${{ github.workspace }}/candidate/src" python candidate/tools/detail_surface_cache_benchmark.py run --label candidate --repo-root candidate --sizes-mib 64 --output metrics/candidate-64.json
-          PYTHONPATH="${{ github.workspace }}/baseline/src" python candidate/tools/detail_surface_cache_benchmark.py run --label baseline --repo-root baseline --sizes-mib 64 --output metrics/baseline-64.json
+          PYTHONPATH="${{ github.workspace }}/candidate/src" python candidate/tools/detail_surface_cache_benchmark.py run --label candidate --repo-root candidate --sizes-mib 64 --defer-fresh-probes --output metrics/candidate-64.json
+          PYTHONPATH="${{ github.workspace }}/baseline/src" python candidate/tools/detail_surface_cache_benchmark.py run --label baseline --repo-root baseline --sizes-mib 64 --defer-fresh-probes --output metrics/baseline-64.json
+          python candidate/tools/detail_surface_cache_benchmark.py pair-fresh --baseline metrics/baseline-64.json --candidate metrics/candidate-64.json --baseline-repo baseline --candidate-repo candidate --size-mib 64
           python candidate/tools/detail_surface_cache_benchmark.py compare --baseline metrics/baseline-64.json --candidate metrics/candidate-64.json --output metrics/comparison-64.json
-          PYTHONPATH="${{ github.workspace }}/baseline/src" python candidate/tools/detail_surface_cache_benchmark.py run --label baseline --repo-root baseline --sizes-mib 180 --output metrics/baseline-180.json
-          PYTHONPATH="${{ github.workspace }}/candidate/src" python candidate/tools/detail_surface_cache_benchmark.py run --label candidate --repo-root candidate --sizes-mib 180 --output metrics/candidate-180.json
+          PYTHONPATH="${{ github.workspace }}/baseline/src" python candidate/tools/detail_surface_cache_benchmark.py run --label baseline --repo-root baseline --sizes-mib 180 --defer-fresh-probes --output metrics/baseline-180.json
+          PYTHONPATH="${{ github.workspace }}/candidate/src" python candidate/tools/detail_surface_cache_benchmark.py run --label candidate --repo-root candidate --sizes-mib 180 --defer-fresh-probes --output metrics/candidate-180.json
+          python candidate/tools/detail_surface_cache_benchmark.py pair-fresh --baseline metrics/baseline-180.json --candidate metrics/candidate-180.json --baseline-repo baseline --candidate-repo candidate --size-mib 180
           python candidate/tools/detail_surface_cache_benchmark.py compare --baseline metrics/baseline-180.json --candidate metrics/candidate-180.json --output metrics/comparison-180.json
 
       - name: Upload cache benchmark metrics

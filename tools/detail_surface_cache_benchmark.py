@@ -252,6 +252,7 @@ def _fresh_process_probe(
     *,
     size_mib: int,
     revision: int,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     completed = subprocess.run(  # noqa: S603 - fixed interpreter and local tool
         [
@@ -268,9 +269,192 @@ def _fresh_process_probe(
         check=True,
         capture_output=True,
         text=True,
-        env=os.environ.copy(),
+        env=os.environ.copy() if env is None else env,
     )
     return dict(json.loads(completed.stdout))
+
+
+def _fresh_probe_orders(samples: int) -> list[tuple[str, str]]:
+    return [
+        ("baseline", "candidate")
+        if sample % 2 == 0
+        else ("candidate", "baseline")
+        for sample in range(samples)
+    ]
+
+
+def _fresh_probe_metrics(probes: list[dict[str, Any]]) -> dict[str, Any]:
+    if not probes:
+        raise ValueError("fresh-process probes must not be empty")
+    fresh_load = [float(probe["load_ms"]) for probe in probes]
+    fresh_consume = [float(probe["consume_ms"]) for probe in probes]
+    fresh_total = [float(probe["load_to_consumed_ms"]) for probe in probes]
+    fresh_initialization = [
+        float(probe["store_initialization_ms"]) for probe in probes
+    ]
+    return {
+        "fresh_process_load_p50_ms": round(statistics.median(fresh_load), 3),
+        "fresh_process_load_p95_ms": round(_percentile(fresh_load, 0.95), 3),
+        "fresh_process_consume_p50_ms": round(
+            statistics.median(fresh_consume),
+            3,
+        ),
+        "fresh_process_consume_p95_ms": round(
+            _percentile(fresh_consume, 0.95),
+            3,
+        ),
+        "fresh_process_load_to_consumed_p50_ms": round(
+            statistics.median(fresh_total),
+            3,
+        ),
+        "fresh_process_load_to_consumed_p95_ms": round(
+            _percentile(fresh_total, 0.95),
+            3,
+        ),
+        "fresh_process_store_initialization_p50_ms": round(
+            statistics.median(fresh_initialization),
+            3,
+        ),
+        "fresh_process_store_initialization_p95_ms": round(
+            _percentile(fresh_initialization, 0.95),
+            3,
+        ),
+        "fresh_process_page_faults_p95": int(
+            _percentile([float(probe["page_faults"]) for probe in probes], 0.95)
+        ),
+        "fresh_process_rss_delta_bytes_p95": int(
+            _percentile(
+                [float(probe["rss_delta_bytes"]) for probe in probes],
+                0.95,
+            )
+        ),
+        "fresh_process_samples": probes,
+        "fresh_process_checksum_calls": sum(
+            int(probe["checksum_calls"]) for probe in probes
+        ),
+    }
+
+
+def _replace_fresh_process_samples(
+    payload: dict[str, Any],
+    *,
+    size_mib: int,
+    probes: list[dict[str, Any]],
+) -> None:
+    row = next(
+        (row for row in payload["results"] if int(row["size_mib"]) == size_mib),
+        None,
+    )
+    if row is None:
+        raise ValueError(f"missing {size_mib} MiB benchmark result")
+    digests = {str(probe["consumption_digest"]) for probe in probes}
+    if digests != {str(row["consumption_digest"])}:
+        raise RuntimeError(f"surface consumption digest changed for {size_mib} MiB")
+    row.update(_fresh_probe_metrics(probes))
+    payload["consume_samples"] = len(probes)
+
+
+def _prepare_surface_cache(
+    library: Path,
+    *,
+    size_mib: int,
+    revision: int,
+) -> None:
+    library.mkdir(parents=True, exist_ok=True)
+    request = _request(library, size_mib=size_mib, revision=revision)
+    store = _store(library)
+    try:
+        if not store.write(request, _surface(request)):
+            raise RuntimeError(f"surface cache write failed for {size_mib} MiB")
+    finally:
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()
+
+
+def _repo_environment(repo_root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root.resolve() / "src")
+    return env
+
+
+def _prepare_surface_cache_subprocess(
+    library: Path,
+    *,
+    size_mib: int,
+    revision: int,
+    env: dict[str, str],
+) -> None:
+    subprocess.run(  # noqa: S603 - fixed interpreter and local tool
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "prepare",
+            "--library",
+            str(library),
+            "--size-mib",
+            str(size_mib),
+            "--revision",
+            str(revision),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def pair_fresh_process_samples(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    baseline_repo: Path,
+    candidate_repo: Path,
+    size_mib: int,
+    samples: int,
+) -> None:
+    sample_count = max(_P95_MIN_SAMPLES, int(samples))
+    environments = {
+        "baseline": _repo_environment(baseline_repo),
+        "candidate": _repo_environment(candidate_repo),
+    }
+    probes: dict[str, list[dict[str, Any]]] = {
+        "baseline": [],
+        "candidate": [],
+    }
+    with tempfile.TemporaryDirectory(prefix="iphoto-surface-cache-paired-") as temp:
+        base = Path(temp)
+        libraries = {
+            "baseline": base / "baseline-library",
+            "candidate": base / "candidate-library",
+        }
+        for label in ("baseline", "candidate"):
+            _prepare_surface_cache_subprocess(
+                libraries[label],
+                size_mib=size_mib,
+                revision=1,
+                env=environments[label],
+            )
+        for order in _fresh_probe_orders(sample_count):
+            for label in order:
+                probes[label].append(
+                    _fresh_process_probe(
+                        libraries[label],
+                        size_mib=size_mib,
+                        revision=1,
+                        env=environments[label],
+                    )
+                )
+    _replace_fresh_process_samples(
+        baseline,
+        size_mib=size_mib,
+        probes=probes["baseline"],
+    )
+    _replace_fresh_process_samples(
+        candidate,
+        size_mib=size_mib,
+        probes=probes["candidate"],
+    )
 
 
 def _git_sha(repo_root: Path) -> str:
@@ -296,6 +480,7 @@ def benchmark(
     repo_root: Path,
     label: str,
     consume_samples: int = 3,
+    defer_fresh_probes: bool = False,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     warm_sample_count = max(_P95_MIN_SAMPLES, int(warm_samples))
@@ -331,13 +516,14 @@ def benchmark(
             del surface
             gc.collect()
 
+            fresh_probe_count = 1 if defer_fresh_probes else consume_sample_count
             fresh_probes = [
                 _fresh_process_probe(
                     library,
                     size_mib=size_mib,
                     revision=revision,
                 )
-                for _sample in range(consume_sample_count)
+                for _sample in range(fresh_probe_count)
             ]
 
             checksum_calls = 0
@@ -371,14 +557,6 @@ def benchmark(
                 raise RuntimeError(
                     f"surface consumption digest changed for {size_mib} MiB"
                 )
-            fresh_load = [float(probe["load_ms"]) for probe in fresh_probes]
-            fresh_consume = [float(probe["consume_ms"]) for probe in fresh_probes]
-            fresh_total = [
-                float(probe["load_to_consumed_ms"]) for probe in fresh_probes
-            ]
-            fresh_initialization = [
-                float(probe["store_initialization_ms"]) for probe in fresh_probes
-            ]
             warm_load = [float(probe["load_ms"]) for probe in warm_probes]
             warm_consume = [float(probe["consume_ms"]) for probe in warm_probes]
             warm_total = [
@@ -411,53 +589,7 @@ def benchmark(
                         _percentile(warm_total, 0.95),
                         3,
                     ),
-                    "fresh_process_load_p50_ms": round(
-                        statistics.median(fresh_load),
-                        3,
-                    ),
-                    "fresh_process_load_p95_ms": round(
-                        _percentile(fresh_load, 0.95),
-                        3,
-                    ),
-                    "fresh_process_consume_p50_ms": round(
-                        statistics.median(fresh_consume),
-                        3,
-                    ),
-                    "fresh_process_consume_p95_ms": round(
-                        _percentile(fresh_consume, 0.95),
-                        3,
-                    ),
-                    "fresh_process_load_to_consumed_p50_ms": round(
-                        statistics.median(fresh_total),
-                        3,
-                    ),
-                    "fresh_process_load_to_consumed_p95_ms": round(
-                        _percentile(fresh_total, 0.95),
-                        3,
-                    ),
-                    "fresh_process_store_initialization_p50_ms": round(
-                        statistics.median(fresh_initialization),
-                        3,
-                    ),
-                    "fresh_process_store_initialization_p95_ms": round(
-                        _percentile(fresh_initialization, 0.95),
-                        3,
-                    ),
-                    "fresh_process_page_faults_p95": int(
-                        _percentile(
-                            [float(probe["page_faults"]) for probe in fresh_probes],
-                            0.95,
-                        )
-                    ),
-                    "fresh_process_rss_delta_bytes_p95": int(
-                        _percentile(
-                            [
-                                float(probe["rss_delta_bytes"])
-                                for probe in fresh_probes
-                            ],
-                            0.95,
-                        )
-                    ),
+                    **_fresh_probe_metrics(fresh_probes),
                     "warm_page_faults_p95": int(
                         _percentile(
                             [float(probe["page_faults"]) for probe in warm_probes],
@@ -471,12 +603,8 @@ def benchmark(
                         )
                     ),
                     "consumption_digest": digests.pop(),
-                    "fresh_process_samples": fresh_probes,
                     "warm_process_samples": warm_probes,
                     "checksum_calls": checksum_calls,
-                    "fresh_process_checksum_calls": sum(
-                        int(probe["checksum_calls"]) for probe in fresh_probes
-                    ),
                     "python_peak_bytes": int(python_peak),
                     "rss_write_delta_bytes": max(0, rss_after_write - rss_before),
                 }
@@ -495,7 +623,7 @@ def benchmark(
         "pyside": pyside_version,
         "qt": qVersion(),
         "warm_samples": warm_sample_count,
-        "consume_samples": consume_sample_count,
+        "consume_samples": 1 if defer_fresh_probes else consume_sample_count,
         "results": results,
     }
 
@@ -582,6 +710,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--sizes-mib", default="16,64,180")
     run_parser.add_argument("--warm-samples", type=int, default=_P95_MIN_SAMPLES)
     run_parser.add_argument("--consume-samples", type=int, default=_P95_MIN_SAMPLES)
+    run_parser.add_argument("--defer-fresh-probes", action="store_true")
+    prepare_parser = subparsers.add_parser("prepare")
+    prepare_parser.add_argument("--library", required=True, type=Path)
+    prepare_parser.add_argument("--size-mib", required=True, type=int)
+    prepare_parser.add_argument("--revision", required=True, type=int)
     probe_parser = subparsers.add_parser("probe")
     probe_parser.add_argument("--library", required=True, type=Path)
     probe_parser.add_argument("--size-mib", required=True, type=int)
@@ -590,6 +723,13 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("--baseline", required=True, type=Path)
     compare_parser.add_argument("--candidate", required=True, type=Path)
     compare_parser.add_argument("--output", required=True, type=Path)
+    pair_parser = subparsers.add_parser("pair-fresh")
+    pair_parser.add_argument("--baseline", required=True, type=Path)
+    pair_parser.add_argument("--candidate", required=True, type=Path)
+    pair_parser.add_argument("--baseline-repo", required=True, type=Path)
+    pair_parser.add_argument("--candidate-repo", required=True, type=Path)
+    pair_parser.add_argument("--size-mib", required=True, type=int)
+    pair_parser.add_argument("--samples", type=int, default=_P95_MIN_SAMPLES)
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -604,8 +744,17 @@ def main(argv: list[str] | None = None) -> int:
             repo_root=args.repo_root,
             label=str(args.label),
             consume_samples=max(1, int(args.consume_samples)),
+            defer_fresh_probes=bool(args.defer_fresh_probes),
         )
         _write_json(args.output, payload)
+        return 0
+
+    if args.command == "prepare":
+        _prepare_surface_cache(
+            args.library,
+            size_mib=max(1, int(args.size_mib)),
+            revision=max(1, int(args.revision)),
+        )
         return 0
 
     if args.command == "probe":
@@ -615,6 +764,21 @@ def main(argv: list[str] | None = None) -> int:
             revision=max(1, int(args.revision)),
         )
         sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "pair-fresh":
+        baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+        candidate = json.loads(args.candidate.read_text(encoding="utf-8"))
+        pair_fresh_process_samples(
+            baseline,
+            candidate,
+            baseline_repo=args.baseline_repo,
+            candidate_repo=args.candidate_repo,
+            size_mib=max(1, int(args.size_mib)),
+            samples=max(1, int(args.samples)),
+        )
+        _write_json(args.baseline, baseline)
+        _write_json(args.candidate, candidate)
         return 0
 
     baseline = json.loads(args.baseline.read_text(encoding="utf-8"))

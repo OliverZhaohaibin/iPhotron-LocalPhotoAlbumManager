@@ -667,6 +667,8 @@ def test_canonical_cache_identity_shares_lock_across_path_aliases(
     assert first_index.lock_path == second_index.lock_path
     assert first_index.ensure_open()
     assert second_index.ensure_open()
+    alias_request = _request(alias / "photo.jpg")
+    assert second.write(alias_request, _surface(alias_request))
     first.close()
 
     metadata = _index_metadata(first_index.root)

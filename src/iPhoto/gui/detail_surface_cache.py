@@ -317,8 +317,8 @@ class NeutralSurfaceStore:
                 return None
         try:
             library_root = root.parents[3]
-            request.source_identity.path.relative_to(library_root)
-        except (IndexError, ValueError):
+            request.source_identity.path.resolve(strict=False).relative_to(library_root)
+        except (IndexError, OSError, ValueError):
             # A request that outlived a library rebind must never populate the
             # newly active library's cache namespace.
             return None

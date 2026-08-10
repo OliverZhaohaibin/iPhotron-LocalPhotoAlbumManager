@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
@@ -33,6 +34,27 @@ from iPhoto.gui.detail_surface_cache_index import SurfaceCacheIndex
 class _Token:
     def is_cancelled(self) -> bool:
         return False
+
+
+class _FailingConnection:
+    def __init__(self, connection: sqlite3.Connection, fail_when) -> None:
+        self._connection = connection
+        self._fail_when = fail_when
+
+    def execute(self, sql: str, parameters=()):
+        if self._fail_when(str(sql)):
+            raise sqlite3.DatabaseError("injected runtime index failure")
+        return self._connection.execute(sql, parameters)
+
+    def __getattr__(self, name: str):
+        return getattr(self._connection, name)
+
+
+def _fail_index_execute(index: SurfaceCacheIndex, fail_when) -> None:
+    assert index.ensure_open()
+    connection = index._connection
+    assert connection is not None
+    index._connection = _FailingConnection(connection, fail_when)  # type: ignore[assignment]
 
 
 def _request(source: Path, *, revision: int = 11, level: int = 1024) -> DetailRenderRequest:
@@ -308,6 +330,80 @@ def test_failed_write_cleanup_marks_recovery_when_row_cannot_be_removed(
     assert index.needs_recovery
 
 
+def test_sqlite_lookup_failure_falls_back_to_delegate_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    _fail_index_execute(
+        index,
+        lambda sql: "FROM entries" in sql and "WHERE digest" in sql,
+    )
+    write = Mock(return_value=False)
+    monkeypatch.setattr(store, "write", write)
+    delegate = Mock()
+    delegate.decode.side_effect = lambda prepared, _token: _surface(prepared)
+    backend = CachedStillDecodeBackend(delegate, store=store)
+
+    decoded = backend.decode(request, _Token())
+
+    assert decoded.backend == "qt"
+    delegate.decode.assert_called_once()
+    assert path.exists()
+    assert index.needs_recovery
+    assert index._connection is None
+    backend.shutdown(timeout_ms=5000)
+
+    reopened = SurfaceCacheIndex(index.root)
+    assert reopened.ensure_open()
+    assert reopened.needs_recovery
+    reopened.close(clean=False)
+
+
+def test_sqlite_checksum_state_failure_does_not_discard_valid_payload(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    digest = surface_cache_module._key_digest(request)
+    index.mark_checksum_state(digest, "untrusted")
+    _fail_index_execute(
+        index,
+        lambda sql: "UPDATE entries" in sql and "checksum_state" in sql,
+    )
+
+    assert store.load(request) is None
+
+    assert path.exists()
+    assert index.needs_recovery
+    assert index._connection is None
+
+
+def test_sqlite_upsert_failure_after_replace_removes_orphan_payload(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path)
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    _fail_index_execute(index, lambda sql: "INSERT INTO entries" in sql)
+
+    assert not store.write(request, _surface(request))
+
+    assert not path.exists()
+    assert index.needs_recovery
+
+
 def test_recovery_required_index_does_not_close_clean(tmp_path: Path) -> None:
     index = SurfaceCacheIndex(tmp_path)
     assert index.ensure_open()
@@ -387,6 +483,61 @@ def test_prune_unlink_failure_keeps_row_and_marks_recovery(
     assert path.exists()
     assert index.get(surface_cache_module._key_digest(request)) is not None
     assert index.needs_recovery
+
+
+def test_sqlite_failure_during_maintenance_never_prunes_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path, budget_bytes=1 << 30)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    finish_maintenance = Mock(wraps=index.finish_maintenance)
+    monkeypatch.setattr(index, "finish_maintenance", finish_maintenance)
+    store._budget_override = 0
+    _fail_index_execute(index, lambda sql: "ORDER BY last_access_ns" in sql)
+
+    store.maintenance(force_prune=True)
+
+    assert path.exists()
+    assert index.needs_recovery
+    assert index._connection is None
+    finish_maintenance.assert_not_called()
+
+
+def test_sqlite_failure_during_recovery_retries_from_payload_scan(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path / "photo.jpg")
+    store = NeutralSurfaceStore(tmp_path, budget_bytes=1 << 30)
+    assert store.write(request, _surface(request))
+    path = store.entry_path(request)
+    index = store._index_for_root()
+    assert path is not None and index is not None
+    index.mark_recovery_required()
+    _fail_index_execute(
+        index,
+        lambda sql: "FROM entries" in sql
+        and "WHERE digest" not in sql
+        and "ORDER BY" not in sql,
+    )
+
+    store.maintenance(recover=True)
+
+    assert path.exists()
+    assert index.needs_recovery
+    assert index._connection is None
+
+    store.maintenance(recover=True)
+
+    assert not index.needs_recovery
+    loaded = store.load(request)
+    assert loaded is not None
+    assert loaded.cache_tier == "disk"
+    assert tuple(index.root.glob("index.sqlite3.corrupt-*"))
 
 
 def test_first_v3_write_removes_rebuildable_v2_namespace(tmp_path: Path) -> None:

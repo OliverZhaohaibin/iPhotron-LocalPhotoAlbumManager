@@ -21,7 +21,7 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 
 | ID | 优先级 | 债务 | 当前风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 SQLite 运行期 fail-open/recovery 修复正在验证 | `in_progress` |
+| TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 已完成 SQLite 运行期 fail-open/rebuild/recovery，并通过最终实现 head 的完整门禁 | `automated_pass` |
 | TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
 | TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
 | TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
@@ -80,12 +80,13 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 - 写入改为 4 MiB buffer 分块、增量 xxhash、fsync 和原子 replace，不再创建完整
   Python payload 副本；last-access、异常恢复、抽样审计和低水位 prune 均有独立合同。
 - `detail-surface-cache-contract` 在同一 runner checkout 固定 `fe623e68` 基线与候选
-  head，覆盖 16/64/180 MiB 并上传原始 JSON。edge-case 实现 SHA `0a9f7d1a` 的
-  [Actions run 31363902491](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31363902491)
-  已在 Ubuntu、macOS 和 Windows 通过该合同；同一 run 的三平台 GPU-first、startup
-  合同及完整 `test` job 也已通过。记录证据时该 run 仍在执行归属 TD-890-03 的
-  macOS/Windows Pets production-shape job，因此这里不把整个 workflow 提前描述为
-  全部完成。
+  head，覆盖 16/64/180 MiB 并上传原始 JSON。edge-case 文档 head `0d7b9331` 的
+  [Actions run 31364282777](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31364282777)
+  已完整成功；SQLite 运行期故障实现 SHA `a744fde2` 的
+  [Actions run 31368415703](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31368415703)
+  也已完整成功，15 个 job 包括三平台 surface-cache、GPU-first、startup、Pets
+  production-shape 和完整 `test`。后一个 run 的 Ubuntu、macOS、Windows 原始
+  surface-cache JSON artifacts 均已确认存在。
 - 磁盘容量查询失败现在会跳过 prune 并保留维护水位，显式零预算仍保持清空语义；
   跨库 generation retire/swap 与 shared memory-cache clear 已在同一 backend lock 内
   原子执行；closed store 拒绝重新 bind，且三项均有独立回归合同。
@@ -93,6 +94,12 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
   CPU 消费门禁均已纳入自动测试；本地同 runner 的 `fe623e68`/candidate
   16/64/180 MiB comparison 也已通过。该指标只证明完整 CPU payload 消费，不声明
   等价于真实 GPU upload；renderer 路径继续由现有三平台 GPU-first 合同覆盖。
+- 任意运行期 SQLite `DatabaseError` 现在统一关闭当前 connection，并将 index 标记为
+  `needs_recovery`/`rebuild_required`；lookup 和 checksum-state 故障在 cache 边界转为
+  miss，图片请求回退 delegate decode。maintenance/recovery 故障不会删除健康 payload
+  或提交 clean 状态，后续恢复会先隔离损坏数据库、重建 metadata、扫描 payload、重算
+  字节和提交维护状态，最后才标记 recovered。真实 connection fault-injection 已覆盖
+  lookup、checksum、upsert、LRU 和 recovery 枚举失败。
 - 最后用户版本 v6.6.8 不包含 neutral-surface 持久化格式；兼容路径为“无旧 cache →
   初始化 v3”，不读取或迁移开发阶段 v2。
 

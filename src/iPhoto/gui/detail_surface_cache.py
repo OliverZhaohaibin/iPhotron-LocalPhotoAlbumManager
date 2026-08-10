@@ -260,10 +260,13 @@ class NeutralSurfaceStore:
                 / "v3"
             )
         with self._lock:
+            if self._closed:
+                raise RuntimeError(
+                    "NeutralSurfaceStore is closed; create a new store generation"
+                )
             previous = self._index
             self._index = None
             self._root = root
-            self._closed = False
             self._disk_hit_count = 0
             self._pending_audits.clear()
             self._legacy_cleanup_done = False

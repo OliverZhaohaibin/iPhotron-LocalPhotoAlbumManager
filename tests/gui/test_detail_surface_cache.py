@@ -702,7 +702,8 @@ def test_closed_store_and_index_cannot_reopen(tmp_path: Path) -> None:
     store = NeutralSurfaceStore(tmp_path)
     assert store.write(request, _surface(request))
     index = store._index_for_root()
-    assert index is not None
+    root = store.root
+    assert index is not None and root is not None
 
     store.close()
 
@@ -711,6 +712,11 @@ def test_closed_store_and_index_cannot_reopen(tmp_path: Path) -> None:
     assert not index.ensure_open()
     assert store.load(request) is None
     assert not store.write(request, _surface(request))
+    with pytest.raises(RuntimeError, match="create a new store generation"):
+        store.bind_library(tmp_path / "other")
+    assert store.closed
+    assert store.root == root
+    assert index.closed
 
 
 def test_clean_library_bind_does_not_traverse_payload_directory(

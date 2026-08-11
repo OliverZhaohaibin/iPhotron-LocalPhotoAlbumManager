@@ -77,7 +77,14 @@ def test_read_geometry_only(store: IndexStore) -> None:
     """Test lightweight fetching with columns and filtering."""
     rows = [
         {"rel": "video.mov", "media_type": 1, "is_favorite": 0, "dt": "2023-01-01"},
-        {"rel": "photo.jpg", "media_type": 0, "is_favorite": 1, "dt": "2023-01-02"},
+        {
+            "rel": "photo.jpg",
+            "media_type": 0,
+            "is_favorite": 1,
+            "dt": "2023-01-02",
+            "source_mtime_ns": 123456,
+            "image_orientation": 6,
+        },
         {"rel": "live.jpg", "media_type": 0, "is_favorite": 0, "live_partner_rel": "live.mov", "dt": "2023-01-03"},
     ]
     store.write_rows(rows)
@@ -89,6 +96,9 @@ def test_read_geometry_only(store: IndexStore) -> None:
     assert "aspect_ratio" in results[0]
     assert "year" in results[0]
     assert "mime" in results[0]
+    photo = next(row for row in results if row["rel"] == "photo.jpg")
+    assert photo["source_mtime_ns"] == 123456
+    assert photo["image_orientation"] == 6
     # Verify sorting (dt DESC)
     assert results[0]["rel"] == "live.jpg"
     assert results[1]["rel"] == "photo.jpg"
@@ -824,6 +834,10 @@ def test_gallery_collection_window_uses_light_projection_with_micro(store: Index
                 "thumbnail_state": "ready",
                 "micro_thumbnail": b"thumb",
                 "thumb_cache_key": "thumb-ready",
+                "video_rotation_cw": 90,
+                "video_linux_180_hint": True,
+                "source_mtime_ns": 123456789,
+                "image_orientation": 6,
                 "metadata": {"camera": "wide-column"},
             }
         ]
@@ -833,6 +847,10 @@ def test_gallery_collection_window_uses_light_projection_with_micro(store: Index
 
     assert len(rows) == 1
     assert rows[0]["micro_thumbnail"] == b"thumb"
+    assert rows[0]["video_rotation_cw"] == 90
+    assert rows[0]["video_linux_180_hint"] == 1
+    assert rows[0]["source_mtime_ns"] == 123456789
+    assert rows[0]["image_orientation"] == 6
     assert "metadata" not in rows[0]
 
 
@@ -857,7 +875,14 @@ def test_thumbnail_hint_window_omits_micro_and_does_not_count(store: IndexStore)
         window = store.read_thumbnail_hint_window(CollectionQuery(), 0, 10)
 
     assert window.total_count == -1
-    assert window.rows == [{"rel": "ready.jpg", "thumb_cache_key": "thumb-ready"}]
+    assert window.rows == [
+        {
+            "rel": "ready.jpg",
+            "thumb_cache_key": "thumb-ready",
+            "thumbnail_state": "ready",
+            "thumb_revision": None,
+        }
+    ]
 
 
 def test_thumbnail_backfill_candidates_and_ready_update(store: IndexStore) -> None:
@@ -883,3 +908,104 @@ def test_thumbnail_backfill_candidates_and_ready_update(store: IndexStore) -> No
     rows = store.read_collection_window(query, 0, 10).rows
     assert [row["rel"] for row in rows] == ["stale.jpg"]
     assert rows[0]["thumbnail_state"] == "ready"
+
+
+def test_thumbnail_revision_cas_rejects_old_publish_and_noop_updates(
+    store: IndexStore,
+) -> None:
+    store.write_rows(
+        [
+            {
+                "rel": "edited.jpg",
+                "id": "edited",
+                "thumbnail_state": "ready",
+                "micro_thumbnail": b"old-micro",
+                "thumb_cache_key": "stable-key",
+                "thumb_revision": "revision-1",
+                "index_revision": 4,
+            }
+        ]
+    )
+
+    assert store.mark_thumbnail_stale(
+        "edited.jpg", desired_revision="revision-2"
+    )
+    stale = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert stale["thumbnail_state"] == "stale"
+    assert stale["micro_thumbnail"] is None
+    stale_index_revision = stale["index_revision"]
+
+    assert not store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"old-result",
+        thumb_cache_key="stable-key",
+        expected_revision="revision-1",
+    )
+    rejected = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert rejected["thumbnail_state"] == "stale"
+    assert rejected["index_revision"] == stale_index_revision
+
+    assert store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"new-result",
+        thumb_cache_key="stable-key",
+        expected_revision="revision-2",
+    )
+    ready = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert ready["thumbnail_state"] == "ready"
+    assert ready["micro_thumbnail"] == b"new-result"
+    ready_index_revision = ready["index_revision"]
+
+    assert not store.update_thumbnail_ready(
+        "edited.jpg",
+        micro_thumbnail=b"new-result",
+        thumb_cache_key="stable-key",
+        expected_revision="revision-2",
+    )
+    unchanged_ready = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert unchanged_ready["index_revision"] == ready_index_revision
+
+    assert store.mark_thumbnail_stale(
+        "edited.jpg", desired_revision="revision-2"
+    )
+    stale_again = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert not store.mark_thumbnail_stale(
+        "edited.jpg", desired_revision="revision-2"
+    )
+    unchanged_stale = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert unchanged_stale["index_revision"] == stale_again["index_revision"]
+
+
+def test_scan_merge_preserves_newer_stale_thumbnail_revision(store: IndexStore) -> None:
+    store.write_rows(
+        [
+            {
+                "rel": "edited.jpg",
+                "id": "edited",
+                "thumbnail_state": "stale",
+                "micro_thumbnail": None,
+                "thumb_cache_key": "stable-key",
+                "thumb_revision": "revision-2",
+            }
+        ]
+    )
+
+    merged = store.merge_scan_rows(
+        [
+            {
+                "rel": "edited.jpg",
+                "id": "edited",
+                "thumbnail_state": "ready",
+                "micro_thumbnail": b"old-result",
+                "thumb_cache_key": "stable-key",
+                "thumb_revision": "revision-1",
+            }
+        ]
+    )
+
+    assert merged[0]["thumbnail_state"] == "stale"
+    assert merged[0]["micro_thumbnail"] is None
+    assert merged[0]["thumb_revision"] == "revision-2"
+    persisted = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
+    assert persisted["thumbnail_state"] == "stale"
+    assert persisted["thumb_revision"] == "revision-2"

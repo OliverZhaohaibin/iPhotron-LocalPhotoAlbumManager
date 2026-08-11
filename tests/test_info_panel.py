@@ -839,10 +839,13 @@ def test_info_panel_pet_avatar_uses_neutral_menu_and_mixed_candidate_shape(
     monkeypatch.setattr(info_panel_module, "GroupPeopleDialog", _FakeDialog)
 
     annotation = RecognitionAnnotation(
-        kind="pet",
-        annotation_id="det-a",
-        entity_id="pet-a",
-        display_name="Miso",
+        source_detection_kind="pet",
+        source_annotation_id="det-a",
+        source_identity_kind="pet",
+        source_identity_id="pet-a",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-a",
+        canonical_display_name="Miso",
         box_x=0,
         box_y=0,
         box_w=10,
@@ -2178,26 +2181,43 @@ def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
         fallback_receiver.setGeometry(0, 0, 24, 24)
         fallback_receiver.show()
 
-        _send_mouse_event(
-            fallback_receiver,
+        assert map_view._application_event_filter_installed is True
+        local_pos = QPointF(12.0, 12.0)
+        outside_host = QPointF(-10_000.0, -10_000.0)
+        press_event = QMouseEvent(
             QEvent.Type.MouseButtonPress,
-            button=Qt.MouseButton.LeftButton,
-            buttons=Qt.MouseButton.LeftButton,
+            local_pos,
+            outside_host,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
         )
+        map_view.eventFilter(fallback_receiver, press_event)
 
         override_cursor = QApplication.overrideCursor()
         assert fallback_receiver not in map_view._map_event_targets
-        assert override_cursor is not None
+        assert override_cursor is not None, (
+            "map-host application filter did not start drag: "
+            f"installed={map_view._application_event_filter_installed}, "
+            f"dragging={map_view._dragging}, "
+            f"receiver_parent_is_host={fallback_receiver.parent() is map_view._map_host}"
+        )
         assert override_cursor.shape() == Qt.CursorShape.ClosedHandCursor
 
-        _send_mouse_event(
-            fallback_receiver,
+        release_event = QMouseEvent(
             QEvent.Type.MouseButtonRelease,
-            button=Qt.MouseButton.LeftButton,
-            buttons=Qt.MouseButton.NoButton,
+            local_pos,
+            outside_host,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
         )
+        map_view.eventFilter(fallback_receiver, release_event)
 
-        assert QApplication.overrideCursor() is None
+        assert QApplication.overrideCursor() is None, (
+            "map-host application filter did not release the drag cursor: "
+            f"dragging={map_view._dragging}"
+        )
     finally:
         panel.shutdown()
         panel.close()

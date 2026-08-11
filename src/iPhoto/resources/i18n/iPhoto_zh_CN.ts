@@ -237,6 +237,66 @@
             <source>Zoom</source>
             <translation>缩放</translation>
         </message>
+        <message>
+            <source>The photo library could not be opened during startup: %1</source>
+            <translation>启动时无法打开照片图库：%1</translation>
+        </message>
+        <message>
+            <source>The photo library database is in use by another process. Close other iPhotron versions and retry.</source>
+            <translation>照片图库数据库正被其他进程使用。请关闭其他 iPhotron 版本后重试。</translation>
+        </message>
+        <message>
+            <source>Windows or security software is temporarily using a migration file. Close other programs or retry shortly.</source>
+            <translation>Windows 或安全软件正在暂时占用迁移文件。请关闭其他程序或稍后重试。</translation>
+        </message>
+        <message>
+            <source>The photo library database is damaged. The original file has been preserved.</source>
+            <translation>照片图库数据库已损坏，原始文件已保留。</translation>
+        </message>
+        <message>
+            <source>The photo library database is read-only. Remove its read-only attribute or grant modify access.</source>
+            <translation>照片图库数据库为只读。请移除只读属性或授予修改权限。</translation>
+        </message>
+        <message>
+            <source>The .iPhoto work folder cannot be updated. Check that folder's permissions.</source>
+            <translation>无法更新 .iPhoto 工作文件夹。请检查该文件夹的权限。</translation>
+        </message>
+        <message>
+            <source>There is not enough free disk space to prepare the photo library.</source>
+            <translation>可用磁盘空间不足，无法准备照片图库。</translation>
+        </message>
+        <message>
+            <source>The photo library database could not be opened. Check the path, drive, and security software.</source>
+            <translation>无法打开照片图库数据库。请检查路径、磁盘连接和安全软件。</translation>
+        </message>
+        <message>
+            <source>A safety backup could not be created. Migration did not start and the original database was preserved.</source>
+            <translation>无法创建安全备份。迁移尚未开始，原数据库已保留。</translation>
+        </message>
+        <message>
+            <source>The photo library database update failed. The original database and backup were preserved.</source>
+            <translation>照片图库数据库更新失败。原数据库和备份均已保留。</translation>
+        </message>
+        <message>
+            <source>This photo library was created by a newer app version. Open it with the same or a newer version.</source>
+            <translation>此照片图库由更新的应用版本创建。请使用相同或更新版本打开。</translation>
+        </message>
+        <message>
+            <source>The photo library index was restored after an interrupted update.</source>
+            <translation>照片图库索引已从中断的更新中恢复。</translation>
+        </message>
+        <message>
+            <source>The photo library was recovered and opened, but temporary migration files could not be removed. They will be cleaned up later.</source>
+            <translation>照片图库已恢复并打开，但无法移除临时迁移文件。系统稍后会再次清理。</translation>
+        </message>
+        <message>
+            <source>The photo library opened, but temporary migration files could not be removed. They will be cleaned up on a later start.</source>
+            <translation>照片图库已打开，但无法移除临时迁移文件。系统将在后续启动时再次清理。</translation>
+        </message>
+        <message>
+            <source>Dismiss</source>
+            <translation>关闭</translation>
+        </message>
     </context>
     <context>
         <name>MapExtension</name>
@@ -1813,6 +1873,25 @@ Select a tile directory to switch back to the legacy backend.</source>
         <message>
             <source>Return to Map</source>
             <translation>返回地图</translation>
+        </message>
+    </context>
+    <context>
+        <name>PetCard</name>
+        <message>
+            <source>Unconfirmed Cat</source>
+            <translation>未确认的猫</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Dog</source>
+            <translation>未确认的狗</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Pet</source>
+            <translation>未确认的宠物</translation>
+        </message>
+        <message>
+            <source>Unconfirmed</source>
+            <translation>未确认</translation>
         </message>
     </context>
 </TS>

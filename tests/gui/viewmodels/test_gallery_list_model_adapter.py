@@ -13,9 +13,10 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.gallery_demand import build_viewport_demand
 from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.viewmodels import gallery_list_model_adapter as adapter_module
+from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
-from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
     GalleryThumbnailCandidate,
     GalleryThumbnailHintResult,
@@ -125,6 +126,30 @@ def _make_dto(**overrides) -> AssetDTO:
     )
     defaults.update(overrides)
     return AssetDTO(**defaults)
+
+
+def test_detail_prefetch_descriptor_carries_indexed_source_identity(
+    adapter,
+    mock_store,
+) -> None:
+    asset = _make_dto(
+        abs_path=Path("/library/photo.jpg"),
+        width=6000,
+        height=4000,
+        size_bytes=123,
+        metadata={"source_mtime_ns": 456, "index_revision": 7},
+    )
+    mock_store.asset_at.return_value = asset
+
+    descriptor = adapter.detail_prefetch_descriptor(3)
+
+    assert descriptor is not None
+    assert descriptor.source_identity is not None
+    assert descriptor.source_identity.revision == ("mtime", 123, 456)
+    assert (descriptor.source_identity.width, descriptor.source_identity.height) == (
+        6000,
+        4000,
+    )
 
 
 def test_adapter_init(adapter):
@@ -425,6 +450,31 @@ def test_tile_snapshot_is_micro_first_and_memory_only(adapter, mock_store, mock_
     mock_thumb_service.request_many.assert_not_called()
 
 
+def test_stale_tile_never_exposes_old_full_or_micro_thumbnail(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        micro_thumbnail=micro,
+        thumbnail_state="stale",
+        thumb_revision="revision-2",
+    )
+    mock_thumb_service.peek_full_thumbnail.return_value = object()
+
+    index = adapter.index(0, 0)
+    snapshot = adapter.data(index, Roles.TILE_SNAPSHOT)
+
+    assert snapshot.loading_state == "placeholder"
+    assert snapshot.micro_image is None
+    assert snapshot.full_pixmap is None
+    assert adapter.data(index, Qt.DecorationRole) is None
+    assert adapter.data(index, Roles.MICRO_THUMBNAIL) is None
+    mock_thumb_service.peek_full_thumbnail.assert_not_called()
+
+
 def test_tile_snapshot_miss_does_not_synchronously_load(adapter, mock_store):
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = None
@@ -634,6 +684,45 @@ def test_startup_gallery_ready_after_visible_thumbnail_terminal(
     assert adapter._startup_gallery_warmup_active is False
 
 
+def test_startup_thumbnail_milestone_requires_visible_active_warmup(
+    adapter,
+    mock_store,
+    monkeypatch,
+) -> None:
+    marks: list[str] = []
+    monkeypatch.setattr(adapter_module, "mark", lambda stage, **_details: marks.append(stage))
+    mock_store.count.return_value = 2
+    adapter._viewport_demand = build_viewport_demand(
+        generation=1,
+        row_count=2,
+        visible_first=0,
+        visible_last=0,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter.begin_startup_gallery_warmup()
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
+
+    adapter._pending_thumbnail_rows.add(1)
+    adapter._flush_thumbnail_updates()
+
+    assert "startup.first_usable_thumbnail" not in marks
+
+    adapter._pending_thumbnail_rows.add(0)
+    adapter._flush_thumbnail_updates()
+
+    assert marks.count("startup.first_usable_thumbnail") == 1
+
+    adapter._finish_startup_gallery_warmup("test")
+    adapter._startup_usable_thumbnail_logged = False
+    adapter._pending_thumbnail_rows.add(0)
+    adapter._flush_thumbnail_updates()
+
+    assert marks.count("startup.first_usable_thumbnail") == 1
+
+
 def test_startup_gallery_timeout_emits_ready_when_thumbnail_never_terminal(
     adapter,
     mock_store,
@@ -795,9 +884,12 @@ def test_cached_thumb_cache_key_becomes_prefetch_candidate(
 
     snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
     candidates = snapshot.candidates
-    assert len(candidates) == 1
-    assert candidates[0].path == Path("/library/prefetch.jpg")
-    assert candidates[0].l2_cache_key == "l2-prefetch"
+    prefetch_candidate = next(
+        candidate
+        for candidate in candidates
+        if candidate.path == Path("/library/prefetch.jpg")
+    )
+    assert prefetch_candidate.l2_cache_key == "l2-prefetch"
     assert candidates[0].kind == "guard"
 
 
@@ -1235,7 +1327,11 @@ def test_old_thumbnail_hint_request_id_with_matching_selection_is_merged(
     assert any(candidate.path == Path("/library/late.jpg") for candidate in candidates)
 
 
-def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter, mock_store):
+def test_invalidate_thumbnail_queues_refresh_and_emits_tile_roles(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
     path = Path("/videos/clip.mp4")
     adapter._duration_cache[path] = 8.0
     mock_store.row_for_path.return_value = 0
@@ -1248,7 +1344,46 @@ def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter,
         adapter.invalidate_thumbnail(str(path))
 
     assert path not in adapter._duration_cache
+    mock_thumb_service.get_thumbnail.assert_called_once_with(
+        path,
+        adapter._thumb_size,
+        priority="high",
+    )
+    assert Qt.DecorationRole in emitted_roles
+    assert Roles.TILE_SNAPSHOT in emitted_roles
     assert Roles.SIZE in emitted_roles
+
+
+def test_revisioned_invalidation_queues_stale_target_and_hides_local_micro(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    path = Path("/photos/edited.jpg")
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=path,
+        micro_thumbnail=micro,
+        thumbnail_state="ready",
+    )
+
+    adapter.invalidate_thumbnail(str(path), desired_revision="revision-2")
+
+    mock_thumb_service.invalidate.assert_called_once_with(
+        path,
+        size=adapter._thumb_size,
+        desired_revision="revision-2",
+    )
+    mock_thumb_service.get_thumbnail.assert_called_once_with(
+        path,
+        adapter._thumb_size,
+        priority="high",
+        thumbnail_state="stale",
+        thumb_revision="revision-2",
+    )
+    assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is None
 
 
 def test_size_role_returns_trimmed_duration_for_video(adapter, mock_store):

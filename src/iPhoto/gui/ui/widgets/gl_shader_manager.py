@@ -97,6 +97,7 @@ _SELECTIVE_COLOR_UNIFORM_NAMES = tuple(
 _UNIFORM_NAMES = (
     "uTex",
     "uSourceKind",
+    "uTextureHasMipmaps",
     "uVideoYTex",
     "uVideoUVTex",
     "uVideoFormat",

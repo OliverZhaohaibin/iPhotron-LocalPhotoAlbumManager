@@ -498,7 +498,7 @@ class InfoLocationMapView(QWidget):
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
         is_map_target = self._is_map_event_target(watched)
-        if is_map_target or self._is_global_map_drag_event(event):
+        if is_map_target or self._is_global_map_drag_event(watched, event):
             self._handle_drag_cursor_event(event)
 
         if is_map_target and event.type() == QEvent.Type.Resize:
@@ -510,7 +510,7 @@ class InfoLocationMapView(QWidget):
     def _is_map_event_target(self, watched: object) -> bool:
         return any(watched is target for target in self._map_event_targets)
 
-    def _is_global_map_drag_event(self, event: QEvent) -> bool:
+    def _is_global_map_drag_event(self, watched: object, event: QEvent) -> bool:
         event_type = event.type()
         if event_type not in {
             QEvent.Type.MouseButtonPress,
@@ -525,7 +525,28 @@ class InfoLocationMapView(QWidget):
         if event_type != QEvent.Type.MouseButtonPress:
             return False
         button = getattr(event, "button", lambda: Qt.MouseButton.NoButton)()
-        return button == Qt.MouseButton.LeftButton and self._event_is_inside_map_host(event)
+        return button == Qt.MouseButton.LeftButton and (
+            self._object_is_inside_map_host(watched)
+            or self._event_is_inside_map_host(event)
+        )
+
+    def _object_is_inside_map_host(self, watched: object) -> bool:
+        """Return whether an application-filter receiver belongs to the map host.
+
+        Offscreen Qt plugins do not guarantee meaningful native global window
+        coordinates.  QObject ancestry is the authoritative signal for child
+        widgets, while the coordinate fallback remains useful for native map
+        surfaces that are not QObject children of the host.
+        """
+
+        if not isinstance(watched, QObject):
+            return False
+        current: QObject | None = watched
+        while current is not None:
+            if current is self._map_host:
+                return True
+            current = current.parent()
+        return False
 
     def _event_is_inside_map_host(self, event: QEvent) -> bool:
         global_point: QPoint | None = None

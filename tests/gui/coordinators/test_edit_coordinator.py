@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -50,6 +50,74 @@ def test_handle_done_clicked_delegates_to_adjustment_committer() -> None:
         reason="edit_done",
     )
     coordinator.leave_edit_mode.assert_called_once_with(restore_reason="edit_done")
+
+
+def test_handle_done_clicked_flushes_latest_values_to_render_session() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    session = SimpleNamespace(
+        set_values=Mock(),
+        values=Mock(return_value={"Exposure": 0.9, "Crop_W": 0.8}),
+    )
+    viewport = Mock(crop_values=Mock(return_value={"Crop_W": 0.8}))
+    render_state = SimpleNamespace(shader_adjustments={"Exposure": 0.9})
+    render_controller = Mock(
+        update_render_session=Mock(return_value=render_state),
+    )
+    throttler = Mock()
+    handle = object()
+    coordinator._session = session
+    coordinator._current_source = Path("/fake/photo.jpg")
+    coordinator._active_edit_viewport = Mock(return_value=viewport)
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator._render_session_controller = render_controller
+    coordinator._render_session_handle = handle
+    coordinator._update_throttler = throttler
+    coordinator._pending_session_values = {"Exposure": 0.9}
+    coordinator.leave_edit_mode = Mock()
+
+    EditCoordinator._handle_done_clicked(coordinator)
+
+    render_controller.update_render_session.assert_called_once_with(
+        handle,
+        {"Exposure": 0.9, "Crop_W": 0.8},
+    )
+    assert coordinator._active_adjustments == {"Exposure": 0.9}
+    assert coordinator._pending_session_values is None
+    throttler.stop.assert_called_once_with()
+
+
+def test_crop_interaction_flushes_final_state_before_ending_render_interaction() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    final_values = {
+        "Crop_CX": 0.4,
+        "Crop_CY": 0.6,
+        "Crop_W": 0.7,
+        "Crop_H": 0.5,
+    }
+    handle = object()
+    render_state = SimpleNamespace(shader_adjustments=dict(final_values))
+    render_controller = Mock()
+    render_controller.update_render_session.return_value = render_state
+    coordinator._session = SimpleNamespace(values=Mock(return_value=final_values))
+    coordinator._current_source = Path("/fake/photo.jpg")
+    coordinator._compare_active = False
+    coordinator._render_session_controller = render_controller
+    coordinator._render_session_handle = handle
+    coordinator._history_manager = Mock()
+    coordinator._update_throttler = Mock()
+    coordinator._pending_session_values = dict(final_values)
+
+    EditCoordinator._handle_crop_interaction_started(coordinator)
+    EditCoordinator._handle_crop_interaction_finished(coordinator)
+
+    coordinator._history_manager.push_undo_state.assert_called_once_with()
+    assert render_controller.method_calls == [
+        call.begin_render_session_interaction(handle),
+        call.update_render_session(handle, final_values),
+        call.end_render_session_interaction(handle),
+    ]
+    coordinator._update_throttler.stop.assert_called_once_with()
+    assert coordinator._pending_session_values is None
 
 
 def test_leave_edit_mode_requests_video_restore_with_probed_duration() -> None:
@@ -104,10 +172,11 @@ def test_leave_edit_mode_requests_video_restore_with_probed_duration() -> None:
             duration_sec=4.5,
         )
     )
+    coordinator._zoom_handler.disconnect_controls.assert_called_once_with()
     coordinator._router.show_detail.assert_called_once_with()
 
 
-def test_leave_edit_mode_still_requests_restore_for_non_video_assets() -> None:
+def test_leave_edit_mode_still_does_not_request_detail_reload() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     source = Path("/fake/photo.jpg")
     viewport = Mock()
@@ -152,12 +221,19 @@ def test_leave_edit_mode_still_requests_restore_for_non_video_assets() -> None:
     ):
         EditCoordinator.leave_edit_mode(coordinator)
 
-    coordinator._media_session.request_restore.assert_called_once_with(
-        MediaRestoreRequest(
-            path=source,
-            reason="edit_exit",
-            duration_sec=None,
-        )
+    coordinator._media_session.request_restore.assert_not_called()
+
+
+def test_unexpected_library_rebind_safely_leaves_active_edit() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    coordinator._session = object()
+    coordinator.leave_edit_mode = Mock()
+
+    EditCoordinator.invalidate_library_binding(coordinator)
+
+    coordinator.leave_edit_mode.assert_called_once_with(
+        restore_reason="library_invalidated",
+        restore_detail=False,
     )
 
 
@@ -395,7 +471,7 @@ def test_start_video_edit_load_sets_trim_before_queueing_thumbnails() -> None:
 
     EditCoordinator._start_video_edit_load(coordinator, Path("/fake/video.mp4"))
 
-    video_area.load_video.assert_called_once_with(
+    video_area.present_video.assert_called_once_with(
         Path("/fake/video.mp4"),
         adjustments={},
         trim_range_ms=(1000, 4000),
@@ -582,6 +658,7 @@ def test_leave_edit_mode_restores_transition_height_flow() -> None:
     coordinator._active_edit_viewport = Mock(return_value=Mock())
     coordinator._preview_manager = Mock()
     coordinator._zoom_handler = Mock()
+    coordinator._owns_zoom_handler = False
     coordinator._header_controller = Mock()
     coordinator._theme_controller = None
     coordinator._media_session = None
@@ -611,6 +688,7 @@ def test_leave_edit_mode_restores_transition_height_flow() -> None:
         EditCoordinator.leave_edit_mode(coordinator)
 
     video_area.set_edit_mode_active.assert_called_once_with(False)
+    coordinator._zoom_handler.disconnect_controls.assert_not_called()
     coordinator._router.show_detail.assert_called_once_with()
     coordinator._transition_manager.leave_edit_mode.assert_called_once_with(
         animate=True,

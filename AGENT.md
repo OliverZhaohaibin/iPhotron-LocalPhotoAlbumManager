@@ -2,22 +2,27 @@
 
 This file is the working guide for coding agents and contributors. It reflects
 the current vNext state: the production runtime has converged on
-`RuntimeContext -> LibrarySession -> application ports/services`, and legacy
-compatibility code is quarantined under `src/iPhoto/legacy/`.
+`RuntimeContext -> LibrarySession -> application ports/services`, and the
+legacy compatibility application tree has been removed.
 
 ## 1. Current Architecture Status
 
 - The vNext cleanup is complete for production source code.
 - Production runtime code must not import `iPhoto.legacy` or `iPhoto.models.*`.
-- Legacy compatibility and old domain-repository code live only in
-  `src/iPhoto/legacy/`. That subtree is temporary quarantine for historical
-  behavior tests and is planned for removal in the next major release.
+- The removed `src/iPhoto/legacy/` application tree must not be restored.
+  Historical behavior that remains a product requirement must be tested
+  through current application, session, domain, or infrastructure surfaces.
 - GUI, CLI, file watchers, Qt workers, and future automation entry points must
   enter library behavior through `RuntimeContext`, `LibrarySession`, and
   application-level surfaces.
 - New business logic belongs in application use cases/services, session
   surfaces, domain values/pure services, or infrastructure adapters. GUI code
   is presentation and Qt transport only.
+- Gallery-to-Detail still rendering uses one GPU-first production path: a
+  render transaction owns generation and terminal state, viewport-aware
+  neutral surfaces feed bounded disk/CPU/GPU caches, and Detail/Edit share one
+  render session. The removed Detail v2 frame cache and still Edit CPU-preview
+  path are not extension points.
 
 The authoritative current architecture is tracked in `docs/architecture.md`.
 Completed vNext migration records are archived under
@@ -74,9 +79,9 @@ Key runtime objects:
 - `LibraryRuntimeController`: GUI/runtime controller bound to the active
   session; it should not re-create standalone compatibility services.
 
-Compatibility code is not a production extension point. Do not add new features
-to `src/iPhoto/legacy/app.py`, `src/iPhoto/legacy/appctx.py`,
-`src/iPhoto/legacy/bootstrap/*`, or other quarantine modules.
+The removed compatibility tree is not a production extension point. Do not
+restore `src/iPhoto/legacy/`; migrate any still-required behavior to current
+application/session surfaces instead.
 
 ## 4. Files And State
 
@@ -94,6 +99,7 @@ Library workspace:
   global_index.db       # SQLite index and current asset/state repository store
   links.json            # Live Photo compatibility materialization
   cache/thumbs/         # Rebuildable thumbnail cache
+  cache/detail-surfaces/v3/ # SQLite-indexed rebuildable neutral RGBA8/sRGB surfaces
   faces/
     face_index.db       # Rebuildable People runtime snapshot
     face_state.db       # Durable People user decisions
@@ -142,7 +148,8 @@ State rules:
   repository/session surfaces. GUI and application code must not bypass the
   session boundary to call it directly.
 - `gui/`: PySide6 views, widgets, controllers, viewmodels, coordinators, menus,
-  and Qt task/signal adapters. It owns presentation state, not durable workflow
+  Qt task/signal adapters, and the Detail transaction/scheduler/cache/session
+  boundary. It owns presentation and GPU residency state, not durable workflow
   rules.
 - `library/`: runtime controller, tree/watch/scan coordination, trash and album
   filesystem shell code bound to session services.
@@ -151,10 +158,9 @@ State rules:
 - `maps/`: optional offline Maps runtime, tile parsing, OBF/native widget/helper
   integration, search, and map rendering internals.
 - `core/`: pure or rendering-oriented algorithms for Live Photo pairing,
-  adjustment math, geometry, export transforms, filters, raw loading, and
-  preview backends.
+  adjustment math, geometry, export transforms, filters, and raw loading.
 - `io/`: metadata extraction, scanner adapters, and sidecar parsing helpers.
-- `legacy/`: quarantine only. No production imports and no new functionality.
+- `legacy/`: removed. Do not recreate it or add compatibility imports.
 
 ## 6. Coding Rules
 
@@ -212,13 +218,26 @@ State rules:
 - All normal edits are non-destructive and stored in `.ipo` sidecars.
 - Editing math belongs in `core/`; persistence belongs behind `EditSidecarPort`
   or session edit services.
+- Static Detail and Edit exchange `PhotoRenderSessionHandle`; entering Edit,
+  Done/Cancel, compare, fullscreen, and adjustment updates must not restore a
+  second source decoder, CPU full-image preview session, or duplicate texture
+  upload path.
+- Sidecar changes replace immutable `EditRenderState` only. They must not enter
+  `DetailDecodeKey` or invalidate source-identical neutral surfaces/textures.
 - QRhi/Metal/OpenGL backend choice must not leak into product workflow rules.
 
 ## 8. Rendering And Maps Platform Rules
 
-- macOS media preview should default to QRhi/Metal when available; OpenGL is a
-  diagnostic or compatibility fallback.
-- Windows/Linux may use QRhi/OpenGL-backed paths depending on runtime support.
+- macOS media preview defaults to QRhi/Metal and may decode non-RAW stills with
+  ImageIO; OpenGL and Qt decode are compatibility fallbacks.
+- Windows uses QRhi/OpenGL and prefers WIC for non-RAW stills; WIC/COM
+  declarations must use fixed-width Windows ABI types. Linux uses QRhi/OpenGL
+  with the Qt still decoder. RAW remains routed through rawpy.
+- Platform decoders may fall back to Qt only inside the existing worker lane.
+  They preserve cancellation and return detached RGBA8888/sRGB surfaces.
+- Initial still presentation is viewport-LOD based and non-mipmapped. GPU
+  residency retains current/previous/next within both the three-texture and
+  192MB limits; a higher LOD replaces the current layer only after a real draw.
 - Legacy OpenGL maps use the `QOpenGLWindow + createWindowContainer()` surface
   where required to avoid transparent-window composition issues.
 - Native OsmAnd widget/helper selection belongs to maps runtime adapters and
@@ -243,6 +262,18 @@ Use targeted regression tests for changed behavior:
 .venv/bin/python -m pytest tests/performance -q
 ```
 
+For Detail rendering, decoder, cache, Edit session, or viewer changes, run:
+
+```bash
+.venv/bin/python -m pytest -q tests/gui/test_detail_pipeline.py tests/gui/test_detail_render_coordinator.py tests/gui/test_detail_decode_backend.py tests/gui/test_detail_request_scheduler.py tests/gui/test_detail_surface_cache.py tests/gui/test_detail_render_session.py tests/ui/controllers/test_player_view_controller_adjustments.py tests/ui/widgets/test_still_texture_residency.py tests/test_detail_benchmark.py
+.venv/bin/python tools/check_architecture.py
+.venv/bin/python -m compileall -q src tools
+```
+
+Platform backend changes also require packaged manual validation on the target
+OS. Source/offscreen tests do not prove WIC, ImageIO, QRhi/Metal, or native
+OpenGL behavior.
+
 Before touching scan visible publishing, collection query performance, trash
 state, or move/restore optimistic UI behavior, read the matching guardrail under
 `docs/misc/`.
@@ -255,10 +286,6 @@ Required guardrail expectations:
 - GUI runtime has no compatibility service factory fallback.
 - Architecture checks are part of CI.
 
-Known non-blocking warning currently documented by the refactor notes:
-
-- `PytestConfigWarning: Unknown config option: env`
-
 ## 10. Release And Documentation Rules
 
 - Keep `README.md` product-facing and concise.
@@ -266,6 +293,9 @@ Known non-blocking warning currently documented by the refactor notes:
 - Keep completed refactor records under `docs/finished/refactor/`.
 - Do not treat archived refactor documents under `docs/finished/` as current
   implementation instructions.
+- Keep `docs/requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md` aligned with the
+  production Detail profiler/harness whenever transaction stages, cache tiers,
+  decoder names, or SLO validation fields change.
 - Release validation may include manual Qt GUI smoke testing and opening an
   existing library, but these are product acceptance checks rather than
   architecture guardrail replacements.

@@ -25,6 +25,7 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.ports import EditServicePort
 from iPhoto.bootstrap.startup_profile import mark
 from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.detail_pipeline import AssetSourceIdentity, DetailPrefetchDescriptor
 from iPhoto.gui.gallery_demand import GalleryViewportDemand
 from iPhoto.gui.ui.models.roles import Roles, role_names
 from iPhoto.infrastructure.services.performance_events import (
@@ -52,6 +53,7 @@ from .gallery_window_loader import GalleryWindowLoader, GalleryWindowResult
 _LOGGER = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _STARTUP_GALLERY_WARMUP_TIMEOUT_MS = 2000
+_MAX_PUBLISHED_THUMBNAIL_OVERRIDES = 2048
 
 
 def _startup_hang_diag_enabled() -> bool:
@@ -88,6 +90,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._viewport_demand: GalleryViewportDemand | None = None
         self._demand_coordinator = GalleryDemandCoordinator()
         self._pending_thumbnail_rows: set[int] = set()
+        self._locally_stale_thumbnail_paths: set[Path] = set()
+        self._published_thumbnail_paths: dict[Path, None] = {}
         self._window_loader = GalleryWindowLoader(self)
         self._window_loader.resultReady.connect(self._on_window_result)
         self._window_loader.requestsDropped.connect(self._store.discard_window_requests)
@@ -100,6 +104,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_diag_logged_viewport = False
         self._startup_diag_logged_window = False
         self._startup_diag_logged_thumbnail_ready = False
+        self._startup_gallery_visible_logged = False
+        self._startup_usable_thumbnail_logged = False
         self._startup_gallery_warmup_active = False
         self._startup_gallery_ready_emitted = False
         self._startup_gallery_window_seen = False
@@ -198,6 +204,31 @@ class GalleryListModelAdapter(QAbstractListModel):
     def columnCount(self, parent=QModelIndex()) -> int:  # type: ignore[override]
         return 1
 
+    def detail_prefetch_descriptor(
+        self,
+        row: int,
+    ) -> DetailPrefetchDescriptor | None:
+        """Return an in-memory full-source prefetch descriptor without I/O."""
+
+        asset = self._store.asset_at(int(row))
+        if asset is None:
+            return None
+        return DetailPrefetchDescriptor(
+            row=int(row),
+            asset_id=str(asset.id),
+            path=asset.abs_path,
+            is_video=bool(asset.is_video),
+            source_identity=AssetSourceIdentity.from_info(
+                asset.abs_path,
+                {
+                    **dict(asset.metadata or {}),
+                    "bytes": asset.size_bytes,
+                    "w": asset.width,
+                    "h": asset.height,
+                },
+            ),
+        )
+
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:  # type: ignore[override]
         if not index.isValid():
             return None
@@ -225,8 +256,25 @@ class GalleryListModelAdapter(QAbstractListModel):
         if role_int == Qt.ItemDataRole.DisplayRole:
             return asset.rel_path.name
         if role_int == Roles.TILE_SNAPSHOT:
-            full = self._thumbnails.peek_full_thumbnail(asset.abs_path, self._thumb_size)
-            micro = asset.micro_thumbnail if isinstance(asset.micro_thumbnail, QImage) else None
+            thumbnail_current = (
+                asset.abs_path not in self._locally_stale_thumbnail_paths
+                and (
+                    asset.thumbnail_state == "ready"
+                    or asset.abs_path in self._published_thumbnail_paths
+                )
+            )
+            full = (
+                self._thumbnails.peek_full_thumbnail(asset.abs_path, self._thumb_size)
+                if thumbnail_current
+                else None
+            )
+            micro = (
+                asset.micro_thumbnail
+                if thumbnail_current
+                and asset.thumbnail_state == "ready"
+                and isinstance(asset.micro_thumbnail, QImage)
+                else None
+            )
             loading_state = (
                 "full"
                 if isinstance(full, QPixmap) and not full.isNull()
@@ -251,6 +299,14 @@ class GalleryListModelAdapter(QAbstractListModel):
                 is_current=row == self._current_row,
             )
         if role_int == Qt.DecorationRole:
+            if (
+                asset.abs_path in self._locally_stale_thumbnail_paths
+                or (
+                    asset.thumbnail_state != "ready"
+                    and asset.abs_path not in self._published_thumbnail_paths
+                )
+            ):
+                return None
             return self._thumbnails.peek_full_thumbnail(asset.abs_path, self._thumb_size)
         if role_int == Qt.ItemDataRole.ToolTipRole:
             return str(asset.abs_path)
@@ -301,6 +357,11 @@ class GalleryListModelAdapter(QAbstractListModel):
             normalized = [str(item).strip() for item in components if item]
             return ", ".join(normalized) if normalized else None
         if role_int == Roles.MICRO_THUMBNAIL:
+            if (
+                asset.thumbnail_state != "ready"
+                or asset.abs_path in self._locally_stale_thumbnail_paths
+            ):
+                return None
             return asset.micro_thumbnail
         if role_int == Roles.INFO:
             return self.info_for_row(row)
@@ -347,6 +408,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_gallery_viewport_seen = False
         self._startup_gallery_thumbnail_seen = False
         self._startup_gallery_heartbeat_count = 0
+        self._startup_gallery_visible_logged = False
+        self._startup_usable_thumbnail_logged = False
         if _startup_hang_diag_enabled():
             self._startup_gallery_heartbeat_timer.start()
         else:
@@ -418,6 +481,9 @@ class GalleryListModelAdapter(QAbstractListModel):
             if self._startup_gallery_warmup_active:
                 self._startup_gallery_window_seen = True
                 mark("gallery_startup_warmup.first_window_applied")
+                if not self._startup_gallery_visible_logged:
+                    self._startup_gallery_visible_logged = True
+                    mark("startup.first_gallery_visible")
             if not self._startup_diag_logged_window:
                 self._startup_diag_logged_window = True
                 _LOGGER.info(
@@ -489,22 +555,57 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._last_selection_signature = None
         self._last_window_identity_signature = None
         self._duration_cache.clear()
+        self._locally_stale_thumbnail_paths.clear()
+        self._published_thumbnail_paths.clear()
         self._demand_coordinator.reset()
         self._thumbnail_hint_request_id += 1
         self._thumbnail_hint_loader.cancel_pending()
         self._store.rebind_asset_query_service(asset_query_service, library_root)
         self._bind_backfill_completion_signal(asset_query_service)
 
-    def invalidate_thumbnail(self, path_str: str) -> None:
+    def invalidate_thumbnail(
+        self,
+        path_str: str,
+        *,
+        desired_revision: str | None = None,
+    ) -> None:
         path = Path(path_str)
-        self._thumbnails.invalidate(path, size=self._thumb_size)
+        if desired_revision:
+            self._locally_stale_thumbnail_paths.add(path)
+            self._published_thumbnail_paths.pop(path, None)
+        self._thumbnails.invalidate(
+            path,
+            size=self._thumb_size,
+            desired_revision=desired_revision,
+        )
         self._duration_cache.pop(path, None)
         row = self._store.row_for_path(path)
         if row is None:
             return
+        # Decoration lookups are intentionally memory-only, so invalidation
+        # alone would leave the filmstrip showing its micro thumbnail until a
+        # later viewport-demand refresh.  Queue the edited asset immediately.
+        if desired_revision:
+            self._thumbnails.get_thumbnail(
+                path,
+                self._thumb_size,
+                priority="high",
+                thumbnail_state="stale",
+                thumb_revision=desired_revision,
+            )
+        else:
+            self._thumbnails.get_thumbnail(
+                path,
+                self._thumb_size,
+                priority="high",
+            )
         idx = self.index(row, 0)
         if idx.isValid():
-            self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.SIZE])
+            self.dataChanged.emit(
+                idx,
+                idx,
+                [Qt.DecorationRole, Roles.TILE_SNAPSHOT, Roles.SIZE],
+            )
 
     def update_favorite(self, row: int, is_favorite: bool) -> None:
         self._store.update_favorite_status(row, is_favorite)
@@ -785,9 +886,26 @@ class GalleryListModelAdapter(QAbstractListModel):
             self.dataChanged.emit(top, bottom, [])
 
     def _on_thumbnail_ready(self, path: Path) -> None:
+        path = Path(path)
+        was_locally_stale = path in self._locally_stale_thumbnail_paths
+        self._locally_stale_thumbnail_paths.discard(path)
         row = self._store.cached_row_for_path(path)
         if row is None:
             return
+        asset = self._store.asset_at(row)
+        if was_locally_stale or (
+            asset is not None and asset.thumbnail_state != "ready"
+        ):
+            self._published_thumbnail_paths[path] = None
+            if (
+                len(self._published_thumbnail_paths)
+                > _MAX_PUBLISHED_THUMBNAIL_OVERRIDES
+            ):
+                self._published_thumbnail_paths.pop(
+                    next(iter(self._published_thumbnail_paths))
+                )
+        else:
+            self._published_thumbnail_paths.pop(path, None)
         if not self._startup_diag_logged_thumbnail_ready:
             self._startup_diag_logged_thumbnail_ready = True
             mark("gallery_startup_warmup.first_full_thumbnail_ready")
@@ -808,18 +926,42 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._pending_thumbnail_rows.clear()
         if not rows:
             return
+        demand = self._viewport_demand
+        track_startup_milestone = (
+            self._startup_gallery_warmup_active
+            and self._startup_gallery_window_seen
+            and self._startup_gallery_viewport_seen
+            and demand is not None
+        )
+        usable_startup_thumbnail_updated = False
+
+        def _emit_range(first: int, last: int) -> None:
+            nonlocal usable_startup_thumbnail_updated
+            emitted = self._emit_thumbnail_range(first, last)
+            if (
+                emitted
+                and track_startup_milestone
+                and demand is not None
+                and first <= demand.visible_last
+                and last >= demand.visible_first
+            ):
+                usable_startup_thumbnail_updated = True
+
         range_first = rows[0]
         range_last = rows[0]
         for row in rows[1:]:
             if row == range_last + 1:
                 range_last = row
                 continue
-            self._emit_thumbnail_range(range_first, range_last)
+            _emit_range(range_first, range_last)
             range_first = range_last = row
-        self._emit_thumbnail_range(range_first, range_last)
+        _emit_range(range_first, range_last)
+        if usable_startup_thumbnail_updated and not self._startup_usable_thumbnail_logged:
+            self._startup_usable_thumbnail_logged = True
+            mark("startup.first_usable_thumbnail")
         self._maybe_finish_startup_gallery_warmup("thumbnail_ready")
 
-    def _emit_thumbnail_range(self, first: int, last: int) -> None:
+    def _emit_thumbnail_range(self, first: int, last: int) -> bool:
         top = self.index(first, 0)
         bottom = self.index(last, 0)
         if top.isValid() and bottom.isValid():
@@ -828,6 +970,8 @@ class GalleryListModelAdapter(QAbstractListModel):
                 bottom,
                 [Qt.DecorationRole, Roles.TILE_SNAPSHOT],
             )
+            return True
+        return False
 
     def _finish_startup_gallery_warmup(self, reason: str) -> None:
         if not self._startup_gallery_warmup_active and self._startup_gallery_ready_emitted:
@@ -1120,6 +1264,8 @@ class GalleryListModelAdapter(QAbstractListModel):
                     l2_cache_key=l2_key,
                     kind="guard" if row in guard_rows else "far_speculative",
                     rank=rank,
+                    thumbnail_state=dto.thumbnail_state,
+                    thumb_revision=dto.thumb_revision,
                 )
             )
         return tuple(candidates)

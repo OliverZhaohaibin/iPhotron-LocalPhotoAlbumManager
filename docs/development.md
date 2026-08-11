@@ -83,6 +83,7 @@ Small behavior contracts that are easy to break during feature work live in
 | Scan UI publishing | [SCAN_VISIBLE_PUBLISH_GUARDRAILS.md](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) |
 | Large library collection queries | [LARGE_LIBRARY_QUERY_GUARDRAILS.md](misc/LARGE_LIBRARY_QUERY_GUARDRAILS.md) |
 | Gallery scrolling, sparse windows, and thumbnail demand | [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) |
+| Gallery → Detail GPU-first transactions, caches, sessions, and packaged validation | [DETAIL_OPEN_BENCHMARK_RUNBOOK.md](requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md) |
 | Trash and restore state | [TRASH_RESTORE_STATE_GUARDRAILS.md](misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |
 | Move/restore optimistic UI | [MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md) |
 | Project popups and People & Pets UI regressions | [PROJECT_POPUP_GUARDRAILS.md](misc/PROJECT_POPUP_GUARDRAILS.md) |
@@ -234,9 +235,12 @@ YOLOX release asset and can be overridden with:
 export IPHOTO_PET_DETECTOR_MODEL_URL="https://example.invalid/yolox_nano.onnx"
 ```
 
-When the DINOv2 TorchScript cache is missing, iPhotron loads `dinov2_vits14`
-through Torch Hub from a pinned, immutable `facebookresearch/dinov2` revision
-and then attempts to cache a TorchScript copy under `extension/models/pets`.
+Production never executes Torch Hub. It loads a packaged DINOv2 TorchScript model,
+or downloads the fixed HTTPS artifact declared by SHA-256 and exact byte size in
+`src/iPhoto/pets/model_manifest.json`. Release engineering may regenerate the
+artifact from the pinned source revision with
+`tools/convert_dinov2_torchscript.py`; that tool also checks eager/TorchScript
+numeric equivalence before publishing.
 
 For offline or packaged validation, disable first-use downloads with:
 
@@ -869,6 +873,55 @@ packaged executable, not from the editable source checkout.
 
 ---
 
+## Gallery Detail GPU-first Development
+
+Static Gallery → Detail presentation has one production pipeline:
+
+```text
+DetailRenderTransaction
+  -> DetailStillRequestScheduler
+  -> memory/disk neutral surface cache or platform decoder
+  -> bounded GPU texture residency
+  -> PhotoRenderSessionHandle shared by Detail/Edit
+  -> actual-draw presented terminal event
+```
+
+The first still surface is selected from viewport physical pixels, DPR, crop,
+rotation, perspective, and zoom demand. It is detached RGBA8888/sRGB and does
+not generate initial mipmaps. The source cache key excludes `.ipo`; adjustment
+changes replace immutable shader state without re-decoding or re-uploading the
+same source. Export remains the separate full-resolution path.
+
+Decoder selection is RAW → rawpy, macOS non-RAW → ImageIO, Windows non-RAW →
+WIC, and Linux/general non-RAW → Qt. ImageIO/WIC failures fall back to Qt in the
+same worker lane and must be visible as `decode_fallback` profiler events. Do
+not add a second controller-owned decoder, path-keyed texture load, or CPU
+full-image Edit preview.
+
+Run the focused contracts after changing this path:
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q \
+  tests/gui/test_detail_pipeline.py \
+  tests/gui/test_detail_render_coordinator.py \
+  tests/gui/test_detail_decode_backend.py \
+  tests/gui/test_detail_request_scheduler.py \
+  tests/gui/test_detail_surface_cache.py \
+  tests/gui/test_detail_render_session.py \
+  tests/ui/controllers/test_player_view_controller_adjustments.py \
+  tests/ui/widgets/test_still_texture_residency.py \
+  tests/test_detail_benchmark.py
+```
+
+Windows must additionally run `tests\gui\test_detail_decode_backend.py` on a
+real Windows Python so the WIC/COM test is not skipped. Package-level validation
+uses `tools/run_detail_packaged_benchmark.py`; commands, manifest semantics,
+privacy rules, and output validation are documented in the runbook linked
+above. Manual acceptance has been completed on Windows and Linux for this
+rollout; future platform decoder/render changes require new target-OS checks.
+
+---
+
 ## Build & Package
 
 ### Running the Application
@@ -909,12 +962,18 @@ macOS/Metal and OpenGL QRhi previews share the same packaged shader set.
 For Windows release work that includes the native maps extension, prefer:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -OutputDir build
+powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -OutputDir build -IncludeOptionalAssets
 ```
 
-That script stages `src/maps/tiles/extension/bin` from the native runtime before
-invoking Nuitka, so it is the recommended packaging entry point whenever the
-OsmAnd helper/native widget runtime is part of the build.
+With `-IncludeOptionalAssets`, the script stages
+`src/maps/tiles/extension/bin` from the native runtime before invoking Nuitka;
+without that switch it builds the smaller base package. It is the recommended
+packaging entry point whenever the OsmAnd helper/native widget runtime is part
+of the build. It uses
+`docs/picture/logo_new.ico` by default and discovers Python from the repository
+`.venv`, the parent `.venv`, `py.exe -3.12`, or a real `python.exe` on `PATH`.
+Use `-PythonExe <path>` to override discovery; Microsoft Store execution aliases
+are rejected during preflight.
 
 For macOS packaging, run the SDK build and sync script first:
 
@@ -925,7 +984,10 @@ python scripts/sync_macos_map_extension.py --sdk-root ../PySide6-OsmAnd-SDK
 
 Then use the same AOT/Nuitka discipline: bundle `src/maps/tiles`, include the
 QRhi `.qsb` files, and verify the packaged app opens both media previews and
-the Location view from the frozen runtime.
+the Location view from the frozen runtime. `scripts/build_nuitka_macos.sh`
+passes the same default ICO to Nuitka, which requires `imageio` to convert it
+to the app bundle's ICNS resource. Linux remains a standalone build and gets
+its desktop icon only at the AppImage packaging stage.
 
 See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and manual flags.
 
@@ -1006,8 +1068,10 @@ python -m pytest tests/architecture -q
 ```
 
 Test configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`:
+
 - Test paths: `tests/`
-- GUI tests (`tests/ui`, `tests/gui`) are excluded by default.
+- The `pytest-qt` plugin is disabled; GUI tests remain part of normal discovery
+  and provide their own Qt fixtures/offscreen setup where required.
 
 Use the project virtual environment explicitly when the shell does not have
 `pytest` on `PATH`:
@@ -1035,6 +1099,7 @@ iphoto-gui
 | `ExifTool not found` | Ensure `exiftool` is in your `PATH` |
 | `FFmpeg not found` | Ensure `ffmpeg` and `ffprobe` are in your `PATH` |
 | OpenGL errors | Update GPU drivers; ensure OpenGL 3.3+ support |
+| Windows Detail logs `wic_to_qt` for every image | Run `pytest -q tests\gui\test_detail_decode_backend.py`; verify the WIC test passes and that COM declarations use fixed-width `HRESULT` rather than `ctypes.wintypes.HRESULT` |
 | `_jit_compiled` module not found | Run AOT compilation step (see Build section) |
 | macOS map tile area is transparent | Verify the active backend is `MapGLWindowWidget`/`MapGLWindow`, keep `IPHOTO_MAP_GL_DEBUG=1` diagnostics, and avoid forcing the legacy `QOpenGLWidget` map path |
 | Packaged media preview cannot load QRhi shaders | Ensure `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` `.qsb` files are included in the Nuitka data files |

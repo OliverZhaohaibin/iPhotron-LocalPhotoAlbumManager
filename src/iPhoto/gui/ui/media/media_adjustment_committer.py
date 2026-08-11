@@ -32,6 +32,15 @@ class MediaAdjustmentCommitter(QObject):
         self._pause_watcher = pause_watcher
         self._resume_watcher = resume_watcher
         self._edit_service_getter = edit_service_getter
+        self._adjustment_preparation_invalidator: Callable[[Path], None] | None = None
+
+    def set_adjustment_preparation_invalidator(
+        self,
+        invalidator: Callable[[Path], None] | None,
+    ) -> None:
+        """Invalidate prepared sidecar state before publishing a commit."""
+
+        self._adjustment_preparation_invalidator = invalidator
 
     def commit(self, source: Path, adjustments: dict, *, reason: str) -> bool:
         paused = False
@@ -44,8 +53,20 @@ class MediaAdjustmentCommitter(QObject):
             )
             if edit_service is None:
                 raise RuntimeError("Edit service is unavailable")
-            edit_service.write_adjustments(source, adjustments)
-            self._asset_vm.invalidate_thumbnail(str(source))
+            commit_result = edit_service.write_adjustments(source, adjustments)
+            desired_revision = getattr(commit_result, "thumbnail_revision", None)
+            if isinstance(desired_revision, str) and desired_revision:
+                self._asset_vm.invalidate_thumbnail(
+                    str(source),
+                    desired_revision=desired_revision,
+                )
+            else:
+                self._asset_vm.invalidate_thumbnail(str(source))
+            if self._adjustment_preparation_invalidator is not None:
+                try:
+                    self._adjustment_preparation_invalidator(source)
+                except Exception:
+                    LOGGER.exception("Failed to invalidate prepared adjustment state")
         except Exception:
             LOGGER.exception("Failed to commit adjustments for %s", source)
             return False

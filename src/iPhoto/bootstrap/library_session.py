@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..application.ports import (
     AssetRepositoryPort,
@@ -20,18 +21,22 @@ from ..infrastructure.repositories.library_state_repository import (
 )
 from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
 from ..infrastructure.services.map_runtime_service import SessionMapRuntimeService
-from ..people.service import PeopleService
-from ..pets.service import PetService
-from .library_asset_state_service import LibraryAssetStateService
 from .library_album_metadata_service import LibraryAlbumMetadataService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_asset_operation_service import LibraryAssetOperationService
 from .library_asset_query_service import LibraryAssetQueryService
+from .library_asset_state_service import LibraryAssetStateService
 from .library_edit_service import LibraryEditService
 from .library_location_service import LibraryLocationService
-from .library_people_service import create_people_service
-from .library_pet_service import create_pet_service
 from .library_scan_service import LibraryScanService
+
+if TYPE_CHECKING:
+    from ..application.services.recognition_merge_service import RecognitionMergeService
+    from ..application.services.recognition_query_service import RecognitionQueryService
+    from ..people.service import PeopleService
+    from ..pets.service import PetService
+    from ..recognition.mutation_coordinator import RecognitionMutationCoordinator
+    from .library_probe import PreparedLibrary, ValidatedPreparedLibrary
 
 
 @dataclass
@@ -47,13 +52,43 @@ class LibrarySession:
     scans: LibraryScanService | None = None
     asset_lifecycle: LibraryAssetLifecycleService | None = None
     asset_operations: LibraryAssetOperationService | None = None
+    recognition_mutations: RecognitionMutationCoordinator | None = None
     people: PeopleService | None = None
     pets: PetService | None = None
+    recognition_queries: RecognitionQueryService | None = None
+    recognition_merges: RecognitionMergeService | None = None
     maps: MapRuntimePort | None = None
     map_interactions: MapInteractionServicePort | None = None
     edit: EditServicePort | None = None
     locations: LocationAssetServicePort | None = None
     bind_asset_runtime: bool = True
+    _shutdown: bool = field(default=False, init=False, repr=False)
+
+    _LAZY_SERVICE_NAMES = frozenset(
+        {
+            "people",
+            "pets",
+            "recognition_mutations",
+            "recognition_queries",
+            "recognition_merges",
+            "maps",
+            "map_interactions",
+            "locations",
+        }
+    )
+
+    def __getattribute__(self, name: str):
+        value = object.__getattribute__(self, name)
+        if name not in object.__getattribute__(self, "_LAZY_SERVICE_NAMES"):
+            return value
+        if object.__getattribute__(self, "_shutdown"):
+            raise RuntimeError("LibrarySession is shut down.")
+        if value is not None:
+            return value
+        factory = object.__getattribute__(self, "_create_lazy_service")
+        value = factory(name)
+        object.__setattr__(self, name, value)
+        return value
 
     def __post_init__(self) -> None:
         self.library_root = Path(self.library_root)
@@ -89,24 +124,78 @@ class LibrarySession:
                 self.library_root,
                 lifecycle_service=self.asset_lifecycle,
             )
-        if self.people is None:
-            self.people = create_people_service(self.library_root)
-        if self.pets is None:
-            self.pets = create_pet_service(self.library_root)
-        if self.maps is None:
-            self.maps = SessionMapRuntimeService()
-        if self.map_interactions is None:
-            self.map_interactions = LibraryMapInteractionService()
+        # Detail playback consults edit sidecars for every still image.  Keep
+        # this lightweight service on the core Gallery/Detail path so the
+        # first image click never becomes a service-construction boundary.
         if self.edit is None:
-            self.edit = LibraryEditService(self.library_root)
-        if self.locations is None:
-            self.locations = LibraryLocationService(
+            self.edit = LibraryEditService(
                 self.library_root,
-                query_service=self.asset_queries,
+                thumbnail_state_service=self.asset_queries,
             )
         bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
         if callable(bind_edit_service):
             bind_edit_service(self.edit)
+        bind_thumbnail_state = getattr(
+            self.asset_runtime,
+            "bind_thumbnail_state_service",
+            None,
+        )
+        if callable(bind_thumbnail_state):
+            bind_thumbnail_state(self.asset_queries)
+
+        # People, Pets, Map and Location remain feature-scoped.
+
+    def _create_lazy_service(self, name: str):
+        if name == "recognition_mutations":
+            from ..recognition.mutation_coordinator import (
+                RecognitionMutationCoordinator,
+            )
+
+            return RecognitionMutationCoordinator(self.library_root)
+        if name == "people":
+            from .library_people_service import create_people_service
+
+            return create_people_service(
+                self.library_root,
+                mutation_coordinator=self.recognition_mutations,
+            )
+        if name == "pets":
+            from .library_pet_service import create_pet_service
+
+            return create_pet_service(
+                self.library_root,
+                mutation_coordinator=self.recognition_mutations,
+            )
+        if name == "recognition_queries":
+            from ..application.services.recognition_query_service import (
+                RecognitionQueryService,
+            )
+
+            return RecognitionQueryService(
+                self.library_root,
+                people_service=self.people,
+                pet_service=self.pets,
+            )
+        if name == "recognition_merges":
+            from ..application.services.recognition_merge_service import (
+                RecognitionMergeService,
+            )
+
+            return RecognitionMergeService(
+                self.people,
+                self.pets,
+                mutation_coordinator=self.recognition_mutations,
+            )
+        if name == "maps":
+            return SessionMapRuntimeService()
+        if name == "map_interactions":
+            return LibraryMapInteractionService()
+        if name == "locations":
+            return LibraryLocationService(
+                self.library_root,
+                query_service=self.asset_queries,
+            )
+        raise AttributeError(name)
 
     @property
     def assets(self) -> AssetRepositoryPort:
@@ -122,13 +211,69 @@ class LibrarySession:
         return self.state_repository
 
     def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
+        people = object.__getattribute__(self, "people")
+        pets = object.__getattribute__(self, "pets")
+        mutations = object.__getattribute__(self, "recognition_mutations")
+        if people is not None:
+            people.shutdown()
+        if pets is not None:
+            pets.shutdown()
+        if mutations is not None:
+            mutations.close()
         shutdown_queries = getattr(self.asset_queries, "shutdown", None)
         if callable(shutdown_queries):
             shutdown_queries()
         bind_edit_service = getattr(self.asset_runtime, "bind_edit_service", None)
         if callable(bind_edit_service):
             bind_edit_service(None)
+        bind_thumbnail_state = getattr(
+            self.asset_runtime,
+            "bind_thumbnail_state_service",
+            None,
+        )
+        if callable(bind_thumbnail_state):
+            bind_thumbnail_state(None)
         self.asset_runtime.shutdown()
+
+    @classmethod
+    def from_prepared(
+        cls,
+        prepared: "PreparedLibrary",
+        *,
+        asset_runtime: LibraryAssetRuntime,
+        bind_asset_runtime: bool = False,
+    ) -> "LibrarySession":
+        """Compose services after an out-of-process library probe succeeded."""
+
+        from ..cache.index_store import mark_repository_prepared
+
+        if prepared.credential is None:
+            raise ValueError("prepared library is missing its credential")
+        mark_repository_prepared(prepared.root, prepared.credential)
+        return cls(
+            prepared.root,
+            asset_runtime=asset_runtime,
+            bind_asset_runtime=bind_asset_runtime,
+        )
+
+    @classmethod
+    def from_validated(
+        cls,
+        validated: "ValidatedPreparedLibrary",
+        *,
+        asset_runtime: LibraryAssetRuntime,
+        bind_asset_runtime: bool = False,
+    ) -> "LibrarySession":
+        """Consume a validated capability and compose one library session."""
+
+        return cls.from_prepared(
+            validated.consume(),
+            asset_runtime=asset_runtime,
+            bind_asset_runtime=bind_asset_runtime,
+        )
 
 
 def create_headless_library_session(root: Path) -> LibrarySession:

@@ -12,12 +12,24 @@ pytest.importorskip("PySide6", reason="PySide6 is required for playback coordina
 from iPhoto.application.ports import LocationWriteJobRecord
 from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+from iPhoto.gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailPrefetchDescriptor,
+    DetailRenderTransaction,
+    PlaybackAsyncToken,
+    VideoPresentationState,
+)
+from iPhoto.gui.detail_render_coordinator import (
+    DetailRenderCoordinator,
+    DetailRenderState,
+    DetailSurfacePresentationResult,
+)
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
-from iPhoto.people.service import ManualFaceAddResult
 from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.people.service import ManualFaceAddResult, PeopleService
 from maps.osmand_search import SearchSuggestion
 
 
@@ -30,6 +42,7 @@ def _make_presentation(
     is_favorite: bool = False,
     info_panel_visible: bool = False,
     reload_token: int = 0,
+    request_generation: int = 1,
 ):
     return DetailPresentation(
         row=0,
@@ -52,6 +65,7 @@ def _make_presentation(
         video_trim_range_ms=(1000, 3000) if is_video else None,
         video_adjusted_preview=is_video,
         reload_token=reload_token,
+        request_generation=request_generation,
     )
 
 
@@ -102,6 +116,104 @@ def test_execute_pending_play_flushes_row_and_restarts_cooldown() -> None:
     coordinator._play_debounce.start.assert_called_once_with()
 
 
+def test_relative_navigation_accumulates_from_pending_target() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=8))
+    coordinator._pending_play_row = 4
+    coordinator.current_row = Mock(return_value=2)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator.select_next(coordinator)
+
+    coordinator.play_asset.assert_called_once_with(5)
+    coordinator.current_row.assert_not_called()
+
+
+def test_rapid_relative_navigation_coalesces_to_the_accumulated_target() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=8))
+    coordinator._pending_play_row = None
+    coordinator.current_row = Mock(return_value=2)
+    coordinator._play_debounce = Mock(isActive=Mock(return_value=True), start=Mock())
+    coordinator._dispatch_play_row = Mock()
+    coordinator._play_profile_started_at = None
+    coordinator._play_profile_row = None
+
+    PlaybackCoordinator.select_next(coordinator)
+    PlaybackCoordinator.select_next(coordinator)
+    PlaybackCoordinator.select_previous(coordinator)
+
+    assert coordinator._pending_play_row == 3
+    coordinator._dispatch_play_row.assert_not_called()
+
+
+def test_relative_navigation_starts_at_first_row_without_a_current_selection() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator._pending_play_row = None
+    coordinator._requested_play_row = None
+    coordinator.current_row = Mock(return_value=-1)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator.select_next(coordinator)
+
+    coordinator.play_asset.assert_called_once_with(0)
+
+
+def test_rapid_navigation_accumulates_while_immediate_target_is_loading() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=8))
+    coordinator._pending_play_row = None
+    coordinator._requested_play_row = None
+    coordinator.current_row = Mock(return_value=2)
+    coordinator._play_debounce = Mock(
+        isActive=Mock(side_effect=[False, True, True]),
+        start=Mock(),
+    )
+    coordinator._dispatch_play_row = Mock()
+    coordinator._play_profile_started_at = None
+    coordinator._play_profile_row = None
+
+    PlaybackCoordinator.select_next(coordinator)
+    PlaybackCoordinator.select_next(coordinator)
+
+    coordinator._dispatch_play_row.assert_called_once_with(3, reason="immediate")
+    assert coordinator._pending_play_row == 4
+    assert coordinator._requested_play_row == 4
+
+
+@pytest.mark.parametrize(
+    ("current_row", "delta"),
+    [
+        (-1, -1),
+        (0, -1),
+        (4, 1),
+    ],
+)
+def test_relative_navigation_stops_at_model_boundaries(current_row: int, delta: int) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator._pending_play_row = None
+    coordinator.current_row = Mock(return_value=current_row)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator._request_relative_asset(coordinator, delta)
+
+    coordinator.play_asset.assert_not_called()
+
+
+def test_relative_navigation_preserves_single_step_behavior() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator._pending_play_row = None
+    coordinator.current_row = Mock(return_value=3)
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator.select_previous(coordinator)
+
+    coordinator.play_asset.assert_called_once_with(2)
+
+
 def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._current_presentation = None
@@ -110,17 +222,24 @@ def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
 
     presentation = _make_presentation()
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._asset_model.set_current_row.assert_called_once_with(0)
     coordinator.assetChanged.emit.assert_called_once_with(0)
     coordinator._update_header.assert_called_once_with(presentation)
-    coordinator._sync_filmstrip_selection.assert_called_once_with(0)
+    coordinator._select_filmstrip_row.assert_called_once_with(0)
     coordinator._render_presentation.assert_called_once_with(presentation)
 
 
@@ -134,7 +253,9 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._clear_play_profile = Mock()
@@ -144,6 +265,66 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
 
     coordinator._render_presentation.assert_not_called()
     coordinator._update_favorite_icon.assert_called_once_with(True)
+
+
+def test_handle_presentation_changed_rerenders_same_asset_for_new_generation() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    previous = _make_presentation(request_generation=1)
+    presentation = _make_presentation(request_generation=2)
+    coordinator._current_presentation = previous
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(set_current_row=Mock())
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = None
+
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    coordinator._render_presentation.assert_called_once_with(presentation)
+    coordinator._update_favorite_icon.assert_not_called()
+
+
+def test_handle_presentation_changed_marks_live_photo_transaction_as_motion() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = replace(
+        _make_presentation(
+            path="/fake/photo.heic",
+            is_video=False,
+            is_live=True,
+            request_generation=3,
+        ),
+        live_motion_abs=Path("/fake/photo.mov"),
+    )
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(set_current_row=Mock())
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._clear_play_profile = Mock()
+
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    assert coordinator._detail_render_transaction.media_kind == "live_motion"
 
 
 def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_changes() -> None:
@@ -161,13 +342,20 @@ def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_chan
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._clear_play_profile = Mock()
     coordinator._info_panel = None
 
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._render_presentation.assert_called_once_with(presentation)
     coordinator._update_favorite_icon.assert_not_called()
@@ -182,19 +370,26 @@ def test_handle_presentation_changed_skips_hidden_detail_updates() -> None:
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
 
     presentation = _make_presentation()
 
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     assert coordinator._current_presentation is None
     coordinator._asset_model.set_current_row.assert_not_called()
     coordinator.assetChanged.emit.assert_not_called()
     coordinator._update_header.assert_not_called()
-    coordinator._sync_filmstrip_selection.assert_not_called()
+    coordinator._select_filmstrip_row.assert_not_called()
     coordinator._render_presentation.assert_not_called()
     coordinator._clear_play_profile.assert_called_once_with(presentation.row)
 
@@ -223,17 +418,29 @@ def test_hidden_presentation_then_explicit_open_of_same_asset_still_renders() ->
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
     coordinator._info_panel = None
 
     presentation = _make_presentation()
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._render_presentation.assert_not_called()
     coordinator._router.is_detail_view_active.return_value = True
-    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     coordinator._render_presentation.assert_called_once_with(presentation)
 
@@ -268,6 +475,7 @@ def test_preserve_live_presentation_keeps_existing_motion_during_same_asset_refr
 
 def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._edit_service_getter = None
     coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
     coordinator._library_manager = SimpleNamespace(
         edit_service=Mock(read_adjustments=Mock(return_value={"Exposure": 0.2}))
@@ -275,6 +483,7 @@ def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> N
     coordinator._player_view = SimpleNamespace(
         video_area=Mock(rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})),
         image_viewer=Mock(rotate_image_ccw=Mock()),
+        apply_committed_adjustments=Mock(return_value=True),
     )
 
     PlaybackCoordinator._handle_rotate_requested(coordinator, Path("/fake/video.mp4"), True)
@@ -288,11 +497,122 @@ def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> N
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},
         reason="rotate",
     )
+    coordinator._player_view.apply_committed_adjustments.assert_called_once_with(
+        Path("/fake/video.mp4"),
+        {"Exposure": 0.2, "Crop_Rotate90": 3.0},
+        "rotate",
+    )
+
+
+def test_handle_rotate_requested_uses_injected_edit_service_for_still() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    edit_service = Mock(read_adjustments=Mock(return_value={"Exposure": 0.2}))
+    coordinator._edit_service_getter = Mock(return_value=edit_service)
+    coordinator._library_manager = None
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator._player_view = SimpleNamespace(
+        video_area=Mock(rotate_image_ccw=Mock()),
+        image_viewer=Mock(
+            rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})
+        ),
+        apply_committed_adjustments=Mock(return_value=True),
+    )
+    source = Path("/fake/photo.jpg")
+
+    PlaybackCoordinator._handle_rotate_requested(coordinator, source, False)
+
+    coordinator._edit_service_getter.assert_called_once_with()
+    edit_service.read_adjustments.assert_called_once_with(source)
+    coordinator._adjustment_committer.commit.assert_called_once_with(
+        source,
+        {"Exposure": 0.2, "Crop_Rotate90": 3.0},
+        reason="rotate",
+    )
+    coordinator._player_view.apply_committed_adjustments.assert_called_once_with(
+        source,
+        {"Exposure": 0.2, "Crop_Rotate90": 3.0},
+        "rotate",
+    )
+
+
+def test_handle_rotate_requested_rolls_back_still_when_commit_fails() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    source = Path("/fake/photo.jpg")
+    previous = {
+        "Crop_Rotate90": 1.0,
+        "Perspective_Vertical": 0.2,
+        "Perspective_Horizontal": -0.1,
+    }
+    coordinator._edit_service_getter = Mock(
+        return_value=Mock(read_adjustments=Mock(return_value=previous))
+    )
+    coordinator._library_manager = None
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=False))
+    coordinator._player_view = SimpleNamespace(
+        video_area=Mock(),
+        image_viewer=Mock(
+            rotate_image_ccw=Mock(
+                return_value={
+                    "Crop_Rotate90": 0.0,
+                    "Perspective_Vertical": -0.1,
+                    "Perspective_Horizontal": -0.2,
+                }
+            )
+        ),
+        apply_committed_adjustments=Mock(return_value=True),
+    )
+
+    PlaybackCoordinator._handle_rotate_requested(coordinator, source, False)
+
+    coordinator._player_view.apply_committed_adjustments.assert_called_once_with(
+        source,
+        previous,
+        "rotate_rollback",
+    )
+    coordinator._player_view.image_viewer.set_adjustments.assert_not_called()
+
+
+def test_twenty_rapid_rotations_accumulate_modulo_four_without_reload() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    source = Path("/fake/photo.jpg")
+    persisted = {"Crop_Rotate90": 0.0}
+    edit_service = Mock(
+        read_adjustments=Mock(side_effect=lambda _path: dict(persisted))
+    )
+
+    def rotate() -> dict[str, float]:
+        return {
+            "Crop_Rotate90": float(
+                (int(float(persisted.get("Crop_Rotate90", 0.0))) - 1) % 4
+            )
+        }
+
+    def commit(_path, adjustments, *, reason):
+        assert reason == "rotate"
+        persisted.clear()
+        persisted.update(adjustments)
+        return True
+
+    coordinator._edit_service_getter = Mock(return_value=edit_service)
+    coordinator._library_manager = None
+    coordinator._adjustment_committer = Mock(commit=Mock(side_effect=commit))
+    coordinator._player_view = SimpleNamespace(
+        video_area=Mock(),
+        image_viewer=Mock(rotate_image_ccw=Mock(side_effect=rotate)),
+        apply_committed_adjustments=Mock(return_value=True),
+    )
+
+    for _click in range(20):
+        PlaybackCoordinator._handle_rotate_requested(coordinator, source, False)
+
+    assert persisted["Crop_Rotate90"] == 0.0
+    assert coordinator._adjustment_committer.commit.call_count == 20
+    assert coordinator._player_view.apply_committed_adjustments.call_count == 20
 
 
 def test_render_presentation_uses_viewmodel_video_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    video_area = Mock(load_video=Mock(), play=Mock(), reset_zoom=Mock())
+    video_area = Mock(begin_load=Mock(), play=Mock(), reset_zoom=Mock())
     coordinator._player_view = Mock(
         show_video_surface=Mock(),
         video_area=video_area,
@@ -309,17 +629,14 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
     coordinator._zoom_widget = Mock(show=Mock())
     coordinator._info_panel = None
     coordinator._clear_play_profile = Mock()
+    coordinator._schedule_video_preparation = Mock()
 
     presentation = _make_presentation()
 
     PlaybackCoordinator._render_presentation(coordinator, presentation)
 
-    video_area.load_video.assert_called_once_with(
-        Path("/fake/video.mp4"),
-        adjustments={"Exposure": 0.2},
-        trim_range_ms=(1000, 3000),
-        adjusted_preview=True,
-    )
+    video_area.begin_load.assert_called_once_with(Path("/fake/video.mp4"), 1)
+    coordinator._schedule_video_preparation.assert_called_once_with(presentation)
     assert coordinator._trim_in_ms == 1000
     assert coordinator._trim_out_ms == 3000
 
@@ -329,7 +646,7 @@ def test_render_presentation_defers_video_load_during_location_file_write() -> N
     video_area = Mock(
         has_video=Mock(return_value=True),
         stop=Mock(),
-        load_video=Mock(),
+        present_video=Mock(),
         play=Mock(),
     )
     coordinator._player_view = Mock(
@@ -367,7 +684,7 @@ def test_render_presentation_defers_video_load_during_location_file_write() -> N
         call.stop(),
     ]
     coordinator._player_view.show_video_surface.assert_not_called()
-    video_area.load_video.assert_not_called()
+    video_area.present_video.assert_not_called()
     video_area.play.assert_not_called()
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
 
@@ -407,9 +724,752 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
 
     PlaybackCoordinator._render_presentation(coordinator, presentation)
 
-    assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
-    player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
+    assert parent.mock_calls == [call.stop()]
+    player_view.display_image.assert_called_once_with(
+        Path("/fake/photo.heic"),
+        asset_id="asset-1",
+        request_generation=1,
+        transaction=None,
+    )
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
+    coordinator._refresh_face_name_overlay_for_presentation.assert_not_called()
+
+
+def test_live_photo_fallback_reuses_the_asset_identity() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    coordinator._active_live_motion = Path("/fake/photo.mov")
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = "asset-1"
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    coordinator._detail_render_transaction = transaction
+    render_coordinator = Mock(owns_generation=Mock(return_value=True))
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    coordinator._player_view = Mock(
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=False),
+        display_image=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+
+    coordinator._player_view.display_image.assert_called_once_with(
+        still,
+        transaction=transaction,
+    )
+    assert coordinator._active_live_asset_id == ""
+
+
+def test_live_photo_motion_preparation_failure_restores_pending_still() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=2,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(motion),
+    )
+    presentation = replace(
+        _make_presentation(
+            path=str(still),
+            asset_id="asset-1",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=motion,
+    )
+    coordinator._pending_video_token = token
+    coordinator._async_token_is_current = Mock(return_value=True)
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._current_presentation = presentation
+    coordinator._active_live_motion = motion
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = "asset-1"
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock()),
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=True),
+        display_image=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+    coordinator._is_playing = True
+
+    PlaybackCoordinator._on_video_preparation_failed(
+        coordinator,
+        token,
+        RuntimeError("broken motion metadata"),
+    )
+
+    assert coordinator._pending_video_token is None
+    assert coordinator._active_live_motion is None
+    assert coordinator._active_live_asset_id == ""
+    assert coordinator._is_playing is False
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.PREPARING
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.defer_still_updates.assert_called_once_with(False)
+    coordinator._player_view.apply_pending_still.assert_called_once_with()
+    coordinator._player_view.display_image.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_not_called()
+    coordinator._player_view.show_live_badge.assert_called_once_with()
+    coordinator._player_view.set_live_replay_enabled.assert_called_once_with(True)
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert lifecycle.snapshot.state is DetailRenderState.PRESENTED
+    assert lifecycle.snapshot.presented_surfaces == ("live_still",)
+    coordinator._schedule_recognition_overlay.assert_called_once_with(presentation, 7)
+    coordinator._prefetch_neighbor_stills.assert_called_once_with(0)
+
+
+def test_regular_video_preparation_failure_remains_terminal() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    video = Path("/fake/video.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="video",
+        source_identity=AssetSourceIdentity.create(video),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=2,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(video),
+    )
+    coordinator._pending_video_token = token
+    coordinator._async_token_is_current = Mock(return_value=True)
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock()),
+        defer_still_updates=Mock(),
+        show_placeholder=Mock(),
+    )
+
+    PlaybackCoordinator._on_video_preparation_failed(
+        coordinator,
+        token,
+        RuntimeError("broken video metadata"),
+    )
+
+    assert coordinator._pending_video_token is None
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.FAILED
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.defer_still_updates.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_called_once_with(
+        "Unable to load this video."
+    )
+
+
+def test_live_motion_first_frame_completes_current_transaction() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    render_coordinator = Mock(
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.NEW_SURFACE
+        )
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = Path("/fake/photo.mov")
+    coordinator._current_presentation = replace(
+        _make_presentation(
+            path="/fake/photo.heic",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=Path("/fake/photo.mov"),
+    )
+    coordinator._player_view = Mock(show_video_surface=Mock())
+
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+
+    render_coordinator.mark_surface_presented.assert_called_once_with(
+        7,
+        "live_motion_frame",
+    )
+    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=False)
+
+
+def test_regular_video_first_frame_enables_interactive_controls() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    render_coordinator = Mock(
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.NEW_SURFACE
+        )
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = None
+    coordinator._current_presentation = _make_presentation(request_generation=7)
+    coordinator._player_view = Mock(show_video_surface=Mock())
+
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+
+    render_coordinator.mark_surface_presented.assert_called_once_with(
+        7,
+        "video_frame",
+    )
+    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=True)
+
+
+def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    render_coordinator = Mock(
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.NEW_SURFACE
+        )
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    still = Path("/fake/photo.heic")
+    coordinator._active_live_motion = Path("/fake/photo.mov")
+    coordinator._current_presentation = _make_presentation(
+        path=str(still),
+        is_video=False,
+        is_live=True,
+        request_generation=7,
+    )
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    render_coordinator.mark_surface_presented.assert_not_called()
+
+
+def test_rejected_still_surface_does_not_refresh_overlay_or_prefetch() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    render_coordinator = Mock(
+        owns_generation=Mock(return_value=True),
+        mark_surface_presented=Mock(
+            return_value=DetailSurfacePresentationResult.REJECTED_STALE
+        ),
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=render_coordinator)
+    coordinator._detail_render_transaction = transaction
+    coordinator._active_live_motion = None
+    coordinator._current_presentation = _make_presentation(
+        path=str(still),
+        asset_id="asset-1",
+        is_video=False,
+        is_live=True,
+        request_generation=7,
+    )
+    coordinator._presented_still_source = Path("/fake/previous.heic")
+    coordinator._presented_still_generation = 6
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert coordinator._presented_still_source == Path("/fake/previous.heic")
+    assert coordinator._presented_still_generation == 6
+    coordinator._schedule_recognition_overlay.assert_not_called()
+    coordinator._prefetch_neighbor_stills.assert_not_called()
+
+
+@pytest.mark.parametrize("has_pending_still", [False, True])
+def test_live_photo_motion_to_still_runs_overlay_and_prefetch(
+    qapp,
+    has_pending_still: bool,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = motion
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = "asset-1"
+    coordinator._current_presentation = _make_presentation(
+        path=str(still),
+        asset_id="asset-1",
+        is_video=False,
+        is_live=True,
+        request_generation=7,
+    )
+    coordinator._player_view = Mock(
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=has_pending_still),
+        display_image=Mock(),
+        show_video_surface=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    if has_pending_still:
+        coordinator._player_view.display_image.assert_not_called()
+    else:
+        coordinator._player_view.display_image.assert_called_once_with(
+            still,
+            transaction=transaction,
+        )
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+    coordinator._schedule_recognition_overlay.assert_called_once_with(
+        coordinator._current_presentation,
+        7,
+    )
+    coordinator._prefetch_neighbor_stills.assert_called_once_with(0)
+
+
+def test_live_photo_second_replay_restores_overlay_without_reopening_transaction(
+    qapp,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    terminal_presentations = []
+    lifecycle_surfaces = []
+    lifecycle.presented.connect(terminal_presentations.append)
+    lifecycle.surfacePresented.connect(
+        lambda _snapshot, kind: lifecycle_surfaces.append(kind)
+    )
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    presentation = replace(
+        _make_presentation(
+            path=str(still),
+            asset_id="asset-1",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=motion,
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_request_generation = 7
+    coordinator._current_presentation = presentation
+    coordinator._face_name_overlay = Mock()
+    coordinator._player_view = Mock(
+        video_area=Mock(begin_load=Mock()),
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=False),
+        display_image=Mock(),
+        show_video_surface=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_video_preparation = Mock()
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+    coordinator._is_playing = False
+
+    PlaybackCoordinator._autoplay_live_motion(coordinator, presentation)
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    PlaybackCoordinator.replay_live_photo(coordinator)
+    PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
+    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert len(terminal_presentations) == 1
+    assert lifecycle_surfaces == ["live_motion_frame", "live_still"]
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+    assert coordinator._presented_still_source == still
+    assert coordinator._presented_still_generation == 7
+    assert coordinator._schedule_recognition_overlay.call_count == 2
+    assert coordinator._prefetch_neighbor_stills.call_args_list == [call(0), call(0)]
+    assert coordinator._player_view.display_image.call_args_list == [
+        call(still, transaction=transaction),
+        call(still, transaction=transaction),
+    ]
+    assert coordinator._face_name_overlay.set_overlay_active.call_args_list == [
+        call(False),
+        call(False),
+    ]
+
+
+def test_live_photo_replay_preparation_failure_restores_overlay() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.heic")
+    motion = Path("/fake/photo.mov")
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="live_motion",
+        source_identity=AssetSourceIdentity.create(still),
+    )
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(7)
+    lifecycle.mark_surface_presented(7, "live_motion_frame")
+    lifecycle.mark_surface_presented(7, "live_still")
+    presentation = replace(
+        _make_presentation(
+            path=str(still),
+            asset_id="asset-1",
+            is_video=False,
+            is_live=True,
+            request_generation=7,
+        ),
+        live_motion_abs=motion,
+    )
+    token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=2,
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(motion),
+    )
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_request_generation = 7
+    coordinator._current_presentation = presentation
+    coordinator._face_name_overlay = Mock()
+    coordinator._player_view = Mock(
+        video_area=Mock(begin_load=Mock(), stop=Mock()),
+        defer_still_updates=Mock(),
+        apply_pending_still=Mock(return_value=False),
+        display_image=Mock(),
+        show_video_surface=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._schedule_video_preparation = Mock()
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+    coordinator._async_token_is_current = Mock(return_value=True)
+    coordinator._active_live_motion = None
+    coordinator._active_live_still = still
+    coordinator._active_live_asset_id = ""
+    coordinator._is_playing = False
+
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+    PlaybackCoordinator.replay_live_photo(coordinator)
+    coordinator._pending_video_token = token
+    PlaybackCoordinator._on_video_preparation_failed(
+        coordinator,
+        token,
+        RuntimeError("replay metadata failed"),
+    )
+    PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
+
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.PRESENTED
+    assert lifecycle.snapshot.presented_surfaces == (
+        "live_motion_frame",
+        "live_still",
+    )
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.display_image.assert_called_once_with(
+        still,
+        transaction=transaction,
+    )
+    coordinator._player_view.show_placeholder.assert_not_called()
+    assert coordinator._schedule_recognition_overlay.call_count == 2
+    assert coordinator._prefetch_neighbor_stills.call_args_list == [call(0), call(0)]
+
+
+def test_old_video_preparation_result_is_rejected_after_rebind() -> None:
+    path = Path("/shared/video.mov")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = new_token
+    coordinator._pending_video_token = old_token
+    coordinator._current_presentation = _make_presentation(path=str(path))
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(video_area=Mock(commit_presentation=Mock()))
+
+    PlaybackCoordinator._on_video_preparation_ready(
+        coordinator,
+        old_token,
+        object(),
+    )
+
+    coordinator._player_view.video_area.commit_presentation.assert_not_called()
+
+
+def test_current_video_preparation_token_commits_result() -> None:
+    path = Path("/shared/video.mov")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    transaction = DetailRenderTransaction(
+        generation=7,
+        asset_id="asset-1",
+        media_kind="video",
+        source_identity=identity,
+    )
+    state = VideoPresentationState(
+        request_generation=7,
+        adjustments={},
+        trim_range_ms=None,
+        adjusted_preview=False,
+        rotation_cw=0,
+        raw_width=1920,
+        raw_height=1080,
+        linux_180_hint=False,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = token
+    coordinator._pending_video_token = token
+    coordinator._current_presentation = _make_presentation(
+        path=str(path),
+        request_generation=7,
+    )
+    coordinator._active_live_motion = None
+    coordinator._detail_render_transaction = transaction
+    coordinator._player_view = Mock(
+        video_area=Mock(commit_presentation=Mock(return_value=True), play=Mock())
+    )
+
+    PlaybackCoordinator._on_video_preparation_ready(coordinator, token, state)
+
+    committed = coordinator._player_view.video_area.commit_presentation.call_args.args[0]
+    assert committed.transaction is transaction
+    coordinator._player_view.video_area.play.assert_called_once_with()
+
+
+def test_old_deferred_geocode_result_is_rejected_after_rebind() -> None:
+    path = Path("/shared/photo.jpg")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    old_token = PlaybackAsyncToken.create(
+        library_epoch=1,
+        asset_generation=4,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    new_token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = new_token
+    coordinator._pending_location_token = old_token
+    coordinator._deferred_locations = {}
+    coordinator._current_presentation = _make_presentation(
+        path=str(path),
+        is_video=False,
+    )
+    coordinator._update_header = Mock()
+
+    PlaybackCoordinator._on_deferred_location_ready(
+        coordinator,
+        old_token,
+        "Berlin",
+    )
+
+    assert coordinator._deferred_locations == {}
+    coordinator._update_header.assert_not_called()
+
+
+def test_current_deferred_geocode_token_updates_current_header() -> None:
+    path = Path("/shared/photo.jpg")
+    identity = AssetSourceIdentity.create(path, size_bytes=10, source_mtime_ns=11)
+    token = PlaybackAsyncToken.create(
+        library_epoch=2,
+        asset_generation=5,
+        asset_id="asset-1",
+        source_identity=identity,
+    )
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 2
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._active_async_token = token
+    coordinator._pending_location_token = token
+    coordinator._deferred_locations = {}
+    coordinator._current_presentation = _make_presentation(
+        path=str(path),
+        is_video=False,
+    )
+    coordinator._update_header = Mock()
+
+    PlaybackCoordinator._on_deferred_location_ready(coordinator, token, "Berlin")
+
+    assert coordinator._deferred_locations == {path: "Berlin"}
+    assert coordinator._current_presentation.location == "Berlin"
+    coordinator._update_header.assert_called_once_with(
+        coordinator._current_presentation
+    )
+
+
+def test_same_library_tree_refresh_does_not_clear_render_session() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = Mock(clear_frame_cache=Mock())
+    coordinator._invalidate_overlay_requests = Mock()
+
+    PlaybackCoordinator.rebind_library(
+        coordinator,
+        7,
+        session_changed=False,
+    )
+
+    coordinator._player_view.clear_frame_cache.assert_not_called()
+    coordinator._invalidate_overlay_requests.assert_not_called()
+
+
+def test_session_rebind_invalidates_tokens_and_render_state() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._library_epoch = 1
+    coordinator._library_epoch_getter = lambda: 2
+    coordinator._asset_generation = 4
+    coordinator._detail_request_generation = 9
+    coordinator._active_async_token = object()
+    coordinator._pending_video_token = object()
+    coordinator._pending_location_token = object()
+    coordinator._invalidate_overlay_requests = Mock()
+    coordinator._video_prepare_pool = Mock(clear=Mock())
+    coordinator._deferred_location_pool = Mock(clear=Mock())
+    coordinator._deferred_locations = {Path("/old.jpg"): "Old"}
+    lifecycle = Mock(reset=Mock())
+    coordinator._render_transaction_coordinator = Mock(return_value=lifecycle)
+    coordinator._detail_render_transaction = object()
+    coordinator._current_presentation = object()
+    coordinator._active_live_motion = Path("/old.mov")
+    coordinator._active_live_still = Path("/old.jpg")
+    coordinator._active_live_asset_id = "old"
+    coordinator._presented_still_generation = 9
+    coordinator._presented_still_source = Path("/old.jpg")
+    coordinator._player_view = Mock(
+        video_area=Mock(stop=Mock()),
+        defer_still_updates=Mock(),
+        cancel_pending_image_requests=Mock(),
+        clear_frame_cache=Mock(),
+        show_placeholder=Mock(),
+    )
+    coordinator._player_bar = Mock(setEnabled=Mock())
+    coordinator._is_playing = True
+    coordinator._update_header = Mock()
+    coordinator._info_panel = None
+    coordinator._clear_info_panel_metadata_state = Mock()
+    coordinator._clear_confirmed_location_metadata = Mock()
+
+    PlaybackCoordinator.rebind_library(coordinator, 2, session_changed=True)
+
+    assert coordinator._library_epoch == 2
+    assert coordinator._asset_generation == 5
+    assert coordinator._detail_request_generation == 10
+    assert coordinator._active_async_token is None
+    assert coordinator._pending_video_token is None
+    assert coordinator._pending_location_token is None
+    assert coordinator._current_presentation is None
+    lifecycle.reset.assert_called_once_with()
+    coordinator._player_view.video_area.stop.assert_called_once_with()
+    coordinator._player_view.clear_frame_cache.assert_called_once_with()
+
+
+def test_neighbor_prefetch_preserves_asset_descriptors() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    previous = DetailPrefetchDescriptor(
+        row=1,
+        asset_id="asset-previous",
+        path=Path("/fake/previous.heic"),
+        is_video=False,
+    )
+    following = DetailPrefetchDescriptor(
+        row=3,
+        asset_id="asset-following",
+        path=Path("/fake/following.heic"),
+        is_video=False,
+    )
+    coordinator._asset_model = Mock(
+        detail_prefetch_descriptor=Mock(side_effect=[previous, following]),
+    )
+    coordinator._player_view = Mock(prefetch_images=Mock())
+
+    PlaybackCoordinator._prefetch_neighbor_stills(coordinator, 2)
+
+    coordinator._player_view.prefetch_images.assert_called_once_with(
+        [previous, following]
+    )
 
 
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:
@@ -533,9 +1593,9 @@ def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:
 
 def test_set_people_library_root_prefers_bound_library_manager_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._people_service = playback_coordinator_module.PeopleService()
+    coordinator._people_service = PeopleService()
     library_root = Path("/fake/library")
-    recreated_service = playback_coordinator_module.PeopleService(
+    recreated_service = PeopleService(
         library_root,
         asset_repository=Mock(),
     )
@@ -605,7 +1665,7 @@ def test_refresh_location_extension_state_falls_back_to_session_runtime_when_unb
     assert PlaybackCoordinator._map_runtime_package_root(coordinator) == Path("/fallback/maps")
 
 
-def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
+def test_refresh_face_name_overlay_schedules_only_after_still_is_presented() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     overlay = Mock()
     coordinator._face_name_overlay = overlay
@@ -614,21 +1674,63 @@ def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
     coordinator._player_view = SimpleNamespace(
         video_area=SimpleNamespace(is_edit_mode_active=lambda: False),
     )
-    coordinator._load_face_name_annotations = Mock(return_value=[Mock(face_id="face-1")])
+    coordinator._presented_still_source = Path("/fake/photo.jpg")
+    coordinator._presented_still_generation = 17
+    coordinator._schedule_recognition_overlay = Mock()
+    presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
 
     PlaybackCoordinator._refresh_face_name_overlay_for_presentation(
+        coordinator,
+        presentation,
+    )
+
+    coordinator._schedule_recognition_overlay.assert_called_once_with(presentation, 17)
+    overlay.set_annotations.assert_not_called()
+
+
+def test_disabled_face_names_never_start_overlay_query() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._show_face_names = False
+    coordinator._active_live_motion = None
+    coordinator._face_name_overlay = Mock()
+    coordinator._recognition_query_service = Mock()
+    coordinator._overlay_pool = Mock()
+    coordinator._player_view = SimpleNamespace(
+        video_area=SimpleNamespace(is_edit_mode_active=lambda: False),
+    )
+
+    PlaybackCoordinator._schedule_recognition_overlay(
         coordinator,
         _make_presentation(
             path="/fake/photo.jpg",
             asset_id="asset-photo",
             is_video=False,
         ),
+        3,
     )
 
-    coordinator._load_face_name_annotations.assert_called_once_with("asset-photo")
-    overlay.set_identity_suggestions.assert_called_once_with([])
-    overlay.set_annotations.assert_called_once()
-    overlay.set_overlay_active.assert_called_once_with(True)
+    coordinator._overlay_pool.start.assert_not_called()
+    coordinator._recognition_query_service.load_overlay.assert_not_called()
+
+
+def test_stale_overlay_generation_is_not_applied() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._overlay_request_generation = 8
+    coordinator._show_face_names = True
+    coordinator._face_name_overlay = Mock()
+
+    PlaybackCoordinator._on_recognition_overlay_ready(
+        coordinator,
+        7,
+        4,
+        SimpleNamespace(),
+    )
+
+    coordinator._face_name_overlay.set_annotations.assert_not_called()
 
 
 def test_load_recognition_identity_suggestions_mixes_people_and_pets() -> None:
@@ -688,6 +1790,7 @@ def test_refresh_face_name_overlay_hides_for_video() -> None:
 def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._people_service = Mock(rename_cluster=Mock())
+    coordinator._recognition_query_service = Mock()
     coordinator._current_presentation = _make_presentation(
         path="/fake/photo.jpg",
         asset_id="asset-photo",
@@ -703,6 +1806,7 @@ def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> No
     )
 
     coordinator._people_service.rename_cluster.assert_called_once_with("person-a", "Alice")
+    coordinator._recognition_query_service.invalidate.assert_called_once_with(None)
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
@@ -849,10 +1953,13 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator._refresh_info_panel_faces = Mock()
     coordinator._people_dashboard_refresh_callback = Mock()
     annotation = RecognitionAnnotation(
-        kind="pet",
-        annotation_id="det-1",
-        entity_id="pet-a",
-        display_name="Miso",
+        source_detection_kind="pet",
+        source_annotation_id="det-1",
+        source_identity_kind="pet",
+        source_identity_id="pet-a",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-a",
+        canonical_display_name="Miso",
         box_x=0,
         box_y=0,
         box_w=10,
@@ -877,6 +1984,69 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator._pet_service.move_detection_to_pet.assert_called_once_with("det-1", "pet-b")
     coordinator._pet_service.move_detection_to_new_pet.assert_called_once_with("det-1", "Nori")
     assert coordinator._refresh_info_panel_faces.call_count == 3
+
+
+def test_cross_kind_annotation_routes_identity_and_detection_mutations_separately() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(
+        rename_cluster=Mock(),
+        delete_face=Mock(return_value=True),
+        reassign_detection_identity=Mock(return_value=True),
+    )
+    coordinator._pet_service = Mock(
+        rename_pet=Mock(),
+        delete_detection=Mock(return_value=True),
+    )
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._recognition_query_service = Mock()
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    pet_source_person_identity = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="det-1",
+        source_identity_kind="pet",
+        source_identity_id="pet-a",
+        canonical_identity_kind="person",
+        canonical_identity_id="person-a",
+        canonical_display_name="Alice",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+
+    PlaybackCoordinator._handle_face_name_rename_submitted(
+        coordinator,
+        pet_source_person_identity.person_id,
+        "Alice Updated",
+    )
+    PlaybackCoordinator._handle_info_panel_face_delete_requested(
+        coordinator,
+        pet_source_person_identity,
+    )
+    PlaybackCoordinator._handle_info_panel_face_move_requested(
+        coordinator,
+        pet_source_person_identity,
+        "person:person-b",
+    )
+
+    coordinator._people_service.rename_cluster.assert_called_once_with(
+        "person-a", "Alice Updated"
+    )
+    coordinator._pet_service.delete_detection.assert_called_once_with("det-1")
+    coordinator._people_service.reassign_detection_identity.assert_called_once_with(
+        source_kind="pet",
+        source_annotation_id="det-1",
+        target_identity="person:person-b",
+    )
+    coordinator._people_service.delete_face.assert_not_called()
 
 
 def test_handle_people_snapshot_committed_refreshes_current_overlay() -> None:
@@ -1433,7 +2603,9 @@ def test_confirmed_location_protects_repeated_stale_presentations_for_detail_ses
     coordinator._asset_model = Mock(set_current_row=Mock())
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._clear_play_profile = Mock()
@@ -1446,8 +2618,13 @@ def test_confirmed_location_protects_repeated_stale_presentations_for_detail_ses
         _make_presentation(path=str(asset_path), is_video=True),
         location="Paris",
     )
-    PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
-    PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
+        PlaybackCoordinator._handle_presentation_changed(coordinator, stale_presentation)
 
     assert coordinator._current_presentation.location == "Munich"
     assert coordinator._current_presentation.info["location"] == "Munich"
@@ -1461,7 +2638,9 @@ def test_confirmed_location_does_not_apply_to_another_asset() -> None:
     coordinator._asset_model = Mock(set_current_row=Mock())
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
-    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._center_filmstrip_if_current = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
     coordinator._render_presentation = Mock()
     coordinator._clear_play_profile = Mock()
     coordinator._confirmed_location_metadata = {
@@ -1472,7 +2651,12 @@ def test_confirmed_location_does_not_apply_to_another_asset() -> None:
         location=None,
     )
 
-    PlaybackCoordinator._handle_presentation_changed(coordinator, other_presentation)
+    with patch.object(
+        playback_coordinator_module.QTimer,
+        "singleShot",
+        side_effect=lambda _delay, callback: callback(),
+    ):
+        PlaybackCoordinator._handle_presentation_changed(coordinator, other_presentation)
 
     assert coordinator._current_presentation.location is None
     assert "location" not in coordinator._current_presentation.info
@@ -1681,7 +2865,20 @@ def test_handle_manual_face_ready_merges_selected_pet_identity() -> None:
     coordinator._manual_face_inflight_asset_id = "asset-photo"
     coordinator._manual_face_pending_merge_target = "pet:pet-a"
     coordinator._pending_manual_face_annotations = {"asset-photo": []}
-    coordinator._people_service = Mock(merge_identities=Mock(return_value=SimpleNamespace(merged=True)))
+    coordinator._people_service = Mock(
+        list_clusters=Mock(
+            return_value=[SimpleNamespace(person_id="person-new", is_hidden=False)]
+        ),
+        cluster_asset_ids=Mock(return_value=["asset-photo"]),
+        merge_identities=Mock(return_value=SimpleNamespace(merged=True, group_redirects={})),
+    )
+    coordinator._pet_service = Mock(
+        list_pets=Mock(return_value=[SimpleNamespace(pet_id="pet-a", is_hidden=False)]),
+        pet_asset_ids=Mock(return_value=[]),
+    )
+    coordinator._recognition_merge_service = Mock(
+        merge=Mock(return_value=SimpleNamespace(merged=True, group_redirects={}))
+    )
     coordinator._current_presentation = _make_presentation(
         path="/fake/photo.jpg",
         asset_id="asset-photo",
@@ -1701,7 +2898,7 @@ def test_handle_manual_face_ready_merges_selected_pet_identity() -> None:
         ),
     )
 
-    coordinator._people_service.merge_identities.assert_called_once_with(
+    coordinator._recognition_merge_service.merge.assert_called_once_with(
         "person:person-new",
         "pet:pet-a",
     )

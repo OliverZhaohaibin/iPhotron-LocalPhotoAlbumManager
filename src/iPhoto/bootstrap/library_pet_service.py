@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..application.ports.pets import PetAssetRepositoryPort
 from ..cache.index_store import get_global_repository
-from ..pets.index_coordinator import (
-    PetIndexCoordinator,
-    get_pet_index_coordinator,
-)
 from ..pets.service import PetService
+
+if TYPE_CHECKING:
+    from ..pets.index_coordinator import PetIndexCoordinator
+    from ..recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
 class IndexStorePetAssetRepository:
@@ -49,6 +49,9 @@ class IndexStorePetAssetRepository:
     def update_pet_statuses(self, asset_ids: Iterable[str], status: str) -> None:
         self._repository().update_pet_statuses(asset_ids, status)
 
+    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
+        return int(self._repository().reset_pet_statuses_for_pipeline_upgrade())
+
     def count_by_pet_status(self) -> dict[str, int]:
         return dict(self._repository().count_by_pet_status())
 
@@ -74,6 +77,7 @@ def create_pet_service(
     *,
     asset_repository: PetAssetRepositoryPort | None = None,
     coordinator: PetIndexCoordinator | None = None,
+    mutation_coordinator: RecognitionMutationCoordinator | None = None,
     repository_factory: Callable[[Path], Any] | None = None,
 ) -> PetService:
     """Create a session-bound Pets service for one library."""
@@ -83,18 +87,13 @@ def create_pet_service(
         root,
         repository_factory=repository_factory,
     )
-    if coordinator is None:
-        resolved_coordinator = get_pet_index_coordinator(
-            root,
-            asset_repository=repository,
-        )
-    else:
+    if coordinator is not None:
         coordinator.set_asset_repository(repository)
-        resolved_coordinator = coordinator
     return PetService(
         root,
         asset_repository=repository,
-        coordinator=resolved_coordinator,
+        coordinator=coordinator,
+        mutation_coordinator=mutation_coordinator,
     )
 
 

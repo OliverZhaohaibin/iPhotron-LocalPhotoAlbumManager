@@ -9,9 +9,15 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for QRhi renderer tests")
 
 from PySide6.QtCore import QPointF, QSize
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage
 
 from iPhoto.gui.ui.widgets.rhi_image_renderer import RhiImageRenderer
+
+
+def _image(width: int = 8, height: int = 8) -> QImage:
+    image = QImage(width, height, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    return image
 
 
 class _FakeBuffer:
@@ -23,6 +29,27 @@ class _FakeBuffer:
     def create(self) -> bool | None:
         self.create_calls += 1
         return self.create_result
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+class _FakeTexture:
+    def __init__(
+        self,
+        size: QSize | None = None,
+        *,
+        create_result: bool | None = True,
+    ) -> None:
+        self.destroyed = False
+        self._size = size or QSize(8, 8)
+        self.create_result = create_result
+
+    def create(self) -> bool | None:
+        return self.create_result
+
+    def pixelSize(self):  # noqa: N802 - mirrors QRhi API
+        return self._size
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -41,9 +68,28 @@ class _FakeRhi:
 class _FakeResourceUpdateBatch:
     def __init__(self) -> None:
         self.dynamic_updates: list[tuple[object, int, int, bytes]] = []
+        self.texture_uploads: list[tuple[object, object]] = []
 
     def updateDynamicBuffer(self, buffer, offset, size, data):  # noqa: N802
         self.dynamic_updates.append((buffer, offset, size, data))
+
+    def uploadTexture(self, texture, description):  # noqa: N802
+        self.texture_uploads.append((texture, description))
+
+
+class _FailingResourceUpdateBatch(_FakeResourceUpdateBatch):
+    def uploadTexture(self, texture, description):  # noqa: N802
+        raise RuntimeError("simulated upload failure")
+
+
+class _FakeTextureRhi:
+    def __init__(self, *, create_result: bool | None = True) -> None:
+        self.create_result = create_result
+        self.new_texture_calls = 0
+
+    def newTexture(self, _fmt, size, *_args):  # noqa: N802 - mirrors QRhi API
+        self.new_texture_calls += 1
+        return _FakeTexture(QSize(size), create_result=self.create_result)
 
 
 class _FakeRenderRhi:
@@ -89,6 +135,137 @@ class _FakeCommandBuffer:
 
     def endPass(self):  # noqa: N802
         self.calls.append(("endPass", ()))
+
+
+def test_warming_a_resident_rhi_texture_refreshes_its_lru_position() -> None:
+    renderer = RhiImageRenderer()
+    renderer._still_textures["stale"] = (object(), 1)
+    renderer._still_textures["previous"] = (object(), 1)
+    renderer._still_textures["current"] = (object(), 1)
+
+    assert renderer.warm_still_texture("previous", _image()) is False
+
+    assert tuple(renderer._still_textures) == ("stale", "current", "previous")
+
+
+def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
+    renderer = RhiImageRenderer()
+    stale = _FakeTexture()
+    previous = _FakeTexture()
+    current = _FakeTexture()
+    renderer._still_textures["stale"] = (stale, 64)
+    renderer._still_textures["previous"] = (previous, 64)
+    renderer._still_textures["current"] = (current, 64)
+    renderer._active_still_key = "current"
+
+    renderer._evict_before_still_allocation(
+        incoming_bytes=64,
+        resident_bytes=192,
+    )
+
+    assert stale.destroyed is True
+    assert previous.destroyed is False
+    assert current.destroyed is False
+    assert tuple(renderer._still_textures) == ("previous", "current")
+
+
+def test_rhi_tracks_mipmap_availability_per_texture_source() -> None:
+    renderer = RhiImageRenderer()
+
+    renderer.upload_still_texture("still", _image())
+    assert renderer._texture_uses_mipmaps is False
+
+    renderer._still_textures.clear()
+    renderer.upload_texture(_image())
+    assert renderer._texture_uses_mipmaps is True
+
+
+def test_rhi_create_failure_never_replaces_active_still_texture() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi(create_result=False)  # type: ignore[assignment]
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+    renderer.upload_still_texture("replacement", _image(16, 8))
+
+    renderer._flush_pending_texture_uploads(_FakeResourceUpdateBatch())
+
+    result = renderer.take_still_upload_result()
+    assert result == {
+        "key": "replacement",
+        "activate": True,
+        "success": False,
+        "reason": "create_failed",
+    }
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert tuple(renderer._still_textures) == ("current",)
+    assert active.destroyed is False
+
+
+def test_rhi_prefetch_drops_when_only_visible_texture_blocks_budget() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi()  # type: ignore[assignment]
+    renderer._still_budget_bytes = 256
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    assert renderer.warm_still_texture("next", _image(8, 8))
+
+    renderer._flush_pending_texture_uploads(_FakeResourceUpdateBatch())
+
+    result = renderer.take_still_upload_result()
+    assert result is not None and result["success"] is False
+    assert tuple(renderer._still_textures) == ("current",)
+    assert active.destroyed is False
+
+
+def test_rhi_foreground_never_overwrites_same_size_active_storage() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    fake_rhi = _FakeTextureRhi()
+    updates = _FakeResourceUpdateBatch()
+    renderer._rhi = fake_rhi  # type: ignore[assignment]
+    renderer._still_budget_bytes = 256
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+    renderer.upload_still_texture("replacement", _image(8, 8))
+
+    renderer._flush_pending_texture_uploads(updates)
+
+    assert fake_rhi.new_texture_calls == 0
+    assert updates.texture_uploads == []
+    assert tuple(renderer._still_textures) == ("current",)
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert active.destroyed is False
+    result = renderer.take_still_upload_result()
+    assert result is not None and result["reason"] == "residency_budget"
+
+
+def test_rhi_failed_reused_neighbor_is_removed_from_residency() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    neighbor = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi()  # type: ignore[assignment]
+    renderer._still_budget_bytes = 512
+    renderer._still_textures["current"] = (active, 256)
+    renderer._still_textures["neighbor"] = (neighbor, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+    renderer.upload_still_texture("replacement", _image(8, 8))
+
+    renderer._flush_pending_texture_uploads(_FailingResourceUpdateBatch())
+
+    assert tuple(renderer._still_textures) == ("current",)
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert active.destroyed is False
+    assert neighbor.destroyed is True
+    result = renderer.take_still_upload_result()
+    assert result is not None and result["reason"] == "upload_failed"
 
 
 def test_overlay_buffer_creation_failure_leaves_no_stale_buffer() -> None:

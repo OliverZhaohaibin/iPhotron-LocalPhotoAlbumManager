@@ -38,9 +38,9 @@ Install the optional runtime with:
 pip install -e ".[pets-ai]"
 ```
 
-The extra provides `onnxruntime`, `torch`, `torchvision`, `hdbscan`, and
-`certifi`. The default model root remains part of the repository extension
-contract:
+The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
+`certifi`. Bundled models are read-only fallbacks; downloads are written to the
+platform user cache:
 
 ```text
 src/extension/models/pets/
@@ -51,10 +51,11 @@ src/extension/models/pets/
 `IPHOTO_PET_MODEL_DIR` overrides that root. Missing models may be populated on
 first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL defaults
 to the upstream YOLOX release and can be overridden with
-`IPHOTO_PET_DETECTOR_MODEL_URL`. DINOv2 Torch Hub loading is pinned to an
-immutable upstream commit; do not replace it with an unversioned default
-branch. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without disabling the
-rest of the application.
+`IPHOTO_PET_DETECTOR_MODEL_URL`. Production does not execute Torch Hub. DINOv2
+must be supplied as the hash- and size-verified TorchScript artifact declared
+in `iPhoto/pets/model_manifest.json`; Torch Hub is restricted to the release
+conversion tool. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without
+disabling the rest of the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
 runtime and the two model files under `extension/models/pets`. A build that
@@ -87,15 +88,30 @@ Each accepted crop receives:
 
 Clustering is species-separated and uses the current complete-link pipeline
 (`species-complete-link-v1`) with a default cosine distance threshold of
-`0.42`. Cats and dogs must never enter the same identity cluster. Stable state
-uses `pet_key` mappings and profile distance to preserve canonical `pet_id`
-values across rebuilds.
+`0.42`. Incremental identity matching uses a progressively expanded ANN
+shortlist followed by exact complete-link verification against every persisted
+member of each shortlisted candidate. Cats and dogs must never enter the same
+identity cluster. Stable state uses `pet_key` mappings and profile distance to
+preserve canonical `pet_id` values across rebuilds.
 
 The detector and clustering pipeline versions are stored separately. A detector
 version change resets eligible `done` assets to `pending`; a clustering-only
 version change reclusters stored embeddings without resetting asset scan state.
 The People-priority filter is part of the detector pipeline version so existing
 libraries are re-evaluated after upgrading.
+
+When an exact `pet_key` carries a canonical identity into a new embedding
+contract, compatible detections from the same batch may join that staged anchor.
+The runtime switch atomically retires the identity's incompatible old-contract
+detections. Any retired asset outside the committed replacement scope is marked
+`pending`, and the complete changed/retired asset sets are persisted for crash
+recovery before the snapshot event is dispatched. Until each retired asset is
+processed, a target-contract migration record lets only that asset fuzzy-match
+the anchored identity even while its new profile has fewer than two samples.
+Processing the asset consumes the record, so ordinary one-sample profiles never
+become general embedding candidates. Outstanding records follow explicit Pet
+merges and advance to the newest target contract if another embedding upgrade
+starts before the previous drain finishes.
 
 ## Scan Scheduling And Status
 
@@ -115,8 +131,10 @@ a startup metadata scan, startup first warms the gallery, runs that scan, then
 starts both AI workers with closed input so they drain persisted
 `pending`/`retry` rows. This avoids model initialization and competing AI work
 on the first-frame path. If the metadata scan scope is already complete, startup
-does not launch scan workers; use an explicit rescan to process newly pending AI
-rows in that case.
+still starts the Pet backfill worker whenever persisted `pending` or `retry` rows
+need draining. With no metadata scan and no queued AI work, startup does not
+launch scan workers; an explicit rescan is only needed to reset or rediscover
+otherwise completed/failed assets.
 
 The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies/models are runtime-availability failures: pending rows are

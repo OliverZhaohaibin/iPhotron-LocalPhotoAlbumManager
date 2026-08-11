@@ -249,11 +249,9 @@ class Ui_MainWindow(QObject):
 
     def _create_detail_feature(self) -> object:
         from .widgets.detail_page import DetailPageWidget
-        from .widgets.gl_image_viewer import GLImageViewer
-        from .widgets.info_panel import InfoPanel
 
         assert self._main_window is not None
-        shared_image_viewer = GLImageViewer()
+        shared_image_viewer = self.prepare_detail_surface()
         self.detail_page = DetailPageWidget(self._main_window, image_viewer=shared_image_viewer)
         for name in (
             "back_button", "info_button", "share_button", "favorite_button",
@@ -264,21 +262,54 @@ class Ui_MainWindow(QObject):
             "detail_chrome_container", "detail_header_separator", "player_stack",
             "player_placeholder", "video_area", "player_bar", "video_trim_bar",
             "face_name_overlay", "filmstrip_view", "live_badge", "badge_host",
-            "player_container", "edit_mode_group", "edit_adjust_action", "edit_crop_action",
-            "edit_compare_button", "edit_reset_button", "edit_done_button",
-            "edit_rotate_left_button", "edit_sidebar", "edit_mode_control",
-            "edit_header_container", "edit_zoom_host", "edit_zoom_host_layout",
-            "edit_right_controls_layout",
+            "player_container",
         ):
             setattr(self, name, getattr(self.detail_page, name))
         self.image_viewer = shared_image_viewer
         self.edit_image_viewer = shared_image_viewer
         self.view_stack.addWidget(self.detail_page)
-        self.info_panel = InfoPanel(self._main_window)
-        self.info_panel.set_map_runtime(getattr(self._library, "map_runtime", None))
         self.player_container.installEventFilter(self._main_window)
         self.retranslateUi(self._main_window)
         return self.detail_page
+
+    def prepare_detail_surface(self):
+        """Create only the single-window native/RHI surface host."""
+
+        existing = getattr(self, "_prepared_detail_surface", None)
+        if existing is not None:
+            return existing
+        from .widgets.gl_image_viewer import GLImageViewer
+
+        self._prepared_detail_surface = GLImageViewer()
+        return self._prepared_detail_surface
+
+    def ensure_detail_edit_bundle(self) -> object:
+        """Publish the edit-only Detail controls on first edit use."""
+
+        detail_page = self.ensure_feature(FeatureKind.DETAIL)
+        detail_page.ensure_edit_bundle()
+        for name in (
+            "edit_mode_group", "edit_adjust_action", "edit_crop_action",
+            "edit_compare_button", "edit_reset_button", "edit_done_button",
+            "edit_rotate_left_button", "edit_sidebar", "edit_mode_control",
+            "edit_header_container", "edit_zoom_host", "edit_zoom_host_layout",
+            "edit_right_controls_layout",
+        ):
+            setattr(self, name, getattr(detail_page, name))
+        return detail_page
+
+    def ensure_info_panel(self):
+        """Create the metadata/location panel on first explicit use."""
+
+        existing = getattr(self, "info_panel", None)
+        if existing is not None:
+            return existing
+        from .widgets.info_panel import InfoPanel
+
+        assert self._main_window is not None
+        self.info_panel = InfoPanel(self._main_window)
+        self.info_panel.set_map_runtime(getattr(self._library, "map_runtime", None))
+        return self.info_panel
 
     def _create_preview_feature(self) -> object:
         from .widgets.preview_window import PreviewWindow

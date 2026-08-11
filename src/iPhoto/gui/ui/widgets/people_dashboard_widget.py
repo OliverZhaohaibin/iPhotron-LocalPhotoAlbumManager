@@ -6,8 +6,9 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
@@ -22,19 +23,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iPhoto.bootstrap.library_people_service import create_people_service
-from iPhoto.bootstrap.library_pet_service import create_pet_service
+from iPhoto.application.services.recognition_merge_service import (
+    IdentityMergeFailure,
+    IdentityMergeOutcome,
+    IdentityMergeRefreshPolicy,
+    IdentityRef,
+)
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
-from iPhoto.people.service import PeopleService
 from iPhoto.pets.records import PetSummary
-from iPhoto.pets.service import PetService
 
 from ..menus.core import MenuActionSpec, MenuContext, populate_menu
 from ..menus.style import apply_menu_style
 from . import dialogs
-from .people_dashboard_board import GroupBoard, PeopleBoard
+from .people_dashboard_board import GroupBoard, IdentityBoard
 from .people_dashboard_cards import GroupCard, PeopleCard, PetCard
 from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
 from .people_dashboard_shared import (
@@ -44,6 +47,22 @@ from .people_dashboard_shared import (
 
 logger = logging.getLogger(__name__)
 _LOCKED_RETRY_INTERVAL_MS = 1500
+
+if TYPE_CHECKING:
+    from iPhoto.people.service import PeopleService
+    from iPhoto.pets.service import PetService
+
+
+def _people_service(library_root: Path | None = None) -> PeopleService:
+    from iPhoto.people.service import PeopleService
+
+    return PeopleService(library_root)
+
+
+def _pet_service(library_root: Path | None = None) -> PetService:
+    from iPhoto.pets.service import PetService
+
+    return PetService(library_root)
 
 
 @dataclass(frozen=True)
@@ -67,6 +86,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         index_version: int,
         people_service: PeopleService,
         pet_service: PetService,
+        query_service: object | None = None,
         status_message: str | None,
         pet_status_message: str | None,
         show_hidden_people: bool,
@@ -77,6 +97,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         self._index_version = index_version
         self._people_service = people_service
         self._pet_service = pet_service
+        self._query_service = query_service
         self._status_message = status_message
         self._pet_status_message = pet_status_message
         self._show_hidden_people = bool(show_hidden_people)
@@ -111,12 +132,20 @@ class _PeopleDashboardLoaderWorker(QRunnable):
                 self._pet_status_message,
             )
             return
-        summaries, groups, pending = self._people_service.load_dashboard(
-            include_hidden=self._show_hidden_people
-        )
-        pet_summaries, pet_pending = self._pet_service.load_dashboard(
-            include_hidden=self._show_hidden_people
-        )
+        if self._query_service is not None:
+            snapshot = self._query_service.load_dashboard(self._show_hidden_people)
+            summaries = list(snapshot.people)
+            groups = list(snapshot.groups)
+            pet_summaries = list(snapshot.pets)
+            pending = snapshot.pending_people
+            pet_pending = snapshot.pending_pets
+        else:
+            pet_summaries, pet_pending = self._pet_service.load_dashboard(
+                include_hidden=self._show_hidden_people
+            )
+            summaries, groups, pending = self._people_service.load_dashboard(
+                include_hidden=self._show_hidden_people
+            )
         self._signals.loaded.emit(
             self._generation,
             self._index_version,
@@ -131,15 +160,28 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         )
 
 
+class _UnboundRecognitionMergeService:
+    def merge(self, source: object, target: object) -> IdentityMergeOutcome:
+        return IdentityMergeOutcome(
+            False,
+            IdentityRef.parse(source),
+            IdentityRef.parse(target),
+            IdentityMergeFailure.RECOVERY_PENDING,
+        )
+
+
 class PeopleDashboardWidget(QWidget):
     clusterActivated = Signal(str)  # noqa: N815
     groupActivated = Signal(str)  # noqa: N815
     petActivated = Signal(str)  # noqa: N815
+    firstViewportReady = Signal(int)  # noqa: N815
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._service = PeopleService()
-        self._pet_service = PetService()
+        self._service = _people_service()
+        self._pet_service = _pet_service()
+        self._merge_service: object = _UnboundRecognitionMergeService()
+        self._query_service: object | None = None
         self._pinned_service: PinnedItemsService | None = None
         self._status_message: str | None = None
         self._pet_status_message: str | None = None
@@ -161,7 +203,16 @@ class PeopleDashboardWidget(QWidget):
         self._load_signals = _PeopleDashboardLoaderSignals()
         self._load_signals.loaded.connect(self._on_load_completed)
         self._load_signals.failed.connect(self._on_load_failed)
-        self._load_pool = QThreadPool.globalInstance()
+        self._load_pool = QThreadPool(self)
+        self._load_pool.setMaxThreadCount(1)
+        self._load_pool.setThreadPriority(QThread.Priority.NormalPriority)
+        self._card_build_generation = 0
+        self._first_viewport_emitted_generation = -1
+        self._pending_card_specs: list[tuple[str, int, object]] = []
+        self._card_build_timer = QTimer(self)
+        self._card_build_timer.setSingleShot(True)
+        self._card_build_timer.setInterval(0)
+        self._card_build_timer.timeout.connect(self._build_next_card_batch)
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(500)
@@ -255,7 +306,7 @@ class PeopleDashboardWidget(QWidget):
         self._people_title.setStyleSheet("color: #111111; font-size: 18px; font-weight: 800;")
         self._content_layout.addWidget(self._people_title)
 
-        self._board = PeopleBoard()
+        self._board = IdentityBoard()
         self._board.mergeRequested.connect(self._merge_cluster_pair)
         self._board.orderChanged.connect(self._persist_cluster_order)
         self._content_layout.addWidget(self._board)
@@ -266,14 +317,75 @@ class PeopleDashboardWidget(QWidget):
         self._apply_theme_styles()
 
     def set_people_service(self, service: PeopleService | None) -> None:
-        self._service = service or PeopleService()
+        self._service = service or _people_service()
+        self._merge_service = _UnboundRecognitionMergeService()
         self._current_library_root = self._service.library_root()
         configure_people_cover_cache(self._current_library_root)
         self.reload()
 
     def set_pet_service(self, service: PetService | None) -> None:
-        self._pet_service = service or PetService()
+        self._pet_service = service or _pet_service()
+        self._merge_service = _UnboundRecognitionMergeService()
         self.reload(preserve_content=bool(self._summaries or self._pet_summaries or self._groups))
+
+    def set_services(
+        self,
+        people_service: PeopleService | None,
+        pet_service: PetService | None,
+        pinned_service: PinnedItemsService | None = None,
+        *,
+        query_service: object | None = None,
+        merge_service: object | None = None,
+        reload: bool = True,
+    ) -> None:
+        """Atomically bind the dashboard domain and schedule at most one load."""
+
+        self._service = people_service or _people_service()
+        self._pet_service = pet_service or _pet_service()
+        self._merge_service = merge_service or _UnboundRecognitionMergeService()
+        self._pinned_service = pinned_service
+        self._query_service = query_service
+        self._current_library_root = self._service.library_root()
+        configure_people_cover_cache(self._current_library_root)
+        if reload:
+            self.reload(
+                preserve_content=bool(
+                    self._summaries or self._pet_summaries or self._groups
+                )
+            )
+
+    def apply_snapshot(
+        self,
+        *,
+        library_root: Path | None,
+        summaries: list[PersonSummary],
+        groups: list[PeopleGroupSummary],
+        pet_summaries: list[PetSummary],
+        pending: int,
+        pet_pending: int,
+        status_message: str | None = None,
+        pet_status_message: str | None = None,
+        index_version: int = 0,
+    ) -> bool:
+        """Apply a generation-checked immutable dashboard warmup result."""
+
+        if library_root != self._current_library_root:
+            return False
+        self._load_generation += 1
+        self._index_version = max(self._index_version, int(index_version))
+        self._on_load_completed(
+            self._load_generation,
+            int(index_version),
+            library_root is not None,
+            list(summaries),
+            list(groups),
+            list(pet_summaries),
+            int(pending),
+            int(pet_pending),
+            status_message,
+            pet_status_message,
+        )
+        return True
 
     def set_library_root(self, library_root: Path | None) -> None:
         service_matches_root = self._service.library_root() == library_root
@@ -287,12 +399,9 @@ class PeopleDashboardWidget(QWidget):
         ):
             return
         self._current_library_root = library_root
-        self._service = (
-            create_people_service(library_root) if library_root is not None else PeopleService()
-        )
-        self._pet_service = (
-            create_pet_service(library_root) if library_root is not None else PetService()
-        )
+        self._service = _people_service(library_root)
+        self._pet_service = _pet_service(library_root)
+        self._query_service = None
         configure_people_cover_cache(library_root)
         self.reload()
 
@@ -365,12 +474,22 @@ class PeopleDashboardWidget(QWidget):
             index_version=index_version,
             people_service=self._service,
             pet_service=self._pet_service,
+            query_service=self._query_service,
             status_message=self._status_message,
             pet_status_message=self._pet_status_message,
             show_hidden_people=self._show_hidden_people,
             signals=self._load_signals,
         )
         self._load_pool.start(worker)
+
+    def _invalidate_query_cache(self) -> None:
+        invalidate = getattr(self._query_service, "invalidate", None)
+        if callable(invalidate):
+            invalidate()
+
+    def _reload_after_mutation(self, *, preserve_content: bool) -> None:
+        self._invalidate_query_cache()
+        self.reload(preserve_content=preserve_content)
 
     def _on_load_completed(
         self,
@@ -387,6 +506,9 @@ class PeopleDashboardWidget(QWidget):
     ) -> None:
         if generation != self._load_generation:
             return
+        self._card_build_generation += 1
+        self._card_build_timer.stop()
+        self._pending_card_specs.clear()
         self._loading = False
         if not is_bound:
             self._loaded_index_version = index_version
@@ -395,6 +517,7 @@ class PeopleDashboardWidget(QWidget):
             self._set_unbound_message()
             self._empty.show()
             self._scroll.hide()
+            self._emit_first_viewport_ready()
             return
 
         next_summaries = list(summaries)
@@ -420,8 +543,9 @@ class PeopleDashboardWidget(QWidget):
             self._empty.hide()
             self._scroll.show()
             if cards_changed:
-                self._populate_groups()
-                self._populate_cards()
+                self._begin_incremental_population()
+            else:
+                self._emit_first_viewport_ready()
             return
 
         if status_text or pet_status_text:
@@ -436,6 +560,7 @@ class PeopleDashboardWidget(QWidget):
         self._scroll.hide()
         self._clear_group_cards()
         self._clear_cards()
+        self._emit_first_viewport_ready()
 
         if self._loaded_index_version < self._index_version:
             self._schedule_visible_refresh()
@@ -465,6 +590,7 @@ class PeopleDashboardWidget(QWidget):
         if not self._summaries and not self._pet_summaries and not self._groups:
             self._empty.show()
             self._scroll.hide()
+        self._emit_first_viewport_ready()
 
     def _populate_groups(self) -> None:
         self._clear_group_cards()
@@ -516,6 +642,82 @@ class PeopleDashboardWidget(QWidget):
         for card in cards:
             card.load_cover_artwork()
 
+    def _begin_incremental_population(self) -> None:
+        """Build the visible card batch now and yield between later batches."""
+
+        self._card_build_timer.stop()
+        self._pending_card_specs.clear()
+        self._clear_group_cards()
+        self._clear_cards()
+        if self._groups:
+            self._groups_section.show()
+        else:
+            self._groups_section.hide()
+        self._pending_card_specs.extend(
+            ("group", index, summary) for index, summary in enumerate(self._groups)
+        )
+        self._pending_card_specs.extend(
+            ("person", index, summary) for index, summary in enumerate(self._summaries)
+        )
+        offset = len(self._summaries)
+        self._pending_card_specs.extend(
+            ("pet", offset + index, summary)
+            for index, summary in enumerate(self._pet_summaries)
+        )
+        self._build_next_card_batch()
+
+    def _build_next_card_batch(self) -> None:
+        batch = self._pending_card_specs[:12]
+        del self._pending_card_specs[:12]
+        group_cards: list[GroupCard] = []
+        people_cards: list[PeopleCard] = []
+        for kind, index, summary in batch:
+            if kind == "group":
+                card = GroupCard(
+                    board=self._groups_board,
+                    summary=summary,
+                    seed_index=index,
+                )
+                card.activated.connect(self.groupActivated.emit)
+                card.menuRequested.connect(self._show_group_menu)
+                self._group_cards[summary.group_id] = card
+                group_cards.append(card)
+            elif kind == "person":
+                card = PeopleCard(board=self._board, summary=summary, seed_index=index)
+                card.activated.connect(self.clusterActivated.emit)
+                card.menuRequested.connect(self._show_card_menu)
+                self._cards[summary.person_id] = card
+                people_cards.append(card)
+            else:
+                card = PetCard(board=self._board, summary=summary, seed_index=index)
+                card.activated.connect(self.petActivated.emit)
+                card.menuRequested.connect(self._show_card_menu)
+                self._pet_cards[summary.pet_id] = card
+                people_cards.append(card)
+        self._groups_board.append_cards(group_cards)
+        self._board.append_cards(people_cards)
+        for card in (*group_cards, *people_cards):
+            card.load_cover_artwork()
+        if batch:
+            self._emit_first_viewport_ready()
+        if self._pending_card_specs:
+            self._card_build_timer.start()
+
+    def _emit_first_viewport_ready(self) -> None:
+        generation = self._card_build_generation
+        if self._first_viewport_emitted_generation == generation:
+            return
+        self._first_viewport_emitted_generation = generation
+        self.firstViewportReady.emit(generation)
+
+    def shutdown(self) -> None:
+        self._refresh_timer.stop()
+        self._card_build_timer.stop()
+        self._load_generation += 1
+        self._pending_card_specs.clear()
+        self._load_pool.clear()
+        self._load_pool.waitForDone(1500)
+
     def _on_scroll_activity(self) -> None:
         if self._pending_index_refresh and self.isVisible():
             self._schedule_visible_refresh()
@@ -535,17 +737,20 @@ class PeopleDashboardWidget(QWidget):
     def _summary_for_pet(self, pet_id: str) -> PetSummary | None:
         return next((item for item in self._pet_summaries if item.pet_id == pet_id), None)
 
-    def _show_card_menu(self, person_id: str, global_pos) -> None:
-        summary = self._summary_for_person(person_id)
-        if summary is None:
-            pet_summary = self._summary_for_pet(person_id)
-            if pet_summary is None:
-                return
-            menu = self._build_pet_menu(pet_summary)
-            menu.exec(global_pos)
+    def _show_card_menu(self, identity_key: str, global_pos) -> None:
+        identity = IdentityRef.parse(identity_key)
+        if identity is None:
             return
-
-        menu = self._build_card_menu(summary)
+        if identity.kind == "person":
+            summary = self._summary_for_person(identity.entity_id)
+            if summary is None:
+                return
+            menu = self._build_card_menu(summary)
+        else:
+            summary = self._summary_for_pet(identity.entity_id)
+            if summary is None:
+                return
+            menu = self._build_pet_menu(summary)
         menu.exec(global_pos)
 
     def _show_group_menu(self, group_id: str, global_pos) -> None:
@@ -742,7 +947,7 @@ class PeopleDashboardWidget(QWidget):
         if not accepted:
             return
         self._service.rename_cluster(summary.person_id, text.strip() or None)
-        self.reload(preserve_content=bool(self._summaries))
+        self._reload_after_mutation(preserve_content=bool(self._summaries))
 
     def _rename_pet(self, summary: PetSummary) -> None:
         title = (
@@ -759,7 +964,9 @@ class PeopleDashboardWidget(QWidget):
         if not accepted:
             return
         self._pet_service.rename_pet(summary.pet_id, text.strip() or None)
-        self.reload(preserve_content=bool(self._summaries or self._pet_summaries))
+        self._reload_after_mutation(
+            preserve_content=bool(self._summaries or self._pet_summaries)
+        )
 
     def _toggle_pet_hidden(self, summary: PetSummary) -> None:
         next_hidden = not summary.is_hidden
@@ -767,7 +974,7 @@ class PeopleDashboardWidget(QWidget):
             return
         changed = self._pet_service.set_pet_hidden(summary.pet_id, next_hidden)
         if changed:
-            self.reload(
+            self._reload_after_mutation(
                 preserve_content=bool(self._summaries or self._pet_summaries or self._groups)
             )
 
@@ -793,7 +1000,9 @@ class PeopleDashboardWidget(QWidget):
             summary.pet_id,
             summary.key_detection_id,
         ):
-            self.reload(preserve_content=bool(self._summaries or self._pet_summaries))
+            self._reload_after_mutation(
+                preserve_content=bool(self._summaries or self._pet_summaries)
+            )
 
     def _delete_pet_detection(self, summary: PetSummary) -> None:
         if not summary.key_detection_id:
@@ -810,7 +1019,9 @@ class PeopleDashboardWidget(QWidget):
         ):
             return
         if self._pet_service.delete_detection(summary.key_detection_id):
-            self.reload(preserve_content=bool(self._summaries or self._pet_summaries))
+            self._reload_after_mutation(
+                preserve_content=bool(self._summaries or self._pet_summaries)
+            )
 
     def _toggle_person_pin(self, summary: PersonSummary) -> None:
         if self._pinned_service is None:
@@ -846,7 +1057,7 @@ class PeopleDashboardWidget(QWidget):
             library_root=library_root,
         )
         if renamed:
-            self.reload(preserve_content=bool(self._summaries))
+            self._reload_after_mutation(preserve_content=bool(self._summaries))
 
     def _toggle_person_hidden(self, summary: PersonSummary) -> None:
         next_hidden = not summary.is_hidden
@@ -854,7 +1065,9 @@ class PeopleDashboardWidget(QWidget):
             return
         changed = self._service.set_cluster_hidden(summary.person_id, next_hidden)
         if changed:
-            self.reload(preserve_content=bool(self._summaries or self._groups))
+            self._reload_after_mutation(
+                preserve_content=bool(self._summaries or self._groups)
+            )
 
     def _toggle_pet_pin(self, summary: PetSummary) -> None:
         if self._pinned_service is None:
@@ -908,7 +1121,9 @@ class PeopleDashboardWidget(QWidget):
         if not self._confirm_disband_group(summary):
             return
         if self._service.delete_group(summary.group_id):
-            self.reload(preserve_content=bool(self._summaries or self._groups))
+            self._reload_after_mutation(
+                preserve_content=bool(self._summaries or self._groups)
+            )
 
     def _merge_person(self, summary: PersonSummary) -> None:
         has_other_identities = len(self._summaries) + len(self._pet_summaries) > 1
@@ -980,7 +1195,7 @@ class PeopleDashboardWidget(QWidget):
             return
         group = self._service.create_group(dialog.selected_person_ids())
         if group is not None:
-            self.reload(preserve_content=bool(self._summaries))
+            self._reload_after_mutation(preserve_content=bool(self._summaries))
 
     def _group_dialog_choices(self) -> list[_IdentityChoice]:
         choices: list[_IdentityChoice] = []
@@ -1004,11 +1219,7 @@ class PeopleDashboardWidget(QWidget):
             )
         return choices
 
-    def _merge_cluster_pair(self, source_person_id: str, target_person_id: str) -> None:
-        source_identity = self._identity_for_card_id(source_person_id)
-        target_identity = self._identity_for_card_id(target_person_id)
-        if source_identity is None or target_identity is None:
-            return
+    def _merge_cluster_pair(self, source_identity: str, target_identity: str) -> None:
         self._confirm_merge(source_identity, target_identity)
 
     def _confirm_merge(self, source_person_id: str, target_person_id: str) -> bool:
@@ -1036,24 +1247,63 @@ class PeopleDashboardWidget(QWidget):
         if not MergeConfirmDialog.confirm(2, self):
             return False
 
-        source_kind, source_id = source_identity.split(":", 1)
-        target_kind, target_id = target_identity.split(":", 1)
-        if source_kind == "person" and target_kind == "person":
-            merged = self._service.merge_clusters(source_id, target_id)
-        elif source_kind == "pet" and target_kind == "pet":
-            merged = self._pet_service.merge_pets(source_id, target_id)
+        try:
+            outcome = self._merge_service.merge(source_identity, target_identity)
+        except (sqlite3.Error, OSError):
+            logger.exception("Identity merge failed: %s -> %s", source_identity, target_identity)
+            dialogs.show_warning(
+                self,
+                tr(
+                    "PeopleDashboard",
+                    "The identities could not be merged. No photos were deleted.",
+                ),
+                title=tr("PeopleDashboard", "Merge Failed"),
+            )
+            return False
+        merged = outcome.merged
+        if merged:
+            self._remap_pinned_identity(
+                source_identity,
+                target_identity,
+                group_redirects=outcome.group_redirects,
+            )
+        elif outcome.failure == IdentityMergeFailure.HIDDEN_STATE_MISMATCH:
+            dialogs.show_information(
+                self,
+                self._hidden_state_merge_message(),
+                title=tr("PeopleDashboard", "Cannot Merge People"),
+            )
+        elif outcome.failure == IdentityMergeFailure.RECOVERY_PENDING:
+            dialogs.show_information(
+                self,
+                tr(
+                    "PeopleDashboard",
+                    "Recognition data is still recovering. Please try again shortly.",
+                ),
+                title=tr("PeopleDashboard", "Recognition Busy"),
+            )
         else:
-            result = self._service.merge_identities(source_identity, target_identity)
-            merged = bool(result and result.merged)
-            if result is not None:
-                self._remap_pinned_identity(
-                    source_identity,
-                    target_identity,
-                    group_redirects=result.group_redirects,
-                )
+            dialogs.show_warning(
+                self,
+                tr(
+                    "PeopleDashboard",
+                    (
+                        "The identities could not be merged. "
+                        "They may have changed since this view was loaded."
+                    ),
+                ),
+                title=tr("PeopleDashboard", "Merge Failed"),
+            )
         if merged:
             self._remove_merged_source_card(source_identity)
-            self.reload(preserve_content=bool(self._summaries or self._pet_summaries or self._groups))
+            if outcome.refresh_policy == IdentityMergeRefreshPolicy.IMMEDIATE:
+                self._reload_after_mutation(
+                    preserve_content=bool(
+                        self._summaries or self._pet_summaries or self._groups
+                    )
+                )
+            else:
+                self._invalidate_query_cache()
         return merged
 
     def _remove_merged_source_card(self, source_identity: str) -> None:
@@ -1071,23 +1321,9 @@ class PeopleDashboardWidget(QWidget):
             ]
         self._populate_cards()
 
-    def _identity_for_card_id(self, card_id: str) -> str | None:
-        if self._summary_for_person(card_id) is not None:
-            return f"person:{card_id}"
-        if self._summary_for_pet(card_id) is not None:
-            return f"pet:{card_id}"
-        return None
-
     def _normalize_identity(self, identity: str) -> str | None:
-        text = str(identity or "").strip()
-        if not text:
-            return None
-        if ":" not in text:
-            return self._identity_for_card_id(text)
-        kind, entity_id = (part.strip() for part in text.split(":", 1))
-        if kind not in {"person", "pet"} or not entity_id:
-            return None
-        return f"{kind}:{entity_id}"
+        parsed = IdentityRef.parse(identity)
+        return parsed.key if parsed is not None else None
 
     def _identity_hidden(self, identity: str) -> bool | None:
         normalized = self._normalize_identity(identity)
@@ -1152,7 +1388,11 @@ class PeopleDashboardWidget(QWidget):
         kind, entity_id = normalized.split(":", 1)
         if kind == "person":
             summary = self._summary_for_person(entity_id)
-            return (summary.name or "").strip() if summary is not None else tr("PeopleDashboard", "Unnamed")
+            return (
+                (summary.name or "").strip()
+                if summary is not None
+                else tr("PeopleDashboard", "Unnamed")
+            )
         summary = self._summary_for_pet(entity_id)
         return self._pet_label(summary) if summary is not None else tr("PeopleDashboard", "Unnamed")
 
@@ -1198,6 +1438,12 @@ class PeopleDashboardWidget(QWidget):
         )
 
     def _persist_cluster_order(self, ordered_person_ids: list[str]) -> None:
+        ordered_person_ids = [
+            identity.entity_id
+            for value in ordered_person_ids
+            if (identity := IdentityRef.parse(value)) is not None
+            and identity.kind == "person"
+        ]
         current_ids = {summary.person_id for summary in self._summaries}
         filtered = [person_id for person_id in ordered_person_ids if person_id in current_ids]
         if len(filtered) != len(self._summaries):
@@ -1208,6 +1454,7 @@ class PeopleDashboardWidget(QWidget):
             )
         if filtered:
             self._service.set_cluster_order(filtered)
+            self._invalidate_query_cache()
 
     def _persist_group_order(self, ordered_group_ids: list[str]) -> None:
         current_ids = {summary.group_id for summary in self._groups}
@@ -1220,6 +1467,7 @@ class PeopleDashboardWidget(QWidget):
             )
         if filtered:
             self._service.set_group_order(filtered)
+            self._invalidate_query_cache()
 
     def _group_summary_for_group(self, group_id: str) -> PeopleGroupSummary | None:
         return next((item for item in self._groups if item.group_id == group_id), None)

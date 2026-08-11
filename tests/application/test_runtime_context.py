@@ -198,7 +198,41 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     context.asset_runtime = asset_runtime
     context._container = None
     context._pending_basic_library_path = root
+    context._library_epoch = 0
     return context, library, asset_runtime
+
+
+def test_library_epoch_advances_for_open_and_close(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    context, _library, _asset_runtime = _runtime_context(library_root)
+
+    assert context.library_epoch == 0
+    context.open_library(library_root)
+    opened_epoch = context.library_epoch
+    context.close_library()
+
+    assert opened_epoch == 1
+    assert context.library_epoch == 2
+
+
+def test_new_epoch_is_visible_before_session_bind_callback(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    context, library, _asset_runtime = _runtime_context(library_root)
+    observed_epochs: list[int] = []
+    original_bind = library.bind_library_session
+
+    def observe_bind(session: object | None) -> None:
+        if session is not None:
+            observed_epochs.append(context.library_epoch)
+        original_bind(session)
+
+    library.bind_library_session = observe_bind  # type: ignore[method-assign]
+
+    context.open_library(library_root)
+
+    assert observed_epochs == [1]
 
 
 def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(

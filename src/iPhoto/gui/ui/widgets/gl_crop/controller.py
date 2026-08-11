@@ -12,7 +12,7 @@ import math
 import numbers
 from collections.abc import Callable, Mapping
 
-from PySide6.QtCore import QObject, QPointF, Qt
+from PySide6.QtCore import QObject, QPointF, QTimer, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 
 from ..view_transform_controller import compute_fit_to_view_scale
@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 _MIN_DIMENSION_EPSILON = 1e-9
 # Tolerance for floating-point aspect-ratio comparison.
 _ASPECT_RATIO_TOLERANCE = 1e-6
+_WHEEL_INTERACTION_IDLE_MS = 140
 
 
 def _coerce_real(value: object, default: float) -> float:
@@ -61,6 +62,7 @@ def _fit_crop_aspect(
     aspect: float,
     image_width: int = 0,
     image_height: int = 0,
+    bounds: tuple[float, float, float, float] | None = None,
 ) -> None:
     """Adjust *crop_state* in-place so the crop has the requested pixel aspect.
 
@@ -79,7 +81,7 @@ def _fit_crop_aspect(
         images).
 
     The smaller dimension is expanded to match the larger one whenever the
-    result still fits within the normalised [0, 1] bounds.  If expanding
+    result still fits within the transformed image bounds.  If expanding
     would exceed the bounds the larger dimension is shrunk instead.  This
     prevents the crop box from monotonically shrinking when the user
     switches between aspect ratios repeatedly.
@@ -93,6 +95,10 @@ def _fit_crop_aspect(
     else:
         norm_aspect = aspect
 
+    left, top, right, bottom = bounds or (0.0, 0.0, 1.0, 1.0)
+    max_width = max(crop_state.min_width, right - left)
+    max_height = max(crop_state.min_height, bottom - top)
+
     cur = crop_state.width / max(_MIN_DIMENSION_EPSILON, crop_state.height)
     if abs(cur - norm_aspect) < _ASPECT_RATIO_TOLERANCE:
         return
@@ -101,22 +107,22 @@ def _fit_crop_aspect(
     if cur > norm_aspect:
         # Width is proportionally too large → try expanding height.
         desired_height = crop_state.width / norm_aspect
-        if desired_height <= 1.0:
+        if desired_height <= max_height:
             crop_state.height = desired_height
         else:
             # Can't expand height enough; shrink width instead.
-            crop_state.height = min(1.0, desired_height)
+            crop_state.height = min(max_height, desired_height)
             crop_state.width = crop_state.height * norm_aspect
     else:
         # Height is proportionally too large → try expanding width.
         desired_width = crop_state.height * norm_aspect
-        if desired_width <= 1.0:
+        if desired_width <= max_width:
             crop_state.width = desired_width
         else:
             # Can't expand width enough; shrink height instead.
-            crop_state.width = min(1.0, desired_width)
+            crop_state.width = min(max_width, desired_width)
             crop_state.height = crop_state.width / norm_aspect
-    crop_state.clamp()
+    crop_state.clamp((left, top, right, bottom))
 
 
 class CropInteractionController:
@@ -176,11 +182,16 @@ class CropInteractionController:
             on_animation_complete=self._on_animation_complete,
             timer_parent=timer_parent,
         )
+        self._wheel_interaction_timer = QTimer(timer_parent)
+        self._wheel_interaction_timer.setSingleShot(True)
+        self._wheel_interaction_timer.setInterval(_WHEEL_INTERACTION_IDLE_MS)
+        self._wheel_interaction_timer.timeout.connect(self._finish_wheel_interaction)
 
         # Interaction state
         self._active: bool = False
         self._crop_drag_handle: CropHandle = CropHandle.NONE
         self._crop_dragging: bool = False
+        self._wheel_interacting: bool = False
         self._crop_last_pos = QPointF()
         self._crop_edge_threshold: float = 48.0
         self._crop_faded_out: bool = False
@@ -193,6 +204,10 @@ class CropInteractionController:
     def is_active(self) -> bool:
         """Return True if crop mode is currently active."""
         return self._active
+
+    def is_interacting(self) -> bool:
+        """Return whether a drag or wheel crop interaction is active."""
+        return self._crop_dragging or self._wheel_interacting
 
     def set_locked_aspect_ratio(self, ratio: float) -> None:
         """Set the aspect ratio constraint for crop resizing.
@@ -212,7 +227,15 @@ class CropInteractionController:
             snapshot = self._model.create_snapshot()
             crop_state = self._model.get_crop_state()
             tex_w, tex_h = self._texture_size_provider()
-            _fit_crop_aspect(crop_state, ratio, tex_w, tex_h)
+            _fit_crop_aspect(
+                crop_state,
+                ratio,
+                tex_w,
+                tex_h,
+                self._model.get_crop_bounds(),
+            )
+            if not self._model.ensure_valid_or_revert(snapshot, allow_shrink=True):
+                return
             if self._model.has_changed(snapshot):
                 self._crop_faded_out = False
                 self._emit_crop_changed()
@@ -295,7 +318,7 @@ class CropInteractionController:
 
         # Emit crop changed signal if crop state was modified
         if crop_changed:
-            self._model.get_crop_state().clamp()
+            self._model.clamp_crop_state()
             self._emit_crop_changed()
 
         # Request UI update if either quad or crop changed
@@ -327,9 +350,23 @@ class CropInteractionController:
     def set_active(self, enabled: bool, values: Mapping[str, float] | None = None) -> None:
         """Enable or disable crop mode with optional initial crop values."""
         if enabled == self._active:
-            if enabled and values is not None:
+            # ``set_adjustments()`` feeds the persisted crop values back into
+            # this controller.  During a drag the model is already the source
+            # of those values, so applying them again would also clamp and
+            # rewrite the image centre that the active strategy is using.
+            # Ignore that feedback, and avoid the same transform mutation when
+            # the external values already match the local model.
+            if (
+                enabled
+                and values is not None
+                and not self.is_interacting()
+                and not self._crop_values_match(values)
+            ):
                 self._apply_crop_values(values)
             return
+
+        if not enabled and self._wheel_interacting:
+            self._finish_wheel_interaction(restart_idle=False)
 
         self._active = bool(enabled)
         if not self._active:
@@ -361,6 +398,8 @@ class CropInteractionController:
         if tex_w <= 0 or tex_h <= 0:
             return
 
+        if self._wheel_interacting:
+            self._finish_wheel_interaction(restart_idle=False)
         self._animator.stop_animation()
         self._animator.stop_idle()
         self._crop_faded_out = False
@@ -386,6 +425,8 @@ class CropInteractionController:
                 texture_size_provider=self._texture_size_provider,
                 get_effective_scale=self._transform_controller.get_effective_scale,
                 get_dpr=self._transform_controller._get_dpr,
+                get_pan_pixels=self._transform_controller.get_pan_pixels,
+                set_pan_pixels=self._transform_controller.set_pan_pixels,
                 get_viewport_device_scale=self._transform_controller.get_viewport_device_scale,
                 on_crop_changed=self._emit_crop_changed,
             )
@@ -426,7 +467,11 @@ class CropInteractionController:
         if self._current_strategy is not None:
             self._current_strategy.on_drag(delta_view)
 
-        self._animator.restart_idle()
+        # The idle animation frames the crop and fades the yellow overlay.  It
+        # must never start while a mouse interaction is still active: pausing
+        # at a perspective edge used to let its timer fire mid-drag, abruptly
+        # zooming the preview around a new centre.
+        self._animator.stop_idle()
         self._on_request_update()
 
     def handle_mouse_release(self, event: QMouseEvent) -> None:
@@ -457,7 +502,10 @@ class CropInteractionController:
 
         angle = event.angleDelta().y()
         if angle == 0:
-            self._animator.restart_idle()
+            if self._wheel_interacting:
+                self._wheel_interaction_timer.start()
+            else:
+                self._animator.restart_idle()
             return
 
         # Guard against devices that emit unusually large wheel deltas
@@ -465,29 +513,67 @@ class CropInteractionController:
 
         factor = math.pow(1.0015, angle)
         if abs(factor - 1.0) <= 1e-6:
-            self._animator.restart_idle()
+            if self._wheel_interacting:
+                self._wheel_interaction_timer.start()
+            else:
+                self._animator.restart_idle()
             event.accept()
             return
         anchor_image = self._transform_controller.convert_viewport_to_image(event.position())
-        anchor_norm_x = max(0.0, min(1.0, float(anchor_image.x()) / float(tex_w)))
-        anchor_norm_y = max(0.0, min(1.0, float(anchor_image.y()) / float(tex_h)))
+        anchor_norm_x = float(anchor_image.x()) / float(tex_w)
+        anchor_norm_y = float(anchor_image.y()) / float(tex_h)
 
         snapshot = self._model.create_snapshot()
         crop_state = self._model.get_crop_state()
-        crop_state.zoom_about_point(anchor_norm_x, anchor_norm_y, factor)
+        crop_bounds = self._model.get_crop_bounds()
+        crop_state.zoom_about_point(anchor_norm_x, anchor_norm_y, factor, crop_bounds)
         # Preserve locked aspect ratio after the uniform zoom
         if self._locked_aspect > 0:
-            _fit_crop_aspect(crop_state, self._locked_aspect, tex_w, tex_h)
+            _fit_crop_aspect(
+                crop_state,
+                self._locked_aspect,
+                tex_w,
+                tex_h,
+                crop_bounds,
+            )
         if not self._model.ensure_valid_or_revert(snapshot, allow_shrink=False):
             self._on_request_update()
-            self._animator.restart_idle()
+            if self._wheel_interacting:
+                self._wheel_interaction_timer.start()
+            else:
+                self._animator.restart_idle()
             event.accept()
             return
         if self._model.has_changed(snapshot):
+            self._begin_wheel_interaction()
             self._emit_crop_changed()
         self._on_request_update()
-        self._animator.restart_idle()
+        if self._wheel_interacting:
+            self._wheel_interaction_timer.start()
+        else:
+            self._animator.restart_idle()
         event.accept()
+
+    def _begin_wheel_interaction(self) -> None:
+        """Start one debounced interaction spanning a burst of wheel events."""
+
+        if self._wheel_interacting:
+            return
+        self._wheel_interacting = True
+        if self._on_interaction_started is not None:
+            self._on_interaction_started()
+
+    def _finish_wheel_interaction(self, *, restart_idle: bool = True) -> None:
+        """Finish the active wheel burst and publish its final state once."""
+
+        self._wheel_interaction_timer.stop()
+        if not self._wheel_interacting:
+            return
+        self._wheel_interacting = False
+        if self._on_interaction_finished is not None:
+            self._on_interaction_finished()
+        if restart_idle and self._active:
+            self._animator.restart_idle()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -496,7 +582,7 @@ class CropInteractionController:
         """Apply crop values to the crop state."""
         crop_state = self._model.get_crop_state()
         if values:
-            crop_state.set_from_mapping(values)
+            crop_state.set_from_mapping(values, self._model.get_crop_bounds())
         else:
             crop_state.set_full()
 
@@ -510,7 +596,7 @@ class CropInteractionController:
 
         center = crop_state.center_pixels(tex_w, tex_h)
         scale = self._transform_controller.get_effective_scale()
-        clamped_center = self._clamp_image_center_to_crop(center, scale)
+        clamped_center = self._clamp_view_center_to_transformed_image(center, scale)
         self._transform_controller.apply_image_center_pixels(clamped_center, scale)
         if changed:
             self._emit_crop_changed()
@@ -523,6 +609,29 @@ class CropInteractionController:
             if abs(float(values.get(key, current[key])) - current[key]) > 1e-6:
                 return False
         return True
+
+    def _clamp_view_center_to_transformed_image(
+        self,
+        center: QPointF,
+        scale: float,
+    ) -> QPointF:
+        """Clamp view centring without discarding projected image extensions."""
+
+        bounds = self._model.get_crop_bounds()
+        if all(
+            abs(actual - expected) <= 1e-6
+            for actual, expected in zip(bounds, (0.0, 0.0, 1.0, 1.0), strict=True)
+        ):
+            return self._clamp_image_center_to_crop(center, scale)
+
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return QPointF(center)
+        left, top, right, bottom = bounds
+        return QPointF(
+            max(left * tex_w, min(right * tex_w, float(center.x()))),
+            max(top * tex_h, min(bottom * tex_h, float(center.y()))),
+        )
 
     def _crop_hit_test(self, point: QPointF) -> CropHandle:
         """Determine which crop handle (if any) is under the cursor."""
@@ -560,7 +669,8 @@ class CropInteractionController:
     def _on_idle_timeout(self) -> None:
         """Handle idle timeout - start fade-out animation."""
         tex_w, tex_h = self._texture_size_provider()
-        if not self._active or tex_w <= 0 or tex_h <= 0:
+        if not self._active or self._crop_dragging or tex_w <= 0 or tex_h <= 0:
+            self._animator.stop_idle()
             return
 
         target_scale = self._target_scale_for_crop()
@@ -588,10 +698,18 @@ class CropInteractionController:
         vw, vh = view_dims
         fit_w, fit_h = fit_size
         tex_size = (int(fit_w), int(fit_h))
-        base_scale = compute_fit_to_view_scale(tex_size, vw, vh)
+        fit_scale = compute_fit_to_view_scale(tex_size, vw, vh)
+        cover_scale = max(
+            1.0,
+            _coerce_real(self._transform_controller.get_image_cover_scale(), 1.0),
+        )
+        base_effective_scale = fit_scale * cover_scale
         min_zoom = _coerce_real(self._transform_controller.minimum_zoom(), 0.1)
         max_zoom = _coerce_real(self._transform_controller.maximum_zoom(), 16.0)
-        zoom_factor = max(min_zoom, min(max_zoom, scale / max(base_scale, 1e-6)))
+        zoom_factor = max(
+            min_zoom,
+            min(max_zoom, scale / max(base_effective_scale, 1e-6)),
+        )
         self._transform_controller.set_zoom_factor_direct(zoom_factor)
         actual_scale = self._transform_controller.get_effective_scale()
         self._transform_controller.apply_image_center_pixels(center, actual_scale)
@@ -622,9 +740,23 @@ class CropInteractionController:
         scale_w = available_w / crop_width
         scale_h = available_h / crop_height
         target_scale = min(scale_w, scale_h)
-        base_scale = compute_fit_to_view_scale((tex_w, tex_h), vw, vh)
-        min_scale = base_scale * _coerce_real(self._transform_controller.minimum_zoom(), 0.1)
-        max_scale = base_scale * _coerce_real(self._transform_controller.maximum_zoom(), 16.0)
+        fit_size = _coerce_real_pair(self._transform_controller._get_fit_texture_size())
+        if fit_size is None:
+            fit_size = (float(tex_w), float(tex_h))
+        fit_scale = compute_fit_to_view_scale(fit_size, vw, vh)
+        cover_scale = max(
+            1.0,
+            _coerce_real(self._transform_controller.get_image_cover_scale(), 1.0),
+        )
+        base_effective_scale = fit_scale * cover_scale
+        min_scale = base_effective_scale * _coerce_real(
+            self._transform_controller.minimum_zoom(),
+            0.1,
+        )
+        max_scale = base_effective_scale * _coerce_real(
+            self._transform_controller.maximum_zoom(),
+            16.0,
+        )
         return max(min_scale, min(max_scale, target_scale))
 
     # ------------------------------------------------------------------
@@ -701,10 +833,23 @@ class CropInteractionController:
 
         eased_pressure = ease_in_quad(min(1.0, pressure))
 
-        texture_size = (tex_w, tex_h)
-        base_scale = compute_fit_to_view_scale(texture_size, vw, vh)
-        min_scale = max(base_scale, 1e-6)
-        max_scale = base_scale * self._transform_controller.maximum_zoom()
+        fit_size = _coerce_real_pair(self._transform_controller._get_fit_texture_size())
+        if fit_size is None:
+            fit_size = (float(tex_w), float(tex_h))
+        fit_scale = compute_fit_to_view_scale(fit_size, vw, vh)
+        cover_scale = max(
+            1.0,
+            _coerce_real(self._transform_controller.get_image_cover_scale(), 1.0),
+        )
+        base_effective_scale = max(fit_scale * cover_scale, 1e-6)
+        min_scale = base_effective_scale * _coerce_real(
+            self._transform_controller.minimum_zoom(),
+            0.1,
+        )
+        max_scale = base_effective_scale * _coerce_real(
+            self._transform_controller.maximum_zoom(),
+            16.0,
+        )
 
         shrink_strength = 0.05
         new_scale_raw = view_scale * (1.0 - shrink_strength * eased_pressure)
@@ -715,8 +860,7 @@ class CropInteractionController:
         crop_center_view = self._transform_controller.convert_image_to_viewport(
             crop_center.x(), crop_center.y()
         )
-        base_scale_safe = max(base_scale, 1e-6)
-        target_zoom = new_scale / base_scale_safe
+        target_zoom = new_scale / base_effective_scale
         self._transform_controller.set_zoom(target_zoom, anchor=crop_center_view)
 
         pan_gain = 0.75 + 0.25 * eased_pressure
@@ -730,5 +874,8 @@ class CropInteractionController:
             current_center.y() + offset_delta.y(),
         )
         effective_scale = self._transform_controller.get_effective_scale()
-        clamped_center = self._clamp_image_center_to_crop(target_center, effective_scale)
+        clamped_center = self._clamp_view_center_to_transformed_image(
+            target_center,
+            effective_scale,
+        )
         self._transform_controller.apply_image_center_pixels(clamped_center, effective_scale)

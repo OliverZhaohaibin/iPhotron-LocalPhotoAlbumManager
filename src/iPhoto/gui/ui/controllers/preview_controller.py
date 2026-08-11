@@ -5,14 +5,16 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 import sys
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from PySide6.QtCore import QModelIndex, QObject, QRect
 
 from ....application.ports import EditServicePort
 from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
-from ..widgets.preview_window import PreviewWindow
+
+if TYPE_CHECKING:
+    from ..widgets.preview_window import PreviewWindow
 
 
 class PreviewController(QObject):
@@ -20,14 +22,17 @@ class PreviewController(QObject):
 
     def __init__(
         self,
-        preview_window: PreviewWindow,
+        preview_window: "PreviewWindow | None" = None,
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
         parent: QObject | None = None,
+        *,
+        preview_window_provider: "Callable[[], PreviewWindow] | None" = None,
     ) -> None:
         """Store the shared preview window instance."""
 
         super().__init__(parent)
         self._preview_window = preview_window
+        self._preview_window_provider = preview_window_provider
         self._edit_service_getter = edit_service_getter
 
     def bind_view(self, view: AssetGrid) -> None:
@@ -40,7 +45,8 @@ class PreviewController(QObject):
     def close_preview(self, delayed: bool = True) -> None:
         """Close the preview window, optionally cancelling the delay timer."""
 
-        self._preview_window.close_preview(delayed)
+        if self._preview_window is not None:
+            self._preview_window.close_preview(delayed)
 
     def close_preview_after_release(self) -> None:
         """Hide the preview window after a successful long press."""
@@ -79,7 +85,8 @@ class PreviewController(QObject):
             adjustment_path,
             info,
         )
-        self._preview_window.show_preview(
+        preview_window = self._resolve_preview_window()
+        preview_window.show_preview(
             preview_path,
             global_rect,
             aspect_ratio_hint=aspect_hint,
@@ -87,6 +94,14 @@ class PreviewController(QObject):
             trim_range_ms=trim_range_ms,
             adjusted_preview=adjusted_preview,
         )
+
+    def _resolve_preview_window(self) -> "PreviewWindow":
+        if self._preview_window is None:
+            provider = self._preview_window_provider
+            if provider is None:
+                raise RuntimeError("Preview window provider is unavailable")
+            self._preview_window = provider()
+        return self._preview_window
 
     def _extract_aspect_hint(self, info: Any) -> float | None:
         """Return a best-effort display aspect ratio hint from model metadata."""

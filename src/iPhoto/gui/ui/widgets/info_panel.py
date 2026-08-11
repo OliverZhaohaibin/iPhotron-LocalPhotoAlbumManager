@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from iPhoto.gui.i18n import formatters, tr
 from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
+from iPhoto.utils.image_loader import load_qpixmap
 from ....application.ports import MapRuntimePort
 
 from ..icons import load_icon
@@ -1916,8 +1917,8 @@ def _avatar_pixmap(path: Path | None) -> QPixmap | None:
     cached = _AVATAR_PIXMAP_CACHE.get(cache_key)
     if cached is not None and not cached.isNull():
         return QPixmap(cached)
-    source = QPixmap(str(path))
-    if source.isNull():
+    source = load_qpixmap(path)
+    if source is None or source.isNull():
         return None
     size = _FACE_AVATAR_DIAMETER
     scaled = source.scaled(

@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import Mock
 
-from iPhoto.application.ports import EditRenderingState
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
+from iPhoto.application.ports import EditRenderingState
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.signal import Signal
 
@@ -63,6 +63,24 @@ def test_show_row_builds_presentation_and_requests_detail_route():
     assert received[0].asset_id == dto.id
     assert received[0].path == dto.abs_path
     assert received[0].is_favorite is True
+
+
+def test_presentation_carries_indexed_source_identity() -> None:
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    dto.width = 6000
+    dto.height = 4000
+    dto.size_bytes = 123
+    dto.metadata.update({"source_mtime_ns": 456, "index_revision": 9})
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    vm.show_row(0)
+
+    identity = vm.presentation.value.source_identity
+    assert identity is not None
+    assert identity.revision == ("mtime", 123, 456)
+    assert (identity.width, identity.height) == (6000, 4000)
 
 
 def test_next_and_previous_delegate_to_session():
@@ -319,7 +337,20 @@ def test_restore_after_adjustment_rebinds_current_path():
     assert received[0].reload_token == 1
 
 
-def test_show_row_builds_video_state_from_sidecar():
+def test_rotate_commit_does_not_reload_current_detail() -> None:
+    vm = DetailViewModel.__new__(DetailViewModel)
+    vm.restore_after_adjustment = Mock()
+
+    DetailViewModel._handle_adjustments_committed(
+        vm,
+        Path("/fake/photo.jpg"),
+        "rotate",
+    )
+
+    vm.restore_after_adjustment.assert_not_called()
+
+
+def test_show_row_defers_video_state_sidecar_read():
     edit_service = Mock()
     edit_service.describe_adjustments.return_value = EditRenderingState(
         sidecar_exists=True,
@@ -338,12 +369,13 @@ def test_show_row_builds_video_state_from_sidecar():
     vm.show_row(0)
 
     presentation = vm.presentation.value
-    assert presentation.video_adjusted_preview is True
-    assert presentation.video_adjustments == {"Exposure": 0.3}
-    assert presentation.video_trim_range_ms == (1000, 4000)
+    assert presentation.video_adjusted_preview is False
+    assert presentation.video_adjustments is None
+    assert presentation.video_trim_range_ms is None
+    edit_service.describe_adjustments.assert_not_called()
 
 
-def test_restore_request_prefers_duration_hint_for_video_trim():
+def test_restore_request_keeps_video_sidecar_out_of_route_path():
     edit_service = Mock()
     edit_service.describe_adjustments.return_value = EditRenderingState(
         sidecar_exists=True,
@@ -370,8 +402,10 @@ def test_restore_request_prefers_duration_hint_for_video_trim():
     )
 
     presentation = vm.presentation.value
-    assert presentation.video_trim_range_ms == (2000, 7250)
+    assert presentation.video_trim_range_ms is None
     assert presentation.reload_token == 1
+    assert presentation.video_duration_hint == 7.25
+    edit_service.describe_adjustments.assert_not_called()
 
 
 def test_store_row_change_refreshes_current_presentation():

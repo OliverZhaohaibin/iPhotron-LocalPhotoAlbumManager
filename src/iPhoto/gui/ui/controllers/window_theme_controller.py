@@ -27,6 +27,8 @@ class WindowThemeController(QObject):
         ui: Ui_MainWindow,
         window: QObject | None,
         theme_manager: ThemeManager,
+        *,
+        apply_initial_theme: bool = True,
     ) -> None:
         super().__init__(window)
         self._ui = ui
@@ -42,12 +44,16 @@ class WindowThemeController(QObject):
         # Connect to theme changes
         self._theme_manager.themeChanged.connect(self._on_theme_changed)
 
-        # Initial application
-        self._apply_colors(self._theme_manager.current_colors())
+        if apply_initial_theme:
+            self.apply_current_theme()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def apply_current_theme(self) -> None:
+        """Synchronise window widgets with the active application theme."""
+        self._apply_colors(self._theme_manager.current_colors())
+
     def set_detail_ui_controller(
         self, controller: "DetailUIController" | None
     ) -> None:
@@ -321,20 +327,20 @@ class WindowThemeController(QObject):
 
         # Edit Sidebar Icons
         # We need to update CollapsibleSections
-        sections = self._ui.edit_sidebar.findChildren(CollapsibleSection)
-        for section in sections:
-            section.set_toggle_icon_tint(colors.text_primary)
-            icon_label = getattr(section, "_icon_label", None)
-            icon_name = getattr(section, "_icon_name", "")
-            icon_size = getattr(section, "_icon_size", 20)
-            if icon_label and icon_name:
-                # Some icons have native colors
-                if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg", "denoise.svg"}:
-                    icon_label.setPixmap(load_icon(icon_name).pixmap(icon_size, icon_size))
-                else:
-                    icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(icon_size, icon_size))
-
-        self._ui.edit_sidebar.set_control_icon_tint(colors.text_primary)
+        edit_sidebar = getattr(self._ui, "edit_sidebar", None)
+        if edit_sidebar is not None:
+            sections = edit_sidebar.findChildren(CollapsibleSection)
+            for section in sections:
+                section.set_toggle_icon_tint(colors.text_primary)
+                icon_label = getattr(section, "_icon_label", None)
+                icon_name = getattr(section, "_icon_name", "")
+                icon_size = getattr(section, "_icon_size", 20)
+                if icon_label and icon_name:
+                    if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg", "denoise.svg"}:
+                        icon_label.setPixmap(load_icon(icon_name).pixmap(icon_size, icon_size))
+                    else:
+                        icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(icon_size, icon_size))
+            edit_sidebar.set_control_icon_tint(colors.text_primary)
 
         # Main/Edit Toolbar Icons
         # Zoom buttons
@@ -347,9 +353,11 @@ class WindowThemeController(QObject):
             self._ui.gallery_page.back_button.setIcon(load_icon("chevron.left.svg", color=icon_color))
 
         # Edit header buttons
-        self._ui.edit_compare_button.setIcon(
-            load_icon("square.fill.and.line.vertical.and.square.svg", color=icon_color)
-        )
+        edit_compare_button = getattr(self._ui, "edit_compare_button", None)
+        if edit_compare_button is not None:
+            edit_compare_button.setIcon(
+                load_icon("square.fill.and.line.vertical.and.square.svg", color=icon_color)
+            )
 
         # Detail Header buttons (Info, Favorite, Share, Rotate)
         if self._detail_ui_controller:

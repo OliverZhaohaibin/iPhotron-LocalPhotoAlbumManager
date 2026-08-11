@@ -22,6 +22,8 @@ class GalleryThumbnailCandidate:
     l2_cache_key: str
     rank: int
     kind: ThumbnailCandidateKind
+    thumbnail_state: str = "ready"
+    thumb_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +79,14 @@ class _HintWorker(QRunnable):
             for offset, row in enumerate(window.rows):
                 rel = row.get("rel") if isinstance(row, dict) else None
                 cache_key = row.get("thumb_cache_key") if isinstance(row, dict) else None
+                thumbnail_state = (
+                    str(row.get("thumbnail_state") or "ready")
+                    if isinstance(row, dict)
+                    else "ready"
+                )
+                thumb_revision = (
+                    row.get("thumb_revision") if isinstance(row, dict) else None
+                )
                 if (
                     not isinstance(rel, str)
                     or not rel
@@ -95,6 +105,10 @@ class _HintWorker(QRunnable):
                         if absolute_row in request.guard_rows
                         else "far_speculative"
                     ),
+                    thumbnail_state=thumbnail_state,
+                    thumb_revision=(
+                        thumb_revision if isinstance(thumb_revision, str) else None
+                    ),
                 )
             candidates = tuple(
                 GalleryThumbnailCandidate(
@@ -103,6 +117,8 @@ class _HintWorker(QRunnable):
                     l2_cache_key=by_row[row].l2_cache_key,
                     rank=rank,
                     kind=by_row[row].kind,
+                    thumbnail_state=by_row[row].thumbnail_state,
+                    thumb_revision=by_row[row].thumb_revision,
                 )
                 for rank, row in enumerate(request.ordered_rows)
                 if row in by_row

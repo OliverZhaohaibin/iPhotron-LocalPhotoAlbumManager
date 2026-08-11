@@ -6,15 +6,21 @@ import os
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.repository import PetRepository
-from iPhoto.pets.service import pet_library_paths
-from iPhoto.utils.pathutils import ensure_work_dir
+from iPhoto.recognition.assignment_recovery import (
+    apply_detection_assignment_with_group_refresh,
+)
+from iPhoto.utils.pathutils import (
+    LibraryAssetPathError,
+    ensure_work_dir,
+    resolve_library_asset_path,
+)
 
-from .index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
 from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
     AssetFaceAnnotation,
@@ -24,8 +30,13 @@ from .repository import (
     PeopleGroupSummary,
     PersonSummary,
 )
-from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 from .state_repository import FaceStateRepository
+from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
+
+if TYPE_CHECKING:
+    from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
+
+    from .index_coordinator import PeopleIndexCoordinator
 
 
 def _default_shared_face_model_dir() -> Path:
@@ -34,10 +45,7 @@ def _default_shared_face_model_dir() -> Path:
         return Path(override).expanduser()
 
     if os.name == "nt":
-        base = Path(
-            os.environ.get("LOCALAPPDATA")
-            or Path.home() / "AppData" / "Local"
-        )
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         # InsightFace expects ``root/models/<pack>``. Keeping the cache outside
         # Program Files makes on-demand model installation work for a standard
         # non-administrator account and keeps models out of the base bundle.
@@ -100,17 +108,66 @@ class PeopleService:
         *,
         asset_repository: PeopleAssetRepositoryPort | None = None,
         coordinator: PeopleIndexCoordinator | None = None,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
     ) -> None:
         self._library_root = library_root
         self._asset_repository = asset_repository
         self._coordinator = coordinator
+        self._mutation_coordinator = mutation_coordinator
+        self._owns_mutation_coordinator = False
+        self._shutdown = False
+        self._repository: FaceRepository | None = None
+        if self._mutation_coordinator is not None:
+            self._mutation_coordinator.register_recovery_handler(
+                {"recognition_detection_assignment"},
+                self._recover_assignment_operation,
+            )
+
+    def _recover_assignment_operation(self, operation) -> bool:
+        if self._library_root is None or operation.kind != "recognition_detection_assignment":
+            return False
+        changed = apply_detection_assignment_with_group_refresh(
+            self._library_root,
+            operation.payload,
+        )
+        coordinator = self._mutation_coordinator
+        if coordinator is None:
+            return False
+        if changed:
+            coordinator.commit_and_dispatch(
+                operation.operation_id,
+                {"kind": operation.kind, **operation.payload},
+                lambda: None,
+            )
+        else:
+            coordinator.transition(
+                operation.operation_id,
+                "finalized",
+                error="assignment_recovery_rejected",
+            )
+        return True
 
     def set_library_root(self, library_root: Path | None) -> None:
-        if self._library_root == library_root:
+        if self._library_root == library_root and not self._shutdown:
             return
+        self.shutdown()
+        self._shutdown = False
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
+        self._mutation_coordinator = None
+        self._repository = None
+
+    def shutdown(self) -> None:
+        self._shutdown = True
+        coordinator = self._coordinator
+        if coordinator is not None:
+            coordinator.close()
+        if self._owns_mutation_coordinator and self._mutation_coordinator is not None:
+            self._mutation_coordinator.close()
+        self._coordinator = None
+        self._mutation_coordinator = None
+        self._owns_mutation_coordinator = False
 
     def library_root(self) -> Path | None:
         return self._library_root
@@ -124,15 +181,34 @@ class PeopleService:
 
     @property
     def coordinator(self) -> PeopleIndexCoordinator | None:
+        if self._shutdown:
+            return None
         if self._coordinator is not None:
             return self._coordinator
         if self._library_root is None:
             return None
-        self._coordinator = get_people_index_coordinator(
+        from .index_coordinator import PeopleIndexCoordinator
+
+        self._coordinator = PeopleIndexCoordinator(
             self._library_root,
             asset_repository=self._asset_repository,
+            mutation_coordinator=self._ensure_mutation_coordinator(),
         )
         return self._coordinator
+
+    def _ensure_mutation_coordinator(self) -> RecognitionMutationCoordinator:
+        if self._shutdown:
+            raise RuntimeError("People service is shut down.")
+        if self._mutation_coordinator is None:
+            from iPhoto.recognition.mutation_coordinator import (
+                RecognitionMutationCoordinator,
+            )
+
+            if self._library_root is None:
+                raise RuntimeError("People service is not bound to a library.")
+            self._mutation_coordinator = RecognitionMutationCoordinator(self._library_root)
+            self._owns_mutation_coordinator = True
+        return self._mutation_coordinator
 
     def paths(self) -> FaceLibraryPaths | None:
         if self._library_root is None:
@@ -140,10 +216,13 @@ class PeopleService:
         return face_library_paths(self._library_root)
 
     def repository(self) -> FaceRepository | None:
+        if self._repository is not None:
+            return self._repository
         paths = self.paths()
         if paths is None:
             return None
-        return FaceRepository(paths.index_db_path, paths.state_db_path)
+        self._repository = FaceRepository(paths.index_db_path, paths.state_db_path)
+        return self._repository
 
     def list_clusters(self, *, include_hidden: bool = False) -> list[PersonSummary]:
         repository = self.repository()
@@ -165,6 +244,7 @@ class PeopleService:
         *,
         repository: FaceRepository | None = None,
         summaries: list[PersonSummary] | None = None,
+        pet_summaries: list[PetSummary] | None = None,
     ) -> list[PeopleGroupSummary]:
         if self._library_root is None:
             return []
@@ -179,7 +259,8 @@ class PeopleService:
         else:
             summary_list = summaries
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
-        pet_summaries_by_id = {summary.pet_id: summary for summary in self._list_pet_summaries()}
+        pet_summary_list = self._list_pet_summaries() if pet_summaries is None else pet_summaries
+        pet_summaries_by_id = {summary.pet_id: summary for summary in pet_summary_list}
         return self._build_group_summaries(
             repository,
             repository.list_groups(),
@@ -208,6 +289,7 @@ class PeopleService:
         self,
         *,
         include_hidden: bool = False,
+        pet_summaries: list[PetSummary] | None = None,
     ) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
         repository = self.repository()
         if repository is None:
@@ -221,7 +303,11 @@ class PeopleService:
             ],
             repository,
         )
-        groups = self.list_groups(repository=repository, summaries=summaries)
+        groups = self.list_groups(
+            repository=repository,
+            summaries=summaries,
+            pet_summaries=pet_summaries,
+        )
         counts = self.face_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
         return summaries, groups, pending
@@ -330,10 +416,10 @@ class PeopleService:
             coordinator.set_group_order(group_ids)
 
     def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return False
-        return repository.set_person_hidden(person_id, hidden)
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.set_person_hidden(person_id, hidden))
 
     def is_cluster_hidden(self, person_id: str) -> bool:
         repository = self.repository()
@@ -345,12 +431,21 @@ class PeopleService:
         if self._library_root is None:
             return False
         coordinator = self.coordinator
-        return bool(coordinator and coordinator.merge_persons(
-            source_person_id,
-            target_person_id,
-        ))
+        return bool(
+            coordinator
+            and coordinator.merge_persons(
+                source_person_id,
+                target_person_id,
+            )
+        )
 
-    def merge_identities(self, source_identity: str, target_identity: str) -> IdentityMergeResult | None:
+    def recognition_mutation_pending(self) -> bool:
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.recovery_pending)
+
+    def merge_identities(
+        self, source_identity: str, target_identity: str
+    ) -> IdentityMergeResult | None:
         if self._library_root is None:
             return None
         source = _parse_identity_id(source_identity)
@@ -367,42 +462,58 @@ class PeopleService:
         if repository is None or paths is None:
             return None
         state_repository = FaceStateRepository(paths.state_db_path)
-        redirect_sources = {
-            (redirect.source_kind, redirect.source_id)
+        redirects = {
+            (redirect.source_kind, redirect.source_id): (
+                redirect.target_kind,
+                redirect.target_id,
+            )
             for redirect in state_repository.get_identity_redirects()
         }
-        if source in redirect_sources or target in redirect_sources:
+        existing_target = redirects.get(source)
+        if existing_target == target:
+            repository.refresh_all_group_assets()
+            return IdentityMergeResult(
+                merged=True,
+                source_kind=source_kind,
+                source_id=source_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                group_redirects={},
+            )
+        if existing_target is not None or target in redirects:
             return None
 
         person_summaries = {
             summary.person_id: summary
             for summary in repository.get_person_summaries(include_hidden=True)
         }
-        pet_paths = pet_library_paths(self._library_root)
-        pet_repository = PetRepository(pet_paths.index_db_path, pet_paths.state_db_path)
+        pet_root = ensure_work_dir(self._library_root) / "pets"
+        pet_repository = PetRepository(
+            pet_root / "pet_index.db",
+            pet_root / "pet_state.db",
+        )
         pet_summaries = {
             summary.pet_id: summary
             for summary in pet_repository.get_pet_summaries(include_hidden=True)
         }
 
-        source_hidden = self._identity_hidden(source_kind, source_id, person_summaries, pet_summaries)
-        target_hidden = self._identity_hidden(target_kind, target_id, person_summaries, pet_summaries)
+        source_hidden = self._identity_hidden(
+            source_kind, source_id, person_summaries, pet_summaries
+        )
+        target_hidden = self._identity_hidden(
+            target_kind, target_id, person_summaries, pet_summaries
+        )
         if source_hidden is None or target_hidden is None or source_hidden != target_hidden:
             return None
 
-        if not state_repository.add_identity_redirect(
-            source_kind=source_kind,
-            source_id=source_id,
-            target_kind=target_kind,
-            target_id=target_id,
-        ):
-            return None
-        group_redirects = state_repository.remap_identity_in_groups(
+        ensured = state_repository.merge_identity_redirect_and_groups(
             source_kind=source_kind,
             source_id=source_id,
             target_kind=target_kind,
             target_id=target_id,
         )
+        if not ensured.succeeded:
+            return None
         repository.refresh_all_group_assets()
         return IdentityMergeResult(
             merged=True,
@@ -410,8 +521,77 @@ class PeopleService:
             source_id=source_id,
             target_kind=target_kind,
             target_id=target_id,
-            group_redirects=group_redirects,
+            group_redirects=ensured.group_redirects,
         )
+
+    def reassign_detection_identity(
+        self,
+        *,
+        source_kind: str,
+        source_annotation_id: str,
+        target_identity: str,
+    ) -> bool:
+        """Assign one detection to a cross-kind identity without converting it."""
+
+        if self._library_root is None or source_kind not in {"person", "pet"}:
+            return False
+        target = _parse_identity_id(target_identity)
+        if target is None or target[0] == source_kind or not source_annotation_id:
+            return False
+        target_kind, target_id = target
+        repository = self.repository()
+        paths = self.paths()
+        if repository is None or paths is None:
+            return False
+        target_exists = (
+            self.has_cluster(target_id) if target_kind == "person" else self.has_pet(target_id)
+        )
+        if not target_exists:
+            return False
+        if source_kind == "person":
+            source_exists = repository.has_face(source_annotation_id)
+        else:
+            pet_root = ensure_work_dir(self._library_root) / "pets"
+            source_exists = (
+                PetRepository(
+                    pet_root / "pet_index.db",
+                    pet_root / "pet_state.db",
+                ).get_detection(source_annotation_id)
+                is not None
+            )
+        if not source_exists:
+            return False
+
+        payload = {
+            "source_kind": source_kind,
+            "source_annotation_id": source_annotation_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+        }
+        journal = self._ensure_mutation_coordinator()
+        journal.register_recovery_handler(
+            {"recognition_detection_assignment"},
+            self._recover_assignment_operation,
+        )
+        with journal.mutation_scope():
+            if not journal.recover_pending():
+                return False
+            operation_id = journal.try_prepare("recognition_detection_assignment", payload)
+            if operation_id is None:
+                return False
+            changed = apply_detection_assignment_with_group_refresh(
+                self._library_root,
+                payload,
+            )
+            if not changed:
+                journal.transition(operation_id, "finalized", error="assignment_rejected")
+                return False
+            journal.commit_and_dispatch(
+                operation_id,
+                {"kind": "recognition_detection_assignment", **payload},
+                lambda: None,
+            )
+            return True
 
     def delete_face(self, annotation_face_id: str) -> bool:
         if self._library_root is None or not annotation_face_id:
@@ -499,14 +679,7 @@ class PeopleService:
             rows_by_id = asset_repository.get_rows_by_ids([asset_id])
             if asset_id not in rows_by_id:
                 return []
-        redirected_people = self._redirected_source_ids("person")
-        if not redirected_people:
-            return repository.list_asset_face_annotations(asset_id)
-        return [
-            annotation
-            for annotation in repository.list_asset_face_annotations(asset_id)
-            if annotation.person_id not in redirected_people
-        ]
+        return repository.list_asset_face_annotations(asset_id)
 
     def list_person_name_suggestions(self) -> list[PersonSummary]:
         return [
@@ -542,11 +715,9 @@ class PeopleService:
         asset_rel = str(row.get("rel") or row.get("path") or "").strip()
         if not asset_rel:
             raise ManualFaceValidationError("The selected photo path could not be resolved.")
-        resolved_library_root = library_root.resolve()
-        image_path = (resolved_library_root / asset_rel).resolve()
         try:
-            image_path.relative_to(resolved_library_root)
-        except ValueError as exc:
+            image_path = resolve_library_asset_path(library_root, asset_rel)
+        except LibraryAssetPathError as exc:
             raise ManualFaceValidationError("The selected photo path is invalid.") from exc
         if not image_path.is_file():
             raise ManualFaceValidationError("The selected photo file could not be found.")
@@ -712,18 +883,78 @@ class PeopleService:
     def _list_pet_summaries(self) -> list[PetSummary]:
         if self._library_root is None:
             return []
-        paths = pet_library_paths(self._library_root)
-        repository = PetRepository(paths.index_db_path, paths.state_db_path)
-        redirected_pets = self._redirected_source_ids("pet")
+        pet_root = ensure_work_dir(self._library_root) / "pets"
+        repository = PetRepository(
+            pet_root / "pet_index.db",
+            pet_root / "pet_state.db",
+        )
+        face_paths = self.paths()
+        redirects = (
+            FaceStateRepository(face_paths.state_db_path).get_identity_redirects()
+            if face_paths is not None
+            else []
+        )
+        redirected_pets = {
+            redirect.source_id for redirect in redirects if redirect.source_kind == "pet"
+        }
+        summaries = [
+            summary
+            for summary in repository.get_pet_summaries(include_hidden=True)
+            if summary.pet_id not in redirected_pets
+        ]
+        assets_by_pet = repository.get_asset_ids_by_pets(summary.pet_id for summary in summaries)
+        source_pet_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "pet"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        source_pet_assets = (
+            repository.get_asset_ids_by_pets(source_pet_ids) if source_pet_ids else {}
+        )
+        source_person_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "person"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        face_repository = self.repository()
+        source_person_assets = (
+            face_repository.get_asset_ids_by_people(source_person_ids)
+            if face_repository is not None and source_person_ids
+            else {}
+        )
+        for redirect in redirects:
+            if redirect.target_kind != "pet" or redirect.target_id not in assets_by_pet:
+                continue
+            source_assets = (
+                source_person_assets.get(redirect.source_id, ())
+                if redirect.source_kind == "person"
+                else source_pet_assets.get(redirect.source_id, ())
+            )
+            assets_by_pet[redirect.target_id] = list(
+                dict.fromkeys((*assets_by_pet[redirect.target_id], *source_assets))
+            )
+        all_asset_ids = list(
+            dict.fromkeys(
+                asset_id for asset_ids in assets_by_pet.values() for asset_id in asset_ids
+            )
+        )
+        valid_ids = set(self._valid_asset_ids(all_asset_ids))
         return [
             replace(
                 summary,
-                asset_count=len(
-                    self._valid_asset_ids(self._pet_asset_ids_with_redirects(summary.pet_id, repository))
+                asset_count=sum(
+                    asset_id in valid_ids for asset_id in assets_by_pet.get(summary.pet_id, ())
                 ),
             )
-            for summary in repository.get_pet_summaries(include_hidden=True)
-            if summary.pet_id not in redirected_pets
+            for summary in summaries
         ]
 
     def _valid_asset_ids(self, asset_ids: list[str]) -> list[str]:
@@ -742,13 +973,21 @@ class PeopleService:
     ) -> list[PersonSummary]:
         if self._library_root is None or not summaries:
             return summaries
+        assets_by_person = repository.get_asset_ids_by_people(
+            summary.person_id for summary in summaries
+        )
+        all_asset_ids = list(
+            dict.fromkeys(
+                asset_id for asset_ids in assets_by_person.values() for asset_id in asset_ids
+            )
+        )
+        valid_ids = set(self._valid_asset_ids(all_asset_ids))
         return [
             replace(
                 summary,
-                asset_count=len(
-                    self._valid_asset_ids(
-                        repository.get_asset_ids_by_person(summary.person_id)
-                    )
+                asset_count=sum(
+                    asset_id in valid_ids
+                    for asset_id in assets_by_person.get(summary.person_id, ())
                 ),
             )
             for summary in summaries
@@ -763,31 +1002,6 @@ class PeopleService:
             for redirect in FaceStateRepository(paths.state_db_path).get_identity_redirects()
             if redirect.source_kind == kind
         }
-
-    def _pet_asset_ids_with_redirects(
-        self,
-        pet_id: str,
-        repository: PetRepository,
-    ) -> list[str]:
-        asset_dates: dict[str, str] = {
-            asset_id: ""
-            for asset_id in repository.get_asset_ids_by_pet(pet_id)
-        }
-        face_repository = self.repository()
-        paths = self.paths()
-        if face_repository is None or paths is None:
-            return list(asset_dates)
-        for redirect in FaceStateRepository(paths.state_db_path).get_identity_redirects():
-            if redirect.target_kind != "pet" or redirect.target_id != pet_id:
-                continue
-            source_ids = (
-                face_repository.get_asset_ids_by_person(redirect.source_id)
-                if redirect.source_kind == "person"
-                else repository.get_asset_ids_by_pet(redirect.source_id)
-            )
-            for asset_id in source_ids:
-                asset_dates.setdefault(asset_id, "")
-        return list(asset_dates)
 
     def _identity_hidden(
         self,

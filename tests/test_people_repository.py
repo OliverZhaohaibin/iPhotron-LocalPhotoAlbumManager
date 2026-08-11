@@ -774,6 +774,43 @@ def test_merge_persons_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
     }
 
 
+def test_merge_persons_fills_blank_target_name_from_source(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-b",
+            asset_rel="album/b.jpg",
+            person_id="person-b",
+        ),
+    ]
+    repository.replace_all(
+        faces,
+        [
+            _person_record(
+                person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"
+            ),
+            _person_record(
+                person_id="person-b", key_face_id="face-b", face_count=1, name=None
+            ),
+        ],
+    )
+
+    merged, _redirects = repository.merge_persons_with_redirects("person-a", "person-b")
+
+    assert merged is True
+    summaries = repository.get_person_summaries()
+    assert [(summary.person_id, summary.name) for summary in summaries] == [
+        ("person-b", "Alice")
+    ]
+
+
 def test_list_asset_face_annotations_returns_only_matching_asset(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [
@@ -1545,3 +1582,61 @@ def test_get_person_ids_for_asset_ids_chunks_large_sqlite_in_queries(tmp_path: P
     )
 
     assert person_ids == [f"person-{index:04d}" for index in range(face_count)]
+
+
+def test_cross_identity_group_failure_rolls_back_redirect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+    state_repository.initialize()
+
+    def fail_group_remap(*_args, **_kwargs):
+        raise sqlite3.OperationalError("forced group remap failure")
+
+    monkeypatch.setattr(
+        state_repository,
+        "_remap_groups_for_merged_identity",
+        fail_group_remap,
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="forced group remap failure"):
+        state_repository.merge_identity_redirect_and_groups(
+            source_kind="person",
+            source_id="person-a",
+            target_kind="pet",
+            target_id="pet-a",
+        )
+
+    assert state_repository.get_identity_redirects() == []
+
+
+def test_cross_identity_redirect_ensure_is_idempotent_and_rejects_conflict(
+    tmp_path: Path,
+) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+
+    applied = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-a",
+    )
+    repeated = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-a",
+    )
+    conflict = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-b",
+    )
+
+    assert applied.status == "applied"
+    assert repeated.status == "already_applied"
+    assert repeated.succeeded is True
+    assert conflict.status == "conflict"
+    assert conflict.succeeded is False

@@ -116,6 +116,11 @@ class AssetFaceAnnotation:
     image_height: int
     thumbnail_path: Path | None = None
     is_manual: bool = False
+    source_identity_kind: str = "person"
+    source_identity_id: str | None = None
+    canonical_identity_kind: str = "person"
+    canonical_identity_id: str | None = None
+    canonical_display_name: str | None = None
 
 
 @dataclass(frozen=True)

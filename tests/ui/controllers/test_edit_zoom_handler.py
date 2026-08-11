@@ -134,3 +134,35 @@ def test_set_viewer_retargets_controls_without_disconnect_warning(qapp):
     assert first.zoom_out_calls == 0
     assert second.zoom_in_calls == 1
     assert second.zoom_out_calls == 1
+
+
+def test_set_viewer_recovers_when_qt_connections_are_already_invalid(qapp):
+    """An invalid Qt-side callable proxy must not warn or disable zoom controls."""
+    first = ConcreteViewer()
+    second = ConcreteViewer()
+    btn_in = MockButton()
+    btn_out = MockButton()
+    slider = MockSlider()
+
+    handler = EditZoomHandler(first, btn_in, btn_out, slider)
+    handler.connect_controls()
+
+    # Reproduce the state from the Windows warning: the handler still considers
+    # itself connected after Qt has already removed the two button connections.
+    assert QObject.disconnect(handler._zoom_in_connection)
+    assert QObject.disconnect(handler._zoom_out_connection)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        handler.set_viewer(second)
+
+    runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert runtime_warnings == []
+
+    btn_in.clicked.emit()
+    btn_out.clicked.emit()
+
+    assert first.zoom_in_calls == 0
+    assert first.zoom_out_calls == 0
+    assert second.zoom_in_calls == 1
+    assert second.zoom_out_calls == 1

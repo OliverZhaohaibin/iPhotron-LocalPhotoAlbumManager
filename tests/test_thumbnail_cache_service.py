@@ -10,10 +10,11 @@ from unittest.mock import Mock, patch
 import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
 from PIL import Image
-from PySide6.QtCore import QFile, QSize
+from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QImage, QPixmap
 
 from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file
+from iPhoto.infrastructure.services.thumbnail_artifact import thumbnail_revision
 from iPhoto.infrastructure.services.thumbnail_cache_service import (
     ThumbnailCacheService,
     ThumbnailDemandSnapshot,
@@ -26,6 +27,7 @@ from iPhoto.infrastructure.services.thumbnail_cache_service import (
     _CancellationToken,
 )
 from iPhoto.infrastructure.services.thumbnail_runtime_policy import ThumbnailRuntimePolicy
+from iPhoto.utils.image_loader import load_qimage
 
 
 def _reconcile(
@@ -99,10 +101,10 @@ def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> N
     size = QSize(64, 64)
 
     with patch(
-        "iPhoto.infrastructure.services.thumbnail_cache_service.image_loader.load_qimage",
+        "iPhoto.infrastructure.services.thumbnail_artifact.image_loader.load_qimage",
         return_value=image,
     ), patch(
-        "iPhoto.infrastructure.services.thumbnail_cache_service.compute_color_statistics",
+        "iPhoto.infrastructure.services.thumbnail_artifact.compute_color_statistics",
     ) as compute_stats:
         rendered = service._render_thumbnail(path, size)
 
@@ -219,6 +221,164 @@ def test_worker_loads_l2_hit_without_rendering_source(tmp_path: Path) -> None:
     assert image is not None
     assert not image.isNull()
     render.assert_not_called()
+
+
+def test_ready_l2_hit_skips_revision_micro_and_repository_work(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    disk_file = thumbnail_cache_file(tmp_path / "thumbs", path, (512, 512))
+    disk_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), "red").save(disk_file, format="JPEG")
+
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.thumbnail_revision",
+        side_effect=AssertionError("ready L2 hits must not fingerprint"),
+    ), patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.publish_thumbnail_artifact",
+        side_effect=AssertionError("ready L2 hits must not render or encode micro"),
+    ), patch.object(
+        service,
+        "_publish_thumbnail_ready",
+        side_effect=AssertionError("ready L2 hits must not update the repository"),
+    ):
+        image = service._load_or_render_thumbnail(
+            path,
+            size,
+            None,
+            service._disk_cache_key(path),
+            "ready",
+            "persisted-revision",
+        )
+
+    assert image is not None and not image.isNull()
+
+
+def test_lagging_stale_hint_does_not_invalidate_same_published_revision(
+    tmp_path: Path,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    service._desired_revisions[key] = "revision-2"
+    service._thumbnail_states[key] = "ready"
+
+    with patch.object(service, "invalidate") as invalidate:
+        service.request_many(
+            [
+                ThumbnailRequest(
+                    path,
+                    size,
+                    ThumbnailRequestKind.VISIBLE,
+                    1,
+                    thumbnail_state="stale",
+                    thumb_revision="revision-2",
+                )
+            ],
+            generation=1,
+        )
+
+    invalidate.assert_not_called()
+    assert service._queued_tasks[key].thumbnail_state == "ready"
+
+
+def test_invalidation_prevents_old_worker_from_restoring_stale_disk_thumbnail(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "thumbs"
+    service = ThumbnailCacheService(cache_dir)
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    Image.new("RGB", (32, 32), "green").save(path)
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    disk_file = thumbnail_cache_file(cache_dir, path, (512, 512))
+    Image.new("RGB", (512, 512), "green").save(disk_file)
+    token = _CancellationToken()
+    render_started = threading.Event()
+    allow_render_to_finish = threading.Event()
+    stale_image = QImage(512, 512, QImage.Format.Format_RGB32)
+    stale_image.fill(QColor("blue"))
+    result: list[QImage | None] = []
+
+    old_revision = thumbnail_revision(path)
+
+    def render_stale(_path: Path, _size: QSize, **_kwargs) -> QImage:
+        render_started.set()
+        assert allow_render_to_finish.wait(timeout=2.0)
+        return stale_image
+
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_artifact.render_thumbnail_image",
+        side_effect=render_stale,
+    ):
+        worker = threading.Thread(
+            target=lambda: result.append(
+                service._load_or_render_thumbnail(
+                    path,
+                    size,
+                    token,
+                    None,
+                    "stale",
+                    old_revision,
+                )
+            )
+        )
+        worker.start()
+        assert render_started.wait(timeout=2.0)
+        path.with_suffix(".ipo").write_text("<iPhotoAdjustments version='1.0'/>")
+        new_revision = thumbnail_revision(path)
+        service.invalidate(path, size=size, desired_revision=new_revision)
+        allow_render_to_finish.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    assert disk_file.exists()
+    assert Image.open(disk_file).getpixel((256, 256))[1] > 100
+
+    edited_image = QImage(512, 512, QImage.Format.Format_RGB32)
+    edited_image.fill(QColor("red"))
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_artifact.render_thumbnail_image",
+        return_value=edited_image,
+    ):
+        assert service._load_or_render_thumbnail(
+            path,
+            size,
+            None,
+            None,
+            "stale",
+            new_revision,
+        ) is not None
+
+    restarted = ThumbnailCacheService(cache_dir)
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.publish_thumbnail_artifact"
+    ) as render_after_restart:
+        cached = restarted._load_or_render_thumbnail(path, size)
+
+    assert cached is not None
+    assert cached.pixelColor(256, 256).red() > cached.pixelColor(256, 256).blue()
+    render_after_restart.assert_not_called()
+
+
+def test_invalidation_discards_staged_thumbnail_for_same_asset(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(256, 256)
+    image = QImage(8, 8, QImage.Format.Format_RGB32)
+    service._stage_result(
+        ThumbnailLoadResult(path, size, image, 1, ThumbnailRequestKind.VISIBLE)
+    )
+
+    service.invalidate(path, size=size)
+
+    assert not service._publish_visible
+    assert service._cache_key(path, size) not in service._publish_keys
+    assert service._staging_used_bytes == 0
 
 
 def test_peek_full_thumbnail_never_touches_disk(tmp_path: Path) -> None:
@@ -913,7 +1073,7 @@ def test_l1_rejects_stale_thumbnail_writes_outside_current_demand(
     assert stale_key not in service._memory_bytes
 
 
-def test_l2_reader_opens_once_without_exists_or_read_bytes(tmp_path: Path) -> None:
+def test_l2_reader_uses_safe_shared_decoder(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     path = tmp_path / "photo.jpg"
     size = QSize(512, 512)
@@ -922,17 +1082,16 @@ def test_l2_reader_opens_once_without_exists_or_read_bytes(tmp_path: Path) -> No
     Image.new("RGB", (32, 32), "red").save(disk_file, format="JPEG")
 
     with (
-        patch.object(Path, "exists", side_effect=AssertionError("exists called")),
         patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes called")),
         patch(
-            "iPhoto.infrastructure.services.thumbnail_cache_service.QFile",
-            wraps=QFile,
-        ) as qfile,
+            "iPhoto.infrastructure.services.thumbnail_cache_service.load_qimage",
+            wraps=load_qimage,
+        ) as decode,
     ):
         image = service._load_cached_thumbnail_only(path, size)
 
     assert image is not None and not image.isNull()
-    assert qfile.call_count == 1
+    decode.assert_called_once_with(disk_file, size)
 
 
 def test_l2_512_file_decodes_directly_to_display_bucket_without_new_disk_file(
@@ -1674,9 +1833,10 @@ def test_l2_reader_distinguishes_miss_read_and_decode_errors(tmp_path: Path) -> 
         cancellation=None,
         tier="L2",
     )
-    with patch("iPhoto.infrastructure.services.thumbnail_cache_service.QFile") as qfile:
-        qfile.return_value.open.return_value = False
-        qfile.return_value.errorString.return_value = "Permission denied"
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.load_qimage",
+        side_effect=OSError("cache file is unreadable"),
+    ):
         _image, read_error, _elapsed = service._read_cached_thumbnail(
             invalid,
             path=invalid,

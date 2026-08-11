@@ -20,9 +20,11 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from ...config import WORK_DIR_NAME
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
@@ -59,6 +61,7 @@ _OMIT_METADATA_VALUE = object()
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
 _global_lock = threading.Lock()
+_prepared_roots: dict[Path, Any] = {}
 
 
 def _coerce_json_metadata_value(value: Any) -> Any:
@@ -130,8 +133,30 @@ def get_global_repository(library_root: Path) -> "AssetRepository":
             )
             _global_instance.close()
         
-        _global_instance = AssetRepository(resolved_root)
+        credential = _prepared_roots.pop(resolved_root, None)
+        skip_initialization = False
+        if credential is not None:
+            expected_database = resolved_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
+            matches_current = getattr(credential, "matches_current", None)
+            skip_initialization = (
+                getattr(credential, "database_path", None) == expected_database
+                and callable(matches_current)
+                and bool(matches_current())
+            )
+            if not skip_initialization:
+                raise RuntimeError("prepared repository credential is stale")
+        _global_instance = AssetRepository(
+            resolved_root,
+            initialize=not skip_initialization,
+        )
         return _global_instance
+
+
+def mark_repository_prepared(library_root: Path, credential: Any) -> None:
+    """Register one consume-on-open schema preparation credential."""
+
+    with _global_lock:
+        _prepared_roots[Path(library_root)] = credential
 
 
 def reset_global_repository() -> None:
@@ -145,6 +170,7 @@ def reset_global_repository() -> None:
         if _global_instance is not None:
             _global_instance.close()
             _global_instance = None
+        _prepared_roots.clear()
 
 
 class AssetRepository:
@@ -162,7 +188,7 @@ class AssetRepository:
     Note: For the global database singleton, use `get_global_repository()`.
     """
 
-    def __init__(self, library_root: Path):
+    def __init__(self, library_root: Path, *, initialize: bool = True):
         """Initialize the asset repository.
         
         Args:
@@ -179,13 +205,14 @@ class AssetRepository:
             dict[int, PageCursor | None],
         ] = {}
         self._collection_meta_cache: dict[CollectionQuery, tuple[int, int]] = {}
-        self._init_db()
+        if initialize:
+            self._init_db()
 
     def _init_db(self) -> None:
         """Initialize the database schema."""
         try:
             # Use a transient connection for initialization
-            with sqlite3.connect(self.path, timeout=10.0) as conn:
+            with closing(sqlite3.connect(self.path, timeout=10.0)) as conn, conn:
                 SchemaMigrator.initialize_schema(conn)
         except sqlite3.DatabaseError as exc:
             logger.warning("Detected index.db corruption at %s: %s", self.path, exc)
@@ -427,9 +454,14 @@ class AssetRepository:
         if normalized is None or not ids_list:
             return
 
-        placeholders = ", ".join(["?"] * len(ids_list))
-        query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
-        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+        for start in range(0, len(ids_list), 500):
+            chunk = ids_list[start : start + 500]
+            placeholders = ", ".join(["?"] * len(chunk))
+            query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
+            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
+
+    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
+        return self._reset_ai_statuses_for_pipeline_upgrade("face_status")
 
     def count_by_face_status(self) -> Dict[str, int]:
         """Return a status-to-count mapping for ``assets.face_status``."""
@@ -506,9 +538,36 @@ class AssetRepository:
         if normalized is None or not ids_list:
             return
 
-        placeholders = ", ".join(["?"] * len(ids_list))
-        query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
-        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+        for start in range(0, len(ids_list), 500):
+            chunk = ids_list[start : start + 500]
+            placeholders = ", ".join(["?"] * len(chunk))
+            query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
+            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
+
+    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
+        return self._reset_ai_statuses_for_pipeline_upgrade("pet_status")
+
+    def _reset_ai_statuses_for_pipeline_upgrade(self, column: str) -> int:
+        if column not in {"face_status", "pet_status"}:
+            raise ValueError("Unsupported AI status column")
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            cursor = conn.execute(
+                f"""
+                UPDATE assets
+                SET {column} = 'pending'
+                WHERE {column} = 'done'
+                  AND COALESCE(CAST(media_type AS TEXT), '0') NOT IN ('1', 'video')
+                  AND COALESCE(CAST(live_role AS INTEGER), 0) = 0
+                  AND COALESCE(mime, '') NOT LIKE 'video/%'
+                """
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            if should_close:
+                conn.close()
 
     def count_by_pet_status(self) -> Dict[str, int]:
         """Return a status-to-count mapping for ``assets.pet_status``."""
@@ -687,8 +746,8 @@ class AssetRepository:
             "dur", "year", "month", "dt", "ts", "sort_ts", "content_id", "bytes",
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
-            "face_status", "thumbnail_state", "thumb_cache_key",
-            "index_revision", "micro_thumbnail"
+            "face_status", "thumbnail_state", "thumb_cache_key", "thumb_revision",
+            "index_revision", "micro_thumbnail", "source_mtime_ns", "image_orientation"
         ]
 
         logger.debug(
@@ -1087,7 +1146,8 @@ class AssetRepository:
             "w", "h", "gps", "content_id", "still_image_time", "dur", "live_role",
             "live_partner_rel", "aspect_ratio", "media_type", "is_favorite", "is_deleted",
             "has_gps", "thumbnail_state", "location", "micro_thumbnail", "thumb_cache_key",
-            "face_status",
+            "face_status", "video_rotation_cw", "video_linux_180_hint",
+            "source_mtime_ns", "image_orientation", "thumb_revision",
         )
         select_clause = f"SELECT {', '.join(columns)}"
         first = max(0, int(first))
@@ -1140,7 +1200,7 @@ class AssetRepository:
         should_close = conn != self._db_manager._conn
         try:
             conn.row_factory = sqlite3.Row
-            select_clause = "SELECT rel, thumb_cache_key"
+            select_clause = "SELECT rel, thumb_cache_key, thumbnail_state, thumb_revision"
             if first > _DEEP_OFFSET_LIMIT:
                 sql, params = self._build_deep_collection_window_query(
                     conn,
@@ -1443,39 +1503,104 @@ class AssetRepository:
         micro_thumbnail: bytes | None = None,
         thumb_cache_key: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Update thumbnail readiness for a single asset row."""
+        expected_revision: str | None = None,
+    ) -> bool:
+        """Publish readiness only for the currently desired render revision."""
 
         normalized_rel = unicodedata.normalize("NFC", str(rel))
+        revision_guard = (
+            " AND (thumb_revision = ? OR thumb_revision IS NULL)"
+            if expected_revision is not None
+            else ""
+        )
+        revision_params = (
+            [str(expected_revision)] if expected_revision is not None else []
+        )
         if error:
-            self._db_manager.execute_in_transaction(
-                """
+            error_text = str(error)
+            changed = self._db_manager.execute_in_transaction(
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'failed',
                     thumb_error = ?,
+                    thumb_revision = COALESCE(?, thumb_revision),
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{revision_guard}
+                    AND (
+                        thumbnail_state != 'failed'
+                        OR COALESCE(thumb_error, '') != ?
+                    )
                 """,
-                [str(error), _utc_ms(), normalized_rel],
+                [error_text, expected_revision, _utc_ms(), normalized_rel]
+                + revision_params
+                + [error_text],
             )
         else:
             if not str(thumb_cache_key or "").strip():
                 raise ValueError("ready thumbnails require thumb_cache_key")
-            self._db_manager.execute_in_transaction(
-                """
+            change_guards = ["thumbnail_state != 'ready'", "thumb_error IS NOT NULL"]
+            change_params: list[Any] = []
+            if micro_thumbnail is not None:
+                change_guards.append("micro_thumbnail IS NOT ?")
+                change_params.append(micro_thumbnail)
+            if thumb_cache_key is not None:
+                change_guards.append("COALESCE(thumb_cache_key, '') != ?")
+                change_params.append(thumb_cache_key)
+            changed = self._db_manager.execute_in_transaction(
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'ready',
                     micro_thumbnail = COALESCE(?, micro_thumbnail),
                     thumb_cache_key = COALESCE(?, thumb_cache_key),
+                    thumb_revision = COALESCE(?, thumb_revision),
                     thumb_error = NULL,
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{revision_guard}
+                    AND ({' OR '.join(change_guards)})
                 """,
-                [micro_thumbnail, thumb_cache_key, _utc_ms(), normalized_rel],
+                [
+                    micro_thumbnail,
+                    thumb_cache_key,
+                    expected_revision,
+                    _utc_ms(),
+                    normalized_rel,
+                ]
+                + revision_params
+                + change_params,
             )
-        self._clear_collection_anchor_cache()
+        if changed:
+            self._clear_collection_anchor_cache()
+        return bool(changed)
+
+    def mark_thumbnail_stale(self, rel: str, *, desired_revision: str) -> bool:
+        """Select a desired revision without deleting the last complete artifact."""
+
+        normalized_rel = unicodedata.normalize("NFC", str(rel))
+        revision = str(desired_revision).strip()
+        if not revision:
+            raise ValueError("stale thumbnails require a desired revision")
+        changed = self._db_manager.execute_in_transaction(
+            """
+            UPDATE assets
+            SET thumbnail_state = 'stale',
+                micro_thumbnail = NULL,
+                thumb_revision = ?,
+                thumb_error = NULL,
+                thumb_updated_at = ?,
+                index_revision = COALESCE(index_revision, 0) + 1
+            WHERE rel = ?
+                AND (
+                    thumbnail_state != 'stale'
+                    OR COALESCE(thumb_revision, '') != ?
+                )
+            """,
+            [revision, _utc_ms(), normalized_rel, revision],
+        )
+        if changed:
+            self._clear_collection_anchor_cache()
+        return bool(changed)
 
     def _cursor_for_collection_offset(
         self,

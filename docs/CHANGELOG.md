@@ -4,6 +4,49 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — Gallery Detail GPU-first Rendering
+
+### Rendering pipeline
+
+- Unified still and video Detail presentation under one immutable render
+  transaction and terminal-state coordinator; stale generations cannot publish
+  a final frame after a newer open.
+- Replaced sensor-resolution-first still loading with viewport/DPR/crop/
+  rotation/perspective/zoom-aware LOD decode and atomic replacement after the
+  new texture is actually drawn.
+- Added versioned neutral surface caching, byte-budgeted memory residency, and
+  current/previous/next GPU texture residency. Source identity is independent
+  from `.ipo` edit revision, and initial still textures do not generate mipmaps.
+- Added macOS ImageIO and Windows WIC non-RAW decoders with in-worker Qt
+  fallback; RAW uses the embedded-preview/half/full rawpy path. Windows WIC COM
+  declarations now use a fixed signed 32-bit `HRESULT` ABI across supported
+  CPython builds.
+
+### Detail/Edit session
+
+- Added `PhotoRenderSessionHandle` and immutable `EditRenderState` so static
+  Detail and Edit share source texture, LODs, color statistics, live shader
+  state, and persisted baseline.
+- Removed the still Edit full-image loader, CPU realtime preview chain, repeated
+  color-stat calculation, and static Done/Cancel media replay. Export and video
+  editing retain their independent quality/lifecycle paths.
+- Removed the legacy Detail v2/frame-cache flags, old full-frame cache coupling,
+  diagnostic duplicate scheduler path, and synchronous video compatibility
+  entry point. GPU-first is the sole production Detail path.
+
+### Verification and operations
+
+- Added generation-safe background JSONL profiling and a packaged benchmark
+  harness covering cold/disk/memory/GPU cache groups, sidecar-only changes,
+  Detail/Edit, fullscreen, LOD, memory pressure, and rapid switching.
+- Added macOS/Windows/Linux CI contract coverage for transactions, schedulers,
+  decoders, surface caches, render sessions, residency, and benchmark
+  validation. Windows and Linux packaged/manual acceptance was completed for
+  the rollout in addition to the macOS development path.
+- Stabilized full-process Qt tests by retaining one strongly owned
+  `QApplication`; this prevents cached QIcon/QPixmap resources from surviving a
+  destroyed application and crashing later QtSvg widget construction.
+
 ## Unreleased — People & Pets Recognition
 
 🐾 *Adds a library-scoped Pets bounded context and composes pet identities with

@@ -14,11 +14,14 @@ For completed migration records and verification history, see
 The vNext architecture cleanup is complete for production source code.
 
 - Production runtime code no longer imports `iPhoto.legacy` or `iPhoto.models.*`.
-- Compatibility and old domain-repository code is quarantined under
-  `src/iPhoto/legacy/` for explicit historical behavior tests only.
+- The compatibility application tree and old domain-repository implementation
+  under `src/iPhoto/legacy/` have been removed.
 - `RuntimeContext -> LibrarySession` is the active library entry path.
 - Application ports and services define the boundary used by GUI, CLI, workers,
   People, Maps, Edit, thumbnails, and lifecycle operations.
+- Gallery-to-Detail rendering has converged on one GPU-first production path.
+  Still and video opens share a generation-safe render transaction; static
+  Detail/Edit share source surfaces, GPU residency, and immutable edit state.
 - Architecture guardrails are enforced by `tools/check_architecture.py` and
   `tests/architecture`.
 
@@ -306,6 +309,16 @@ coordinators, menus, shortcuts, Qt workers, and signal adapters. GUI code calls
 session/application surfaces and does not directly write durable state or call
 concrete repository singletons.
 
+The static media pipeline is a GUI/rendering boundary rather than an application
+workflow service. `DetailRenderCoordinator` owns the active still/video
+transaction and its single terminal state. `DetailStillRequestScheduler`
+deduplicates one source revision and decode level, while platform decoders
+produce detached neutral RGBA8888/sRGB surfaces. `PhotoRenderSessionHandle`
+shares the current source texture, available LODs, `ColorStats`, and immutable
+`EditRenderState` between Detail and Edit. Sidecar persistence still enters
+through the session edit surface; it does not become part of the neutral source
+cache key.
+
 User-visible GUI text goes through the Qt translation boundary. New strings
 should use `iPhoto.gui.i18n.tr(context, source_text)` or
 `QCoreApplication.translate(...)` with a stable context. Long-lived widgets
@@ -343,8 +356,8 @@ It is not a legacy manager facade.
 - `src/maps`: optional offline map runtime, tile parsing, OBF/native
   widget/helper integration, search, and map rendering internals. GUI map
   views construct concrete map widgets through `map_widget_factory`.
-- `core/`: editing math, filters, geometry, preview backends, export transforms,
-  raw loading, and Live Photo pairing rules.
+- `core/`: editing math, filters, geometry, export transforms, raw loading, and
+  Live Photo pairing rules.
 - `cache/index_store/`: current global SQLite index implementation used behind
   repository/session surfaces, not a public GUI/application shortcut.
 
@@ -357,6 +370,7 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, independent `face_status`/`pet_status`, and related library state. |
 | `.iPhoto/links.json` | Derived Live Photo compatibility materialization; repository/session Live Photo role state remains authoritative for runtime behavior. |
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
+| `.iPhoto/cache/detail-surfaces/v3/` | SQLite-indexed, rebuildable neutral RGBA8/sRGB Detail surfaces keyed by source identity, decoder contract, orientation, and LOD; trusted hits validate indexed header/stat metadata without scanning the full payload, and sidecar revision is excluded. |
 | `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
 | `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers, and manual faces. |
 | `.iPhoto/faces/thumbnails/` | Rebuildable cropped face thumbnails. |
@@ -432,6 +446,49 @@ GUI viewmodels may cache window/selection state, but repository/session surfaces
 remain the source of truth for persisted asset state. Explicit detail-view row
 loads are retained independently from newer viewport generations so navigation
 does not lose an in-flight target.
+
+### Gallery To Detail/Edit Rendering
+
+```mermaid
+sequenceDiagram
+    participant Gallery as Gallery
+    participant Tx as DetailRenderCoordinator
+    participant Scheduler as Still Request Scheduler
+    participant Cache as Surface Cache
+    participant Decoder as Platform Decoder
+    participant GPU as Texture Residency
+    participant Edit as Detail/Edit Session
+
+    Gallery->>Tx: begin immutable transaction
+    Tx->>Scheduler: viewport/DPR/geometry request
+    Scheduler->>Scheduler: deduplicate or promote same key
+    Scheduler->>Cache: memory then disk lookup
+    alt cache miss
+        Cache->>Decoder: viewport-aware decode
+        Decoder-->>Cache: detached neutral surface
+        Cache->>Cache: async versioned write
+    end
+    Cache-->>GPU: decoded or cached surface
+    GPU->>GPU: reuse key or upload without initial mipmaps
+    GPU-->>Tx: actual draw presented
+    Tx-->>Edit: shared PhotoRenderSessionHandle
+    Edit->>GPU: immutable shader-state updates
+```
+
+`DetailDecodeKey` contains asset/source revision, orientation, and decode level;
+it intentionally excludes `.ipo` revision. Initial quality is selected from
+physical viewport demand rather than full sensor dimensions. Zoom, crop,
+rotation, or perspective may request a higher LOD, but the prior texture stays
+visible until the replacement is drawn. Current/previous/next GPU residency is
+bounded by both three textures and 192MB. Source changes invalidate neutral
+surfaces and textures; sidecar changes replace render state only.
+
+Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
+with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,
+half-size, then full fallback sequence. All stale generations are rejected at
+thread/render boundaries. Static Edit no longer creates a second full-image
+loader or CPU preview session; Done/Cancel and fullscreen retain the same render
+session. Export remains an independent full-resolution path.
 
 ### Scan And Index
 
@@ -527,22 +584,19 @@ and image decoding stay off the GUI thread; only bounded `QPixmap` publication
 runs there. Thumbnail infrastructure may apply edit state, but edit persistence
 remains behind session/edit sidecar services.
 
-## Legacy Quarantine And Removal Policy
+## Removed Legacy Application Tree
 
-`src/iPhoto/legacy/` contains quarantined compatibility modules, including old
-root compatibility paths such as `legacy/app.py` and `legacy/appctx.py`, old
-bootstrap factory shims, old domain-repository use cases, old repository
-adapters, and old model shims.
+The former `src/iPhoto/legacy/` compatibility tree, including app/appctx
+wrappers, bootstrap shims, domain-repository use cases, repository adapters,
+and model shims, has been removed.
 
 Rules:
 
 - Production runtime must not import `iPhoto.legacy`.
 - Production runtime must not import `iPhoto.models.*`.
-- No new functionality goes into quarantine modules.
-- Tests that cover historical behavior must import quarantine modules
-  explicitly.
-- The whole quarantine subtree is planned for deletion in the next major
-  release.
+- Do not restore compatibility modules or tests that target removed interfaces.
+- Historical behavior that remains a product requirement must be covered
+  through current application, session, domain, or infrastructure surfaces.
 
 ## Architecture Guardrails
 
@@ -611,9 +665,19 @@ identity record types.
 
 OpenGL, QRhi/Metal, native OsmAnd widgets, helper-backed map renderers, and CPU
 fallbacks are runtime-selected adapters. Product workflows must not depend on a
-specific rendering backend.
+specific rendering backend. Detail still decode follows the same rule through
+ImageIO, WIC, Qt, and rawpy adapters; native failure may fall back to Qt without
+creating a second scheduler or presentation path.
 
-### ADR-8: Composed People And Pets Identities
+### ADR-8: GPU-First Detail With Shared Edit Sessions
+
+The current viewport, not full sensor dimensions, defines initial still-image
+quality. Neutral source surfaces, edit state, and GPU residency have separate
+identities and invalidation rules. Detail and static Edit share one GUI-owned
+render session; shader updates do not reload source pixels. The legacy Detail
+v2 full-frame cache and still Edit CPU-preview chain must not be restored.
+
+### ADR-9: Composed People And Pets Identities
 
 The dashboard, pinned sidebar, annotations, and identity groups may compose
 person and pet summaries. Canonical records remain owned by their bounded
@@ -634,6 +698,8 @@ The current production source satisfies the vNext architecture criteria when:
 - `infrastructure/` has no GUI imports.
 - production runtime has no `iPhoto.legacy` or `iPhoto.models.*` imports.
 - architecture checks are in CI.
+- Detail still opens use the generation-safe scheduler/cache/session path;
+  static Edit does not re-decode or re-upload the current source.
 - key product behavior remains covered: folder browsing, global indexing, Live
   Photos, People, Pets, Maps fallback, editing, location assignment, trash,
   import/move/delete/restore, and export.

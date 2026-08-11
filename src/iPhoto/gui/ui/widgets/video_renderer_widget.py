@@ -271,6 +271,7 @@ class VideoRendererWidget(QRhiWidget):
 
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
+    videoFramePresented = Signal()
     zoomChanged = Signal(float)
 
     _ZOOM_MIN = 0.1
@@ -302,6 +303,7 @@ class VideoRendererWidget(QRhiWidget):
         self._native_size = QSizeF()
         self._first_render_done = False
         self._has_frame = False
+        self._frame_presentation_pending = False
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
         self._transparent_rounded_clip_enabled = False
@@ -429,6 +431,7 @@ class VideoRendererWidget(QRhiWidget):
         self._current_frame = frame
         self._frame_dirty = True
         self._has_frame = True
+        self._frame_presentation_pending = True
 
         # Check for resolution change
         fmt = frame.surfaceFormat()
@@ -476,6 +479,7 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_h = 0
         self._container_linux_180_hint = False
         self._has_frame = False
+        self._frame_presentation_pending = False
         self._user_rotate90_steps = 0
         if self._zoom_factor != 1.0:
             self._zoom_factor = 1.0
@@ -771,6 +775,9 @@ class VideoRendererWidget(QRhiWidget):
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
         self._emit_first_frame_ready()
+        if self._frame_presentation_pending:
+            self._frame_presentation_pending = False
+            self.videoFramePresented.emit()
 
     def _emit_first_frame_ready(self) -> None:
         """Notify listeners that the first opaque frame has been rendered."""

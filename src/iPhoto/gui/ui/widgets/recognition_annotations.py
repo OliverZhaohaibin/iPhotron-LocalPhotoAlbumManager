@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from iPhoto.people.records import AssetFaceAnnotation
 from iPhoto.pets.records import AssetPetAnnotation
 
 
@@ -26,10 +27,13 @@ class RecognitionIdentitySuggestion:
 
 @dataclass(frozen=True)
 class RecognitionAnnotation:
-    kind: str
-    annotation_id: str
-    entity_id: str | None
-    display_name: str | None
+    source_detection_kind: str
+    source_annotation_id: str
+    source_identity_kind: str
+    source_identity_id: str | None
+    canonical_identity_kind: str
+    canonical_identity_id: str | None
+    canonical_display_name: str | None
     box_x: int
     box_y: int
     box_w: int
@@ -38,29 +42,53 @@ class RecognitionAnnotation:
     image_height: int
     thumbnail_path: Path | None = None
     is_manual: bool = False
+    is_stale: bool = False
+    stale_reason: str | None = None
+
+    @property
+    def kind(self) -> str:
+        """Compatibility alias; mutation routing must always use the source kind."""
+
+        return self.source_detection_kind
+
+    @property
+    def annotation_id(self) -> str:
+        return self.source_annotation_id
+
+    @property
+    def entity_id(self) -> str | None:
+        return self.canonical_identity_id
+
+    @property
+    def display_name(self) -> str | None:
+        return self.canonical_display_name
 
     @property
     def face_id(self) -> str:
-        return f"{self.kind}:{self.annotation_id}"
+        return f"{self.source_detection_kind}:{self.source_annotation_id}"
 
     @property
     def detection_id(self) -> str:
-        return self.annotation_id
+        return self.source_annotation_id
 
     @property
     def person_id(self) -> str | None:
-        if not self.entity_id:
+        if not self.canonical_identity_id:
             return None
-        return f"{self.kind}:{self.entity_id}"
+        return f"{self.canonical_identity_kind}:{self.canonical_identity_id}"
 
 
-def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotation:
-    display_name = annotation.display_name
+def face_annotation_adapter(annotation: AssetFaceAnnotation) -> RecognitionAnnotation:
     return RecognitionAnnotation(
-        kind="pet",
-        annotation_id=annotation.detection_id,
-        entity_id=annotation.pet_id,
-        display_name=display_name,
+        source_detection_kind="person",
+        source_annotation_id=annotation.face_id,
+        source_identity_kind=annotation.source_identity_kind or "person",
+        source_identity_id=annotation.source_identity_id or annotation.person_id,
+        canonical_identity_kind=annotation.canonical_identity_kind or "person",
+        canonical_identity_id=annotation.canonical_identity_id or annotation.person_id,
+        canonical_display_name=(
+            annotation.canonical_display_name or annotation.display_name
+        ),
         box_x=annotation.box_x,
         box_y=annotation.box_y,
         box_w=annotation.box_w,
@@ -68,4 +96,27 @@ def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotat
         image_width=annotation.image_width,
         image_height=annotation.image_height,
         thumbnail_path=annotation.thumbnail_path,
+        is_manual=annotation.is_manual,
+    )
+
+
+def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotation:
+    display_name = annotation.canonical_display_name or annotation.display_name
+    return RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id=annotation.detection_id,
+        source_identity_kind="pet",
+        source_identity_id=annotation.source_identity_id or annotation.pet_id,
+        canonical_identity_kind=annotation.canonical_identity_kind or "pet",
+        canonical_identity_id=annotation.canonical_identity_id or annotation.pet_id,
+        canonical_display_name=display_name,
+        box_x=annotation.box_x,
+        box_y=annotation.box_y,
+        box_w=annotation.box_w,
+        box_h=annotation.box_h,
+        image_width=annotation.image_width,
+        image_height=annotation.image_height,
+        thumbnail_path=annotation.thumbnail_path,
+        is_stale=annotation.is_stale,
+        stale_reason=annotation.stale_reason,
     )

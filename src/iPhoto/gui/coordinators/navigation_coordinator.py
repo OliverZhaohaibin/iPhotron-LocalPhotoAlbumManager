@@ -19,7 +19,7 @@ from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 
 if TYPE_CHECKING:
-    from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+    from iPhoto.gui.coordinators.contracts import DetailNavigationPort
 
 
 class NavigationCoordinator(QObject):
@@ -45,7 +45,7 @@ class NavigationCoordinator(QObject):
         self._facade = facade
         self._pinned_items_service = pinned_items_service
 
-        self._playback_coordinator: Optional[PlaybackCoordinator] = None
+        self._detail_navigation: DetailNavigationPort | None = None
 
         self._suppress_tree_refresh = False
         self._tree_refresh_suppression_reason: Optional[Literal["edit", "operation"]] = None
@@ -54,8 +54,9 @@ class NavigationCoordinator(QObject):
 
         self._connect_signals()
 
-    def set_playback_coordinator(self, coordinator: PlaybackCoordinator) -> None:
-        self._playback_coordinator = coordinator
+    def set_detail_navigation_port(self, detail: DetailNavigationPort) -> None:
+        """Bind the narrow Detail port used by Gallery navigation."""
+        self._detail_navigation = detail
 
     def _connect_signals(self) -> None:
         self._sidebar.albumSelected.connect(
@@ -323,8 +324,8 @@ class NavigationCoordinator(QObject):
             self._router.show_detail()
 
     def _handle_detail_requested(self, row: int) -> None:
-        if self._playback_coordinator is not None:
-            self._playback_coordinator.play_asset(row)
+        if self._detail_navigation is not None:
+            self._detail_navigation.play_asset(row)
 
     def _handle_map_assets_changed(self, assets: list, root: Path) -> None:
         map_view = self._router.map_view()
@@ -351,8 +352,8 @@ class NavigationCoordinator(QObject):
         return False
 
     def _reset_playback(self) -> None:
-        if self._playback_coordinator is not None:
-            self._playback_coordinator.reset_for_gallery()
+        if self._detail_navigation is not None:
+            self._detail_navigation.reset_for_gallery()
 
     def suppress_tree_refresh_for_edit(self) -> None:
         self._suppress_tree_refresh = True

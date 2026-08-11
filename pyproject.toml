@@ -29,6 +29,7 @@ dependencies = [
   "PyOpenGL>=3.1.7",
   "PyOpenGL_accelerate>=3.1.7",
   "rawpy>=0.23",
+  "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -58,12 +59,12 @@ pets-ai = [
     "onnxruntime>=1.18,<2",
     "torch",
     "torchvision",
-    "hdbscan",
+    "usearch>=2.26,<3",
 ]
 
 [project.scripts]
 iphoto = "iPhoto.cli:app"
-iphoto-gui = "iPhoto.gui.main:main"
+iphoto-gui = "iPhoto.entrypoint:main"
 
 
 [tool.setuptools]
@@ -87,7 +88,11 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -p no:pytestqt --ignore=tests/ui --ignore=tests/gui"
+addopts = "-ra -p no:pytestqt"
+markers = [
+    "pets_model_contract: real official YOLOX model and image contract",
+    "pets_scale_contract: large synthetic Pets incremental-index contract",
+]
 pythonpath = ["src"]
 
 [tool.typer]

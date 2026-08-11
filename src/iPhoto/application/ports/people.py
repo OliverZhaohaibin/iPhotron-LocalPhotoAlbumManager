@@ -26,6 +26,9 @@ class PeopleAssetRepositoryPort(Protocol):
     def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
         """Persist the same face status for many asset rows."""
 
+    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
+        """Reset every eligible done asset without materializing all IDs."""
+
     def count_by_face_status(self) -> dict[str, int]:
         """Return face-status counts from the asset index."""
 

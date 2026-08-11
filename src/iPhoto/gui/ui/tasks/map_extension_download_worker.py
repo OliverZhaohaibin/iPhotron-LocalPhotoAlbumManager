@@ -34,6 +34,7 @@ _DOWNLOAD_TIMEOUT_SECONDS = 30
 class MapExtensionDownloadRequest:
     package_root: Path
     platform: str
+    local_archive_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -72,12 +73,17 @@ class MapExtensionDownloadWorker(QRunnable):
             self.signals.finished.emit()
 
     def _download_and_stage(self) -> MapExtensionDownloadResult:
-        if not supports_map_extension_download(self._request.platform):
-            raise RuntimeError("Map extension download is unavailable on this platform.")
-
-        download_url = default_osmand_download_url(self._request.platform)
-        if not download_url:
-            raise RuntimeError("Map extension download URL is unavailable.")
+        local_archive = self._request.local_archive_path
+        if local_archive is None:
+            if not supports_map_extension_download(self._request.platform):
+                raise RuntimeError("Map extension download is unavailable on this platform.")
+            download_url = default_osmand_download_url(self._request.platform)
+            if not download_url:
+                raise RuntimeError("Map extension download URL is unavailable.")
+        else:
+            local_archive = Path(local_archive).resolve()
+            if not local_archive.is_file():
+                raise RuntimeError("Bundled map extension archive is missing.")
 
         tiles_root = default_osmand_tiles_root(self._request.package_root)
         tiles_root.mkdir(parents=True, exist_ok=True)
@@ -88,10 +94,13 @@ class MapExtensionDownloadWorker(QRunnable):
         install_verified = False
         try:
             archive_name = "extension.zip" if self._request.platform == "win32" else "extension.tar.xz"
-            archive_path = tmp_dir / archive_name
+            archive_path = local_archive or (tmp_dir / archive_name)
             extracted_root = tmp_dir / "extracted"
             extracted_root.mkdir(parents=True, exist_ok=True)
-            self._download_archive(download_url, archive_path)
+            if local_archive is None:
+                self._download_archive(download_url, archive_path)
+            else:
+                self.signals.progress.emit(5, 100, "Preparing bundled map extension...")
             self._extract_archive(archive_path, extracted_root)
             staged_extension_root = extracted_root / "extension"
             self.signals.progress.emit(96, 100, "Validating map extension...")
@@ -146,13 +155,26 @@ class MapExtensionDownloadWorker(QRunnable):
         suffixes = archive_path.suffixes
         if suffixes[-2:] == [".tar", ".xz"]:
             with tarfile.open(archive_path, mode="r:xz") as archive:
-                archive.extractall(extracted_root)
+                archive.extractall(extracted_root, filter="data")
+            return
+        if archive_path.suffix == ".tar":
+            with tarfile.open(archive_path, mode="r:") as archive:
+                archive.extractall(extracted_root, filter="data")
             return
         if archive_path.suffix == ".zip":
             with zipfile.ZipFile(archive_path) as archive:
-                archive.extractall(extracted_root)
+                self._extract_zip_safely(archive, extracted_root)
             return
         raise RuntimeError(f"Unsupported map extension archive: {archive_path.name}")
+
+    @staticmethod
+    def _extract_zip_safely(archive: zipfile.ZipFile, extracted_root: Path) -> None:
+        root = extracted_root.resolve()
+        for member in archive.infolist():
+            destination = (root / member.filename).resolve()
+            if destination != root and root not in destination.parents:
+                raise RuntimeError("Map extension archive contains an unsafe path.")
+        archive.extractall(root)
 
     def _validate_extension_root(self, extension_root: Path) -> None:
         required_paths = (

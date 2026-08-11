@@ -70,7 +70,7 @@ def test_main_window_close_event_runs_shutdown_once(monkeypatch, qapp) -> None:
         def cleanup(self) -> None:
             cleanup_calls.append(True)
 
-        def set_controller(self, _controller) -> None:
+        def set_detail_coordinator(self, _controller) -> None:
             return None
 
     monkeypatch.setattr(main_window_module, "Ui_MainWindow", _FakeUi)
@@ -85,7 +85,7 @@ def test_main_window_close_event_runs_shutdown_once(monkeypatch, qapp) -> None:
             shutdown_calls.append(True)
             window.closeEvent(QCloseEvent())
 
-    window.coordinator = _ReentrantCoordinator()
+    window._coordinator_lifecycle = _ReentrantCoordinator()
     try:
         window.closeEvent(QCloseEvent())
         window.closeEvent(QCloseEvent())
@@ -208,7 +208,7 @@ def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_d
     assert attributes == []
 
 
-def test_prepare_qt_runtime_for_maps_sets_xcb_glx_on_linux_when_native_widget_exists(monkeypatch) -> None:
+def test_prepare_qt_runtime_for_maps_does_not_force_xcb_for_native_widget(monkeypatch) -> None:
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
     monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: False)
     monkeypatch.setattr("maps.map_sources.has_usable_osmand_native_widget", lambda root: True)
@@ -219,9 +219,9 @@ def test_prepare_qt_runtime_for_maps_sets_xcb_glx_on_linux_when_native_widget_ex
 
     _prepare_qt_runtime_for_maps()
 
-    assert os.environ["QT_QPA_PLATFORM"] == "xcb"
-    assert os.environ["QT_OPENGL"] == "desktop"
-    assert os.environ["QT_XCB_GL_INTEGRATION"] == "xcb_glx"
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
 def test_prepare_qt_runtime_for_maps_skips_when_native_widget_is_unavailable(monkeypatch) -> None:
@@ -240,7 +240,7 @@ def test_prepare_qt_runtime_for_maps_skips_when_native_widget_is_unavailable(mon
     assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
-def test_prepare_qt_runtime_for_maps_forces_xcb_glx_in_packaged_linux_builds(monkeypatch) -> None:
+def test_prepare_qt_runtime_for_maps_preserves_wayland_in_packaged_linux_builds(monkeypatch) -> None:
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
     monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: True)
     monkeypatch.delenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", raising=False)
@@ -251,9 +251,9 @@ def test_prepare_qt_runtime_for_maps_forces_xcb_glx_in_packaged_linux_builds(mon
 
     _prepare_qt_runtime_for_maps()
 
-    assert os.environ["QT_QPA_PLATFORM"] == "xcb"
-    assert os.environ["QT_OPENGL"] == "desktop"
-    assert os.environ["QT_XCB_GL_INTEGRATION"] == "xcb_glx"
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
 
 
 def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monkeypatch) -> None:
@@ -275,9 +275,9 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
 @pytest.mark.parametrize(
     ("platform", "expected"),
     (
-        ("win32", (("detail",), ("preview", "people"))),
-        ("darwin", ((), ("detail", "preview", "people"))),
-        ("linux", (("detail",), ("preview", "people"))),
+        ("win32", (("detail",), ())),
+        ("darwin", ((), ("detail",))),
+        ("linux", (("detail",), ())),
     ),
 )
 def test_startup_feature_plan_keeps_opengl_rhi_detail_before_show(
@@ -346,6 +346,55 @@ def test_startup_input_guard_filters_only_window_startup_input() -> None:
     assert guard.eventFilter(child, _FakeEvent(QEvent.Type.MouseButtonPress)) is False
 
 
+def test_settings_initialization_failure_emits_one_failed_terminal(
+    monkeypatch,
+    qapp,
+    tmp_path: Path,
+) -> None:
+    from iPhoto.bootstrap import startup_orchestrator as orchestrator_module
+    from iPhoto.bootstrap.bootstrap_settings import BootstrapSettings
+    from iPhoto.gui.main import main
+
+    events: list[tuple[str, dict]] = []
+
+    class _FakeApp:
+        def __init__(self, _arguments) -> None:
+            return None
+
+        def platformName(self) -> str:  # noqa: N802 - Qt API
+            return "offscreen"
+
+    class _BrokenSettings:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr("iPhoto.gui.main._prefer_local_source_tree", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._bootstrap_macos_external_tool_path", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._prepare_qt_runtime_for_maps", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._configure_qt_opengl_defaults", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main._enable_startup_hang_diagnostics", lambda: None)
+    monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
+    monkeypatch.setattr("iPhoto.utils.logging.get_logger", lambda: None)
+    monkeypatch.setattr(
+        "iPhoto.bootstrap.bootstrap_settings.load_bootstrap_settings",
+        lambda: BootstrapSettings(path=tmp_path / "settings.json"),
+    )
+    monkeypatch.setattr("iPhoto.settings.manager.SettingsManager", _BrokenSettings)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "mark",
+        lambda stage, **details: events.append((stage, details)),
+    )
+
+    assert main([]) == 1
+    terminals = [
+        stage
+        for stage, _details in events
+        if stage in {"startup.completed", "startup.degraded", "startup.failed", "startup.cancelled"}
+    ]
+    assert terminals == ["startup.failed"]
+
+
 @pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
 @pytest.mark.parametrize("emit_startup_ready", (True, False))
 def test_main_creates_required_features_in_platform_safe_order(
@@ -403,6 +452,11 @@ def test_main_creates_required_features_in_platform_safe_order(
             return None
 
         def exec(self) -> int:
+            # Model the event loop processing delayed startup work before it
+            # exits.  main() now cancels any still-pending startup attempt when
+            # exec() returns, matching the real application lifecycle.
+            for callback in list(delayed_callbacks):
+                callback()
             return 0
 
     class _FakeSignal:
@@ -412,9 +466,9 @@ def test_main_creates_required_features_in_platform_safe_order(
         def connect(self, callback) -> None:
             self._callback = callback
 
-        def emit(self) -> None:
+        def emit(self, *args) -> None:
             assert self._callback is not None
-            self._callback()
+            self._callback(*args)
 
     startup_ready_signal = _FakeSignal()
 
@@ -439,10 +493,11 @@ def test_main_creates_required_features_in_platform_safe_order(
             self.firstPainted = _FakeSignal()
 
         def show(self) -> None:
+            assert profile_marks[-1] == "startup.show"
             call_order.append("show")
             self.firstPainted.emit()
 
-        def set_coordinator(self, _coordinator) -> None:
+        def bind_coordinators(self, _lifecycle, _gallery, _detail) -> None:
             call_order.append("set_coordinator")
 
     class _FakeRuntimeContext:
@@ -452,6 +507,14 @@ def test_main_creates_required_features_in_platform_safe_order(
                 "FakeContext",
                 (),
                 {
+                    "request_startup_library_probe": (
+                        lambda self: SimpleNamespace(request_id="startup-request")
+                    ),
+                    "commit_prepared_library": (
+                        lambda self, prepared, *, defer_scan=False: call_order.append(
+                            f"commit:{prepared.request_id}:{defer_scan}"
+                        )
+                    ),
                     "resume_startup_tasks": (
                         lambda self, *, defer_scan=False: call_order.append(
                             f"resume:{defer_scan}"
@@ -463,14 +526,36 @@ def test_main_creates_required_features_in_platform_safe_order(
                 },
             )()
 
+    class _FakeProbeController:
+        def __init__(self, _parent=None) -> None:
+            self.ready = _FakeSignal()
+            self.failed = _FakeSignal()
+
+        def start(self, request) -> None:
+            call_order.append(f"probe:{request.request_id}")
+            self.ready.emit(
+                SimpleNamespace(
+                    request_id=request.request_id,
+                    warnings=(),
+                )
+            )
+
+        def cancel(self) -> None:
+            call_order.append("probe:cancel")
+
     class _FakeCoordinator:
         def __init__(self, _window, _context) -> None:
             call_order.append("coordinator:create")
+            self.gallery = SimpleNamespace(
+                startup_model=self._startup_model,
+                open_album_from_path=lambda _path: None,
+            )
+            self.detail = object()
 
         def start(self) -> None:
             call_order.append("coordinator:start")
 
-        def gallery_startup_model(self):
+        def _startup_model(self):
             return type(
                 "FakeStartupModel",
                 (),
@@ -542,8 +627,13 @@ def test_main_creates_required_features_in_platform_safe_order(
     )
     monkeypatch.setitem(
         __import__("sys").modules,
-        "iPhoto.gui.coordinators.main_coordinator",
-        type("Mod", (), {"MainCoordinator": _FakeCoordinator})(),
+        "iPhoto.bootstrap.library_probe",
+        type("Mod", (), {"LibraryProbeController": _FakeProbeController})(),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "iPhoto.gui.coordinators.desktop_coordinator_runtime",
+        type("Mod", (), {"DesktopCoordinatorRuntime": _FakeCoordinator})(),
     )
     monkeypatch.setitem(
         __import__("sys").modules,
@@ -557,8 +647,6 @@ def test_main_creates_required_features_in_platform_safe_order(
 
     detail_index = call_order.index("feature:detail")
     show_index = call_order.index("show")
-    preview_index = call_order.index("feature:preview")
-    people_index = call_order.index("feature:people")
     coordinator_index = call_order.index("coordinator:create")
 
     if platform in {"win32", "linux"}:
@@ -571,8 +659,20 @@ def test_main_creates_required_features_in_platform_safe_order(
         assert "rhi_detail.created" not in profile_marks
     assert "windows_detail.before_create" not in profile_marks
     assert "windows_detail.created" not in profile_marks
-    assert show_index < preview_index < people_index < coordinator_index
-    assert call_order.index("resume:True") < call_order.index("guard:release")
+    assert "feature:preview" not in call_order
+    assert "feature:people" not in call_order
+    if platform == "darwin":
+        assert show_index < detail_index < coordinator_index
+    else:
+        assert detail_index < show_index < coordinator_index
+    # The shell becomes interactive immediately after the first-paint/watchdog
+    # boundary; library probing and hidden feature creation must not retain the
+    # global input filter.
+    assert call_order.index("guard:release") < call_order.index("probe:startup-request")
+    assert call_order.index("probe:startup-request") < call_order.index(
+        "commit:startup-request:True"
+    )
+    assert call_order.index("commit:startup-request:True") < call_order.index("select")
     assert call_order.index("guard:release") < call_order.index("select")
     assert call_order.index("warmup") < call_order.index("select")
     assert len(delayed_callbacks) == 1
@@ -634,6 +734,10 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
         "iPhoto.gui.main._configure_qt_opengl_defaults",
         lambda _library_root=None: call_order.append(("configure_gl", None)),
     )
+    monkeypatch.setattr(
+        "iPhoto.gui.main._startup_feature_plan",
+        lambda: (("detail",), ()),
+    )
     monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
     monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
     monkeypatch.setattr("iPhoto.gui.main.QColor", _FakeColor)
@@ -656,25 +760,36 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     class _FakeWindow:
         def __init__(self, _context):
-            self.ui = type("FakeUi", (), {"sidebar": type("FakeSidebar", (), {"select_all_photos": lambda *a, **k: None})()})()
+            class _FakeUi:
+                sidebar = type(
+                    "FakeSidebar",
+                    (),
+                    {"select_all_photos": lambda *args, **kwargs: None},
+                )()
+
+                def ensure_feature(self, feature: str) -> None:
+                    call_order.append(("ensure_feature", feature))
+
+            self.ui = _FakeUi()
             self.firstPainted = type("FakeSignal", (), {"connect": lambda *a, **k: None})()
 
         def show(self) -> None:
             call_order.append(("show", None))
 
-        def set_coordinator(self, _coordinator) -> None:
+        def bind_coordinators(self, _lifecycle, _gallery, _detail) -> None:
             return None
 
     class _FakeCoordinator:
         def __init__(self, _window, _context):
-            return None
+            self.gallery = SimpleNamespace(startup_model=lambda: None)
+            self.detail = object()
 
         def start(self) -> None:
             return None
 
     monkeypatch.setattr("iPhoto.utils.logging.get_logger", lambda: None)
     monkeypatch.setitem(__import__("sys").modules, "iPhoto.bootstrap.runtime_context", type("Mod", (), {"RuntimeContext": _FakeRuntimeContext})())
-    monkeypatch.setitem(__import__("sys").modules, "iPhoto.gui.coordinators.main_coordinator", type("Mod", (), {"MainCoordinator": _FakeCoordinator})())
+    monkeypatch.setitem(__import__("sys").modules, "iPhoto.gui.coordinators.desktop_coordinator_runtime", type("Mod", (), {"DesktopCoordinatorRuntime": _FakeCoordinator})())
     monkeypatch.setitem(__import__("sys").modules, "iPhoto.gui.ui.main_window", type("Mod", (), {"MainWindow": _FakeWindow})())
 
     from iPhoto.gui.main import main
@@ -683,4 +798,5 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     assert call_order[0][0] == "prefer"
     assert not any(name == "apply_pending" for name, _value in call_order)
+    assert ("ensure_feature", "detail") in call_order
     assert call_order[1][0] == "prepare_maps"

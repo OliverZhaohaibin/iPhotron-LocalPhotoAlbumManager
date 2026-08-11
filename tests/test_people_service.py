@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from iPhoto.application.services.recognition_merge_service import RecognitionMergeService
 from iPhoto.bootstrap.library_people_service import (
     create_people_asset_repository,
     create_people_service,
@@ -17,6 +18,10 @@ from iPhoto.bootstrap.library_people_service import (
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
+from iPhoto.gui.ui.widgets.recognition_annotations import (
+    face_annotation_adapter,
+    pet_annotation_adapter,
+)
 from iPhoto.library.workers.face_scan_worker import FaceScanWorker
 from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 from iPhoto.people import service as people_service
@@ -27,13 +32,17 @@ from iPhoto.people.index_coordinator import (
 )
 from iPhoto.people.pipeline import DetectedAssetFaces, FaceClusterPipeline
 from iPhoto.people.records import AssetFaceAnnotation
-from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
+from iPhoto.people.repository import FaceRecord, FaceRepository, ManualFaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
+from iPhoto.people.state_repository import FaceStateRepository
+from iPhoto.pets.index_coordinator import PetIndexCoordinator
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import utc_now_iso
 from iPhoto.pets.service import pet_library_paths
+from iPhoto.recognition.operation_journal import RecognitionOperationJournal
+from iPhoto.utils.pathutils import ensure_work_dir
 
 
 @pytest.fixture(autouse=True)
@@ -716,6 +725,15 @@ def test_people_service_can_hide_people_and_optionally_include_them(tmp_path: Pa
     }
 
 
+def test_people_hidden_mutation_routes_through_index_coordinator(tmp_path: Path) -> None:
+    coordinator = Mock()
+    coordinator.set_person_hidden.return_value = True
+    service = PeopleService(tmp_path, coordinator=coordinator)
+
+    assert service.set_cluster_hidden("person-a", True) is True
+    coordinator.set_person_hidden.assert_called_once_with("person-a", True)
+
+
 def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
@@ -748,6 +766,239 @@ def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -
         "person-a",
         "person-b",
     }
+
+
+def test_pending_assignment_blocks_people_identity_mutations_then_merge_retargets(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0},
+            {"rel": "album/b.jpg", "id": "asset-b", "media_type": 0},
+        ]
+    )
+    service = create_people_service(library_root)
+    repository = service.repository()
+    assert repository is not None
+    repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b",
+                asset_id="asset-b",
+                asset_rel="album/b.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1),
+        ],
+    )
+    state = repository.state_repository
+    assert state is not None
+    assert state.set_annotation_identity_assignment(
+        source_kind="pet",
+        source_annotation_id="det-a",
+        target_kind="person",
+        target_id="person-a",
+    )
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(library_root) / "recognition" / "operations.db"
+    )
+    operation_id = journal.prepare(
+        "recognition_detection_assignment",
+        {
+            "source_kind": "pet",
+            "source_annotation_id": "det-a",
+            "target_kind": "person",
+            "target_id": "person-a",
+        },
+    )
+    journal.transition(operation_id, "applying")
+
+    assert service.merge_clusters("person-a", "person-b") is False
+    assert service.delete_face("face-a") is False
+    assert service.move_face_to_person("face-a", "person-b") is False
+    assert service.move_face_to_new_person("face-a", "Blocked") is None
+    coordinator = service.coordinator
+    assert coordinator is not None
+    assert coordinator.submit_detected_batch(
+        [DetectedAssetFaces("asset-a", "album/a.jpg", [])],
+        distance_threshold=0.6,
+        min_samples=2,
+    ) is None
+
+    journal.commit_outbox(operation_id, {"kind": "recognition_detection_assignment"})
+    journal.mark_published(operation_id)
+    assert service.merge_clusters("person-a", "person-b") is True
+    assignments = state.get_annotation_identity_assignments((("pet", "det-a"),))
+    assert assignments[("pet", "det-a")] == ("person", "person-b")
+
+
+@pytest.mark.parametrize("failure_point", ["state_sync", "group_refresh", "outbox"])
+def test_people_runtime_mutation_recovers_forward_after_phase_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    service = create_people_service(library_root)
+    repository = service.repository()
+    assert repository is not None
+    repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b",
+                asset_id="asset-b",
+                asset_rel="album/b.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1),
+        ],
+    )
+    coordinator = service.coordinator
+    assert coordinator is not None
+
+    if failure_point == "state_sync":
+        original = FaceStateRepository.sync_scan_results
+        calls = 0
+
+        def fail_once(self, persons, faces) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("injected state sync failure")
+            original(self, persons, faces)
+
+        monkeypatch.setattr(FaceStateRepository, "sync_scan_results", fail_once)
+    elif failure_point == "group_refresh":
+        original = FaceRepository.refresh_all_group_assets
+        calls = 0
+
+        def fail_once(self) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("injected group refresh failure")
+            original(self)
+
+        monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", fail_once)
+    else:
+        original = coordinator._journal.commit_and_dispatch
+        calls = 0
+
+        def fail_once(operation_id: str, event: dict[str, object], dispatch) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("injected outbox failure")
+            original(operation_id, event, dispatch)
+
+        monkeypatch.setattr(coordinator._journal, "commit_and_dispatch", fail_once)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        coordinator.move_face_to_person("face-a", "person-b")
+
+    if failure_point == "state_sync":
+        monkeypatch.setattr(FaceStateRepository, "sync_scan_results", original)
+    elif failure_point == "group_refresh":
+        monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", original)
+    assert coordinator.delete_face("missing-face") is None
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(library_root) / "recognition" / "operations.db"
+    )
+    assert journal.unfinished() == ()
+
+    reset_people_index_coordinators()
+    recovered = get_people_index_coordinator(library_root)
+    assert recovered.recovery_pending is False
+    paths = face_library_paths(library_root)
+    recovered_repository = FaceRepository(paths.index_db_path, paths.state_db_path)
+    moved_face = next(
+        face for face in recovered_repository.get_all_faces() if face.face_id == "face-a"
+    )
+    assert moved_face.person_id == "person-b"
+    assert journal.unfinished() == ()
+
+
+def test_people_runtime_marker_failure_rolls_back_runtime_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    service = create_people_service(library_root)
+    repository = service.repository()
+    assert repository is not None
+    repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b",
+                asset_id="asset-b",
+                asset_rel="album/b.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1),
+        ],
+    )
+    coordinator = service.coordinator
+    assert coordinator is not None
+    original = FaceRepository._write_runtime_commit
+
+    def fail_marker(*_args, **_kwargs) -> None:
+        raise RuntimeError("injected runtime marker failure")
+
+    monkeypatch.setattr(
+        FaceRepository,
+        "_write_runtime_commit",
+        staticmethod(fail_marker),
+    )
+    with pytest.raises(RuntimeError, match="runtime marker"):
+        coordinator.move_face_to_person("face-a", "person-b")
+    monkeypatch.setattr(
+        FaceRepository,
+        "_write_runtime_commit",
+        staticmethod(original),
+    )
+
+    assert coordinator.delete_face("missing-face") is None
+    current = FaceRepository(
+        face_library_paths(library_root).index_db_path,
+        face_library_paths(library_root).state_db_path,
+    )
+    face = next(face for face in current.get_all_faces() if face.face_id == "face-a")
+    assert face.person_id == "person-a"
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(library_root) / "recognition" / "operations.db"
+    )
+    assert journal.unfinished() == ()
 
 
 def test_cross_merge_pet_into_person_redirects_pet_assets(tmp_path: Path) -> None:
@@ -795,7 +1046,18 @@ def test_cross_merge_pet_into_person_redirects_pet_assets(tmp_path: Path) -> Non
         "asset-person",
         "asset-pet",
     }
+    assert people_repository.get_asset_ids_by_people(("person-a",))["person-a"] == [
+        "asset-person",
+        "asset-pet",
+    ]
     assert pet_service.build_pet_query("pet-a").asset_ids == []
+    assert pet_repository.get_asset_ids_by_pets(("pet-a",))["pet-a"] == []
+    pet_annotations = pet_service.list_asset_pet_annotations("asset-pet")
+    assert len(pet_annotations) == 1
+    assert pet_annotations[0].pet_id == "pet-a"
+    assert pet_annotations[0].canonical_identity_kind == "person"
+    assert pet_annotations[0].canonical_identity_id == "person-a"
+    assert pet_annotations[0].canonical_display_name == "Alice"
 
 
 def test_cross_merge_person_into_pet_redirects_person_assets(tmp_path: Path) -> None:
@@ -844,6 +1106,362 @@ def test_cross_merge_person_into_pet_redirects_person_assets(tmp_path: Path) -> 
         "asset-person",
     }
     assert people_service.build_cluster_query("person-a").asset_ids == []
+    face_annotations = people_service.list_asset_face_annotations("asset-person")
+    assert len(face_annotations) == 1
+    assert face_annotations[0].person_id == "person-a"
+    assert face_annotations[0].canonical_identity_kind == "pet"
+    assert face_annotations[0].canonical_identity_id == "pet-a"
+    assert face_annotations[0].canonical_display_name == "Miso"
+
+
+def test_cross_merge_recovery_refreshes_cache_after_state_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_refresh = FaceRepository.refresh_all_group_assets
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    people = create_people_service(library_root)
+    people_repository = people.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [_person_record(person_id="person-a", key_face_id="face-a", face_count=1)],
+    )
+    pets = create_pet_service(library_root)
+    pet_repository = pets.repository()
+    assert pet_repository is not None
+    detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1)],
+    )
+    merge_service = RecognitionMergeService(people, pets)
+
+    def fail_refresh(_repository) -> None:
+        raise RuntimeError("injected after state commit")
+
+    monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", fail_refresh)
+    with pytest.raises(RuntimeError, match="injected after state commit"):
+        merge_service.merge("pet:pet-a", "person:person-a")
+
+    state = FaceStateRepository(face_library_paths(library_root).state_db_path)
+    redirects = state.get_identity_redirects()
+    assert [
+        (redirect.source_kind, redirect.source_id, redirect.target_kind, redirect.target_id)
+        for redirect in redirects
+    ] == [("pet", "pet-a", "person", "person-a")]
+
+    refresh_calls = 0
+    def count_refresh(repository) -> None:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        original_refresh(repository)
+
+    monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", count_refresh)
+    assert merge_service._journal is not None
+    assert [operation.kind for operation in merge_service._journal.unfinished()] == [
+        "recognition_merge"
+    ]
+
+    recovered = RecognitionMergeService(
+        create_people_service(library_root),
+        create_pet_service(library_root),
+    )
+
+    assert refresh_calls == 1
+    assert recovered._journal is not None
+    assert recovered._journal.unfinished() == ()
+    recovered_outcome = recovered.merge("pet:pet-a", "person:person-a")
+    assert recovered_outcome.merged is True
+    assert refresh_calls == 1
+
+
+def test_cross_kind_single_detection_assignment_preserves_source_and_identity(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/person.jpg", "id": "asset-person", "media_type": 0},
+            {"rel": "album/pet.jpg", "id": "asset-pet", "media_type": 0},
+        ]
+    )
+    people_service = create_people_service(library_root)
+    people_repository = people_service.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-person",
+                asset_rel="album/person.jpg",
+                person_id="person-a",
+            )
+        ],
+        [
+            _person_record(
+                person_id="person-a",
+                key_face_id="face-a",
+                face_count=1,
+                name="Alice",
+            )
+        ],
+    )
+    pet_service = create_pet_service(library_root)
+    pet_repository = pet_service.repository()
+    assert pet_repository is not None
+    pet_detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-pet",
+        asset_rel="album/pet.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [pet_detection],
+        [
+            _pet_record(
+                pet_id="pet-a",
+                key_detection_id="det-a",
+                detection_count=1,
+                name="Miso",
+            )
+        ],
+    )
+
+    assert people_service.reassign_detection_identity(
+        source_kind="pet",
+        source_annotation_id="det-a",
+        target_identity="person:person-a",
+    )
+    pet_annotation = pet_annotation_adapter(
+        pet_service.list_asset_pet_annotations("asset-pet")[0]
+    )
+    assert pet_annotation.source_detection_kind == "pet"
+    assert pet_annotation.source_annotation_id == "det-a"
+    assert pet_annotation.person_id == "person:person-a"
+    assert pet_annotation.canonical_display_name == "Alice"
+    assert set(people_service.build_cluster_query("person-a").asset_ids) == {
+        "asset-person",
+        "asset-pet",
+    }
+    assert pet_service.build_pet_query("pet-a").asset_ids == []
+
+    assert people_service.reassign_detection_identity(
+        source_kind="person",
+        source_annotation_id="face-a",
+        target_identity="pet:pet-a",
+    )
+    face_annotation = face_annotation_adapter(
+        people_service.list_asset_face_annotations("asset-person")[0]
+    )
+    assert face_annotation.source_detection_kind == "person"
+    assert face_annotation.source_annotation_id == "face-a"
+    assert face_annotation.person_id == "pet:pet-a"
+    assert face_annotation.canonical_display_name == "Miso"
+    assert people_service.build_cluster_query("person-a").asset_ids == ["asset-pet"]
+    assert pet_service.build_pet_query("pet-a").asset_ids == ["asset-person"]
+    assert people_repository.get_asset_ids_by_people(("person-a",))["person-a"] == [
+        "asset-pet"
+    ]
+    assert pet_repository.get_asset_ids_by_pets(("pet-a",))["pet-a"] == [
+        "asset-person"
+    ]
+
+    assert {item.person_id for item in people_service.list_clusters()} == {"person-a"}
+    assert {item.pet_id for item in pet_service.list_pets()} == {"pet-a"}
+
+
+def test_cross_kind_assignment_refreshes_target_and_source_group_assets(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/own.jpg", "id": "asset-own", "media_type": 0},
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0},
+        ]
+    )
+    people = create_people_service(library_root)
+    people_repository = people.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-own",
+                asset_rel="album/own.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1),
+        ],
+    )
+    pets = create_pet_service(library_root)
+    pet_repository = pets.repository()
+    assert pet_repository is not None
+    detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-shared",
+        asset_rel="album/shared.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1)],
+    )
+    people_group = people.create_group(["person:person-a", "person:person-b"])
+    mixed_group = people.create_group(["pet:pet-a", "person:person-b"])
+    assert people_group is not None and mixed_group is not None
+    assert people.group_asset_ids(people_group.group_id) == []
+    assert people.group_asset_ids(mixed_group.group_id) == ["asset-shared"]
+
+    assert people.reassign_detection_identity(
+        source_kind="pet",
+        source_annotation_id="det-a",
+        target_identity="person:person-a",
+    )
+
+    assert people.group_asset_ids(people_group.group_id) == ["asset-shared"]
+    assert people.group_asset_ids(mixed_group.group_id) == []
+
+    assert people.reassign_detection_identity(
+        source_kind="person",
+        source_annotation_id="face-b",
+        target_identity="pet:pet-a",
+    )
+    reverse_group = people.create_group(["pet:pet-a", "person:person-a"])
+    assert reverse_group is not None
+    assert people.group_asset_ids(reverse_group.group_id) == ["asset-shared"]
+    assert people.build_cluster_query("person-b").asset_ids == []
+
+
+@pytest.mark.parametrize("recovery_owner", ["people", "pets"])
+def test_assignment_recovery_refreshes_source_and_target_group_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_owner: str,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/own.jpg", "id": "asset-own", "media_type": 0},
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0},
+        ]
+    )
+    people = create_people_service(library_root)
+    people_repository = people.repository()
+    assert people_repository is not None
+    people_repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a",
+                asset_id="asset-own",
+                asset_rel="album/own.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1),
+        ],
+    )
+    pets = create_pet_service(library_root)
+    pet_repository = pets.repository()
+    assert pet_repository is not None
+    detection = _pet_detection_record(
+        detection_id="det-a",
+        asset_id="asset-shared",
+        asset_rel="album/shared.jpg",
+        pet_id="pet-a",
+    )
+    pet_repository.replace_all(
+        [detection],
+        [_pet_record(pet_id="pet-a", key_detection_id="det-a", detection_count=1)],
+    )
+    target_group = people.create_group(["person:person-a", "person:person-b"])
+    source_group = people.create_group(["pet:pet-a", "person:person-b"])
+    assert target_group is not None and source_group is not None
+    assert people.group_asset_ids(target_group.group_id) == []
+    assert people.group_asset_ids(source_group.group_id) == ["asset-shared"]
+
+    original_refresh = FaceRepository.refresh_all_group_assets
+    refresh_calls = 0
+
+    def fail_first_refresh(repository: FaceRepository) -> None:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("injected assignment group refresh failure")
+        original_refresh(repository)
+
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        fail_first_refresh,
+    )
+    with pytest.raises(RuntimeError, match="assignment group refresh"):
+        people.reassign_detection_identity(
+            source_kind="pet",
+            source_annotation_id="det-a",
+            target_identity="person:person-a",
+        )
+
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(library_root) / "recognition" / "operations.db"
+    )
+    assert [operation.kind for operation in journal.unfinished()] == [
+        "recognition_detection_assignment"
+    ]
+    assert people.group_asset_ids(target_group.group_id) == []
+    assert people.group_asset_ids(source_group.group_id) == ["asset-shared"]
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        original_refresh,
+    )
+
+    if recovery_owner == "people":
+        assert people.reassign_detection_identity(
+            source_kind="pet",
+            source_annotation_id="det-a",
+            target_identity="person:person-a",
+        )
+    else:
+        PetIndexCoordinator(library_root)
+
+    assert journal.unfinished() == ()
+    assert people.group_asset_ids(target_group.group_id) == ["asset-shared"]
+    assert people.group_asset_ids(source_group.group_id) == []
 
 
 def test_cross_merge_retargets_existing_redirect_sources(tmp_path: Path) -> None:
@@ -1018,7 +1636,7 @@ def test_pet_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> Non
     same_kind_merge = pet_service.merge_pets("pet-a", "pet-b")
 
     assert cross_merge is not None and cross_merge.merged is True
-    assert same_kind_merge is True
+    assert same_kind_merge.merged is True
     assert set(pet_service.build_pet_query("pet-b").asset_ids) == {
         "asset-person",
         "asset-pet-a",
@@ -1250,7 +1868,12 @@ def test_asset_face_annotations_skip_manual_person_redirected_to_pet(tmp_path: P
     merge = people_service.merge_identities(f"person:{result.person_id}", "pet:pet-a")
 
     assert merge is not None and merge.merged is True
-    assert people_service.list_asset_face_annotations("asset-a") == []
+    annotations = people_service.list_asset_face_annotations("asset-a")
+    assert len(annotations) == 1
+    assert annotations[0].person_id == result.person_id
+    assert annotations[0].canonical_identity_kind == "pet"
+    assert annotations[0].canonical_identity_id == "pet-a"
+    assert annotations[0].canonical_display_name == "Miso"
 
 
 def test_merge_manual_only_people_keeps_profiles_embedding_free(tmp_path: Path) -> None:

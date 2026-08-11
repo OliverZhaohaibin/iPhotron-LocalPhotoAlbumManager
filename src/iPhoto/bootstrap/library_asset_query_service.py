@@ -472,20 +472,38 @@ class LibraryAssetQueryService:
                     str(row.get("id") or library_rel),
                     thumbnail_cache_dir=self._thumbnail_cache_dir(),
                     prefer_cached_micro=True,
+                    refresh_cache=str(row.get("thumbnail_state") or "") == "stale",
+                    expected_revision=str(row.get("thumb_revision") or "") or None,
                 )
+                row_revision = str(row.get("thumb_revision") or "") or None
+                rendered_revision = getattr(thumbnail, "thumb_revision", None)
                 if thumbnail.thumb_error:
-                    update_thumbnail_ready(library_rel, error=thumbnail.thumb_error)
+                    if not str(row.get("thumb_cache_key") or "").strip():
+                        error_kwargs: dict[str, Any] = {
+                            "error": thumbnail.thumb_error
+                        }
+                        if row_revision is not None:
+                            error_kwargs["expected_revision"] = row_revision
+                        update_thumbnail_ready(library_rel, **error_kwargs)
                     self.thumbnail_backfill_progress.emit(root, index, total)
                     continue
-                update_thumbnail_ready(
-                    library_rel,
-                    micro_thumbnail=thumbnail.micro_thumbnail,
-                    thumb_cache_key=thumbnail.thumb_cache_key,
+                ready_kwargs: dict[str, Any] = {
+                    "micro_thumbnail": thumbnail.micro_thumbnail,
+                    "thumb_cache_key": thumbnail.thumb_cache_key,
+                }
+                if rendered_revision is not None:
+                    ready_kwargs["expected_revision"] = rendered_revision
+                published = bool(
+                    update_thumbnail_ready(library_rel, **ready_kwargs)
                 )
+                if not published:
+                    self.thumbnail_backfill_progress.emit(root, index, total)
+                    continue
                 ready_row = dict(row)
                 ready_row["thumbnail_state"] = "ready"
                 ready_row["micro_thumbnail"] = thumbnail.micro_thumbnail
                 ready_row["thumb_cache_key"] = thumbnail.thumb_cache_key
+                ready_row["thumb_revision"] = rendered_revision or row_revision
                 ready_row["thumb_error"] = None
                 ready_rows.append(ready_row)
                 self.thumbnail_backfill_progress.emit(root, index, total)
@@ -582,6 +600,37 @@ class LibraryAssetQueryService:
         if row is None:
             return None
         return bool(row.get("is_favorite"))
+
+    def mark_thumbnail_stale(self, path: Path, desired_revision: str) -> bool:
+        marker = getattr(self._repository(), "mark_thumbnail_stale", None)
+        if not callable(marker):
+            return False
+        return bool(
+            marker(
+                self._library_relative_path(path),
+                desired_revision=desired_revision,
+            )
+        )
+
+    def publish_thumbnail_ready(
+        self,
+        path: Path,
+        *,
+        revision: str,
+        cache_key: str,
+        micro_thumbnail: bytes,
+    ) -> bool:
+        updater = getattr(self._repository(), "update_thumbnail_ready", None)
+        if not callable(updater):
+            return False
+        return bool(
+            updater(
+                self._library_relative_path(path),
+                micro_thumbnail=micro_thumbnail,
+                thumb_cache_key=cache_key,
+                expected_revision=revision,
+            )
+        )
 
     def location_cache_writer(self, root: Path) -> _ScopedLocationCacheWriter:
         """Return an object compatible with legacy asset-entry location writes."""

@@ -22,8 +22,6 @@ from PySide6.QtWidgets import (
 from ....gui.i18n import tr
 from ..icon import load_icon
 from ..palette import SIDEBAR_TEXT_COLOR, viewer_surface_color
-from .edit_sidebar import EditSidebar
-from .edit_topbar import SegmentedTopBar
 from .face_name_overlay import FaceNameOverlayWidget
 from .filmstrip_view import FilmstripView
 from .gl_image_viewer import GLImageViewer
@@ -64,30 +62,8 @@ class DetailPageWidget(QWidget):
         # Initialised in ``_build_player_area()``; set here so that
         # ``hide_rhi_init_cover()`` and ``resizeEvent`` always find the attr.
         self._rhi_init_cover: QWidget | None = None
-
-        # Edit chrome -------------------------------------------------------
-        self.edit_mode_group = QActionGroup(main_window)
-        self.edit_mode_group.setExclusive(True)
-
-        self.edit_adjust_action = QAction(main_window)
-        self.edit_adjust_action.setCheckable(True)
-        self.edit_adjust_action.setChecked(True)
-        self.edit_mode_group.addAction(self.edit_adjust_action)
-
-        self.edit_crop_action = QAction(main_window)
-        self.edit_crop_action.setCheckable(True)
-        self.edit_mode_group.addAction(self.edit_crop_action)
-
-        self.edit_compare_button = QToolButton(self)
-        self.edit_reset_button = QPushButton(self)
-        self.edit_done_button = QPushButton(self)
-        self.edit_rotate_left_button = QToolButton(self)
-        self.edit_zoom_host = QWidget(self)
-        self.edit_zoom_host_layout = QHBoxLayout(self.edit_zoom_host)
-        self.edit_zoom_host_layout.setContentsMargins(0, 0, 0, 0)
-        self.edit_zoom_host_layout.setSpacing(4)
-        self.edit_sidebar = EditSidebar()
-        self.edit_sidebar.setObjectName("editSidebar")
+        self._edit_bundle_created = False
+        self._main_window = main_window
 
         # Header widgets -----------------------------------------------------
         self.back_button = QToolButton(self)
@@ -144,7 +120,7 @@ class DetailPageWidget(QWidget):
 
         self._build_header(main_window, layout)
         self._build_player_area()
-        self._build_edit_container(main_window, layout)
+        self._build_player_container(layout)
         layout.addWidget(self.filmstrip_view)
         self.retranslate_ui()
 
@@ -193,7 +169,9 @@ class DetailPageWidget(QWidget):
         edit_done_button = getattr(self, "edit_done_button", None)
         if edit_done_button is not None:
             edit_done_button.setText(tr("DetailPage", "Done"))
-        self.edit_rotate_left_button.setToolTip(tr("DetailPage", "Rotate counter-clockwise"))
+        edit_rotate_left_button = getattr(self, "edit_rotate_left_button", None)
+        if edit_rotate_left_button is not None:
+            edit_rotate_left_button.setToolTip(tr("DetailPage", "Rotate counter-clockwise"))
         default_placeholder_text = self.default_placeholder_text()
         if (
             self.player_stack.currentWidget() is self.player_placeholder
@@ -450,10 +428,8 @@ class DetailPageWidget(QWidget):
         self.badge_host = player_container
         self._raise_player_overlays()
 
-    def _build_edit_container(self, main_window: QWidget, parent_layout: QVBoxLayout) -> None:
-        """Wrap the shared viewer with the edit header and sidebar."""
-
-        del main_window  # The metrics come from module-level constants.
+    def _build_player_container(self, parent_layout: QVBoxLayout) -> None:
+        """Install the playback host without constructing optional edit chrome."""
 
         edit_container = QWidget(self)
         edit_container.setObjectName("editPage")
@@ -461,9 +437,6 @@ class DetailPageWidget(QWidget):
         edit_layout = QVBoxLayout(edit_container)
         edit_layout.setContentsMargins(0, 0, 0, 0)
         edit_layout.setSpacing(6)
-
-        self.edit_header_container = self._build_edit_header()
-        edit_layout.addWidget(self.edit_header_container)
 
         edit_body = QWidget(edit_container)
         edit_body_layout = QHBoxLayout(edit_body)
@@ -478,9 +451,42 @@ class DetailPageWidget(QWidget):
         player_column_layout.addWidget(self.video_trim_bar)
 
         edit_body_layout.addWidget(self.player_column, 1)
-        edit_body_layout.addWidget(self.edit_sidebar)
         edit_layout.addWidget(edit_body, 1)
+        self._edit_layout = edit_layout
+        self._edit_body_layout = edit_body_layout
 
+        parent_layout.addWidget(edit_container, 1)
+
+    def ensure_edit_bundle(self) -> None:
+        """Create edit-only controls immediately before the first edit session."""
+
+        if self._edit_bundle_created:
+            return
+        from .edit_sidebar import EditSidebar
+
+        self.edit_mode_group = QActionGroup(self._main_window)
+        self.edit_mode_group.setExclusive(True)
+        self.edit_adjust_action = QAction(self._main_window)
+        self.edit_adjust_action.setCheckable(True)
+        self.edit_adjust_action.setChecked(True)
+        self.edit_mode_group.addAction(self.edit_adjust_action)
+        self.edit_crop_action = QAction(self._main_window)
+        self.edit_crop_action.setCheckable(True)
+        self.edit_mode_group.addAction(self.edit_crop_action)
+        self.edit_compare_button = QToolButton(self)
+        self.edit_reset_button = QPushButton(self)
+        self.edit_done_button = QPushButton(self)
+        self.edit_rotate_left_button = QToolButton(self)
+        self.edit_zoom_host = QWidget(self)
+        self.edit_zoom_host_layout = QHBoxLayout(self.edit_zoom_host)
+        self.edit_zoom_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.edit_zoom_host_layout.setSpacing(4)
+        self.edit_sidebar = EditSidebar()
+        self.edit_sidebar.setObjectName("editSidebar")
+
+        self.edit_header_container = self._build_edit_header()
+        self._edit_layout.insertWidget(0, self.edit_header_container)
+        self._edit_body_layout.addWidget(self.edit_sidebar)
         default_sidebar_min = self.edit_sidebar.minimumWidth()
         default_sidebar_max = self.edit_sidebar.maximumWidth()
         default_sidebar_hint = max(self.edit_sidebar.sizeHint().width(), default_sidebar_min)
@@ -490,13 +496,14 @@ class DetailPageWidget(QWidget):
         self.edit_sidebar.setMinimumWidth(0)
         self.edit_sidebar.setMaximumWidth(0)
         self.edit_sidebar.hide()
-
         self.edit_header_container.hide()
-
-        parent_layout.addWidget(edit_container, 1)
+        self._edit_bundle_created = True
+        self.retranslate_ui()
 
     def _build_edit_header(self) -> QWidget:
         """Construct the toolbar shown while the edit chrome is visible."""
+
+        from .edit_topbar import SegmentedTopBar
 
         container = QWidget(self)
         container.setObjectName("editHeaderContainer")

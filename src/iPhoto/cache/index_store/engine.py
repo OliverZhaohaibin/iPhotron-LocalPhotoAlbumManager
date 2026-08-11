@@ -137,7 +137,7 @@ class DatabaseManager:
         self,
         query: str,
         params: tuple | list | None = None,
-    ) -> None:
+    ) -> int:
         """Execute a single query within a transaction.
         
         Args:
@@ -150,15 +150,16 @@ class DatabaseManager:
         try:
             if is_nested:
                 if params:
-                    conn.execute(query, params)
+                    cursor = conn.execute(query, params)
                 else:
-                    conn.execute(query)
+                    cursor = conn.execute(query)
             else:
                 with conn:
                     if params:
-                        conn.execute(query, params)
+                        cursor = conn.execute(query, params)
                     else:
-                        conn.execute(query)
+                        cursor = conn.execute(query)
+            return max(0, int(cursor.rowcount))
         finally:
             if not is_nested:
                 conn.close()

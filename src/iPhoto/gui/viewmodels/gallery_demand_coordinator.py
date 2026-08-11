@@ -128,6 +128,7 @@ class GalleryDemandCoordinator:
         viewport = self.viewport
         if viewport is None:
             return None
+        visible_rows = tuple(visible_rows)
         guard_rows = tuple(viewport.iter_full_guard_rows())
         speculative_rows = tuple(viewport.iter_full_speculative_rows())
         candidates: list[ThumbnailPrefetchCandidate] = []
@@ -145,9 +146,13 @@ class GalleryDemandCoordinator:
                             dto.metadata.get("thumb_cache_key") if dto.metadata else None
                         )
                         l2_key = metadata_key if isinstance(metadata_key, str) else None
+                    thumbnail_state = dto.thumbnail_state
+                    thumb_revision = dto.thumb_revision
                 elif hint is not None:
                     path = Path(hint.path)
                     l2_key = hint.l2_cache_key
+                    thumbnail_state = hint.thumbnail_state
+                    thumb_revision = hint.thumb_revision
                 else:
                     continue
                 paths.append(path)
@@ -159,6 +164,8 @@ class GalleryDemandCoordinator:
                             l2_cache_key=l2_key,
                             kind=kind,
                             rank=rank,
+                            thumbnail_state=thumbnail_state,
+                            thumb_revision=thumb_revision,
                         )
                     )
             return tuple(dict.fromkeys(paths))
@@ -168,6 +175,21 @@ class GalleryDemandCoordinator:
         visible_paths = tuple(
             dict.fromkeys(Path(dto.abs_path) for _row, dto in visible_rows)
         )
+        for rank, (row, dto) in enumerate(visible_rows):
+            l2_key = dto.thumb_cache_key
+            if not isinstance(l2_key, str) or not l2_key.strip():
+                continue
+            candidates.append(
+                ThumbnailPrefetchCandidate(
+                    row=row,
+                    path=dto.abs_path,
+                    l2_cache_key=l2_key,
+                    kind="guard",
+                    rank=rank,
+                    thumbnail_state=dto.thumbnail_state,
+                    thumb_revision=dto.thumb_revision,
+                )
+            )
         return ThumbnailDemandSnapshot(
             revision=viewport.generation,
             size=size,
@@ -191,6 +213,8 @@ class GalleryDemandCoordinator:
                 l2_cache_key=candidate.l2_cache_key,
                 rank=rank,
                 kind="guard" if row in guard_rows else "far_speculative",
+                thumbnail_state=candidate.thumbnail_state,
+                thumb_revision=candidate.thumb_revision,
             )
             for rank, row in enumerate(ordered_rows)
             if (candidate := self.hint_candidates_by_row.get(row)) is not None

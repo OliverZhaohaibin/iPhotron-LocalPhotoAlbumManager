@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import threading
 from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -16,6 +18,7 @@ from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 from .records import (
     AssetFaceAnnotation,
     FaceRecord,
+    IdentityGroupMember,
     ManualFaceRecord,
     PeopleGroupRecord,
     PersonRecord,
@@ -48,6 +51,8 @@ class FaceRepository:
     def __init__(self, db_path: Path, state_db_path: Path | None = None) -> None:
         self._db_path = Path(db_path)
         self._state_repo = FaceStateRepository(state_db_path) if state_db_path is not None else None
+        self._initialized = False
+        self._initialize_lock = threading.Lock()
 
     @property
     def db_path(self) -> Path:
@@ -58,11 +63,17 @@ class FaceRepository:
         return self._state_repo
 
     def initialize(self) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as conn:
-            self._create_schema(conn)
-        if self._state_repo is not None:
-            self._state_repo.initialize()
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(self._connect()) as conn:
+                self._create_schema(conn)
+            if self._state_repo is not None:
+                self._state_repo.initialize()
+            self._initialized = True
 
     def replace_all(
         self,
@@ -70,6 +81,8 @@ class FaceRepository:
         persons: list[PersonRecord],
         *,
         sync_runtime_state: bool = True,
+        operation_id: str | None = None,
+        operation_kind: str = "people_scan_commit",
     ) -> None:
         self.initialize()
         with closing(self._connect()) as conn:
@@ -130,15 +143,320 @@ class FaceRepository:
                 """,
                 person_rows,
             )
+            if operation_id is not None:
+                self._write_runtime_commit(
+                    conn,
+                    operation_id,
+                    {
+                        "operation_kind": operation_kind,
+                        "changed_asset_ids": sorted(
+                            {face.asset_id for face in faces if face.asset_id}
+                        ),
+                        "changed_person_ids": sorted(
+                            {person.person_id for person in persons if person.person_id}
+                        ),
+                    },
+                )
             conn.commit()
         if sync_runtime_state:
-            self.sync_runtime_state()
+            if operation_id is not None:
+                self.complete_runtime_state_sync(operation_id)
+            else:
+                self.sync_runtime_state()
 
     def sync_runtime_state(self) -> None:
         if self._state_repo is None:
             return
         self._sync_person_cover_defaults()
         self.refresh_all_group_assets()
+
+    def record_runtime_commit(
+        self,
+        operation_id: str,
+        payload: dict[str, object],
+        *,
+        state_synced: bool = False,
+    ) -> None:
+        if not operation_id:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            self._write_runtime_commit(
+                conn,
+                operation_id,
+                payload,
+                state_synced=state_synced,
+            )
+            conn.commit()
+
+    def add_manual_face(
+        self,
+        face: ManualFaceRecord,
+        *,
+        person_name: str | None = None,
+        operation_id: str | None = None,
+    ) -> None:
+        if self._state_repo is None:
+            raise RuntimeError("Manual faces require a People state repository.")
+        if operation_id is None:
+            self._state_repo.add_manual_face(face, person_name=person_name)
+            self.sync_runtime_state()
+            return
+        self.record_runtime_commit(
+            operation_id,
+            {
+                "operation_kind": "people_add_manual_face",
+                "manual_face": {
+                    "face_id": face.face_id,
+                    "asset_id": face.asset_id,
+                    "asset_rel": face.asset_rel,
+                    "box_x": face.box_x,
+                    "box_y": face.box_y,
+                    "box_w": face.box_w,
+                    "box_h": face.box_h,
+                    "thumbnail_path": face.thumbnail_path,
+                    "person_id": face.person_id,
+                    "created_at": face.created_at,
+                    "image_width": face.image_width,
+                    "image_height": face.image_height,
+                },
+                "person_name": person_name,
+                "changed_asset_ids": [face.asset_id],
+                "changed_person_ids": [face.person_id],
+            },
+        )
+        self.complete_runtime_state_sync(operation_id)
+
+    @staticmethod
+    def _write_runtime_commit(
+        conn: sqlite3.Connection,
+        operation_id: str,
+        payload: dict[str, object],
+        *,
+        state_synced: bool = False,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO people_runtime_commits (
+                operation_id, payload_json, state_synced, created_at, updated_at
+            ) VALUES (?, ?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(operation_id) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                state_synced = MAX(people_runtime_commits.state_synced, excluded.state_synced),
+                updated_at = datetime('now')
+            """,
+            (
+                operation_id,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                int(state_synced),
+            ),
+        )
+
+    def get_runtime_commit(self, operation_id: str) -> dict[str, object] | None:
+        if not operation_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json, state_synced
+                FROM people_runtime_commits WHERE operation_id = ?
+                """,
+                (operation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row["payload_json"] or "{}"))
+        payload["state_synced"] = bool(row["state_synced"])
+        return payload
+
+    def complete_runtime_state_sync(self, operation_id: str) -> dict[str, object] | None:
+        payload = self.get_runtime_commit(operation_id)
+        if payload is None or bool(payload.get("state_synced")):
+            return payload
+        operation_kind = str(payload.get("operation_kind") or "")
+        if self._state_repo is not None:
+            if operation_kind == "people_add_manual_face":
+                manual_payload = payload.get("manual_face")
+                if isinstance(manual_payload, dict):
+                    manual_face = ManualFaceRecord(**manual_payload)
+                    self._state_repo.add_manual_face(
+                        manual_face,
+                        person_name=(
+                            str(payload["person_name"])
+                            if payload.get("person_name") is not None
+                            else None
+                        ),
+                    )
+                    payload["changed_group_ids"] = (
+                        self._state_repo.list_group_ids_for_people(
+                            (manual_face.person_id,)
+                        )
+                    )
+            if operation_kind == "people_delete_face":
+                face_key = str(payload.get("face_key") or "")
+                face_id = str(payload.get("face_id") or "")
+                if not face_key and face_id:
+                    self._state_repo.delete_manual_face(face_id)
+            elif operation_kind == "people_move_face":
+                face_id = str(payload.get("face_id") or "")
+                target_person_id = str(payload.get("target_person_id") or "")
+                if face_id and target_person_id:
+                    manual_face = self._state_repo.get_manual_face(face_id)
+                    if manual_face is not None:
+                        self._state_repo.move_manual_face(face_id, target_person_id)
+            elif operation_kind == "people_move_face_new":
+                new_person_id = str(payload.get("new_person_id") or "")
+                new_name = payload.get("new_name")
+                face_id = str(payload.get("face_id") or "")
+                if face_id and new_person_id:
+                    manual_face = self._state_repo.get_manual_face(face_id)
+                    if manual_face is not None:
+                        self._state_repo.move_manual_face(face_id, new_person_id)
+            if operation_kind in {
+                "people_delete_face",
+                "people_move_face",
+                "people_move_face_new",
+            }:
+                mutation = self._finalize_face_mutation(
+                    changed_asset_ids=(
+                        str(value)
+                        for value in payload.get("changed_asset_ids", ())
+                        if value
+                    ),
+                    changed_person_ids=(
+                        str(value)
+                        for value in payload.get("changed_person_ids", ())
+                        if value
+                    ),
+                )
+                payload["changed_asset_ids"] = list(mutation.changed_asset_ids)
+                payload["changed_person_ids"] = list(mutation.changed_person_ids)
+                payload["changed_group_ids"] = list(mutation.changed_group_ids)
+                payload["person_redirects"] = mutation.person_redirects
+                payload["group_redirects"] = mutation.group_redirects
+
+            persons = self.get_all_person_records()
+            faces = self.get_all_faces()
+            if operation_kind in {
+                "people_scan_commit",
+                "people_delete_face",
+                "people_move_face",
+                "people_move_face_new",
+            }:
+                self._state_repo.sync_scan_results(persons, faces)
+            if operation_kind == "people_delete_face":
+                face_key = str(payload.get("face_key") or "")
+                if face_key:
+                    self._state_repo.reject_face_key(
+                        face_key,
+                        asset_id=str(payload.get("asset_id") or "") or None,
+                        asset_rel=str(payload.get("asset_rel") or "") or None,
+                    )
+                face_id = str(payload.get("face_id") or "")
+                if face_id:
+                    self._state_repo.clear_annotation_identity_assignment("person", face_id)
+            elif operation_kind == "people_move_face_new":
+                new_person_id = str(payload.get("new_person_id") or "")
+                new_name = payload.get("new_name")
+                if new_person_id and new_name:
+                    self._state_repo.rename_person(new_person_id, str(new_name))
+            elif operation_kind == "people_rename":
+                person_id = str(payload.get("person_id") or "")
+                if person_id:
+                    self._state_repo.rename_person(person_id, payload.get("name"))
+            elif operation_kind == "people_merge":
+                payload["group_redirects"] = self._complete_merge_state_sync(
+                    payload,
+                    persons,
+                )
+            if operation_kind in {
+                "people_delete_face",
+                "people_move_face",
+                "people_move_face_new",
+            }:
+                active_ids = {person.person_id for person in persons if person.person_id}
+                for person_id in (
+                    str(value)
+                    for value in payload.get("changed_person_ids", ())
+                    if value
+                ):
+                    if person_id not in active_ids:
+                        self._state_repo.remove_person_from_groups(person_id)
+                        self._state_repo.delete_person_state(person_id)
+            if operation_kind == "people_create_group":
+                group = self._state_repo.create_group(payload.get("members", ()))
+                if group is not None:
+                    payload["changed_group_ids"] = [group.group_id]
+                    payload["changed_person_ids"] = list(group.member_person_ids)
+                    payload["changed_asset_ids"] = (
+                        self.get_common_asset_ids_for_group(group.group_id)
+                    )
+            elif operation_kind == "people_delete_group":
+                self._state_repo.delete_group(str(payload.get("group_id") or ""))
+        self.sync_runtime_state()
+        persisted_payload = {
+            key: value for key, value in payload.items() if key != "state_synced"
+        }
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                UPDATE people_runtime_commits
+                SET payload_json = ?, state_synced = 1, updated_at = datetime('now')
+                WHERE operation_id = ?
+                """,
+                (
+                    json.dumps(
+                        persisted_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    operation_id,
+                ),
+            )
+            conn.commit()
+        payload["state_synced"] = True
+        return payload
+
+    def _complete_merge_state_sync(
+        self,
+        payload: dict[str, object],
+        persons: list[PersonRecord],
+    ) -> dict[str, str | None]:
+        if self._state_repo is None:
+            return {}
+        source_person_id = str(payload.get("source_person_id") or "")
+        target_person_id = str(payload.get("target_person_id") or "")
+        target = next(
+            (person for person in persons if person.person_id == target_person_id),
+            None,
+        )
+        if not source_person_id or not target_person_id:
+            return {}
+        center_embedding = (
+            target.center_embedding
+            if target is not None
+            else np.empty((0,), dtype=np.float32)
+        )
+        return self._state_repo.merge_persons(
+            source_person_id,
+            target_person_id,
+            center_embedding=center_embedding,
+            target_name=(
+                target.name if target is not None else payload.get("target_name")
+            ),
+            target_created_at=(
+                target.created_at
+                if target is not None
+                else str(payload.get("target_created_at") or _utc_now_iso())
+            ),
+            sample_count=(
+                max(int(target.sample_count), int(target.face_count))
+                if target is not None
+                else int(payload.get("sample_count") or 0)
+            ),
+            hidden_state=bool(payload.get("hidden_state", False)),
+        )
 
     def get_all_faces(self) -> list[FaceRecord]:
         self.initialize()
@@ -201,6 +519,35 @@ class FaceRepository:
                 """
             ).fetchall()
         return [self._person_from_row(row) for row in rows]
+
+    def get_person_name_map(
+        self,
+        person_ids: Iterable[str],
+    ) -> dict[str, str | None]:
+        """Return runtime display names for a bounded set of canonical people."""
+
+        unique_ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
+        if not unique_ids:
+            return {}
+        self.initialize()
+        result: dict[str, str | None] = {}
+        with closing(self._connect()) as conn:
+            for start in range(0, len(unique_ids), 500):
+                chunk = unique_ids[start : start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT person_id, name FROM persons "
+                    f"WHERE person_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                result.update(
+                    {
+                        str(row["person_id"]): row["name"]
+                        for row in rows
+                        if row["person_id"]
+                    }
+                )
+        return result
 
     def remove_faces_for_assets(
         self,
@@ -402,6 +749,22 @@ class FaceRepository:
         ordered = sorted(ordered, key=lambda item: item[1], reverse=True)
         return [asset_id for asset_id, _last_seen in ordered]
 
+    def get_asset_ids_by_people(
+        self,
+        person_ids: Iterable[str],
+    ) -> dict[str, list[str]]:
+        """Return effective identity assets for dashboard cards in one batch."""
+        target_ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
+        if not target_ids:
+            return {}
+        rows = self._effective_identity_asset_rows(
+            IdentityGroupMember("person", person_id) for person_id in target_ids
+        )
+        return {
+            person_id: sorted(rows.get(("person", person_id), {}))
+            for person_id in target_ids
+        }
+
     def get_person_ids_for_asset_ids(self, asset_ids: Iterable[str]) -> list[str]:
         ids = [str(asset_id) for asset_id in asset_ids if asset_id]
         if not ids:
@@ -458,6 +821,17 @@ class FaceRepository:
             rejected_face_keys = self._state_repo.get_rejected_face_keys(
                 row["face_key"] for row in rows if row["face_key"]
             )
+        canonical = self._canonical_annotation_identities(
+            str(row["person_id"]) for row in rows if row["person_id"]
+        )
+        assignments = (
+            self._state_repo.get_annotation_identity_assignments(
+                ("person", str(row["face_id"])) for row in rows if row["face_id"]
+            )
+            if self._state_repo is not None
+            else {}
+        )
+        assigned_canonical = self._canonical_identity_refs(assignments.values())
         annotations = [
             AssetFaceAnnotation(
                 face_id=str(row["face_id"]),
@@ -475,12 +849,36 @@ class FaceRepository:
                     else None
                 ),
                 is_manual=False,
+                source_identity_id=(
+                    str(row["person_id"]) if row["person_id"] else None
+                ),
+                canonical_identity_kind=(
+                    assigned_canonical[assignments[("person", str(row["face_id"]))]][0]
+                    if ("person", str(row["face_id"])) in assignments
+                    else canonical[str(row["person_id"])][0]
+                    if row["person_id"] else "person"
+                ),
+                canonical_identity_id=(
+                    assigned_canonical[assignments[("person", str(row["face_id"]))]][1]
+                    if ("person", str(row["face_id"])) in assignments
+                    else canonical[str(row["person_id"])][1]
+                    if row["person_id"] else None
+                ),
+                canonical_display_name=(
+                    assigned_canonical[assignments[("person", str(row["face_id"]))]][2]
+                    if ("person", str(row["face_id"])) in assignments
+                    else canonical[str(row["person_id"])][2]
+                    if row["person_id"] else None
+                ),
             )
             for row in rows
             if row["face_id"] and row["face_key"] not in rejected_face_keys
         ]
         if self._state_repo is not None:
             manual_faces = self._state_repo.get_manual_faces_for_asset(asset_id)
+            manual_canonical = self._canonical_annotation_identities(
+                face.person_id for face in manual_faces
+            )
             names = self._state_repo.get_profile_name_map(
                 face.person_id for face in manual_faces
             )
@@ -524,24 +922,124 @@ class FaceRepository:
                         else None
                     ),
                     is_manual=True,
+                    source_identity_id=face.person_id,
+                    canonical_identity_kind=manual_canonical[face.person_id][0],
+                    canonical_identity_id=manual_canonical[face.person_id][1],
+                    canonical_display_name=manual_canonical[face.person_id][2],
                 )
                 for face in manual_faces
             )
         annotations.sort(key=lambda face: (face.box_x, face.box_y, face.face_id))
         return annotations
 
-    def rename_person(self, person_id: str, name_or_none: str | None) -> None:
+    def _canonical_annotation_identities(
+        self,
+        person_ids: Iterable[str],
+    ) -> dict[str, tuple[str, str, str | None]]:
+        source_ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
+        if not source_ids:
+            return {}
+        resolved = self._canonical_identity_refs(
+            ("person", source_id) for source_id in source_ids
+        )
+        return {
+            source_id: resolved[("person", source_id)] for source_id in source_ids
+        }
+
+    def _canonical_identity_refs(
+        self,
+        refs: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], tuple[str, str, str | None]]:
+        source_refs = tuple(
+            dict.fromkeys(
+                (str(kind), str(entity_id))
+                for kind, entity_id in refs
+                if kind in {"person", "pet"} and entity_id
+            )
+        )
+        if not source_refs:
+            return {}
+        redirect_map: dict[tuple[str, str], tuple[str, str]] = {}
+        if self._state_repo is not None:
+            redirect_map = {
+                (redirect.source_kind, redirect.source_id): (
+                    redirect.target_kind,
+                    redirect.target_id,
+                )
+                for redirect in self._state_repo.get_identity_redirects()
+            }
+        resolved = {
+            source_ref: _resolve_identity_redirect(*source_ref, redirect_map)
+            for source_ref in source_refs
+        }
+        person_targets = [
+            entity_id for kind, entity_id in resolved.values() if kind == "person"
+        ]
+        person_names = (
+            self._state_repo.get_profile_name_map(person_targets)
+            if self._state_repo is not None
+            else {}
+        )
+        pet_names: dict[str, str | None] = {}
+        pet_targets = [entity_id for kind, entity_id in resolved.values() if kind == "pet"]
+        pet_state_path = self._db_path.parent.parent / "pets" / "pet_state.db"
+        if pet_targets and pet_state_path.exists():
+            from iPhoto.pets.state_repository import PetStateRepository
+
+            pet_names = PetStateRepository(pet_state_path).get_profile_name_map(pet_targets)
+        return {
+            source_ref: (
+                kind,
+                entity_id,
+                person_names.get(entity_id) if kind == "person" else pet_names.get(entity_id),
+            )
+            for source_ref, (kind, entity_id) in resolved.items()
+        }
+
+    def rename_person(
+        self,
+        person_id: str,
+        name_or_none: str | None,
+        *,
+        operation_id: str | None = None,
+    ) -> bool:
+        if not person_id:
+            return False
         self.initialize()
         normalized_name = _normalize_name(name_or_none)
         updated_at = _utc_now_iso()
         with closing(self._connect()) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM persons WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+            if exists is None and (
+                self._state_repo is None
+                or self._state_repo.get_profile(person_id) is None
+            ):
+                return False
             conn.execute(
                 "UPDATE persons SET name = ?, updated_at = ? WHERE person_id = ?",
                 (normalized_name, updated_at, person_id),
             )
+            if operation_id is not None:
+                self._write_runtime_commit(
+                    conn,
+                    operation_id,
+                    {
+                        "operation_kind": "people_rename",
+                        "person_id": person_id,
+                        "name": normalized_name,
+                        "changed_asset_ids": self.get_asset_ids_by_person(person_id),
+                        "changed_person_ids": [person_id],
+                    },
+                )
             conn.commit()
-        if self._state_repo is not None:
+        if operation_id is not None:
+            self.complete_runtime_state_sync(operation_id)
+        elif self._state_repo is not None:
             self._state_repo.rename_person(person_id, normalized_name)
+        return True
 
     def set_person_cover(self, person_id: str, face_id: str) -> bool:
         if self._state_repo is None or not person_id or not face_id:
@@ -598,6 +1096,8 @@ class FaceRepository:
         self,
         source_person_id: str,
         target_person_id: str,
+        *,
+        operation_id: str | None = None,
     ) -> tuple[bool, dict[str, str | None]]:
         if not source_person_id or not target_person_id or source_person_id == target_person_id:
             return False, {}
@@ -666,21 +1166,29 @@ class FaceRepository:
             source_person = person_map.get(source_person_id)
             target_profile = profile_map.get(target_person_id)
             source_profile = profile_map.get(source_person_id)
-            target_name = None
+            target_name = next(
+                (
+                    str(value)
+                    for value in (
+                        target_person["name"] if target_person is not None else None,
+                        target_profile.name if target_profile is not None else None,
+                        source_person["name"] if source_person is not None else None,
+                        source_profile.name if source_profile is not None else None,
+                    )
+                    if value is not None and str(value).strip()
+                ),
+                None,
+            )
             target_created_at = _utc_now_iso()
             if target_person is not None:
-                target_name = target_person["name"]
                 target_created_at = target_person["created_at"]
             elif target_profile is not None:
-                target_name = target_profile.name
                 target_created_at = target_profile.created_at
             elif manual_target_faces:
                 target_created_at = min(face.created_at for face in manual_target_faces)
             elif source_person is not None:
-                target_name = source_person["name"]
                 target_created_at = source_person["created_at"]
             elif source_profile is not None:
-                target_name = source_profile.name
                 target_created_at = source_profile.created_at
             elif manual_source_faces:
                 target_created_at = min(face.created_at for face in manual_source_faces)
@@ -731,9 +1239,36 @@ class FaceRepository:
             else:
                 conn.execute("DELETE FROM persons WHERE person_id = ?", (target_person_id,))
             conn.execute("DELETE FROM persons WHERE person_id = ?", (source_person_id,))
+            if operation_id is not None:
+                self._write_runtime_commit(
+                    conn,
+                    operation_id,
+                    {
+                        "operation_kind": "people_merge",
+                        "source_person_id": source_person_id,
+                        "target_person_id": target_person_id,
+                        "target_name": target_name,
+                        "target_created_at": target_created_at,
+                        "sample_count": len(merged_faces),
+                        "hidden_state": source_hidden,
+                        "changed_asset_ids": sorted(
+                            {face.asset_id for face in merged_faces if face.asset_id}
+                        ),
+                        "changed_person_ids": [source_person_id, target_person_id],
+                    },
+                )
             conn.commit()
 
-        if self._state_repo is not None:
+        if operation_id is not None:
+            runtime_commit = self.complete_runtime_state_sync(operation_id)
+            if runtime_commit is not None:
+                group_redirects = {
+                    str(key): (str(value) if value is not None else None)
+                    for key, value in dict(
+                        runtime_commit.get("group_redirects", {})
+                    ).items()
+                }
+        elif self._state_repo is not None:
             group_redirects = self._state_repo.merge_persons(
                 source_person_id,
                 target_person_id,
@@ -747,7 +1282,12 @@ class FaceRepository:
             self.refresh_all_group_assets()
         return True, group_redirects
 
-    def delete_face(self, face_id: str) -> FaceMutationResult | None:
+    def delete_face(
+        self,
+        face_id: str,
+        *,
+        operation_id: str | None = None,
+    ) -> FaceMutationResult | None:
         if not face_id:
             return None
         self.initialize()
@@ -768,33 +1308,91 @@ class FaceRepository:
                 if not face.person_id:
                     return None
                 conn.execute("UPDATE faces SET person_id = NULL WHERE face_id = ?", (face_id,))
+                if operation_id is not None:
+                    self._write_runtime_commit(
+                        conn,
+                        operation_id,
+                        {
+                            "operation_kind": "people_delete_face",
+                            "face_id": face.face_id,
+                            "face_key": face.face_key,
+                            "asset_id": face.asset_id,
+                            "asset_rel": face.asset_rel,
+                            "changed_asset_ids": [face.asset_id],
+                            "changed_person_ids": [face.person_id],
+                        },
+                    )
                 conn.commit()
-                if self._state_repo is not None:
+                if operation_id is not None:
+                    runtime_commit = self.complete_runtime_state_sync(operation_id)
+                    return self._mutation_result_from_commit(runtime_commit)
+                elif self._state_repo is not None:
+                    self._state_repo.clear_annotation_identity_assignment(
+                        "person", face_id
+                    )
                     self._state_repo.reject_face_key(
                         face.face_key,
                         asset_id=face.asset_id,
                         asset_rel=face.asset_rel,
                     )
-                return self._finalize_face_mutation(
+                result = self._finalize_face_mutation(
                     changed_asset_ids=(face.asset_id,),
                     changed_person_ids=(face.person_id,),
                 )
+                self.refresh_all_group_assets()
+                return result
 
         if self._state_repo is None:
             return None
         manual_face = self._state_repo.get_manual_face(face_id)
         if manual_face is None:
             return None
-        self._state_repo.delete_manual_face(face_id)
-        return self._finalize_face_mutation(
+        if operation_id is not None:
+            self.record_runtime_commit(
+                operation_id,
+                {
+                    "operation_kind": "people_delete_face",
+                    "face_id": face_id,
+                    "asset_id": manual_face.asset_id,
+                    "changed_asset_ids": [manual_face.asset_id],
+                    "changed_person_ids": [manual_face.person_id],
+                },
+            )
+            runtime_commit = self.complete_runtime_state_sync(operation_id)
+            return self._mutation_result_from_commit(runtime_commit)
+        else:
+            self._state_repo.clear_annotation_identity_assignment("person", face_id)
+            self._state_repo.delete_manual_face(face_id)
+        result = self._finalize_face_mutation(
             changed_asset_ids=(manual_face.asset_id,),
             changed_person_ids=(manual_face.person_id,),
+        )
+        self.refresh_all_group_assets()
+        return result
+
+    def has_face(self, face_id: str) -> bool:
+        if not face_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM faces WHERE face_id = ?",
+                (face_id,),
+            ).fetchone()
+        return bool(
+            row is not None
+            or (
+                self._state_repo is not None
+                and self._state_repo.get_manual_face(face_id) is not None
+            )
         )
 
     def move_face_to_person(
         self,
         face_id: str,
         target_person_id: str,
+        *,
+        operation_id: str | None = None,
     ) -> FaceMutationResult | None:
         if not face_id or not target_person_id:
             return None
@@ -819,8 +1417,23 @@ class FaceRepository:
                     "UPDATE faces SET person_id = ? WHERE face_id = ?",
                     (target_person_id, face_id),
                 )
+                if operation_id is not None:
+                    self._write_runtime_commit(
+                        conn,
+                        operation_id,
+                        {
+                            "operation_kind": "people_move_face",
+                            "face_id": face.face_id,
+                            "asset_id": face.asset_id,
+                            "changed_asset_ids": [face.asset_id],
+                            "changed_person_ids": [face.person_id, target_person_id],
+                        },
+                    )
                 conn.commit()
-                if self._state_repo is not None:
+                if operation_id is not None:
+                    runtime_commit = self.complete_runtime_state_sync(operation_id)
+                    return self._mutation_result_from_commit(runtime_commit)
+                elif self._state_repo is not None:
                     self._state_repo.assign_face_key(
                         face.face_key,
                         target_person_id,
@@ -837,7 +1450,21 @@ class FaceRepository:
         manual_face = self._state_repo.get_manual_face(face_id)
         if manual_face is None or manual_face.person_id == target_person_id:
             return None
-        if not self._state_repo.move_manual_face(face_id, target_person_id):
+        if operation_id is not None:
+            self.record_runtime_commit(
+                operation_id,
+                {
+                    "operation_kind": "people_move_face",
+                    "face_id": face_id,
+                    "asset_id": manual_face.asset_id,
+                    "target_person_id": target_person_id,
+                    "changed_asset_ids": [manual_face.asset_id],
+                    "changed_person_ids": [manual_face.person_id, target_person_id],
+                },
+            )
+            runtime_commit = self.complete_runtime_state_sync(operation_id)
+            return self._mutation_result_from_commit(runtime_commit)
+        elif not self._state_repo.move_manual_face(face_id, target_person_id):
             return None
         return self._finalize_face_mutation(
             changed_asset_ids=(manual_face.asset_id,),
@@ -849,6 +1476,8 @@ class FaceRepository:
         face_id: str,
         new_person_id: str,
         new_name: str,
+        *,
+        operation_id: str | None = None,
     ) -> FaceMutationResult | None:
         normalized_name = _normalize_name(new_name)
         if not face_id or not new_person_id or not normalized_name:
@@ -875,8 +1504,25 @@ class FaceRepository:
                     "UPDATE faces SET person_id = ? WHERE face_id = ?",
                     (new_person_id, face_id),
                 )
+                if operation_id is not None:
+                    self._write_runtime_commit(
+                        conn,
+                        operation_id,
+                        {
+                            "operation_kind": "people_move_face_new",
+                            "face_id": face.face_id,
+                            "asset_id": face.asset_id,
+                            "new_person_id": new_person_id,
+                            "new_name": normalized_name,
+                            "changed_asset_ids": [face.asset_id],
+                            "changed_person_ids": [face.person_id, new_person_id],
+                        },
+                    )
                 conn.commit()
-                if self._state_repo is not None:
+                if operation_id is not None:
+                    runtime_commit = self.complete_runtime_state_sync(operation_id)
+                    return self._mutation_result_from_commit(runtime_commit)
+                elif self._state_repo is not None:
                     self._state_repo.assign_face_key(
                         face.face_key,
                         new_person_id,
@@ -900,23 +1546,61 @@ class FaceRepository:
         manual_face = self._state_repo.get_manual_face(face_id)
         if manual_face is None or manual_face.person_id == new_person_id:
             return None
-        self._state_repo.upsert_person_profile(
-            new_person_id,
-            name_or_none=normalized_name,
-            created_at=manual_face.created_at,
-        )
-        if not self._state_repo.move_manual_face(face_id, new_person_id):
-            return None
+        if operation_id is not None:
+            self.record_runtime_commit(
+                operation_id,
+                {
+                    "operation_kind": "people_move_face_new",
+                    "face_id": face_id,
+                    "asset_id": manual_face.asset_id,
+                    "new_person_id": new_person_id,
+                    "new_name": normalized_name,
+                    "created_at": manual_face.created_at,
+                    "changed_asset_ids": [manual_face.asset_id],
+                    "changed_person_ids": [manual_face.person_id, new_person_id],
+                },
+            )
+            runtime_commit = self.complete_runtime_state_sync(operation_id)
+            return self._mutation_result_from_commit(runtime_commit)
+        else:
+            self._state_repo.upsert_person_profile(
+                new_person_id,
+                name_or_none=normalized_name,
+                created_at=manual_face.created_at,
+            )
+            if not self._state_repo.move_manual_face(face_id, new_person_id):
+                return None
         return self._finalize_face_mutation(
             changed_asset_ids=(manual_face.asset_id,),
             changed_person_ids=(manual_face.person_id, new_person_id),
         )
 
-    def create_group(self, member_person_ids: Iterable[object]) -> PeopleGroupRecord | None:
+    def create_group(
+        self,
+        member_person_ids: Iterable[object],
+        *,
+        operation_id: str | None = None,
+    ) -> PeopleGroupRecord | None:
         if self._state_repo is None:
             return None
         self.initialize()
-        group = self._state_repo.create_group(member_person_ids)
+        members = tuple(member_person_ids)
+        if operation_id is not None:
+            self.record_runtime_commit(
+                operation_id,
+                {
+                    "operation_kind": "people_create_group",
+                    "members": [
+                        member.key if hasattr(member, "key") else str(member)
+                        for member in members
+                        if member
+                    ],
+                    "changed_asset_ids": [],
+                    "changed_person_ids": [],
+                },
+            )
+            self.complete_runtime_state_sync(operation_id)
+        group = self._state_repo.create_group(members)
         if group is not None:
             self.refresh_group_assets(group.group_id)
         return group
@@ -927,7 +1611,12 @@ class FaceRepository:
         self.initialize()
         return self._state_repo.list_groups()
 
-    def delete_group(self, group_id: str) -> tuple[bool, PeopleGroupRecord | None, list[str]]:
+    def delete_group(
+        self,
+        group_id: str,
+        *,
+        operation_id: str | None = None,
+    ) -> tuple[bool, PeopleGroupRecord | None, list[str]]:
         if self._state_repo is None or not group_id:
             return False, None, []
         self.initialize()
@@ -935,7 +1624,21 @@ class FaceRepository:
         if group is None:
             return False, None, []
         asset_ids = self.get_common_asset_ids_for_group(group_id)
-        deleted_group = self._state_repo.delete_group(group_id)
+        if operation_id is not None:
+            self.record_runtime_commit(
+                operation_id,
+                {
+                    "operation_kind": "people_delete_group",
+                    "group_id": group_id,
+                    "changed_asset_ids": list(asset_ids),
+                    "changed_person_ids": list(group.member_person_ids),
+                    "changed_group_ids": [group_id],
+                },
+            )
+            self.complete_runtime_state_sync(operation_id)
+            deleted_group = group if self._state_repo.get_group(group_id) is None else None
+        else:
+            deleted_group = self._state_repo.delete_group(group_id)
         if deleted_group is None:
             return False, None, []
         return True, deleted_group, asset_ids
@@ -1010,12 +1713,12 @@ class FaceRepository:
         group_members = _unique_group_members(members)
         if len(group_members) < 2:
             return []
-        per_member_assets: list[dict[str, str]] = []
-        for member in group_members:
-            if member.kind == "person":
-                per_member_assets.append(self._person_asset_rows(member.entity_id))
-            elif member.kind == "pet":
-                per_member_assets.append(self._pet_asset_rows(member.entity_id))
+        effective_rows = self._effective_identity_asset_rows(group_members)
+        per_member_assets = [
+            effective_rows.get((member.kind, member.entity_id), {})
+            for member in group_members
+            if member.kind in {"person", "pet"}
+        ]
         if not per_member_assets or any(not assets for assets in per_member_assets):
             return []
         common_ids = set(per_member_assets[0])
@@ -1032,21 +1735,9 @@ class FaceRepository:
     def _person_asset_rows(self, person_id: str) -> dict[str, str]:
         if not person_id:
             return {}
-        assets = self._direct_person_asset_rows(person_id)
-        if self._state_repo is not None:
-            for redirect in self._state_repo.get_identity_redirects():
-                if redirect.target_kind != "person" or redirect.target_id != person_id:
-                    continue
-                source_assets = (
-                    self._direct_person_asset_rows(redirect.source_id)
-                    if redirect.source_kind == "person"
-                    else self._direct_pet_asset_rows(redirect.source_id)
-                )
-                for asset_id, last_seen in source_assets.items():
-                    previous = assets.get(asset_id)
-                    if previous is None or last_seen > previous:
-                        assets[asset_id] = last_seen
-        return assets
+        return self._effective_identity_asset_rows(
+            (IdentityGroupMember("person", person_id),)
+        ).get(("person", person_id), {})
 
     def _direct_person_asset_rows(self, person_id: str) -> dict[str, str]:
         if not person_id:
@@ -1077,21 +1768,218 @@ class FaceRepository:
     def _pet_asset_rows(self, pet_id: str) -> dict[str, str]:
         if not pet_id:
             return {}
-        assets = self._direct_pet_asset_rows(pet_id)
-        if self._state_repo is not None:
-            for redirect in self._state_repo.get_identity_redirects():
-                if redirect.target_kind != "pet" or redirect.target_id != pet_id:
-                    continue
-                source_assets = (
-                    self._direct_person_asset_rows(redirect.source_id)
-                    if redirect.source_kind == "person"
-                    else self._direct_pet_asset_rows(redirect.source_id)
-                )
-                for asset_id, last_seen in source_assets.items():
-                    previous = assets.get(asset_id)
-                    if previous is None or last_seen > previous:
-                        assets[asset_id] = last_seen
-        return assets
+        return self._effective_identity_asset_rows(
+            (IdentityGroupMember("pet", pet_id),)
+        ).get(("pet", pet_id), {})
+
+    def get_asset_ids_by_pets_effective(
+        self, pet_ids: Iterable[str]
+    ) -> dict[str, list[str]]:
+        target_ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
+        rows = self._effective_identity_asset_rows(
+            IdentityGroupMember("pet", pet_id) for pet_id in target_ids
+        )
+        return {
+            pet_id: sorted(rows.get(("pet", pet_id), {}))
+            for pet_id in target_ids
+        }
+
+    def _effective_identity_asset_rows(
+        self, members: Iterable[IdentityGroupMember]
+    ) -> dict[tuple[str, str], dict[str, str]]:
+        """Aggregate assets by effective identity, honoring assignment before redirect."""
+
+        requested = tuple(
+            dict.fromkeys(
+                (member.kind, member.entity_id)
+                for member in members
+                if member.kind in {"person", "pet"} and member.entity_id
+            )
+        )
+        result = {identity: {} for identity in requested}
+        if not requested:
+            return result
+        self.initialize()
+        redirects = self._state_repo.get_identity_redirects() if self._state_repo else []
+        redirected_sources = {
+            (redirect.source_kind, redirect.source_id) for redirect in redirects
+        }
+        raw_to_target = {
+            identity: identity
+            for identity in requested
+            if identity not in redirected_sources
+        }
+        for redirect in redirects:
+            target = (redirect.target_kind, redirect.target_id)
+            if target in result:
+                raw_to_target[(redirect.source_kind, redirect.source_id)] = target
+
+        direct_rows: dict[tuple[str, str], tuple[str, str]] = {}
+        person_ids = tuple(identity_id for kind, identity_id in raw_to_target if kind == "person")
+        if person_ids:
+            with closing(self._connect()) as conn:
+                for start in range(0, len(person_ids), 900):
+                    chunk = person_ids[start : start + 900]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    for row in conn.execute(
+                        f"""
+                        SELECT face_id, person_id, asset_id, detected_at
+                        FROM faces WHERE person_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall():
+                        if row["face_id"] and row["person_id"] and row["asset_id"]:
+                            direct_rows[("person", str(row["face_id"]))] = (
+                                str(row["asset_id"]), str(row["detected_at"] or "")
+                            )
+            if self._state_repo is not None:
+                for face in self._state_repo.get_manual_faces_for_persons(person_ids):
+                    direct_rows[("person", face.face_id)] = (face.asset_id, face.created_at)
+
+        pet_ids = tuple(identity_id for kind, identity_id in raw_to_target if kind == "pet")
+        pet_db_path = self._db_path.parent.parent / "pets" / "pet_index.db"
+        if pet_ids and pet_db_path.exists():
+            with closing(connect_sqlite(pet_db_path, check_same_thread=False)) as conn:
+                conn.row_factory = sqlite3.Row
+                configure_sqlite_connection(conn, pet_db_path, foreign_keys=True, wal=True)
+                for start in range(0, len(pet_ids), 900):
+                    chunk = pet_ids[start : start + 900]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    for row in conn.execute(
+                        f"""
+                        SELECT detection_id, pet_id, asset_id, detected_at
+                        FROM pet_detections WHERE pet_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall():
+                        if row["detection_id"] and row["pet_id"] and row["asset_id"]:
+                            direct_rows[("pet", str(row["detection_id"]))] = (
+                                str(row["asset_id"]), str(row["detected_at"] or "")
+                            )
+
+        assignments = (
+            self._state_repo.get_annotation_identity_assignments(direct_rows)
+            if self._state_repo is not None else {}
+        )
+        source_identity_by_ref: dict[tuple[str, str], tuple[str, str]] = {}
+        if direct_rows:
+            face_ref_ids = {ref[1] for ref in direct_rows if ref[0] == "person"}
+            pet_ref_ids = {ref[1] for ref in direct_rows if ref[0] == "pet"}
+            if face_ref_ids:
+                with closing(self._connect()) as conn:
+                    for start in range(0, len(face_ref_ids), 900):
+                        chunk = tuple(face_ref_ids)[start : start + 900]
+                        placeholders = ", ".join("?" for _ in chunk)
+                        for row in conn.execute(
+                            f"""
+                            SELECT face_id, person_id
+                            FROM faces WHERE face_id IN ({placeholders})
+                            """,
+                            chunk,
+                        ).fetchall():
+                            if row["person_id"]:
+                                source_identity_by_ref[("person", str(row["face_id"]))] = (
+                                    "person", str(row["person_id"])
+                                )
+                if self._state_repo is not None:
+                    for face in self._state_repo.get_manual_faces():
+                        if face.face_id in face_ref_ids:
+                            source_identity_by_ref[("person", face.face_id)] = (
+                                "person", face.person_id
+                            )
+            if pet_ref_ids and pet_db_path.exists():
+                with closing(connect_sqlite(pet_db_path, check_same_thread=False)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    configure_sqlite_connection(conn, pet_db_path, foreign_keys=True, wal=True)
+                    for start in range(0, len(pet_ref_ids), 900):
+                        chunk = tuple(pet_ref_ids)[start : start + 900]
+                        placeholders = ", ".join("?" for _ in chunk)
+                        for row in conn.execute(
+                            f"""
+                            SELECT detection_id, pet_id
+                            FROM pet_detections
+                            WHERE detection_id IN ({placeholders})
+                            """,
+                            chunk,
+                        ).fetchall():
+                            if row["pet_id"]:
+                                source_identity_by_ref[("pet", str(row["detection_id"]))] = (
+                                    "pet", str(row["pet_id"])
+                                )
+
+        for ref, (asset_id, last_seen) in direct_rows.items():
+            if ref in assignments:
+                continue
+            target = raw_to_target.get(source_identity_by_ref.get(ref, ("", "")))
+            if target in result:
+                previous = result[target].get(asset_id)
+                if previous is None or last_seen > previous:
+                    result[target][asset_id] = last_seen
+
+        targeted = (
+            self._state_repo.get_annotation_identity_assignments_for_targets(requested)
+            if self._state_repo is not None else {}
+        )
+        missing_refs = tuple(ref for ref in targeted if ref not in direct_rows)
+        if missing_refs:
+            direct_rows.update(self._annotation_asset_rows(missing_refs, pet_db_path))
+        for ref, target in targeted.items():
+            row = direct_rows.get(ref)
+            if row is None or target not in result:
+                continue
+            asset_id, last_seen = row
+            previous = result[target].get(asset_id)
+            if previous is None or last_seen > previous:
+                result[target][asset_id] = last_seen
+        return result
+
+    def _annotation_asset_rows(
+        self,
+        refs: Iterable[tuple[str, str]],
+        pet_db_path: Path,
+    ) -> dict[tuple[str, str], tuple[str, str]]:
+        requested = tuple(dict.fromkeys(refs))
+        result: dict[tuple[str, str], tuple[str, str]] = {}
+        face_ids = tuple(annotation_id for kind, annotation_id in requested if kind == "person")
+        if face_ids:
+            with closing(self._connect()) as conn:
+                for start in range(0, len(face_ids), 900):
+                    chunk = face_ids[start : start + 900]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    for row in conn.execute(
+                        f"""
+                        SELECT face_id, asset_id, detected_at
+                        FROM faces WHERE face_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall():
+                        result[("person", str(row["face_id"]))] = (
+                            str(row["asset_id"]), str(row["detected_at"] or "")
+                        )
+            if self._state_repo is not None:
+                face_id_set = set(face_ids)
+                for face in self._state_repo.get_manual_faces():
+                    if face.face_id in face_id_set:
+                        result[("person", face.face_id)] = (face.asset_id, face.created_at)
+        detection_ids = tuple(annotation_id for kind, annotation_id in requested if kind == "pet")
+        if detection_ids and pet_db_path.exists():
+            with closing(connect_sqlite(pet_db_path, check_same_thread=False)) as conn:
+                conn.row_factory = sqlite3.Row
+                configure_sqlite_connection(conn, pet_db_path, foreign_keys=True, wal=True)
+                for start in range(0, len(detection_ids), 900):
+                    chunk = detection_ids[start : start + 900]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    for row in conn.execute(
+                        f"""
+                        SELECT detection_id, asset_id, detected_at
+                        FROM pet_detections WHERE detection_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall():
+                        result[("pet", str(row["detection_id"]))] = (
+                            str(row["asset_id"]), str(row["detected_at"] or "")
+                        )
+        return result
 
     def _direct_pet_asset_rows(self, pet_id: str) -> dict[str, str]:
         if not pet_id:
@@ -1117,6 +2005,37 @@ class FaceRepository:
             for row in rows
             if row["asset_id"]
         }
+
+    def _direct_pet_asset_rows_by_ids(
+        self,
+        pet_ids: Iterable[str],
+    ) -> dict[str, dict[str, str]]:
+        ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
+        result = {pet_id: {} for pet_id in ids}
+        pet_db_path = self._db_path.parent.parent / "pets" / "pet_index.db"
+        if not ids or not pet_db_path.exists():
+            return result
+        with closing(connect_sqlite(pet_db_path, check_same_thread=False)) as conn:
+            conn.row_factory = sqlite3.Row
+            configure_sqlite_connection(conn, pet_db_path, foreign_keys=True, wal=True)
+            for start in range(0, len(ids), 900):
+                chunk = ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT pet_id, asset_id, MAX(detected_at) AS last_detected_at
+                    FROM pet_detections
+                    WHERE pet_id IN ({placeholders})
+                    GROUP BY pet_id, asset_id
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    if row["pet_id"] and row["asset_id"]:
+                        result[str(row["pet_id"])][str(row["asset_id"])] = str(
+                            row["last_detected_at"] or ""
+                        )
+        return result
 
     def get_common_asset_ids_for_group(self, group_id: str) -> list[str]:
         if self._state_repo is None:
@@ -1227,6 +2146,32 @@ class FaceRepository:
             changed_person_ids=person_ids,
             changed_group_ids=tuple(sorted(group_id for group_id in changed_group_ids if group_id)),
             group_redirects=group_redirects,
+        )
+
+    @staticmethod
+    def _mutation_result_from_commit(
+        payload: dict[str, object] | None,
+    ) -> FaceMutationResult:
+        values = payload or {}
+        return FaceMutationResult(
+            changed_asset_ids=tuple(
+                str(value) for value in values.get("changed_asset_ids", ()) if value
+            ),
+            changed_person_ids=tuple(
+                str(value) for value in values.get("changed_person_ids", ()) if value
+            ),
+            changed_group_ids=tuple(
+                str(value) for value in values.get("changed_group_ids", ()) if value
+            ),
+            person_redirects={
+                str(key): str(value)
+                for key, value in dict(values.get("person_redirects", {})).items()
+                if value is not None
+            },
+            group_redirects={
+                str(key): (str(value) if value is not None else None)
+                for key, value in dict(values.get("group_redirects", {})).items()
+            },
         )
 
     def _rebuild_runtime_person(self, person_id: str) -> bool:
@@ -1431,6 +2376,17 @@ class FaceRepository:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_face_key ON faces(face_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_asset_id ON faces(asset_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_asset_rel ON faces(asset_rel)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS people_runtime_commits (
+                operation_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                state_synced INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     @staticmethod
     def _face_from_row(row: sqlite3.Row) -> FaceRecord:
@@ -1484,3 +2440,16 @@ class FaceRepository:
         }
         if column_name not in columns:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
+def _resolve_identity_redirect(
+    source_kind: str,
+    source_id: str,
+    redirects: dict[tuple[str, str], tuple[str, str]],
+) -> tuple[str, str]:
+    cursor = (source_kind, source_id)
+    visited: set[tuple[str, str]] = set()
+    while cursor in redirects and cursor not in visited:
+        visited.add(cursor)
+        cursor = redirects[cursor]
+    return cursor

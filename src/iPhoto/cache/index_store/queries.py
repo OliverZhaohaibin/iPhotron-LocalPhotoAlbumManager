@@ -331,12 +331,14 @@ class QueryBuilder:
         params: List[Any] = []
 
         if collection_query.min_thumbnail_state:
-            where_clauses.append("thumbnail_state = ?")
-            params.append(collection_query.min_thumbnail_state)
             if collection_query.min_thumbnail_state == "ready":
+                where_clauses.append("thumbnail_state IN ('ready', 'stale')")
                 where_clauses.append(
                     "TRIM(COALESCE(thumb_cache_key, '')) != ''"
                 )
+            else:
+                where_clauses.append("thumbnail_state = ?")
+                params.append(collection_query.min_thumbnail_state)
 
         if collection_query.collection_type == CollectionType.ALBUM or album_path:
             album_where, album_params = QueryBuilder.build_album_filter(

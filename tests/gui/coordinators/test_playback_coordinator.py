@@ -1717,6 +1717,30 @@ def test_disabled_face_names_never_start_overlay_query() -> None:
     coordinator._recognition_query_service.load_overlay.assert_not_called()
 
 
+def test_recognition_overlay_worker_loads_identity_candidates_with_annotations() -> None:
+    snapshot = SimpleNamespace(
+        asset_id="asset-photo",
+        faces=(),
+        pets=(),
+        candidates=(SimpleNamespace(identity_key="person:person-a", name="Alice"),),
+    )
+    query_service = Mock(load_overlay=Mock(return_value=snapshot))
+    signals = Mock()
+    worker = playback_coordinator_module._RecognitionOverlayWorker(
+        request_generation=8,
+        still_generation=4,
+        asset_id="asset-photo",
+        query_service=query_service,
+        signals=signals,
+    )
+
+    worker.run()
+
+    query_service.load_overlay.assert_called_once_with("asset-photo")
+    signals.ready.emit.assert_called_once_with(8, 4, snapshot)
+    signals.failed.emit.assert_not_called()
+
+
 def test_stale_overlay_generation_is_not_applied() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._overlay_request_generation = 8

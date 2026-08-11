@@ -130,7 +130,7 @@ class _RecognitionOverlayWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - worker thread
         try:
-            snapshot = self._query_service.load_asset_annotations(self._asset_id)
+            snapshot = self._query_service.load_overlay(self._asset_id)
         except Exception as exc:  # noqa: BLE001 - async optional-domain boundary
             self._signals.failed.emit(self._request_generation, exc)
             return

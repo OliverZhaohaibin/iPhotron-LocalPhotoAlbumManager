@@ -533,51 +533,87 @@ class PetIndexCoordinator(QObject):
             previous_version = repository.get_scan_metadata("clustering_pipeline_version")
             if previous_version == clustering_pipeline_version:
                 return 0
-            previous_detections = repository.get_all_detections()
-            operation_payload = {
-                "clustering_pipeline_version": clustering_pipeline_version,
-                "previous_clustering_pipeline_version": previous_version or "",
-                "changed_asset_ids": list(
-                    dict.fromkeys(
-                        detection.asset_id
-                        for detection in previous_detections
-                        if detection.asset_id
-                    )
-                ),
-            }
-            operation_id = self._try_prepare_operation_locked("pet_recluster", operation_payload)
-            if operation_id is None:
-                return 0
-            reclustered_count = repository.recluster_detections(
+            return self._recluster_active_generation_locked(
+                repository,
+                clustering_pipeline_version=clustering_pipeline_version,
+                previous_version=previous_version,
                 distance_threshold=distance_threshold,
-                operation_id=operation_id,
+                reason="pipeline_upgrade",
             )
-            repository.set_scan_metadata(
-                "clustering_pipeline_version",
+
+    def consolidate_active_generation_after_scan(
+        self,
+        *,
+        clustering_pipeline_version: str,
+        distance_threshold: float,
+    ) -> int:
+        """Recluster the active generation once after a successful scan drain."""
+
+        with self._lock:
+            if self._shutdown_requested:
+                return 0
+            if not self._ensure_recovered_locked():
+                return 0
+            repository = self._repository()
+            return self._recluster_active_generation_locked(
+                repository,
+                clustering_pipeline_version=clustering_pipeline_version,
+                previous_version=repository.get_scan_metadata("clustering_pipeline_version"),
+                distance_threshold=distance_threshold,
+                reason="scan_drain_consolidation",
+            )
+
+    def _recluster_active_generation_locked(
+        self,
+        repository: PetRepository,
+        *,
+        clustering_pipeline_version: str,
+        previous_version: str | None,
+        distance_threshold: float,
+        reason: str,
+    ) -> int:
+        previous_detections = repository.get_all_detections()
+        if not previous_detections:
+            return 0
+        changed_asset_ids = tuple(
+            dict.fromkeys(
+                detection.asset_id for detection in previous_detections if detection.asset_id
+            )
+        )
+        operation_payload = {
+            "clustering_pipeline_version": clustering_pipeline_version,
+            "previous_clustering_pipeline_version": previous_version or "",
+            "recluster_reason": reason,
+            "changed_asset_ids": list(changed_asset_ids),
+        }
+        operation_id = self._try_prepare_operation_locked("pet_recluster", operation_payload)
+        if operation_id is None:
+            return 0
+        reclustered_count = repository.recluster_detections(
+            distance_threshold=distance_threshold,
+            operation_id=operation_id,
+        )
+        repository.set_scan_metadata(
+            "clustering_pipeline_version",
+            clustering_pipeline_version,
+        )
+        if reclustered_count:
+            self._emit_journaled_snapshot(
+                operation_id,
+                changed_asset_ids=changed_asset_ids,
+                changed_pet_ids=tuple(pet.pet_id for pet in repository.get_all_pet_records()),
+            )
+            LOGGER.info(
+                "Reclustered %d pet detections for %s (%s -> %s) in %s",
+                reclustered_count,
+                reason,
+                previous_version or "<missing>",
                 clustering_pipeline_version,
+                self._library_root,
             )
-            if reclustered_count:
-                self._emit_journaled_snapshot(
-                    operation_id,
-                    changed_asset_ids=tuple(
-                        dict.fromkeys(
-                            detection.asset_id
-                            for detection in previous_detections
-                            if detection.asset_id
-                        )
-                    ),
-                    changed_pet_ids=tuple(pet.pet_id for pet in repository.get_all_pet_records()),
-                )
-                LOGGER.info(
-                    "Reclustered %d pet detections for clustering pipeline upgrade %s -> %s in %s",
-                    reclustered_count,
-                    previous_version or "<missing>",
-                    clustering_pipeline_version,
-                    self._library_root,
-                )
-            else:
-                self._emit_journaled_snapshot(operation_id)
-            return reclustered_count
+        else:
+            self._emit_journaled_snapshot(operation_id)
+        return reclustered_count
 
     def delete_detection(self, detection_id: str) -> PetSnapshotEvent | None:
         with self._lock:

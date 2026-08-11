@@ -108,6 +108,7 @@ class PetScanWorker(QThread):
             self.statusChanged.emit("Pet scanning is unavailable for this library.")
             return
 
+        committed_detection_batch = False
         while not self._cancelled:
             self._top_up_pending_rows()
             batch = self._next_batch()
@@ -115,6 +116,29 @@ class PetScanWorker(QThread):
                 if self._input_closed:
                     self._top_up_pending_rows()
                     if self._queue.empty():
+                        if committed_detection_batch and not self._cancelled:
+                            try:
+                                if self._consolidate_after_scan(pipeline):
+                                    self.petIndexUpdated.emit()
+                            except PetSnapshotCommittedError as exc:
+                                LOGGER.error(
+                                    "Pet scan consolidation bookkeeping failed after commit: %s",
+                                    exc,
+                                    exc_info=True,
+                                )
+                                self.statusChanged.emit(str(exc))
+                                return
+                            except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
+                                LOGGER.warning("Pet scan consolidation unavailable: %s", exc)
+                                self.statusChanged.emit(str(exc))
+                                return
+                            except Exception as exc:  # noqa: BLE001  # pragma: no cover
+                                LOGGER.warning(
+                                    "Pet scan consolidation failed: %s", exc, exc_info=True
+                                )
+                                reason = str(exc).strip() or exc.__class__.__name__
+                                self.statusChanged.emit(f"Pet scan consolidation paused: {reason}")
+                                return
                         self._mark_backfill_complete_if_drained()
                         return
                 continue
@@ -129,6 +153,7 @@ class PetScanWorker(QThread):
                 for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
                     self._queued_ids.discard(asset_id)
                 if committed:
+                    committed_detection_batch = True
                     self.petIndexUpdated.emit()
                 time.sleep(self.CPU_BACKOFF_SECONDS)
             except PetSnapshotCommittedError as exc:
@@ -274,6 +299,16 @@ class PetScanWorker(QThread):
         if coordinator is None:
             return False
         reclustered_count = coordinator.recluster_for_pipeline_upgrade(
+            clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+            distance_threshold=pipeline.distance_threshold,
+        )
+        return reclustered_count > 0
+
+    def _consolidate_after_scan(self, pipeline: PetClusterPipeline) -> bool:
+        coordinator = self._pet_service.coordinator
+        if coordinator is None or self._cancelled:
+            return False
+        reclustered_count = coordinator.consolidate_active_generation_after_scan(
             clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
             distance_threshold=pipeline.distance_threshold,
         )

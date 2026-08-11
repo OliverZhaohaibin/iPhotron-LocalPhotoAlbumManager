@@ -30,6 +30,7 @@ from iPhoto.pets.pipeline import (
     PET_MODEL_MANIFEST,
     DetectedAssetPets,
     PetClusterPipeline,
+    _cluster_distance_matrix_bounded_single_link,
     _decode_yolox_predictions,
     _dedupe_supported_species_boxes,
     _DetectedPetBox,
@@ -297,7 +298,7 @@ def test_cluster_pet_records_ignores_hdbscan_for_default_identity_grouping(
     assert clustered[2].pet_id != clustered[0].pet_id
 
 
-def test_cluster_pet_records_complete_link_blocks_similarity_chain() -> None:
+def test_cluster_pet_records_bounded_single_link_blocks_similarity_chain() -> None:
     sixty_degrees = np.asarray([0.5, 0.8660254])
     thirty_degrees = np.asarray([0.8660254, 0.5])
     detections = [
@@ -329,6 +330,141 @@ def test_cluster_pet_records_complete_link_blocks_similarity_chain() -> None:
     assert len(pets) == 2
     assert clustered[0].pet_id == clustered[1].pet_id
     assert clustered[2].pet_id != clustered[0].pet_id
+
+
+def _distance_matrix_partition(
+    distance_matrix: np.ndarray,
+    *,
+    member_keys: list[str],
+    compatibility_keys: list[object],
+    link_threshold: float = 0.42,
+    diameter_threshold: float = 0.63,
+) -> set[frozenset[str]]:
+    labels = _cluster_distance_matrix_bounded_single_link(
+        distance_matrix,
+        compatibility_keys=compatibility_keys,
+        member_keys=member_keys,
+        link_threshold=link_threshold,
+        diameter_threshold=diameter_threshold,
+    )
+    return {
+        frozenset(
+            member_keys[index]
+            for index, member_label in enumerate(labels.tolist())
+            if member_label == label
+        )
+        for label in set(labels.tolist())
+    }
+
+
+def test_bounded_single_link_rejoins_anonymized_cross_batch_dog_samples() -> None:
+    distances = np.asarray(
+        [
+            [0.0, 0.4289, 0.4246, 0.3353, 0.5029, 0.4791, 0.5540],
+            [0.4289, 0.0, 0.2927, 0.2343, 0.3443, 0.4156, 0.6077],
+            [0.4246, 0.2927, 0.0, 0.2599, 0.3359, 0.2436, 0.5087],
+            [0.3353, 0.2343, 0.2599, 0.0, 0.3090, 0.4058, 0.6096],
+            [0.5029, 0.3443, 0.3359, 0.3090, 0.0, 0.3072, 0.5382],
+            [0.4791, 0.4156, 0.2436, 0.4058, 0.3072, 0.0, 0.3828],
+            [0.5540, 0.6077, 0.5087, 0.6096, 0.5382, 0.3828, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    member_keys = [f"dog-{index}" for index in range(7)]
+    compatibility = [("dog", "embedding-v1", 384, 1)] * 7
+    expected = {frozenset(member_keys)}
+
+    assert (
+        _distance_matrix_partition(
+            distances,
+            member_keys=member_keys,
+            compatibility_keys=compatibility,
+        )
+        == expected
+    )
+
+    permutation = [6, 2, 4, 0, 5, 1, 3]
+    assert (
+        _distance_matrix_partition(
+            distances[np.ix_(permutation, permutation)],
+            member_keys=[member_keys[index] for index in permutation],
+            compatibility_keys=[compatibility[index] for index in permutation],
+        )
+        == expected
+    )
+
+
+def test_bounded_single_link_keeps_two_real_cats_beyond_link_threshold() -> None:
+    partition = _distance_matrix_partition(
+        np.asarray([[0.0, 0.4202], [0.4202, 0.0]], dtype=np.float32),
+        member_keys=["foreground-cat", "background-cat"],
+        compatibility_keys=[("cat", "embedding-v1", 384, 1)] * 2,
+    )
+
+    assert partition == {frozenset({"foreground-cat"}), frozenset({"background-cat"})}
+
+
+def test_bounded_single_link_rejoins_four_anonymized_calico_samples() -> None:
+    distances = np.asarray(
+        [
+            [0.0, 0.217, 0.376, 0.331],
+            [0.217, 0.0, 0.304, 0.289],
+            [0.376, 0.304, 0.0, 0.248],
+            [0.331, 0.289, 0.248, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    member_keys = [f"calico-{index}" for index in range(4)]
+
+    assert _distance_matrix_partition(
+        distances,
+        member_keys=member_keys,
+        compatibility_keys=[("cat", "embedding-v1", 384, 1)] * 4,
+    ) == {frozenset(member_keys)}
+
+
+@pytest.mark.parametrize(
+    ("outer_distance", "expected_cluster_count"),
+    [(0.63, 1), (0.6301, 2)],
+)
+def test_bounded_single_link_enforces_cluster_diameter_boundary(
+    outer_distance: float,
+    expected_cluster_count: int,
+) -> None:
+    distances = np.asarray(
+        [
+            [0.0, 0.2, 0.42],
+            [0.2, 0.0, outer_distance],
+            [0.42, outer_distance, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    partition = _distance_matrix_partition(
+        distances,
+        member_keys=["cat-a", "cat-b", "cat-c"],
+        compatibility_keys=[("cat", "embedding-v1", 384, 1)] * 3,
+    )
+
+    assert len(partition) == expected_cluster_count
+
+
+def test_bounded_single_link_requires_species_and_embedding_contract_match() -> None:
+    distances = np.zeros((3, 3), dtype=np.float32)
+    partition = _distance_matrix_partition(
+        distances,
+        member_keys=["cat-v1", "dog-v1", "cat-v2"],
+        compatibility_keys=[
+            ("cat", "embedding-v1", 384, 1),
+            ("dog", "embedding-v1", 384, 1),
+            ("cat", "embedding-v2", 384, 2),
+        ],
+    )
+
+    assert partition == {
+        frozenset({"cat-v1"}),
+        frozenset({"dog-v1"}),
+        frozenset({"cat-v2"}),
+    }
 
 
 def test_decode_yolox_raw_grid_output_expands_pet_box() -> None:
@@ -1252,6 +1388,199 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
     assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-target"]
 
 
+def test_scan_drain_consolidation_rejoins_unstable_cross_batch_singletons(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    angles = (0.0, 30.0, 60.0)
+    detections = [
+        _detection(
+            detection_id=f"dog-{index}",
+            asset_id=f"asset-{index}",
+            embedding=np.asarray(
+                [
+                    np.cos(np.deg2rad(angle)),
+                    np.sin(np.deg2rad(angle)),
+                    0.0,
+                ]
+            ),
+            species_label="dog",
+        )
+        for index, angle in enumerate(angles)
+    ]
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version=detections[0].embedding_pipeline_version,
+        embedding_dimension=detections[0].embedding_dim,
+        clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+    )
+
+    for detection in detections:
+        repository.replace_assets_incrementally(
+            [detection.asset_id],
+            [detection],
+            distance_threshold=0.42,
+        )
+
+    assert len(repository.get_all_pet_records()) == 3
+    emitted_operation_ids: list[str] = []
+    original_emit = coordinator._emit_journaled_snapshot
+
+    def record_emit(operation_id: str, **event_fields):
+        emitted_operation_ids.append(operation_id)
+        return original_emit(operation_id, **event_fields)
+
+    monkeypatch.setattr(coordinator, "_emit_journaled_snapshot", record_emit)
+    reclustered = coordinator.consolidate_active_generation_after_scan(
+        clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+        distance_threshold=0.42,
+    )
+
+    assert reclustered == 3
+    assert len(repository.get_all_pet_records()) == 1
+    assert len(emitted_operation_ids) == 1
+
+
+def test_pet_scan_worker_consolidates_once_after_one_detection_per_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    assert repository is not None
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version="dinov2-vits14-imagenet-normalized-v1",
+        embedding_dimension=3,
+        detector_pipeline_version=PET_DETECTOR_PIPELINE_VERSION,
+        clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+    )
+    repository.set_scan_metadata_many(
+        {
+            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_state": "complete",
+        }
+    )
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    worker.BATCH_SIZE = 1
+    worker.CPU_BACKOFF_SECONDS = 0.0
+    monkeypatch.setattr(worker, "_top_up_pending_rows", lambda: None)
+    finalized_cluster_counts: list[int] = []
+    monkeypatch.setattr(
+        worker,
+        "_mark_backfill_complete_if_drained",
+        lambda: finalized_cluster_counts.append(len(repository.get_all_pet_records())),
+    )
+    monkeypatch.setattr(
+        "iPhoto.library.workers.pet_scan_worker.PetClusterPipeline",
+        lambda **_kwargs: SimpleNamespace(distance_threshold=0.42),
+    )
+
+    detections_by_asset = {
+        f"asset-{index}": _detection(
+            detection_id=f"dog-{index}",
+            asset_id=f"asset-{index}",
+            embedding=np.asarray(
+                [
+                    np.cos(np.deg2rad(angle)),
+                    np.sin(np.deg2rad(angle)),
+                    0.0,
+                ]
+            ),
+            species_label="dog",
+        )
+        for index, angle in enumerate((0.0, 30.0, 60.0))
+    }
+
+    def commit_one(batch, *_args):
+        detection = detections_by_asset[str(batch[0]["id"])]
+        repository.replace_assets_incrementally(
+            [detection.asset_id],
+            [detection],
+            distance_threshold=0.42,
+        )
+        return True
+
+    monkeypatch.setattr(worker, "_process_batch", commit_one)
+    update_events: list[None] = []
+    worker.petIndexUpdated.connect(lambda: update_events.append(None))
+    worker.enqueue_rows(
+        {
+            "id": asset_id,
+            "rel": f"album/{asset_id}.jpg",
+            "media_type": 0,
+            "pet_status": "pending",
+        }
+        for asset_id in detections_by_asset
+    )
+    worker.finish_input()
+
+    worker.run()
+
+    assert len(repository.get_all_pet_records()) == 1
+    assert len(update_events) == 4  # three batch events plus one final consolidation event
+    assert finalized_cluster_counts == [1]
+
+
+def test_pet_scan_worker_empty_drain_skips_consolidation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    assert repository is not None
+    repository.set_scan_metadata_many(
+        {
+            "detector_pipeline_version": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_state": "complete",
+            "clustering_pipeline_version": PET_CLUSTERING_PIPELINE_VERSION,
+        }
+    )
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    monkeypatch.setattr(worker, "_top_up_pending_rows", lambda: None)
+    finalized: list[None] = []
+    monkeypatch.setattr(
+        worker,
+        "_mark_backfill_complete_if_drained",
+        lambda: finalized.append(None),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_consolidate_after_scan",
+        lambda _pipeline: pytest.fail("empty scans must not consolidate"),
+    )
+    monkeypatch.setattr(
+        "iPhoto.library.workers.pet_scan_worker.PetClusterPipeline",
+        lambda **_kwargs: SimpleNamespace(distance_threshold=0.42),
+    )
+    worker.finish_input()
+
+    worker.run()
+
+    assert finalized == [None]
+
+
+def test_pet_scan_worker_cancelled_scan_skips_consolidation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = create_pet_service(tmp_path)
+    coordinator = service.coordinator
+    assert coordinator is not None
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    worker.cancel()
+    monkeypatch.setattr(
+        coordinator,
+        "consolidate_active_generation_after_scan",
+        lambda **_kwargs: pytest.fail("cancelled scans must not consolidate"),
+    )
+
+    assert worker._consolidate_after_scan(SimpleNamespace(distance_threshold=0.42)) is False
+
+
 def test_pet_merge_redirect_chain_keeps_all_alias_clusters_linked(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     detections = [
@@ -1900,6 +2229,10 @@ def test_pet_detector_pipeline_version_includes_hybrid_deduplication() -> None:
     assert PET_DETECTOR_PIPELINE_VERSION == "yolox-letterbox-tiles-people-priority-v6"
 
 
+def test_pet_clustering_pipeline_version_uses_bounded_single_link() -> None:
+    assert PET_CLUSTERING_PIPELINE_VERSION == "species-bounded-single-link-v2"
+
+
 def test_default_pet_model_dir_uses_user_cache(monkeypatch) -> None:
     monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
     assert default_pet_model_dir().name == "pets"
@@ -2010,6 +2343,9 @@ def test_pet_scan_worker_reclusters_for_clustering_upgrade_without_resetting_ass
         sample_count=2,
     )
     repository.replace_all([cat, dog], [old_pet])
+    assert repository.rename_pet("pet-old", "Milo")
+    assert repository.set_pet_hidden("pet-old", True)
+    assert repository.set_pet_cover("pet-old", "det-cat")
     repository.set_scan_metadata("clustering_pipeline_version", "old-clustering")
     worker = PetScanWorker(tmp_path, pet_service=service)
     pipeline = PetClusterPipeline(
@@ -2026,6 +2362,14 @@ def test_pet_scan_worker_reclusters_for_clustering_upgrade_without_resetting_ass
     )
     detections = repository.get_all_detections()
     assert len({detection.pet_id for detection in detections}) == 2
+    retained = next(
+        summary
+        for summary in repository.get_pet_summaries(include_hidden=True)
+        if summary.pet_id == "pet-old"
+    )
+    assert retained.name == "Milo"
+    assert retained.is_hidden is True
+    assert retained.key_detection_id == "det-cat"
 
 
 def test_pet_scan_worker_recluster_does_not_let_old_key_votes_remerge_split_cats(
@@ -2130,6 +2474,11 @@ def test_pet_scan_worker_only_typed_availability_errors_use_unavailable_path(
         raise error
 
     monkeypatch.setattr(worker, "_process_batch", fail_batch)
+    monkeypatch.setattr(
+        worker,
+        "_consolidate_after_scan",
+        lambda _pipeline: pytest.fail("failed scans must not consolidate"),
+    )
     worker.run()
 
     assert repo.get_rows_by_ids(["asset-a"])["asset-a"]["pet_status"] == "pending"

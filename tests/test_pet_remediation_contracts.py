@@ -1169,7 +1169,7 @@ def test_unstable_profile_only_reuses_identity_by_exact_pet_key(tmp_path: Path) 
     assert repository.get_detection("same-key").pet_id == "pet-a"  # type: ignore[union-attr]
 
 
-def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -> None:
+def test_stable_profile_match_validates_full_cluster_diameter(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     close = [
         _detection(f"close-{index}", asset_id=f"asset-{index}", pet_id="pet-a")
@@ -1178,7 +1178,7 @@ def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -
     distant = _detection(
         "distant",
         asset_id="asset-distant",
-        embedding=np.asarray([0.8, 0.6, 0.0]),
+        embedding=np.asarray([0.7, np.sqrt(0.51), 0.0]),
         pet_id="pet-a",
     )
     members = [*close, distant]
@@ -1204,7 +1204,7 @@ def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -
     assert repository.get_detection("candidate").pet_id != "pet-a"  # type: ignore[union-attr]
 
 
-def test_complete_link_excludes_zero_detection_replacement_assets(tmp_path: Path) -> None:
+def test_bounded_cluster_excludes_zero_detection_replacement_assets(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     outlier = _detection(
         "outlier",
@@ -1240,7 +1240,7 @@ def test_complete_link_excludes_zero_detection_replacement_assets(tmp_path: Path
     assert repository.get_detection("outlier") is None
 
 
-def test_complete_link_expands_ann_shortlist_until_ninth_candidate(tmp_path: Path) -> None:
+def test_bounded_cluster_expands_ann_shortlist_until_ninth_candidate(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db")
     detection = _detection("candidate", asset_id="asset-candidate")
     ordered = [(index / 100.0, f"pet-{index}") for index in range(1, 10)]
@@ -1283,7 +1283,7 @@ def test_complete_link_expands_ann_shortlist_until_ninth_candidate(tmp_path: Pat
         ([(0.01, f"pet-{index}") for index in range(8)], [8, 16]),
     ],
 )
-def test_complete_link_progressive_search_stops_at_threshold_or_exhaustion(
+def test_bounded_cluster_progressive_search_stops_at_threshold_or_exhaustion(
     tmp_path: Path,
     ordered: list[tuple[float, str]],
     expected_limits: list[int],
@@ -1313,6 +1313,46 @@ def test_complete_link_progressive_search_stops_at_threshold_or_exhaustion(
 
     assert matched == ""
     assert candidate_index.limits == expected_limits
+
+
+@pytest.mark.parametrize(
+    ("farthest_member_distance", "expected_pet_id"),
+    [(0.62, "pet-a"), (0.64, "")],
+)
+def test_stable_incremental_match_uses_link_and_cluster_diameter_bounds(
+    tmp_path: Path,
+    farthest_member_distance: float,
+    expected_pet_id: str,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db")
+    candidate = _detection("candidate")
+
+    class CandidateIndex:
+        def search(self, _embedding, *, species_label, limit):
+            assert species_label == "dog"
+            assert limit == 8
+            return [(0.3, "pet-a")]
+
+    def vector_at_cosine_distance(distance: float) -> np.ndarray:
+        cosine = 1.0 - distance
+        return normalize_vector(np.asarray([cosine, np.sqrt(1.0 - cosine * cosine), 0.0]))
+
+    matched = repository._nearest_compatible_pet_id(
+        candidate,
+        member_samples={
+            "pet-a": (
+                ("asset-near", vector_at_cosine_distance(0.40)),
+                ("asset-far", vector_at_cosine_distance(farthest_member_distance)),
+            )
+        },
+        staged_samples={},
+        excluded_asset_ids=set(),
+        candidate_index=CandidateIndex(),  # type: ignore[arg-type]
+        staged_candidate_species={},
+        distance_threshold=0.42,
+    )
+
+    assert matched == expected_pet_id
 
 
 def test_stable_incremental_matching_is_input_order_invariant(tmp_path: Path) -> None:
@@ -1722,9 +1762,11 @@ def test_move_and_merge_recover_after_runtime_commit(
         assert {pet.pet_id for pet in recovered_repository.get_all_pet_records()} == {"pet-b"}
 
 
+@pytest.mark.parametrize("recluster_reason", ["pipeline_upgrade", "scan_drain_consolidation"])
 def test_recluster_recovers_state_and_pipeline_metadata(
     tmp_path: Path,
     monkeypatch,
+    recluster_reason: str,
 ) -> None:
     repository = PetRepository(
         tmp_path / ".iPhoto" / "pets" / "pet_index.db",
@@ -1751,10 +1793,16 @@ def test_recluster_recovers_state_and_pipeline_metadata(
 
     monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
     with pytest.raises(sqlite3.OperationalError, match="injected state sync failure"):
-        coordinator.recluster_for_pipeline_upgrade(
-            clustering_pipeline_version="cluster-v-next",
-            distance_threshold=0.2,
-        )
+        if recluster_reason == "pipeline_upgrade":
+            coordinator.recluster_for_pipeline_upgrade(
+                clustering_pipeline_version="cluster-v-next",
+                distance_threshold=0.2,
+            )
+        else:
+            coordinator.consolidate_active_generation_after_scan(
+                clustering_pipeline_version="cluster-v-next",
+                distance_threshold=0.2,
+            )
 
     operation = coordinator._journal.unfinished()[0]
     assert operation.kind == "pet_recluster"

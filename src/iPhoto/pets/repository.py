@@ -918,9 +918,7 @@ class PetRepository:
         high_watermark: int = 1200,
         retain: int = 1000,
     ) -> int:
-        protected = tuple(
-            dict.fromkeys(str(value) for value in protected_operation_ids if value)
-        )
+        protected = tuple(dict.fromkeys(str(value) for value in protected_operation_ids if value))
         where = "state_synced = 1"
         parameters: tuple[object, ...] = ()
         if protected:
@@ -973,9 +971,7 @@ class PetRepository:
             return _IncrementalPetAssignment()
         redirects = state_snapshot.redirects if state_snapshot is not None else {}
         key_map = state_snapshot.key_map if state_snapshot is not None else {}
-        durable_profiles = (
-            state_snapshot.durable_profiles if state_snapshot is not None else {}
-        )
+        durable_profiles = state_snapshot.durable_profiles if state_snapshot is not None else {}
         stable_profiles = {
             pet_id: pet
             for pet_id, pet in existing_pets.items()
@@ -1185,8 +1181,11 @@ class PetRepository:
         distance_threshold: float,
         migration_profiles: dict[str, PetRecord] | None = None,
     ) -> str:
+        from .pipeline import PET_CLUSTER_DIAMETER_MULTIPLIER
+
         migration_profiles = migration_profiles or {}
         detection_species = _normalize_species_label(detection.species_label)
+        diameter_threshold = distance_threshold * PET_CLUSTER_DIAMETER_MULTIPLIER
         limit = 8
         seen: set[str] = set()
         while True:
@@ -1230,7 +1229,7 @@ class PetRepository:
                 if pet_id in seen:
                     continue
                 seen.add(pet_id)
-                if center_distance > distance_threshold:
+                if center_distance > diameter_threshold:
                     break
                 within_threshold.append((center_distance, pet_id))
 
@@ -1240,8 +1239,9 @@ class PetRepository:
                 if pet_id not in member_samples and pet_id not in staged_candidate_species
             )
             if missing:
-                member_samples.update(self._load_complete_link_samples_for_pets(missing))
-            for _center_distance, pet_id in within_threshold:
+                member_samples.update(self._load_cluster_member_samples_for_pets(missing))
+            compatible_candidates: list[tuple[float, float, str]] = []
+            for center_distance, pet_id in within_threshold:
                 samples = (
                     *(
                         sample
@@ -1251,16 +1251,24 @@ class PetRepository:
                     ),
                     *staged_samples.get(pet_id, ()),
                 )
-                if (
-                    samples
-                    and max(cosine_distance(detection.embedding, sample) for sample in samples)
-                    > distance_threshold
-                ):
+                if not samples:
+                    if center_distance <= distance_threshold:
+                        compatible_candidates.append((center_distance, center_distance, pet_id))
                     continue
-                return pet_id
+                member_distances = tuple(
+                    cosine_distance(detection.embedding, sample) for sample in samples
+                )
+                nearest_member_distance = min(member_distances)
+                if nearest_member_distance > distance_threshold:
+                    continue
+                if max(member_distances) > diameter_threshold:
+                    continue
+                compatible_candidates.append((nearest_member_distance, center_distance, pet_id))
+            if compatible_candidates:
+                return min(compatible_candidates)[2]
 
             indexed_threshold_exhausted = bool(
-                indexed_candidates and indexed_candidates[-1][0] > distance_threshold
+                indexed_candidates and indexed_candidates[-1][0] > diameter_threshold
             )
             if indexed_threshold_exhausted or len(indexed_candidates) < limit:
                 return ""
@@ -1287,7 +1295,7 @@ class PetRepository:
             grouped.setdefault(str(row["asset_id"]), []).append(str(row["pet_id"]))
         return {asset_id: tuple(dict.fromkeys(pet_ids)) for asset_id, pet_ids in grouped.items()}
 
-    def _load_complete_link_samples_for_pets(
+    def _load_cluster_member_samples_for_pets(
         self,
         pet_ids: tuple[str, ...],
     ) -> dict[str, tuple[tuple[str, np.ndarray], ...]]:

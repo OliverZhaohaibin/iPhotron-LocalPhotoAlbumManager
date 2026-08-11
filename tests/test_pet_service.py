@@ -431,6 +431,48 @@ def test_dedupe_supported_species_boxes_keeps_best_overlapping_pet_label() -> No
     ]
 
 
+def test_dedupe_supported_species_boxes_keeps_two_real_cats_from_img_6518() -> None:
+    boxes = [
+        _DetectedPetBox((401, 1727, 3883, 3090), 0.674, "cat"),
+        _DetectedPetBox((0, 1704, 3260, 2621), 0.425, "cat"),
+        _DetectedPetBox((0, 1133, 1449, 1506), 0.318, "cat"),
+    ]
+
+    deduped = _dedupe_supported_species_boxes(boxes)
+
+    assert [box.bbox for box in deduped] == [
+        (401, 1727, 3883, 3090),
+        (0, 1133, 1449, 1506),
+    ]
+
+
+def test_dedupe_supported_species_boxes_suppresses_centered_nested_box() -> None:
+    boxes = [
+        _DetectedPetBox((0, 0, 200, 200), 0.90, "dog"),
+        _DetectedPetBox((70, 70, 60, 60), 0.80, "dog"),
+    ]
+
+    assert _dedupe_supported_species_boxes(boxes) == [boxes[0]]
+
+
+def test_dedupe_supported_species_boxes_keeps_far_center_nested_pet() -> None:
+    boxes = [
+        _DetectedPetBox((0, 0, 300, 300), 0.90, "cat"),
+        _DetectedPetBox((220, 20, 60, 60), 0.80, "cat"),
+    ]
+
+    assert _dedupe_supported_species_boxes(boxes) == boxes
+
+
+def test_dedupe_supported_species_boxes_uses_standard_same_species_iou() -> None:
+    boxes = [
+        _DetectedPetBox((0, 0, 100, 100), 0.90, "cat"),
+        _DetectedPetBox((20, 0, 100, 100), 0.80, "cat"),
+    ]
+
+    assert _dedupe_supported_species_boxes(boxes) == [boxes[0]]
+
+
 def test_people_priority_overlap_matches_iou_and_smaller_box_coverage() -> None:
     people_box = (732, 668, 2089, 2930)
 
@@ -596,6 +638,46 @@ def test_pet_pipeline_filters_people_overlaps_before_embedding(tmp_path: Path) -
     assert len(embedded_sizes) == 1
     assert pipeline.last_scan_metrics.people_overlaps == 1
     assert pipeline.last_scan_metrics.accepted_detections == 1
+
+
+def test_pet_pipeline_dedupes_dscf6997_mural_before_people_filtering(
+    tmp_path: Path,
+) -> None:
+    image_dir = tmp_path / "album"
+    image_dir.mkdir()
+    Image.new("RGB", (416, 624), color=(128, 96, 64)).save(image_dir / "mural.jpg")
+    pipeline = PetClusterPipeline(
+        model_root=tmp_path / "models",
+        allow_model_download=False,
+        min_pet_size=40,
+    )
+    pipeline._detector = SimpleNamespace(
+        detect=lambda _image: [
+            SimpleNamespace(bbox=(0, 6, 409, 424), confidence=0.767, species_label="dog"),
+            SimpleNamespace(bbox=(1, 15, 270, 380), confidence=0.658, species_label="dog"),
+        ]
+    )
+    pipeline._embedder = SimpleNamespace(
+        embed=lambda _image: pytest.fail("People filtering must run before embedding")
+    )
+
+    results = pipeline.detect_pets_for_rows(
+        [{"id": "asset-mural", "rel": "album/mural.jpg"}],
+        library_root=tmp_path,
+        thumbnail_dir=tmp_path / ".iPhoto" / "pets" / "thumbnails",
+        people_boxes_by_asset_id={
+            "asset-mural": [
+                (246, 378, 27, 28),
+                (59, 65, 210, 288),
+            ]
+        },
+    )
+
+    assert len(results) == 1
+    assert results[0].detections == []
+    assert pipeline.last_scan_metrics.candidate_boxes == 2
+    assert pipeline.last_scan_metrics.people_overlaps == 1
+    assert pipeline.last_scan_metrics.accepted_detections == 0
 
 
 def test_canonicalize_pet_identities_prefers_pet_key_vote(tmp_path: Path) -> None:
@@ -1409,6 +1491,56 @@ def test_pet_batch_revalidates_people_overlaps_inside_serialized_commit(tmp_path
     assert not thumbnail.exists()
 
 
+def test_pet_reconciliation_removes_dscf6997_mural_detected_before_people(
+    tmp_path: Path,
+) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    coordinator = service.coordinator
+    assert repository is not None
+    assert coordinator is not None
+    mural_detection = replace(
+        _detection(
+            detection_id="dscf6997-mural",
+            asset_id="asset-mural",
+            species_label="dog",
+        ),
+        box_x=0,
+        box_y=64,
+        box_w=4092,
+        box_h=4237,
+        image_width=4160,
+        image_height=6240,
+        confidence=0.767,
+    )
+
+    coordinator.submit_detected_batch(
+        [
+            DetectedAssetPets(
+                asset_id="asset-mural",
+                asset_rel="album/mural.jpg",
+                detections=[mural_detection],
+            )
+        ],
+        distance_threshold=0.42,
+    )
+
+    assert len(repository.get_all_detections()) == 1
+
+    event = coordinator.reconcile_people_overlaps(
+        {
+            "asset-mural": (
+                (2463, 3780, 266, 281),
+                (589, 650, 2103, 2878),
+            )
+        }
+    )
+
+    assert event is not None
+    assert event.changed_asset_ids == ("asset-mural",)
+    assert repository.get_all_detections() == []
+
+
 def test_pet_scan_session_rolls_back_runtime_snapshot_when_state_sync_fails(
     tmp_path: Path,
     monkeypatch,
@@ -1734,6 +1866,10 @@ def test_pet_model_manifest_is_the_runtime_contract_source() -> None:
     assert embedder["source_revision"] == _DINO_SOURCE_REVISION
     assert len(embedder["torchscript_sha256"]) == 64
     assert embedder["torchscript_size"] > 0
+
+
+def test_pet_detector_pipeline_version_includes_hybrid_deduplication() -> None:
+    assert PET_DETECTOR_PIPELINE_VERSION == "yolox-letterbox-tiles-people-priority-v6"
 
 
 def test_default_pet_model_dir_uses_user_cache(monkeypatch) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import ssl
 import sys
@@ -85,12 +86,15 @@ PET_MODEL_MANIFEST = _load_pet_model_manifest()
 _DETECTOR_MANIFEST = PET_MODEL_MANIFEST["detector"]
 _EMBEDDER_MANIFEST = PET_MODEL_MANIFEST["embedder"]
 SUPPORTED_DEFAULT_SPECIES = frozenset({"cat", "dog"})
-PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-people-priority-v5"
+PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-people-priority-v6"
 PET_CLUSTERING_PIPELINE_VERSION = "species-complete-link-v1"
 PET_EMBEDDING_PIPELINE_VERSION = "dinov2-vits14-imagenet-normalized-v1"
 PET_KEY_VERSION = "v2"
 PET_DETECTOR_KEY_VERSION = "yolox-nano-coco-0.1.1rc0-raw-bgr-v1"
 DEFAULT_PET_DISTANCE_THRESHOLD = 0.42
+PET_PET_IOU_THRESHOLD = 0.50
+PET_PET_SMALLER_BOX_COVERAGE_THRESHOLD = 0.90
+PET_PET_NORMALIZED_CENTER_DISTANCE_THRESHOLD = 0.35
 PET_PEOPLE_IOU_THRESHOLD = 0.50
 PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD = 0.90
 PET_PEOPLE_LARGER_PET_RATIO = 1.50
@@ -1406,27 +1410,12 @@ def _yolox_grids(input_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate(grid_parts, axis=0), np.concatenate(stride_parts, axis=0)
 
 
-def _nms_pet_boxes(
-    boxes: list[_DetectedPetBox],
-    *,
-    threshold: float = 0.5,
-) -> list[_DetectedPetBox]:
-    selected: list[_DetectedPetBox] = []
-    for box in sorted(boxes, key=lambda item: item.confidence, reverse=True):
-        if any(
-            existing.species_label == box.species_label
-            and _bbox_iou(existing.bbox, box.bbox) >= threshold
-            for existing in selected
-        ):
-            continue
-        selected.append(box)
-    return selected
-
-
 def _dedupe_supported_species_boxes(
     boxes: list[_DetectedPetBox],
     *,
-    threshold: float = 0.65,
+    threshold: float = PET_PET_IOU_THRESHOLD,
+    smaller_box_coverage_threshold: float = PET_PET_SMALLER_BOX_COVERAGE_THRESHOLD,
+    normalized_center_distance_threshold: float = PET_PET_NORMALIZED_CENTER_DISTANCE_THRESHOLD,
     cross_species_threshold: float = 0.90,
     cross_species_score_margin: float = 0.25,
 ) -> list[_DetectedPetBox]:
@@ -1435,14 +1424,44 @@ def _dedupe_supported_species_boxes(
         suppress = False
         for existing in selected:
             overlap = _bbox_iou(existing.bbox, box.bbox)
-            if existing.species_label == box.species_label and overlap >= threshold:
-                suppress = True
-                break
-            if (
+            smaller_box_coverage = _bbox_smaller_box_coverage(existing.bbox, box.bbox)
+            normalized_center_distance = _bbox_normalized_center_distance(
+                existing.bbox,
+                box.bbox,
+            )
+            reason = ""
+            if existing.species_label == box.species_label:
+                if overlap >= threshold:
+                    reason = "same_species_iou"
+                elif (
+                    smaller_box_coverage >= smaller_box_coverage_threshold
+                    and normalized_center_distance <= normalized_center_distance_threshold
+                ):
+                    reason = "same_species_containment"
+            elif (
                 existing.species_label != box.species_label
                 and overlap >= cross_species_threshold
                 and existing.confidence - box.confidence >= cross_species_score_margin
             ):
+                reason = "cross_species_iou"
+
+            if reason:
+                _LOGGER.debug(
+                    "Suppressed pet box: reason=%s species=%s candidate_confidence=%.3f "
+                    "candidate_bbox=%s kept_species=%s kept_confidence=%.3f kept_bbox=%s "
+                    "iou=%.3f smaller_box_coverage=%.3f "
+                    "normalized_center_distance=%.3f",
+                    reason,
+                    box.species_label,
+                    box.confidence,
+                    box.bbox,
+                    existing.species_label,
+                    existing.confidence,
+                    existing.bbox,
+                    overlap,
+                    smaller_box_coverage,
+                    normalized_center_distance,
+                )
                 suppress = True
                 break
         if suppress:
@@ -1459,6 +1478,35 @@ def _bbox_iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int])
     if union <= 0:
         return 0.0
     return intersection / float(union)
+
+
+def _bbox_smaller_box_coverage(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> float:
+    left_area = max(0, left[2]) * max(0, left[3])
+    right_area = max(0, right[2]) * max(0, right[3])
+    smaller_area = min(left_area, right_area)
+    if smaller_area <= 0:
+        return 0.0
+    return _bbox_intersection_area(left, right) / float(smaller_area)
+
+
+def _bbox_normalized_center_distance(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> float:
+    left_area = max(0, left[2]) * max(0, left[3])
+    right_area = max(0, right[2]) * max(0, right[3])
+    smaller_area = min(left_area, right_area)
+    if smaller_area <= 0:
+        return float("inf")
+    left_center = (left[0] + left[2] / 2.0, left[1] + left[3] / 2.0)
+    right_center = (right[0] + right[2] / 2.0, right[1] + right[3] / 2.0)
+    return math.hypot(
+        left_center[0] - right_center[0],
+        left_center[1] - right_center[1],
+    ) / math.sqrt(smaller_area)
 
 
 def _bbox_intersection_area(

@@ -54,7 +54,8 @@ GUI thread
   -> 读取 viewer layout + DPR，选择 LOD，提交完整 request
 
 sidecar preparation pool (2 lanes)
-  -> read_adjustments；latest-only queue 可绕过一个卡住的 native RAW probe
+  -> 最多 1 个 speculative preparation；previous/next 使用 bounded window queue
+  -> 第二 lane 保留给 latest foreground，允许绕过一个卡住的 native RAW probe
   -> hover/click 可 promotion/reuse；running stale cooperative cancel 后不再按 key 复用
   -> 完成后释放，不形成 edit-state cache
 

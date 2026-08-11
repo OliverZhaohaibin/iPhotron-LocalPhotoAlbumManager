@@ -679,6 +679,76 @@ def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Pa
     assert repository.state_repository.get_rejected_pet_keys(["pet-key-a"]) == {"pet-key-a"}
 
 
+def test_incremental_state_inputs_share_one_sqlite_read_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = PetStateRepository(tmp_path / "pet_state.db")
+    detection = _detection(
+        detection_id="snapshot",
+        pet_key="snapshot-key",
+        pet_id="pet-snapshot",
+    )
+    pet = PetRecord(
+        pet_id="pet-snapshot",
+        name="Before",
+        key_detection_id=detection.detection_id,
+        detection_count=1,
+        center_embedding=detection.embedding,
+        embedding_dim=detection.embedding_dim,
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        sample_count=1,
+        profile_state="unstable",
+    )
+    state.sync_scan_results([pet], [detection])
+    writer = PetStateRepository(state.db_path)
+    writer.initialize()
+    original_connect = state._connect
+    mutation_injected = False
+
+    class _CursorAfterFirstRead:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def fetchall(self):
+            nonlocal mutation_injected
+            rows = self._cursor.fetchall()
+            if not mutation_injected:
+                mutation_injected = True
+                writer.rename_pet("pet-snapshot", "After")
+            return rows
+
+        def __getattr__(self, name):
+            return getattr(self._cursor, name)
+
+    class _ConnectionAfterFirstRead:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            cursor = self._connection.execute(sql, parameters)
+            if "SELECT pet_key FROM rejected_pet_keys" in str(sql):
+                return _CursorAfterFirstRead(cursor)
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(
+        state,
+        "_connect",
+        lambda: _ConnectionAfterFirstRead(original_connect()),
+    )
+
+    snapshot = state._load_incremental_state(["snapshot-key"])
+
+    assert mutation_injected
+    assert snapshot.key_map == {"snapshot-key": "pet-snapshot"}
+    assert snapshot.durable_profiles["pet-snapshot"].name == "Before"
+    assert writer.get_profiles_by_ids(["pet-snapshot"])["pet-snapshot"].name == "After"
+
+
 def test_delete_detection_replaces_custom_cover_and_removes_thumbnail(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     thumbnail_dir = tmp_path / "thumbnails"

@@ -242,6 +242,9 @@ class PetStateRepository:
             return _IncrementalStateSnapshot(frozenset(), {}, {}, {})
         self.initialize()
         with closing(self._connect()) as conn:
+            # Python's sqlite3 driver does not open a transaction for SELECTs.
+            # Pin all assignment inputs to one WAL snapshot explicitly.
+            conn.execute("BEGIN")
             rejected_rows: list[sqlite3.Row] = []
             key_rows: list[sqlite3.Row] = []
             for chunk in _chunked(unique_keys, 500):
@@ -299,6 +302,7 @@ class PetStateRepository:
                         chunk,
                     ).fetchall()
                 )
+            conn.rollback()
         return _IncrementalStateSnapshot(
             rejected_keys=frozenset(
                 str(row["pet_key"]) for row in rejected_rows if row["pet_key"]

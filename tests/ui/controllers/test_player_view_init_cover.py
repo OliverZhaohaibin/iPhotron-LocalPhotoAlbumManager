@@ -326,6 +326,277 @@ class TestInitCoverTracking:
 
         assert dispatched == [source_b.absolute()]
 
+    def test_neighbor_prefetch_reserves_one_lane_for_foreground(
+        self,
+        controller,
+        qapp,
+        tmp_path,
+        mocker,
+    ):
+        sources = {
+            "A": tmp_path / "a.nef",
+            "B": tmp_path / "b.nef",
+            "C": tmp_path / "c.jpg",
+        }
+        for source in sources.values():
+            source.write_bytes(b"source")
+        started = {name: Event() for name in sources}
+        releases = {name: Event() for name in ("A", "B")}
+        dispatched: list[tuple[str, Path]] = []
+
+        def probe(identity):
+            name = identity.path.stem.upper()
+            started[name].set()
+            assert releases[name].wait(5)
+            return AssetSourceIdentity.create(identity.path, width=4000, height=3000)
+
+        class _EditService:
+            def read_adjustments(self, source):
+                started[Path(source).stem.upper()].set()
+                return {}
+
+        mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.probe_raw_source_identity",
+            side_effect=probe,
+        )
+        controller._edit_service_getter = lambda: _EditService()
+        mocker.patch.object(
+            controller,
+            "_dispatch_prepared_intent",
+            side_effect=lambda intent, _adjustments: dispatched.append(
+                (intent.reason, intent.source_identity.path)
+            )
+            or True,
+        )
+
+        try:
+            assert controller.prefetch_images([sources["A"], sources["B"]])
+            assert started["A"].wait(5)
+            assert not started["B"].is_set()
+            assert len(controller._preparation_prefetch_queue) == 1
+
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent(
+                    "C",
+                    AssetSourceIdentity.create(
+                        sources["C"], width=1600, height=1200
+                    ),
+                    1,
+                    "initial",
+                )
+            )
+            assert started["C"].wait(5)
+            assert _spin_until(
+                qapp,
+                lambda: dispatched == [("initial", sources["C"].absolute())],
+            )
+            assert not releases["A"].is_set()
+            assert not started["B"].is_set()
+            assert controller._preparation_prefetch_queue == []
+        finally:
+            for release in releases.values():
+                release.set()
+            assert controller._preparation_pool.waitForDone(5000)
+            qapp.processEvents()
+
+        assert dispatched == [("initial", sources["C"].absolute())]
+        assert not started["B"].is_set()
+
+    def test_neighbor_prefetch_preparations_run_serially(
+        self,
+        controller,
+        qapp,
+        tmp_path,
+        mocker,
+    ):
+        sources = {name: tmp_path / f"{name.lower()}.nef" for name in ("A", "B")}
+        for source in sources.values():
+            source.write_bytes(b"raw")
+        started = {name: Event() for name in sources}
+        releases = {name: Event() for name in sources}
+        dispatched: list[tuple[str | None, Path]] = []
+
+        def probe(identity):
+            name = identity.path.stem.upper()
+            started[name].set()
+            assert releases[name].wait(5)
+            return AssetSourceIdentity.create(identity.path, width=4000, height=3000)
+
+        mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.probe_raw_source_identity",
+            side_effect=probe,
+        )
+        mocker.patch.object(
+            controller,
+            "_dispatch_prepared_intent",
+            side_effect=lambda intent, _adjustments: dispatched.append(
+                (intent.residency_slot, intent.source_identity.path)
+            )
+            or True,
+        )
+
+        try:
+            assert controller.prefetch_images([sources["A"], sources["B"]])
+            assert started["A"].wait(5)
+            assert not started["B"].is_set()
+
+            releases["A"].set()
+            assert _spin_until(
+                qapp,
+                lambda: dispatched == [("previous", sources["A"].absolute())],
+            )
+            assert started["B"].wait(5)
+
+            releases["B"].set()
+            assert _spin_until(
+                qapp,
+                lambda: dispatched
+                == [
+                    ("previous", sources["A"].absolute()),
+                    ("next", sources["B"].absolute()),
+                ],
+            )
+        finally:
+            for release in releases.values():
+                release.set()
+            assert controller._preparation_pool.waitForDone(5000)
+            qapp.processEvents()
+
+        assert controller._preparation_prefetch_queue == []
+
+    def test_queued_neighbor_click_uses_bypass_lane_without_duplicate_worker(
+        self,
+        controller,
+        qapp,
+        tmp_path,
+        mocker,
+    ):
+        source_a = tmp_path / "a.nef"
+        source_b = tmp_path / "b.jpg"
+        source_a.write_bytes(b"raw")
+        source_b.write_bytes(b"jpeg")
+        a_started = Event()
+        release_a = Event()
+        b_reads = 0
+        dispatched: list[tuple[str, Path]] = []
+
+        def probe(identity):
+            a_started.set()
+            assert release_a.wait(5)
+            return AssetSourceIdentity.create(identity.path, width=4000, height=3000)
+
+        class _EditService:
+            def read_adjustments(self, source):
+                nonlocal b_reads
+                if Path(source) == source_b.absolute():
+                    b_reads += 1
+                return {}
+
+        mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.probe_raw_source_identity",
+            side_effect=probe,
+        )
+        controller._edit_service_getter = lambda: _EditService()
+        mocker.patch.object(
+            controller,
+            "_dispatch_prepared_intent",
+            side_effect=lambda intent, _adjustments: dispatched.append(
+                (intent.reason, intent.source_identity.path)
+            )
+            or True,
+        )
+
+        try:
+            assert controller.prefetch_images([source_a, source_b])
+            assert a_started.wait(5)
+            assert len(controller._preparation_prefetch_queue) == 1
+
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent(
+                    "",
+                    AssetSourceIdentity.create(source_b, width=1600, height=1200),
+                    7,
+                    "initial",
+                )
+            )
+            assert _spin_until(
+                qapp,
+                lambda: dispatched == [("initial", source_b.absolute())],
+            )
+            assert b_reads == 1
+            assert controller._preparation_prefetch_queue == []
+            assert not release_a.is_set()
+        finally:
+            release_a.set()
+            assert controller._preparation_pool.waitForDone(5000)
+            qapp.processEvents()
+
+        assert b_reads == 1
+        assert dispatched == [("initial", source_b.absolute())]
+
+    def test_new_neighbor_window_replaces_queue_and_waits_for_old_terminal(
+        self,
+        controller,
+        tmp_path,
+    ):
+        class _Pool:
+            def __init__(self):
+                self.queued = []
+                self.starts = []
+
+            def start(self, worker, priority):
+                self.queued.append(worker)
+                self.starts.append((worker, priority))
+
+            def tryTake(self, worker):
+                if worker not in self.queued:
+                    return False
+                self.queued.remove(worker)
+                return True
+
+            def mark_running(self, worker):
+                self.queued.remove(worker)
+
+        sources = [tmp_path / f"{name}.jpg" for name in ("a", "b", "c", "d")]
+        for source in sources:
+            source.write_bytes(b"jpeg")
+        original_pool = controller._preparation_pool
+        pool = _Pool()
+        controller._preparation_pool = pool
+        workers = []
+
+        try:
+            assert controller.prefetch_images(sources[:2])
+            old_worker = next(iter(controller._preparation_entries.values())).worker
+            workers.append(old_worker)
+            pool.mark_running(old_worker)
+
+            assert controller.prefetch_images(sources[2:])
+            assert old_worker._cancelled
+            assert controller._preparation_entries == {}
+            assert [intent.source_identity.path for intent in controller._preparation_prefetch_queue] == [
+                sources[2].absolute(),
+                sources[3].absolute(),
+            ]
+            assert pool.queued == []
+
+            controller._on_adjustment_preparation_finished(old_worker)
+            new_worker = next(iter(controller._preparation_entries.values())).worker
+            workers.append(new_worker)
+            assert new_worker.source_identity.path == sources[2].absolute()
+            assert [intent.source_identity.path for intent in controller._preparation_prefetch_queue] == [
+                sources[3].absolute()
+            ]
+
+            controller.cancel_pending_image_requests()
+            assert controller._preparation_prefetch_queue == []
+            controller._on_adjustment_preparation_finished(new_worker)
+            assert len(pool.starts) == 2
+        finally:
+            for worker in workers:
+                controller._on_adjustment_preparation_finished(worker)
+            controller._preparation_pool = original_pool
+
     def test_cancelled_preparation_key_is_not_reused_for_a_b_a(
         self,
         controller,

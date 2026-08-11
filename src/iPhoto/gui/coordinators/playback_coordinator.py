@@ -728,6 +728,15 @@ class PlaybackCoordinator(QObject):
             unassigned_rename_signal.connect(
                 self._handle_info_panel_face_move_to_new_person_requested
             )
+        existing_identity_signal = getattr(
+            self._face_name_overlay,
+            "existingIdentitySubmitted",
+            None,
+        )
+        if existing_identity_signal is not None:
+            existing_identity_signal.connect(
+                self._handle_face_name_existing_identity_submitted
+            )
         manual_signal = getattr(self._face_name_overlay, "manualFaceSubmitted", None)
         if manual_signal is not None:
             manual_signal.connect(self._handle_manual_face_submitted)
@@ -1832,6 +1841,76 @@ class PlaybackCoordinator(QObject):
             LOGGER.exception("Failed to rename person %s", entity_id)
             return
         self._refresh_recognition_views_after_mutation()
+
+    @Slot(object, str)
+    def _handle_face_name_existing_identity_submitted(
+        self,
+        annotation: object,
+        target_identity: str,
+    ) -> None:
+        """Assign an inline name selection without changing typed-name semantics."""
+
+        target_kind, target_id = self._entity_kind_and_id(target_identity)
+        if not target_id:
+            return
+        normalized_target = f"{target_kind}:{target_id}"
+        current_identity = getattr(annotation, "person_id", None)
+        if not isinstance(current_identity, str) or not current_identity:
+            self._handle_info_panel_face_move_requested(annotation, normalized_target)
+            return
+
+        source_kind, source_id = self._entity_kind_and_id(current_identity)
+        if not source_id:
+            return
+        normalized_source = f"{source_kind}:{source_id}"
+        if normalized_source == normalized_target:
+            return
+        merge_service = getattr(self, "_recognition_merge_service", None)
+        if merge_service is None:
+            return
+        try:
+            outcome = merge_service.merge(normalized_source, normalized_target)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception(
+                "Failed to merge inline recognition identity %s into %s",
+                normalized_source,
+                normalized_target,
+            )
+            self._show_inline_identity_error(
+                tr(
+                    "PlaybackCoordinator",
+                    "The name could not be assigned. Please try again.",
+                )
+            )
+            return
+        if getattr(outcome, "merged", False):
+            self._refresh_recognition_views_after_mutation()
+            return
+
+        failure_value = getattr(outcome, "failure", None)
+        failure = getattr(failure_value, "value", failure_value)
+        if failure == "same_asset_conflict":
+            message = tr(
+                "PlaybackCoordinator",
+                (
+                    "A pet identity cannot contain two detections from the same photo. "
+                    "Delete a duplicate detection instead of merging it."
+                ),
+            )
+        else:
+            message = tr(
+                "PlaybackCoordinator",
+                "The name could not be assigned. The identities may have changed.",
+            )
+        self._show_inline_identity_error(message)
+
+    def _show_inline_identity_error(self, message: str) -> None:
+        overlay = getattr(self, "_face_name_overlay", None)
+        show_error = getattr(overlay, "show_name_error", None)
+        if not callable(show_error):
+            show_error = getattr(overlay, "show_manual_error", None)
+        if callable(show_error):
+            show_error(message)
 
     @Slot(object)
     def _handle_info_panel_face_delete_requested(self, annotation: object) -> None:

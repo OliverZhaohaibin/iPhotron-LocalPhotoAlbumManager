@@ -278,6 +278,62 @@ def test_unassigned_pending_face_click_creates_named_identity(qapp) -> None:
     assert overlay._states["face-1"].layout.label_text == "Alice"
 
 
+@pytest.mark.parametrize("promotion_state", ["candidate", "confirmed"])
+def test_saved_name_editor_reuses_identity_dropdown_for_all_states(
+    qapp,
+    promotion_state: str,
+) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(display_name=None if promotion_state == "candidate" else "Bob")
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": promotion_state}
+    )
+    overlay.set_identity_suggestions(
+        [RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3)]
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    overlay._start_editing("face-1")
+    assert overlay._editor is not None
+    assert overlay._editor._model.item(0).text() == "Alice"
+    overlay._editor.setText("Alice")
+    assert overlay._editor._completer.setCurrentRow(0)
+    overlay._editor._handle_completion_activated("Alice")
+
+    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    rename_spy = QSignalSpy(overlay.renameSubmitted)
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    records = _spy_records(selection_spy)
+    assert len(records) == 1
+    assert records[0][0].face_id == "face-1"
+    assert records[0][1] == "person:person-a"
+    assert _spy_records(rename_spy) == []
+
+
+def test_saved_name_editor_only_merges_explicit_dropdown_selection(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    overlay.set_identity_suggestions(
+        [RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3)]
+    )
+    overlay.set_annotations([_annotation(display_name="Bob")])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    overlay._start_editing("face-1")
+    assert overlay._editor is not None
+    overlay._editor.setText("Alice")
+
+    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    rename_spy = QSignalSpy(overlay.renameSubmitted)
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    assert _spy_records(selection_spy) == []
+    assert _spy_records(rename_spy) == [["person-1", "Alice"]]
+
+
 def test_face_name_overlay_hover_updates_highlighted_face(qapp) -> None:
     surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations(

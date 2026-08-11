@@ -1978,6 +1978,111 @@ def test_unassigned_pending_face_rename_creates_confirmed_person() -> None:
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
+def test_unassigned_pending_face_dropdown_moves_detection_to_existing_identity() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._handle_info_panel_face_move_requested = Mock()
+    annotation = AssetFaceAnnotation(
+        face_id="noise-face",
+        person_id=None,
+        display_name=None,
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+        promotion_state="candidate",
+    )
+
+    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
+        coordinator,
+        annotation,
+        "person:person-existing",
+    )
+
+    coordinator._handle_info_panel_face_move_requested.assert_called_once_with(
+        annotation,
+        "person:person-existing",
+    )
+
+
+def test_assigned_name_dropdown_merges_entire_identity_into_selection() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._recognition_merge_service = Mock(
+        merge=Mock(return_value=SimpleNamespace(merged=True, failure=None))
+    )
+    coordinator._recognition_query_service = Mock()
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._current_presentation = None
+    coordinator._people_dashboard_refresh_callback = Mock()
+    annotation = AssetFaceAnnotation(
+        face_id="face-1",
+        person_id="person-candidate",
+        display_name=None,
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+        promotion_state="candidate",
+    )
+
+    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
+        coordinator,
+        annotation,
+        "person:person-existing",
+    )
+
+    coordinator._recognition_merge_service.merge.assert_called_once_with(
+        "person:person-candidate",
+        "person:person-existing",
+    )
+    coordinator._recognition_query_service.invalidate.assert_called_once_with(None)
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+
+
+def test_pet_name_dropdown_reports_same_asset_merge_conflict() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._recognition_merge_service = Mock(
+        merge=Mock(
+            return_value=SimpleNamespace(
+                merged=False,
+                failure=SimpleNamespace(value="same_asset_conflict"),
+            )
+        )
+    )
+    coordinator._face_name_overlay = Mock()
+    annotation = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="det-1",
+        source_identity_kind="pet",
+        source_identity_id="pet-candidate",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-candidate",
+        canonical_display_name=None,
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+        promotion_state="candidate",
+    )
+
+    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
+        coordinator,
+        annotation,
+        "pet:pet-existing",
+    )
+
+    coordinator._face_name_overlay.show_name_error.assert_called_once_with(
+        "A pet identity cannot contain two detections from the same photo. "
+        "Delete a duplicate detection instead of merging it."
+    )
+
+
 def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._pet_service = Mock(

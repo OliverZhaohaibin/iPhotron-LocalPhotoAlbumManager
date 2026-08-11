@@ -135,7 +135,15 @@ class _FaceNameEditor(QLineEdit):
             return None
         return identity_key
 
-    def suggestion_identity_key(self) -> str | None:
+    def selected_identity_key(self) -> str | None:
+        """Return only an explicitly activated completion.
+
+        Saved identity labels use this stricter form because silently treating a
+        typed duplicate name as a merge would be surprising and destructive.
+        Manual face creation keeps the looser exact-name matching exposed by
+        :meth:`suggestion_identity_key` for backwards compatibility.
+        """
+
         text = self.text().strip()
         if (
             self._selected_identity_key
@@ -143,6 +151,12 @@ class _FaceNameEditor(QLineEdit):
             and self._selected_identity_name.strip().casefold() == text.casefold()
         ):
             return self._selected_identity_key
+        return None
+
+    def suggestion_identity_key(self) -> str | None:
+        selected_identity_key = self.selected_identity_key()
+        if selected_identity_key is not None:
+            return selected_identity_key
         normalized = self.text().strip().casefold()
         matches = [
             suggestion.identity_key
@@ -204,6 +218,7 @@ class _FaceNameEditor(QLineEdit):
 class FaceNameOverlayWidget(QWidget):
     renameSubmitted = Signal(str, object)
     unassignedRenameSubmitted = Signal(object, str)
+    existingIdentitySubmitted = Signal(object, str)
     manualFaceSubmitted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -372,9 +387,13 @@ class FaceNameOverlayWidget(QWidget):
         self.update()
 
     def show_manual_error(self, message: str) -> None:
+        self.show_name_error(message)
+
+    def show_name_error(self, message: str) -> None:
         if not message:
             return
-        target = self._manual_editor.geometry().center() if self._manual_editor is not None else self.rect().center()
+        editor = self._editor or self._manual_editor
+        target = editor.geometry().center() if editor is not None else self.rect().center()
         QToolTip.showText(self.mapToGlobal(target), message, self)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -1206,10 +1225,19 @@ class FaceNameOverlayWidget(QWidget):
         if state is None:
             self._cancel_editing()
             return
+        selected_identity_key = self._editor.selected_identity_key()
         new_name = self._editor.text().strip() or None
         person_id = state.annotation.person_id
         if not person_id and not new_name:
             self._cancel_editing()
+            return
+        if selected_identity_key and not self._is_current_identity(
+            state.annotation,
+            selected_identity_key,
+        ):
+            annotation = state.annotation
+            self._teardown_editor(show_chip=True)
+            self.existingIdentitySubmitted.emit(annotation, selected_identity_key)
             return
         if hasattr(state.annotation, "canonical_display_name"):
             fields = getattr(state.annotation, "__dataclass_fields__", {})
@@ -1227,6 +1255,20 @@ class FaceNameOverlayWidget(QWidget):
             self.renameSubmitted.emit(person_id, new_name)
         elif new_name:
             self.unassignedRenameSubmitted.emit(updated_annotation, new_name)
+
+    @staticmethod
+    def _is_current_identity(
+        annotation: object,
+        identity_key: str,
+    ) -> bool:
+        current_identity = getattr(annotation, "person_id", None)
+        if not isinstance(current_identity, str) or not current_identity:
+            return False
+        if current_identity.startswith(("person:", "pet:")):
+            return current_identity == identity_key
+        kind = getattr(annotation, "kind", "person")
+        normalized_kind = "pet" if kind == "pet" else "person"
+        return f"{normalized_kind}:{current_identity}" == identity_key
 
     def _cancel_editing(self) -> None:
         if self._editing_face_id is None and self._editor is None:

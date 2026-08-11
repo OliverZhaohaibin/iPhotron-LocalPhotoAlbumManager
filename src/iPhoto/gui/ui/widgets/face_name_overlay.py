@@ -203,6 +203,7 @@ class _FaceNameEditor(QLineEdit):
 
 class FaceNameOverlayWidget(QWidget):
     renameSubmitted = Signal(str, object)
+    unassignedRenameSubmitted = Signal(object, str)
     manualFaceSubmitted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1171,7 +1172,13 @@ class FaceNameOverlayWidget(QWidget):
 
     def _start_editing(self, face_id: str) -> None:
         state = self._states.get(face_id)
-        if state is None or not state.annotation.person_id:
+        if state is None:
+            return
+        if (
+            not state.annotation.person_id
+            and getattr(state.annotation, "promotion_state", "legacy_visible")
+            != "candidate"
+        ):
             return
         self._cancel_editing()
         self._set_hovered_face_id(None)
@@ -1196,10 +1203,14 @@ class FaceNameOverlayWidget(QWidget):
         if self._editing_face_id is None or self._editor is None:
             return
         state = self._states.get(self._editing_face_id)
-        if state is None or not state.annotation.person_id:
+        if state is None:
             self._cancel_editing()
             return
         new_name = self._editor.text().strip() or None
+        person_id = state.annotation.person_id
+        if not person_id and not new_name:
+            self._cancel_editing()
+            return
         if hasattr(state.annotation, "canonical_display_name"):
             fields = getattr(state.annotation, "__dataclass_fields__", {})
             changes = {"canonical_display_name": new_name}
@@ -1210,10 +1221,12 @@ class FaceNameOverlayWidget(QWidget):
             state.annotation = replace(state.annotation, **changes)
         else:
             state.annotation = replace(state.annotation, display_name=new_name)
-        person_id = state.annotation.person_id
+        updated_annotation = state.annotation
         self._teardown_editor(show_chip=True)
         if person_id:
             self.renameSubmitted.emit(person_id, new_name)
+        elif new_name:
+            self.unassignedRenameSubmitted.emit(updated_annotation, new_name)
 
     def _cancel_editing(self) -> None:
         if self._editing_face_id is None and self._editor is None:

@@ -719,6 +719,15 @@ class PlaybackCoordinator(QObject):
         rename_signal = getattr(self._face_name_overlay, "renameSubmitted", None)
         if rename_signal is not None:
             rename_signal.connect(self._handle_face_name_rename_submitted)
+        unassigned_rename_signal = getattr(
+            self._face_name_overlay,
+            "unassignedRenameSubmitted",
+            None,
+        )
+        if unassigned_rename_signal is not None:
+            unassigned_rename_signal.connect(
+                self._handle_info_panel_face_move_to_new_person_requested
+            )
         manual_signal = getattr(self._face_name_overlay, "manualFaceSubmitted", None)
         if manual_signal is not None:
             manual_signal.connect(self._handle_manual_face_submitted)

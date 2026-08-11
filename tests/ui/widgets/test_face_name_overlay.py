@@ -223,6 +223,61 @@ def test_face_name_overlay_labels_candidate_as_pending_confirmation(qapp) -> Non
     assert overlay._states["face-1"].layout.label_text == "Pending confirmation"
 
 
+def test_candidate_face_click_opens_editor_and_confirms_renamed_cluster(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(display_name=None)
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": "candidate"}
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    QTest.mouseClick(
+        viewer,
+        Qt.MouseButton.LeftButton,
+        pos=viewer.mapFromGlobal(overlay.mapToGlobal(_chip_center(overlay).toPoint())),
+    )
+    _wait_until(qapp, lambda: overlay._editor is not None)
+    overlay._editor.setText("Alice")
+    spy = QSignalSpy(overlay.renameSubmitted)
+
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    assert _spy_records(spy) == [["person-1", "Alice"]]
+    assert overlay._states["face-1"].layout.label_text == "Alice"
+
+
+def test_unassigned_pending_face_click_creates_named_identity(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(person_id=None, display_name=None)
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": "candidate"}
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    QTest.mouseClick(
+        viewer,
+        Qt.MouseButton.LeftButton,
+        pos=viewer.mapFromGlobal(overlay.mapToGlobal(_chip_center(overlay).toPoint())),
+    )
+    _wait_until(qapp, lambda: overlay._editor is not None)
+    overlay._editor.setText("Alice")
+    spy = QSignalSpy(overlay.unassignedRenameSubmitted)
+
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    records = _spy_records(spy)
+    assert len(records) == 1
+    assert records[0][0].face_id == "face-1"
+    assert records[0][1] == "Alice"
+    assert overlay._states["face-1"].layout.label_text == "Alice"
+
+
 def test_face_name_overlay_hover_updates_highlighted_face(qapp) -> None:
     surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations(

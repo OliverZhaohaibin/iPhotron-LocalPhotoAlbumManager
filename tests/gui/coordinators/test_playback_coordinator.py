@@ -1937,6 +1937,47 @@ def test_handle_info_panel_face_move_to_new_person_requested_refreshes_views() -
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
+def test_unassigned_pending_face_rename_creates_confirmed_person() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(
+        move_face_to_new_person=Mock(return_value="person-new")
+    )
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    annotation = AssetFaceAnnotation(
+        face_id="noise-face",
+        person_id=None,
+        display_name=None,
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+        promotion_state="candidate",
+    )
+
+    PlaybackCoordinator._handle_info_panel_face_move_to_new_person_requested(
+        coordinator,
+        annotation,
+        "Alice",
+    )
+
+    coordinator._people_service.move_face_to_new_person.assert_called_once_with(
+        "noise-face",
+        "Alice",
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+
+
 def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._pet_service = Mock(

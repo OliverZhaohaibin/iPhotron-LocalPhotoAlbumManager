@@ -5,7 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QCursor,
@@ -100,7 +111,9 @@ class _FaceNameEditor(QLineEdit):
             "QListView::item:selected { background-color: rgba(33,108,255,32); color: rgba(18,18,18,235); }"
         )
         self._completer.setPopup(popup)
-        self._completer.activated.connect(self._handle_completion_activated)
+        self._completer.activated[QModelIndex].connect(
+            self._handle_completion_activated
+        )
         self.textEdited.connect(self._clear_selected_identity)
         self.setCompleter(self._completer)
         self.setFrame(True)
@@ -165,8 +178,7 @@ class _FaceNameEditor(QLineEdit):
         ]
         return matches[0] if len(matches) == 1 else None
 
-    def _handle_completion_activated(self, _completion: object) -> None:
-        index = self._completer.currentIndex()
+    def _handle_completion_activated(self, index: QModelIndex) -> None:
         if not index.isValid():
             return
         identity_key = index.data(Qt.ItemDataRole.UserRole)
@@ -187,8 +199,18 @@ class _FaceNameEditor(QLineEdit):
         self._selected_identity_key = None
         self._selected_identity_name = None
 
+    def _accept_current_completion(self) -> bool:
+        self._handle_completion_activated(self._completer.currentIndex())
+        popup = self._completer.popup()
+        if popup is not None:
+            popup.hide()
+        return self.selected_identity_key() is not None
+
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            popup = self._completer.popup()
+            if popup is not None and popup.isVisible():
+                self._accept_current_completion()
             self._closing = True
             self.commitRequested.emit()
             event.accept()

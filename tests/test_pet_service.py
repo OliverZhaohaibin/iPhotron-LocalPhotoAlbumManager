@@ -446,6 +446,15 @@ def test_dedupe_supported_species_boxes_keeps_two_real_cats_from_img_6518() -> N
     ]
 
 
+def test_dedupe_supported_species_boxes_suppresses_img_2939_head_box() -> None:
+    boxes = [
+        _DetectedPetBox((59, 868, 1098, 1372), 0.436, "cat"),
+        _DetectedPetBox((340, 1427, 866, 707), 0.321, "cat"),
+    ]
+
+    assert _dedupe_supported_species_boxes(boxes) == [boxes[0]]
+
+
 def test_dedupe_supported_species_boxes_suppresses_centered_nested_box() -> None:
     boxes = [
         _DetectedPetBox((0, 0, 200, 200), 0.90, "dog"),
@@ -459,6 +468,15 @@ def test_dedupe_supported_species_boxes_keeps_far_center_nested_pet() -> None:
     boxes = [
         _DetectedPetBox((0, 0, 300, 300), 0.90, "cat"),
         _DetectedPetBox((220, 20, 60, 60), 0.80, "cat"),
+    ]
+
+    assert _dedupe_supported_species_boxes(boxes) == boxes
+
+
+def test_dedupe_supported_species_boxes_keeps_box_outside_center_guard() -> None:
+    boxes = [
+        _DetectedPetBox((0, 0, 300, 300), 0.90, "cat"),
+        _DetectedPetBox((141, 100, 100, 100), 0.80, "cat"),
     ]
 
     assert _dedupe_supported_species_boxes(boxes) == boxes

@@ -31,7 +31,11 @@ from .pipeline import (
     _pet_people_overlap_decision,
 )
 from .records import PetMergeOutcome, PetMutationFailure
-from .repository import PetRepository
+from .repository import (
+    PetClusteringConsolidationCancelledError,
+    PetClusteringConsolidationResult,
+    PetRepository,
+)
 from .scan_session import PetScanSession
 from .status import PET_STATUS_DONE, PET_STATUS_FAILED, PET_STATUS_PENDING, PET_STATUS_RETRY
 
@@ -48,6 +52,7 @@ _PET_JOURNAL_KINDS = {
     "pet_move_detection_new",
     "pet_overlap_reconcile",
     "pet_recluster",
+    "pet_cluster_consolidate",
     "recognition_detection_assignment",
     "recognition_merge",
 }
@@ -114,7 +119,7 @@ class PetIndexCoordinator(QObject):
                         "Pets recognition recovery is incomplete."
                     )
                 self._prune_runtime_commits_locked()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._recovery_error = exc
             LOGGER.error(
                 "Pets recognition recovery failed during bind for %s",
@@ -143,7 +148,7 @@ class PetIndexCoordinator(QObject):
         *,
         distance_threshold: float,
         detector_pipeline_version: str | None = None,
-        clustering_pipeline_version: str | None = None,
+        clustering_pipeline_target: str | None = None,
         people_boxes_provider: Callable[
             [Iterable[str]],
             dict[str, tuple[tuple[int, int, int, int], ...]],
@@ -256,7 +261,7 @@ class PetIndexCoordinator(QObject):
                         staged_detections[0].embedding_dim if staged_detections else 0
                     ),
                     "detector_pipeline_version": detector_pipeline_version or "",
-                    "clustering_pipeline_version": clustering_pipeline_version or "",
+                    "clustering_pipeline_target": clustering_pipeline_target or "",
                     "published_thumbnail_paths": [
                         str(path)
                         for path in self._planned_thumbnail_targets(
@@ -291,6 +296,7 @@ class PetIndexCoordinator(QObject):
                     retry_asset_ids=[*retry_ids, *terminal_failed_ids],
                     distance_threshold=distance_threshold,
                     operation_id=operation_id,
+                    clustering_pipeline_target=clustering_pipeline_target,
                 )
             except Exception as exc:
                 runtime_commit = repository.get_runtime_commit(operation_id)
@@ -335,13 +341,7 @@ class PetIndexCoordinator(QObject):
                     generation_id=generation_id,
                     embedding_pipeline_version=(staged_detections[0].embedding_pipeline_version),
                     embedding_dimension=staged_detections[0].embedding_dim,
-                    clustering_pipeline_version=clustering_pipeline_version,
                 )
-            else:
-                if clustering_pipeline_version:
-                    repository.set_scan_metadata(
-                        "clustering_pipeline_version", clustering_pipeline_version
-                    )
             explicit_status_ids = set(done_ids) | set(retry_ids) | set(terminal_failed_ids)
             retired_pending_ids = [
                 asset_id
@@ -387,7 +387,7 @@ class PetIndexCoordinator(QObject):
             self._journal.commit_and_dispatch(
                 operation_id,
                 outbox_payload,
-                lambda: self._scheduleEmit.emit(event),
+                lambda event=event: self._scheduleEmit.emit(event),
             )
             return event
 
@@ -516,104 +516,114 @@ class PetIndexCoordinator(QObject):
             )
             return PetMergeOutcome(True, operation_id=operation_id)
 
-    def recluster_for_pipeline_upgrade(
-        self,
-        *,
-        clustering_pipeline_version: str,
-        distance_threshold: float,
-    ) -> int:
-        """Serialize a version-gated recluster with every other Pet mutation."""
+    def prepare_clustering_pipeline(self, *, clustering_pipeline_target: str) -> int:
+        """Durably queue an upgrade without running clustering before scan drain."""
 
         with self._lock:
-            if self._shutdown_requested:
+            if self._shutdown_requested or not self._ensure_recovered_locked():
                 return 0
-            if not self._ensure_recovered_locked():
-                return 0
-            repository = self._repository()
-            previous_version = repository.get_scan_metadata("clustering_pipeline_version")
-            if previous_version == clustering_pipeline_version:
-                return 0
-            return self._recluster_active_generation_locked(
-                repository,
-                clustering_pipeline_version=clustering_pipeline_version,
-                previous_version=previous_version,
-                distance_threshold=distance_threshold,
-                reason="pipeline_upgrade",
+            return self._repository().prepare_clustering_pipeline(
+                target_version=clustering_pipeline_target
             )
 
-    def consolidate_active_generation_after_scan(
+    def has_pending_clustering_consolidation(
         self,
         *,
-        clustering_pipeline_version: str,
+        clustering_pipeline_target: str,
+    ) -> bool:
+        with self._lock:
+            if self._shutdown_requested or not self._ensure_recovered_locked():
+                return False
+            return self._repository().has_pending_clustering_consolidation(
+                target_version=clustering_pipeline_target
+            )
+
+    def consolidate_pending_clustering(
+        self,
+        *,
+        clustering_pipeline_target: str,
         distance_threshold: float,
-    ) -> int:
-        """Recluster the active generation once after a successful scan drain."""
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> PetClusteringConsolidationResult | None:
+        """Consolidate only components reachable from durable pending seeds."""
 
         with self._lock:
-            if self._shutdown_requested:
-                return 0
-            if not self._ensure_recovered_locked():
-                return 0
+            if self._shutdown_requested or not self._ensure_recovered_locked():
+                return None
             repository = self._repository()
-            return self._recluster_active_generation_locked(
-                repository,
-                clustering_pipeline_version=clustering_pipeline_version,
-                previous_version=repository.get_scan_metadata("clustering_pipeline_version"),
-                distance_threshold=distance_threshold,
-                reason="scan_drain_consolidation",
+            if not repository.has_pending_clustering_consolidation(
+                target_version=clustering_pipeline_target
+            ):
+                return PetClusteringConsolidationResult()
+            repository.set_clustering_consolidation_state(
+                "running",
+                target_version=clustering_pipeline_target,
             )
-
-    def _recluster_active_generation_locked(
-        self,
-        repository: PetRepository,
-        *,
-        clustering_pipeline_version: str,
-        previous_version: str | None,
-        distance_threshold: float,
-        reason: str,
-    ) -> int:
-        previous_detections = repository.get_all_detections()
-        if not previous_detections:
-            return 0
-        changed_asset_ids = tuple(
-            dict.fromkeys(
-                detection.asset_id for detection in previous_detections if detection.asset_id
+            operation_payload = {
+                "clustering_pipeline_target": clustering_pipeline_target,
+                "previous_clustering_pipeline_version": (
+                    repository.get_scan_metadata("clustering_pipeline_version") or ""
+                ),
+            }
+            operation_id = self._try_prepare_operation_locked(
+                "pet_cluster_consolidate",
+                operation_payload,
             )
-        )
-        operation_payload = {
-            "clustering_pipeline_version": clustering_pipeline_version,
-            "previous_clustering_pipeline_version": previous_version or "",
-            "recluster_reason": reason,
-            "changed_asset_ids": list(changed_asset_ids),
-        }
-        operation_id = self._try_prepare_operation_locked("pet_recluster", operation_payload)
-        if operation_id is None:
-            return 0
-        reclustered_count = repository.recluster_detections(
-            distance_threshold=distance_threshold,
-            operation_id=operation_id,
-        )
-        repository.set_scan_metadata(
-            "clustering_pipeline_version",
-            clustering_pipeline_version,
-        )
-        if reclustered_count:
+            if operation_id is None:
+                repository.set_clustering_consolidation_state(
+                    "pending",
+                    target_version=clustering_pipeline_target,
+                )
+                return None
+            try:
+                result = repository.consolidate_pending_clustering(
+                    target_version=clustering_pipeline_target,
+                    distance_threshold=distance_threshold,
+                    operation_id=operation_id,
+                    is_cancelled=is_cancelled,
+                )
+                repository.refresh_people_group_assets_for_pets(result.changed_pet_ids)
+            except PetClusteringConsolidationCancelledError:
+                repository.set_clustering_consolidation_state(
+                    "pending",
+                    target_version=clustering_pipeline_target,
+                )
+                self._journal.transition(
+                    operation_id,
+                    "finalized",
+                    payload=operation_payload,
+                    error="cancelled_before_index_commit",
+                )
+                return None
+            except Exception as exc:
+                runtime_commit = repository.get_runtime_commit(operation_id)
+                if runtime_commit is None:
+                    repository.set_clustering_consolidation_state(
+                        "pending",
+                        target_version=clustering_pipeline_target,
+                    )
+                    self._journal.transition(
+                        operation_id,
+                        "finalized",
+                        payload=operation_payload,
+                        error=str(exc),
+                    )
+                    raise
+                raise PetSnapshotCommittedError(
+                    "Pet clustering committed; durable state recovery is pending."
+                ) from exc
             self._emit_journaled_snapshot(
                 operation_id,
-                changed_asset_ids=changed_asset_ids,
-                changed_pet_ids=tuple(pet.pet_id for pet in repository.get_all_pet_records()),
+                changed_asset_ids=result.changed_asset_ids,
+                changed_pet_ids=result.changed_pet_ids,
             )
             LOGGER.info(
-                "Reclustered %d pet detections for %s (%s -> %s) in %s",
-                reclustered_count,
-                reason,
-                previous_version or "<missing>",
-                clustering_pipeline_version,
+                "Consolidated %d pending Pet clustering seeds into local components for %s in %s",
+                result.processed_seed_count,
+                clustering_pipeline_target,
                 self._library_root,
             )
-        else:
-            self._emit_journaled_snapshot(operation_id)
-        return reclustered_count
+            return result
 
     def delete_detection(self, detection_id: str) -> PetSnapshotEvent | None:
         with self._lock:
@@ -952,6 +962,7 @@ class PetIndexCoordinator(QObject):
                     "pet_move_detection_new",
                     "pet_overlap_reconcile",
                     "pet_recluster",
+                    "pet_cluster_consolidate",
                 }:
                     runtime_commit = repository.get_runtime_commit(operation.operation_id)
                     if runtime_commit is not None:
@@ -962,7 +973,11 @@ class PetIndexCoordinator(QObject):
                             runtime_commit,
                         )
                         continue
-                    if operation.kind in {"pet_overlap_reconcile", "pet_recluster"}:
+                    if operation.kind in {
+                        "pet_overlap_reconcile",
+                        "pet_recluster",
+                        "pet_cluster_consolidate",
+                    }:
                         self._journal.transition(
                             operation.operation_id,
                             "finalized",
@@ -1009,9 +1024,23 @@ class PetIndexCoordinator(QObject):
                     generation_id=generation_id,
                     embedding_pipeline_version=embedding_version,
                     embedding_dimension=embedding_dimension,
-                    clustering_pipeline_version=(
-                        str(payload.get("clustering_pipeline_version") or "") or None
+                )
+            clustering_target = str(
+                payload.get("clustering_pipeline_target")
+                or payload.get("clustering_pipeline_version")
+                or ""
+            )
+            if clustering_target:
+                repository.queue_pet_ids_for_clustering(
+                    (
+                        str(value)
+                        for value in (
+                            payload.get("affected_pet_ids") or payload.get("changed_pet_ids", ())
+                        )
+                        if value
                     ),
+                    target_version=clustering_target,
+                    generation_id=generation_id,
                 )
             done_ids = [str(value) for value in payload.get("done_asset_ids", ()) if value]
             retry_ids = [str(value) for value in payload.get("retry_asset_ids", ()) if value]
@@ -1049,7 +1078,7 @@ class PetIndexCoordinator(QObject):
             self._journal.commit_and_dispatch(
                 operation.operation_id,
                 event_payload,
-                lambda: self._scheduleEmit.emit(event),
+                lambda event=event: self._scheduleEmit.emit(event),
             )
 
     def _recover_legacy_pet_recognition_merge(self, repository, operation) -> bool:
@@ -1111,6 +1140,7 @@ class PetIndexCoordinator(QObject):
             "pet_move_detection",
             "pet_move_detection_new",
             "pet_overlap_reconcile",
+            "pet_cluster_consolidate",
         }:
             repository.refresh_people_group_assets_for_pets(
                 str(value)

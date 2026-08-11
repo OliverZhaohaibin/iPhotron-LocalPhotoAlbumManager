@@ -1304,7 +1304,7 @@ def test_redirected_unstable_pet_profile_recognizes_new_key(tmp_path: Path) -> N
     assert [pet.pet_id for pet in pets] == ["pet-target"]
 
 
-def test_pipeline_recluster_and_merge_share_coordinator_lock(
+def test_pipeline_consolidation_and_merge_share_coordinator_lock(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1349,24 +1349,22 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
     )
     coordinator = PetIndexCoordinator(tmp_path)
     monkeypatch.setattr(coordinator, "_repository", lambda: repository)
-    original_recluster = repository.recluster_detections
-    recluster_entered = threading.Event()
-    release_recluster = threading.Event()
+    coordinator.prepare_clustering_pipeline(clustering_pipeline_target="test-version")
+    original_consolidate = repository.consolidate_pending_clustering
+    consolidation_entered = threading.Event()
+    release_consolidation = threading.Event()
     merge_finished = threading.Event()
     merge_results: list[bool] = []
 
-    def blocked_recluster(*, distance_threshold: float, operation_id: str | None = None) -> int:
-        recluster_entered.set()
-        assert release_recluster.wait(2)
-        return original_recluster(
-            distance_threshold=distance_threshold,
-            operation_id=operation_id,
-        )
+    def blocked_consolidation(**kwargs):
+        consolidation_entered.set()
+        assert release_consolidation.wait(2)
+        return original_consolidate(**kwargs)
 
-    monkeypatch.setattr(repository, "recluster_detections", blocked_recluster)
-    recluster_thread = threading.Thread(
-        target=lambda: coordinator.recluster_for_pipeline_upgrade(
-            clustering_pipeline_version="test-version",
+    monkeypatch.setattr(repository, "consolidate_pending_clustering", blocked_consolidation)
+    consolidation_thread = threading.Thread(
+        target=lambda: coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target="test-version",
             distance_threshold=0.2,
         )
     )
@@ -1375,13 +1373,13 @@ def test_pipeline_recluster_and_merge_share_coordinator_lock(
         merge_results.append(coordinator.merge_pets("pet-source", "pet-target").merged)
         merge_finished.set()
 
-    recluster_thread.start()
-    assert recluster_entered.wait(2)
+    consolidation_thread.start()
+    assert consolidation_entered.wait(2)
     merge_thread = threading.Thread(target=merge)
     merge_thread.start()
     assert merge_finished.wait(0.1) is False
-    release_recluster.set()
-    recluster_thread.join(2)
+    release_consolidation.set()
+    consolidation_thread.join(2)
     merge_thread.join(2)
 
     assert merge_results == [True]
@@ -1394,7 +1392,7 @@ def test_scan_drain_consolidation_rejoins_unstable_cross_batch_singletons(
 ) -> None:
     coordinator = PetIndexCoordinator(tmp_path)
     repository = coordinator._repository()
-    angles = (0.0, 30.0, 60.0)
+    angles = tuple(float(value) for value in range(0, 61, 10))
     detections = [
         _detection(
             detection_id=f"dog-{index}",
@@ -1414,7 +1412,6 @@ def test_scan_drain_consolidation_rejoins_unstable_cross_batch_singletons(
         generation_id=0,
         embedding_pipeline_version=detections[0].embedding_pipeline_version,
         embedding_dimension=detections[0].embedding_dim,
-        clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
     )
 
     for detection in detections:
@@ -1422,9 +1419,10 @@ def test_scan_drain_consolidation_rejoins_unstable_cross_batch_singletons(
             [detection.asset_id],
             [detection],
             distance_threshold=0.42,
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
         )
 
-    assert len(repository.get_all_pet_records()) == 3
+    assert len(repository.get_all_pet_records()) == 7
     emitted_operation_ids: list[str] = []
     original_emit = coordinator._emit_journaled_snapshot
 
@@ -1433,14 +1431,294 @@ def test_scan_drain_consolidation_rejoins_unstable_cross_batch_singletons(
         return original_emit(operation_id, **event_fields)
 
     monkeypatch.setattr(coordinator, "_emit_journaled_snapshot", record_emit)
-    reclustered = coordinator.consolidate_active_generation_after_scan(
-        clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+    result = coordinator.consolidate_pending_clustering(
+        clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
         distance_threshold=0.42,
     )
 
-    assert reclustered == 3
+    assert result is not None and result.processed_seed_count == 7
     assert len(repository.get_all_pet_records()) == 1
     assert len(emitted_operation_ids) == 1
+
+
+def test_local_consolidation_does_not_use_global_recluster_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    first = _detection(
+        detection_id="dog-a",
+        asset_id="asset-a",
+        embedding=np.asarray([1.0, 0.0, 0.0]),
+        species_label="dog",
+    )
+    second = _detection(
+        detection_id="dog-b",
+        asset_id="asset-b",
+        embedding=np.asarray([0.98, 0.2, 0.0]),
+        species_label="dog",
+    )
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version=first.embedding_pipeline_version,
+        embedding_dimension=first.embedding_dim,
+    )
+    for detection in (first, second):
+        repository.replace_assets_incrementally(
+            [detection.asset_id],
+            [detection],
+            distance_threshold=0.42,
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        )
+
+    monkeypatch.setattr(
+        repository,
+        "get_all_detections",
+        lambda: pytest.fail("local consolidation must not read all detections"),
+    )
+    monkeypatch.setattr(
+        repository,
+        "replace_all",
+        lambda *_args, **_kwargs: pytest.fail("local consolidation must not replace all rows"),
+    )
+
+    result = coordinator.consolidate_pending_clustering(
+        clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        distance_threshold=0.42,
+    )
+
+    assert result is not None and result.changed
+    assert len(repository.get_all_pet_records()) == 1
+
+
+def test_cancelled_local_consolidation_keeps_durable_pending_queue(tmp_path: Path) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    detections = [
+        _detection(
+            detection_id=f"dog-{index}",
+            asset_id=f"asset-{index}",
+            embedding=np.asarray([np.cos(angle), np.sin(angle), 0.0]),
+            species_label="dog",
+        )
+        for index, angle in enumerate((0.0, 0.2))
+    ]
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version=detections[0].embedding_pipeline_version,
+        embedding_dimension=detections[0].embedding_dim,
+    )
+    for detection in detections:
+        repository.replace_assets_incrementally(
+            [detection.asset_id],
+            [detection],
+            distance_threshold=0.42,
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        )
+
+    result = coordinator.consolidate_pending_clustering(
+        clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        distance_threshold=0.42,
+        is_cancelled=lambda: True,
+    )
+
+    assert result is None
+    assert repository.has_pending_clustering_consolidation(
+        target_version=PET_CLUSTERING_PIPELINE_VERSION
+    )
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "pending"
+    assert len(repository.get_all_pet_records()) == 2
+    assert coordinator._journal.unfinished() == ()
+
+
+def test_failed_local_consolidation_keeps_queue_and_publishes_no_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    detections = [
+        _detection(
+            detection_id=f"dog-{index}",
+            asset_id=f"asset-{index}",
+            embedding=np.asarray([np.cos(angle), np.sin(angle), 0.0]),
+            species_label="dog",
+        )
+        for index, angle in enumerate((0.0, 0.2))
+    ]
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version=detections[0].embedding_pipeline_version,
+        embedding_dimension=detections[0].embedding_dim,
+    )
+    for detection in detections:
+        repository.replace_assets_incrementally(
+            [detection.asset_id],
+            [detection],
+            distance_threshold=0.42,
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        )
+
+    def fail_cluster(*_args, **_kwargs):
+        raise RuntimeError("injected consolidation failure")
+
+    monkeypatch.setattr(pet_pipeline, "cluster_pet_records", fail_cluster)
+    monkeypatch.setattr(
+        coordinator,
+        "_emit_journaled_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("failed consolidation must not publish"),
+    )
+
+    with pytest.raises(RuntimeError, match="injected consolidation failure"):
+        coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+            distance_threshold=0.42,
+        )
+
+    assert repository.has_pending_clustering_consolidation(
+        target_version=PET_CLUSTERING_PIPELINE_VERSION
+    )
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "pending"
+    assert repository.get_scan_metadata("clustering_pipeline_version") != (
+        PET_CLUSTERING_PIPELINE_VERSION
+    )
+    assert len(repository.get_all_pet_records()) == 2
+    assert coordinator._journal.unfinished() == ()
+
+
+def test_restart_preserves_bounded_v3_queue_instead_of_seeding_full_library(
+    tmp_path: Path,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    detections = [
+        _detection(
+            detection_id=f"dog-{index}",
+            asset_id=f"asset-{index}",
+            pet_id=f"pet-{index}",
+            embedding=embedding,
+            species_label="dog",
+        )
+        for index, embedding in enumerate(
+            (
+                np.asarray([1.0, 0.0, 0.0]),
+                np.asarray([0.0, 1.0, 0.0]),
+                np.asarray([0.0, 0.0, 1.0]),
+            )
+        )
+    ]
+    timestamp = utc_now_iso()
+    repository.replace_all(
+        detections,
+        [
+            PetRecord(
+                pet_id=str(detection.pet_id),
+                name=None,
+                key_detection_id=detection.detection_id,
+                detection_count=1,
+                center_embedding=detection.embedding,
+                embedding_dim=detection.embedding_dim,
+                created_at=timestamp,
+                updated_at=timestamp,
+                sample_count=1,
+                profile_state="unstable",
+                species_label="dog",
+                embedding_pipeline_version=detection.embedding_pipeline_version,
+                generation_id=detection.generation_id,
+            )
+            for detection in detections
+        ],
+    )
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version=detections[0].embedding_pipeline_version,
+        embedding_dimension=detections[0].embedding_dim,
+    )
+    repository.set_scan_metadata_many(
+        {
+            "clustering_pipeline_version": PET_CLUSTERING_PIPELINE_VERSION,
+            "clustering_pipeline_target": PET_CLUSTERING_PIPELINE_VERSION,
+            "clustering_consolidation_state": "clean",
+        }
+    )
+    repository.queue_pet_ids_for_clustering(
+        ("pet-0",),
+        target_version=PET_CLUSTERING_PIPELINE_VERSION,
+    )
+    repository.set_clustering_consolidation_state(
+        "running",
+        target_version=PET_CLUSTERING_PIPELINE_VERSION,
+    )
+
+    assert (
+        coordinator.prepare_clustering_pipeline(
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION
+        )
+        == 1
+    )
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "pending"
+
+    result = coordinator.consolidate_pending_clustering(
+        clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        distance_threshold=0.1,
+    )
+
+    assert result is not None and result.processed_seed_count == 1
+    assert len(repository.get_all_pet_records()) == 3
+
+
+def test_empty_worker_run_recovers_durable_pending_consolidation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    assert repository is not None
+    detections = [
+        _detection(
+            detection_id=f"dog-{index}",
+            asset_id=f"asset-{index}",
+            embedding=np.asarray([np.cos(angle), np.sin(angle), 0.0]),
+            species_label="dog",
+        )
+        for index, angle in enumerate((0.0, 0.2))
+    ]
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version=detections[0].embedding_pipeline_version,
+        embedding_dimension=detections[0].embedding_dim,
+        detector_pipeline_version=PET_DETECTOR_PIPELINE_VERSION,
+    )
+    repository.set_scan_metadata_many(
+        {
+            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_state": "complete",
+        }
+    )
+    for detection in detections:
+        repository.replace_assets_incrementally(
+            [detection.asset_id],
+            [detection],
+            distance_threshold=0.42,
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        )
+
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    monkeypatch.setattr(worker, "_top_up_pending_rows", lambda: None)
+    monkeypatch.setattr(
+        "iPhoto.library.workers.pet_scan_worker.PetClusterPipeline",
+        lambda **_kwargs: SimpleNamespace(distance_threshold=0.42),
+    )
+    worker.finish_input()
+
+    worker.run()
+
+    assert len(repository.get_all_pet_records()) == 1
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "clean"
+    assert repository.get_scan_metadata("clustering_pipeline_version") == (
+        PET_CLUSTERING_PIPELINE_VERSION
+    )
 
 
 def test_pet_scan_worker_consolidates_once_after_one_detection_per_batch(
@@ -1455,7 +1733,6 @@ def test_pet_scan_worker_consolidates_once_after_one_detection_per_batch(
         embedding_pipeline_version="dinov2-vits14-imagenet-normalized-v1",
         embedding_dimension=3,
         detector_pipeline_version=PET_DETECTOR_PIPELINE_VERSION,
-        clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
     )
     repository.set_scan_metadata_many(
         {
@@ -1491,7 +1768,7 @@ def test_pet_scan_worker_consolidates_once_after_one_detection_per_batch(
             ),
             species_label="dog",
         )
-        for index, angle in enumerate((0.0, 30.0, 60.0))
+        for index, angle in enumerate(range(0, 61, 10))
     }
 
     def commit_one(batch, *_args):
@@ -1500,6 +1777,7 @@ def test_pet_scan_worker_consolidates_once_after_one_detection_per_batch(
             [detection.asset_id],
             [detection],
             distance_threshold=0.42,
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
         )
         return True
 
@@ -1520,8 +1798,8 @@ def test_pet_scan_worker_consolidates_once_after_one_detection_per_batch(
     worker.run()
 
     assert len(repository.get_all_pet_records()) == 1
-    assert len(update_events) == 4  # three batch events plus one final consolidation event
-    assert finalized_cluster_counts == [1]
+    assert len(update_events) == 8  # seven batch events plus one final consolidation event
+    assert finalized_cluster_counts == [7]
 
 
 def test_pet_scan_worker_empty_drain_skips_consolidation(
@@ -1537,6 +1815,8 @@ def test_pet_scan_worker_empty_drain_skips_consolidation(
             "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
             "detector_migration_state": "complete",
             "clustering_pipeline_version": PET_CLUSTERING_PIPELINE_VERSION,
+            "clustering_pipeline_target": PET_CLUSTERING_PIPELINE_VERSION,
+            "clustering_consolidation_state": "clean",
         }
     )
     worker = PetScanWorker(tmp_path, pet_service=service)
@@ -1549,7 +1829,7 @@ def test_pet_scan_worker_empty_drain_skips_consolidation(
     )
     monkeypatch.setattr(
         worker,
-        "_consolidate_after_scan",
+        "_consolidate_pending_clustering",
         lambda _pipeline: pytest.fail("empty scans must not consolidate"),
     )
     monkeypatch.setattr(
@@ -1574,11 +1854,11 @@ def test_pet_scan_worker_cancelled_scan_skips_consolidation(
     worker.cancel()
     monkeypatch.setattr(
         coordinator,
-        "consolidate_active_generation_after_scan",
+        "consolidate_pending_clustering",
         lambda **_kwargs: pytest.fail("cancelled scans must not consolidate"),
     )
 
-    assert worker._consolidate_after_scan(SimpleNamespace(distance_threshold=0.42)) is False
+    assert worker._consolidate_pending_clustering(SimpleNamespace(distance_threshold=0.42)) is False
 
 
 def test_pet_merge_redirect_chain_keeps_all_alias_clusters_linked(tmp_path: Path) -> None:
@@ -2230,7 +2510,7 @@ def test_pet_detector_pipeline_version_includes_hybrid_deduplication() -> None:
 
 
 def test_pet_clustering_pipeline_version_uses_bounded_single_link() -> None:
-    assert PET_CLUSTERING_PIPELINE_VERSION == "species-bounded-single-link-v2"
+    assert PET_CLUSTERING_PIPELINE_VERSION == "species-bounded-single-link-v3"
 
 
 def test_default_pet_model_dir_uses_user_cache(monkeypatch) -> None:
@@ -2305,7 +2585,7 @@ def test_pet_scan_worker_maps_legacy_backfill_marker_to_running_migration(
     assert repository.get_scan_metadata("detector_migration_state") == "running"
 
 
-def test_pet_scan_worker_reclusters_for_clustering_upgrade_without_resetting_assets(
+def test_pet_scan_worker_queues_clustering_upgrade_without_resetting_assets(
     tmp_path: Path,
 ) -> None:
     asset_repo = _FakePetAssetRepository(
@@ -2353,13 +2633,19 @@ def test_pet_scan_worker_reclusters_for_clustering_upgrade_without_resetting_ass
         allow_model_download=False,
     )
 
-    assert worker._recluster_for_clustering_upgrade(pipeline) is True
+    assert worker._prepare_clustering_pipeline() is True
 
     assert asset_repo.update_calls == []
     assert [row["pet_status"] for row in asset_repo.rows] == ["done", "done"]
+    assert repository.get_scan_metadata("clustering_pipeline_version") == "old-clustering"
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "pending"
+
+    assert worker._consolidate_pending_clustering(pipeline) is True
+
     assert repository.get_scan_metadata("clustering_pipeline_version") == (
         PET_CLUSTERING_PIPELINE_VERSION
     )
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "clean"
     detections = repository.get_all_detections()
     assert len({detection.pet_id for detection in detections}) == 2
     retained = next(
@@ -2372,7 +2658,7 @@ def test_pet_scan_worker_reclusters_for_clustering_upgrade_without_resetting_ass
     assert retained.key_detection_id == "det-cat"
 
 
-def test_pet_scan_worker_recluster_does_not_let_old_key_votes_remerge_split_cats(
+def test_pet_scan_worker_consolidation_does_not_let_old_key_votes_remerge_split_cats(
     tmp_path: Path,
 ) -> None:
     asset_repo = _FakePetAssetRepository(
@@ -2418,7 +2704,8 @@ def test_pet_scan_worker_recluster_does_not_let_old_key_votes_remerge_split_cats
         allow_model_download=False,
     )
 
-    assert worker._recluster_for_clustering_upgrade(pipeline) is True
+    assert worker._prepare_clustering_pipeline() is True
+    assert worker._consolidate_pending_clustering(pipeline) is True
 
     detections = repository.get_all_detections()
     pet_ids = {detection.pet_id for detection in detections}
@@ -2476,7 +2763,7 @@ def test_pet_scan_worker_only_typed_availability_errors_use_unavailable_path(
     monkeypatch.setattr(worker, "_process_batch", fail_batch)
     monkeypatch.setattr(
         worker,
-        "_consolidate_after_scan",
+        "_consolidate_pending_clustering",
         lambda _pipeline: pytest.fail("failed scans must not consolidate"),
     )
     worker.run()

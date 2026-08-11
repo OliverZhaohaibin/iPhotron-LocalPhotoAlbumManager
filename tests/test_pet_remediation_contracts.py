@@ -1114,13 +1114,13 @@ def test_generation_contract_is_reused_and_activated_in_one_transaction(
     second, second_generation = repository.assign_embedding_generation([detection])
     assert first_generation == second_generation
     assert first[0].generation_id == second[0].generation_id
+    repository.set_scan_metadata("clustering_pipeline_version", "cluster-v1")
 
     repository.activate_embedding_generation(
         generation_id=first_generation,
         embedding_pipeline_version="embedding-v2",
         embedding_dimension=detection.embedding_dim,
         detector_pipeline_version="detector-v5",
-        clustering_pipeline_version="cluster-v2",
     )
     with sqlite3.connect(repository.db_path) as connection:
         metadata = dict(connection.execute("SELECT key, value FROM scan_metadata"))
@@ -1135,7 +1135,7 @@ def test_generation_contract_is_reused_and_activated_in_one_transaction(
     assert metadata["active_embedding_pipeline_version"] == "embedding-v2"
     assert metadata["active_embedding_dimension"] == str(detection.embedding_dim)
     assert metadata["detector_pipeline_version"] == "detector-v5"
-    assert metadata["clustering_pipeline_version"] == "cluster-v2"
+    assert metadata["clustering_pipeline_version"] == "cluster-v1"
     assert active == ("embedding-v2", detection.embedding_dim, "active")
 
 
@@ -1762,11 +1762,9 @@ def test_move_and_merge_recover_after_runtime_commit(
         assert {pet.pet_id for pet in recovered_repository.get_all_pet_records()} == {"pet-b"}
 
 
-@pytest.mark.parametrize("recluster_reason", ["pipeline_upgrade", "scan_drain_consolidation"])
-def test_recluster_recovers_state_and_pipeline_metadata(
+def test_local_consolidation_recovers_state_and_pipeline_metadata(
     tmp_path: Path,
     monkeypatch,
-    recluster_reason: str,
 ) -> None:
     repository = PetRepository(
         tmp_path / ".iPhoto" / "pets" / "pet_index.db",
@@ -1785,6 +1783,7 @@ def test_recluster_recovers_state_and_pipeline_metadata(
     )
     coordinator = PetIndexCoordinator(tmp_path)
     monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    coordinator.prepare_clustering_pipeline(clustering_pipeline_target="cluster-v-next")
     state = repository.state_repository
     assert state is not None
 
@@ -1792,20 +1791,14 @@ def test_recluster_recovers_state_and_pipeline_metadata(
         raise sqlite3.OperationalError("injected state sync failure")
 
     monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
-    with pytest.raises(sqlite3.OperationalError, match="injected state sync failure"):
-        if recluster_reason == "pipeline_upgrade":
-            coordinator.recluster_for_pipeline_upgrade(
-                clustering_pipeline_version="cluster-v-next",
-                distance_threshold=0.2,
-            )
-        else:
-            coordinator.consolidate_active_generation_after_scan(
-                clustering_pipeline_version="cluster-v-next",
-                distance_threshold=0.2,
-            )
+    with pytest.raises(PetSnapshotCommittedError, match="durable state recovery"):
+        coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target="cluster-v-next",
+            distance_threshold=0.2,
+        )
 
     operation = coordinator._journal.unfinished()[0]
-    assert operation.kind == "pet_recluster"
+    assert operation.kind == "pet_cluster_consolidate"
     assert repository.get_runtime_commit(operation.operation_id)["state_synced"] is False  # type: ignore[index]
 
     recovered = PetIndexCoordinator(tmp_path)
@@ -1817,6 +1810,14 @@ def test_recluster_recovers_state_and_pipeline_metadata(
         "cluster-v-next"
     )
     assert recovered._journal.unfinished() == ()
+    operation_db = tmp_path / ".iPhoto" / "recognition" / "operations.db"
+    with sqlite3.connect(operation_db) as connection:
+        outbox_rows = connection.execute(
+            "SELECT event_json FROM event_outbox WHERE operation_id = ?",
+            (operation.operation_id,),
+        ).fetchall()
+    assert len(outbox_rows) == 1
+    assert json.loads(outbox_rows[0][0])["changed_asset_ids"] == ["asset-a", "asset-b"]
 
 
 def _detection(

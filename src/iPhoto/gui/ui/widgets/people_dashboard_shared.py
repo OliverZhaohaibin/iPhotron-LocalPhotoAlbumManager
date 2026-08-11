@@ -9,11 +9,11 @@ from typing import Iterable
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainterPath, QPalette, QPixmap
-from PySide6.QtWidgets import QFrame, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QWidget
 
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.infrastructure.services.people_cover_cache_service import PeopleCoverCacheService
-from iPhoto.people.image_utils import create_cover_thumbnail, load_image_rgb
+from iPhoto.people.image_utils import create_cover_thumbnail
 from iPhoto.utils.pathutils import ensure_work_dir
 
 CARD_WIDTH = 156
@@ -142,6 +142,45 @@ def _widget_uses_dark_theme(widget: QWidget | None) -> bool:
     if widget is None:
         return False
     return widget.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def _resolve_dashboard_dark_mode(parent: QWidget | None) -> bool:
+    """Resolve the effective dashboard theme from context, then the painted palette."""
+
+    widget = parent.window() if parent is not None and parent.window() is not None else parent
+    coordinator = getattr(widget, "coordinator", None)
+    context = getattr(coordinator, "_context", None)
+    theme_manager = getattr(context, "theme", None)
+    if theme_manager is not None:
+        effective_mode = getattr(theme_manager, "get_effective_theme_mode", None)
+        if callable(effective_mode):
+            return effective_mode() == "dark"
+        current_colors = getattr(theme_manager, "current_colors", None)
+        if callable(current_colors):
+            colors = current_colors()
+            is_dark = getattr(colors, "is_dark", None)
+            if isinstance(is_dark, bool):
+                return is_dark
+
+    settings = getattr(context, "settings", None)
+    if settings is not None and hasattr(settings, "get"):
+        theme_setting = settings.get("ui.theme", "system")
+        if theme_setting == "dark":
+            return True
+        if theme_setting == "light":
+            return False
+
+    # The application palette is the visual source of truth after an explicit
+    # Light/Dark selection. It must win over the OS scheme (for example, Light
+    # Mode inside a macOS session whose system appearance is dark).
+    if widget is not None:
+        return _widget_uses_dark_theme(widget)
+    if parent is not None:
+        return _widget_uses_dark_theme(parent)
+    app = QApplication.instance()
+    if app is not None:
+        return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+    return False
 
 
 def _button_distance(first: QWidget, second: QWidget) -> float:

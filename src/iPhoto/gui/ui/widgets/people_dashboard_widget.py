@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -41,7 +40,7 @@ from .people_dashboard_board import GroupBoard, IdentityBoard
 from .people_dashboard_cards import GroupCard, PeopleCard, PetCard
 from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
 from .people_dashboard_shared import (
-    _widget_uses_dark_theme,
+    _resolve_dashboard_dark_mode,
     configure_people_cover_cache,
 )
 
@@ -1171,7 +1170,6 @@ class PeopleDashboardWidget(QWidget):
             confirm_text=tr("PeopleDashboard", "Choose"),
             min_selection=1,
             max_selection=1,
-            dark_mode=self._uses_dark_theme(),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1188,7 +1186,6 @@ class PeopleDashboardWidget(QWidget):
         dialog = GroupPeopleDialog(
             choices,  # type: ignore[arg-type]
             initial_selected_ids=[initial_person_id],
-            dark_mode=self._uses_dark_theme(),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1657,25 +1654,7 @@ class PeopleDashboardWidget(QWidget):
             """)
 
     def _uses_dark_theme(self) -> bool:
-        window = self.window()
-        coordinator = getattr(window, "coordinator", None)
-        context = getattr(coordinator, "_context", None)
-        theme_manager = getattr(context, "theme", None)
-        if theme_manager is not None and hasattr(theme_manager, "get_effective_theme_mode"):
-            return theme_manager.get_effective_theme_mode() == "dark"
-
-        settings = getattr(context, "settings", None)
-        if settings is not None and hasattr(settings, "get"):
-            theme_setting = settings.get("ui.theme", "system")
-            if theme_setting == "dark":
-                return True
-            if theme_setting == "light":
-                return False
-
-        app = QGuiApplication.instance()
-        if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
-            return True
-        return _widget_uses_dark_theme(self)
+        return _resolve_dashboard_dark_mode(self)
 
     def _load_show_hidden_people_setting(self) -> bool:
         window = self.window()

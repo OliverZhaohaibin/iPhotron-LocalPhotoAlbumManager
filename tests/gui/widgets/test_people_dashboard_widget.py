@@ -684,6 +684,59 @@ def test_group_people_dialog_supports_light_and_dark_styles(qapp: QApplication) 
     dark_dialog.close()
 
 
+def test_new_group_dialog_resolves_current_window_theme(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    class Theme:
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+
+        def get_effective_theme_mode(self) -> str:
+            return self.mode
+
+    theme = Theme("light")
+    shell = QWidget()
+    shell.coordinator = SimpleNamespace(_context=SimpleNamespace(theme=theme, settings=None))
+    widget = PeopleDashboardWidget(parent=shell)
+    summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    widget._summaries = summaries
+    opened_dialogs: list[GroupPeopleDialog] = []
+
+    class CapturingGroupPeopleDialog(GroupPeopleDialog):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            opened_dialogs.append(self)
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        people_dashboard_widget,
+        "GroupPeopleDialog",
+        CapturingGroupPeopleDialog,
+    )
+
+    widget._open_group_dialog("person:person-a")
+    light_dialog = opened_dialogs[-1]
+    assert light_dialog._dark_mode is False
+    assert "#F5F6FA" in light_dialog._panel.styleSheet()
+
+    theme.mode = "dark"
+    widget._open_group_dialog("person:person-a")
+    dark_dialog = opened_dialogs[-1]
+    assert dark_dialog._dark_mode is True
+    assert "#171B27" in dark_dialog._panel.styleSheet()
+
+    light_dialog.close()
+    dark_dialog.close()
+    widget.close()
+    shell.close()
+
+
 def test_group_people_dialog_has_no_background_overlay(qapp: QApplication) -> None:
     summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),

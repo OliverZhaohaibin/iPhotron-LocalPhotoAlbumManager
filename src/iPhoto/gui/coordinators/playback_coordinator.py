@@ -130,7 +130,7 @@ class _RecognitionOverlayWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - worker thread
         try:
-            snapshot = self._query_service.load_asset_annotations(self._asset_id)
+            snapshot = self._query_service.load_overlay(self._asset_id)
         except Exception as exc:  # noqa: BLE001 - async optional-domain boundary
             self._signals.failed.emit(self._request_generation, exc)
             return
@@ -719,6 +719,24 @@ class PlaybackCoordinator(QObject):
         rename_signal = getattr(self._face_name_overlay, "renameSubmitted", None)
         if rename_signal is not None:
             rename_signal.connect(self._handle_face_name_rename_submitted)
+        unassigned_rename_signal = getattr(
+            self._face_name_overlay,
+            "unassignedRenameSubmitted",
+            None,
+        )
+        if unassigned_rename_signal is not None:
+            unassigned_rename_signal.connect(
+                self._handle_info_panel_face_move_to_new_person_requested
+            )
+        existing_identity_signal = getattr(
+            self._face_name_overlay,
+            "existingIdentitySubmitted",
+            None,
+        )
+        if existing_identity_signal is not None:
+            existing_identity_signal.connect(
+                self._handle_face_name_existing_identity_submitted
+            )
         manual_signal = getattr(self._face_name_overlay, "manualFaceSubmitted", None)
         if manual_signal is not None:
             manual_signal.connect(self._handle_manual_face_submitted)
@@ -1824,6 +1842,85 @@ class PlaybackCoordinator(QObject):
             return
         self._refresh_recognition_views_after_mutation()
 
+    @Slot(object, str)
+    def _handle_face_name_existing_identity_submitted(
+        self,
+        annotation: object,
+        target_identity: str,
+    ) -> None:
+        """Assign an inline name selection without changing typed-name semantics."""
+
+        target_kind, target_id = self._entity_kind_and_id(target_identity)
+        if not target_id:
+            return
+        normalized_target = f"{target_kind}:{target_id}"
+        current_identity = getattr(annotation, "person_id", None)
+        if not isinstance(current_identity, str) or not current_identity:
+            self._handle_info_panel_face_move_requested(annotation, normalized_target)
+            return
+
+        source_kind, source_id = self._entity_kind_and_id(current_identity)
+        if not source_id:
+            return
+        normalized_source = f"{source_kind}:{source_id}"
+        if normalized_source == normalized_target:
+            return
+        merge_service = getattr(self, "_recognition_merge_service", None)
+        if merge_service is None:
+            return
+        try:
+            outcome = merge_service.merge(normalized_source, normalized_target)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception(
+                "Failed to merge inline recognition identity %s into %s",
+                normalized_source,
+                normalized_target,
+            )
+            self._show_inline_identity_error(
+                tr(
+                    "PlaybackCoordinator",
+                    "The name could not be assigned. Please try again.",
+                )
+            )
+            return
+        if getattr(outcome, "merged", False):
+            self._refresh_recognition_views_after_mutation()
+            return
+
+        failure_value = getattr(outcome, "failure", None)
+        failure = getattr(failure_value, "value", failure_value)
+        if failure == "same_asset_conflict":
+            self._show_same_asset_identity_error()
+            return
+        self._show_identity_assignment_changed_error()
+
+    def _show_identity_assignment_changed_error(self) -> None:
+        self._show_inline_identity_error(
+            tr(
+                "PlaybackCoordinator",
+                "The name could not be assigned. The identities may have changed.",
+            )
+        )
+
+    def _show_same_asset_identity_error(self) -> None:
+        self._show_inline_identity_error(
+            tr(
+                "PlaybackCoordinator",
+                (
+                    "A pet identity cannot contain two detections from the same photo. "
+                    "Delete a duplicate detection instead of merging it."
+                ),
+            )
+        )
+
+    def _show_inline_identity_error(self, message: str) -> None:
+        overlay = getattr(self, "_face_name_overlay", None)
+        show_error = getattr(overlay, "show_name_error", None)
+        if not callable(show_error):
+            show_error = getattr(overlay, "show_manual_error", None)
+        if callable(show_error):
+            show_error(message)
+
     @Slot(object)
     def _handle_info_panel_face_delete_requested(self, annotation: object) -> None:
         annotation_id = self._annotation_id(annotation)
@@ -1894,7 +1991,10 @@ class PlaybackCoordinator(QObject):
                 return
             target_pet_id = target_id
             try:
-                changed = pet_service.move_detection_to_pet(annotation_id, target_pet_id)
+                outcome = pet_service.move_detection_to_pet_with_outcome(
+                    annotation_id,
+                    target_pet_id,
+                )
             except (sqlite3.Error, OSError):
                 LOGGER.exception(
                     "Failed to move pet detection %s to pet %s",
@@ -1902,8 +2002,15 @@ class PlaybackCoordinator(QObject):
                     target_pet_id,
                 )
                 return
-            if changed:
+            if getattr(outcome, "succeeded", False):
                 self._refresh_recognition_views_after_mutation()
+                return
+            failure_value = getattr(outcome, "failure", None)
+            failure = getattr(failure_value, "value", failure_value)
+            if failure == "same_asset_conflict":
+                self._show_same_asset_identity_error()
+            else:
+                self._show_identity_assignment_changed_error()
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:

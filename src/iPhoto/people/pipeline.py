@@ -18,6 +18,10 @@ from typing import Callable, Sequence
 
 import numpy as np
 
+from iPhoto.recognition.promotion import (
+    PROMOTION_CONFIRMED,
+    PROMOTION_LEGACY_VISIBLE,
+)
 from iPhoto.utils.pathutils import resolve_library_asset_path
 
 from .image_utils import (
@@ -38,6 +42,12 @@ from .repository_utils import profile_state_for_sample_count
 
 _LOGGER = logging.getLogger(__name__)
 _REQUIRED_FACE_MODULES = ("detection", "recognition")
+FACE_CANDIDATE_QUALITY_VERSION = "confidence-geometry-v1"
+DEFAULT_FACE_DETECTOR_MIN_CONFIDENCE = 0.60
+DEFAULT_FACE_SMALL_TARGET_MIN_CONFIDENCE = 0.75
+DEFAULT_FACE_TINY_AREA_RATIO = 0.0005
+DEFAULT_FACE_SMALL_AREA_RATIO = 0.005
+DEFAULT_FACE_RELATIVE_AREA_RATIO = 0.15
 
 
 @dataclass(frozen=True)
@@ -46,6 +56,19 @@ class DetectedAssetFaces:
     asset_rel: str
     faces: list[FaceRecord]
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class FaceScanMetrics:
+    face_candidates_total: int = 0
+    face_rejected_confidence: int = 0
+    face_rejected_size: int = 0
+    face_rejected_tiny_area: int = 0
+    face_rejected_relative_area: int = 0
+    face_accepted: int = 0
+    face_cluster_noise: int = 0
+    person_candidates: int = 0
+    person_promotions: int = 0
 
 
 class FaceClusterPipeline:
@@ -57,13 +80,24 @@ class FaceClusterPipeline:
         distance_threshold: float = 0.6,
         min_samples: int = 2,
         min_face_size: int = 40,
+        detector_min_confidence: float = DEFAULT_FACE_DETECTOR_MIN_CONFIDENCE,
+        small_target_min_confidence: float = DEFAULT_FACE_SMALL_TARGET_MIN_CONFIDENCE,
+        tiny_area_ratio: float = DEFAULT_FACE_TINY_AREA_RATIO,
+        small_area_ratio: float = DEFAULT_FACE_SMALL_AREA_RATIO,
+        relative_area_ratio: float = DEFAULT_FACE_RELATIVE_AREA_RATIO,
     ) -> None:
         self._model_root = Path(model_root)
         self._model_pack = model_pack
         self._distance_threshold = float(distance_threshold)
         self._min_samples = int(min_samples)
         self._min_face_size = int(min_face_size)
+        self._detector_min_confidence = float(detector_min_confidence)
+        self._small_target_min_confidence = float(small_target_min_confidence)
+        self._tiny_area_ratio = float(tiny_area_ratio)
+        self._small_area_ratio = float(small_area_ratio)
+        self._relative_area_ratio = float(relative_area_ratio)
         self._analysis_app = None
+        self._last_scan_metrics = FaceScanMetrics()
 
     @property
     def distance_threshold(self) -> float:
@@ -72,6 +106,14 @@ class FaceClusterPipeline:
     @property
     def min_samples(self) -> int:
         return self._min_samples
+
+    @property
+    def candidate_quality_version(self) -> str:
+        return FACE_CANDIDATE_QUALITY_VERSION
+
+    @property
+    def last_scan_metrics(self) -> FaceScanMetrics:
+        return self._last_scan_metrics
 
     def detect_faces_for_rows(
         self,
@@ -87,6 +129,12 @@ class FaceClusterPipeline:
         face_app = self._ensure_face_analysis()
         cancellation_requested = is_cancelled or (lambda: False)
         results: list[DetectedAssetFaces] = []
+        face_candidates_total = 0
+        face_rejected_confidence = 0
+        face_rejected_size = 0
+        face_rejected_tiny_area = 0
+        face_rejected_relative_area = 0
+        face_accepted = 0
         for row in rows:
             if cancellation_requested():
                 break
@@ -134,13 +182,41 @@ class FaceClusterPipeline:
 
             image_width, image_height = image.size
             faces: list[FaceRecord] = []
+            basic_candidates: list[tuple[object, tuple[int, int, int, int], float, float]] = []
             for detected in detected_faces:
+                face_candidates_total += 1
                 bbox = _normalize_bbox(
                     detected.bbox,
                     image_width=image_width,
                     image_height=image_height,
                 )
+                confidence = float(getattr(detected, "det_score", 0.0))
+                if confidence < self._detector_min_confidence:
+                    face_rejected_confidence += 1
+                    continue
                 if bbox[2] < self._min_face_size or bbox[3] < self._min_face_size:
+                    face_rejected_size += 1
+                    continue
+                area_ratio = (bbox[2] * bbox[3]) / max(1, image_width * image_height)
+                if area_ratio < self._tiny_area_ratio:
+                    face_rejected_tiny_area += 1
+                    continue
+                basic_candidates.append((detected, bbox, confidence, area_ratio))
+
+            largest_area = max(
+                (bbox[2] * bbox[3] for _detected, bbox, _confidence, _ratio in basic_candidates),
+                default=0,
+            )
+            for detected, bbox, confidence, area_ratio in basic_candidates:
+                relative_area = (bbox[2] * bbox[3]) / max(1, largest_area)
+                if (
+                    confidence < self._small_target_min_confidence
+                    and (
+                        area_ratio < self._small_area_ratio
+                        or relative_area < self._relative_area_ratio
+                    )
+                ):
+                    face_rejected_relative_area += 1
                     continue
 
                 embedding = _extract_embedding(detected)
@@ -165,7 +241,7 @@ class FaceClusterPipeline:
                         box_y=bbox[1],
                         box_w=bbox[2],
                         box_h=bbox[3],
-                        confidence=float(getattr(detected, "det_score", 0.0)),
+                        confidence=confidence,
                         embedding=embedding,
                         embedding_dim=int(embedding.shape[0]),
                         thumbnail_path=thumbnail_path.relative_to(thumbnail_dir.parent).as_posix(),
@@ -175,6 +251,7 @@ class FaceClusterPipeline:
                         image_height=image_height,
                     )
                 )
+                face_accepted += 1
 
             results.append(
                 DetectedAssetFaces(
@@ -183,6 +260,14 @@ class FaceClusterPipeline:
                     faces=faces,
                 )
             )
+        self._last_scan_metrics = FaceScanMetrics(
+            face_candidates_total=face_candidates_total,
+            face_rejected_confidence=face_rejected_confidence,
+            face_rejected_size=face_rejected_size,
+            face_rejected_tiny_area=face_rejected_tiny_area,
+            face_rejected_relative_area=face_rejected_relative_area,
+            face_accepted=face_accepted,
+        )
         return results
 
     def _ensure_face_analysis(self):
@@ -265,14 +350,14 @@ def cluster_face_records(
         min_samples=min_samples,
     )
 
+    updated_faces = list(faces)
     grouped_indices: dict[str, list[int]] = defaultdict(list)
     for index, label in enumerate(labels.tolist()):
         if label == -1:
-            grouped_indices[f"noise-{index}"].append(index)
+            updated_faces[index] = replace(updated_faces[index], person_id=None)
         else:
             grouped_indices[f"cluster-{label}"].append(index)
 
-    updated_faces = list(faces)
     persons: list[PersonRecord] = []
     for indices in grouped_indices.values():
         members = [faces[index] for index in indices]
@@ -282,6 +367,7 @@ def cluster_face_records(
             np.stack([member.embedding for member in members], axis=0)
         )
         timestamp = _utc_now_iso()
+        evidence_asset_count = len({member.asset_id for member in members if member.asset_id})
         persons.append(
             PersonRecord(
                 person_id=person_id,
@@ -292,7 +378,8 @@ def cluster_face_records(
                 created_at=timestamp,
                 updated_at=timestamp,
                 sample_count=len(members),
-                profile_state=profile_state_for_sample_count(len(members)),
+                profile_state=profile_state_for_sample_count(evidence_asset_count),
+                evidence_asset_count=evidence_asset_count,
             )
         )
         for index in indices:
@@ -328,6 +415,7 @@ def build_person_records_from_faces(
             np.stack([member.embedding for member in members], axis=0)
         )
         sample_count = len(members)
+        evidence_asset_count = len({member.asset_id for member in members if member.asset_id})
         persons.append(
             PersonRecord(
                 person_id=person_id,
@@ -341,7 +429,8 @@ def build_person_records_from_faces(
                 ),
                 updated_at=updated_at,
                 sample_count=sample_count,
-                profile_state=profile_state_for_sample_count(sample_count),
+                profile_state=profile_state_for_sample_count(evidence_asset_count),
+                evidence_asset_count=evidence_asset_count,
             )
         )
     persons.sort(key=lambda person: (-person.face_count, person.created_at))
@@ -355,7 +444,7 @@ def canonicalize_cluster_identities(
     *,
     distance_threshold: float,
 ) -> tuple[list[FaceRecord], list[PersonRecord]]:
-    if not faces or not persons:
+    if not faces:
         return faces, persons
 
     profiles = {profile.person_id: profile for profile in state_repository.get_profiles()}
@@ -397,6 +486,28 @@ def canonicalize_cluster_identities(
                 member,
                 person_id=canonical_id,
             )
+    # A snapshot rebuild may classify an old durable face as DBSCAN noise.  Only
+    # sticky, user-visible legacy/confirmed assignments are restored by face key;
+    # genuinely new noise remains unassigned and therefore cannot create a card.
+    for index, face in enumerate(updated_faces):
+        if face.person_id is not None:
+            continue
+        durable_person_id = face_key_map.get(face.face_key)
+        profile = profiles.get(durable_person_id) if durable_person_id else None
+        if profile is None or profile.promotion_state not in {
+            PROMOTION_CONFIRMED,
+            PROMOTION_LEGACY_VISIBLE,
+        }:
+            continue
+        updated_faces[index] = replace(face, person_id=profile.person_id)
+
+    for face in updated_faces:
+        if face.person_id is None:
+            continue
+        profile = profiles.get(face.person_id)
+        if profile is not None:
+            canonical_names.setdefault(face.person_id, profile.name)
+            canonical_created_at.setdefault(face.person_id, profile.created_at)
     canonical_persons = build_person_records_from_faces(
         updated_faces,
         names_by_person_id=canonical_names,

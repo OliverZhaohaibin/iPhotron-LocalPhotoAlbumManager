@@ -13,6 +13,14 @@ from typing import Iterable
 import numpy as np
 
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
+from iPhoto.recognition.promotion import (
+    PROMOTION_CONFIRMED,
+    PROMOTION_LEGACY_VISIBLE,
+    IdentityPromotionRecord,
+    automatic_promotion_state,
+    merged_promotion_state,
+    normalize_promotion_state,
+)
 
 from .records import (
     FaceRecord,
@@ -33,6 +41,8 @@ from .repository_utils import (
     _utc_now_iso,
     profile_state_for_sample_count,
 )
+
+_PEOPLE_PROMOTION_MIN_ASSETS = 3
 
 
 @dataclass(frozen=True)
@@ -120,12 +130,28 @@ class FaceStateRepository:
                     profile_state
                 FROM person_profiles
                 """).fetchall()
+            promotion_rows = conn.execute(
+                "SELECT person_id, evidence_asset_count, promotion_state "
+                "FROM person_identity_promotions"
+            ).fetchall()
+        promotions = {
+            str(row["person_id"]): IdentityPromotionRecord(
+                identity_id=str(row["person_id"]),
+                evidence_asset_count=int(row["evidence_asset_count"] or 0),
+                promotion_state=normalize_promotion_state(row["promotion_state"]),
+            )
+            for row in promotion_rows
+        }
         profiles: list[PersonProfile] = []
         for row in rows:
             person_id = str(row["person_id"])
             sample_count = int(row["sample_count"] or 0)
             if sample_count <= 0:
                 sample_count = inferred_sample_counts.get(person_id, 0)
+            promotion = promotions.get(person_id)
+            evidence_asset_count = (
+                promotion.evidence_asset_count if promotion is not None else sample_count
+            )
             profiles.append(
                 PersonProfile(
                     person_id=person_id,
@@ -138,7 +164,13 @@ class FaceStateRepository:
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     sample_count=sample_count,
-                    profile_state=profile_state_for_sample_count(sample_count),
+                    profile_state=profile_state_for_sample_count(evidence_asset_count),
+                    evidence_asset_count=evidence_asset_count,
+                    promotion_state=(
+                        promotion.promotion_state
+                        if promotion is not None
+                        else PROMOTION_LEGACY_VISIBLE
+                    ),
                 )
             )
         return profiles
@@ -179,6 +211,16 @@ class FaceStateRepository:
                 ).fetchone()
                 if inferred_row is not None:
                     sample_count = int(inferred_row["sample_count"] or 0)
+            promotion_row = conn.execute(
+                "SELECT evidence_asset_count, promotion_state "
+                "FROM person_identity_promotions WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+        evidence_asset_count = (
+            int(promotion_row["evidence_asset_count"] or 0)
+            if promotion_row is not None
+            else sample_count
+        )
         return PersonProfile(
             person_id=str(row["person_id"]),
             name=row["name"],
@@ -190,8 +232,65 @@ class FaceStateRepository:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             sample_count=sample_count,
-            profile_state=profile_state_for_sample_count(sample_count),
+            profile_state=profile_state_for_sample_count(evidence_asset_count),
+            evidence_asset_count=evidence_asset_count,
+            promotion_state=(
+                normalize_promotion_state(promotion_row["promotion_state"])
+                if promotion_row is not None
+                else PROMOTION_LEGACY_VISIBLE
+            ),
         )
+
+    def get_promotion_records(
+        self,
+        person_ids: Iterable[str] = (),
+    ) -> dict[str, IdentityPromotionRecord]:
+        self.initialize()
+        ids = tuple(dict.fromkeys(str(value) for value in person_ids if value))
+        with closing(self._connect()) as conn:
+            if ids:
+                rows: list[sqlite3.Row] = []
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start : start + 500]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    rows.extend(
+                        conn.execute(
+                            "SELECT person_id, evidence_asset_count, promotion_state "
+                            f"FROM person_identity_promotions WHERE person_id IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                    )
+            else:
+                rows = conn.execute(
+                    "SELECT person_id, evidence_asset_count, promotion_state "
+                    "FROM person_identity_promotions"
+                ).fetchall()
+        return {
+            str(row["person_id"]): IdentityPromotionRecord(
+                identity_id=str(row["person_id"]),
+                evidence_asset_count=int(row["evidence_asset_count"] or 0),
+                promotion_state=normalize_promotion_state(row["promotion_state"]),
+            )
+            for row in rows
+        }
+
+    def confirm_person(self, person_id: str) -> None:
+        if not person_id:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO person_identity_promotions (
+                    person_id, evidence_asset_count, promotion_state, updated_at
+                ) VALUES (?, 0, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    promotion_state = excluded.promotion_state,
+                    updated_at = excluded.updated_at
+                """,
+                (person_id, PROMOTION_CONFIRMED, _utc_now_iso()),
+            )
+            conn.commit()
 
     def get_manual_faces(self) -> list[ManualFaceRecord]:
         self.initialize()
@@ -442,6 +541,17 @@ class FaceStateRepository:
                     """,
                     (face.person_id, next_order, timestamp),
                 )
+            conn.execute(
+                """
+                INSERT INTO person_identity_promotions (
+                    person_id, evidence_asset_count, promotion_state, updated_at
+                ) VALUES (?, 1, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    promotion_state = excluded.promotion_state,
+                    updated_at = excluded.updated_at
+                """,
+                (face.person_id, PROMOTION_CONFIRMED, timestamp),
+            )
             conn.commit()
 
     def delete_manual_face(self, face_id: str) -> None:
@@ -466,6 +576,17 @@ class FaceStateRepository:
             conn.execute(
                 "UPDATE manual_faces SET person_id = ? WHERE face_id = ?",
                 (target_person_id, face_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO person_identity_promotions (
+                    person_id, evidence_asset_count, promotion_state, updated_at
+                ) VALUES (?, 0, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    promotion_state = excluded.promotion_state,
+                    updated_at = excluded.updated_at
+                """,
+                (target_person_id, PROMOTION_CONFIRMED, _utc_now_iso()),
             )
             conn.commit()
         return True
@@ -692,9 +813,19 @@ class FaceStateRepository:
 
     def sync_scan_results(self, persons: list[PersonRecord], faces: list[FaceRecord]) -> None:
         self.initialize()
+        evidence_assets_by_person: dict[str, set[str]] = {}
+        for face in faces:
+            if face.person_id and face.asset_id:
+                evidence_assets_by_person.setdefault(face.person_id, set()).add(face.asset_id)
+        for face in self.get_manual_faces():
+            if face.person_id and face.asset_id:
+                evidence_assets_by_person.setdefault(face.person_id, set()).add(face.asset_id)
         person_rows = []
         for person in persons:
             sample_count = max(int(person.sample_count), int(person.face_count))
+            evidence_asset_count = len(
+                evidence_assets_by_person.get(person.person_id, set())
+            )
             person_rows.append(
                 (
                     person.person_id,
@@ -704,7 +835,7 @@ class FaceStateRepository:
                     person.created_at,
                     person.updated_at,
                     sample_count,
-                    profile_state_for_sample_count(sample_count),
+                    profile_state_for_sample_count(evidence_asset_count),
                 )
             )
         with closing(self._connect()) as conn:
@@ -725,6 +856,31 @@ class FaceStateRepository:
                 person_rows,
             )
             timestamp = _utc_now_iso()
+            for person in persons:
+                evidence_asset_count = len(
+                    evidence_assets_by_person.get(person.person_id, set())
+                )
+                state = automatic_promotion_state(
+                    evidence_asset_count,
+                    minimum_evidence=_PEOPLE_PROMOTION_MIN_ASSETS,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO person_identity_promotions (
+                        person_id, evidence_asset_count, promotion_state, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        evidence_asset_count = excluded.evidence_asset_count,
+                        promotion_state = CASE
+                            WHEN person_identity_promotions.promotion_state IN (
+                                'confirmed', 'legacy_visible'
+                            ) THEN person_identity_promotions.promotion_state
+                            ELSE excluded.promotion_state
+                        END,
+                        updated_at = excluded.updated_at
+                    """,
+                    (person.person_id, evidence_asset_count, state, timestamp),
+                )
             conn.executemany(
                 """
                 INSERT INTO face_keys (
@@ -823,6 +979,18 @@ class FaceStateRepository:
                     "unstable",
                 ),
             )
+            if _normalize_name(name_or_none) is not None:
+                conn.execute(
+                    """
+                    INSERT INTO person_identity_promotions (
+                        person_id, evidence_asset_count, promotion_state, updated_at
+                    ) VALUES (?, 0, ?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        promotion_state = excluded.promotion_state,
+                        updated_at = excluded.updated_at
+                    """,
+                    (person_id, PROMOTION_CONFIRMED, updated_at),
+                )
             conn.commit()
 
     def upsert_person_profile(
@@ -833,6 +1001,7 @@ class FaceStateRepository:
         created_at: str | None = None,
         center_embedding: np.ndarray | None = None,
         sample_count: int = 0,
+        evidence_asset_count: int | None = None,
     ) -> None:
         if not person_id:
             return
@@ -847,6 +1016,10 @@ class FaceStateRepository:
         )
         created_value = str(created_at or timestamp)
         profile_sample_count = max(int(sample_count), 0)
+        profile_evidence_count = max(
+            int(profile_sample_count if evidence_asset_count is None else evidence_asset_count),
+            0,
+        )
         with closing(self._connect()) as conn:
             conn.execute(
                 """
@@ -870,8 +1043,29 @@ class FaceStateRepository:
                     created_value,
                     timestamp,
                     profile_sample_count,
-                    profile_state_for_sample_count(profile_sample_count),
+                    profile_state_for_sample_count(profile_evidence_count),
                 ),
+            )
+            state = automatic_promotion_state(
+                profile_evidence_count,
+                minimum_evidence=_PEOPLE_PROMOTION_MIN_ASSETS,
+            )
+            conn.execute(
+                """
+                INSERT INTO person_identity_promotions (
+                    person_id, evidence_asset_count, promotion_state, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    evidence_asset_count = excluded.evidence_asset_count,
+                    promotion_state = CASE
+                        WHEN person_identity_promotions.promotion_state IN (
+                            'confirmed', 'legacy_visible'
+                        ) THEN person_identity_promotions.promotion_state
+                        ELSE excluded.promotion_state
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (person_id, profile_evidence_count, state, timestamp),
             )
             conn.commit()
 
@@ -884,6 +1078,7 @@ class FaceStateRepository:
         target_name: str | None,
         target_created_at: str,
         sample_count: int,
+        evidence_asset_count: int,
         hidden_state: bool,
     ) -> dict[str, str | None]:
         self.initialize()
@@ -912,8 +1107,42 @@ class FaceStateRepository:
                     target_created_at,
                     updated_at,
                     int(sample_count),
-                    profile_state_for_sample_count(sample_count),
+                    profile_state_for_sample_count(evidence_asset_count),
                 ),
+            )
+            promotion_rows = conn.execute(
+                """
+                SELECT person_id, promotion_state
+                FROM person_identity_promotions
+                WHERE person_id IN (?, ?)
+                """,
+                (source_person_id, target_person_id),
+            ).fetchall()
+            promotion_states = {
+                str(row["person_id"]): str(row["promotion_state"])
+                for row in promotion_rows
+            }
+            merged_state = merged_promotion_state(
+                promotion_states.get(source_person_id),
+                promotion_states.get(target_person_id),
+                evidence_asset_count=evidence_asset_count,
+                minimum_evidence=_PEOPLE_PROMOTION_MIN_ASSETS,
+            )
+            conn.execute(
+                """
+                INSERT INTO person_identity_promotions (
+                    person_id, evidence_asset_count, promotion_state, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    evidence_asset_count = excluded.evidence_asset_count,
+                    promotion_state = excluded.promotion_state,
+                    updated_at = excluded.updated_at
+                """,
+                (target_person_id, evidence_asset_count, merged_state, updated_at),
+            )
+            conn.execute(
+                "DELETE FROM person_identity_promotions WHERE person_id = ?",
+                (source_person_id,),
             )
             conn.execute(
                 "UPDATE face_keys SET person_id = ?, updated_at = ? WHERE person_id = ?",
@@ -2193,6 +2422,10 @@ class FaceStateRepository:
             conn.execute("DELETE FROM person_card_orders WHERE person_id = ?", (person_id,))
             conn.execute("DELETE FROM hidden_people WHERE person_id = ?", (person_id,))
             conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (person_id,))
+            conn.execute(
+                "DELETE FROM person_identity_promotions WHERE person_id = ?",
+                (person_id,),
+            )
             conn.commit()
 
     @staticmethod
@@ -2279,6 +2512,17 @@ class FaceStateRepository:
 
     @staticmethod
     def _create_schema(conn: sqlite3.Connection) -> None:
+        promotion_table_existed = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'person_identity_promotions'"
+            ).fetchone()
+        )
+        face_keys_table_existed = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'face_keys'"
+            ).fetchone()
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS person_profiles (
                 person_id TEXT PRIMARY KEY,
@@ -2303,6 +2547,46 @@ class FaceStateRepository:
             "profile_state",
             "TEXT NOT NULL DEFAULT 'unstable'",
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS person_identity_promotions (
+                person_id TEXT PRIMARY KEY,
+                evidence_asset_count INTEGER NOT NULL DEFAULT 0,
+                promotion_state TEXT NOT NULL DEFAULT 'candidate',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        if not promotion_table_existed:
+            if face_keys_table_existed:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO person_identity_promotions (
+                        person_id, evidence_asset_count, promotion_state, updated_at
+                    )
+                    SELECT
+                        profile.person_id,
+                        COALESCE(keys.evidence_asset_count, 0),
+                        'legacy_visible',
+                        profile.updated_at
+                    FROM person_profiles AS profile
+                    LEFT JOIN (
+                        SELECT person_id, COUNT(DISTINCT asset_id) AS evidence_asset_count
+                        FROM face_keys
+                        GROUP BY person_id
+                    ) AS keys ON keys.person_id = profile.person_id
+                    """
+                )
+            else:
+                conn.execute(
+                    """
+                INSERT OR IGNORE INTO person_identity_promotions (
+                    person_id, evidence_asset_count, promotion_state, updated_at
+                )
+                SELECT person_id, sample_count, 'legacy_visible', updated_at
+                FROM person_profiles
+                    """
+                )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS face_keys (
                 face_key TEXT PRIMARY KEY,

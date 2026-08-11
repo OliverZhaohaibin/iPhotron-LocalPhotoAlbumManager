@@ -11,6 +11,7 @@ import numpy as np
 
 class PetMutationFailure(StrEnum):
     REJECTED = "rejected"
+    SAME_ASSET_CONFLICT = "same_asset_conflict"
     RECOVERY_PENDING = "recovery_pending"
     SHUTTING_DOWN = "shutting_down"
 
@@ -23,6 +24,15 @@ class PetMergeOutcome:
 
     def __bool__(self) -> bool:
         return self.merged
+
+
+@dataclass(frozen=True, slots=True)
+class PetMutationOutcome:
+    succeeded: bool
+    failure: PetMutationFailure | None = None
+
+    def __bool__(self) -> bool:
+        return self.succeeded
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,7 @@ class PetRecord:
     embedding_pipeline_version: str = "dinov2-vits14-imagenet-normalized-v1"
     generation_id: int = 0
     boundary_embeddings: tuple[np.ndarray, ...] = ()
+    evidence_asset_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -87,6 +98,8 @@ class PetProfile:
     embedding_pipeline_version: str = "dinov2-vits14-imagenet-normalized-v1"
     generation_id: int = 0
     boundary_embeddings: tuple[np.ndarray, ...] = ()
+    evidence_asset_count: int = 0
+    promotion_state: str = "legacy_visible"
 
 
 @dataclass(frozen=True)
@@ -101,6 +114,8 @@ class PetSummary:
     asset_count: int = 0
     profile_state: str = "unstable"
     species_label: str | None = None
+    evidence_asset_count: int = 0
+    promotion_state: str = "legacy_visible"
 
 
 @dataclass(frozen=True)
@@ -123,3 +138,4 @@ class AssetPetAnnotation:
     is_stale: bool = False
     stale_reason: str | None = None
     source_generation_id: int | None = None
+    promotion_state: str = "legacy_visible"

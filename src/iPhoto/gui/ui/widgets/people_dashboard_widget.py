@@ -765,7 +765,7 @@ class PeopleDashboardWidget(QWidget):
         apply_menu_style(menu, self)
         merge_enabled = any(
             choice.person_id != f"person:{summary.person_id}"
-            for choice in self._merge_choices("person", summary.person_id, summary.is_hidden)
+            for choice in self._merge_choices("person", summary.person_id)
         )
         context = MenuContext(
             surface="people_dashboard",
@@ -827,7 +827,7 @@ class PeopleDashboardWidget(QWidget):
         apply_menu_style(menu, self)
         merge_enabled = any(
             choice.person_id != f"pet:{summary.pet_id}"
-            for choice in self._merge_choices("pet", summary.pet_id, summary.is_hidden)
+            for choice in self._merge_choices("pet", summary.pet_id)
         )
         context = MenuContext(
             surface="people_dashboard",
@@ -978,15 +978,8 @@ class PeopleDashboardWidget(QWidget):
             )
 
     def _merge_pet(self, summary: PetSummary) -> None:
-        has_other_identities = len(self._summaries) + len(self._pet_summaries) > 1
-        choices = self._merge_choices("pet", summary.pet_id, summary.is_hidden)
+        choices = self._merge_choices("pet", summary.pet_id)
         if not choices:
-            if has_other_identities:
-                dialogs.show_information(
-                    self,
-                    self._hidden_state_merge_message(),
-                    title=tr("PeopleDashboard", "Cannot Merge People"),
-                )
             return
         self._open_merge_dialog(
             f"pet:{summary.pet_id}",
@@ -1125,15 +1118,8 @@ class PeopleDashboardWidget(QWidget):
             )
 
     def _merge_person(self, summary: PersonSummary) -> None:
-        has_other_identities = len(self._summaries) + len(self._pet_summaries) > 1
-        choices = self._merge_choices("person", summary.person_id, summary.is_hidden)
+        choices = self._merge_choices("person", summary.person_id)
         if not choices:
-            if has_other_identities:
-                dialogs.show_information(
-                    self,
-                    self._hidden_state_merge_message(),
-                    title=tr("PeopleDashboard", "Cannot Merge People"),
-                )
             return
 
         self._open_merge_dialog(
@@ -1146,14 +1132,12 @@ class PeopleDashboardWidget(QWidget):
         self,
         source_kind: str,
         source_id: str,
-        source_hidden: bool,
     ) -> list[_IdentityChoice]:
         source_identity = f"{source_kind}:{source_id}"
         return [
             choice
             for choice in self._group_dialog_choices()
             if choice.person_id != source_identity
-            and self._identity_hidden(choice.person_id) == source_hidden
         ]
 
     def _open_merge_dialog(
@@ -1233,14 +1217,6 @@ class PeopleDashboardWidget(QWidget):
         target_hidden = self._identity_hidden(target_identity)
         if source_hidden is None or target_hidden is None:
             return False
-        if source_hidden != target_hidden:
-            dialogs.show_information(
-                self,
-                self._hidden_state_merge_message(),
-                title=tr("PeopleDashboard", "Cannot Merge People"),
-            )
-            return False
-
         if not MergeConfirmDialog.confirm(2, self):
             return False
 
@@ -1278,6 +1254,18 @@ class PeopleDashboardWidget(QWidget):
                     "Recognition data is still recovering. Please try again shortly.",
                 ),
                 title=tr("PeopleDashboard", "Recognition Busy"),
+            )
+        elif outcome.failure == IdentityMergeFailure.SAME_ASSET_CONFLICT:
+            dialogs.show_information(
+                self,
+                tr(
+                    "PeopleDashboard",
+                    (
+                        "A pet identity cannot contain two detections from the same photo. "
+                        "Delete a duplicate detection instead of merging it."
+                    ),
+                ),
+                title=tr("PeopleDashboard", "Cannot Merge Pets"),
             )
         else:
             dialogs.show_warning(

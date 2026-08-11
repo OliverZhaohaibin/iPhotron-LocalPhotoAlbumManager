@@ -44,6 +44,7 @@ class RecognitionAnnotation:
     is_manual: bool = False
     is_stale: bool = False
     stale_reason: str | None = None
+    promotion_state: str = "legacy_visible"
 
     @property
     def kind(self) -> str:
@@ -97,6 +98,7 @@ def face_annotation_adapter(annotation: AssetFaceAnnotation) -> RecognitionAnnot
         image_height=annotation.image_height,
         thumbnail_path=annotation.thumbnail_path,
         is_manual=annotation.is_manual,
+        promotion_state=annotation.promotion_state,
     )
 
 
@@ -119,4 +121,5 @@ def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotat
         thumbnail_path=annotation.thumbnail_path,
         is_stale=annotation.is_stale,
         stale_reason=annotation.stale_reason,
+        promotion_state=annotation.promotion_state,
     )

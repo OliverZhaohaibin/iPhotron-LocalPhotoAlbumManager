@@ -18,7 +18,8 @@ def apply_detection_assignment_with_group_refresh(
 
     faces_root = ensure_work_dir(Path(library_root)) / "faces"
     state_db_path = faces_root / "face_state.db"
-    succeeded = FaceStateRepository(state_db_path).set_annotation_identity_assignment(
+    face_state_repository = FaceStateRepository(state_db_path)
+    succeeded = face_state_repository.set_annotation_identity_assignment(
         source_kind=str(payload.get("source_kind") or ""),
         source_annotation_id=str(payload.get("source_annotation_id") or ""),
         target_kind=str(payload.get("target_kind") or ""),
@@ -26,6 +27,15 @@ def apply_detection_assignment_with_group_refresh(
     )
     if not succeeded:
         return False
+    target_kind = str(payload.get("target_kind") or "")
+    target_id = str(payload.get("target_id") or "")
+    if target_kind == "person":
+        face_state_repository.confirm_person(target_id)
+    elif target_kind == "pet":
+        from iPhoto.pets.state_repository import PetStateRepository
+
+        pets_root = ensure_work_dir(Path(library_root)) / "pets"
+        PetStateRepository(pets_root / "pet_state.db").confirm_pet(target_id)
     FaceRepository(
         faces_root / "face_index.db",
         state_db_path,

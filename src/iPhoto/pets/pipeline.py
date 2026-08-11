@@ -101,6 +101,9 @@ PET_PEOPLE_IOU_THRESHOLD = 0.50
 PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD = 0.90
 PET_PEOPLE_LARGER_PET_RATIO = 1.50
 PET_PEOPLE_MURAL_IMAGE_COVERAGE_THRESHOLD = 0.60
+PET_CANDIDATE_QUALITY_VERSION = "tiny-low-confidence-v1"
+DEFAULT_PET_TINY_AREA_RATIO = 0.001
+DEFAULT_PET_TINY_MAX_CONFIDENCE = 0.45
 DEFAULT_PET_DETECTOR_MODEL_URL = str(_DETECTOR_MANIFEST["url"])
 PET_MODEL_AUTO_DOWNLOAD_ENV = "IPHOTO_PET_MODEL_AUTO_DOWNLOAD"
 PET_DETECTOR_MODEL_URL_ENV = "IPHOTO_PET_DETECTOR_MODEL_URL"
@@ -163,6 +166,7 @@ class _DetectedPetBox:
     bbox: tuple[int, int, int, int]
     confidence: float
     species_label: str
+    quality_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -178,8 +182,13 @@ class PetScanMetrics:
     candidate_boxes: int = 0
     unsupported_species: int = 0
     too_small: int = 0
+    pet_quality_rejected: int = 0
     people_overlaps: int = 0
     accepted_detections: int = 0
+    pet_candidate_identities: int = 0
+    pet_promotions: int = 0
+    same_asset_cannot_link_hits: int = 0
+    same_asset_manual_conflicts: int = 0
 
 
 @dataclass(frozen=True)
@@ -204,6 +213,8 @@ class PetClusterPipeline:
         detector_score_threshold: float = 0.30,
         enable_tiled_detection: bool = True,
         tile_scan_min_confidence: float | None = None,
+        tiny_area_ratio: float = DEFAULT_PET_TINY_AREA_RATIO,
+        tiny_max_confidence: float = DEFAULT_PET_TINY_MAX_CONFIDENCE,
     ) -> None:
         self._model_root = Path(model_root)
         self._detector_model_name = detector_model_name
@@ -223,6 +234,8 @@ class PetClusterPipeline:
             if tile_scan_min_confidence is None
             else float(tile_scan_min_confidence)
         )
+        self._tiny_area_ratio = float(tiny_area_ratio)
+        self._tiny_max_confidence = float(tiny_max_confidence)
         self._detector: _YoloxOnnxPetDetector | None = None
         self._embedder: _DinoV2Embedder | None = None
         self._last_scan_metrics = PetScanMetrics()
@@ -234,6 +247,10 @@ class PetClusterPipeline:
     @property
     def detector_pipeline_version(self) -> str:
         return PET_DETECTOR_PIPELINE_VERSION
+
+    @property
+    def candidate_quality_version(self) -> str:
+        return PET_CANDIDATE_QUALITY_VERSION
 
     @property
     def last_scan_metrics(self) -> PetScanMetrics:
@@ -259,6 +276,7 @@ class PetClusterPipeline:
         candidate_boxes = 0
         unsupported_species = 0
         too_small = 0
+        pet_quality_rejected = 0
         people_overlaps = 0
         accepted_detections = 0
         excluded_people_boxes = people_boxes_by_asset_id or {}
@@ -312,6 +330,9 @@ class PetClusterPipeline:
             detections: list[PetDetectionRecord] = []
             created_thumbnail_paths: list[Path] = []
             supported_boxes: list[_DetectedPetBox] = []
+            quality_candidates: list[
+                tuple[tuple[int, int, int, int], float, str, float]
+            ] = []
             candidate_boxes += len(boxes)
             for detected in boxes:
                 if detected.species_label not in self._supported_species:
@@ -325,11 +346,32 @@ class PetClusterPipeline:
                 if bbox[2] < self._min_pet_size or bbox[3] < self._min_pet_size:
                     too_small += 1
                     continue
+                area_ratio = (bbox[2] * bbox[3]) / max(1, image_width * image_height)
+                if (
+                    area_ratio < self._tiny_area_ratio
+                    and float(detected.confidence) < self._tiny_max_confidence
+                ):
+                    pet_quality_rejected += 1
+                    continue
+                quality_candidates.append(
+                    (bbox, float(detected.confidence), detected.species_label, area_ratio)
+                )
+
+            largest_pet_area_ratio = max(
+                (area_ratio for _bbox, _confidence, _species, area_ratio in quality_candidates),
+                default=0.0,
+            )
+            for bbox, confidence, species_label, area_ratio in quality_candidates:
                 supported_boxes.append(
                     _DetectedPetBox(
                         bbox=bbox,
-                        confidence=detected.confidence,
-                        species_label=detected.species_label,
+                        confidence=confidence,
+                        species_label=species_label,
+                        quality_score=_pet_candidate_quality_score(
+                            confidence=confidence,
+                            relative_area_ratio=area_ratio
+                            / max(largest_pet_area_ratio, np.finfo(np.float32).eps),
+                        ),
                     )
                 )
 
@@ -423,6 +465,7 @@ class PetClusterPipeline:
                         image_width=image_width,
                         image_height=image_height,
                         species_label=detected.species_label,
+                        quality_score=detected.quality_score,
                         pet_key_version=PET_KEY_VERSION,
                         embedding_pipeline_version=PET_EMBEDDING_PIPELINE_VERSION,
                     )
@@ -443,6 +486,7 @@ class PetClusterPipeline:
             candidate_boxes=candidate_boxes,
             unsupported_species=unsupported_species,
             too_small=too_small,
+            pet_quality_rejected=pet_quality_rejected,
             people_overlaps=people_overlaps,
             accepted_detections=accepted_detections,
         )
@@ -553,6 +597,7 @@ def cluster_pet_records(
             np.stack([member.embedding for member in members], axis=0)
         )
         timestamp = utc_now_iso()
+        evidence_asset_count = len({member.asset_id for member in members if member.asset_id})
         pets.append(
             PetRecord(
                 pet_id=pet_id,
@@ -564,11 +609,12 @@ def cluster_pet_records(
                 created_at=timestamp,
                 updated_at=timestamp,
                 sample_count=len(members),
-                profile_state=profile_state_for_sample_count(len(members)),
+                profile_state=profile_state_for_sample_count(evidence_asset_count),
                 species_label=_dominant_species_label(members),
                 embedding_pipeline_version=members[0].embedding_pipeline_version,
                 generation_id=members[0].generation_id,
                 boundary_embeddings=_boundary_embeddings(members, center_embedding),
+                evidence_asset_count=evidence_asset_count,
             )
         )
         for index in grouped:
@@ -583,6 +629,7 @@ def build_pet_records_from_detections(
     *,
     names_by_pet_id: dict[str, str | None] | None = None,
     created_at_by_pet_id: dict[str, str] | None = None,
+    allow_mixed_identity_members: bool = False,
 ) -> list[PetRecord]:
     grouped: dict[str, list[PetDetectionRecord]] = defaultdict(list)
     for detection in detections:
@@ -599,27 +646,39 @@ def build_pet_records_from_detections(
             for label in (_normalize_species_label(member.species_label) for member in members)
             if label is not None
         }
-        if len(species_labels) > 1:
+        if len(species_labels) > 1 and not allow_mixed_identity_members:
             raise ValueError(
                 f"Pet {pet_id} mixes incompatible species labels: {sorted(species_labels)}"
             )
-        contracts = {
-            (
-                str(member.embedding_pipeline_version or ""),
-                int(member.embedding_dim),
-                int(member.generation_id),
-            )
-            for member in members
-        }
-        if len(contracts) != 1:
+        contract_groups: dict[tuple[str, int, int], list[PetDetectionRecord]] = defaultdict(list)
+        for member in members:
+            contract_groups[
+                (
+                    str(member.embedding_pipeline_version or ""),
+                    int(member.embedding_dim),
+                    int(member.generation_id),
+                )
+            ].append(member)
+        if len(contract_groups) != 1 and not allow_mixed_identity_members:
             raise ValueError(
-                f"Pet {pet_id} mixes incompatible embedding contracts: {sorted(contracts)}"
+                f"Pet {pet_id} mixes incompatible embedding contracts: "
+                f"{sorted(contract_groups)}"
             )
+        _profile_contract, profile_members = max(
+            contract_groups.items(),
+            key=lambda item: (
+                len(item[1]),
+                item[0][2],
+                item[0][0],
+                item[0][1],
+            ),
+        )
         key_detection = max(members, key=key_detection_sort_key)
         center_embedding = compute_cluster_center(
-            np.stack([member.embedding for member in members], axis=0)
+            np.stack([member.embedding for member in profile_members], axis=0)
         )
         sample_count = len(members)
+        evidence_asset_count = len({member.asset_id for member in members if member.asset_id})
         pets.append(
             PetRecord(
                 pet_id=pet_id,
@@ -634,11 +693,12 @@ def build_pet_records_from_detections(
                 ),
                 updated_at=updated_at,
                 sample_count=sample_count,
-                profile_state=profile_state_for_sample_count(sample_count),
+                profile_state=profile_state_for_sample_count(evidence_asset_count),
                 species_label=_dominant_species_label(members),
-                embedding_pipeline_version=members[0].embedding_pipeline_version,
-                generation_id=members[0].generation_id,
-                boundary_embeddings=_boundary_embeddings(members, center_embedding),
+                embedding_pipeline_version=profile_members[0].embedding_pipeline_version,
+                generation_id=profile_members[0].generation_id,
+                boundary_embeddings=_boundary_embeddings(profile_members, center_embedding),
+                evidence_asset_count=evidence_asset_count,
             )
         )
     pets.sort(key=lambda pet: (-pet.detection_count, pet.created_at, pet.pet_id))
@@ -701,7 +761,14 @@ def canonicalize_pet_identities(
                 distance_threshold=distance_threshold,
             )
         )
-        if is_incompatible and not resolution.is_redirect_alias and canonical_id in direct_anchors:
+        same_asset_conflict = bool(
+            canonical_members.get(canonical_id)
+            and _detection_groups_share_asset(canonical_members[canonical_id], members)
+        )
+        if is_incompatible and (
+            same_asset_conflict
+            or (not resolution.is_redirect_alias and canonical_id in direct_anchors)
+        ):
             canonical_id = uuid.uuid4().hex
             resolution = PetIdentityResolution(
                 raw_pet_id=canonical_id,
@@ -828,6 +895,7 @@ def _cluster_pet_detection_labels(
             for detection in detections
         ],
         member_keys=[detection.detection_id for detection in detections],
+        cannot_link_keys=[detection.asset_id for detection in detections],
         distance_threshold=distance_threshold,
     )
 
@@ -837,6 +905,7 @@ def _cluster_embeddings_bounded_single_link(
     *,
     compatibility_keys: Sequence[object],
     member_keys: Sequence[str] | None = None,
+    cannot_link_keys: Sequence[str] | None = None,
     distance_threshold: float,
 ) -> np.ndarray:
     count = int(embeddings.shape[0])
@@ -846,6 +915,7 @@ def _cluster_embeddings_bounded_single_link(
         cosine_distance_matrix(embeddings),
         compatibility_keys=compatibility_keys,
         member_keys=member_keys,
+        cannot_link_keys=cannot_link_keys,
         link_threshold=distance_threshold,
         diameter_threshold=distance_threshold * PET_CLUSTER_DIAMETER_MULTIPLIER,
     )
@@ -858,6 +928,7 @@ def _cluster_distance_matrix_bounded_single_link(
     link_threshold: float,
     diameter_threshold: float,
     member_keys: Sequence[str] | None = None,
+    cannot_link_keys: Sequence[str] | None = None,
 ) -> np.ndarray:
     """Cluster nearest-neighbour links without allowing unbounded similarity chains."""
 
@@ -871,9 +942,15 @@ def _cluster_distance_matrix_bounded_single_link(
     stable_keys = tuple(member_keys or (str(index) for index in range(count)))
     if len(stable_keys) != count:
         raise ValueError("Pet member key count must match the distance matrix.")
+    resolved_cannot_link_keys = tuple(cannot_link_keys or ("" for _ in range(count)))
+    if len(resolved_cannot_link_keys) != count:
+        raise ValueError("Pet cannot-link key count must match the distance matrix.")
 
     clusters: list[list[int]] = [[index] for index in range(count)]
     diameters: list[float] = [0.0] * count
+    cannot_link_sets: list[set[str]] = [
+        ({key} if key else set()) for key in resolved_cannot_link_keys
+    ]
 
     while True:
         best_pair: tuple[int, int] | None = None
@@ -884,6 +961,11 @@ def _cluster_distance_matrix_bounded_single_link(
                 left = clusters[left_index]
                 right = clusters[right_index]
                 if not _cluster_keys_compatible(left, right, compatibility_keys):
+                    continue
+                if cannot_link_sets[left_index] & cannot_link_sets[right_index]:
+                    _LOGGER.debug(
+                        "Pet clustering constraint hit: same_asset_cannot_link_hits=1"
+                    )
                     continue
                 cross_distances = [
                     float(distance_matrix[left_member, right_member])
@@ -919,8 +1001,10 @@ def _cluster_distance_matrix_bounded_single_link(
         merged = sorted(clusters[left_index] + clusters[right_index])
         clusters[left_index] = merged
         diameters[left_index] = best_diameter
+        cannot_link_sets[left_index].update(cannot_link_sets[right_index])
         del clusters[right_index]
         del diameters[right_index]
+        del cannot_link_sets[right_index]
         ordering = sorted(
             range(len(clusters)),
             key=lambda cluster_index: tuple(
@@ -929,6 +1013,7 @@ def _cluster_distance_matrix_bounded_single_link(
         )
         clusters = [clusters[index] for index in ordering]
         diameters = [diameters[index] for index in ordering]
+        cannot_link_sets = [cannot_link_sets[index] for index in ordering]
 
     labels = np.empty((count,), dtype=np.int32)
     for cluster_id, members in enumerate(clusters):
@@ -982,6 +1067,8 @@ def _detection_groups_compatible(
         left, right
     ):
         return False
+    if _detection_groups_share_asset(left, right):
+        return False
     if not left or not right:
         return True
     cross_distances = [
@@ -996,6 +1083,15 @@ def _detection_groups_compatible(
         np.stack([member.embedding for member in members], axis=0)
     )
     return float(distance_matrix.max()) <= (distance_threshold * PET_CLUSTER_DIAMETER_MULTIPLIER)
+
+
+def _detection_groups_share_asset(
+    left: Sequence[PetDetectionRecord],
+    right: Sequence[PetDetectionRecord],
+) -> bool:
+    left_assets = {detection.asset_id for detection in left if detection.asset_id}
+    right_assets = {detection.asset_id for detection in right if detection.asset_id}
+    return bool(left_assets & right_assets)
 
 
 def _dominant_species_label(detections: Sequence[PetDetectionRecord]) -> str | None:
@@ -1014,6 +1110,17 @@ def _normalize_species_label(value: object) -> str | None:
         return None
     label = str(value).strip().lower()
     return label or None
+
+
+def _pet_candidate_quality_score(
+    *,
+    confidence: float,
+    relative_area_ratio: float,
+) -> float:
+    """Rank retained detections without turning relative size into a hard gate."""
+
+    normalized_area = min(1.0, math.sqrt(max(0.0, float(relative_area_ratio))))
+    return float(0.75 * max(0.0, min(1.0, confidence)) + 0.25 * normalized_area)
 
 
 def _normalize_bbox(
@@ -1501,7 +1608,11 @@ def _dedupe_supported_species_boxes(
     cross_species_score_margin: float = 0.25,
 ) -> list[_DetectedPetBox]:
     selected: list[_DetectedPetBox] = []
-    for box in sorted(boxes, key=lambda item: item.confidence, reverse=True):
+    for box in sorted(
+        boxes,
+        key=lambda item: (item.quality_score, item.confidence),
+        reverse=True,
+    ):
         suppress = False
         for existing in selected:
             overlap = _bbox_iou(existing.bbox, box.bbox)

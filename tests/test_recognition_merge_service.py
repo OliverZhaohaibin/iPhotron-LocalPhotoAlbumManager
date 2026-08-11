@@ -85,15 +85,15 @@ def test_routes_all_directions_with_typed_identity(
     getattr(owner, called_method).assert_called_once_with(*called_args)
 
 
-def test_hidden_state_mismatch_is_structured_and_does_not_mutate() -> None:
+def test_manual_merge_allows_hidden_state_mismatch() -> None:
     people, pets = _services(person_hidden=False, pet_hidden=True)
     service = RecognitionMergeService(people, pets)
 
     outcome = service.merge(IdentityRef("person", "same"), IdentityRef("pet", "same"))
 
-    assert outcome.merged is False
-    assert outcome.failure is IdentityMergeFailure.HIDDEN_STATE_MISMATCH
-    people.merge_identities.assert_not_called()
+    assert outcome.merged is True
+    assert outcome.failure is None
+    people.merge_identities.assert_called_once_with("person:same", "pet:same")
 
 
 def test_merge_holds_library_lease_from_hidden_check_through_mutation(tmp_path) -> None:
@@ -170,6 +170,20 @@ def test_pet_merge_recovery_pending_is_not_reported_as_rejected() -> None:
     assert outcome.failure is IdentityMergeFailure.RECOVERY_PENDING
 
 
+def test_pet_same_asset_conflict_is_preserved_by_typed_merge_boundary() -> None:
+    people, pets = _services()
+    pets.merge_pets.return_value = PetMergeOutcome(
+        False,
+        PetMutationFailure.SAME_ASSET_CONFLICT,
+    )
+    service = RecognitionMergeService(people, pets)
+
+    outcome = service.merge("pet:same", "pet:other-pet")
+
+    assert outcome.merged is False
+    assert outcome.failure is IdentityMergeFailure.SAME_ASSET_CONFLICT
+
+
 def test_pending_assignment_blocks_person_merge_before_people_mutation(tmp_path) -> None:
     people, pets = _services()
     pets.library_root = lambda: tmp_path
@@ -194,7 +208,7 @@ def test_pending_assignment_blocks_person_merge_before_people_mutation(tmp_path)
     people.merge_clusters.assert_not_called()
 
 
-def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) -> None:
+def test_manual_pet_merge_ignores_species_and_embedding_contracts(tmp_path) -> None:
     pets = create_pet_service(tmp_path)
     repository = pets.repository()
     assert repository is not None
@@ -202,7 +216,11 @@ def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) ->
     detections: list[PetDetectionRecord] = []
     records: list[PetRecord] = []
     for index, pet_id in enumerate(("pet-a", "pet-b")):
-        embedding = np.asarray([float(index == 0), float(index == 1)], dtype=np.float32)
+        embedding = np.asarray(
+            [1.0, 0.0] if index == 0 else [0.0, 1.0, 0.0],
+            dtype=np.float32,
+        )
+        pipeline_version = f"test-pipeline-v{index + 1}"
         detection = PetDetectionRecord(
             detection_id=f"detection-{pet_id}",
             pet_key=f"v2:{pet_id}",
@@ -214,7 +232,7 @@ def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) ->
             box_h=100,
             confidence=0.9,
             embedding=embedding,
-            embedding_dim=2,
+            embedding_dim=int(embedding.shape[0]),
             embedding_model="test-model",
             detector_model="test-detector",
             thumbnail_path=None,
@@ -222,7 +240,9 @@ def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) ->
             detected_at=timestamp,
             image_width=100,
             image_height=100,
-            species_label="dog",
+            species_label="cat" if index == 0 else "dog",
+            embedding_pipeline_version=pipeline_version,
+            generation_id=index,
         )
         detections.append(detection)
         records.append(
@@ -232,10 +252,13 @@ def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) ->
                 key_detection_id=detection.detection_id,
                 detection_count=1,
                 center_embedding=embedding,
-                embedding_dim=2,
+                embedding_dim=int(embedding.shape[0]),
                 created_at=timestamp,
                 updated_at=timestamp,
                 sample_count=1,
+                species_label=detection.species_label,
+                embedding_pipeline_version=pipeline_version,
+                generation_id=index,
             )
         )
     repository.replace_all(detections, records)
@@ -244,7 +267,10 @@ def test_real_pet_merge_is_not_blocked_by_outer_recognition_journal(tmp_path) ->
     outcome = service.merge("pet:pet-a", "pet:pet-b")
 
     assert outcome.merged is True
-    assert [pet.pet_id for pet in repository.get_all_pet_records()] == ["pet-b"]
+    merged_pets = repository.get_all_pet_records()
+    assert [pet.pet_id for pet in merged_pets] == ["pet-b"]
+    assert merged_pets[0].detection_count == 2
+    assert merged_pets[0].embedding_dim == 3
     assert {detection.pet_id for detection in repository.get_all_detections()} == {"pet-b"}
     assert repository.state_repository is not None
     assert repository.state_repository.get_merge_redirect_map()["pet-a"] == "pet-b"

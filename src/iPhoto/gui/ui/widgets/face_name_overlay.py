@@ -5,7 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QCursor,
@@ -100,7 +111,9 @@ class _FaceNameEditor(QLineEdit):
             "QListView::item:selected { background-color: rgba(33,108,255,32); color: rgba(18,18,18,235); }"
         )
         self._completer.setPopup(popup)
-        self._completer.activated.connect(self._handle_completion_activated)
+        self._completer.activated[QModelIndex].connect(
+            self._handle_completion_activated
+        )
         self.textEdited.connect(self._clear_selected_identity)
         self.setCompleter(self._completer)
         self.setFrame(True)
@@ -135,7 +148,15 @@ class _FaceNameEditor(QLineEdit):
             return None
         return identity_key
 
-    def suggestion_identity_key(self) -> str | None:
+    def selected_identity_key(self) -> str | None:
+        """Return only an explicitly activated completion.
+
+        Saved identity labels use this stricter form because silently treating a
+        typed duplicate name as a merge would be surprising and destructive.
+        Manual face creation keeps the looser exact-name matching exposed by
+        :meth:`suggestion_identity_key` for backwards compatibility.
+        """
+
         text = self.text().strip()
         if (
             self._selected_identity_key
@@ -143,6 +164,12 @@ class _FaceNameEditor(QLineEdit):
             and self._selected_identity_name.strip().casefold() == text.casefold()
         ):
             return self._selected_identity_key
+        return None
+
+    def suggestion_identity_key(self) -> str | None:
+        selected_identity_key = self.selected_identity_key()
+        if selected_identity_key is not None:
+            return selected_identity_key
         normalized = self.text().strip().casefold()
         matches = [
             suggestion.identity_key
@@ -151,14 +178,20 @@ class _FaceNameEditor(QLineEdit):
         ]
         return matches[0] if len(matches) == 1 else None
 
-    def _handle_completion_activated(self, _completion: object) -> None:
-        index = self._completer.currentIndex()
+    def _handle_completion_activated(self, index: QModelIndex) -> None:
         if not index.isValid():
             return
         identity_key = index.data(Qt.ItemDataRole.UserRole)
         if not isinstance(identity_key, str) or not identity_key:
             return
         name = str(index.data() or "").strip()
+        if not name:
+            return
+        # A custom QCompleter popup can emit ``activated`` before the line edit
+        # receives the completed text (and on some platforms it never inserts
+        # it).  Persist the chosen display value ourselves so the identity key
+        # cannot be mistaken for a plain typed-name submission.
+        self.setText(name)
         self._selected_identity_key = identity_key
         self._selected_identity_name = name
 
@@ -166,8 +199,18 @@ class _FaceNameEditor(QLineEdit):
         self._selected_identity_key = None
         self._selected_identity_name = None
 
+    def _accept_current_completion(self) -> bool:
+        self._handle_completion_activated(self._completer.currentIndex())
+        popup = self._completer.popup()
+        if popup is not None:
+            popup.hide()
+        return self.selected_identity_key() is not None
+
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            popup = self._completer.popup()
+            if popup is not None and popup.isVisible():
+                self._accept_current_completion()
             self._closing = True
             self.commitRequested.emit()
             event.accept()
@@ -203,6 +246,8 @@ class _FaceNameEditor(QLineEdit):
 
 class FaceNameOverlayWidget(QWidget):
     renameSubmitted = Signal(str, object)
+    unassignedRenameSubmitted = Signal(object, str)
+    existingIdentitySubmitted = Signal(object, str)
     manualFaceSubmitted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -371,9 +416,13 @@ class FaceNameOverlayWidget(QWidget):
         self.update()
 
     def show_manual_error(self, message: str) -> None:
+        self.show_name_error(message)
+
+    def show_name_error(self, message: str) -> None:
         if not message:
             return
-        target = self._manual_editor.geometry().center() if self._manual_editor is not None else self.rect().center()
+        editor = self._editor or self._manual_editor
+        target = editor.geometry().center() if editor is not None else self.rect().center()
         QToolTip.showText(self.mapToGlobal(target), message, self)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -601,12 +650,15 @@ class FaceNameOverlayWidget(QWidget):
             pass
 
     def _display_name(self, annotation: AssetFaceAnnotation) -> str:
-        name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
-        display_name = (
-            name.strip()
-            if isinstance(name, str) and name.strip()
-            else tr("FaceNameOverlay", "unnamed")
-        )
+        if getattr(annotation, "promotion_state", "legacy_visible") == "candidate":
+            display_name = tr("FaceNameOverlay", "Pending confirmation")
+        else:
+            name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
+            display_name = (
+                name.strip()
+                if isinstance(name, str) and name.strip()
+                else tr("FaceNameOverlay", "unnamed")
+            )
         if bool(getattr(annotation, "is_stale", False)):
             return tr(
                 "FaceNameOverlay",
@@ -1168,7 +1220,13 @@ class FaceNameOverlayWidget(QWidget):
 
     def _start_editing(self, face_id: str) -> None:
         state = self._states.get(face_id)
-        if state is None or not state.annotation.person_id:
+        if state is None:
+            return
+        if (
+            not state.annotation.person_id
+            and getattr(state.annotation, "promotion_state", "legacy_visible")
+            != "candidate"
+        ):
             return
         self._cancel_editing()
         self._set_hovered_face_id(None)
@@ -1193,22 +1251,53 @@ class FaceNameOverlayWidget(QWidget):
         if self._editing_face_id is None or self._editor is None:
             return
         state = self._states.get(self._editing_face_id)
-        if state is None or not state.annotation.person_id:
+        if state is None:
             self._cancel_editing()
             return
+        selected_identity_key = self._editor.selected_identity_key()
         new_name = self._editor.text().strip() or None
+        person_id = state.annotation.person_id
+        if not person_id and not new_name:
+            self._cancel_editing()
+            return
+        if selected_identity_key and not self._is_current_identity(
+            state.annotation,
+            selected_identity_key,
+        ):
+            annotation = state.annotation
+            self._teardown_editor(show_chip=True)
+            self.existingIdentitySubmitted.emit(annotation, selected_identity_key)
+            return
         if hasattr(state.annotation, "canonical_display_name"):
             fields = getattr(state.annotation, "__dataclass_fields__", {})
             changes = {"canonical_display_name": new_name}
             if "display_name" in fields:
                 changes["display_name"] = new_name
+            if new_name and "promotion_state" in fields:
+                changes["promotion_state"] = "confirmed"
             state.annotation = replace(state.annotation, **changes)
         else:
             state.annotation = replace(state.annotation, display_name=new_name)
-        person_id = state.annotation.person_id
+        updated_annotation = state.annotation
         self._teardown_editor(show_chip=True)
         if person_id:
             self.renameSubmitted.emit(person_id, new_name)
+        elif new_name:
+            self.unassignedRenameSubmitted.emit(updated_annotation, new_name)
+
+    @staticmethod
+    def _is_current_identity(
+        annotation: object,
+        identity_key: str,
+    ) -> bool:
+        current_identity = getattr(annotation, "person_id", None)
+        if not isinstance(current_identity, str) or not current_identity:
+            return False
+        if current_identity.startswith(("person:", "pet:")):
+            return current_identity == identity_key
+        kind = getattr(annotation, "kind", "person")
+        normalized_kind = "pet" if kind == "pet" else "person"
+        return f"{normalized_kind}:{current_identity}" == identity_key
 
     def _cancel_editing(self) -> None:
         if self._editing_face_id is None and self._editor is None:

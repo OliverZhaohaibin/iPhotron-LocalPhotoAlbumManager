@@ -8,7 +8,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for face overlay test
 
 import os
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QCursor, QImage, QMouseEvent, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
@@ -208,6 +208,187 @@ def test_face_name_overlay_shows_fallback_and_clamps_label(qapp) -> None:
     assert layout.label_text == "unnamed"
     assert layout.chip_rect.right() <= viewer.geometry().right()
     assert layout.chip_rect.bottom() <= viewer.geometry().bottom()
+
+
+def test_face_name_overlay_labels_candidate_as_pending_confirmation(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(display_name=None)
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": "candidate"}
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    assert overlay._states["face-1"].layout.label_text == "Pending confirmation"
+
+
+def test_candidate_face_click_opens_editor_and_confirms_renamed_cluster(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(display_name=None)
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": "candidate"}
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    QTest.mouseClick(
+        viewer,
+        Qt.MouseButton.LeftButton,
+        pos=viewer.mapFromGlobal(overlay.mapToGlobal(_chip_center(overlay).toPoint())),
+    )
+    _wait_until(qapp, lambda: overlay._editor is not None)
+    overlay._editor.setText("Alice")
+    spy = QSignalSpy(overlay.renameSubmitted)
+
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    assert _spy_records(spy) == [["person-1", "Alice"]]
+    assert overlay._states["face-1"].layout.label_text == "Alice"
+
+
+def test_unassigned_pending_face_click_creates_named_identity(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(person_id=None, display_name=None)
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": "candidate"}
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    QTest.mouseClick(
+        viewer,
+        Qt.MouseButton.LeftButton,
+        pos=viewer.mapFromGlobal(overlay.mapToGlobal(_chip_center(overlay).toPoint())),
+    )
+    _wait_until(qapp, lambda: overlay._editor is not None)
+    overlay._editor.setText("Alice")
+    spy = QSignalSpy(overlay.unassignedRenameSubmitted)
+
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    records = _spy_records(spy)
+    assert len(records) == 1
+    assert records[0][0].face_id == "face-1"
+    assert records[0][1] == "Alice"
+    assert overlay._states["face-1"].layout.label_text == "Alice"
+
+
+@pytest.mark.parametrize("promotion_state", ["candidate", "confirmed"])
+def test_saved_name_editor_reuses_identity_dropdown_for_all_states(
+    qapp,
+    promotion_state: str,
+) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(display_name=None if promotion_state == "candidate" else "Bob")
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": promotion_state}
+    )
+    overlay.set_identity_suggestions(
+        [RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3)]
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    overlay._start_editing("face-1")
+    assert overlay._editor is not None
+    assert overlay._editor._model.item(0).text() == "Alice"
+    overlay._editor.setText("Ali")
+    assert overlay._editor._completer.setCurrentRow(0)
+    overlay._editor._completer.activated[QModelIndex].emit(
+        overlay._editor._completer.currentIndex()
+    )
+    assert overlay._editor.text() == "Alice"
+    assert overlay._editor.selected_identity_key() == "person:person-a"
+
+    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    rename_spy = QSignalSpy(overlay.renameSubmitted)
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    records = _spy_records(selection_spy)
+    assert len(records) == 1
+    assert records[0][0].face_id == "face-1"
+    assert records[0][1] == "person:person-a"
+    assert _spy_records(rename_spy) == []
+
+
+@pytest.mark.parametrize("selection_method", ["mouse", "keyboard"])
+def test_saved_pet_name_dropdown_submits_existing_identity(
+    qapp,
+    selection_method: str,
+) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="detection-source",
+        source_identity_kind="pet",
+        source_identity_id="pet-source",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-source",
+        canonical_display_name=None,
+        box_x=80,
+        box_y=80,
+        box_w=100,
+        box_h=90,
+        image_width=420,
+        image_height=320,
+        promotion_state="candidate",
+    )
+    overlay.set_identity_suggestions(
+        [RecognitionIdentitySuggestion("pet:pet-existing", "Miso", None, 3)]
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    overlay._start_editing(annotation.face_id)
+    editor = overlay._editor
+    assert editor is not None
+    editor.setText("Mis")
+    editor._completer.setCompletionPrefix("Mis")
+    assert editor._completer.setCurrentRow(0)
+
+    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    rename_spy = QSignalSpy(overlay.renameSubmitted)
+    if selection_method == "mouse":
+        index = editor._completer.currentIndex()
+        assert index.isValid()
+        editor._completer.activated[QModelIndex].emit(index)
+        qapp.processEvents()
+        assert editor.selected_identity_key() == "pet:pet-existing"
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+    else:
+        assert editor._accept_current_completion()
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    assert _spy_records(selection_spy) == [[annotation, "pet:pet-existing"]]
+    assert _spy_records(rename_spy) == []
+
+
+def test_saved_name_editor_only_merges_explicit_dropdown_selection(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    overlay.set_identity_suggestions(
+        [RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3)]
+    )
+    overlay.set_annotations([_annotation(display_name="Bob")])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    overlay._start_editing("face-1")
+    assert overlay._editor is not None
+    overlay._editor.setText("Alice")
+
+    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    rename_spy = QSignalSpy(overlay.renameSubmitted)
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    assert _spy_records(selection_spy) == []
+    assert _spy_records(rename_spy) == [["person-1", "Alice"]]
 
 
 def test_face_name_overlay_hover_updates_highlighted_face(qapp) -> None:
@@ -681,7 +862,9 @@ def test_manual_face_submission_preserves_selected_pet_identity(qapp) -> None:
     assert overlay._manual_editor is not None
     overlay._manual_editor.setText("Miso")
     assert overlay._manual_editor._completer.setCurrentRow(1)
-    overlay._manual_editor._handle_completion_activated("Miso")
+    overlay._manual_editor._handle_completion_activated(
+        overlay._manual_editor._completer.currentIndex()
+    )
 
     spy = QSignalSpy(overlay.manualFaceSubmitted)
     QTest.keyClick(overlay._manual_editor, Qt.Key.Key_Return)

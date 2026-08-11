@@ -95,6 +95,7 @@ DEFAULT_PET_DISTANCE_THRESHOLD = 0.42
 PET_PET_IOU_THRESHOLD = 0.50
 PET_PET_SMALLER_BOX_COVERAGE_THRESHOLD = 0.90
 PET_PET_NORMALIZED_CENTER_DISTANCE_THRESHOLD = 0.40
+PET_PET_CROSS_SPECIES_MUTUAL_COVERAGE_THRESHOLD = 0.90
 PET_PEOPLE_IOU_THRESHOLD = 0.50
 PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD = 0.90
 PET_PEOPLE_LARGER_PET_RATIO = 1.50
@@ -1416,6 +1417,9 @@ def _dedupe_supported_species_boxes(
     threshold: float = PET_PET_IOU_THRESHOLD,
     smaller_box_coverage_threshold: float = PET_PET_SMALLER_BOX_COVERAGE_THRESHOLD,
     normalized_center_distance_threshold: float = PET_PET_NORMALIZED_CENTER_DISTANCE_THRESHOLD,
+    cross_species_mutual_coverage_threshold: float = (
+        PET_PET_CROSS_SPECIES_MUTUAL_COVERAGE_THRESHOLD
+    ),
     cross_species_threshold: float = 0.90,
     cross_species_score_margin: float = 0.25,
 ) -> list[_DetectedPetBox]:
@@ -1424,7 +1428,11 @@ def _dedupe_supported_species_boxes(
         suppress = False
         for existing in selected:
             overlap = _bbox_iou(existing.bbox, box.bbox)
-            smaller_box_coverage = _bbox_smaller_box_coverage(existing.bbox, box.bbox)
+            existing_box_coverage, candidate_box_coverage = _bbox_pair_coverages(
+                existing.bbox,
+                box.bbox,
+            )
+            smaller_box_coverage = max(existing_box_coverage, candidate_box_coverage)
             normalized_center_distance = _bbox_normalized_center_distance(
                 existing.bbox,
                 box.bbox,
@@ -1439,6 +1447,13 @@ def _dedupe_supported_species_boxes(
                 ):
                     reason = "same_species_containment"
             elif (
+                existing.species_label in SUPPORTED_DEFAULT_SPECIES
+                and box.species_label in SUPPORTED_DEFAULT_SPECIES
+                and existing_box_coverage >= cross_species_mutual_coverage_threshold
+                and candidate_box_coverage >= cross_species_mutual_coverage_threshold
+            ):
+                reason = "cross_species_mutual_coverage"
+            elif (
                 existing.species_label != box.species_label
                 and overlap >= cross_species_threshold
                 and existing.confidence - box.confidence >= cross_species_score_margin
@@ -1449,7 +1464,8 @@ def _dedupe_supported_species_boxes(
                 _LOGGER.debug(
                     "Suppressed pet box: reason=%s species=%s candidate_confidence=%.3f "
                     "candidate_bbox=%s kept_species=%s kept_confidence=%.3f kept_bbox=%s "
-                    "iou=%.3f smaller_box_coverage=%.3f "
+                    "iou=%.3f smaller_box_coverage=%.3f kept_box_coverage=%.3f "
+                    "candidate_box_coverage=%.3f "
                     "normalized_center_distance=%.3f",
                     reason,
                     box.species_label,
@@ -1460,6 +1476,8 @@ def _dedupe_supported_species_boxes(
                     existing.bbox,
                     overlap,
                     smaller_box_coverage,
+                    existing_box_coverage,
+                    candidate_box_coverage,
                     normalized_center_distance,
                 )
                 suppress = True
@@ -1480,16 +1498,16 @@ def _bbox_iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int])
     return intersection / float(union)
 
 
-def _bbox_smaller_box_coverage(
+def _bbox_pair_coverages(
     left: tuple[int, int, int, int],
     right: tuple[int, int, int, int],
-) -> float:
+) -> tuple[float, float]:
     left_area = max(0, left[2]) * max(0, left[3])
     right_area = max(0, right[2]) * max(0, right[3])
-    smaller_area = min(left_area, right_area)
-    if smaller_area <= 0:
-        return 0.0
-    return _bbox_intersection_area(left, right) / float(smaller_area)
+    if left_area <= 0 or right_area <= 0:
+        return 0.0, 0.0
+    intersection = _bbox_intersection_area(left, right)
+    return intersection / float(left_area), intersection / float(right_area)
 
 
 def _bbox_normalized_center_distance(

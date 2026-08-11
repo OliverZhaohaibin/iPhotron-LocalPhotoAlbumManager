@@ -415,20 +415,31 @@ def test_yolox_detector_scans_uncovered_tiles_when_full_image_has_large_dog() ->
     assert {box.species_label for box in boxes} == {"cat", "dog"}
 
 
-def test_dedupe_supported_species_boxes_keeps_best_overlapping_pet_label() -> None:
+def test_dedupe_supported_species_boxes_suppresses_img_3747_cross_species_duplicate() -> None:
     boxes = [
-        _DetectedPetBox((10, 10, 100, 100), 0.61, "cat"),
-        _DetectedPetBox((12, 12, 98, 98), 0.72, "dog"),
-        _DetectedPetBox((250, 10, 100, 100), 0.55, "cat"),
+        _DetectedPetBox((918, 1041, 1633, 1667), 0.451, "dog"),
+        _DetectedPetBox((907, 1027, 1587, 1700), 0.378, "cat"),
     ]
 
-    deduped = _dedupe_supported_species_boxes(boxes)
+    assert _dedupe_supported_species_boxes(boxes) == [boxes[0]]
 
-    assert [(box.species_label, box.confidence) for box in deduped] == [
-        ("dog", 0.72),
-        ("cat", 0.61),
-        ("cat", 0.55),
+
+def test_dedupe_supported_species_boxes_keeps_distinct_cross_species_overlap() -> None:
+    boxes = [
+        _DetectedPetBox((0, 0, 100, 100), 0.80, "dog"),
+        _DetectedPetBox((15, 0, 100, 100), 0.70, "cat"),
     ]
+
+    assert _dedupe_supported_species_boxes(boxes) == boxes
+
+
+def test_dedupe_supported_species_boxes_does_not_mutually_dedupe_unsupported_label() -> None:
+    boxes = [
+        _DetectedPetBox((0, 0, 100, 100), 0.88, "sheep"),
+        _DetectedPetBox((1, 1, 98, 98), 0.70, "cat"),
+    ]
+
+    assert _dedupe_supported_species_boxes(boxes) == boxes
 
 
 def test_dedupe_supported_species_boxes_keeps_two_real_cats_from_img_6518() -> None:
@@ -614,11 +625,10 @@ def test_pet_pipeline_dedupes_overlapping_supported_species_after_filtering(
     assert [round(detection.confidence, 2) for detection in results[0].detections] == [
         0.82,
         0.76,
-        0.70,
     ]
     assert pipeline.last_scan_metrics.candidate_boxes == 4
     assert pipeline.last_scan_metrics.unsupported_species == 1
-    assert pipeline.last_scan_metrics.accepted_detections == 3
+    assert pipeline.last_scan_metrics.accepted_detections == 2
 
 
 def test_pet_pipeline_filters_people_overlaps_before_embedding(tmp_path: Path) -> None:

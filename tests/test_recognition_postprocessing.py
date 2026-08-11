@@ -373,3 +373,32 @@ def test_pet_promotion_uses_cross_asset_evidence(tmp_path: Path) -> None:
     promotion = state.get_promotion_records(["pet-a"])["pet-a"]
     assert promotion.evidence_asset_count == 2
     assert promotion.promotion_state == "eligible"
+
+
+def test_pet_merge_persists_union_evidence_before_runtime_state_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = PetRepository(
+        tmp_path / "pet_index.db",
+        tmp_path / "pet_state.db",
+    )
+    source = _pet_detection("source", asset_id="asset-a", pet_id="pet-source")
+    target = _pet_detection("target", asset_id="asset-b", pet_id="pet-target")
+    repository.replace_all(
+        [source, target],
+        [_pet("pet-source", [source]), _pet("pet-target", [target])],
+    )
+    state = repository.state_repository
+    assert state is not None
+    before = state.get_promotion_records(["pet-source", "pet-target"])
+    assert {record.evidence_asset_count for record in before.values()} == {1}
+    assert {record.promotion_state for record in before.values()} == {"candidate"}
+    monkeypatch.setattr(repository, "complete_runtime_state_sync", lambda _operation_id: None)
+
+    result = repository.merge_pets("pet-source", "pet-target")
+
+    assert result is not None
+    promotion = state.get_promotion_records(["pet-target"])["pet-target"]
+    assert promotion.evidence_asset_count == 2
+    assert promotion.promotion_state == "eligible"

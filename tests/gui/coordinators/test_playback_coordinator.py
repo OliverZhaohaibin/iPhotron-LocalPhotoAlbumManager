@@ -2151,6 +2151,49 @@ def test_unassigned_pet_name_dropdown_reports_same_asset_move_conflict() -> None
     )
 
 
+@pytest.mark.parametrize(
+    "failure",
+    ["recovery_pending", "shutting_down", "rejected"],
+)
+def test_unassigned_pet_name_dropdown_reports_generic_move_failure(failure: str) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._pet_service = Mock(
+        move_detection_to_pet_with_outcome=Mock(
+            return_value=SimpleNamespace(
+                succeeded=False,
+                failure=SimpleNamespace(value=failure),
+            )
+        )
+    )
+    coordinator._face_name_overlay = Mock()
+    annotation = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="det-unassigned",
+        source_identity_kind="pet",
+        source_identity_id=None,
+        canonical_identity_kind="pet",
+        canonical_identity_id=None,
+        canonical_display_name=None,
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+        promotion_state="candidate",
+    )
+
+    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
+        coordinator,
+        annotation,
+        "pet:pet-existing",
+    )
+
+    coordinator._face_name_overlay.show_name_error.assert_called_once_with(
+        "The name could not be assigned. The identities may have changed."
+    )
+
+
 def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._pet_service = Mock(

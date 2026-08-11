@@ -2821,8 +2821,13 @@ class PetRepository:
                 target_pet_id,
             )
             return None
+        merged_evidence_asset_count = len(source_asset_ids | target_asset_ids)
         self._state_repo.ensure_runtime_candidates(runtime_pets, runtime_detections)
-        durable_merged = self._state_repo.merge_pets(source_pet_id, target_pet_id)
+        durable_merged = self._state_repo.merge_pets(
+            source_pet_id,
+            target_pet_id,
+            evidence_asset_count=merged_evidence_asset_count,
+        )
         if not durable_merged:
             redirects = self._state_repo.get_merge_redirect_map()
             if redirects.get(source_pet_id) != target_pet_id:

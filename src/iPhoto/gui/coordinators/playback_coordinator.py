@@ -1892,6 +1892,9 @@ class PlaybackCoordinator(QObject):
         if failure == "same_asset_conflict":
             self._show_same_asset_identity_error()
             return
+        self._show_identity_assignment_changed_error()
+
+    def _show_identity_assignment_changed_error(self) -> None:
         self._show_inline_identity_error(
             tr(
                 "PlaybackCoordinator",
@@ -2006,6 +2009,8 @@ class PlaybackCoordinator(QObject):
             failure = getattr(failure_value, "value", failure_value)
             if failure == "same_asset_conflict":
                 self._show_same_asset_identity_error()
+            else:
+                self._show_identity_assignment_changed_error()
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:

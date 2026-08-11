@@ -962,7 +962,13 @@ class PetStateRepository:
             conn.commit()
         return int(cursor.rowcount or 0) > 0
 
-    def merge_pets(self, source_pet_id: str, target_pet_id: str) -> bool:
+    def merge_pets(
+        self,
+        source_pet_id: str,
+        target_pet_id: str,
+        *,
+        evidence_asset_count: int,
+    ) -> bool:
         if not source_pet_id or not target_pet_id or source_pet_id == target_pet_id:
             return False
         self.initialize()
@@ -1065,13 +1071,7 @@ class PetStateRepository:
                 (source_pet_id, target_pet_id),
             ).fetchall()
             promotions = {str(row["pet_id"]): row for row in promotion_rows}
-            evidence_asset_count = max(
-                (
-                    int(row["evidence_asset_count"] or 0)
-                    for row in promotion_rows
-                ),
-                default=0,
-            )
+            authoritative_evidence_asset_count = max(0, int(evidence_asset_count))
             merged_state = merged_promotion_state(
                 promotions.get(source_pet_id)["promotion_state"]
                 if source_pet_id in promotions
@@ -1079,7 +1079,7 @@ class PetStateRepository:
                 promotions.get(target_pet_id)["promotion_state"]
                 if target_pet_id in promotions
                 else None,
-                evidence_asset_count=evidence_asset_count,
+                evidence_asset_count=authoritative_evidence_asset_count,
                 minimum_evidence=_PET_PROMOTION_MIN_ASSETS,
             )
             conn.execute(
@@ -1092,7 +1092,12 @@ class PetStateRepository:
                     promotion_state = excluded.promotion_state,
                     updated_at = excluded.updated_at
                 """,
-                (target_pet_id, evidence_asset_count, merged_state, timestamp),
+                (
+                    target_pet_id,
+                    authoritative_evidence_asset_count,
+                    merged_state,
+                    timestamp,
+                ),
             )
             conn.execute(
                 "DELETE FROM pet_identity_promotions WHERE pet_id = ?",

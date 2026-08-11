@@ -83,6 +83,60 @@ def test_production_shape_fallback_is_correct_at_1k(
     assert metrics["rss_bytes"] <= 4 * 1024 * 1024 * 1024
 
 
+def test_warm_incremental_commit_uses_bounded_sqlite_connections(tmp_path: Path) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    warm = [
+        _detection(
+            detection_id="warm",
+            asset_id="warm-asset",
+            embedding=_synthetic_vector(0, 4),
+            pet_id=None,
+        )
+    ]
+    repository.replace_assets_incrementally(
+        ["warm-asset"],
+        warm,
+        distance_threshold=-1.0,
+    )
+    state_repository = repository.state_repository
+    assert state_repository is not None
+    connection_counts = {"runtime": 0, "state": 0}
+    runtime_connect = repository._connect
+    state_connect = state_repository._connect
+
+    def counted_runtime_connect():
+        connection_counts["runtime"] += 1
+        return runtime_connect()
+
+    def counted_state_connect():
+        connection_counts["state"] += 1
+        return state_connect()
+
+    repository._connect = counted_runtime_connect  # type: ignore[method-assign]
+    state_repository._connect = counted_state_connect  # type: ignore[method-assign]
+    batch_count = 10
+    for batch_index in range(batch_count):
+        opens_before = sum(connection_counts.values())
+        first = 1 + batch_index * 16
+        batch = [
+            _detection(
+                detection_id=f"budget-{index:04d}",
+                asset_id=f"budget-asset-{index:04d}",
+                embedding=_synthetic_vector(index, 4),
+                pet_id=None,
+            )
+            for index in range(first, first + 16)
+        ]
+        repository.replace_assets_incrementally(
+            [detection.asset_id for detection in batch],
+            batch,
+            distance_threshold=-1.0,
+        )
+        assert sum(connection_counts.values()) - opens_before <= 4
+
+    assert sum(connection_counts.values()) <= batch_count * 4
+
+
 def _benchmark_incremental(root: Path, count: int) -> dict[str, object]:
     root.mkdir(parents=True)
     repository = PetRepository(root / "pet_index.db", root / "pet_state.db")
@@ -150,8 +204,60 @@ def _benchmark_growth(
         return connection
 
     repository._connect = traced_connect  # type: ignore[method-assign]
+    phase_seconds = {
+        "assignment_seconds": 0.0,
+        "state_sync_seconds": 0.0,
+        "index_update_seconds": 0.0,
+        "synthetic_seconds": 0.0,
+    }
+    original_assignment = repository._assign_incremental_pet_ids
+    original_state_sync = repository._sync_runtime_state_payload
+    original_index_update = repository._update_profile_indexes
+    state_repository = repository.state_repository
+    original_state_snapshot = (
+        state_repository._load_incremental_state
+        if state_repository is not None
+        else None
+    )
+
+    def timed_assignment(*args, **kwargs):
+        phase_started = time.perf_counter()
+        try:
+            return original_assignment(*args, **kwargs)
+        finally:
+            phase_seconds["assignment_seconds"] += time.perf_counter() - phase_started
+
+    def timed_state_snapshot(*args, **kwargs):
+        phase_started = time.perf_counter()
+        try:
+            assert original_state_snapshot is not None
+            return original_state_snapshot(*args, **kwargs)
+        finally:
+            phase_seconds["assignment_seconds"] += time.perf_counter() - phase_started
+
+    def timed_state_sync(*args, **kwargs):
+        phase_started = time.perf_counter()
+        try:
+            return original_state_sync(*args, **kwargs)
+        finally:
+            phase_seconds["state_sync_seconds"] += time.perf_counter() - phase_started
+
+    def timed_index_update(*args, **kwargs):
+        phase_started = time.perf_counter()
+        try:
+            return original_index_update(*args, **kwargs)
+        finally:
+            phase_seconds["index_update_seconds"] += time.perf_counter() - phase_started
+
+    repository._assign_incremental_pet_ids = timed_assignment  # type: ignore[method-assign]
+    repository._sync_runtime_state_payload = timed_state_sync  # type: ignore[method-assign]
+    repository._update_profile_indexes = timed_index_update  # type: ignore[method-assign]
+    if state_repository is not None:
+        state_repository._load_incremental_state = timed_state_snapshot  # type: ignore[method-assign]
     started = time.perf_counter()
+    next_progress = 5_000
     for start in range(0, count, 16):
+        synthetic_started = time.perf_counter()
         batch = [
             _detection(
                 detection_id=f"growth-{index:06d}",
@@ -161,11 +267,21 @@ def _benchmark_growth(
             )
             for index in range(start, min(start + 16, count))
         ]
+        phase_seconds["synthetic_seconds"] += time.perf_counter() - synthetic_started
         repository.replace_assets_incrementally(
             [detection.asset_id for detection in batch],
             batch,
             distance_threshold=-1.0,
         )
+        completed = min(start + 16, count)
+        if completed >= next_progress or completed == count:
+            print(
+                "Pets production-shape progress: "
+                f"{completed}/{count} in {time.perf_counter() - started:.2f}s",
+                flush=True,
+            )
+            while next_progress <= completed:
+                next_progress += 5_000
     elapsed = time.perf_counter() - started
     rss_bytes = _peak_rss_bytes()
     full_profile_reads = sum(
@@ -179,6 +295,15 @@ def _benchmark_growth(
         "seconds": elapsed,
         "rss_bytes": rss_bytes,
         "full_profile_reads": full_profile_reads,
+        **phase_seconds,
+        "runtime_mutation_seconds": max(
+            0.0,
+            elapsed
+            - phase_seconds["synthetic_seconds"]
+            - phase_seconds["assignment_seconds"]
+            - phase_seconds["state_sync_seconds"]
+            - phase_seconds["index_update_seconds"],
+        ),
     }
     if not exercise_restart:
         return metrics

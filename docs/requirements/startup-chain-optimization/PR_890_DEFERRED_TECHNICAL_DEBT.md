@@ -1,13 +1,13 @@
 # PR #890 延期技术债务台账
 
-更新日期：2026-08-10
+更新日期：2026-08-11
 
 ## 状态与范围
 
 - 原审查基线：`59c961875a5e337299cf7f2fb1bff59c63b74f93`
 - Bug-only 修复提交：`588682c29f526e9903dd90c32796bb7e3e744fe5`
 - 修复 PR：[#902](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/pull/902)
-- 当前状态：`deferred / not_started`
+- 当前状态：`remediation_in_progress / remote_pending`
 
 PR #902 只修复 PR #890 审查项 1–6、9，并补充第 10 项的正常解释器退出
 smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR 的组织方式，以及
@@ -23,8 +23,8 @@ smoke test。磁盘缓存性能、统一 surface/RAW 内存预算、历史 PR �
 | --- | --- | --- | --- | --- |
 | TD-890-01 | P1 | 磁盘 neutral-surface cache 的命中、写入和 prune 为高线性成本 | PR #903 已完成跨进程 cache namespace ownership，并通过全部非 Windows 长尾门禁 | `automated_pass` |
 | TD-890-02 | P1 | CPU/mmap/RenderSession/GPU/RAW 缺少统一字节所有权 | 只观测 tracker 已接入；预算执行与 lease 迁移仍未开始 | `in_progress` |
-| TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | PR #902 CI 中唯一非成功项，无法提供稳定的三平台 50k×384 证据 | `not_started` |
-| TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | 当前只保证本阶段 base/head 触发，向前合并后的同 SHA 证据仍需人工组织 | `not_started` |
+| TD-890-03 | P2 | Windows Pets production-shape 合同超过 30 分钟 job 上限 | SQLite connection/I/O 放大已在本地收口并加入阶段 metrics；仍需 Windows 连续两次 30 分钟内成功 | `local_pass_remote_pending` |
+| TD-890-04 | P2 | stacked branch 到 `edit-base`/`main` 的 CI promotion 策略未闭环 | strict head、merge-ref、merge-SHA 触发已写入 workflow；实际远端 run 证据待补 | `remote_pending` |
 | TD-890-05 | P3 | 大型跨子系统 PR 的回滚和归因边界不足 | 历史 PR 无法安全追溯拆分；未来同类变更仍可能形成不可独立回滚的组合 | `process_debt` |
 
 ## TD-890-01：磁盘 surface cache 的线性成本
@@ -199,10 +199,25 @@ PR #902 的 [GitHub Actions run 31333850127](https://github.com/OliverZhaohaibin
 成功。PR #902 没有修改 Pets repository 或该合同实现，因此未在 bug-only PR 中通过
 放宽 timeout、缩小数据规模或跳过 Windows 来制造绿灯。
 
+当前修复基线 `54eef7b3` 的
+[GitHub Actions run 31391123235](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/31391123235)
+中，Windows production-shape 在测试运行约 27 分 50 秒后同样触发 30 分钟 job
+timeout 并被取消。针对该热点，本轮实现将 rejected keys、pet-key mapping、redirects
+和 durable profiles 合并为一次 state DB 只读快照；正常增量提交直接复用已构造的
+payload、pets、detections 和 runtime connection 完成 state sync、`state_synced` 标记与
+有界 prune。`sync_scan_results()` 的名称查询也复用同一 state connection，并新增正常
+warm batch 两个数据库合计不超过 4 次 connection open/close 的合同。
+
+本地 50k×384、batch=16、USearch production-shape 已在 30 分钟门槛内通过：growth
+65.26 秒、cold restart 3.86 秒、mutation 12.96 秒；growth 内 assignment 6.65 秒、
+state sync 24.72 秒、index update 0.08 秒、runtime mutation 33.45 秒。该结果证明实现
+与 metrics 合同可运行，但不能替代 Windows runner 证据，因此本项保持
+`local_pass_remote_pending`。
+
 ### 后续计划与验收
 
-1. 在 `_benchmark_growth()` 增加分阶段耗时和进度采样，区分 SQLite mutation、
-   USearch add/rebuild、restart、merge/delete 和 RSS probe。
+1. `_benchmark_growth()` 已增加每 5k 项进度和 assignment、runtime mutation、state
+   sync、index update、restart、mutation 分阶段耗时。
 2. 使用 Windows profiler/ETW 或等价工具确认 50k batch-16 增长的主热点，并与同一
    runner image 上的 Ubuntu/macOS 结构对比。
 3. 优先修复算法或 I/O 放大；只有在有稳定 P95 数据证明工作量合理且不可再优化时，
@@ -214,9 +229,14 @@ PR #902 的 [GitHub Actions run 31333850127](https://github.com/OliverZhaohaibin
 
 ## TD-890-04：CI promotion 与分支触发策略
 
-PR #902 当前只保证 `codex/startup-chain-optimization` 阶段的 pull request 和 push
-触发。`edit-base`/`main` 的向前合并、同一或组合 SHA 的重新验证，以及 stacked PR
-解除后的最终 required-check 策略未在本轮修改。
+当前 workflow 已按 strict policy 配置：push 覆盖 `main`、`edit-base` 和
+`codex/startup-chain-optimization`，pull request 只以 `main`、`edit-base` 作为 base
+filter；`pets-production-shape-contract` 不再按 event 跳过 push，三平台矩阵继续保持
+50k×384、batch=16 和 30 分钟门槛。静态 workflow 合同已锁定这些条件。
+
+远端仍需取得 exact head push、PR synthetic merge-ref，以及合并到 `edit-base` 后实际
+merge SHA 的正常事件成功 run；其中 Windows production-shape 还必须连续两次在 30
+分钟内完成。因此本项只能标记为 `remote_pending`，不能仅凭 workflow 修改关闭。
 
 后续应为每个实际 promotion base 明确：
 

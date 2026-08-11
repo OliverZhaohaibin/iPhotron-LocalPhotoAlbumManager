@@ -35,6 +35,14 @@ class PetCoverRecord:
     is_custom: bool
 
 
+@dataclass(frozen=True)
+class _IncrementalStateSnapshot:
+    rejected_keys: frozenset[str]
+    key_map: dict[str, str]
+    redirects: dict[str, str]
+    durable_profiles: dict[str, PetProfile]
+
+
 class PetStateRepository:
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
@@ -223,6 +231,91 @@ class PetStateRepository:
                 )
         return {str(row["pet_key"]) for row in rows if row["pet_key"]}
 
+    def _load_incremental_state(
+        self,
+        pet_keys: Iterable[str],
+    ) -> _IncrementalStateSnapshot:
+        """Read all durable assignment inputs from one state-DB snapshot."""
+
+        unique_keys = tuple(str(key) for key in dict.fromkeys(pet_keys) if key)
+        if not unique_keys:
+            return _IncrementalStateSnapshot(frozenset(), {}, {}, {})
+        self.initialize()
+        with closing(self._connect()) as conn:
+            # Python's sqlite3 driver does not open a transaction for SELECTs.
+            # Pin all assignment inputs to one WAL snapshot explicitly.
+            conn.execute("BEGIN")
+            rejected_rows: list[sqlite3.Row] = []
+            key_rows: list[sqlite3.Row] = []
+            for chunk in _chunked(unique_keys, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rejected_rows.extend(
+                    conn.execute(
+                        f"SELECT pet_key FROM rejected_pet_keys "
+                        f"WHERE pet_key IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+                key_rows.extend(
+                    conn.execute(
+                        f"SELECT pet_key, pet_id FROM pet_keys "
+                        f"WHERE pet_key IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+            redirect_rows = conn.execute(
+                "SELECT source_pet_id, target_pet_id FROM merge_redirects"
+            ).fetchall()
+            redirects = _canonical_redirect_map(
+                {
+                    str(row["source_pet_id"]): str(row["target_pet_id"])
+                    for row in redirect_rows
+                    if row["source_pet_id"] and row["target_pet_id"]
+                }
+            )
+            key_map = {
+                str(row["pet_key"]): str(row["pet_id"])
+                for row in key_rows
+                if row["pet_key"] and row["pet_id"]
+            }
+            mapped_ids = tuple(
+                dict.fromkeys(
+                    redirects.get(pet_id, pet_id)
+                    for pet_id in key_map.values()
+                    if pet_id
+                )
+            )
+            profile_rows: list[sqlite3.Row] = []
+            for chunk in _chunked(mapped_ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                profile_rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT
+                            pet_id, name, center_embedding, embedding_dim,
+                            created_at, updated_at, sample_count, profile_state,
+                            species_label, embedding_pipeline_version, generation_id,
+                            boundary_embeddings, boundary_sample_count
+                        FROM pet_profiles
+                        WHERE pet_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+            conn.rollback()
+        return _IncrementalStateSnapshot(
+            rejected_keys=frozenset(
+                str(row["pet_key"]) for row in rejected_rows if row["pet_key"]
+            ),
+            key_map=key_map,
+            redirects=redirects,
+            durable_profiles={
+                str(row["pet_id"]): _profile_from_row(row)
+                for row in profile_rows
+                if row["pet_id"]
+            },
+        )
+
     def add_rejected_pet_key(self, pet_key: str) -> None:
         if not pet_key:
             return
@@ -270,10 +363,27 @@ class PetStateRepository:
         replaced_pet_ids: Iterable[str] = (),
     ) -> None:
         self.initialize()
-        names = self.get_profile_name_map(pet.pet_id for pet in pets)
         timestamp = utc_now_iso()
         detection_by_id = {detection.detection_id: detection for detection in detections}
         with closing(self._connect()) as conn:
+            unique_pet_ids = tuple(
+                dict.fromkeys(pet.pet_id for pet in pets if pet.pet_id)
+            )
+            name_rows: list[sqlite3.Row] = []
+            for chunk in _chunked(unique_pet_ids, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                name_rows.extend(
+                    conn.execute(
+                        f"SELECT pet_id, name FROM pet_profiles "
+                        f"WHERE pet_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+            names = {
+                str(row["pet_id"]): row["name"]
+                for row in name_rows
+                if row["pet_id"]
+            }
             redirect_rows = conn.execute(
                 "SELECT source_pet_id, target_pet_id FROM merge_redirects"
             ).fetchall()

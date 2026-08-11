@@ -297,9 +297,11 @@ def test_saved_name_editor_reuses_identity_dropdown_for_all_states(
     overlay._start_editing("face-1")
     assert overlay._editor is not None
     assert overlay._editor._model.item(0).text() == "Alice"
-    overlay._editor.setText("Alice")
+    overlay._editor.setText("Ali")
     assert overlay._editor._completer.setCurrentRow(0)
-    overlay._editor._handle_completion_activated("Alice")
+    overlay._editor._completer.activated.emit("Alice")
+    assert overlay._editor.text() == "Alice"
+    assert overlay._editor.selected_identity_key() == "person:person-a"
 
     selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
     rename_spy = QSignalSpy(overlay.renameSubmitted)

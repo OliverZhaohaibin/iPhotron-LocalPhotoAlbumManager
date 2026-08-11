@@ -173,6 +173,13 @@ class _FaceNameEditor(QLineEdit):
         if not isinstance(identity_key, str) or not identity_key:
             return
         name = str(index.data() or "").strip()
+        if not name:
+            return
+        # A custom QCompleter popup can emit ``activated`` before the line edit
+        # receives the completed text (and on some platforms it never inserts
+        # it).  Persist the chosen display value ourselves so the identity key
+        # cannot be mistaken for a plain typed-name submission.
+        self.setText(name)
         self._selected_identity_key = identity_key
         self._selected_identity_name = name
 

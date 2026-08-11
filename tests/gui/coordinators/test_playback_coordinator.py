@@ -2107,11 +2107,57 @@ def test_pet_name_dropdown_reports_same_asset_merge_conflict() -> None:
     )
 
 
+def test_unassigned_pet_name_dropdown_reports_same_asset_move_conflict() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._pet_service = Mock(
+        move_detection_to_pet_with_outcome=Mock(
+            return_value=SimpleNamespace(
+                succeeded=False,
+                failure=SimpleNamespace(value="same_asset_conflict"),
+            )
+        )
+    )
+    coordinator._face_name_overlay = Mock()
+    annotation = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="det-unassigned",
+        source_identity_kind="pet",
+        source_identity_id=None,
+        canonical_identity_kind="pet",
+        canonical_identity_id=None,
+        canonical_display_name=None,
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+        promotion_state="candidate",
+    )
+
+    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
+        coordinator,
+        annotation,
+        "pet:pet-existing",
+    )
+
+    coordinator._pet_service.move_detection_to_pet_with_outcome.assert_called_once_with(
+        "det-unassigned",
+        "pet-existing",
+    )
+    coordinator._face_name_overlay.show_name_error.assert_called_once_with(
+        "A pet identity cannot contain two detections from the same photo. "
+        "Delete a duplicate detection instead of merging it."
+    )
+
+
 def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._pet_service = Mock(
         delete_detection=Mock(return_value=True),
-        move_detection_to_pet=Mock(return_value=True),
+        move_detection_to_pet_with_outcome=Mock(
+            return_value=SimpleNamespace(succeeded=True, failure=None)
+        ),
         move_detection_to_new_pet=Mock(return_value="pet-new"),
     )
     coordinator._current_presentation = _make_presentation(
@@ -2151,7 +2197,10 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     )
 
     coordinator._pet_service.delete_detection.assert_called_once_with("det-1")
-    coordinator._pet_service.move_detection_to_pet.assert_called_once_with("det-1", "pet-b")
+    coordinator._pet_service.move_detection_to_pet_with_outcome.assert_called_once_with(
+        "det-1",
+        "pet-b",
+    )
     coordinator._pet_service.move_detection_to_new_pet.assert_called_once_with("det-1", "Nori")
     assert coordinator._refresh_info_panel_faces.call_count == 3
 

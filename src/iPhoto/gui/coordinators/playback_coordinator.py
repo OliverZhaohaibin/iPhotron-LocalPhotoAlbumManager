@@ -1890,19 +1890,25 @@ class PlaybackCoordinator(QObject):
         failure_value = getattr(outcome, "failure", None)
         failure = getattr(failure_value, "value", failure_value)
         if failure == "same_asset_conflict":
-            message = tr(
+            self._show_same_asset_identity_error()
+            return
+        self._show_inline_identity_error(
+            tr(
+                "PlaybackCoordinator",
+                "The name could not be assigned. The identities may have changed.",
+            )
+        )
+
+    def _show_same_asset_identity_error(self) -> None:
+        self._show_inline_identity_error(
+            tr(
                 "PlaybackCoordinator",
                 (
                     "A pet identity cannot contain two detections from the same photo. "
                     "Delete a duplicate detection instead of merging it."
                 ),
             )
-        else:
-            message = tr(
-                "PlaybackCoordinator",
-                "The name could not be assigned. The identities may have changed.",
-            )
-        self._show_inline_identity_error(message)
+        )
 
     def _show_inline_identity_error(self, message: str) -> None:
         overlay = getattr(self, "_face_name_overlay", None)
@@ -1982,7 +1988,10 @@ class PlaybackCoordinator(QObject):
                 return
             target_pet_id = target_id
             try:
-                changed = pet_service.move_detection_to_pet(annotation_id, target_pet_id)
+                outcome = pet_service.move_detection_to_pet_with_outcome(
+                    annotation_id,
+                    target_pet_id,
+                )
             except (sqlite3.Error, OSError):
                 LOGGER.exception(
                     "Failed to move pet detection %s to pet %s",
@@ -1990,8 +1999,13 @@ class PlaybackCoordinator(QObject):
                     target_pet_id,
                 )
                 return
-            if changed:
+            if getattr(outcome, "succeeded", False):
                 self._refresh_recognition_views_after_mutation()
+                return
+            failure_value = getattr(outcome, "failure", None)
+            failure = getattr(failure_value, "value", failure_value)
+            if failure == "same_asset_conflict":
+                self._show_same_asset_identity_error()
             return
         people_service = getattr(self, "_people_service", None)
         if people_service is None:

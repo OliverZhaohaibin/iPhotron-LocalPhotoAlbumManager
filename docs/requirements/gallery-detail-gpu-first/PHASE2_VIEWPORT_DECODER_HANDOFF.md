@@ -53,9 +53,9 @@ GUI thread
   -> 由内存索引构造 AssetSourceIdentity（点击/hover 不 stat）
   -> 读取 viewer layout + DPR，选择 LOD，提交完整 request
 
-sidecar preparation pool (1 lane)
-  -> read_adjustments，仅保留进行中的同源结果
-  -> hover/click 可 promotion/reuse
+sidecar preparation pool (2 lanes)
+  -> read_adjustments；latest-only queue 可绕过一个卡住的 native RAW probe
+  -> hover/click 可 promotion/reuse；running stale cooperative cancel 后不再按 key 复用
   -> 完成后释放，不形成 edit-state cache
 
 still decode pool (2 lanes)

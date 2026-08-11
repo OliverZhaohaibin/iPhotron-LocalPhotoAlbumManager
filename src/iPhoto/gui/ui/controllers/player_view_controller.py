@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 
 from PySide6.QtCore import (
     QObject,
@@ -198,6 +199,7 @@ class _ScheduledStillSurfaceDecodeWorker(_StillSurfaceDecodeWorker):
 
 
 class _AdjustmentPreparationSignals(QObject):
+    started = Signal(object)
     ready = Signal(object, object)
     failed = Signal(object, str)
     finished = Signal(object)
@@ -230,6 +232,7 @@ class _AdjustmentPreparationWorker(QRunnable):
         self._cancelled = True
 
     def run(self) -> None:  # pragma: no cover - worker-thread filesystem boundary
+        self.signals.started.emit(self)
         try:
             if self._cancelled:
                 return
@@ -271,12 +274,12 @@ class _AdjustmentPreparationWorker(QRunnable):
             )
             if not self._cancelled:
                 self.signals.ready.emit(
-                    self.key,
+                    self,
                     PreparedStillState.create(adjustments, identity),
                 )
         except Exception as exc:  # noqa: BLE001 - edit providers have varied I/O failures
             if not self._cancelled:
-                self.signals.failed.emit(self.key, str(exc))
+                self.signals.failed.emit(self, str(exc))
         finally:
             self.signals.finished.emit(self)
 
@@ -313,6 +316,7 @@ class _PreparationEntry:
     worker: _AdjustmentPreparationWorker
     intents: list[_PreparedRequestIntent]
     priority: int
+    state: Literal["queued", "running"] = "queued"
     result: PreparedStillState | None = None
 
 
@@ -398,7 +402,10 @@ class PlayerViewController(QObject):
         self._still_scheduler.warmed.connect(self._on_scheduled_surface_warmed)
         self._still_scheduler.failed.connect(self._on_scheduled_image_failed)
         self._preparation_pool = QThreadPool(self)
-        self._preparation_pool.setMaxThreadCount(1)
+        # RAW geometry probing enters LibRaw and cannot always be physically
+        # interrupted.  Keep a second lane available so the newest foreground
+        # preparation can bypass one stale native worker.
+        self._preparation_pool.setMaxThreadCount(2)
         self._preparation_entries: dict[object, _PreparationEntry] = {}
         self._preparation_entry_by_worker: dict[int, _PreparationEntry] = {}
         self._raw_source_probe_cache: OrderedDict[
@@ -757,7 +764,7 @@ class PlayerViewController(QObject):
                     entry.worker.cancel()
                     self._retire_preparation_entry(entry)
                 else:
-                    entry.intents.clear()
+                    self._detach_running_preparation_entry(entry)
 
         signals = _AdjustmentPreparationSignals()
         edit_service = self._edit_service_getter() if self._edit_service_getter else None
@@ -771,6 +778,7 @@ class PlayerViewController(QObject):
         entry = _PreparationEntry(worker=worker, intents=[intent], priority=priority)
         self._preparation_entries[key] = entry
         self._preparation_entry_by_worker[id(worker)] = entry
+        signals.started.connect(self._on_adjustment_preparation_started)
         signals.ready.connect(self._on_adjustment_prepared)
         signals.failed.connect(self._on_adjustment_preparation_failed)
         signals.finished.connect(self._on_adjustment_preparation_finished)
@@ -781,9 +789,18 @@ class PlayerViewController(QObject):
             return False
         return True
 
-    def _on_adjustment_prepared(self, key: object, state: object) -> None:
-        entry = self._preparation_entries.get(key)
-        if entry is None or not isinstance(state, PreparedStillState):
+    def _on_adjustment_preparation_started(self, worker: object) -> None:
+        entry = self._preparation_entry_by_worker.get(id(worker))
+        if entry is not None:
+            entry.state = "running"
+
+    def _on_adjustment_prepared(self, worker: object, state: object) -> None:
+        entry = self._preparation_entry_by_worker.get(id(worker))
+        if (
+            entry is None
+            or self._preparation_entries.get(entry.worker.key) is not entry
+            or not isinstance(state, PreparedStillState)
+        ):
             return
         entry.result = state
         identity = state.source_identity
@@ -1026,9 +1043,12 @@ class PlayerViewController(QObject):
         getter = getattr(self._image_viewer, "maximum_texture_size", None)
         return max(1, int(getter())) if callable(getter) else 8192
 
-    def _on_adjustment_preparation_failed(self, key: object, message: str) -> None:
-        entry = self._preparation_entries.get(key)
-        if entry is None:
+    def _on_adjustment_preparation_failed(self, worker: object, message: str) -> None:
+        entry = self._preparation_entry_by_worker.get(id(worker))
+        if (
+            entry is None
+            or self._preparation_entries.get(entry.worker.key) is not entry
+        ):
             return
         for intent in tuple(entry.intents):
             if intent.reason != "prefetch" and intent.generation == self._request_generation:
@@ -1045,6 +1065,16 @@ class PlayerViewController(QObject):
             self._preparation_entries.pop(key, None)
         self._preparation_entry_by_worker.pop(id(entry.worker), None)
         entry.worker.signals.deleteLater()
+
+    def _detach_running_preparation_entry(self, entry: _PreparationEntry) -> None:
+        """Cancel stale delivery while retaining terminal worker ownership."""
+
+        entry.worker.cancel()
+        entry.intents.clear()
+        entry.result = None
+        key = entry.worker.key
+        if self._preparation_entries.get(key) is entry:
+            self._preparation_entries.pop(key, None)
 
     def _on_scheduled_image_ready(
         self,
@@ -1287,7 +1317,10 @@ class PlayerViewController(QObject):
 
         self.cancel_pending_image_requests()
         self._preparation_pool.clear()
-        self._preparation_pool.waitForDone(max(0, int(timeout_ms)))
+        preparation_done = self._preparation_pool.waitForDone(max(0, int(timeout_ms)))
+        if preparation_done:
+            for entry in tuple(self._preparation_entry_by_worker.values()):
+                self._retire_preparation_entry(entry)
         self._still_scheduler.shutdown(timeout_ms=timeout_ms)
         self._decode_backend.shutdown(timeout_ms=min(max(0, int(timeout_ms)), 1000))
         clear_residency = getattr(self._image_viewer, "clear_still_residency", None)
@@ -1684,6 +1717,8 @@ class PlayerViewController(QObject):
             entry.worker.cancel()
             if self._preparation_pool.tryTake(entry.worker):
                 self._retire_preparation_entry(entry)
+            else:
+                self._detach_running_preparation_entry(entry)
 
     def defer_still_updates(self, enabled: bool) -> None:
         """Control whether still frames should be applied immediately."""

@@ -9,7 +9,9 @@ when switching to a QRhiWidget that has not yet rendered.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -63,6 +65,17 @@ def _surface(path: Path, image: QImage, *, level: int = 1024) -> DecodedSurface:
         decode_level=level,
         backend="fake",
     )
+
+
+def _spin_until(qapp, predicate, *, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    qapp.processEvents()
+    return bool(predicate())
 
 
 def _assert_ibeam_cursor() -> None:
@@ -242,6 +255,233 @@ class TestInitCoverTracking:
     def test_still_decode_uses_dedicated_bounded_pool(self, controller):
         assert controller._pool is not QThreadPool.globalInstance()
         assert controller._pool.maxThreadCount() == 2
+        assert controller._preparation_pool.maxThreadCount() == 2
+
+    def test_latest_preparation_bypasses_one_blocked_raw_worker(
+        self,
+        controller,
+        qapp,
+        tmp_path,
+        mocker,
+    ):
+        source_a = tmp_path / "a.nef"
+        source_b = tmp_path / "b.jpg"
+        source_a.write_bytes(b"raw-a")
+        source_b.write_bytes(b"jpeg-b")
+        probe_started = Event()
+        release_probe = Event()
+        b_prepared = Event()
+        dispatched: list[Path] = []
+
+        def probe(identity):
+            probe_started.set()
+            assert release_probe.wait(5)
+            return AssetSourceIdentity.create(
+                identity.path,
+                width=4000,
+                height=3000,
+            )
+
+        class _EditService:
+            def read_adjustments(self, source):
+                if Path(source) == source_b.absolute():
+                    b_prepared.set()
+                return {}
+
+        mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.probe_raw_source_identity",
+            side_effect=probe,
+        )
+        controller._edit_service_getter = lambda: _EditService()
+        mocker.patch.object(
+            controller,
+            "_dispatch_prepared_intent",
+            side_effect=lambda intent, _adjustments: dispatched.append(
+                intent.source_identity.path
+            )
+            or True,
+        )
+        raw_identity = AssetSourceIdentity.create(source_a, width=0, height=0)
+        jpeg_identity = AssetSourceIdentity.create(source_b, width=1600, height=1200)
+
+        try:
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent("A", raw_identity, 1, "initial")
+            )
+            assert probe_started.wait(5)
+            first_a = next(iter(controller._preparation_entries.values())).worker
+
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent("B", jpeg_identity, 2, "initial")
+            )
+
+            assert b_prepared.wait(5)
+            assert _spin_until(qapp, lambda: dispatched == [source_b.absolute()])
+            assert first_a._cancelled
+            assert not release_probe.is_set()
+        finally:
+            release_probe.set()
+            assert controller._preparation_pool.waitForDone(5000)
+            qapp.processEvents()
+
+        assert dispatched == [source_b.absolute()]
+
+    def test_cancelled_preparation_key_is_not_reused_for_a_b_a(
+        self,
+        controller,
+        tmp_path,
+        mocker,
+    ):
+        class _Pool:
+            def __init__(self):
+                self.queued = []
+
+            def start(self, worker, _priority):
+                self.queued.append(worker)
+
+            def tryTake(self, worker):
+                if worker not in self.queued:
+                    return False
+                self.queued.remove(worker)
+                return True
+
+            def mark_running(self, worker):
+                self.queued.remove(worker)
+
+        original_pool = controller._preparation_pool
+        pool = _Pool()
+        controller._preparation_pool = pool
+        dispatch = mocker.patch.object(controller, "_dispatch_prepared_intent")
+        failure = mocker.patch.object(controller, "_on_adjusted_image_failed")
+        identity_a = AssetSourceIdentity.create(
+            tmp_path / "a.raw", width=4000, height=3000, source_mtime_ns=1
+        )
+        identity_b = AssetSourceIdentity.create(
+            tmp_path / "b.jpg", width=1600, height=1200, source_mtime_ns=1
+        )
+        workers = []
+
+        try:
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent("A", identity_a, 1, "initial")
+            )
+            first_a = next(iter(controller._preparation_entries.values())).worker
+            workers.append(first_a)
+            pool.mark_running(first_a)
+
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent("B", identity_b, 2, "initial")
+            )
+            worker_b = next(iter(controller._preparation_entries.values())).worker
+            workers.append(worker_b)
+            pool.mark_running(worker_b)
+
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent("A", identity_a, 3, "initial")
+            )
+            second_a = next(iter(controller._preparation_entries.values())).worker
+            workers.append(second_a)
+
+            assert first_a._cancelled
+            assert worker_b._cancelled
+            assert second_a is not first_a
+            assert second_a.generation == 3
+            assert controller._preparation_entries[second_a.key].worker is second_a
+
+            stale_state = PreparedStillState.create({}, identity_a)
+            controller._on_adjustment_prepared(first_a, stale_state)
+            controller._on_adjustment_preparation_failed(first_a, "stale failure")
+            controller._on_adjustment_preparation_finished(first_a)
+
+            dispatch.assert_not_called()
+            failure.assert_not_called()
+            assert controller._preparation_entries[second_a.key].worker is second_a
+        finally:
+            for worker in workers:
+                controller._on_adjustment_preparation_finished(worker)
+            controller._preparation_pool = original_pool
+
+    def test_latest_preparation_starts_when_one_of_two_stale_lanes_releases(
+        self,
+        controller,
+        qapp,
+        tmp_path,
+        mocker,
+    ):
+        sources = {
+            "A": tmp_path / "a.nef",
+            "B": tmp_path / "b.nef",
+            "C": tmp_path / "c.jpg",
+        }
+        for source in sources.values():
+            source.write_bytes(b"source")
+        started = {name: Event() for name in ("A", "B", "C")}
+        releases = {name: Event() for name in ("A", "B")}
+        dispatched: list[Path] = []
+
+        def probe(identity):
+            name = identity.path.stem.upper()
+            started[name].set()
+            assert releases[name].wait(5)
+            return AssetSourceIdentity.create(identity.path, width=4000, height=3000)
+
+        class _EditService:
+            def read_adjustments(self, source):
+                name = Path(source).stem.upper()
+                started[name].set()
+                return {}
+
+        mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.probe_raw_source_identity",
+            side_effect=probe,
+        )
+        controller._edit_service_getter = lambda: _EditService()
+        mocker.patch.object(
+            controller,
+            "_dispatch_prepared_intent",
+            side_effect=lambda intent, _adjustments: dispatched.append(
+                intent.source_identity.path
+            )
+            or True,
+        )
+
+        try:
+            for generation, name in enumerate(("A", "B"), start=1):
+                assert controller._schedule_adjustment_preparation(
+                    _PreparedRequestIntent(
+                        name,
+                        AssetSourceIdentity.create(
+                            sources[name], width=0, height=0
+                        ),
+                        generation,
+                        "initial",
+                    )
+                )
+                assert started[name].wait(5)
+
+            assert controller._schedule_adjustment_preparation(
+                _PreparedRequestIntent(
+                    "C",
+                    AssetSourceIdentity.create(
+                        sources["C"], width=1600, height=1200
+                    ),
+                    3,
+                    "initial",
+                )
+            )
+            assert not started["C"].is_set()
+
+            releases["B"].set()
+            assert started["C"].wait(5)
+            assert not releases["A"].is_set()
+            assert _spin_until(qapp, lambda: dispatched == [sources["C"].absolute()])
+        finally:
+            for release in releases.values():
+                release.set()
+            assert controller._preparation_pool.waitForDone(5000)
+            qapp.processEvents()
+
+        assert dispatched == [sources["C"].absolute()]
 
     def test_hover_adjustment_preparation_is_promoted_for_click(self, controller):
         class _Pool:

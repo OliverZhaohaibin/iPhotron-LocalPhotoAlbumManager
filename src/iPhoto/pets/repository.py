@@ -30,7 +30,7 @@ from .repository_utils import (
     serialize_embedding,
     utc_now_iso,
 )
-from .state_repository import PetStateRepository
+from .state_repository import PetStateRepository, _IncrementalStateSnapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -321,11 +321,16 @@ class PetRepository:
             return PetIncrementalCommitResult()
 
         staged = list(detections)
+        state_snapshot: _IncrementalStateSnapshot | None = None
         if self._state_repo is not None and staged:
-            rejected = self._state_repo.get_rejected_pet_keys(
+            state_snapshot = self._state_repo._load_incremental_state(
                 detection.pet_key for detection in staged
             )
-            staged = [detection for detection in staged if detection.pet_key not in rejected]
+            staged = [
+                detection
+                for detection in staged
+                if detection.pet_key not in state_snapshot.rejected_keys
+            ]
 
         contracts = {
             (
@@ -356,6 +361,7 @@ class PetRepository:
             existing_pets=existing_pets,
             candidate_index=candidate_index,
             match_context=match_context,
+            state_snapshot=state_snapshot,
             excluded_asset_ids=set(replaced_asset_ids),
             distance_threshold=distance_threshold,
         )
@@ -632,16 +638,26 @@ class PetRepository:
             }
             self._write_runtime_commit(conn, effective_operation_id, commit_payload)
             conn.commit()
-
-        if contract_replacement_pet_ids or consumed_migration_candidate:
-            self._invalidate_profile_indexes()
-        elif embedding_contract is not None:
-            self._update_profile_indexes(
-                embedding_contract,
-                affected_pet_ids=affected_pet_ids,
-                rebuilt_pets=rebuilt_pets,
+            if contract_replacement_pet_ids or consumed_migration_candidate:
+                self._invalidate_profile_indexes()
+            elif embedding_contract is not None:
+                self._update_profile_indexes(
+                    embedding_contract,
+                    affected_pet_ids=affected_pet_ids,
+                    rebuilt_pets=rebuilt_pets,
+                )
+            # The runtime commit is durable before state sync begins.  Reuse
+            # the already-open runtime connection for the terminal marker and
+            # pruning, while preserving the unsynced marker if state I/O fails.
+            self._sync_runtime_state_payload(
+                commit_payload,
+                rebuilt_pets,
+                runtime_detections,
             )
-        self.complete_runtime_state_sync(effective_operation_id)
+            self._mark_runtime_state_synced(conn, effective_operation_id)
+            if str(effective_operation_id).startswith("internal-"):
+                self._prune_runtime_commits_in_connection(conn)
+            conn.commit()
         return PetIncrementalCommitResult(
             changed_asset_ids=changed_asset_ids,
             retired_asset_ids=retired_asset_ids,
@@ -801,6 +817,26 @@ class PetRepository:
             detection_rows = self._select_detections_by_pet_ids(conn, affected_pet_ids)
         pets = [self._pet_from_row(row) for row in pet_rows]
         detections = [self._detection_from_row(row) for row in detection_rows]
+        self._sync_runtime_state_payload(payload, pets, detections)
+        with closing(self._connect()) as conn:
+            self._mark_runtime_state_synced(conn, operation_id)
+            if str(operation_id).startswith("internal-"):
+                self._prune_runtime_commits_in_connection(conn)
+            conn.commit()
+        payload["state_synced"] = True
+        return payload
+
+    def _sync_runtime_state_payload(
+        self,
+        payload: dict[str, object],
+        pets: list[PetRecord],
+        detections: list[PetDetectionRecord],
+    ) -> None:
+        """Apply one committed runtime payload without re-reading its rows."""
+
+        affected_pet_ids = tuple(
+            str(value) for value in payload.get("affected_pet_ids", ()) if value
+        )
         if self._state_repo is not None:
             operation_kind = str(payload.get("operation_kind") or "")
             if operation_kind == "pet_delete_detection":
@@ -839,20 +875,20 @@ class PetRepository:
                         face_index_path,
                         face_state_path,
                     ).refresh_all_group_assets()
-        with closing(self._connect()) as conn:
-            conn.execute(
-                """
-                UPDATE pet_runtime_commits
-                SET state_synced = 1, updated_at = ?
-                WHERE operation_id = ?
-                """,
-                (utc_now_iso(), str(operation_id)),
-            )
-            conn.commit()
-        payload["state_synced"] = True
-        if str(operation_id).startswith("internal-"):
-            self.prune_runtime_commits()
-        return payload
+
+    @staticmethod
+    def _mark_runtime_state_synced(
+        conn: sqlite3.Connection,
+        operation_id: str,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE pet_runtime_commits
+            SET state_synced = 1, updated_at = ?
+            WHERE operation_id = ?
+            """,
+            (utc_now_iso(), str(operation_id)),
+        )
 
     def prune_runtime_commits(
         self,
@@ -864,43 +900,62 @@ class PetRepository:
         """Bound synced commit history while retaining unfinished journal owners."""
 
         protected = tuple(dict.fromkeys(str(value) for value in protected_operation_ids if value))
-        deleted = 0
         with closing(self._connect()) as conn:
-            where = "state_synced = 1"
-            parameters: tuple[object, ...] = ()
-            if protected:
-                placeholders = ", ".join("?" for _ in protected)
-                where += f" AND operation_id NOT IN ({placeholders})"
-                parameters = protected
-            row = conn.execute(
-                f"SELECT COUNT(*) AS count FROM pet_runtime_commits WHERE {where}",
-                parameters,
-            ).fetchone()
-            if row is None or int(row["count"] or 0) <= high_watermark:
-                return 0
-            while True:
-                stale = conn.execute(
-                    f"""
-                    SELECT operation_id
-                    FROM pet_runtime_commits
-                    WHERE {where}
-                    ORDER BY rowid DESC
-                    LIMIT 500 OFFSET ?
-                    """,
-                    (*parameters, retain),
-                ).fetchall()
-                if not stale:
-                    break
-                stale_ids = tuple(str(item["operation_id"]) for item in stale)
-                placeholders = ", ".join("?" for _ in stale_ids)
-                cursor = conn.execute(
-                    f"DELETE FROM pet_runtime_commits WHERE operation_id IN ({placeholders})",
-                    stale_ids,
-                )
-                deleted += int(cursor.rowcount or 0)
-                conn.commit()
-                if len(stale_ids) < 500:
-                    break
+            deleted = self._prune_runtime_commits_in_connection(
+                conn,
+                protected_operation_ids=protected,
+                high_watermark=high_watermark,
+                retain=retain,
+            )
+            conn.commit()
+            return deleted
+
+    @staticmethod
+    def _prune_runtime_commits_in_connection(
+        conn: sqlite3.Connection,
+        *,
+        protected_operation_ids: Iterable[str] = (),
+        high_watermark: int = 1200,
+        retain: int = 1000,
+    ) -> int:
+        protected = tuple(
+            dict.fromkeys(str(value) for value in protected_operation_ids if value)
+        )
+        where = "state_synced = 1"
+        parameters: tuple[object, ...] = ()
+        if protected:
+            placeholders = ", ".join("?" for _ in protected)
+            where += f" AND operation_id NOT IN ({placeholders})"
+            parameters = protected
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM pet_runtime_commits WHERE {where}",
+            parameters,
+        ).fetchone()
+        if row is None or int(row["count"] or 0) <= high_watermark:
+            return 0
+        deleted = 0
+        while True:
+            stale = conn.execute(
+                f"""
+                SELECT operation_id
+                FROM pet_runtime_commits
+                WHERE {where}
+                ORDER BY rowid DESC
+                LIMIT 500 OFFSET ?
+                """,
+                (*parameters, retain),
+            ).fetchall()
+            if not stale:
+                break
+            stale_ids = tuple(str(item["operation_id"]) for item in stale)
+            placeholders = ", ".join("?" for _ in stale_ids)
+            cursor = conn.execute(
+                f"DELETE FROM pet_runtime_commits WHERE operation_id IN ({placeholders})",
+                stale_ids,
+            )
+            deleted += int(cursor.rowcount or 0)
+            if len(stale_ids) < 500:
+                break
         return deleted
 
     def _assign_incremental_pet_ids(
@@ -910,26 +965,16 @@ class PetRepository:
         existing_pets: dict[str, PetRecord],
         candidate_index: _ProfileCandidateIndex | None = None,
         match_context: _ProfileMatchContext | None = None,
+        state_snapshot: _IncrementalStateSnapshot | None = None,
         excluded_asset_ids: set[str],
         distance_threshold: float,
     ) -> _IncrementalPetAssignment:
         if not detections:
             return _IncrementalPetAssignment()
-        redirects = (
-            self._state_repo.get_merge_redirect_map() if self._state_repo is not None else {}
-        )
-        key_map = (
-            self._state_repo.get_pet_key_map(detection.pet_key for detection in detections)
-            if self._state_repo is not None
-            else {}
-        )
-        mapped_ids = tuple(
-            dict.fromkeys(
-                redirects.get(mapped_id, mapped_id) for mapped_id in key_map.values() if mapped_id
-            )
-        )
+        redirects = state_snapshot.redirects if state_snapshot is not None else {}
+        key_map = state_snapshot.key_map if state_snapshot is not None else {}
         durable_profiles = (
-            self._state_repo.get_profiles_by_ids(mapped_ids) if self._state_repo is not None else {}
+            state_snapshot.durable_profiles if state_snapshot is not None else {}
         )
         stable_profiles = {
             pet_id: pet

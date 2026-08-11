@@ -734,7 +734,7 @@ def test_people_hidden_mutation_routes_through_index_coordinator(tmp_path: Path)
     coordinator.set_person_hidden.assert_called_once_with("person-a", True)
 
 
-def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -> None:
+def test_people_service_merge_allows_hidden_state_difference(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
 
@@ -761,11 +761,10 @@ def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -
     )
     assert service.set_cluster_hidden("person-a", True) is True
 
-    assert service.merge_clusters("person-a", "person-b") is False
-    assert {summary.person_id for summary in service.list_clusters(include_hidden=True)} == {
-        "person-a",
-        "person-b",
-    }
+    assert service.merge_clusters("person-a", "person-b") is True
+    summaries = service.list_clusters(include_hidden=True, include_candidates=True)
+    assert [summary.person_id for summary in summaries] == ["person-b"]
+    assert summaries[0].is_hidden is False
 
 
 def test_pending_assignment_blocks_people_identity_mutations_then_merge_retargets(
@@ -1645,7 +1644,7 @@ def test_pet_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> Non
     assert pet_service.build_pet_query("pet-a").asset_ids == []
 
 
-def test_cross_merge_blocks_hidden_state_mismatch(tmp_path: Path) -> None:
+def test_manual_cross_merge_allows_hidden_state_mismatch(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
     get_global_repository(library_root).write_rows(
@@ -1683,8 +1682,10 @@ def test_cross_merge_blocks_hidden_state_mismatch(tmp_path: Path) -> None:
     )
     people_service.set_cluster_hidden("person-a", True)
 
-    assert people_service.merge_identities("person:person-a", "pet:pet-a") is None
-    assert people_service.has_cluster("person-a") is True
+    result = people_service.merge_identities("person:person-a", "pet:pet-a")
+
+    assert result is not None and result.merged is True
+    assert people_service.has_cluster("person-a") is False
     assert pet_service.has_pet("pet-a") is True
 
 

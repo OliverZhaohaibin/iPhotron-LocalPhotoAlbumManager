@@ -535,7 +535,7 @@ class PeopleService:
         target_hidden = self._identity_hidden(
             target_kind, target_id, person_summaries, pet_summaries
         )
-        if source_hidden is None or target_hidden is None or source_hidden != target_hidden:
+        if source_hidden is None or target_hidden is None:
             return None
 
         ensured = state_repository.merge_identity_redirect_and_groups(

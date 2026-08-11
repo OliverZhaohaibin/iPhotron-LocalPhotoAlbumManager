@@ -629,6 +629,7 @@ def build_pet_records_from_detections(
     *,
     names_by_pet_id: dict[str, str | None] | None = None,
     created_at_by_pet_id: dict[str, str] | None = None,
+    allow_mixed_identity_members: bool = False,
 ) -> list[PetRecord]:
     grouped: dict[str, list[PetDetectionRecord]] = defaultdict(list)
     for detection in detections:
@@ -645,25 +646,36 @@ def build_pet_records_from_detections(
             for label in (_normalize_species_label(member.species_label) for member in members)
             if label is not None
         }
-        if len(species_labels) > 1:
+        if len(species_labels) > 1 and not allow_mixed_identity_members:
             raise ValueError(
                 f"Pet {pet_id} mixes incompatible species labels: {sorted(species_labels)}"
             )
-        contracts = {
-            (
-                str(member.embedding_pipeline_version or ""),
-                int(member.embedding_dim),
-                int(member.generation_id),
-            )
-            for member in members
-        }
-        if len(contracts) != 1:
+        contract_groups: dict[tuple[str, int, int], list[PetDetectionRecord]] = defaultdict(list)
+        for member in members:
+            contract_groups[
+                (
+                    str(member.embedding_pipeline_version or ""),
+                    int(member.embedding_dim),
+                    int(member.generation_id),
+                )
+            ].append(member)
+        if len(contract_groups) != 1 and not allow_mixed_identity_members:
             raise ValueError(
-                f"Pet {pet_id} mixes incompatible embedding contracts: {sorted(contracts)}"
+                f"Pet {pet_id} mixes incompatible embedding contracts: "
+                f"{sorted(contract_groups)}"
             )
+        _profile_contract, profile_members = max(
+            contract_groups.items(),
+            key=lambda item: (
+                len(item[1]),
+                item[0][2],
+                item[0][0],
+                item[0][1],
+            ),
+        )
         key_detection = max(members, key=key_detection_sort_key)
         center_embedding = compute_cluster_center(
-            np.stack([member.embedding for member in members], axis=0)
+            np.stack([member.embedding for member in profile_members], axis=0)
         )
         sample_count = len(members)
         evidence_asset_count = len({member.asset_id for member in members if member.asset_id})
@@ -683,9 +695,9 @@ def build_pet_records_from_detections(
                 sample_count=sample_count,
                 profile_state=profile_state_for_sample_count(evidence_asset_count),
                 species_label=_dominant_species_label(members),
-                embedding_pipeline_version=members[0].embedding_pipeline_version,
-                generation_id=members[0].generation_id,
-                boundary_embeddings=_boundary_embeddings(members, center_embedding),
+                embedding_pipeline_version=profile_members[0].embedding_pipeline_version,
+                generation_id=profile_members[0].generation_id,
+                boundary_embeddings=_boundary_embeddings(profile_members, center_embedding),
                 evidence_asset_count=evidence_asset_count,
             )
         )

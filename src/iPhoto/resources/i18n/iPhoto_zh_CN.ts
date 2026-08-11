@@ -723,6 +723,26 @@
             <translation>无法合并人物</translation>
         </message>
         <message>
+            <source>Merge Failed</source>
+            <translation>合并失败</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. No photos were deleted.</source>
+            <translation>无法合并这些身份。没有删除任何照片。</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. They may have changed since this view was loaded.</source>
+            <translation>无法合并这些身份。它们可能在当前视图加载后发生了变化。</translation>
+        </message>
+        <message>
+            <source>Recognition Busy</source>
+            <translation>识别任务繁忙</translation>
+        </message>
+        <message>
+            <source>Recognition data is still recovering. Please try again shortly.</source>
+            <translation>识别数据仍在恢复中，请稍后重试。</translation>
+        </message>
+        <message>
             <source>Cannot Merge Pets</source>
             <translation>无法合并宠物</translation>
         </message>
@@ -1158,6 +1178,18 @@
         <message>
             <source>Writing data, please wait...</source>
             <translation>正在写入数据，请稍候…</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. Please try again.</source>
+            <translation>无法分配该名称，请重试。</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. The identities may have changed.</source>
+            <translation>无法分配该名称，相关身份可能已经发生变化。</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>同一个宠物身份不能包含同一张照片中的两个检测结果。请删除重复检测，不要通过合并绕过此限制。</translation>
         </message>
     </context>
     <context>

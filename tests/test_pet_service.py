@@ -1138,7 +1138,7 @@ def test_pet_repository_persists_detection_and_profile_species(tmp_path: Path) -
     assert repository.state_repository.get_profiles()[0].species_label == "cat"
 
 
-def test_merge_pets_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
+def test_manual_pet_merge_allows_mismatched_hidden_state(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     first = _detection(detection_id="det-a", asset_id="asset-a", pet_id="pet-a")
     second = _detection(detection_id="det-b", asset_id="asset-b", pet_id="pet-b")
@@ -1169,11 +1169,10 @@ def test_merge_pets_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
     repository.replace_all([first, second], pets)
     assert repository.set_pet_hidden("pet-a", True) is True
 
-    assert repository.merge_pets("pet-a", "pet-b") is None
-    assert {summary.pet_id for summary in repository.get_pet_summaries(include_hidden=True)} == {
-        "pet-a",
-        "pet-b",
-    }
+    assert repository.merge_pets("pet-a", "pet-b") is not None
+    summaries = repository.get_pet_summaries(include_hidden=True)
+    assert [summary.pet_id for summary in summaries] == ["pet-b"]
+    assert summaries[0].is_hidden is False
 
 
 def test_merge_pets_repairs_legacy_runtime_without_durable_profiles(tmp_path: Path) -> None:
@@ -1218,7 +1217,7 @@ def test_merge_pets_repairs_legacy_runtime_without_durable_profiles(tmp_path: Pa
     assert [profile.pet_id for profile in repository.state_repository.get_profiles()] == ["pet-b"]
 
 
-def test_manual_pet_merge_rejects_incompatible_species(tmp_path: Path) -> None:
+def test_manual_pet_merge_allows_incompatible_species(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     source_detection = _detection(
         detection_id="det-source",
@@ -1259,11 +1258,10 @@ def test_manual_pet_merge_rejects_incompatible_species(tmp_path: Path) -> None:
         ),
     ]
     repository.replace_all([source_detection, target_detection], pets)
-    assert repository.merge_pets("pet-source", "pet-target") is None
-    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {
-        "pet-source",
-        "pet-target",
-    }
+    assert repository.merge_pets("pet-source", "pet-target") is not None
+    merged = repository.get_all_pet_records()
+    assert [pet.pet_id for pet in merged] == ["pet-target"]
+    assert merged[0].detection_count == 2
 
 
 def test_redirected_unstable_pet_profile_recognizes_new_key(tmp_path: Path) -> None:

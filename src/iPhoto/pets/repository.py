@@ -2796,9 +2796,6 @@ class PetRepository:
             for pet in self.get_all_pet_records()
             if pet.pet_id in {source_pet_id, target_pet_id}
         ]
-        contracts = {EmbeddingContract.from_pet(pet) for pet in runtime_pets}
-        if len(contracts) > 1:
-            return None
         runtime_detections = [
             detection
             for detection in self.get_all_detections()
@@ -2823,18 +2820,6 @@ class PetRepository:
                 source_pet_id,
                 target_pet_id,
             )
-            return None
-        durable_profiles = self._state_repo.get_profiles_by_ids((source_pet_id, target_pet_id))
-        species_labels = {
-            label
-            for value in (
-                *(detection.species_label for detection in runtime_detections),
-                *(pet.species_label for pet in runtime_pets),
-                *(profile.species_label for profile in durable_profiles.values()),
-            )
-            if (label := _normalize_species_label(value)) is not None
-        }
-        if len(species_labels) > 1:
             return None
         self._state_repo.ensure_runtime_candidates(runtime_pets, runtime_detections)
         durable_merged = self._state_repo.merge_pets(source_pet_id, target_pet_id)
@@ -3004,25 +2989,10 @@ class PetRepository:
         effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             target = conn.execute(
-                """
-                SELECT pet_id, species_label,
-                       embedding_pipeline_version, embedding_dim, generation_id
-                FROM pets WHERE pet_id = ?
-                """,
+                "SELECT pet_id FROM pets WHERE pet_id = ?",
                 (target_pet_id,),
             ).fetchone()
             if target is None:
-                return None
-            target_contract = EmbeddingContract(
-                pipeline_version=str(target["embedding_pipeline_version"] or ""),
-                dimension=int(target["embedding_dim"] or 0),
-                generation_id=int(target["generation_id"] or 0),
-            )
-            if EmbeddingContract.from_detection(detection) != target_contract:
-                return None
-            if _normalize_species_label(detection.species_label) != _normalize_species_label(
-                target["species_label"]
-            ):
                 return None
             same_asset = conn.execute(
                 """
@@ -3157,6 +3127,7 @@ class PetRepository:
             detections,
             names_by_pet_id=names,
             created_at_by_pet_id=created_at,
+            allow_mixed_identity_members=True,
         )
         conn.execute("DELETE FROM pets")
         if pets:
@@ -3188,6 +3159,7 @@ class PetRepository:
             detections,
             names_by_pet_id=names,
             created_at_by_pet_id=created_at,
+            allow_mixed_identity_members=True,
         )
         self.replace_all(detections, pets)
 

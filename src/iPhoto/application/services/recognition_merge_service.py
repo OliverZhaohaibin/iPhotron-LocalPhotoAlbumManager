@@ -192,14 +192,6 @@ class RecognitionMergeService:
                 target_ref,
                 IdentityMergeFailure.NOT_FOUND,
             )
-        if source_hidden != target_hidden:
-            return IdentityMergeOutcome(
-                False,
-                source_ref,
-                target_ref,
-                IdentityMergeFailure.HIDDEN_STATE_MISMATCH,
-            )
-
         if source_ref.kind == target_ref.kind == "person":
             changed_asset_ids = tuple(
                 dict.fromkeys(

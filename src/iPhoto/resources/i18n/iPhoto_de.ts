@@ -723,6 +723,26 @@
             <translation>Personen können nicht zusammengeführt werden</translation>
         </message>
         <message>
+            <source>Merge Failed</source>
+            <translation>Zusammenführen fehlgeschlagen</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. No photos were deleted.</source>
+            <translation>Die Identitäten konnten nicht zusammengeführt werden. Es wurden keine Fotos gelöscht.</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. They may have changed since this view was loaded.</source>
+            <translation>Die Identitäten konnten nicht zusammengeführt werden. Möglicherweise wurden sie seit dem Laden dieser Ansicht geändert.</translation>
+        </message>
+        <message>
+            <source>Recognition Busy</source>
+            <translation>Erkennung ausgelastet</translation>
+        </message>
+        <message>
+            <source>Recognition data is still recovering. Please try again shortly.</source>
+            <translation>Die Erkennungsdaten werden noch wiederhergestellt. Bitte versuchen Sie es in Kürze erneut.</translation>
+        </message>
+        <message>
             <source>Cannot Merge Pets</source>
             <translation>Haustiere können nicht zusammengeführt werden</translation>
         </message>
@@ -1158,6 +1178,18 @@
         <message>
             <source>Writing data, please wait...</source>
             <translation>Daten werden geschrieben, bitte warten …</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. Please try again.</source>
+            <translation>Der Name konnte nicht zugewiesen werden. Bitte versuchen Sie es erneut.</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. The identities may have changed.</source>
+            <translation>Der Name konnte nicht zugewiesen werden. Die Identitäten wurden möglicherweise geändert.</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>Eine Haustieridentität kann nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie eine doppelte Erkennung, anstatt sie zusammenzuführen.</translation>
         </message>
     </context>
     <context>

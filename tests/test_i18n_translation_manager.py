@@ -113,6 +113,16 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
     assert QCoreApplication.translate("ShareController", "Copied to Clipboard", None) == "已复制到剪贴板"
     assert QCoreApplication.translate("MainCoordinator", "Moved", None) == "已移动"
     assert QCoreApplication.translate("InformationPopup", "Information", None) == "信息"
+    assert QCoreApplication.translate("PeopleDashboard", "Merge Failed", None) == "合并失败"
+    assert (
+        QCoreApplication.translate(
+            "PeopleDashboard",
+            "The identities could not be merged. "
+            "They may have changed since this view was loaded.",
+            None,
+        )
+        == "无法合并这些身份。它们可能在当前视图加载后发生了变化。"
+    )
     assert QCoreApplication.translate("GalleryPage", "Return to Map", None) == "返回地图"
     assert QCoreApplication.translate("MainWindow", "Dismiss", None) == "关闭"
     assert (

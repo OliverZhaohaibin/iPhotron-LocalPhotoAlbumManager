@@ -1123,30 +1123,16 @@ def test_group_menu_contains_disband_action(qapp: QApplication) -> None:
     assert "Disband Group" in [action.text() for action in menu.actions()]
 
 
-def test_merge_person_shows_warning_when_hidden_state_differs(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_merge_person_choices_include_different_hidden_state(qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z", True),
         PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z", False),
     ]
 
-    warnings: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        people_dashboard_widget.dialogs,
-        "show_information",
-        lambda _parent, message, title="iPhoto": warnings.append((title, message)),
-    )
+    choices = widget._merge_choices("person", "person-a")
 
-    widget._merge_person(widget._summaries[0])
-
-    assert warnings == [
-        (
-            "Cannot Merge People",
-            "Hidden and visible identity cards cannot be merged. Please make both cards hidden or visible first.",
-        )
-    ]
+    assert [choice.person_id for choice in choices] == ["person:person-b"]
 
 
 def test_merge_person_reuses_group_people_dialog(monkeypatch, qapp: QApplication) -> None:
@@ -1350,30 +1336,16 @@ def test_right_click_pet_to_pet_uses_typed_merge_service_once(
     assert [card.identity_key for card in widget._board.visible_cards()] == ["pet:pet-b"]
 
 
-def test_merge_pet_shows_warning_when_only_hidden_mismatch_exists(
-    monkeypatch, qapp: QApplication
-) -> None:
+def test_merge_pet_choices_include_different_hidden_state(qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._pet_summaries = [
         PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:00Z", True),
         PetSummary("pet-b", "Nori", "det-b", 1, None, "2024-01-01T00:00:01Z", False),
     ]
 
-    warnings: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        people_dashboard_widget.dialogs,
-        "show_information",
-        lambda _parent, message, title="iPhoto": warnings.append((title, message)),
-    )
+    choices = widget._merge_choices("pet", "pet-a")
 
-    widget._merge_pet(widget._pet_summaries[0])
-
-    assert warnings == [
-        (
-            "Cannot Merge People",
-            "Hidden and visible identity cards cannot be merged. Please make both cards hidden or visible first.",
-        )
-    ]
+    assert [choice.person_id for choice in choices] == ["pet:pet-b"]
 
 
 @pytest.mark.parametrize(

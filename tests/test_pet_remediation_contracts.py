@@ -1020,7 +1020,7 @@ def test_cross_generation_contract_switch_rolls_back_old_runtime_on_failure(
     assert profile.generation_id == 0
 
 
-def test_generation_contract_rejects_cross_space_merge_and_move(tmp_path: Path) -> None:
+def test_manual_actions_override_generation_contract(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     first = _detection("first", pet_id="pet-a")
     second = replace(
@@ -1035,11 +1035,12 @@ def test_generation_contract_rejects_cross_space_merge_and_move(tmp_path: Path) 
     )
     repository.replace_all([first, second], [_pet("pet-a", first), _pet("pet-b", second)])
 
-    assert repository.merge_pets("pet-a", "pet-b") is None
-    assert repository.move_detection_to_pet("first", "pet-b") is None
+    assert repository.move_detection_to_pet("first", "pet-b") is not None
+    assert repository.get_detection("first").pet_id == "pet-b"  # type: ignore[union-attr]
+    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {"pet-b"}
 
 
-def test_cross_species_move_is_rejected_and_journal_is_finalized(tmp_path: Path) -> None:
+def test_cross_species_move_succeeds_and_journal_is_finalized(tmp_path: Path) -> None:
     repository = PetRepository(
         tmp_path / ".iPhoto" / "pets" / "pet_index.db",
         tmp_path / ".iPhoto" / "pets" / "pet_state.db",
@@ -1050,13 +1051,10 @@ def test_cross_species_move_is_rejected_and_journal_is_finalized(tmp_path: Path)
     coordinator = PetIndexCoordinator(tmp_path)
     coordinator._repository = lambda: repository  # type: ignore[method-assign]
 
-    assert coordinator.move_detection_to_pet("cat", "pet-dog") is None
-    assert repository.get_detection("cat").pet_id == "pet-cat"  # type: ignore[union-attr]
+    assert coordinator.move_detection_to_pet("cat", "pet-dog") is not None
+    assert repository.get_detection("cat").pet_id == "pet-dog"  # type: ignore[union-attr]
     assert repository.get_detection("dog").pet_id == "pet-dog"  # type: ignore[union-attr]
-    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {
-        "pet-cat",
-        "pet-dog",
-    }
+    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {"pet-dog"}
     assert coordinator._journal.unfinished() == ()
 
 

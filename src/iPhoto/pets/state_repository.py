@@ -995,11 +995,6 @@ class PetStateRepository:
                 cursor = redirects[cursor]
             if cursor != target_pet_id:
                 return False
-            hidden_map = self.get_pet_hidden_map((source_pet_id, target_pet_id))
-            if bool(hidden_map.get(source_pet_id, False)) != bool(
-                hidden_map.get(target_pet_id, False)
-            ):
-                return False
             if target["name"] is None and source["name"] is not None:
                 conn.execute(
                     "UPDATE pet_profiles SET name = ?, updated_at = ? WHERE pet_id = ?",

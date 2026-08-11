@@ -18,9 +18,21 @@ import numpy as np
 
 from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.state_repository import FaceStateRepository
+from iPhoto.recognition.promotion import (
+    PROMOTION_CANDIDATE,
+    PROMOTION_CONFIRMED,
+    PROMOTION_LEGACY_VISIBLE,
+)
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
-from .records import AssetPetAnnotation, PetDetectionRecord, PetProfile, PetRecord, PetSummary
+from .records import (
+    AssetPetAnnotation,
+    PetDetectionRecord,
+    PetMutationFailure,
+    PetProfile,
+    PetRecord,
+    PetSummary,
+)
 from .repository_utils import (
     cosine_distance,
     deserialize_embedding,
@@ -135,6 +147,8 @@ class PetRepository:
         self._initialize_lock = threading.Lock()
         self._mutation_lock = threading.RLock()
         self._match_contexts: dict[EmbeddingContract, _ProfileMatchContext] = {}
+        self._last_mutation_failure: PetMutationFailure | None = None
+        self._same_asset_manual_conflicts = 0
 
     @property
     def db_path(self) -> Path:
@@ -143,6 +157,14 @@ class PetRepository:
     @property
     def state_repository(self) -> PetStateRepository | None:
         return self._state_repo
+
+    @property
+    def last_mutation_failure(self) -> PetMutationFailure | None:
+        return self._last_mutation_failure
+
+    @property
+    def same_asset_manual_conflicts(self) -> int:
+        return self._same_asset_manual_conflicts
 
     def initialize(self) -> None:
         if self._initialized:
@@ -918,6 +940,12 @@ class PetRepository:
                             (normalize_name(str(new_name)), utc_now_iso(), new_pet_id),
                         )
                         conn.commit()
+                if new_pet_id:
+                    self._state_repo.confirm_pet(new_pet_id)
+            elif operation_kind == "pet_move_detection":
+                target_pet_id = str(payload.get("target_pet_id") or "")
+                if target_pet_id:
+                    self._state_repo.confirm_pet(target_pet_id)
         if str(payload.get("operation_kind") or "") == "pet_delete_detection":
             face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
             face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
@@ -1051,7 +1079,7 @@ class PetRepository:
         )
         member_samples = match_context.member_samples if match_context is not None else {}
         candidate_index = candidate_index or _ProfileCandidateIndex(centers, species)
-        staged_samples: dict[str, list[np.ndarray]] = {}
+        staged_samples: dict[str, list[tuple[str, np.ndarray]]] = {}
         assigned_by_detection_id: dict[str, PetDetectionRecord] = {}
         contract_replacement_pet_ids: set[str] = set()
         staged_candidate_species: dict[str, str | None] = {}
@@ -1083,6 +1111,11 @@ class PetRepository:
                 candidate_id = ""
             elif candidate_id and candidate_id not in existing_pets and durable_profile is None:
                 candidate_id = ""
+            elif candidate_id and any(
+                asset_id == detection.asset_id
+                for asset_id, _sample in staged_samples.get(candidate_id, ())
+            ):
+                candidate_id = ""
             if candidate_id:
                 candidate_profile = existing_pets.get(candidate_id) or durable_profile
                 if candidate_profile is not None and EmbeddingContract.from_profile(
@@ -1095,7 +1128,7 @@ class PetRepository:
                     detection, pet_id=candidate_id
                 )
                 staged_samples.setdefault(candidate_id, []).append(
-                    normalize_vector(detection.embedding)
+                    (detection.asset_id, normalize_vector(detection.embedding))
                 )
             else:
                 unmatched.append(detection)
@@ -1126,7 +1159,7 @@ class PetRepository:
                     detection, pet_id=candidate_id
                 )
                 staged_samples.setdefault(candidate_id, []).append(
-                    normalize_vector(detection.embedding)
+                    (detection.asset_id, normalize_vector(detection.embedding))
                 )
             else:
                 still_unmatched.append(detection)
@@ -1258,7 +1291,7 @@ class PetRepository:
         detection: PetDetectionRecord,
         *,
         member_samples: dict[str, tuple[tuple[str, np.ndarray], ...]],
-        staged_samples: dict[str, list[np.ndarray]],
+        staged_samples: dict[str, list[tuple[str, np.ndarray]]],
         excluded_asset_ids: set[str],
         candidate_index: _ProfileCandidateIndex,
         staged_candidate_species: dict[str, str | None],
@@ -1282,7 +1315,9 @@ class PetRepository:
                 (
                     cosine_distance(
                         detection.embedding,
-                        normalize_vector(np.mean(samples, axis=0)),
+                        normalize_vector(
+                            np.mean([sample for _asset_id, sample in samples], axis=0)
+                        ),
                     ),
                     pet_id,
                 )
@@ -1326,14 +1361,21 @@ class PetRepository:
                 member_samples.update(self._load_cluster_member_samples_for_pets(missing))
             compatible_candidates: list[tuple[float, float, str]] = []
             for center_distance, pet_id in within_threshold:
-                samples = (
-                    *(
-                        sample
-                        for asset_id, sample in member_samples.get(pet_id, ())
-                        if pet_id not in staged_candidate_species
-                        and asset_id not in excluded_asset_ids
-                    ),
-                    *staged_samples.get(pet_id, ()),
+                retained_samples = tuple(
+                    (asset_id, sample)
+                    for asset_id, sample in member_samples.get(pet_id, ())
+                    if pet_id not in staged_candidate_species
+                    and asset_id not in excluded_asset_ids
+                )
+                current_staged_samples = tuple(staged_samples.get(pet_id, ()))
+                if any(
+                    asset_id == detection.asset_id
+                    for asset_id, _sample in (*retained_samples, *current_staged_samples)
+                ):
+                    continue
+                samples = tuple(
+                    sample
+                    for _asset_id, sample in (*retained_samples, *current_staged_samples)
                 )
                 if not samples:
                     if center_distance <= distance_threshold:
@@ -2331,8 +2373,10 @@ class PetRepository:
         hidden_map: dict[str, bool] = {}
         cover_paths: dict[str, str] = {}
         profile_names: dict[str, str | None] = {}
+        promotion_map = {}
         if self._state_repo is not None:
             hidden_map, cover_paths, profile_names = self._state_repo.get_summary_state_maps()
+            promotion_map = self._state_repo.get_promotion_records()
         effective_asset_sets: dict[str, set[str]] = {}
         for asset_row in asset_rows:
             runtime_pet_id = str(asset_row["pet_id"])
@@ -2362,6 +2406,12 @@ class PetRepository:
             if thumbnail_path:
                 resolved_thumbnail = (self._db_path.parent / str(thumbnail_path)).resolve()
             name = row["name"] if row["name"] is not None else profile_names.get(pet_id)
+            promotion = promotion_map.get(pet_id)
+            evidence_asset_count = (
+                promotion.evidence_asset_count
+                if promotion is not None
+                else len(effective_assets.get(pet_id, ()))
+            )
             summaries.append(
                 PetSummary(
                     pet_id=pet_id,
@@ -2372,8 +2422,14 @@ class PetRepository:
                     created_at=str(row["created_at"] or ""),
                     is_hidden=bool(hidden_map.get(pet_id, False)),
                     asset_count=len(effective_assets.get(pet_id, ())),
-                    profile_state=str(row["profile_state"] or "unstable"),
+                    profile_state=profile_state_for_sample_count(evidence_asset_count),
                     species_label=_normalize_species_label(row["species_label"]),
+                    evidence_asset_count=evidence_asset_count,
+                    promotion_state=(
+                        promotion.promotion_state
+                        if promotion is not None
+                        else PROMOTION_LEGACY_VISIBLE
+                    ),
                 )
             )
         if not include_hidden:
@@ -2493,6 +2549,13 @@ class PetRepository:
                 for row in rows
                 if row["pet_id"]
             )
+            promotion_map = self._state_repo.get_promotion_records(
+                redirects.get(str(row["pet_id"]), str(row["pet_id"]))
+                for row in rows
+                if row["pet_id"]
+            )
+        else:
+            promotion_map = {}
         canonical_identities = self._canonical_annotation_identities(
             str(row["pet_id"]) for row in rows if row["pet_id"]
         )
@@ -2554,6 +2617,13 @@ class PetRepository:
                         int(row["source_generation_id"])
                         if row["source_generation_id"] is not None
                         else None
+                    ),
+                    promotion_state=(
+                        PROMOTION_CONFIRMED
+                        if ("pet", str(row["detection_id"])) in assignments
+                        else promotion_map[canonical_pet_id].promotion_state
+                        if canonical_pet_id and canonical_pet_id in promotion_map
+                        else PROMOTION_CANDIDATE
                     ),
                 )
             )
@@ -2717,6 +2787,7 @@ class PetRepository:
         *,
         operation_id: str | None = None,
     ) -> PetMutationResult | None:
+        self._last_mutation_failure = None
         if self._state_repo is None:
             return None
         self.initialize()
@@ -2733,6 +2804,26 @@ class PetRepository:
             for detection in self.get_all_detections()
             if detection.pet_id in {source_pet_id, target_pet_id}
         ]
+        source_asset_ids = {
+            detection.asset_id
+            for detection in runtime_detections
+            if detection.pet_id == source_pet_id and detection.asset_id
+        }
+        target_asset_ids = {
+            detection.asset_id
+            for detection in runtime_detections
+            if detection.pet_id == target_pet_id and detection.asset_id
+        }
+        if source_asset_ids & target_asset_ids:
+            self._last_mutation_failure = PetMutationFailure.SAME_ASSET_CONFLICT
+            self._same_asset_manual_conflicts += 1
+            LOGGER.warning(
+                "Rejected pet merge due to same-asset cannot-link: "
+                "same_asset_manual_conflicts=1 source=%s target=%s",
+                source_pet_id,
+                target_pet_id,
+            )
+            return None
         durable_profiles = self._state_repo.get_profiles_by_ids((source_pet_id, target_pet_id))
         species_labels = {
             label
@@ -2906,6 +2997,7 @@ class PetRepository:
         *,
         operation_id: str | None = None,
     ) -> PetMutationResult | None:
+        self._last_mutation_failure = None
         detection = self.get_detection(detection_id)
         if detection is None or not target_pet_id:
             return None
@@ -2932,6 +3024,26 @@ class PetRepository:
                 target["species_label"]
             ):
                 return None
+            same_asset = conn.execute(
+                """
+                SELECT 1
+                FROM pet_detections
+                WHERE pet_id = ? AND asset_id = ? AND detection_id != ?
+                LIMIT 1
+                """,
+                (target_pet_id, detection.asset_id, detection_id),
+            ).fetchone()
+            if same_asset is not None:
+                self._last_mutation_failure = PetMutationFailure.SAME_ASSET_CONFLICT
+                self._same_asset_manual_conflicts += 1
+                LOGGER.warning(
+                    "Rejected pet detection move due to same-asset cannot-link: "
+                    "same_asset_manual_conflicts=1 detection=%s target=%s asset=%s",
+                    detection_id,
+                    target_pet_id,
+                    detection.asset_id,
+                )
+                return None
             conn.execute(
                 "UPDATE pet_detections SET pet_id = ? WHERE detection_id = ?",
                 (target_pet_id, detection_id),
@@ -2955,6 +3067,8 @@ class PetRepository:
             )
             conn.commit()
         self.complete_runtime_state_sync(effective_operation_id)
+        if self._state_repo is not None:
+            self._state_repo.confirm_pet(target_pet_id)
         self._refresh_people_group_assets_for_pets((detection.pet_id, target_pet_id))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
@@ -3287,7 +3401,7 @@ class PetRepository:
             pet.created_at,
             pet.updated_at,
             sample_count,
-            profile_state_for_sample_count(sample_count),
+            pet.profile_state,
             _normalize_species_label(pet.species_label),
             pet.embedding_pipeline_version,
             pet.generation_id,

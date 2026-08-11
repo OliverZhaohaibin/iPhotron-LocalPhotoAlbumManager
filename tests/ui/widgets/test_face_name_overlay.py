@@ -210,6 +210,19 @@ def test_face_name_overlay_shows_fallback_and_clamps_label(qapp) -> None:
     assert layout.chip_rect.bottom() <= viewer.geometry().bottom()
 
 
+def test_face_name_overlay_labels_candidate_as_pending_confirmation(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    annotation = _annotation(display_name=None)
+    annotation = AssetFaceAnnotation(
+        **{**annotation.__dict__, "promotion_state": "candidate"}
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+
+    assert overlay._states["face-1"].layout.label_text == "Pending confirmation"
+
+
 def test_face_name_overlay_hover_updates_highlighted_face(qapp) -> None:
     surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations(

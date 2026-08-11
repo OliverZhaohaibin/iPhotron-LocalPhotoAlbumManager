@@ -14,6 +14,14 @@ from pathlib import Path
 import numpy as np
 
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
+from iPhoto.recognition.promotion import (
+    PROMOTION_CONFIRMED,
+    PROMOTION_LEGACY_VISIBLE,
+    IdentityPromotionRecord,
+    automatic_promotion_state,
+    merged_promotion_state,
+    normalize_promotion_state,
+)
 
 from .records import PetDetectionRecord, PetProfile, PetRecord
 from .repository_utils import (
@@ -23,6 +31,8 @@ from .repository_utils import (
     serialize_embedding,
     utc_now_iso,
 )
+
+_PET_PROMOTION_MIN_ASSETS = 2
 
 
 @dataclass(frozen=True)
@@ -94,6 +104,18 @@ class PetStateRepository:
                 FROM pet_profiles
                 """
             ).fetchall()
+            promotion_rows = conn.execute(
+                "SELECT pet_id, evidence_asset_count, promotion_state "
+                "FROM pet_identity_promotions"
+            ).fetchall()
+        promotions = {
+            str(row["pet_id"]): IdentityPromotionRecord(
+                identity_id=str(row["pet_id"]),
+                evidence_asset_count=int(row["evidence_asset_count"] or 0),
+                promotion_state=normalize_promotion_state(row["promotion_state"]),
+            )
+            for row in promotion_rows
+        }
         profiles: list[PetProfile] = []
         for row in rows:
             pet_id = str(row["pet_id"])
@@ -102,6 +124,10 @@ class PetStateRepository:
             sample_count = int(row["sample_count"] or 0)
             if sample_count <= 0:
                 sample_count = inferred_counts.get(pet_id, 0)
+            promotion = promotions.get(pet_id)
+            evidence_asset_count = (
+                promotion.evidence_asset_count if promotion is not None else sample_count
+            )
             profiles.append(
                 PetProfile(
                     pet_id=pet_id,
@@ -114,7 +140,7 @@ class PetStateRepository:
                     created_at=str(row["created_at"] or ""),
                     updated_at=str(row["updated_at"] or ""),
                     sample_count=sample_count,
-                    profile_state=profile_state_for_sample_count(sample_count),
+                    profile_state=profile_state_for_sample_count(evidence_asset_count),
                     species_label=_normalize_species_label(row["species_label"]),
                     embedding_pipeline_version=str(
                         row["embedding_pipeline_version"] or ""
@@ -124,6 +150,12 @@ class PetStateRepository:
                         row["boundary_embeddings"],
                         embedding_dim=int(row["embedding_dim"] or 0),
                         sample_count=int(row["boundary_sample_count"] or 0),
+                    ),
+                    evidence_asset_count=evidence_asset_count,
+                    promotion_state=(
+                        promotion.promotion_state
+                        if promotion is not None
+                        else PROMOTION_LEGACY_VISIBLE
                     ),
                 )
             )
@@ -152,12 +184,21 @@ class PetStateRepository:
                     conn.execute(
                         f"""
                         SELECT
-                            pet_id, name, center_embedding, embedding_dim,
-                            created_at, updated_at, sample_count, profile_state,
-                            species_label, embedding_pipeline_version, generation_id,
-                            boundary_embeddings, boundary_sample_count
+                            pet_profiles.pet_id, pet_profiles.name,
+                            pet_profiles.center_embedding, pet_profiles.embedding_dim,
+                            pet_profiles.created_at, pet_profiles.updated_at,
+                            pet_profiles.sample_count, pet_profiles.profile_state,
+                            pet_profiles.species_label,
+                            pet_profiles.embedding_pipeline_version,
+                            pet_profiles.generation_id,
+                            pet_profiles.boundary_embeddings,
+                            pet_profiles.boundary_sample_count,
+                            pet_identity_promotions.evidence_asset_count,
+                            pet_identity_promotions.promotion_state
                         FROM pet_profiles
-                        WHERE pet_id IN ({placeholders})
+                        LEFT JOIN pet_identity_promotions
+                          ON pet_identity_promotions.pet_id = pet_profiles.pet_id
+                        WHERE pet_profiles.pet_id IN ({placeholders})
                         """,
                         chunk,
                     ).fetchall()
@@ -167,6 +208,56 @@ class PetStateRepository:
             for row in rows
             if row["pet_id"]
         }
+
+    def get_promotion_records(
+        self,
+        pet_ids: Iterable[str] = (),
+    ) -> dict[str, IdentityPromotionRecord]:
+        self.initialize()
+        ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
+        with closing(self._connect()) as conn:
+            if ids:
+                rows: list[sqlite3.Row] = []
+                for chunk in _chunked(ids, 500):
+                    placeholders = ", ".join("?" for _ in chunk)
+                    rows.extend(
+                        conn.execute(
+                            "SELECT pet_id, evidence_asset_count, promotion_state "
+                            f"FROM pet_identity_promotions WHERE pet_id IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                    )
+            else:
+                rows = conn.execute(
+                    "SELECT pet_id, evidence_asset_count, promotion_state "
+                    "FROM pet_identity_promotions"
+                ).fetchall()
+        return {
+            str(row["pet_id"]): IdentityPromotionRecord(
+                identity_id=str(row["pet_id"]),
+                evidence_asset_count=int(row["evidence_asset_count"] or 0),
+                promotion_state=normalize_promotion_state(row["promotion_state"]),
+            )
+            for row in rows
+        }
+
+    def confirm_pet(self, pet_id: str) -> None:
+        if not pet_id:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO pet_identity_promotions (
+                    pet_id, evidence_asset_count, promotion_state, updated_at
+                ) VALUES (?, 0, ?, ?)
+                ON CONFLICT(pet_id) DO UPDATE SET
+                    promotion_state = excluded.promotion_state,
+                    updated_at = excluded.updated_at
+                """,
+                (pet_id, PROMOTION_CONFIRMED, utc_now_iso()),
+            )
+            conn.commit()
 
     def get_profile_name_map(self, pet_ids: Iterable[str]) -> dict[str, str | None]:
         unique_ids = [str(pet_id) for pet_id in dict.fromkeys(pet_ids) if pet_id]
@@ -394,10 +485,19 @@ class PetStateRepository:
                     if row["source_pet_id"] and row["target_pet_id"]
                 }
             )
+            evidence_assets_by_pet: dict[str, set[str]] = {}
+            for detection in detections:
+                if not detection.pet_id or not detection.asset_id:
+                    continue
+                canonical_pet_id = redirects.get(detection.pet_id, detection.pet_id)
+                evidence_assets_by_pet.setdefault(canonical_pet_id, set()).add(
+                    detection.asset_id
+                )
             for pet in pets:
                 if pet.pet_id in redirects:
                     continue
                 sample_count = max(int(pet.sample_count), int(pet.detection_count))
+                evidence_asset_count = len(evidence_assets_by_pet.get(pet.pet_id, set()))
                 existing = conn.execute(
                     "SELECT created_at, name FROM pet_profiles WHERE pet_id = ?",
                     (pet.pet_id,),
@@ -441,7 +541,7 @@ class PetStateRepository:
                         created_at,
                         timestamp,
                         sample_count,
-                        profile_state_for_sample_count(sample_count),
+                        profile_state_for_sample_count(evidence_asset_count),
                         _normalize_species_label(pet.species_label),
                         pet.embedding_pipeline_version,
                         pet.generation_id,
@@ -451,6 +551,27 @@ class PetStateRepository:
                         ),
                         min(len(pet.boundary_embeddings), 8),
                     ),
+                )
+                state = automatic_promotion_state(
+                    evidence_asset_count,
+                    minimum_evidence=_PET_PROMOTION_MIN_ASSETS,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO pet_identity_promotions (
+                        pet_id, evidence_asset_count, promotion_state, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(pet_id) DO UPDATE SET
+                        evidence_asset_count = excluded.evidence_asset_count,
+                        promotion_state = CASE
+                            WHEN pet_identity_promotions.promotion_state IN (
+                                'confirmed', 'legacy_visible'
+                            ) THEN pet_identity_promotions.promotion_state
+                            ELSE excluded.promotion_state
+                        END,
+                        updated_at = excluded.updated_at
+                    """,
+                    (pet.pet_id, evidence_asset_count, state, timestamp),
                 )
 
             for detection in detections:
@@ -535,7 +656,6 @@ class PetStateRepository:
                         timestamp,
                     ),
                 )
-
             current_pet_ids = {pet.pet_id for pet in pets if pet.pet_id}
             replaced_ids = {str(pet_id) for pet_id in replaced_pet_ids if pet_id}
             stale_automatic_cover_ids = sorted(replaced_ids - current_pet_ids)
@@ -593,6 +713,19 @@ class PetStateRepository:
                         _normalize_species_label(pet.species_label),
                     ),
                 )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO pet_identity_promotions (
+                        pet_id, evidence_asset_count, promotion_state, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        pet.pet_id,
+                        max(0, int(pet.evidence_asset_count or sample_count)),
+                        PROMOTION_LEGACY_VISIBLE,
+                        timestamp,
+                    ),
+                )
             for detection in detections:
                 if not detection.pet_id:
                     continue
@@ -636,6 +769,18 @@ class PetStateRepository:
                 """,
                 (normalize_name(name_or_none), timestamp, pet_id),
             )
+            if normalize_name(name_or_none) is not None:
+                conn.execute(
+                    """
+                    INSERT INTO pet_identity_promotions (
+                        pet_id, evidence_asset_count, promotion_state, updated_at
+                    ) VALUES (?, 0, ?, ?)
+                    ON CONFLICT(pet_id) DO UPDATE SET
+                        promotion_state = excluded.promotion_state,
+                        updated_at = excluded.updated_at
+                    """,
+                    (pet_id, PROMOTION_CONFIRMED, timestamp),
+                )
             conn.commit()
 
     def set_pet_hidden(self, pet_id: str, hidden: bool) -> bool:
@@ -916,6 +1061,48 @@ class PetStateRepository:
             )
             conn.execute("DELETE FROM pet_covers WHERE pet_id = ?", (source_pet_id,))
             conn.execute("DELETE FROM hidden_pets WHERE pet_id = ?", (source_pet_id,))
+            promotion_rows = conn.execute(
+                """
+                SELECT pet_id, evidence_asset_count, promotion_state
+                FROM pet_identity_promotions
+                WHERE pet_id IN (?, ?)
+                """,
+                (source_pet_id, target_pet_id),
+            ).fetchall()
+            promotions = {str(row["pet_id"]): row for row in promotion_rows}
+            evidence_asset_count = max(
+                (
+                    int(row["evidence_asset_count"] or 0)
+                    for row in promotion_rows
+                ),
+                default=0,
+            )
+            merged_state = merged_promotion_state(
+                promotions.get(source_pet_id)["promotion_state"]
+                if source_pet_id in promotions
+                else None,
+                promotions.get(target_pet_id)["promotion_state"]
+                if target_pet_id in promotions
+                else None,
+                evidence_asset_count=evidence_asset_count,
+                minimum_evidence=_PET_PROMOTION_MIN_ASSETS,
+            )
+            conn.execute(
+                """
+                INSERT INTO pet_identity_promotions (
+                    pet_id, evidence_asset_count, promotion_state, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(pet_id) DO UPDATE SET
+                    evidence_asset_count = excluded.evidence_asset_count,
+                    promotion_state = excluded.promotion_state,
+                    updated_at = excluded.updated_at
+                """,
+                (target_pet_id, evidence_asset_count, merged_state, timestamp),
+            )
+            conn.execute(
+                "DELETE FROM pet_identity_promotions WHERE pet_id = ?",
+                (source_pet_id,),
+            )
             conn.commit()
         return True
 
@@ -926,6 +1113,12 @@ class PetStateRepository:
         return conn
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
+        promotion_table_existed = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'pet_identity_promotions'"
+            ).fetchone()
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS pet_profiles (
@@ -954,6 +1147,26 @@ class PetStateRepository:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_identity_promotions (
+                pet_id TEXT PRIMARY KEY,
+                evidence_asset_count INTEGER NOT NULL DEFAULT 0,
+                promotion_state TEXT NOT NULL DEFAULT 'candidate',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        if not promotion_table_existed:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO pet_identity_promotions (
+                    pet_id, evidence_asset_count, promotion_state, updated_at
+                )
+                SELECT pet_id, sample_count, 'legacy_visible', updated_at
+                FROM pet_profiles
+                """
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS pet_covers (
@@ -1044,6 +1257,11 @@ def _chunked(values: tuple[str, ...], size: int) -> Iterable[tuple[str, ...]]:
 
 def _profile_from_row(row: sqlite3.Row) -> PetProfile:
     sample_count = int(row["sample_count"] or 0)
+    evidence_asset_count = int(
+        row["evidence_asset_count"] or 0
+        if "evidence_asset_count" in row.keys()
+        else sample_count
+    )
     return PetProfile(
         pet_id=str(row["pet_id"]),
         name=row["name"],
@@ -1054,7 +1272,7 @@ def _profile_from_row(row: sqlite3.Row) -> PetProfile:
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
         sample_count=sample_count,
-        profile_state=profile_state_for_sample_count(sample_count),
+        profile_state=profile_state_for_sample_count(evidence_asset_count),
         species_label=_normalize_species_label(row["species_label"]),
         embedding_pipeline_version=str(row["embedding_pipeline_version"] or ""),
         generation_id=int(row["generation_id"] or 0),
@@ -1062,6 +1280,12 @@ def _profile_from_row(row: sqlite3.Row) -> PetProfile:
             row["boundary_embeddings"],
             embedding_dim=int(row["embedding_dim"] or 0),
             sample_count=int(row["boundary_sample_count"] or 0),
+        ),
+        evidence_asset_count=evidence_asset_count,
+        promotion_state=(
+            normalize_promotion_state(row["promotion_state"])
+            if "promotion_state" in row.keys() and row["promotion_state"] is not None
+            else PROMOTION_LEGACY_VISIBLE
         ),
     )
 

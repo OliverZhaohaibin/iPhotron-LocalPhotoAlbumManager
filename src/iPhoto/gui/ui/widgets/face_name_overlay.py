@@ -601,12 +601,15 @@ class FaceNameOverlayWidget(QWidget):
             pass
 
     def _display_name(self, annotation: AssetFaceAnnotation) -> str:
-        name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
-        display_name = (
-            name.strip()
-            if isinstance(name, str) and name.strip()
-            else tr("FaceNameOverlay", "unnamed")
-        )
+        if getattr(annotation, "promotion_state", "legacy_visible") == "candidate":
+            display_name = tr("FaceNameOverlay", "Pending confirmation")
+        else:
+            name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
+            display_name = (
+                name.strip()
+                if isinstance(name, str) and name.strip()
+                else tr("FaceNameOverlay", "unnamed")
+            )
         if bool(getattr(annotation, "is_stale", False)):
             return tr(
                 "FaceNameOverlay",
@@ -1202,6 +1205,8 @@ class FaceNameOverlayWidget(QWidget):
             changes = {"canonical_display_name": new_name}
             if "display_name" in fields:
                 changes["display_name"] = new_name
+            if new_name and "promotion_state" in fields:
+                changes["promotion_state"] = "confirmed"
             state.annotation = replace(state.annotation, **changes)
         else:
             state.annotation = replace(state.annotation, display_name=new_name)

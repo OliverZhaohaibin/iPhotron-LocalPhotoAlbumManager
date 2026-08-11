@@ -12,6 +12,7 @@ from iPhoto.application.ports.pets import PetAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.state_repository import FaceStateRepository
+from iPhoto.recognition.promotion import VISIBLE_PROMOTION_STATES
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.pathutils import ensure_work_dir
 
@@ -19,6 +20,7 @@ from .records import (
     AssetPetAnnotation,
     PetMergeOutcome,
     PetMutationFailure,
+    PetMutationOutcome,
     PetSummary,
 )
 from .repository import PetRepository
@@ -180,6 +182,7 @@ class PetService:
         self,
         *,
         include_hidden: bool = False,
+        include_candidates: bool = False,
         _read_context: _PetReadContext | None = None,
     ) -> list[PetSummary]:
         repository = self.repository()
@@ -191,6 +194,10 @@ class PetService:
                 summary
                 for summary in repository.get_pet_summaries(include_hidden=include_hidden)
                 if summary.pet_id not in context.redirected_pet_ids
+                and (
+                    include_candidates
+                    or summary.promotion_state in VISIBLE_PROMOTION_STATES
+                )
             ],
             repository,
             redirects=context.redirects,
@@ -299,10 +306,23 @@ class PetService:
         return coordinator.delete_detection(detection_id) is not None
 
     def move_detection_to_pet(self, detection_id: str, target_pet_id: str) -> bool:
+        return bool(self.move_detection_to_pet_with_outcome(detection_id, target_pet_id))
+
+    def move_detection_to_pet_with_outcome(
+        self,
+        detection_id: str,
+        target_pet_id: str,
+    ) -> PetMutationOutcome:
         coordinator = self.coordinator
         if coordinator is None:
-            return False
-        return coordinator.move_detection_to_pet(detection_id, target_pet_id) is not None
+            return PetMutationOutcome(False, PetMutationFailure.RECOVERY_PENDING)
+        event = coordinator.move_detection_to_pet(detection_id, target_pet_id)
+        if event is None:
+            return PetMutationOutcome(
+                False,
+                coordinator.last_mutation_failure or PetMutationFailure.REJECTED,
+            )
+        return PetMutationOutcome(True)
 
     def move_detection_to_new_pet(self, detection_id: str, new_name: str) -> str | None:
         normalized_name = str(new_name or "").strip()
@@ -329,7 +349,13 @@ class PetService:
     def has_pet(self, pet_id: str) -> bool:
         if pet_id in self._redirected_source_ids("pet"):
             return False
-        return any(summary.pet_id == pet_id for summary in self.list_pets(include_hidden=True))
+        return any(
+            summary.pet_id == pet_id
+            for summary in self.list_pets(
+                include_hidden=True,
+                include_candidates=True,
+            )
+        )
 
     def list_asset_pet_annotations(self, asset_id: str) -> list[AssetPetAnnotation]:
         repository = self.repository()

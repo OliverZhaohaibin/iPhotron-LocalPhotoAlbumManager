@@ -13,6 +13,11 @@ from typing import Iterable
 
 import numpy as np
 
+from iPhoto.recognition.promotion import (
+    PROMOTION_CANDIDATE,
+    PROMOTION_CONFIRMED,
+    PROMOTION_LEGACY_VISIBLE,
+)
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 
 from .records import (
@@ -101,7 +106,7 @@ class FaceRepository:
                         person.created_at,
                         person.updated_at,
                         sample_count,
-                        profile_state_for_sample_count(sample_count),
+                        person.profile_state,
                     )
                 )
             conn.executemany(
@@ -361,6 +366,11 @@ class FaceRepository:
                 new_name = payload.get("new_name")
                 if new_person_id and new_name:
                     self._state_repo.rename_person(new_person_id, str(new_name))
+                    self._state_repo.confirm_person(new_person_id)
+            elif operation_kind == "people_move_face":
+                target_person_id = str(payload.get("target_person_id") or "")
+                if target_person_id:
+                    self._state_repo.confirm_person(target_person_id)
             elif operation_kind == "people_rename":
                 person_id = str(payload.get("person_id") or "")
                 if person_id:
@@ -455,6 +465,11 @@ class FaceRepository:
                 if target is not None
                 else int(payload.get("sample_count") or 0)
             ),
+            evidence_asset_count=(
+                int(target.evidence_asset_count)
+                if target is not None and target.evidence_asset_count > 0
+                else int(payload.get("evidence_asset_count") or 0)
+            ),
             hidden_state=bool(payload.get("hidden_state", False)),
         )
 
@@ -518,7 +533,30 @@ class FaceRepository:
                 ORDER BY created_at ASC, person_id ASC
                 """
             ).fetchall()
-        return [self._person_from_row(row) for row in rows]
+            evidence_rows = conn.execute(
+                """
+                SELECT person_id, COUNT(DISTINCT asset_id) AS evidence_asset_count
+                FROM faces
+                WHERE person_id IS NOT NULL
+                GROUP BY person_id
+                """
+            ).fetchall()
+        evidence_by_person_id = {
+            str(row["person_id"]): int(row["evidence_asset_count"] or 0)
+            for row in evidence_rows
+            if row["person_id"]
+        }
+        return [
+            PersonRecord(
+                **{
+                    **self._person_from_row(row).__dict__,
+                    "evidence_asset_count": evidence_by_person_id.get(
+                        str(row["person_id"]), 0
+                    ),
+                }
+            )
+            for row in rows
+        ]
 
     def get_person_name_map(
         self,
@@ -653,6 +691,7 @@ class FaceRepository:
         profile_map = {}
         order_map: dict[str, int] = {}
         hidden_map: dict[str, bool] = {}
+        promotion_map = {}
         if self._state_repo is not None:
             for face in self._state_repo.get_manual_faces():
                 manual_faces_by_person_id[face.person_id].append(face)
@@ -665,6 +704,7 @@ class FaceRepository:
             )
             order_map = self._state_repo.get_person_order_map(person_ids)
             hidden_map = self._state_repo.get_person_hidden_map(person_ids)
+            promotion_map = self._state_repo.get_promotion_records()
         summaries: list[PersonSummary] = []
         for person_id in person_ids:
             row = auto_rows_by_person_id.get(person_id)
@@ -697,6 +737,15 @@ class FaceRepository:
                 resolved_thumbnail = (self._db_path.parent / thumbnail_path).resolve()
             asset_ids = set(auto_asset_ids_by_person_id.get(person_id, set()))
             asset_ids.update(face.asset_id for face in manual_faces if face.asset_id)
+            promotion = promotion_map.get(person_id)
+            evidence_asset_count = (
+                promotion.evidence_asset_count if promotion is not None else len(asset_ids)
+            )
+            promotion_state = (
+                promotion.promotion_state
+                if promotion is not None
+                else PROMOTION_LEGACY_VISIBLE
+            )
             summaries.append(
                 PersonSummary(
                     person_id=person_id,
@@ -707,6 +756,9 @@ class FaceRepository:
                     created_at=str(created_at),
                     is_hidden=bool(hidden_map.get(person_id, False)),
                     asset_count=len(asset_ids),
+                    profile_state=profile_state_for_sample_count(evidence_asset_count),
+                    evidence_asset_count=evidence_asset_count,
+                    promotion_state=promotion_state,
                 )
             )
         summaries.sort(key=lambda summary: (-summary.face_count, summary.created_at, summary.person_id))
@@ -824,6 +876,13 @@ class FaceRepository:
         canonical = self._canonical_annotation_identities(
             str(row["person_id"]) for row in rows if row["person_id"]
         )
+        promotion_map = (
+            self._state_repo.get_promotion_records(
+                str(row["person_id"]) for row in rows if row["person_id"]
+            )
+            if self._state_repo is not None
+            else {}
+        )
         assignments = (
             self._state_repo.get_annotation_identity_assignments(
                 ("person", str(row["face_id"])) for row in rows if row["face_id"]
@@ -870,12 +929,22 @@ class FaceRepository:
                     else canonical[str(row["person_id"])][2]
                     if row["person_id"] else None
                 ),
+                promotion_state=(
+                    PROMOTION_CONFIRMED
+                    if ("person", str(row["face_id"])) in assignments
+                    else promotion_map[str(row["person_id"])].promotion_state
+                    if row["person_id"] and str(row["person_id"]) in promotion_map
+                    else PROMOTION_CANDIDATE
+                ),
             )
             for row in rows
             if row["face_id"] and row["face_key"] not in rejected_face_keys
         ]
         if self._state_repo is not None:
             manual_faces = self._state_repo.get_manual_faces_for_asset(asset_id)
+            manual_promotions = self._state_repo.get_promotion_records(
+                face.person_id for face in manual_faces
+            )
             manual_canonical = self._canonical_annotation_identities(
                 face.person_id for face in manual_faces
             )
@@ -926,6 +995,11 @@ class FaceRepository:
                     canonical_identity_kind=manual_canonical[face.person_id][0],
                     canonical_identity_id=manual_canonical[face.person_id][1],
                     canonical_display_name=manual_canonical[face.person_id][2],
+                    promotion_state=(
+                        manual_promotions[face.person_id].promotion_state
+                        if face.person_id in manual_promotions
+                        else PROMOTION_CONFIRMED
+                    ),
                 )
                 for face in manual_faces
             )
@@ -1204,6 +1278,16 @@ class FaceRepository:
             ]
             center_embedding = np.empty((0,), dtype=np.float32)
             updated_at = _utc_now_iso()
+            evidence_asset_count = len(
+                {
+                    *(face.asset_id for face in merged_faces if face.asset_id),
+                    *(
+                        face.asset_id
+                        for face in (*manual_source_faces, *manual_target_faces)
+                        if face.asset_id
+                    ),
+                }
+            )
             if merged_faces:
                 key_face = max(merged_faces, key=_key_face_sort_key)
                 center_embedding = compute_cluster_center(
@@ -1233,7 +1317,7 @@ class FaceRepository:
                         target_created_at,
                         updated_at,
                         len(merged_faces),
-                        profile_state_for_sample_count(len(merged_faces)),
+                        profile_state_for_sample_count(evidence_asset_count),
                     ),
                 )
             else:
@@ -1250,6 +1334,7 @@ class FaceRepository:
                         "target_name": target_name,
                         "target_created_at": target_created_at,
                         "sample_count": len(merged_faces),
+                        "evidence_asset_count": evidence_asset_count,
                         "hidden_state": source_hidden,
                         "changed_asset_ids": sorted(
                             {face.asset_id for face in merged_faces if face.asset_id}
@@ -1276,6 +1361,7 @@ class FaceRepository:
                 target_name=target_name,
                 target_created_at=target_created_at,
                 sample_count=len(merged_faces),
+                evidence_asset_count=evidence_asset_count,
                 hidden_state=source_hidden,
             )
             self._sync_person_cover_defaults()
@@ -1305,8 +1391,6 @@ class FaceRepository:
             ).fetchone()
             if row is not None:
                 face = self._face_from_row(row)
-                if not face.person_id:
-                    return None
                 conn.execute("UPDATE faces SET person_id = NULL WHERE face_id = ?", (face_id,))
                 if operation_id is not None:
                     self._write_runtime_commit(
@@ -1319,7 +1403,9 @@ class FaceRepository:
                             "asset_id": face.asset_id,
                             "asset_rel": face.asset_rel,
                             "changed_asset_ids": [face.asset_id],
-                            "changed_person_ids": [face.person_id],
+                            "changed_person_ids": (
+                                [face.person_id] if face.person_id else []
+                            ),
                         },
                     )
                 conn.commit()
@@ -1337,7 +1423,7 @@ class FaceRepository:
                     )
                 result = self._finalize_face_mutation(
                     changed_asset_ids=(face.asset_id,),
-                    changed_person_ids=(face.person_id,),
+                    changed_person_ids=((face.person_id,) if face.person_id else ()),
                 )
                 self.refresh_all_group_assets()
                 return result
@@ -1411,7 +1497,7 @@ class FaceRepository:
             ).fetchone()
             if row is not None:
                 face = self._face_from_row(row)
-                if not face.person_id or face.person_id == target_person_id:
+                if face.person_id == target_person_id:
                     return None
                 conn.execute(
                     "UPDATE faces SET person_id = ? WHERE face_id = ?",
@@ -1425,8 +1511,11 @@ class FaceRepository:
                             "operation_kind": "people_move_face",
                             "face_id": face.face_id,
                             "asset_id": face.asset_id,
+                            "target_person_id": target_person_id,
                             "changed_asset_ids": [face.asset_id],
-                            "changed_person_ids": [face.person_id, target_person_id],
+                            "changed_person_ids": [
+                                value for value in (face.person_id, target_person_id) if value
+                            ],
                         },
                     )
                 conn.commit()
@@ -1440,9 +1529,12 @@ class FaceRepository:
                         asset_id=face.asset_id,
                         asset_rel=face.asset_rel,
                     )
+                    self._state_repo.confirm_person(target_person_id)
                 return self._finalize_face_mutation(
                     changed_asset_ids=(face.asset_id,),
-                    changed_person_ids=(face.person_id, target_person_id),
+                    changed_person_ids=(
+                        value for value in (face.person_id, target_person_id) if value
+                    ),
                 )
 
         if self._state_repo is None:
@@ -1498,7 +1590,7 @@ class FaceRepository:
             ).fetchone()
             if row is not None:
                 face = self._face_from_row(row)
-                if not face.person_id or face.person_id == new_person_id:
+                if face.person_id == new_person_id:
                     return None
                 conn.execute(
                     "UPDATE faces SET person_id = ? WHERE face_id = ?",
@@ -1515,7 +1607,9 @@ class FaceRepository:
                             "new_person_id": new_person_id,
                             "new_name": normalized_name,
                             "changed_asset_ids": [face.asset_id],
-                            "changed_person_ids": [face.person_id, new_person_id],
+                            "changed_person_ids": [
+                                value for value in (face.person_id, new_person_id) if value
+                            ],
                         },
                     )
                 conn.commit()
@@ -1535,10 +1629,14 @@ class FaceRepository:
                         created_at=face.detected_at,
                         center_embedding=face.embedding,
                         sample_count=1,
+                        evidence_asset_count=1,
                     )
+                    self._state_repo.confirm_person(new_person_id)
                 return self._finalize_face_mutation(
                     changed_asset_ids=(face.asset_id,),
-                    changed_person_ids=(face.person_id, new_person_id),
+                    changed_person_ids=(
+                        value for value in (face.person_id, new_person_id) if value
+                    ),
                 )
 
         if self._state_repo is None:
@@ -2229,6 +2327,12 @@ class FaceRepository:
                 np.stack([face.embedding for face in auto_faces], axis=0)
             )
             sample_count = len(auto_faces)
+            evidence_asset_count = len(
+                {
+                    *(face.asset_id for face in auto_faces if face.asset_id),
+                    *(face.asset_id for face in manual_faces if face.asset_id),
+                }
+            )
             updated_at = _utc_now_iso()
             conn.execute(
                 """
@@ -2254,7 +2358,7 @@ class FaceRepository:
                     created_at,
                     updated_at,
                     sample_count,
-                    profile_state_for_sample_count(sample_count),
+                    profile_state_for_sample_count(evidence_asset_count),
                 ),
             )
             conn.commit()
@@ -2266,6 +2370,7 @@ class FaceRepository:
                 created_at=created_at,
                 center_embedding=center_embedding,
                 sample_count=sample_count,
+                evidence_asset_count=evidence_asset_count,
             )
         return True
 

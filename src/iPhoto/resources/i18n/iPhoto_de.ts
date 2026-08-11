@@ -723,6 +723,14 @@
             <translation>Personen können nicht zusammengeführt werden</translation>
         </message>
         <message>
+            <source>Cannot Merge Pets</source>
+            <translation>Haustiere können nicht zusammengeführt werden</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>Eine Haustieridentität darf nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie stattdessen eine doppelte Erkennung.</translation>
+        </message>
+        <message>
             <source>Merge Person</source>
             <translation>Person zusammenführen</translation>
         </message>
@@ -1429,6 +1437,10 @@
         <message>
             <source>unnamed</source>
             <translation>unbenannt</translation>
+        </message>
+        <message>
+            <source>Pending confirmation</source>
+            <translation>Bestätigung ausstehend</translation>
         </message>
         <message>
             <source>Please enter a name before saving the face.</source>

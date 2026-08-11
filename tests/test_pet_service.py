@@ -173,21 +173,25 @@ def test_cluster_pet_records_splits_known_detector_species() -> None:
     detections = [
         _detection(
             detection_id="cat-a",
+            asset_id="asset-cat-a",
             embedding=np.asarray([1.0, 0.0]),
             species_label="cat",
         ),
         _detection(
             detection_id="cat-b",
+            asset_id="asset-cat-b",
             embedding=np.asarray([0.99, 0.01]),
             species_label="cat",
         ),
         _detection(
             detection_id="dog-a",
+            asset_id="asset-dog-a",
             embedding=np.asarray([1.0, 0.0]),
             species_label="dog",
         ),
         _detection(
             detection_id="dog-b",
+            asset_id="asset-dog-b",
             embedding=np.asarray([0.99, 0.01]),
             species_label="dog",
         ),
@@ -207,8 +211,16 @@ def test_cluster_pet_records_splits_known_detector_species() -> None:
 
 def test_cluster_pet_records_clusters_same_unknown_species() -> None:
     detections = [
-        _detection(detection_id="old-a", embedding=np.asarray([1.0, 0.0])),
-        _detection(detection_id="old-b", embedding=np.asarray([0.99, 0.01])),
+        _detection(
+            detection_id="old-a",
+            asset_id="asset-old-a",
+            embedding=np.asarray([1.0, 0.0]),
+        ),
+        _detection(
+            detection_id="old-b",
+            asset_id="asset-old-b",
+            embedding=np.asarray([0.99, 0.01]),
+        ),
     ]
 
     clustered, pets = cluster_pet_records(
@@ -239,8 +251,16 @@ def test_build_pet_records_rejects_mixed_known_species_for_one_identity() -> Non
 
 def test_cluster_pet_records_default_clusters_small_similar_pet_samples() -> None:
     detections = [
-        _detection(detection_id="cat-a", embedding=np.asarray([1.0, 0.0])),
-        _detection(detection_id="cat-b", embedding=np.asarray([0.99, 0.01])),
+        _detection(
+            detection_id="cat-a",
+            asset_id="asset-cat-a",
+            embedding=np.asarray([1.0, 0.0]),
+        ),
+        _detection(
+            detection_id="cat-b",
+            asset_id="asset-cat-b",
+            embedding=np.asarray([0.99, 0.01]),
+        ),
     ]
 
     clustered, pets = cluster_pet_records(
@@ -2037,13 +2057,14 @@ def test_pet_summaries_expose_profile_species_and_sort_stable_first(
         ],
     )
 
-    summaries = service.list_pets()
+    summaries = service.list_pets(include_candidates=True)
 
     assert [summary.pet_id for summary in summaries] == ["pet-stable", "pet-unstable"]
     assert summaries[0].profile_state == "stable"
     assert summaries[0].species_label == "dog"
     assert summaries[1].profile_state == "unstable"
     assert summaries[1].species_label == "cat"
+    assert [summary.pet_id for summary in service.list_pets()] == ["pet-stable"]
 
 
 def test_pet_scan_session_replaces_stale_detections_for_same_asset_path(tmp_path: Path) -> None:

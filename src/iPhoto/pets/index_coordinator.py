@@ -112,6 +112,7 @@ class PetIndexCoordinator(QObject):
         self._pet_repository.initialize()
         self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
         self._recovery_error: Exception | None = None
+        self._last_mutation_failure: PetMutationFailure | None = None
         try:
             with self._lock:
                 if not self._journal.recover_pending():
@@ -134,6 +135,10 @@ class PetIndexCoordinator(QObject):
     @property
     def library_root(self) -> Path:
         return self._library_root
+
+    @property
+    def last_mutation_failure(self) -> PetMutationFailure | None:
+        return self._last_mutation_failure
 
     def set_asset_repository(
         self,
@@ -498,14 +503,22 @@ class PetIndexCoordinator(QObject):
                 operation_id=operation_id,
             )
             if result is None:
+                failure = (
+                    repository.last_mutation_failure
+                    or PetMutationFailure.REJECTED
+                )
                 self._journal.transition(
                     operation_id,
                     "finalized",
-                    error="merge_rejected",
+                    error=(
+                        "same_asset_conflict"
+                        if failure == PetMutationFailure.SAME_ASSET_CONFLICT
+                        else "merge_rejected"
+                    ),
                 )
                 return PetMergeOutcome(
                     False,
-                    PetMutationFailure.REJECTED,
+                    failure,
                     operation_id,
                 )
             self._emit_journaled_snapshot(
@@ -742,9 +755,12 @@ class PetIndexCoordinator(QObject):
         target_pet_id: str,
     ) -> PetSnapshotEvent | None:
         with self._lock:
+            self._last_mutation_failure = None
             if self._shutdown_requested:
+                self._last_mutation_failure = PetMutationFailure.SHUTTING_DOWN
                 return None
             if not self._ensure_recovered_locked():
+                self._last_mutation_failure = PetMutationFailure.RECOVERY_PENDING
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -752,6 +768,7 @@ class PetIndexCoordinator(QObject):
                 {"detection_id": detection_id, "target_pet_id": target_pet_id},
             )
             if operation_id is None:
+                self._last_mutation_failure = PetMutationFailure.RECOVERY_PENDING
                 return None
             result = repository.move_detection_to_pet(
                 detection_id,
@@ -759,10 +776,19 @@ class PetIndexCoordinator(QObject):
                 operation_id=operation_id,
             )
             if result is None:
+                self._last_mutation_failure = (
+                    repository.last_mutation_failure
+                    or PetMutationFailure.REJECTED
+                )
                 self._journal.transition(
                     operation_id,
                     "finalized",
-                    error="move_rejected",
+                    error=(
+                        "same_asset_conflict"
+                        if self._last_mutation_failure
+                        == PetMutationFailure.SAME_ASSET_CONFLICT
+                        else "move_rejected"
+                    ),
                 )
                 return None
             return self._emit_journaled_snapshot(

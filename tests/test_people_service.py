@@ -2577,7 +2577,7 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
         "asset-new",
         "asset-shared",
     ]
-    summaries = service.list_clusters()
+    summaries = service.list_clusters(include_candidates=True)
     assert len(summaries) == 1
     assert summaries[0].face_count == 2
     query = service.build_cluster_query(summaries[0].person_id)

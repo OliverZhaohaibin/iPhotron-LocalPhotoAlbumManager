@@ -170,6 +170,20 @@ def test_pet_merge_recovery_pending_is_not_reported_as_rejected() -> None:
     assert outcome.failure is IdentityMergeFailure.RECOVERY_PENDING
 
 
+def test_pet_same_asset_conflict_is_preserved_by_typed_merge_boundary() -> None:
+    people, pets = _services()
+    pets.merge_pets.return_value = PetMergeOutcome(
+        False,
+        PetMutationFailure.SAME_ASSET_CONFLICT,
+    )
+    service = RecognitionMergeService(people, pets)
+
+    outcome = service.merge("pet:same", "pet:other-pet")
+
+    assert outcome.merged is False
+    assert outcome.failure is IdentityMergeFailure.SAME_ASSET_CONFLICT
+
+
 def test_pending_assignment_blocks_person_merge_before_people_mutation(tmp_path) -> None:
     people, pets = _services()
     pets.library_root = lambda: tmp_path

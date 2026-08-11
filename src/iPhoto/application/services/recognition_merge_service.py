@@ -51,6 +51,7 @@ class IdentityMergeFailure(StrEnum):
     SAME_IDENTITY = "same_identity"
     NOT_FOUND = "not_found"
     HIDDEN_STATE_MISMATCH = "hidden_state_mismatch"
+    SAME_ASSET_CONFLICT = "same_asset_conflict"
     REDIRECT_CONFLICT = "redirect_conflict"
     RECOVERY_PENDING = "recovery_pending"
     REJECTED = "rejected"
@@ -258,9 +259,13 @@ class RecognitionMergeService:
                     PetMutationFailure.RECOVERY_PENDING,
                     PetMutationFailure.SHUTTING_DOWN,
                 }
+                same_asset_conflict = (
+                    pet_outcome.failure == PetMutationFailure.SAME_ASSET_CONFLICT
+                )
             else:
                 merged = bool(pet_outcome)
                 temporary_failure = False
+                same_asset_conflict = False
             return IdentityMergeOutcome(
                 merged,
                 source_ref,
@@ -269,6 +274,8 @@ class RecognitionMergeService:
                 if merged
                 else IdentityMergeFailure.RECOVERY_PENDING
                 if temporary_failure
+                else IdentityMergeFailure.SAME_ASSET_CONFLICT
+                if same_asset_conflict
                 else IdentityMergeFailure.REJECTED,
                 refresh_policy=(
                     IdentityMergeRefreshPolicy.SNAPSHOT
@@ -373,18 +380,33 @@ class RecognitionMergeService:
 
     def _hidden_state(self, identity: IdentityRef) -> bool | None:
         if identity.kind == "person":
-            summaries = self._people_service.list_clusters(include_hidden=True)
+            summaries = self._list_including_candidates(
+                self._people_service.list_clusters,
+            )
             summary = next(
                 (item for item in summaries if item.person_id == identity.entity_id),
                 None,
             )
         else:
-            summaries = self._pet_service.list_pets(include_hidden=True)
+            summaries = self._list_including_candidates(
+                self._pet_service.list_pets,
+            )
             summary = next(
                 (item for item in summaries if item.pet_id == identity.entity_id),
                 None,
             )
         return bool(summary.is_hidden) if summary is not None else None
+
+    @staticmethod
+    def _list_including_candidates(list_method):
+        """Support older injected service doubles while using the new internal flag."""
+
+        try:
+            return list_method(include_hidden=True, include_candidates=True)
+        except TypeError as exc:
+            if "include_candidates" not in str(exc):
+                raise
+            return list_method(include_hidden=True)
 
     def _asset_ids(self, identity: IdentityRef) -> list[str]:
         if identity.kind == "person":

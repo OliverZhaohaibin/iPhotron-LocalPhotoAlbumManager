@@ -263,19 +263,22 @@ class PetScanWorker(QThread):
         retry_detected = [
             item for item in detected if not item.asset_id or str(item.asset_id) not in failed_ids
         ]
-        metrics = pipeline.last_scan_metrics
+        metrics = getattr(pipeline, "last_scan_metrics", None)
         LOGGER.info(
             "Pet scan batch processed for %s: assets=%d candidates=%d accepted=%d "
-            "unsupported_species=%d too_small=%d people_overlaps=%d retry=%d failed=%d",
+            "unsupported_species=%d too_small=%d quality_rejected=%d people_overlaps=%d "
+            "retry=%d failed=%d quality_version=%s",
             self._library_root,
             len(batch),
-            metrics.candidate_boxes,
-            metrics.accepted_detections,
-            metrics.unsupported_species,
-            metrics.too_small,
-            metrics.people_overlaps,
+            getattr(metrics, "candidate_boxes", 0),
+            getattr(metrics, "accepted_detections", 0),
+            getattr(metrics, "unsupported_species", 0),
+            getattr(metrics, "too_small", 0),
+            getattr(metrics, "pet_quality_rejected", 0),
+            getattr(metrics, "people_overlaps", 0),
             len(first_retry_ids),
             len(failed_ids),
+            getattr(pipeline, "candidate_quality_version", "legacy"),
         )
         try:
             event = coordinator.submit_detected_batch(

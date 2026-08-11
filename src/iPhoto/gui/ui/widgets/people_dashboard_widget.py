@@ -1279,6 +1279,18 @@ class PeopleDashboardWidget(QWidget):
                 ),
                 title=tr("PeopleDashboard", "Recognition Busy"),
             )
+        elif outcome.failure == IdentityMergeFailure.SAME_ASSET_CONFLICT:
+            dialogs.show_information(
+                self,
+                tr(
+                    "PeopleDashboard",
+                    (
+                        "A pet identity cannot contain two detections from the same photo. "
+                        "Delete a duplicate detection instead of merging it."
+                    ),
+                ),
+                title=tr("PeopleDashboard", "Cannot Merge Pets"),
+            )
         else:
             dialogs.show_warning(
                 self,

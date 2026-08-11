@@ -9,7 +9,7 @@ import logging
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -49,7 +49,7 @@ class EmbeddingContract:
     generation_id: int
 
     @classmethod
-    def from_detection(cls, detection: PetDetectionRecord) -> "EmbeddingContract":
+    def from_detection(cls, detection: PetDetectionRecord) -> EmbeddingContract:
         return cls(
             pipeline_version=str(detection.embedding_pipeline_version or ""),
             dimension=int(detection.embedding_dim),
@@ -57,11 +57,11 @@ class EmbeddingContract:
         )
 
     @classmethod
-    def from_pet(cls, pet: PetRecord) -> "EmbeddingContract":
+    def from_pet(cls, pet: PetRecord) -> EmbeddingContract:
         return cls.from_profile(pet)
 
     @classmethod
-    def from_profile(cls, profile: PetProfile | PetRecord) -> "EmbeddingContract":
+    def from_profile(cls, profile: PetProfile | PetRecord) -> EmbeddingContract:
         return cls(
             pipeline_version=str(profile.embedding_pipeline_version or ""),
             dimension=int(profile.embedding_dim),
@@ -85,14 +85,40 @@ class PetIncrementalCommitResult:
         )
 
 
+@dataclass(frozen=True)
+class PetClusteringConsolidationResult:
+    processed_seed_count: int = 0
+    changed_asset_ids: tuple[str, ...] = ()
+    added_pet_ids: tuple[str, ...] = ()
+    updated_pet_ids: tuple[str, ...] = ()
+    removed_pet_ids: tuple[str, ...] = ()
+
+    @property
+    def changed_pet_ids(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(self.added_pet_ids + self.updated_pet_ids + self.removed_pet_ids)
+        )
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.changed_asset_ids or self.changed_pet_ids)
+
+
+class PetClusteringConsolidationCancelledError(RuntimeError):
+    """Raised before a consolidation transaction commits."""
+
+
 @dataclass
 class _ProfileMatchContext:
     profiles: dict[str, PetRecord]
     centers: dict[str, np.ndarray]
     species: dict[str, str | None]
+    all_centers: dict[str, np.ndarray]
+    all_species: dict[str, str | None]
     member_samples: dict[str, tuple[tuple[str, np.ndarray], ...]]
     migration_candidates_by_asset: dict[str, tuple[str, ...]]
-    candidate_index: "_ProfileCandidateIndex"
+    candidate_index: _ProfileCandidateIndex
+    consolidation_candidate_index: _ProfileCandidateIndex
 
 
 @dataclass(frozen=True)
@@ -306,6 +332,7 @@ class PetRepository:
         distance_threshold: float,
         operation_id: str | None = None,
         operation_kind: str = "pet_scan_commit",
+        clustering_pipeline_target: str | None = None,
     ) -> PetIncrementalCommitResult:
         """Replace detections for a bounded asset set without rewriting the index."""
 
@@ -522,6 +549,34 @@ class PetRepository:
                         (str(stale_reason), *chunk),
                     )
             affected_pet_ids = tuple(sorted(old_pet_ids | new_pet_ids | stale_pet_ids))
+            if clustering_pipeline_target and affected_pet_ids:
+                queue_generation_id = (
+                    int(contract[2])
+                    if contract is not None
+                    else next(
+                        (
+                            int(detection.generation_id)
+                            for detection in previous_detections
+                            if detection.pet_id
+                        ),
+                        int(
+                            (
+                                conn.execute(
+                                    "SELECT value FROM scan_metadata WHERE key = ?",
+                                    ("active_generation_id",),
+                                ).fetchone()
+                                or {"value": 0}
+                            )["value"]
+                            or 0
+                        ),
+                    )
+                )
+                self._queue_pet_ids_for_clustering_in_connection(
+                    conn,
+                    affected_pet_ids,
+                    target_version=clustering_pipeline_target,
+                    generation_id=queue_generation_id,
+                )
 
             for chunk in _chunked(replaced_asset_ids, 500):
                 placeholders = ", ".join("?" for _ in chunk)
@@ -617,7 +672,7 @@ class PetRepository:
             )
             removed = tuple(sorted(old_pet_ids - surviving_pet_ids))
             updated = tuple(
-                sorted(((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed)))
+                sorted((old_pet_ids | new_pet_ids | stale_pet_ids) - set(added) - set(removed))
             )
             commit_payload = {
                 "operation_kind": operation_kind,
@@ -635,6 +690,7 @@ class PetRepository:
                 "embedding_pipeline_version": contract[0] if contract else "",
                 "embedding_dimension": int(contract[1]) if contract else 0,
                 "generation_id": int(contract[2]) if contract else 0,
+                "clustering_pipeline_target": str(clustering_pipeline_target or ""),
             }
             self._write_runtime_commit(conn, effective_operation_id, commit_payload)
             conn.commit()
@@ -918,9 +974,7 @@ class PetRepository:
         high_watermark: int = 1200,
         retain: int = 1000,
     ) -> int:
-        protected = tuple(
-            dict.fromkeys(str(value) for value in protected_operation_ids if value)
-        )
+        protected = tuple(dict.fromkeys(str(value) for value in protected_operation_ids if value))
         where = "state_synced = 1"
         parameters: tuple[object, ...] = ()
         if protected:
@@ -973,9 +1027,7 @@ class PetRepository:
             return _IncrementalPetAssignment()
         redirects = state_snapshot.redirects if state_snapshot is not None else {}
         key_map = state_snapshot.key_map if state_snapshot is not None else {}
-        durable_profiles = (
-            state_snapshot.durable_profiles if state_snapshot is not None else {}
-        )
+        durable_profiles = state_snapshot.durable_profiles if state_snapshot is not None else {}
         stable_profiles = {
             pet_id: pet
             for pet_id, pet in existing_pets.items()
@@ -1121,14 +1173,28 @@ class PetRepository:
                     pet_id: _normalize_species_label(pet.species_label)
                     for pet_id, pet in stable_profiles.items()
                 }
+                all_centers = {
+                    pet_id: normalize_vector(pet.center_embedding)
+                    for pet_id, pet in profiles.items()
+                }
+                all_species = {
+                    pet_id: _normalize_species_label(pet.species_label)
+                    for pet_id, pet in profiles.items()
+                }
                 migration_candidates_by_asset = self._migration_candidates_for_contract(contract)
                 context = _ProfileMatchContext(
                     profiles=profiles,
                     centers=centers,
                     species=species,
+                    all_centers=all_centers,
+                    all_species=all_species,
                     member_samples={},
                     migration_candidates_by_asset=migration_candidates_by_asset,
                     candidate_index=_ProfileCandidateIndex(centers, species),
+                    consolidation_candidate_index=_ProfileCandidateIndex(
+                        all_centers,
+                        all_species,
+                    ),
                 )
                 self._match_contexts[contract] = context
             return context
@@ -1146,15 +1212,20 @@ class PetRepository:
                 return
             for pet_id in affected_pet_ids:
                 context.candidate_index.remove(pet_id)
+                context.consolidation_candidate_index.remove(pet_id)
                 context.profiles.pop(pet_id, None)
                 context.member_samples.pop(pet_id, None)
                 context.centers.pop(pet_id, None)
                 context.species.pop(pet_id, None)
+                context.all_centers.pop(pet_id, None)
+                context.all_species.pop(pet_id, None)
             for pet in rebuilt_pets:
                 pet_contract = EmbeddingContract.from_pet(pet)
                 if pet_contract != contract:
                     continue
                 context.profiles[pet.pet_id] = pet
+                context.all_centers[pet.pet_id] = normalize_vector(pet.center_embedding)
+                context.all_species[pet.pet_id] = _normalize_species_label(pet.species_label)
                 if str(pet.profile_state or "unstable") == "stable":
                     context.centers[pet.pet_id] = normalize_vector(pet.center_embedding)
                     context.species[pet.pet_id] = _normalize_species_label(pet.species_label)
@@ -1167,6 +1238,15 @@ class PetRepository:
                 for pet in rebuilt_pets
                 if EmbeddingContract.from_pet(pet) == contract
                 and str(pet.profile_state or "unstable") == "stable"
+            )
+            context.consolidation_candidate_index.upsert_many(
+                (
+                    pet.pet_id,
+                    normalize_vector(pet.center_embedding),
+                    _normalize_species_label(pet.species_label),
+                )
+                for pet in rebuilt_pets
+                if EmbeddingContract.from_pet(pet) == contract
             )
 
     def _invalidate_profile_indexes(self) -> None:
@@ -1185,8 +1265,11 @@ class PetRepository:
         distance_threshold: float,
         migration_profiles: dict[str, PetRecord] | None = None,
     ) -> str:
+        from .pipeline import PET_CLUSTER_DIAMETER_MULTIPLIER
+
         migration_profiles = migration_profiles or {}
         detection_species = _normalize_species_label(detection.species_label)
+        diameter_threshold = distance_threshold * PET_CLUSTER_DIAMETER_MULTIPLIER
         limit = 8
         seen: set[str] = set()
         while True:
@@ -1230,7 +1313,7 @@ class PetRepository:
                 if pet_id in seen:
                     continue
                 seen.add(pet_id)
-                if center_distance > distance_threshold:
+                if center_distance > diameter_threshold:
                     break
                 within_threshold.append((center_distance, pet_id))
 
@@ -1240,8 +1323,9 @@ class PetRepository:
                 if pet_id not in member_samples and pet_id not in staged_candidate_species
             )
             if missing:
-                member_samples.update(self._load_complete_link_samples_for_pets(missing))
-            for _center_distance, pet_id in within_threshold:
+                member_samples.update(self._load_cluster_member_samples_for_pets(missing))
+            compatible_candidates: list[tuple[float, float, str]] = []
+            for center_distance, pet_id in within_threshold:
                 samples = (
                     *(
                         sample
@@ -1251,16 +1335,24 @@ class PetRepository:
                     ),
                     *staged_samples.get(pet_id, ()),
                 )
-                if (
-                    samples
-                    and max(cosine_distance(detection.embedding, sample) for sample in samples)
-                    > distance_threshold
-                ):
+                if not samples:
+                    if center_distance <= distance_threshold:
+                        compatible_candidates.append((center_distance, center_distance, pet_id))
                     continue
-                return pet_id
+                member_distances = tuple(
+                    cosine_distance(detection.embedding, sample) for sample in samples
+                )
+                nearest_member_distance = min(member_distances)
+                if nearest_member_distance > distance_threshold:
+                    continue
+                if max(member_distances) > diameter_threshold:
+                    continue
+                compatible_candidates.append((nearest_member_distance, center_distance, pet_id))
+            if compatible_candidates:
+                return min(compatible_candidates)[2]
 
             indexed_threshold_exhausted = bool(
-                indexed_candidates and indexed_candidates[-1][0] > distance_threshold
+                indexed_candidates and indexed_candidates[-1][0] > diameter_threshold
             )
             if indexed_threshold_exhausted or len(indexed_candidates) < limit:
                 return ""
@@ -1287,7 +1379,7 @@ class PetRepository:
             grouped.setdefault(str(row["asset_id"]), []).append(str(row["pet_id"]))
         return {asset_id: tuple(dict.fromkeys(pet_ids)) for asset_id, pet_ids in grouped.items()}
 
-    def _load_complete_link_samples_for_pets(
+    def _load_cluster_member_samples_for_pets(
         self,
         pet_ids: tuple[str, ...],
     ) -> dict[str, tuple[tuple[str, np.ndarray], ...]]:
@@ -1437,7 +1529,6 @@ class PetRepository:
         embedding_pipeline_version: str,
         embedding_dimension: int,
         detector_pipeline_version: str | None = None,
-        clustering_pipeline_version: str | None = None,
     ) -> None:
         self.initialize()
         metadata = {
@@ -1447,8 +1538,6 @@ class PetRepository:
         }
         if detector_pipeline_version:
             metadata["detector_pipeline_version"] = str(detector_pipeline_version)
-        if clustering_pipeline_version:
-            metadata["clustering_pipeline_version"] = str(clustering_pipeline_version)
         with self._mutation_lock, closing(self._connect()) as conn:
             conn.execute(
                 "UPDATE embedding_generations SET status = 'readable' WHERE status = 'active'"
@@ -1555,6 +1644,220 @@ class PetRepository:
             )
             conn.commit()
 
+    @staticmethod
+    def _set_scan_metadata_in_connection(
+        conn: sqlite3.Connection,
+        values: dict[str, object],
+    ) -> None:
+        normalized = [
+            (str(key).strip(), str(value)) for key, value in values.items() if str(key).strip()
+        ]
+        if not normalized:
+            return
+        conn.executemany(
+            """
+            INSERT INTO scan_metadata (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            normalized,
+        )
+
+    @classmethod
+    def _queue_pet_ids_for_clustering_in_connection(
+        cls,
+        conn: sqlite3.Connection,
+        pet_ids: Iterable[str],
+        *,
+        target_version: str,
+        generation_id: int,
+    ) -> int:
+        ids = tuple(dict.fromkeys(str(value) for value in pet_ids if value))
+        target = str(target_version or "").strip()
+        if not ids or not target:
+            return 0
+        timestamp = utc_now_iso()
+        before = int(conn.total_changes)
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO pet_clustering_consolidation_queue (
+                target_version, generation_id, pet_id, queued_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [(target, int(generation_id), pet_id, timestamp) for pet_id in ids],
+        )
+        cls._set_scan_metadata_in_connection(
+            conn,
+            {
+                "clustering_pipeline_target": target,
+                "clustering_consolidation_state": "pending",
+            },
+        )
+        return max(0, int(conn.total_changes) - before)
+
+    def queue_pet_ids_for_clustering(
+        self,
+        pet_ids: Iterable[str],
+        *,
+        target_version: str,
+        generation_id: int | None = None,
+    ) -> int:
+        self.initialize()
+        with self._mutation_lock, closing(self._connect()) as conn:
+            effective_generation = generation_id
+            if effective_generation is None:
+                row = conn.execute(
+                    "SELECT value FROM scan_metadata WHERE key = ?",
+                    ("active_generation_id",),
+                ).fetchone()
+                effective_generation = int(row["value"] or 0) if row is not None else 0
+            queued = self._queue_pet_ids_for_clustering_in_connection(
+                conn,
+                pet_ids,
+                target_version=target_version,
+                generation_id=int(effective_generation),
+            )
+            conn.commit()
+        return queued
+
+    def prepare_clustering_pipeline(self, *, target_version: str) -> int:
+        """Durably seed a version upgrade without reclustering the full library."""
+
+        target = str(target_version or "").strip()
+        if not target:
+            return 0
+        self.initialize()
+        with self._mutation_lock, closing(self._connect()) as conn:
+            generation_row = conn.execute(
+                "SELECT value FROM scan_metadata WHERE key = ?",
+                ("active_generation_id",),
+            ).fetchone()
+            generation_id = int(generation_row["value"] or 0) if generation_row else 0
+            version_row = conn.execute(
+                "SELECT value FROM scan_metadata WHERE key = ?",
+                ("clustering_pipeline_version",),
+            ).fetchone()
+            state_row = conn.execute(
+                "SELECT value FROM scan_metadata WHERE key = ?",
+                ("clustering_consolidation_state",),
+            ).fetchone()
+            completed_version = str(version_row["value"] or "") if version_row else ""
+            state = str(state_row["value"] or "") if state_row else ""
+            pending_row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM pet_clustering_consolidation_queue
+                WHERE target_version = ? AND generation_id = ?
+                """,
+                (target, generation_id),
+            ).fetchone()
+            pending_count = int(pending_row["count"] or 0) if pending_row else 0
+            if completed_version == target:
+                if pending_count == 0:
+                    if state != "clean":
+                        self._set_scan_metadata_in_connection(
+                            conn,
+                            {
+                                "clustering_pipeline_target": target,
+                                "clustering_consolidation_state": "clean",
+                            },
+                        )
+                        conn.commit()
+                    return 0
+                # A normal v3 batch or an interrupted v3 consolidation already
+                # populated the exact affected set. Preserve it across worker
+                # restarts instead of accidentally promoting the recovery into
+                # a full-library migration.
+                if state != "pending":
+                    self._set_scan_metadata_in_connection(
+                        conn,
+                        {
+                            "clustering_pipeline_target": target,
+                            "clustering_consolidation_state": "pending",
+                        },
+                    )
+                    conn.commit()
+                return pending_count
+
+            conn.execute(
+                """
+                DELETE FROM pet_clustering_consolidation_queue
+                WHERE target_version != ? OR generation_id != ?
+                """,
+                (target, generation_id),
+            )
+            pet_rows = conn.execute(
+                """
+                SELECT DISTINCT pet_id
+                FROM pet_detections
+                WHERE generation_id = ? AND pet_id IS NOT NULL AND pet_id != ''
+                ORDER BY pet_id
+                """,
+                (generation_id,),
+            ).fetchall()
+            pet_ids = tuple(str(row["pet_id"]) for row in pet_rows if row["pet_id"])
+            if pet_ids:
+                self._queue_pet_ids_for_clustering_in_connection(
+                    conn,
+                    pet_ids,
+                    target_version=target,
+                    generation_id=generation_id,
+                )
+            else:
+                self._set_scan_metadata_in_connection(
+                    conn,
+                    {
+                        "clustering_pipeline_target": target,
+                        "clustering_pipeline_version": target,
+                        "clustering_consolidation_state": "clean",
+                    },
+                )
+            conn.commit()
+        return len(pet_ids)
+
+    def has_pending_clustering_consolidation(self, *, target_version: str) -> bool:
+        target = str(target_version or "").strip()
+        if not target:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            generation_row = conn.execute(
+                "SELECT value FROM scan_metadata WHERE key = ?",
+                ("active_generation_id",),
+            ).fetchone()
+            generation_id = int(generation_row["value"] or 0) if generation_row else 0
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM pet_clustering_consolidation_queue
+                WHERE target_version = ? AND generation_id = ?
+                LIMIT 1
+                """,
+                (target, generation_id),
+            ).fetchone()
+            state_row = conn.execute(
+                "SELECT value FROM scan_metadata WHERE key = ?",
+                ("clustering_consolidation_state",),
+            ).fetchone()
+        state = str(state_row["value"] or "") if state_row else ""
+        return row is not None or state in {"pending", "running"}
+
+    def set_clustering_consolidation_state(
+        self,
+        state: str,
+        *,
+        target_version: str,
+    ) -> None:
+        normalized = str(state or "").strip().lower()
+        if normalized not in {"clean", "pending", "running"}:
+            raise ValueError(f"Unsupported Pet clustering consolidation state: {state}")
+        self.set_scan_metadata_many(
+            {
+                "clustering_pipeline_target": target_version,
+                "clustering_consolidation_state": normalized,
+            }
+        )
+
     def sync_runtime_state(self) -> None:
         if self._state_repo is None:
             return
@@ -1604,62 +1907,339 @@ class PetRepository:
                 )
         return removed
 
-    def recluster_detections(
+    @staticmethod
+    def _candidate_pet_ids_within_distance(
+        embedding: np.ndarray,
+        *,
+        species_label: str | None,
+        candidate_index: _ProfileCandidateIndex,
+        maximum_distance: float,
+    ) -> tuple[str, ...]:
+        limit = 8
+        selected: dict[str, float] = {}
+        while True:
+            candidates = candidate_index.search(
+                embedding,
+                species_label=species_label,
+                limit=limit,
+            )
+            for distance, pet_id in candidates:
+                if distance <= maximum_distance:
+                    selected[pet_id] = min(distance, selected.get(pet_id, float("inf")))
+            if not candidates or len(candidates) < limit or candidates[-1][0] > maximum_distance:
+                break
+            limit *= 2
+        return tuple(
+            pet_id
+            for pet_id, _ in sorted(
+                selected.items(),
+                key=lambda item: (item[1], item[0]),
+            )
+        )
+
+    def consolidate_pending_clustering(
         self,
         *,
+        target_version: str,
         distance_threshold: float,
-        operation_id: str | None = None,
-    ) -> int:
-        from .pipeline import canonicalize_pet_identities, cluster_pet_records
+        operation_id: str,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> PetClusteringConsolidationResult:
+        """Recluster only components reachable from durable pending Pet seeds."""
 
-        all_detections = self.get_all_detections()
-        if not all_detections:
-            return 0
-        active = EmbeddingContract(
-            pipeline_version=str(self.get_scan_metadata("active_embedding_pipeline_version") or ""),
-            dimension=int(self.get_scan_metadata("active_embedding_dimension") or 0),
-            generation_id=int(self.get_scan_metadata("active_generation_id") or 0),
+        from .pipeline import (
+            PET_CLUSTER_DIAMETER_MULTIPLIER,
+            build_pet_records_from_detections,
+            canonicalize_pet_identities,
+            cluster_pet_records,
         )
-        if not active.pipeline_version or active.dimension <= 0:
-            contracts = {
-                EmbeddingContract.from_detection(detection) for detection in all_detections
-            }
-            if len(contracts) != 1:
-                return 0
-            active = next(iter(contracts))
-        detections = [
-            detection
-            for detection in all_detections
-            if EmbeddingContract.from_detection(detection) == active
-        ]
-        if not detections:
-            return 0
-        clustered_detections, pets = cluster_pet_records(
-            detections,
-            distance_threshold=distance_threshold,
-        )
-        if self._state_repo is not None:
-            clustered_detections, pets = canonicalize_pet_identities(
-                clustered_detections,
-                pets,
-                self._state_repo,
-                distance_threshold=distance_threshold,
+
+        target = str(target_version or "").strip()
+        if not target or not operation_id:
+            return PetClusteringConsolidationResult()
+        cancelled = is_cancelled or (lambda: False)
+        self.initialize()
+        with self._mutation_lock:
+            if cancelled():
+                raise PetClusteringConsolidationCancelledError()
+            generation_id = int(self.get_scan_metadata("active_generation_id") or 0)
+            embedding_version = str(
+                self.get_scan_metadata("active_embedding_pipeline_version") or ""
             )
-        retained_detections = [
-            detection
-            for detection in all_detections
-            if EmbeddingContract.from_detection(detection) != active
-        ]
-        retained_pets = [
-            pet for pet in self.get_all_pet_records() if EmbeddingContract.from_pet(pet) != active
-        ]
-        self.replace_all(
-            retained_detections + clustered_detections,
-            retained_pets + pets,
-            operation_id=operation_id,
-            operation_kind="pet_recluster",
-        )
-        return len(clustered_detections)
+            embedding_dimension = int(self.get_scan_metadata("active_embedding_dimension") or 0)
+            with closing(self._connect()) as conn:
+                seed_rows = conn.execute(
+                    """
+                    SELECT pet_id
+                    FROM pet_clustering_consolidation_queue
+                    WHERE target_version = ? AND generation_id = ?
+                    ORDER BY pet_id
+                    """,
+                    (target, generation_id),
+                ).fetchall()
+                if not embedding_version or embedding_dimension <= 0:
+                    contract_rows = conn.execute(
+                        """
+                        SELECT DISTINCT embedding_pipeline_version, embedding_dim
+                        FROM pet_detections
+                        WHERE generation_id = ?
+                        """,
+                        (generation_id,),
+                    ).fetchall()
+                    if len(contract_rows) == 1:
+                        embedding_version = str(
+                            contract_rows[0]["embedding_pipeline_version"] or ""
+                        )
+                        embedding_dimension = int(contract_rows[0]["embedding_dim"] or 0)
+            seed_ids = tuple(str(row["pet_id"]) for row in seed_rows if row["pet_id"])
+            contract = EmbeddingContract(
+                pipeline_version=embedding_version,
+                dimension=embedding_dimension,
+                generation_id=generation_id,
+            )
+            context = self._profiles_for_contract(contract)
+            profiles = context.profiles
+            member_cache: dict[str, tuple[PetDetectionRecord, ...]] = {}
+
+            def members_for(pet_id: str) -> tuple[PetDetectionRecord, ...]:
+                cached = member_cache.get(pet_id)
+                if cached is not None:
+                    return cached
+                with closing(self._connect()) as member_conn:
+                    rows = self._select_detections_by_pet_ids(member_conn, (pet_id,))
+                members = tuple(
+                    detection
+                    for detection in (self._detection_from_row(row) for row in rows)
+                    if EmbeddingContract.from_detection(detection) == contract
+                )
+                member_cache[pet_id] = members
+                return members
+
+            processed_pet_ids: set[str] = set()
+            changed_old_pet_ids: set[str] = set()
+            changed_new_pet_ids: set[str] = set()
+            changed_detections: list[PetDetectionRecord] = []
+            rebuilt_pets: list[PetRecord] = []
+            changed_asset_ids: list[str] = []
+            diameter_threshold = distance_threshold * PET_CLUSTER_DIAMETER_MULTIPLIER
+
+            for seed_id in seed_ids:
+                if seed_id in processed_pet_ids:
+                    continue
+                if cancelled():
+                    raise PetClusteringConsolidationCancelledError()
+                seed_members = members_for(seed_id)
+                if not seed_members:
+                    processed_pet_ids.add(seed_id)
+                    continue
+                component = {seed_id}
+                frontier = [seed_id]
+                while frontier:
+                    if cancelled():
+                        raise PetClusteringConsolidationCancelledError()
+                    current_id = frontier.pop()
+                    current_members = members_for(current_id)
+                    current_species = _normalize_species_label(
+                        profiles.get(current_id).species_label
+                        if current_id in profiles
+                        else current_members[0].species_label
+                        if current_members
+                        else None
+                    )
+                    candidate_ids: set[str] = set()
+                    for detection in current_members:
+                        candidate_ids.update(
+                            self._candidate_pet_ids_within_distance(
+                                detection.embedding,
+                                species_label=current_species,
+                                candidate_index=context.consolidation_candidate_index,
+                                maximum_distance=diameter_threshold,
+                            )
+                        )
+                    for candidate_id in sorted(candidate_ids):
+                        if candidate_id in component or candidate_id not in profiles:
+                            continue
+                        candidate_members = members_for(candidate_id)
+                        if not candidate_members:
+                            continue
+                        if any(
+                            cosine_distance(left.embedding, right.embedding) <= distance_threshold
+                            for left in current_members
+                            for right in candidate_members
+                        ):
+                            component.add(candidate_id)
+                            frontier.append(candidate_id)
+
+                processed_pet_ids.update(component)
+                component_members = sorted(
+                    (detection for pet_id in component for detection in members_for(pet_id)),
+                    key=lambda detection: detection.detection_id,
+                )
+                if not component_members:
+                    continue
+                original_ids = {
+                    detection.detection_id: str(detection.pet_id or "")
+                    for detection in component_members
+                }
+                if len(component_members) == 1:
+                    consolidated = component_members
+                    component_pets = build_pet_records_from_detections(component_members)
+                else:
+                    consolidated, component_pets = cluster_pet_records(
+                        component_members,
+                        distance_threshold=distance_threshold,
+                    )
+                    if self._state_repo is not None:
+                        consolidated, component_pets = canonicalize_pet_identities(
+                            consolidated,
+                            component_pets,
+                            self._state_repo,
+                            distance_threshold=distance_threshold,
+                        )
+                    else:
+                        grouped: dict[str, list[PetDetectionRecord]] = {}
+                        for detection in consolidated:
+                            grouped.setdefault(str(detection.pet_id or ""), []).append(detection)
+                        replacements: dict[str, str] = {}
+                        used_ids: set[str] = set()
+                        for raw_id, members in sorted(
+                            grouped.items(),
+                            key=lambda item: min(member.detection_id for member in item[1]),
+                        ):
+                            votes: dict[str, int] = {}
+                            for member in members:
+                                original_id = original_ids.get(member.detection_id, "")
+                                if original_id and original_id not in used_ids:
+                                    votes[original_id] = votes.get(original_id, 0) + 1
+                            selected_id = (
+                                min(votes, key=lambda pet_id: (-votes[pet_id], pet_id))
+                                if votes
+                                else raw_id
+                            )
+                            replacements[raw_id] = selected_id
+                            used_ids.add(selected_id)
+                        consolidated = [
+                            replace(
+                                detection,
+                                pet_id=replacements.get(
+                                    str(detection.pet_id or ""),
+                                    detection.pet_id,
+                                ),
+                            )
+                            for detection in consolidated
+                        ]
+                        names = {
+                            pet_id: profiles[pet_id].name
+                            for pet_id in component
+                            if pet_id in profiles
+                        }
+                        created = {
+                            pet_id: profiles[pet_id].created_at
+                            for pet_id in component
+                            if pet_id in profiles
+                        }
+                        component_pets = build_pet_records_from_detections(
+                            consolidated,
+                            names_by_pet_id=names,
+                            created_at_by_pet_id=created,
+                        )
+
+                new_ids = {
+                    detection.detection_id: str(detection.pet_id or "")
+                    for detection in consolidated
+                }
+                if new_ids == original_ids:
+                    continue
+                changed_old_pet_ids.update(value for value in original_ids.values() if value)
+                changed_new_pet_ids.update(value for value in new_ids.values() if value)
+                changed_detections.extend(consolidated)
+                rebuilt_pets.extend(component_pets)
+                changed_asset_ids.extend(
+                    detection.asset_id for detection in consolidated if detection.asset_id
+                )
+
+            if cancelled():
+                raise PetClusteringConsolidationCancelledError()
+
+            affected_pet_ids = tuple(sorted(changed_old_pet_ids | changed_new_pet_ids))
+            deduplicated_pets = {
+                pet.pet_id: pet for pet in rebuilt_pets if pet.pet_id in changed_new_pet_ids
+            }
+            rebuilt_pets = [deduplicated_pets[pet_id] for pet_id in sorted(deduplicated_pets)]
+            changed_asset_ids_tuple = tuple(dict.fromkeys(changed_asset_ids))
+            added = tuple(sorted(changed_new_pet_ids - changed_old_pet_ids))
+            removed = tuple(sorted(changed_old_pet_ids - changed_new_pet_ids))
+            updated = tuple(sorted(changed_old_pet_ids & changed_new_pet_ids))
+            commit_payload = {
+                "operation_kind": "pet_cluster_consolidate",
+                "clustering_pipeline_target": target,
+                "generation_id": generation_id,
+                "processed_seed_count": len(seed_ids),
+                "affected_pet_ids": list(affected_pet_ids),
+                "changed_pet_ids": list(affected_pet_ids),
+                "changed_asset_ids": list(changed_asset_ids_tuple),
+                "added_pet_ids": list(added),
+                "updated_pet_ids": list(updated),
+                "removed_pet_ids": list(removed),
+            }
+            with closing(self._connect()) as conn:
+                if changed_detections:
+                    conn.executemany(
+                        "UPDATE pet_detections SET pet_id = ? WHERE detection_id = ?",
+                        [
+                            (str(detection.pet_id or ""), detection.detection_id)
+                            for detection in changed_detections
+                        ],
+                    )
+                for chunk in _chunked(affected_pet_ids, 500):
+                    placeholders = ", ".join("?" for _ in chunk)
+                    conn.execute(f"DELETE FROM pets WHERE pet_id IN ({placeholders})", chunk)
+                if rebuilt_pets:
+                    conn.executemany(
+                        """
+                        INSERT INTO pets (
+                            pet_id, name, key_detection_id, detection_count,
+                            center_embedding, embedding_dim, created_at, updated_at,
+                            sample_count, profile_state, species_label,
+                            embedding_pipeline_version, generation_id,
+                            boundary_embeddings, boundary_sample_count
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [self._pet_to_row(pet) for pet in rebuilt_pets],
+                    )
+                conn.execute(
+                    """
+                    DELETE FROM pet_clustering_consolidation_queue
+                    WHERE target_version = ? AND generation_id = ?
+                    """,
+                    (target, generation_id),
+                )
+                self._set_scan_metadata_in_connection(
+                    conn,
+                    {
+                        "clustering_pipeline_target": target,
+                        "clustering_pipeline_version": target,
+                        "clustering_consolidation_state": "clean",
+                        "updated_at": utc_now_iso(),
+                    },
+                )
+                self._write_runtime_commit(conn, operation_id, commit_payload)
+                conn.commit()
+                self._sync_runtime_state_payload(
+                    commit_payload,
+                    rebuilt_pets,
+                    changed_detections,
+                )
+                self._mark_runtime_state_synced(conn, operation_id)
+                conn.commit()
+            self._invalidate_profile_indexes()
+            return PetClusteringConsolidationResult(
+                processed_seed_count=len(seed_ids),
+                changed_asset_ids=changed_asset_ids_tuple,
+                added_pet_ids=added,
+                updated_pet_ids=updated,
+                removed_pet_ids=removed,
+            )
 
     def get_all_detections(self) -> list[PetDetectionRecord]:
         self.initialize()
@@ -2608,6 +3188,25 @@ class PetRepository:
                     pet_id, asset_id, embedding_pipeline_version,
                     embedding_dimension, generation_id
                 )
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_clustering_consolidation_queue (
+                target_version TEXT NOT NULL,
+                generation_id INTEGER NOT NULL,
+                pet_id TEXT NOT NULL,
+                queued_at TEXT NOT NULL,
+                PRIMARY KEY (target_version, generation_id, pet_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pet_clustering_queue_generation
+            ON pet_clustering_consolidation_queue (
+                generation_id, target_version, pet_id
             )
             """
         )

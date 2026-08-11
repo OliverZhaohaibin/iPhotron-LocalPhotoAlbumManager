@@ -1114,13 +1114,13 @@ def test_generation_contract_is_reused_and_activated_in_one_transaction(
     second, second_generation = repository.assign_embedding_generation([detection])
     assert first_generation == second_generation
     assert first[0].generation_id == second[0].generation_id
+    repository.set_scan_metadata("clustering_pipeline_version", "cluster-v1")
 
     repository.activate_embedding_generation(
         generation_id=first_generation,
         embedding_pipeline_version="embedding-v2",
         embedding_dimension=detection.embedding_dim,
         detector_pipeline_version="detector-v5",
-        clustering_pipeline_version="cluster-v2",
     )
     with sqlite3.connect(repository.db_path) as connection:
         metadata = dict(connection.execute("SELECT key, value FROM scan_metadata"))
@@ -1135,7 +1135,7 @@ def test_generation_contract_is_reused_and_activated_in_one_transaction(
     assert metadata["active_embedding_pipeline_version"] == "embedding-v2"
     assert metadata["active_embedding_dimension"] == str(detection.embedding_dim)
     assert metadata["detector_pipeline_version"] == "detector-v5"
-    assert metadata["clustering_pipeline_version"] == "cluster-v2"
+    assert metadata["clustering_pipeline_version"] == "cluster-v1"
     assert active == ("embedding-v2", detection.embedding_dim, "active")
 
 
@@ -1169,7 +1169,7 @@ def test_unstable_profile_only_reuses_identity_by_exact_pet_key(tmp_path: Path) 
     assert repository.get_detection("same-key").pet_id == "pet-a"  # type: ignore[union-attr]
 
 
-def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -> None:
+def test_stable_profile_match_validates_full_cluster_diameter(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     close = [
         _detection(f"close-{index}", asset_id=f"asset-{index}", pet_id="pet-a")
@@ -1178,7 +1178,7 @@ def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -
     distant = _detection(
         "distant",
         asset_id="asset-distant",
-        embedding=np.asarray([0.8, 0.6, 0.0]),
+        embedding=np.asarray([0.7, np.sqrt(0.51), 0.0]),
         pet_id="pet-a",
     )
     members = [*close, distant]
@@ -1204,7 +1204,7 @@ def test_stable_profile_match_validates_every_persisted_member(tmp_path: Path) -
     assert repository.get_detection("candidate").pet_id != "pet-a"  # type: ignore[union-attr]
 
 
-def test_complete_link_excludes_zero_detection_replacement_assets(tmp_path: Path) -> None:
+def test_bounded_cluster_excludes_zero_detection_replacement_assets(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     outlier = _detection(
         "outlier",
@@ -1240,7 +1240,7 @@ def test_complete_link_excludes_zero_detection_replacement_assets(tmp_path: Path
     assert repository.get_detection("outlier") is None
 
 
-def test_complete_link_expands_ann_shortlist_until_ninth_candidate(tmp_path: Path) -> None:
+def test_bounded_cluster_expands_ann_shortlist_until_ninth_candidate(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db")
     detection = _detection("candidate", asset_id="asset-candidate")
     ordered = [(index / 100.0, f"pet-{index}") for index in range(1, 10)]
@@ -1283,7 +1283,7 @@ def test_complete_link_expands_ann_shortlist_until_ninth_candidate(tmp_path: Pat
         ([(0.01, f"pet-{index}") for index in range(8)], [8, 16]),
     ],
 )
-def test_complete_link_progressive_search_stops_at_threshold_or_exhaustion(
+def test_bounded_cluster_progressive_search_stops_at_threshold_or_exhaustion(
     tmp_path: Path,
     ordered: list[tuple[float, str]],
     expected_limits: list[int],
@@ -1313,6 +1313,46 @@ def test_complete_link_progressive_search_stops_at_threshold_or_exhaustion(
 
     assert matched == ""
     assert candidate_index.limits == expected_limits
+
+
+@pytest.mark.parametrize(
+    ("farthest_member_distance", "expected_pet_id"),
+    [(0.62, "pet-a"), (0.64, "")],
+)
+def test_stable_incremental_match_uses_link_and_cluster_diameter_bounds(
+    tmp_path: Path,
+    farthest_member_distance: float,
+    expected_pet_id: str,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db")
+    candidate = _detection("candidate")
+
+    class CandidateIndex:
+        def search(self, _embedding, *, species_label, limit):
+            assert species_label == "dog"
+            assert limit == 8
+            return [(0.3, "pet-a")]
+
+    def vector_at_cosine_distance(distance: float) -> np.ndarray:
+        cosine = 1.0 - distance
+        return normalize_vector(np.asarray([cosine, np.sqrt(1.0 - cosine * cosine), 0.0]))
+
+    matched = repository._nearest_compatible_pet_id(
+        candidate,
+        member_samples={
+            "pet-a": (
+                ("asset-near", vector_at_cosine_distance(0.40)),
+                ("asset-far", vector_at_cosine_distance(farthest_member_distance)),
+            )
+        },
+        staged_samples={},
+        excluded_asset_ids=set(),
+        candidate_index=CandidateIndex(),  # type: ignore[arg-type]
+        staged_candidate_species={},
+        distance_threshold=0.42,
+    )
+
+    assert matched == expected_pet_id
 
 
 def test_stable_incremental_matching_is_input_order_invariant(tmp_path: Path) -> None:
@@ -1722,7 +1762,7 @@ def test_move_and_merge_recover_after_runtime_commit(
         assert {pet.pet_id for pet in recovered_repository.get_all_pet_records()} == {"pet-b"}
 
 
-def test_recluster_recovers_state_and_pipeline_metadata(
+def test_local_consolidation_recovers_state_and_pipeline_metadata(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1743,6 +1783,7 @@ def test_recluster_recovers_state_and_pipeline_metadata(
     )
     coordinator = PetIndexCoordinator(tmp_path)
     monkeypatch.setattr(coordinator, "_repository", lambda: repository)
+    coordinator.prepare_clustering_pipeline(clustering_pipeline_target="cluster-v-next")
     state = repository.state_repository
     assert state is not None
 
@@ -1750,14 +1791,14 @@ def test_recluster_recovers_state_and_pipeline_metadata(
         raise sqlite3.OperationalError("injected state sync failure")
 
     monkeypatch.setattr(state, "sync_scan_results", fail_state_sync)
-    with pytest.raises(sqlite3.OperationalError, match="injected state sync failure"):
-        coordinator.recluster_for_pipeline_upgrade(
-            clustering_pipeline_version="cluster-v-next",
+    with pytest.raises(PetSnapshotCommittedError, match="durable state recovery"):
+        coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target="cluster-v-next",
             distance_threshold=0.2,
         )
 
     operation = coordinator._journal.unfinished()[0]
-    assert operation.kind == "pet_recluster"
+    assert operation.kind == "pet_cluster_consolidate"
     assert repository.get_runtime_commit(operation.operation_id)["state_synced"] is False  # type: ignore[index]
 
     recovered = PetIndexCoordinator(tmp_path)
@@ -1769,6 +1810,14 @@ def test_recluster_recovers_state_and_pipeline_metadata(
         "cluster-v-next"
     )
     assert recovered._journal.unfinished() == ()
+    operation_db = tmp_path / ".iPhoto" / "recognition" / "operations.db"
+    with sqlite3.connect(operation_db) as connection:
+        outbox_rows = connection.execute(
+            "SELECT event_json FROM event_outbox WHERE operation_id = ?",
+            (operation.operation_id,),
+        ).fetchall()
+    assert len(outbox_rows) == 1
+    assert json.loads(outbox_rows[0][0])["changed_asset_ids"] == ["asset-a", "asset-b"]
 
 
 def _detection(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import ssl
 import sys
@@ -85,12 +86,17 @@ PET_MODEL_MANIFEST = _load_pet_model_manifest()
 _DETECTOR_MANIFEST = PET_MODEL_MANIFEST["detector"]
 _EMBEDDER_MANIFEST = PET_MODEL_MANIFEST["embedder"]
 SUPPORTED_DEFAULT_SPECIES = frozenset({"cat", "dog"})
-PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-people-priority-v5"
-PET_CLUSTERING_PIPELINE_VERSION = "species-complete-link-v1"
+PET_DETECTOR_PIPELINE_VERSION = "yolox-letterbox-tiles-people-priority-v6"
+PET_CLUSTERING_PIPELINE_VERSION = "species-bounded-single-link-v3"
 PET_EMBEDDING_PIPELINE_VERSION = "dinov2-vits14-imagenet-normalized-v1"
 PET_KEY_VERSION = "v2"
 PET_DETECTOR_KEY_VERSION = "yolox-nano-coco-0.1.1rc0-raw-bgr-v1"
 DEFAULT_PET_DISTANCE_THRESHOLD = 0.42
+PET_CLUSTER_DIAMETER_MULTIPLIER = 1.5
+PET_PET_IOU_THRESHOLD = 0.50
+PET_PET_SMALLER_BOX_COVERAGE_THRESHOLD = 0.90
+PET_PET_NORMALIZED_CENTER_DISTANCE_THRESHOLD = 0.40
+PET_PET_CROSS_SPECIES_MUTUAL_COVERAGE_THRESHOLD = 0.90
 PET_PEOPLE_IOU_THRESHOLD = 0.50
 PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD = 0.90
 PET_PEOPLE_LARGER_PET_RATIO = 1.50
@@ -810,54 +816,119 @@ def _cluster_pet_detection_labels(
     embeddings = np.stack([detection.embedding for detection in detections], axis=0).astype(
         np.float32
     )
-    return _cluster_embeddings_complete_link(
+    return _cluster_embeddings_bounded_single_link(
         embeddings,
-        species_labels=[detection.species_label for detection in detections],
+        compatibility_keys=[
+            (
+                _normalize_species_label(detection.species_label),
+                str(detection.embedding_pipeline_version or ""),
+                int(detection.embedding_dim),
+                int(detection.generation_id),
+            )
+            for detection in detections
+        ],
+        member_keys=[detection.detection_id for detection in detections],
         distance_threshold=distance_threshold,
     )
 
 
-def _cluster_embeddings_complete_link(
+def _cluster_embeddings_bounded_single_link(
     embeddings: np.ndarray,
     *,
-    species_labels: Sequence[str | None],
+    compatibility_keys: Sequence[object],
+    member_keys: Sequence[str] | None = None,
     distance_threshold: float,
 ) -> np.ndarray:
     count = int(embeddings.shape[0])
     if count == 0:
         return np.empty((0,), dtype=np.int32)
-    distance_matrix = cosine_distance_matrix(embeddings)
+    return _cluster_distance_matrix_bounded_single_link(
+        cosine_distance_matrix(embeddings),
+        compatibility_keys=compatibility_keys,
+        member_keys=member_keys,
+        link_threshold=distance_threshold,
+        diameter_threshold=distance_threshold * PET_CLUSTER_DIAMETER_MULTIPLIER,
+    )
+
+
+def _cluster_distance_matrix_bounded_single_link(
+    distance_matrix: np.ndarray,
+    *,
+    compatibility_keys: Sequence[object],
+    link_threshold: float,
+    diameter_threshold: float,
+    member_keys: Sequence[str] | None = None,
+) -> np.ndarray:
+    """Cluster nearest-neighbour links without allowing unbounded similarity chains."""
+
+    count = int(distance_matrix.shape[0])
+    if count == 0:
+        return np.empty((0,), dtype=np.int32)
+    if distance_matrix.shape != (count, count):
+        raise ValueError("Pet distance matrix must be square.")
+    if len(compatibility_keys) != count:
+        raise ValueError("Pet compatibility key count must match the distance matrix.")
+    stable_keys = tuple(member_keys or (str(index) for index in range(count)))
+    if len(stable_keys) != count:
+        raise ValueError("Pet member key count must match the distance matrix.")
+
     clusters: list[list[int]] = [[index] for index in range(count)]
-    normalized_species = [_normalize_species_label(label) for label in species_labels]
+    diameters: list[float] = [0.0] * count
 
     while True:
         best_pair: tuple[int, int] | None = None
-        best_distance = float("inf")
+        best_key: tuple[float, float, tuple[str, ...], tuple[str, ...]] | None = None
+        best_diameter = 0.0
         for left_index in range(len(clusters)):
             for right_index in range(left_index + 1, len(clusters)):
                 left = clusters[left_index]
                 right = clusters[right_index]
-                if not _species_compatible(left, right, normalized_species):
+                if not _cluster_keys_compatible(left, right, compatibility_keys):
                     continue
-                complete_distance = _complete_link_distance(left, right, distance_matrix)
-                if complete_distance > distance_threshold:
+                cross_distances = [
+                    float(distance_matrix[left_member, right_member])
+                    for left_member in left
+                    for right_member in right
+                ]
+                connection_distance = min(cross_distances)
+                if connection_distance > link_threshold:
                     continue
-                tie_key = (complete_distance, left[0], right[0])
-                best_key = (
-                    best_distance,
-                    clusters[best_pair[0]][0] if best_pair is not None else count,
-                    clusters[best_pair[1]][0] if best_pair is not None else count,
+                merged_diameter = max(
+                    diameters[left_index],
+                    diameters[right_index],
+                    max(cross_distances),
                 )
-                if tie_key < best_key:
-                    best_distance = complete_distance
+                if merged_diameter > diameter_threshold:
+                    continue
+                left_keys = tuple(sorted(stable_keys[index] for index in left))
+                right_keys = tuple(sorted(stable_keys[index] for index in right))
+                ordered_cluster_keys = tuple(sorted((left_keys, right_keys)))
+                tie_key = (
+                    connection_distance,
+                    merged_diameter,
+                    ordered_cluster_keys[0],
+                    ordered_cluster_keys[1],
+                )
+                if best_key is None or tie_key < best_key:
+                    best_key = tie_key
                     best_pair = (left_index, right_index)
+                    best_diameter = merged_diameter
         if best_pair is None:
             break
         left_index, right_index = best_pair
         merged = sorted(clusters[left_index] + clusters[right_index])
         clusters[left_index] = merged
+        diameters[left_index] = best_diameter
         del clusters[right_index]
-        clusters.sort(key=lambda values: values[0])
+        del diameters[right_index]
+        ordering = sorted(
+            range(len(clusters)),
+            key=lambda cluster_index: tuple(
+                sorted(stable_keys[index] for index in clusters[cluster_index])
+            ),
+        )
+        clusters = [clusters[index] for index in ordering]
+        diameters = [diameters[index] for index in ordering]
 
     labels = np.empty((count,), dtype=np.int32)
     for cluster_id, members in enumerate(clusters):
@@ -866,25 +937,13 @@ def _cluster_embeddings_complete_link(
     return labels
 
 
-def _complete_link_distance(
+def _cluster_keys_compatible(
     left: Sequence[int],
     right: Sequence[int],
-    distance_matrix: np.ndarray,
-) -> float:
-    return max(
-        float(distance_matrix[left_index, right_index])
-        for left_index in left
-        for right_index in right
-    )
-
-
-def _species_compatible(
-    left: Sequence[int],
-    right: Sequence[int],
-    species_labels: Sequence[str | None],
+    compatibility_keys: Sequence[object],
 ) -> bool:
-    labels = {species_labels[index] for index in [*left, *right]}
-    return len(labels) <= 1
+    keys = {compatibility_keys[index] for index in [*left, *right]}
+    return len(keys) == 1
 
 
 def _detection_species_compatible(
@@ -898,22 +957,45 @@ def _detection_species_compatible(
     return len(set(labels)) <= 1
 
 
+def _detection_contracts_compatible(
+    left: Sequence[PetDetectionRecord],
+    right: Sequence[PetDetectionRecord],
+) -> bool:
+    contracts = {
+        (
+            str(detection.embedding_pipeline_version or ""),
+            int(detection.embedding_dim),
+            int(detection.generation_id),
+        )
+        for detection in [*left, *right]
+    }
+    return len(contracts) <= 1
+
+
 def _detection_groups_compatible(
     left: Sequence[PetDetectionRecord],
     right: Sequence[PetDetectionRecord],
     *,
     distance_threshold: float,
 ) -> bool:
-    if not _detection_species_compatible(left, right):
+    if not _detection_species_compatible(left, right) or not _detection_contracts_compatible(
+        left, right
+    ):
         return False
-    for left_detection in left:
-        for right_detection in right:
-            if (
-                cosine_distance(left_detection.embedding, right_detection.embedding)
-                > distance_threshold
-            ):
-                return False
-    return True
+    if not left or not right:
+        return True
+    cross_distances = [
+        cosine_distance(left_detection.embedding, right_detection.embedding)
+        for left_detection in left
+        for right_detection in right
+    ]
+    if min(cross_distances) > distance_threshold:
+        return False
+    members = [*left, *right]
+    distance_matrix = cosine_distance_matrix(
+        np.stack([member.embedding for member in members], axis=0)
+    )
+    return float(distance_matrix.max()) <= (distance_threshold * PET_CLUSTER_DIAMETER_MULTIPLIER)
 
 
 def _dominant_species_label(detections: Sequence[PetDetectionRecord]) -> str | None:
@@ -1406,27 +1488,15 @@ def _yolox_grids(input_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate(grid_parts, axis=0), np.concatenate(stride_parts, axis=0)
 
 
-def _nms_pet_boxes(
-    boxes: list[_DetectedPetBox],
-    *,
-    threshold: float = 0.5,
-) -> list[_DetectedPetBox]:
-    selected: list[_DetectedPetBox] = []
-    for box in sorted(boxes, key=lambda item: item.confidence, reverse=True):
-        if any(
-            existing.species_label == box.species_label
-            and _bbox_iou(existing.bbox, box.bbox) >= threshold
-            for existing in selected
-        ):
-            continue
-        selected.append(box)
-    return selected
-
-
 def _dedupe_supported_species_boxes(
     boxes: list[_DetectedPetBox],
     *,
-    threshold: float = 0.65,
+    threshold: float = PET_PET_IOU_THRESHOLD,
+    smaller_box_coverage_threshold: float = PET_PET_SMALLER_BOX_COVERAGE_THRESHOLD,
+    normalized_center_distance_threshold: float = PET_PET_NORMALIZED_CENTER_DISTANCE_THRESHOLD,
+    cross_species_mutual_coverage_threshold: float = (
+        PET_PET_CROSS_SPECIES_MUTUAL_COVERAGE_THRESHOLD
+    ),
     cross_species_threshold: float = 0.90,
     cross_species_score_margin: float = 0.25,
 ) -> list[_DetectedPetBox]:
@@ -1435,14 +1505,58 @@ def _dedupe_supported_species_boxes(
         suppress = False
         for existing in selected:
             overlap = _bbox_iou(existing.bbox, box.bbox)
-            if existing.species_label == box.species_label and overlap >= threshold:
-                suppress = True
-                break
-            if (
+            existing_box_coverage, candidate_box_coverage = _bbox_pair_coverages(
+                existing.bbox,
+                box.bbox,
+            )
+            smaller_box_coverage = max(existing_box_coverage, candidate_box_coverage)
+            normalized_center_distance = _bbox_normalized_center_distance(
+                existing.bbox,
+                box.bbox,
+            )
+            reason = ""
+            if existing.species_label == box.species_label:
+                if overlap >= threshold:
+                    reason = "same_species_iou"
+                elif (
+                    smaller_box_coverage >= smaller_box_coverage_threshold
+                    and normalized_center_distance <= normalized_center_distance_threshold
+                ):
+                    reason = "same_species_containment"
+            elif (
+                existing.species_label in SUPPORTED_DEFAULT_SPECIES
+                and box.species_label in SUPPORTED_DEFAULT_SPECIES
+                and existing_box_coverage >= cross_species_mutual_coverage_threshold
+                and candidate_box_coverage >= cross_species_mutual_coverage_threshold
+            ):
+                reason = "cross_species_mutual_coverage"
+            elif (
                 existing.species_label != box.species_label
                 and overlap >= cross_species_threshold
                 and existing.confidence - box.confidence >= cross_species_score_margin
             ):
+                reason = "cross_species_iou"
+
+            if reason:
+                _LOGGER.debug(
+                    "Suppressed pet box: reason=%s species=%s candidate_confidence=%.3f "
+                    "candidate_bbox=%s kept_species=%s kept_confidence=%.3f kept_bbox=%s "
+                    "iou=%.3f smaller_box_coverage=%.3f kept_box_coverage=%.3f "
+                    "candidate_box_coverage=%.3f "
+                    "normalized_center_distance=%.3f",
+                    reason,
+                    box.species_label,
+                    box.confidence,
+                    box.bbox,
+                    existing.species_label,
+                    existing.confidence,
+                    existing.bbox,
+                    overlap,
+                    smaller_box_coverage,
+                    existing_box_coverage,
+                    candidate_box_coverage,
+                    normalized_center_distance,
+                )
                 suppress = True
                 break
         if suppress:
@@ -1459,6 +1573,35 @@ def _bbox_iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int])
     if union <= 0:
         return 0.0
     return intersection / float(union)
+
+
+def _bbox_pair_coverages(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> tuple[float, float]:
+    left_area = max(0, left[2]) * max(0, left[3])
+    right_area = max(0, right[2]) * max(0, right[3])
+    if left_area <= 0 or right_area <= 0:
+        return 0.0, 0.0
+    intersection = _bbox_intersection_area(left, right)
+    return intersection / float(left_area), intersection / float(right_area)
+
+
+def _bbox_normalized_center_distance(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> float:
+    left_area = max(0, left[2]) * max(0, left[3])
+    right_area = max(0, right[2]) * max(0, right[3])
+    smaller_area = min(left_area, right_area)
+    if smaller_area <= 0:
+        return float("inf")
+    left_center = (left[0] + left[2] / 2.0, left[1] + left[3] / 2.0)
+    right_center = (right[0] + right[2] / 2.0, right[1] + right[3] / 2.0)
+    return math.hypot(
+        left_center[0] - right_center[0],
+        left_center[1] - right_center[1],
+    ) / math.sqrt(smaller_area)
 
 
 def _bbox_intersection_area(

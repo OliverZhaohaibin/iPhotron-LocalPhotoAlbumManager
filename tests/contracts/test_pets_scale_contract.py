@@ -4,12 +4,16 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from iPhoto.library.workers.pet_scan_worker import PetScanWorker
+from iPhoto.pets.index_coordinator import PetIndexCoordinator
+from iPhoto.pets.pipeline import PET_CLUSTERING_PIPELINE_VERSION
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
-from iPhoto.pets.repository import PetRepository
+from iPhoto.pets.repository import EmbeddingContract, PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 
 pytestmark = pytest.mark.pets_scale_contract
@@ -29,6 +33,9 @@ def test_incremental_commit_scales_to_50k_without_full_rewrite(tmp_path: Path) -
     assert fifty_k["seconds"] <= max(ten_k["seconds"] * 8.0, 0.5)
     assert fifty_k["seconds"] <= 5.0
     assert fifty_k["wal_delta"] <= 10 * 1024 * 1024
+    assert fifty_k["consolidation_seconds"] <= 5.0
+    assert fifty_k["consolidation_wal_delta"] <= 10 * 1024 * 1024
+    assert fifty_k["consolidation_queue_clean"] is True
     assert fifty_k["rss_bytes"] <= 1536 * 1024 * 1024
     assert not any(
         statement.strip().upper() in {"DELETE FROM PETS", "DELETE FROM PET_DETECTIONS"}
@@ -139,9 +146,15 @@ def test_warm_incremental_commit_uses_bounded_sqlite_connections(tmp_path: Path)
 
 def _benchmark_incremental(root: Path, count: int) -> dict[str, object]:
     root.mkdir(parents=True)
-    repository = PetRepository(root / "pet_index.db", root / "pet_state.db")
+    coordinator = PetIndexCoordinator(root)
+    repository = coordinator._repository()
     detections, pets = _synthetic_snapshot(count)
     repository.replace_all(detections, pets)
+    repository.activate_embedding_generation(
+        generation_id=0,
+        embedding_pipeline_version=detections[0].embedding_pipeline_version,
+        embedding_dimension=detections[0].embedding_dim,
+    )
     wal_path = Path(f"{repository.db_path}-wal")
     wal_before = wal_path.stat().st_size if wal_path.exists() else 0
 
@@ -176,11 +189,63 @@ def _benchmark_incremental(root: Path, count: int) -> dict[str, object]:
     elapsed = time.perf_counter() - started
     assert not result.added_pet_ids
     assert len(result.updated_pet_ids) == 2
+
+    # Queue one isolated species so the worker exercises the real durable drain
+    # path without expanding the affected component beyond the single seed.
+    cat = _detection(
+        detection_id="consolidation-cat",
+        asset_id="consolidation-cat-asset",
+        embedding=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        pet_id=None,
+        species_label="cat",
+    )
+    queued = repository.replace_assets_incrementally(
+        [cat.asset_id],
+        [cat],
+        distance_threshold=0.42,
+        clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+    )
+    assert len(queued.added_pet_ids) == 1
+    # The incremental assignment has already warmed and updated the exact ANN
+    # context. Consolidation must now stay within the durable queue/component.
+    contract = EmbeddingContract.from_detection(cat)
+    assert repository._profiles_for_contract(contract).profiles
+
+    def fail_global_path(*_args, **_kwargs):
+        raise AssertionError("worker drain used a forbidden full-library path")
+
+    repository.get_all_detections = fail_global_path  # type: ignore[method-assign]
+    repository.get_all_pet_records = fail_global_path  # type: ignore[method-assign]
+    repository.replace_all = fail_global_path  # type: ignore[method-assign]
+    consolidation_wal_before = wal_path.stat().st_size if wal_path.exists() else 0
+    worker = PetScanWorker(
+        root,
+        pet_service=SimpleNamespace(coordinator=coordinator),  # type: ignore[arg-type]
+    )
+    consolidation_started = time.perf_counter()
+    assert worker._consolidate_pending_clustering(SimpleNamespace(distance_threshold=0.42)) is False
+    consolidation_elapsed = time.perf_counter() - consolidation_started
+    consolidation_wal_after = wal_path.stat().st_size if wal_path.exists() else 0
+    consolidation_queue_clean = (
+        repository.get_scan_metadata("clustering_pipeline_version")
+        == PET_CLUSTERING_PIPELINE_VERSION
+        and repository.get_scan_metadata("clustering_consolidation_state") == "clean"
+        and not repository.has_pending_clustering_consolidation(
+            target_version=PET_CLUSTERING_PIPELINE_VERSION
+        )
+    )
     wal_after = wal_path.stat().st_size if wal_path.exists() else 0
     rss_bytes = _peak_rss_bytes()
+    coordinator.close()
     return {
         "seconds": elapsed,
         "wal_delta": max(0, wal_after - wal_before),
+        "consolidation_seconds": consolidation_elapsed,
+        "consolidation_wal_delta": max(
+            0,
+            consolidation_wal_after - consolidation_wal_before,
+        ),
+        "consolidation_queue_clean": consolidation_queue_clean,
         "rss_bytes": rss_bytes,
         "sql": tuple(sql),
     }
@@ -215,9 +280,7 @@ def _benchmark_growth(
     original_index_update = repository._update_profile_indexes
     state_repository = repository.state_repository
     original_state_snapshot = (
-        state_repository._load_incremental_state
-        if state_repository is not None
-        else None
+        state_repository._load_incremental_state if state_repository is not None else None
     )
 
     def timed_assignment(*args, **kwargs):
@@ -463,6 +526,7 @@ def _detection(
     asset_id: str,
     embedding: np.ndarray,
     pet_id: str | None,
+    species_label: str = "dog",
 ) -> PetDetectionRecord:
     return PetDetectionRecord(
         detection_id=detection_id,
@@ -483,5 +547,5 @@ def _detection(
         detected_at=utc_now_iso(),
         image_width=800,
         image_height=600,
-        species_label="dog",
+        species_label=species_label,
     )

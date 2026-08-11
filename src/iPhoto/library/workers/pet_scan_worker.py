@@ -98,7 +98,7 @@ class PetScanWorker(QThread):
         self._prepare_detector_migration()
         if self._cancelled:
             return
-        self._recluster_for_clustering_upgrade(pipeline)
+        self._prepare_clustering_pipeline()
         self._prime_pending_rows()
         if self._cancelled:
             return
@@ -116,6 +116,29 @@ class PetScanWorker(QThread):
                     self._top_up_pending_rows()
                     if self._queue.empty():
                         self._mark_backfill_complete_if_drained()
+                        if not self._cancelled and self._has_pending_clustering_consolidation():
+                            try:
+                                if self._consolidate_pending_clustering(pipeline):
+                                    self.petIndexUpdated.emit()
+                            except PetSnapshotCommittedError as exc:
+                                LOGGER.error(
+                                    "Pet scan consolidation bookkeeping failed after commit: %s",
+                                    exc,
+                                    exc_info=True,
+                                )
+                                self.statusChanged.emit(str(exc))
+                                return
+                            except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
+                                LOGGER.warning("Pet scan consolidation unavailable: %s", exc)
+                                self.statusChanged.emit(str(exc))
+                                return
+                            except Exception as exc:  # noqa: BLE001  # pragma: no cover
+                                LOGGER.warning(
+                                    "Pet scan consolidation failed: %s", exc, exc_info=True
+                                )
+                                reason = str(exc).strip() or exc.__class__.__name__
+                                self.statusChanged.emit(f"Pet scan consolidation paused: {reason}")
+                                return
                         return
                 continue
 
@@ -259,7 +282,7 @@ class PetScanWorker(QThread):
                 retry_detected,
                 distance_threshold=pipeline.distance_threshold,
                 detector_pipeline_version=pipeline.detector_pipeline_version,
-                clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
+                clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
                 people_boxes_provider=self._pet_service.people_boxes_by_asset_ids,
                 staged_thumbnail_dir=staging_dir,
                 published_thumbnail_dir=thumbnail_dir,
@@ -269,15 +292,33 @@ class PetScanWorker(QThread):
             shutil.rmtree(staging_dir, ignore_errors=True)
         return event is not None
 
-    def _recluster_for_clustering_upgrade(self, pipeline: PetClusterPipeline) -> bool:
+    def _prepare_clustering_pipeline(self) -> bool:
         coordinator = self._pet_service.coordinator
         if coordinator is None:
             return False
-        reclustered_count = coordinator.recluster_for_pipeline_upgrade(
-            clustering_pipeline_version=PET_CLUSTERING_PIPELINE_VERSION,
-            distance_threshold=pipeline.distance_threshold,
+        queued_count = coordinator.prepare_clustering_pipeline(
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
         )
-        return reclustered_count > 0
+        return queued_count > 0
+
+    def _has_pending_clustering_consolidation(self) -> bool:
+        coordinator = self._pet_service.coordinator
+        if coordinator is None:
+            return False
+        return coordinator.has_pending_clustering_consolidation(
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+        )
+
+    def _consolidate_pending_clustering(self, pipeline: PetClusterPipeline) -> bool:
+        coordinator = self._pet_service.coordinator
+        if coordinator is None or self._cancelled:
+            return False
+        result = coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target=PET_CLUSTERING_PIPELINE_VERSION,
+            distance_threshold=pipeline.distance_threshold,
+            is_cancelled=lambda: self._cancelled,
+        )
+        return bool(result is not None and result.changed)
 
     def _prepare_detector_migration(self) -> None:
         repository = self._pet_service.repository()

@@ -196,6 +196,28 @@ def test_adjusted_image_worker_uses_viewport_backend_once() -> None:
     signals.completed.emit.assert_called_once_with(surface)
 
 
+def test_still_worker_reports_decode_duration_for_playback_regression() -> None:
+    source = Path("/tmp/photo.jpg")
+    signals = Mock()
+    request = _request(source)
+    surface = _surface(request)
+    backend = Mock(decode=Mock(return_value=surface))
+    worker = _StillSurfaceDecodeWorker(request, signals, backend)
+
+    with patch(
+        "iPhoto.gui.ui.controllers.player_view_controller.emit_detail_event"
+    ) as emit_event:
+        worker.run()
+
+    backend_event = next(
+        call
+        for call in emit_event.call_args_list
+        if call.args == ("backend_selected",)
+    )
+    assert backend_event.kwargs["backend"] == "fake"
+    assert backend_event.kwargs["duration_ms"] >= 0.0
+
+
 def test_lod_upgrade_failure_preserves_the_presented_surface() -> None:
     source = Path("/tmp/photo.jpg")
     fail_current = Mock()

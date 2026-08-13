@@ -21,8 +21,10 @@ def test_windows_collector_enables_required_runtime_probes() -> None:
     ):
         assert variable in script
     assert 'Marker "problem_reproduced"' in script
+    assert "Resolve-SourceApplicationProcess" in script
     assert "process_metrics.csv" in script
     assert "Compress-Archive" in script
+    assert "$replacementValues.ToArray()" in script
 
 
 def test_windows_collector_does_not_copy_user_media_or_index() -> None:

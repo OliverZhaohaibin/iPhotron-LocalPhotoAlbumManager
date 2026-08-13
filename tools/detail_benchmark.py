@@ -34,6 +34,7 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
     event_counts: dict[str, int] = defaultdict(int)
     cache_tiers: dict[str, int] = defaultdict(int)
     backend_counts: dict[str, int] = defaultdict(int)
+    backend_decode_values: dict[str, list[float]] = defaultdict(list)
     fallback_counts: dict[str, int] = defaultdict(int)
     gui_tasks: list[float] = []
     for path in paths:
@@ -63,7 +64,14 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
                 if stage == "surface_cache_hit" and isinstance(details, dict):
                     cache_tiers[str(details.get("tier") or "unknown")] += 1
                 if stage == "backend_selected" and isinstance(details, dict):
-                    backend_counts[str(details.get("backend") or "unknown")] += 1
+                    backend = str(details.get("backend") or "unknown")
+                    backend_counts[backend] += 1
+                    try:
+                        backend_decode_values[backend].append(
+                            max(0.0, float(details["duration_ms"]))
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        pass
                 if stage == "decode_fallback" and isinstance(details, dict):
                     fallback_counts[str(details.get("fallback") or "unknown")] += 1
 
@@ -124,6 +132,10 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
             "event_counts": dict(sorted(event_counts.items())),
             "surface_cache_hits": dict(sorted(cache_tiers.items())),
             "backend_distribution": dict(sorted(backend_counts.items())),
+            "backend_decode_ms": {
+                backend: _metric(samples)
+                for backend, samples in sorted(backend_decode_values.items())
+            },
             "fallback_distribution": dict(sorted(fallback_counts.items())),
             "decode_count": event_counts.get("backend_selected", 0),
             "gpu_upload_count": event_counts.get("gpu_upload", 0),

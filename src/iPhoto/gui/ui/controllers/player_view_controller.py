@@ -121,10 +121,11 @@ class _StillSurfaceDecodeWorker(QRunnable):
         try:
             decode_started = time.perf_counter()
             surface = self._backend.decode(self._request, self)
+            decode_elapsed_ms = (time.perf_counter() - decode_started) * 1000.0
             log_detail_profile(
                 "still_worker",
                 "decode",
-                (time.perf_counter() - decode_started) * 1000.0,
+                decode_elapsed_ms,
                 path=self._source.name,
             )
         except DecodeCancelledError:
@@ -168,6 +169,7 @@ class _StillSurfaceDecodeWorker(QRunnable):
             suffix=self._source.suffix.lower(),
             backend=surface.backend,
             decode_level=surface.decode_level,
+            duration_ms=decode_elapsed_ms,
         )
         if surface.fallback:
             emit_detail_event(

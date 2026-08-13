@@ -27,6 +27,7 @@ from iPhoto.gui.detail_surface_residency import (
 from iPhoto.utils.deps import load_pillow
 
 _MAX_DETAIL_SURFACE_BYTES = 192 * 1024 * 1024
+_WINDOWS_QT_PREFERRED_SUFFIXES = frozenset({".jpe", ".jpeg", ".jfif", ".jpg"})
 
 
 class DecodeCancelledError(RuntimeError):
@@ -79,7 +80,12 @@ class StillDecodeBackendRegistry:
                 self._qt,
                 fallback_name="imageio_to_qt",
             )
-        if self._platform == "win32" and self._windows is not None:
+        if (
+            self._platform == "win32"
+            and self._windows is not None
+            and request.source_identity.path.suffix.lower()
+            not in _WINDOWS_QT_PREFERRED_SUFFIXES
+        ):
             return FallbackStillDecodeBackend(
                 self._windows,
                 self._qt,

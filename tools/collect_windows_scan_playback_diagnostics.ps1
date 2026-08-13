@@ -106,6 +106,44 @@ function Add-ReproductionMarker {
     ($payload | ConvertTo-Json -Compress) | Add-Content -LiteralPath $MarkerPath -Encoding UTF8
 }
 
+function Resolve-SourceApplicationProcess {
+    param(
+        [Parameter(Mandatory = $true)]$LauncherProcess,
+        [int]$TimeoutMilliseconds = 5000
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        try {
+            $children = @(Get-CimInstance Win32_Process -Filter (
+                "ParentProcessId = {0}" -f $LauncherProcess.Id
+            ) -ErrorAction Stop | Sort-Object CreationDate -Descending)
+            foreach ($child in $children) {
+                $candidate = Get-Process -Id ([int]$child.ProcessId) `
+                    -ErrorAction SilentlyContinue
+                if ($candidate -and -not $candidate.HasExited) {
+                    return $candidate
+                }
+            }
+        }
+        catch {}
+        try {
+            $LauncherProcess.Refresh()
+            if ($LauncherProcess.HasExited) {
+                break
+            }
+            if ($LauncherProcess.MainWindowHandle -ne [IntPtr]::Zero) {
+                return $LauncherProcess
+            }
+        }
+        catch {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $LauncherProcess
+}
+
 function Write-SystemSnapshot {
     param(
         [Parameter(Mandatory = $true)][string]$Target,
@@ -154,7 +192,7 @@ function Write-SystemSnapshot {
     $snapshot = [ordered]@{
         session_id = $SessionId
         collected_utc = [DateTime]::UtcNow.ToString("o")
-        collector_version = 1
+        collector_version = 2
         launch_mode = $Launch.Mode
         application_name = $appFile.Name
         application_size_bytes = $appFile.Length
@@ -387,6 +425,9 @@ try {
         $startParameters["ArgumentList"] = $launch.Arguments
     }
     $process = Start-Process @startParameters
+    if ($launch.Mode -eq "source") {
+        $process = Resolve-SourceApplicationProcess -LauncherProcess $process
+    }
     Add-ReproductionMarker -MarkerPath $markerPath -Marker "application_started" `
         -ProcessId $process.Id
 
@@ -480,7 +521,8 @@ foreach ($replacement in @(
         }
     }
 }
-Protect-TextArtifacts -Root $sessionDir -Replacements @($replacementValues)
+[object[]]$replacementArray = $replacementValues.ToArray()
+Protect-TextArtifacts -Root $sessionDir -Replacements $replacementArray
 
 $manifest = Get-ChildItem -LiteralPath $sessionDir -Recurse -File | ForEach-Object {
     [pscustomobject]@{

@@ -164,6 +164,7 @@ class _DummyMarkerController(QObject):
     clusterActivated = Signal(list)
     markerActivated = Signal(list)
     thumbnailUpdated = Signal(str, QPixmap)
+    thumbnailInvalidated = Signal(str)
     thumbnailsInvalidated = Signal()
 
     def __init__(self, *args, **kwargs) -> None:
@@ -619,6 +620,31 @@ def test_marker_callout_background_is_opaque(qapp: QApplication, tmp_path) -> No
     assert sample.red() == 255
     assert sample.green() == 255
     assert sample.blue() == 255
+
+
+def test_marker_layer_uses_bounded_lru_and_supports_precise_removal(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    layer = photo_map_view_module._MarkerLayer()
+    layer.MAX_PIXMAPS = 2
+    first = QPixmap(2, 2)
+    first.fill(Qt.GlobalColor.red)
+    second = QPixmap(2, 2)
+    second.fill(Qt.GlobalColor.green)
+    third = QPixmap(2, 2)
+    third.fill(Qt.GlobalColor.blue)
+
+    layer.set_thumbnail("first.jpg", first)
+    layer.set_thumbnail("second.jpg", second)
+    layer.set_thumbnail("first.jpg", first)
+    layer.set_thumbnail("third.jpg", third)
+
+    assert list(layer._pixmaps) == ["first.jpg", "third.jpg"]
+
+    layer.remove_thumbnail("first.jpg")
+
+    assert list(layer._pixmaps) == ["third.jpg"]
 
 
 def test_photo_map_view_routes_marker_assets_through_interaction_service(

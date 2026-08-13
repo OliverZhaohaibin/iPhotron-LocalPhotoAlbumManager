@@ -25,7 +25,6 @@ from PySide6.QtCore import (
     QObject,
     QSize,
     QThreadPool,
-    Qt,
     Signal,
 )
 from PySide6.QtGui import QImage, QPixmap
@@ -46,8 +45,8 @@ class ThumbnailLoader(QObject):
 
     ready = Signal(Path, str, QPixmap)
     cache_written = Signal(Path)
-    _delivered = Signal(object, object, str)
-    _validation_success = Signal(object)
+    _delivered = Signal(object, object, str, object)
+    _validation_success = Signal(object, object)
 
     class Priority(IntEnum):
         """
@@ -79,6 +78,8 @@ class ThumbnailLoader(QObject):
 
         self._album_root: Optional[Path] = None
         self._album_root_str: Optional[str] = None
+        self._album_generation = 0
+        self._rel_generations: Dict[str, int] = {}
 
         self._memory: OrderedDict[Tuple[str, str, int, int], Tuple[int, QPixmap]] = OrderedDict()
         self._max_memory_items = 500
@@ -102,6 +103,7 @@ class ThumbnailLoader(QObject):
                 bool,
                 Optional[float],
                 Optional[float],
+                object,
             ],
         ] = {}
 
@@ -109,6 +111,7 @@ class ThumbnailLoader(QObject):
         self._validation_success.connect(self._handle_validation_success)
 
     def shutdown(self) -> None:
+        self._album_generation += 1
         self._pending_deque.clear()
         self._pending_keys.clear()
         self._pool.waitForDone()
@@ -126,6 +129,8 @@ class ThumbnailLoader(QObject):
     def reset_for_album(self, root: Path) -> None:
         if self._album_root and self._album_root == root:
             return
+        self._album_generation += 1
+        self._rel_generations.clear()
         self._album_root = root
         self._album_root_str = str(root.resolve())
         self._memory.clear()
@@ -173,6 +178,7 @@ class ThumbnailLoader(QObject):
 
         fixed_size = QSize(512, 512)
         base_key = self._base_key(rel, fixed_size)
+        generation_token = self._generation_token(rel)
 
         if base_key in self._missing:
             return None
@@ -204,6 +210,7 @@ class ThumbnailLoader(QObject):
             is_video,
             still_image_time,
             duration,
+            generation_token,
         )
 
         self._store_job_spec(
@@ -218,6 +225,7 @@ class ThumbnailLoader(QObject):
             is_video,
             still_image_time,
             duration,
+            generation_token,
         )
 
         self._schedule_job(base_key, job)
@@ -257,6 +265,7 @@ class ThumbnailLoader(QObject):
         is_video: bool,
         still_image_time: Optional[float],
         duration: Optional[float],
+        generation_token: object,
     ) -> None:
         self._job_specs[base_key] = (
             rel,
@@ -269,6 +278,7 @@ class ThumbnailLoader(QObject):
             is_video,
             still_image_time,
             duration,
+            generation_token,
         )
 
     def _create_job_from_spec(
@@ -283,6 +293,7 @@ class ThumbnailLoader(QObject):
         is_video: bool,
         still_image_time: Optional[float],
         duration: Optional[float],
+        generation_token: object,
     ) -> ThumbnailJob:
         return ThumbnailJob(
             self,
@@ -296,6 +307,7 @@ class ThumbnailLoader(QObject):
             is_video=is_video,
             still_image_time=still_image_time,
             duration=duration,
+            generation_token=generation_token,
         )
 
     def _record_terminal_failure(
@@ -322,11 +334,16 @@ class ThumbnailLoader(QObject):
         full_key: Tuple[str, str, int, int, int],
         image: Optional[QImage],
         rel: str,
+        generation_token: object | None = None,
     ) -> None:
         base_key = full_key[:-1]
         stamp = full_key[-1]
 
         self._active_jobs_count = max(0, self._active_jobs_count - 1)
+        if not self._is_current_generation(base_key, rel, generation_token):
+            self._drain_queue()
+            return
+
         self._pending_keys.discard(base_key)
         spec = self._job_specs.get(base_key)
 
@@ -363,18 +380,41 @@ class ThumbnailLoader(QObject):
 
         self._drain_queue()
 
-    def _handle_validation_success(self, full_key: Tuple[str, str, int, int, int]) -> None:
+    def _handle_validation_success(
+        self,
+        full_key: Tuple[str, str, int, int, int],
+        generation_token: object | None = None,
+    ) -> None:
         base_key = full_key[:-1]
         self._active_jobs_count = max(0, self._active_jobs_count - 1)
+        if not self._is_current_generation(base_key, base_key[1], generation_token):
+            self._drain_queue()
+            return
         self._pending_keys.discard(base_key)
         self._drain_queue()
 
+    def _generation_token(self, rel: str) -> tuple[int, int]:
+        return self._album_generation, self._rel_generations.get(rel, 0)
 
+    def _is_current_generation(
+        self,
+        base_key: Tuple[str, str, int, int],
+        rel: str,
+        generation_token: object | None,
+    ) -> bool:
+        if generation_token is None:
+            return True
+        return (
+            self._album_root_str is not None
+            and base_key[0] == self._album_root_str
+            and generation_token == self._generation_token(rel)
+        )
 
     def invalidate(self, rel: str) -> None:
         if self._album_root is None:
             return
 
+        self._rel_generations[rel] = self._rel_generations.get(rel, 0) + 1
         to_remove = [k for k in self._memory if k[1] == rel]
 
         for k in to_remove:
@@ -415,6 +455,7 @@ class ThumbnailLoader(QObject):
                 bool,
                 Optional[float],
                 Optional[float],
+                object,
             ]
         ],
     ) -> bool:
@@ -460,6 +501,7 @@ class ThumbnailLoader(QObject):
             is_video,
             still_image_time,
             duration,
+            generation_token,
         ) = spec
 
         retry_rel = stored_rel if stored_rel is not None else rel
@@ -481,6 +523,7 @@ class ThumbnailLoader(QObject):
             is_video,
             still_image_time,
             duration,
+            generation_token,
         )
 
         self._store_job_spec(
@@ -495,6 +538,7 @@ class ThumbnailLoader(QObject):
             is_video,
             still_image_time,
             duration,
+            generation_token,
         )
 
         self._schedule_job(base_key, retry_job)

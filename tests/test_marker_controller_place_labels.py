@@ -383,6 +383,11 @@ def test_marker_controller_threshold_grows_when_zooming_out(
         )
         controller._view_zoom = 10.0
         zoomed_in = controller._cluster_threshold(1_920, 1_080)
+        large_zoomed_in = controller._cluster_threshold(
+            3_840,
+            2_160,
+            density_adaptive=True,
+        )
         zoomed_in_clusters = controller._build_exact_projection_clusters(
             width=800,
             height=600,
@@ -390,12 +395,20 @@ def test_marker_controller_threshold_grows_when_zooming_out(
             cell_size=max(math.ceil(zoomed_in), 1),
             margin=72,
         )
+        controller._view_zoom = 6.0
+        small_library_threshold = controller._cluster_threshold(3_840, 2_160)
+        large_library_threshold = controller._cluster_threshold(
+            3_840,
+            2_160,
+            density_adaptive=True,
+        )
     finally:
         controller.shutdown()
 
-    density_floor = (1_920 * 1_080 / MarkerController.TARGET_VISIBLE_CLUSTERS) ** 0.5
     assert zoomed_out > zoomed_in
-    assert zoomed_in >= density_floor
+    assert zoomed_in == 48.0
+    assert large_zoomed_in == 48.0
+    assert large_library_threshold > small_library_threshold
     assert len(zoomed_out_clusters) < len(zoomed_in_clusters)
 
 
@@ -516,6 +529,36 @@ def test_marker_controller_preserves_thumbnails_for_same_library_refresh(
     assert loader.reset_calls == [tmp_path]
     assert loader.invalidate_calls == [asset.library_relative]
     assert len(invalidations) == first_invalidations
+
+
+def test_marker_controller_evicts_only_removed_same_library_thumbnails(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    loader = _DummyThumbnailLoader()
+    controller = MarkerController(
+        _DummyMapWidget(),
+        loader,
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    assets = _assets_at(tmp_path, 2)
+    removed: list[str] = []
+    full_invalidations: list[bool] = []
+    controller.thumbnailInvalidated.connect(removed.append)
+    controller.thumbnailsInvalidated.connect(lambda: full_invalidations.append(True))
+
+    try:
+        controller.set_assets(assets, tmp_path)
+        controller.set_assets([assets[0]], tmp_path)
+    finally:
+        controller.shutdown()
+
+    assert removed == [assets[1].library_relative]
+    assert loader.invalidate_calls == [assets[1].library_relative]
+    assert full_invalidations == [True]
 
 
 def test_marker_controller_invalidates_all_thumbnails_when_library_changes(

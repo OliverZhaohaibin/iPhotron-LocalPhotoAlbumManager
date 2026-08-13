@@ -286,6 +286,7 @@ class MarkerController(QObject):
     citiesUpdated = Signal(list)
     markerActivated = Signal(list)
     thumbnailUpdated = Signal(str, QPixmap)
+    thumbnailInvalidated = Signal(str)
     thumbnailsInvalidated = Signal()
     _clustering_requested = Signal(int, object, int, int, float, float, float, float, int, int)
 
@@ -299,6 +300,7 @@ class MarkerController(QObject):
     TARGET_VISIBLE_CLUSTERS = 160.0
     ZOOM_THRESHOLD_REFERENCE = 7.0
     MAX_ZOOM_OUT_THRESHOLD_FACTOR = 6.0
+    DENSITY_FULL_EFFECT_ZOOM_DELTA = 3.0
 
     def __init__(
         self,
@@ -365,10 +367,17 @@ class MarkerController(QObject):
                 asset.library_relative: asset
                 for asset in self._assets
             }
+            incoming_rels = {
+                asset.library_relative
+                for asset in normalized_assets
+            }
             for incoming_asset in normalized_assets:
                 existing_asset = existing_by_rel.get(incoming_asset.library_relative)
                 if existing_asset is not None and incoming_asset != existing_asset:
                     self._thumbnail_loader.invalidate(incoming_asset.library_relative)
+            for removed_rel in existing_by_rel.keys() - incoming_rels:
+                self._thumbnail_loader.invalidate(removed_rel)
+                self.thumbnailInvalidated.emit(removed_rel)
 
         self._assets = normalized_assets
         self._library_root = library_root
@@ -654,7 +663,12 @@ class MarkerController(QObject):
                 self.clustersUpdated.emit([])
             return
 
-        threshold = self._cluster_threshold(width, height)
+        large_library = len(self._assets) > self.EXACT_PROJECTION_ASSET_LIMIT
+        threshold = self._cluster_threshold(
+            width,
+            height,
+            density_adaptive=large_library,
+        )
         cell_size = max(math.ceil(threshold), 1)
         margin = self._marker_size
 
@@ -721,7 +735,13 @@ class MarkerController(QObject):
             )
         self._publish_clusters(clusters)
 
-    def _cluster_threshold(self, width: int, height: int) -> float:
+    def _cluster_threshold(
+        self,
+        width: int,
+        height: int,
+        *,
+        density_adaptive: bool = False,
+    ) -> float:
         """Return a zoom- and viewport-aware marker clustering radius."""
 
         base_threshold = max(self._marker_size * 0.6, 48.0)
@@ -730,11 +750,22 @@ class MarkerController(QObject):
             self.MAX_ZOOM_OUT_THRESHOLD_FACTOR,
             2.0 ** (zoom_delta / 2.0),
         )
+        threshold = base_threshold * zoom_factor
+        if not density_adaptive:
+            return threshold
+
         viewport_area = float(max(1, width) * max(1, height))
-        density_threshold = math.sqrt(
+        density_floor = math.sqrt(
             viewport_area / self.TARGET_VISIBLE_CLUSTERS
         )
-        return max(base_threshold * zoom_factor, density_threshold)
+        density_weight = min(
+            1.0,
+            zoom_delta / self.DENSITY_FULL_EFFECT_ZOOM_DELTA,
+        )
+        density_threshold = base_threshold + (
+            max(base_threshold, density_floor) - base_threshold
+        ) * density_weight
+        return max(threshold, density_threshold)
 
     def _publish_clusters(self, clusters: list[_MarkerCluster]) -> None:
         """Publish a stable cluster snapshot to the overlay and label layers."""

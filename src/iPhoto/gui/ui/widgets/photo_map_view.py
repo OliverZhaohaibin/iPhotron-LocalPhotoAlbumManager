@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, Iterable, Optional, cast
+from typing import Iterable, Optional, cast
 
 from PySide6.QtCore import QObject, QRectF, Qt, QEvent, Signal, Slot
 from PySide6.QtGui import (
@@ -74,6 +75,7 @@ def _configure_opaque_map_container(
 class _MarkerLayer(QWidget):
     """Transparent overlay that paints thumbnail clusters with callout arrows."""
 
+    MAX_PIXMAPS = 512
     MARKER_SIZE = 72
     THUMBNAIL_NATIVE_SIZE = 192
     THUMBNAIL_DISPLAY_SIZE = 56
@@ -88,7 +90,7 @@ class _MarkerLayer(QWidget):
         # events which are handled by :class:`PhotoMapView` and the map widget.
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._clusters: list[_MarkerCluster] = []
-        self._pixmaps: Dict[str, QPixmap] = {}
+        self._pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
         self._placeholder = self._create_placeholder()
         self._badge_font = QFont()
         self._badge_font.setBold(True)
@@ -126,7 +128,16 @@ class _MarkerLayer(QWidget):
         if pixmap.isNull():
             return
         self._pixmaps[rel] = pixmap
+        self._pixmaps.move_to_end(rel)
+        while len(self._pixmaps) > self.MAX_PIXMAPS:
+            self._pixmaps.popitem(last=False)
         self.update()
+
+    def remove_thumbnail(self, rel: str) -> None:
+        """Remove one obsolete marker thumbnail without disturbing the rest."""
+
+        if self._pixmaps.pop(rel, None) is not None:
+            self.update()
 
     def clear_pixmaps(self) -> None:
         """Drop cached pixmaps so outdated thumbnails are not reused."""
@@ -175,6 +186,8 @@ class _MarkerLayer(QWidget):
         thumbnail = self._pixmaps.get(cluster.representative.library_relative)
         if thumbnail is None:
             thumbnail = self._placeholder
+        else:
+            self._pixmaps.move_to_end(cluster.representative.library_relative)
         if not thumbnail.isNull():
             thumb_rect = QRectF(
                 rect.left() + border,
@@ -615,6 +628,7 @@ class PhotoMapView(QWidget):
         self._marker_controller.citiesUpdated.connect(self._handle_city_annotations)
         self._marker_controller.markerActivated.connect(self._on_marker_activated)
         self._marker_controller.thumbnailUpdated.connect(self._overlay.set_thumbnail)
+        self._marker_controller.thumbnailInvalidated.connect(self._overlay.remove_thumbnail)
         self._marker_controller.thumbnailsInvalidated.connect(self._overlay.clear_pixmaps)
         if self._assets_library_root is not None:
             self._marker_controller.set_assets(self._assets, self._assets_library_root)

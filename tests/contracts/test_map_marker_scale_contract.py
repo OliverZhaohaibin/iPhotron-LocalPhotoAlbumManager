@@ -97,7 +97,11 @@ def _exercise_scale(root: Path, count: int) -> dict[str, int]:
         provides_place_labels=True,
     )
     controller._view_zoom = 2.0
-    threshold = controller._cluster_threshold(width, height)
+    threshold = controller._cluster_threshold(
+        width,
+        height,
+        density_adaptive=True,
+    )
     cell_size = max(math.ceil(threshold), 1)
     worker = _CountingClusterWorker()
     finished: list[list] = []

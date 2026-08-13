@@ -12,7 +12,8 @@ pytest.importorskip(
 )
 pytest.importorskip("PySide6.QtTest", reason="Qt test utilities unavailable", exc_type=ImportError)
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QImage
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
@@ -170,6 +171,50 @@ def test_thumbnail_loader_lru_eviction(tmp_path: Path, qapp: QApplication) -> No
     assert "IMG_3.JPG" not in rels
     assert "IMG_2.JPG" in rels
     assert "IMG_4.JPG" in rels
+
+
+def test_thumbnail_loader_rejects_stale_generation_results(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "race.jpg"
+    key = loader._base_key(rel, QSize(512, 512))
+    stale_generation = loader._generation_token(rel)
+    loader.invalidate(rel)
+    current_generation = loader._generation_token(rel)
+    ready_spy = QSignalSpy(loader.ready)
+
+    current_image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    current_image.fill(Qt.GlobalColor.green)
+    stale_image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    stale_image.fill(Qt.GlobalColor.red)
+    loader._active_jobs_count = 2
+
+    loader._handle_result((*key, 2), current_image, rel, current_generation)
+    loader._handle_result((*key, 1), stale_image, rel, stale_generation)
+
+    stamp, pixmap = loader._memory[key]
+    assert stamp == 2
+    assert pixmap.toImage().pixelColor(0, 0) == current_image.pixelColor(0, 0)
+    assert ready_spy.count() == 1
+
+
+def test_stale_validation_does_not_clear_current_pending_job(tmp_path: Path) -> None:
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "race.jpg"
+    key = loader._base_key(rel, QSize(512, 512))
+    stale_generation = loader._generation_token(rel)
+    loader.invalidate(rel)
+    loader._pending_keys.add(key)
+    loader._active_jobs_count = 1
+
+    loader._handle_validation_success((*key, 1), stale_generation)
+
+    assert key in loader._pending_keys
 
 
 def test_generate_cache_path_different_stamps(tmp_path: Path) -> None:

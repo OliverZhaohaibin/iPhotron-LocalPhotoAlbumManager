@@ -1,652 +1,111 @@
-# 📋 Changelog
+# Changelog
 
-All notable changes to **iPhotron** are documented in this file.
+This changelog keeps the current development-branch contract concise. Older
+release-by-release detail remains available in Git history and GitHub Releases.
 
----
+## Unreleased — Startup & Architecture Hardening
 
-## Unreleased — Gallery Detail GPU-first Rendering
+### Desktop composition
 
-### Rendering pipeline
+- The installed GUI entry point is `iPhoto.entrypoint:main`; helper dispatch can
+  occur before importing the full Qt desktop runtime.
+- `DesktopCoordinatorRuntime` is the production desktop coordinator composition
+  root in `gui/coordinators/desktop_coordinator_runtime.py`.
+- `gui/coordinators/main_coordinator.py` is now a compatibility import only. New
+  architecture and developer documentation must not describe a separate
+  production `MainCoordinator` contract.
+- Optional feature promotion remains separated from the first-frame path.
+  Platform-required GPU Detail construction may still occur before `show()`
+  where Qt native-window behavior requires it.
 
-- Unified still and video Detail presentation under one immutable render
-  transaction and terminal-state coordinator; stale generations cannot publish
-  a final frame after a newer open.
-- Replaced sensor-resolution-first still loading with viewport/DPR/crop/
-  rotation/perspective/zoom-aware LOD decode and atomic replacement after the
-  new texture is actually drawn.
-- Added versioned neutral surface caching, byte-budgeted memory residency, and
-  current/previous/next GPU texture residency. Source identity is independent
-  from `.ipo` edit revision, and initial still textures do not generate mipmaps.
-- Added macOS ImageIO and Windows WIC non-RAW decoders with in-worker Qt
-  fallback; RAW uses the embedded-preview/half/full rawpy path. Windows WIC COM
-  declarations now use a fixed signed 32-bit `HRESULT` ABI across supported
-  CPython builds.
+### Recognition activation
 
-### Detail/Edit session
+- People/Pets model inference is no longer an automatic application-startup or
+  post-metadata-scan task.
+- `RecognitionCoordinator` can bind services and warm persisted dashboard data
+  without initializing inference models.
+- Recognition scans are requested only after the People surface has actually
+  been shown **and** its first viewport reports ready.
+- Scan activation is then delayed briefly so first content/cover delivery is not
+  immediately competing with AI work.
 
-- Added `PhotoRenderSessionHandle` and immutable `EditRenderState` so static
-  Detail and Edit share source texture, LODs, color statistics, live shader
-  state, and persisted baseline.
-- Removed the still Edit full-image loader, CPU realtime preview chain, repeated
-  color-stat calculation, and static Done/Cancel media replay. Export and video
-  editing retain their independent quality/lifecycle paths.
-- Removed the legacy Detail v2/frame-cache flags, old full-frame cache coupling,
-  diagnostic duplicate scheduler path, and synchronous video compatibility
-  entry point. GPU-first is the sole production Detail path.
-
-### Verification and operations
-
-- Added generation-safe background JSONL profiling and a packaged benchmark
-  harness covering cold/disk/memory/GPU cache groups, sidecar-only changes,
-  Detail/Edit, fullscreen, LOD, memory pressure, and rapid switching.
-- Added macOS/Windows/Linux CI contract coverage for transactions, schedulers,
-  decoders, surface caches, render sessions, residency, and benchmark
-  validation. Windows and Linux packaged/manual acceptance was completed for
-  the rollout in addition to the macOS development path.
-- Stabilized full-process Qt tests by retaining one strongly owned
-  `QApplication`; this prevents cached QIcon/QPixmap resources from surviving a
-  destroyed application and crashing later QtSvg widget construction.
+This supersedes older Unreleased wording that described Face/Pet workers as
+starting after startup or metadata scan completion.
 
 ## Unreleased — People & Pets Recognition
 
-🐾 *Adds a library-scoped Pets bounded context and composes pet identities with
-the existing People dashboard, gallery, groups, pins, and media annotations.*
-
-### Key Updates
-
-#### 🐕 Pet Detection And Clustering
-- Added optional YOLOX/ONNXRuntime pet detection, DINOv2 embeddings, and
-  species-separated identity clustering through the `pets-ai` extra.
-- Added tiled fallback detection for small cats/dogs, stable `pet_key`
-  canonicalization, detector/clustering pipeline versioning, and graceful
-  pending-state recovery when optional dependencies or models are unavailable.
-- Pinned the DINOv2 Torch Hub source to an immutable revision and kept the
-  shared model contract under `src/extension/models/pets/`.
-
-#### 💾 Library-Scoped Pets State
-- Added independent `pet_status` bookkeeping to `global_index.db`, rebuildable
-  `.iPhoto/pets/pet_index.db`, and durable `.iPhoto/pets/pet_state.db` state.
-- Added durable names, covers, hidden flags, rejected detections, merges, moves,
-  identity redirects, and reference-safe cleanup of replaced pet thumbnails.
-- Added `LibrarySession.pets`, Pets application ports, bootstrap composition,
-  snapshot coordination, and background `PetScanWorker` scheduling.
-
-#### 👥 People & Pets UI
-- Extended the People dashboard with pet cards, naming, merge/move, hide,
-  cover, delete-detection, pin, and gallery navigation actions.
-- Added mixed person/pet identity groups and cross-kind redirects while keeping
-  People and Pets runtime records in separate bounded contexts.
-- Added pet bounding-box/name annotations to image playback, detail overlays,
-  and information surfaces through the shared recognition annotation transport.
-
-#### 🚀 Startup And Worker Lifecycle
-- Deferred saved-library metadata scanning until the first gallery window is
-  warmed, with a bounded fallback timer.
-- Deferred startup Face/Pet AI workers until metadata scanning completes;
-  interactive rescans continue to feed both workers from committed scan rows.
-- Hardened cancellation and shutdown waits for scanner, face, pet, thumbnail,
-  map, playback, and event-bus resources.
-
-#### 📚 Documentation
-- Updated the production architecture, security, development, packaging, and
-  localized README surfaces for Pets.
-- Added `docs/misc/PETS_RECOGNITION_RUNTIME.md` as the current maintenance
-  contract and marked the original Pets requirements as historical inputs.
-
----
-
-## 🚀 v6.6.8 — Gallery Scroll Performance, Async Windows & Thumbnail Demand
-
-🖼️ *A Gallery performance release focused on low-latency scrolling, sparse
-viewport windows, micro-thumbnail warm-up, predictive full-thumbnail reads, and
-memory-aware thumbnail publishing.*
-
-### Key Updates
-
-#### 🪟 Desktop Startup & On-Demand Features
-- Added a real `MainWindow.firstPainted` boundary. Hidden feature widgets and
-  the main coordinator are now created over later event-loop turns instead of
-  blocking the initial window paint.
-- Split the main UI into on-demand detail, preview, Map, People, and Albums
-  feature bundles, with `featureCreated` wiring for components that appear
-  after the window shell.
-- Kept the GPU-backed detail page in the Windows pre-show phase to avoid native
-  window recreation and a visible false first window; Linux follows the same
-  pre-show rule, while macOS defers it for the faster first-frame path.
-- Reused the settings object loaded during early startup and avoided rewriting
-  an unchanged settings file on every launch.
-
-#### 🧩 Lazy Imports & Runtime Work
-- Replaced eager package exports and startup imports across GUI services,
-  widgets, models, scan workers, geocoding, People, and library runtime code
-  with compatibility-preserving lazy imports.
-- Deferred pending OsmAnd extension installation until the Map feature is first
-  created, and moved Windows map and face assets to versioned per-user extension
-  roots under `%LOCALAPPDATA%`.
-- Added `IPHOTO_STARTUP_PROFILE` checkpoints written as JSON Lines to the
-  platform log directory; diagnostics are disabled and perform no file I/O by
-  default.
-- Added subprocess import-boundary tests that prevent NumPy, Qt Multimedia,
-  People AI, Maps rendering, and the coordinator graph from returning to the
-  initial GUI import path.
-
-#### 📦 Windows Startup Packaging
-- Changed the Windows Nuitka script to build a smaller base package by default;
-  map data/native binaries and face models are included only with
-  `-IncludeOptionalAssets` for offline deployments.
-- Added a Nuitka compilation report for auditing frozen imports while retaining
-  explicit package inclusion required by lazy package exports.
-
-#### ⚡ Gallery Scroll Pipeline
-- Added `GalleryScrollController` for wheel-aware scroll handling, viewport
-  generation tracking, scroll intent classification, and display thumbnail
-  bucket selection.
-- Replaced buffered visible-row polling with `GalleryViewportDemand`, publishing
-  visible, full-prefetch, and micro-warm ranges from the grid every event-loop
-  turn.
-- Added demand policy constants for slow, medium, fast, directional-dwell, and
-  continuous-burst scrolling so the gallery can trade prefetch depth for input
-  responsiveness.
-- Removed the extra off-screen paint pass in `GalleryGridView`; scrolling now
-  relies on warmed model rows and thumbnail demand instead of manual adjacent-row
-  painting.
-
-#### 🧩 Sparse Gallery Model Windows
-- Added asynchronous `GalleryWindowLoader` and request/result types for
-  generation-aware background loading of gallery windows.
-- Reworked `GalleryCollectionStore` into a sparse, OrderedDict-backed cache that
-  merges visible and warm chunks without replacing the whole model window.
-- Added row-load signaling for deep or detail-view requests, plus retained
-  explicit row loads across newer viewport generations.
-- Preserved optimistic move overlays, pinned rows, revision checks, and stale
-  result filtering across asynchronous window results.
-
-#### 🖼️ Tile Snapshots & Model Updates
-- Added `GalleryTileRecord` and `GalleryTileSnapshot` so delegates can paint
-  gallery tiles from one compact role instead of repeatedly querying many roles.
-- Added the `TILE_SNAPSHOT` role and updated the asset delegate to draw full
-  thumbnails, micro thumbnails, badges, favorite state, video duration, and
-  current-row state from the snapshot when available.
-- Batched thumbnail-ready model updates so bursts of completed thumbnails emit
-  coalesced `dataChanged` ranges.
-
-#### 🧠 Thumbnail Runtime & Prefetching
-- Rebuilt `ThumbnailCacheService` around explicit visible, predictive, and
-  far-speculative request lanes with separate concurrency controls.
-- Added `ThumbnailRuntimePolicy` to size memory limits, worker counts, staging
-  depth, publish budget, miss TTLs, and speculative backoff from platform and
-  physical memory.
-- Added L1 byte accounting with pinned-visible retention and eviction preference
-  for old demand or far speculative entries before visible thumbnails.
-- Added staged publish queues that convert a bounded number of `QImage` results
-  to `QPixmap` on the GUI thread, keeping expensive conversion work under a
-  small frame budget.
-- Added L2-only predictive reads for prefetched thumbnails, active prefetch
-  promotion when an item becomes visible, and cancellation/backoff metrics for
-  speculative work.
-
-#### 🗂️ Index Hints & Thumbnail Backfill
-- Added lightweight gallery collection windows in the index repository that omit
-  wide metadata columns while preserving fields needed for tile rendering.
-- Added thumbnail hint windows that return paths and existing 512px cache keys
-  without doing collection counts, enabling predictive L2 reads for nearby rows.
-- Moved thumbnail backfill candidate discovery off the gallery load path and
-  allowed old ready rows with missing micro thumbnails to derive a micro layer
-  from the existing full-size cache.
-- Hardened micro-thumbnail decoding so corrupt index blobs are rejected before
-  reaching Qt image plugins.
-
-#### 🧪 Tests & Benchmarks
-- Added coverage for viewport demand construction, scroll-controller behavior,
-  async gallery window merging, stale generation handling, explicit row loads,
-  tile snapshot updates, thumbnail hint loading, and runtime policy detection.
-- Added thumbnail cache tests for visible/predictive/speculative scheduling,
-  L2-only reads, staged publishing, memory pressure eviction, promotion, and
-  backoff behavior.
-- Added a Qt gallery scroll performance benchmark covering warmed rows, next
-  screen thumbnails, burst behavior, and display-bucket residency.
-- Documented the production sparse-window/thumbnail-demand architecture and a
-  focused Gallery scroll regression checklist under `docs/misc/`.
-
----
-
-## 🚀 v6.6.6 — i18n, macOS Rendering, Map Runtime & Location Resilience
-
-🌐 *A UI internationalization and platform-compatibility pass focused on
-runtime language switching, German and Simplified Chinese resources, macOS
-Metal/QRhi previews, transparent-window map rendering, safer location
-assignment, and packaged runtime coverage.*
-
-### Key Updates
-
-#### 🌐 GUI Internationalization
-- Added `TranslationManager` as a runtime service on `RuntimeContext`, backed by
-  the `ui.language` setting and runtime `languageChanged` refresh signals.
-- Added bundled Qt translation resources for German and Simplified Chinese,
-  plus `languages.json` metadata and package-data coverage for `.ts` / `.qm`
-  resources.
-- Added a language menu under Settings with `English`, `Deutsch`, and
-  `简体中文` choices; English remains the fallback language.
-- Migrated major GUI surfaces to translated text, including main menus,
-  status-bar feedback, info panel, People dashboard, album navigation, gallery
-  context menus, detail/player controls, share/export feedback, face overlays,
-  edit sidebar controls, and the standalone map preview entry point.
-- Added locale-aware GUI formatters for dates, integers, decimals, and file
-  sizes so translated surfaces do not depend on the host system locale.
-
-#### 🧰 i18n Tooling & Guardrails
-- Added Python-aware i18n extraction through `tools/extract_i18n_strings.py`
-  and `scripts/i18n_extract.sh`, covering `src/iPhoto/gui` and `src/maps`
-  without depending on Qt's unavailable Python `lupdate` path.
-- Added `scripts/i18n_compile.sh` for rebuilding `.qm` resources with
-  `pyside6-lrelease`.
-- Added `tools/check_i18n_strings.py` and architecture tests that block direct
-  English literals in high-risk GUI APIs such as `setText`, `setToolTip`,
-  `QAction`, dialogs, and status messages.
-- Added Apple Photos-aligned edit terminology notes under
-  `docs/requirements/i18n/` and a long-term i18n UI text guardrail under
-  `docs/misc/`.
-
-#### 🐾 Requirements Planning
-- Added pet recognition and clustering requirements plus a development guide
-  under `docs/requirements/pets-cluster/`; these documents describe planned
-  work and do not yet represent shipped runtime behavior.
-
-#### 🍎 macOS Media Rendering
-- Added platform QRhi backend selection via `IPHOTO_RHI_BACKEND`; macOS now
-  prefers Metal when Qt exposes it, while Windows and Linux keep the OpenGL path.
-- Added a QRhi-backed image/video adjustment renderer with QSB shader assets for
-  image preview, crop overlay, LUTs, and adjusted-video frames.
-- Routed macOS long-press video previews through the RHI popup path so adjusted,
-  rotate-only, and plain previews share the stable GPU surface.
-- Improved high-DPI crop and pan math by converting logical viewport
-  coordinates through the actual QRhi render-target scale.
-
-#### 🗺️ Maps Runtime & macOS GL Stability
-- Added macOS OsmAnd runtime discovery for `dist-macosx` helper/widget builds
-  and a `scripts/sync_macos_map_extension.py` workflow that copies resources,
-  search data, `.dylib` binaries, dependencies, rpaths, and ad-hoc signatures.
-- Switched the macOS legacy GL map to `QOpenGLWindow + createWindowContainer()`
-  to avoid transparent `QOpenGLWidget` FBO composition in the frameless main
-  window.
-- Hardened map surfaces with opaque backing colors, full-update repaint
-  behavior, optional `IPHOTO_MAP_GL_DEBUG` diagnostics, and GL marker rendering
-  inside supported map passes.
-- Extended standalone map preview backend selection with explicit
-  `auto/native/python/legacy` modes and runtime diagnostics.
-
-#### 📍 Assign Location Resilience
-- Assign Location now persists the selected place to `global_index.db` even when
-  ExifTool is missing or the original file metadata write fails.
-- Added user-facing warnings for missing ExifTool or failed GPS write-back while
-  keeping the local database assignment intact.
-- Sanitized metadata updates before JSON storage so non-serializable third-party
-  values cannot corrupt asset rows.
-
-#### 📦 Packaging & Tests
-- Updated the Windows Nuitka script to bundle QRhi image/overlay/video shader
-  assets and the `maps` package alongside the maps extension.
-- Added regression coverage for render backend selection, macOS map GL surface
-  formats, native map widget event targets, RHI overlay rendering, map runtime
-  sources, macOS extension sync, location assignment fallback, preview windows,
-  and worker-side image scaling.
-
----
-
-## 🚀 v6.0.0 — People, Face Clusters, Groups & Linux Maps Runtime
-
-👥 *A major People release with automatic face clustering, persistent People
-state, multi-person groups, richer location metadata, and broader Windows/Linux
-runtime packaging.*
-
-### Key Updates
-
-#### 👥 People Face Clusters
-- Added the optional **People face-scanning pipeline** powered by InsightFace
-  and ONNXRuntime through the `ai-demo` extra.
-- Detects faces in image assets, writes cropped face thumbnails, builds face
-  embeddings, and clusters them into persistent People cards.
-- Added background face-scan scheduling alongside the normal asset scan, with
-  `pending`, `done`, `skipped`, `retry`, and `failed` status tracking in the
-  global asset index.
-- Rebuilt the People persistence model around a rebuildable runtime snapshot
-  plus stable People state so names, covers, ordering, hidden flags, and group
-  decisions survive rescans and reclustering.
-
-#### 👨‍👩‍👧 People Groups & Dashboard Workflow
-- Added **People groups** for collecting photos where multiple selected people
-  appear together.
-- Group cards support shared-photo queries, cover selection, drag ordering,
-  pinned state, and safe disbanding without deleting the underlying people or
-  photos.
-- Added People card actions for naming, merging, hiding/unhiding, cover
-  management, and dashboard filtering for hidden people.
-- Hardened merge safety so hidden and visible people cannot be merged by
-  accident.
-- Split the People dashboard into focused board, card, dialog, shared, and
-  widget modules for easier testing and future iteration.
-
-#### 🗺️ Location & Info Panel Improvements
-- Added an embedded location map to the floating info panel so geotagged assets
-  can show map context directly in metadata view.
-- Added location assignment plumbing and background tasks for updating selected
-  asset coordinates.
-- Improved map source handling, OsmAnd search support, and map widget runtime
-  behavior.
-- Extended Linux maps support with helper-backed OBF rendering and the native
-  OsmAnd widget runtime when the required shared libraries are present.
-
-#### 🧩 Albums, Menus & Pinned Items
-- Added persistent pinned-item services for albums, people, and groups.
-- Expanded sidebar and gallery context-menu plumbing with shared menu styling
-  and consistent action handling.
-- Improved album dashboard/sidebar behavior, cover actions, rename/delete
-  workflows, and album tree model coverage.
-- Added project popup guardrails so routine warnings and confirmations use the
-  app-themed popup system instead of native `QMessageBox` surfaces.
-
-#### ⚙️ Scanning, Indexing & Packaging
-- Improved the scan pipeline with chunked persistence, scan-merge behavior, and
-  global repository tests for move/delete and status preservation scenarios.
-- Added People cover caching and thumbnail cache services for faster dashboard
-  rendering.
-- Updated Nuitka and Debian packaging guidance for bundled `insightface`,
-  `onnxruntime`, `extension/models`, Linux maps runtime files, and People-page
-  release smoke tests.
-- Added troubleshooting guidance for packaged face-scan failures, runtime typing
-  compatibility issues, model-cache problems, and Linux XCB/GLX map startup.
-
-#### 🧪 Tests & Reliability
-- Added focused coverage for People pipeline clustering, People repositories,
-  People service behavior, People dashboard widgets, group workflows, hidden
-  state, merge guards, and cover persistence.
-- Added tests for info panel maps, map extension download tasks, gallery and
-  playback coordinators, album sidebar/model behavior, scan/index sync, and
-  Linux map source handling.
-- Improved packaged-runtime diagnostics so asset-level face failures are logged
-  and retried without deadlocking the full People scan.
-
----
-
-## 🚀 v5.0.0 — Video Editing, Trim System & Platform Stability
-
-🎬 *Full non-destructive video editing, a visual trim timeline, centralized keyboard shortcuts, and a sweeping round of Linux/GL stability fixes.*
-
-### Key Updates
-
-#### ✂️ Video Editing Workflow
-- Introduced a **complete non-destructive video editing suite** powered by a smooth OpenGL-accelerated preview pipeline.
-- Added a **visual trim timeline** with thumbnail strip, draggable in/out handles, and real-time playhead clamping inside the trim range.
-- Trim in/out points are saved to the sidecar file and **persist across app restarts**; the gallery duration badge now reflects the trimmed length.
-- **Playback progress bar** is remapped to the active trim range so the scrubber always tracks the visible portion of the clip.
-- Fixed stale progress bar after returning from edit mode — duration is force-synced when the video is reloaded.
-- Added **video transport keyboard shortcuts** (seek, play/pause, frame-step) inside the video edit panel.
-- Simplified the video edit sidebar section layout for a cleaner editing experience.
-
-#### ⌨️ Centralized Keyboard Shortcuts
-- Introduced **`AppShortcutManager`** — a single class that owns all application-level keyboard bindings, eliminating duplicated shortcut setup across components.
-- **Space bar** play/pause now works reliably in both gallery view and detail view.
-- Added full **gallery-mode video shortcuts**: volume up/down, mute toggle (M key), and playback controls.
-- Fixed M-key mute shortcut registration; renamed shortcut volume constant for clarity.
-
-#### 🔍 Zoom Handle in Gallery / Detail View
-- Added a **resize/zoom handle** in the video header bar so users can adjust the preview size directly from the gallery and detail view without entering edit mode.
-- Zoom state is emitted via `zoomChanged` and properly synced when switching renderer surfaces or clearing a frame.
-
-#### 🐧 Linux GL Playback Stability
-- Fixed a **critical black-screen bug** in adjusted (edited) video playback on Linux caused by Qt's QRhi context not owning the OpenGL state needed by the custom GL renderer.
-- Aligned the Linux QRhi GL viewer with the Qt GL context; used Qt GL functions for VAO creation with an automatic fallback when QRhi rejects VAO binds.
-- Hardened GL matrix uniform uploads and stabilized video frame dispatch on the GUI thread to eliminate flicker and rotation artifacts on Linux.
-- Snapshots non-packed video frames before uploading to prevent intermittent corruption.
-- Fixed Linux edit-preview viewport sizing and queuing of frames to avoid dropped frames during playback.
-
-#### 🖼️ Crop Overlay & Edit Transition Fixes
-- Fixed **crop overlay disappearing** when the overlay VAO was unavailable — the renderer now falls back to default vertex-array state so the orange crop frame always renders.
-- Cleared stale pre-existing GL errors before binding the overlay VAO; those errors were silently disabling the overlay on Linux.
-- Restored correct **crop-frame fade behavior**: the orange border always remains visible; only handles and guides are suppressed in faded state.
-- Deferred restoration of the detail chrome and filmstrip until the edit-exit animation fully completes, preventing layout jumps.
-- Respected the user's filmstrip visibility preference when leaving edit mode.
-- Fixed video canvas proportions after exiting edit mode by using `crop_center_zoom_strength=1.0` in detail/non-edit mode.
-
-#### 🎞️ Video Metadata & Info Panel
-- Implemented **multi-level cross-brand lens extraction** for both video and image assets — the info panel now resolves lens model, focal length, and aperture from multiple ExifTool fields across all major camera brands.
-- ExifTool is invoked during video playback enrichment to populate lens/focal-length fields that are absent from the media container.
-- Fixed normalization of raw `LensInfo` tuples (e.g. `"23 23 2 2"`) into human-readable strings (`"23mm f/2"`).
-- Eliminated duplicated focal-length/aperture suffixes when the lens string already contains mm notation.
-- Fixed the `ƒ` aperture format in the info panel display.
-
-#### 🐛 Fixes of major bugs
-- Fixed video rotation not refreshing immediately when changed in playback mode.
-- Fixed `ExternalToolError` not being caught explicitly during playback metadata enrichment, preventing silent failures.
-- Fixed `_restore_detail_video_preview` to correctly use `video_requires_adjusted_preview` and pass raw adjustments on the native render path.
-- Fixed out-point reset when re-entering edit mode — `PlaybackCoordinator` now guards trim remapping in edit mode.
-- Fixed SHA-1 usage in temp file naming replaced with **SHA-256** for stronger stability guarantees.
-- Fixed GL `glBindTexture` redundancy before `glGenerateMipmap` calls.
-- Used `ctypes c_uint` GL id buffers to avoid numpy dtype warnings on Windows.
-- Fixed `QShortcut` parent widget to use the top-level window instead of a nested widget, preventing shortcuts from silently failing.
-- Fixed several other minor bugs and improved overall stability.
-
----
-
-## 🚀 v4.6.0 — Windows Maps Extension & Offline OsmAnd Runtime
-
-🗺️ *A new Windows-only maps extension brings the offline OsmAnd/OBF runtime into iPhotron, with clearer packaging, installer integration, and a documented upstream build workflow.*
-
-### Key Updates
-
-#### 🗺️ Windows Maps Extension
-- Added a self-contained **maps extension** rooted at `src/maps/tiles/extension/` for the offline OBF map runtime.
-- The bundled extension now carries `World_basemap_2.obf`, OsmAnd resources, and native runtime binaries in one predictable layout.
-- Windows builds can use the native OsmAnd widget runtime for a fuller offline map experience while keeping the repository self-contained.
-
-#### ⚙️ Runtime Selection & Fallback Behavior
-- Improved map backend startup so iPhotron can prefer the native Windows widget when the runtime is healthy.
-- Preserved the Python/helper-backed OBF renderer as a practical fallback path.
-- Linux and macOS continue using the existing Python / legacy map path while the native maps extension remains Windows only.
-
-#### 📦 Packaging & Installer Integration
-- Aligned local development, Nuitka packaging, and the Windows installer around the same extension directory contract.
-- Documented how the extension is synchronized into packaged builds and optional installer assets.
-- Made Windows release work more reproducible by standardizing which runtime artifacts ship with the application.
-
-#### 🧰 Upstream Build Workflow
-- Split the OsmAnd runtime build pipeline into the dedicated
-  [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK) side project.
-- Added clearer developer documentation for building, syncing, and validating the maps extension from the upstream workspace.
-- Improved the handoff between runtime experimentation in the side project and release packaging in the main iPhotron repository.
-
----
-
-## 🚀 v4.5.0 — Color Grading Expansion & Video Compatibility Improvements
-
-🎨 *A richer color grading workflow, new creative tools, stronger video compatibility, and more native desktop window behavior.*
-
-### Key Updates
-
-#### 🎨 Expanded Color Grading Workflow
-- Further refined the color grading experience for smoother, more precise adjustment workflows.
-- Added new editing tools including **Definition**, **Noise Reduction**, **Sharpen**, and **Vignette**.
-- **Sharpen** includes dedicated `Intensity`, `Edges`, and `Falloff` controls, while **Vignette** adds `Strength`, `Radius`, and `Softness` adjustments.
-- Improved the overall editing flow to make advanced adjustments feel more consistent and intuitive.
-
-#### 🎬 Video Preview & Playback Fixes
-- **Fixed preview black borders:** Videos now render correctly in preview mode without unwanted letterboxing artifacts.
-- **Fixed HEVC and HDR display issues:** Improved compatibility for modern video formats to ensure more reliable playback and preview rendering.
-- Better overall media presentation consistency across different codecs and dynamic-range formats.
-
-#### 🐧 Linux Video Thumbnail Reliability
-- **Fixed incorrect thumbnail orientation on Linux:** Resolved an intermittent issue that could generate video thumbnails with the wrong rotation.
-- Improved thumbnail generation stability for rotated and metadata-sensitive video sources on Linux systems.
-
-#### 🪟 Native Window Snapping
-- Added support for native window snapping behavior to better match each platform's built-in desktop experience.
-- Window management now feels more natural and integrated across supported operating systems.
-
----
-
-## 🚀 v4.3.0 — Linux Alpha, RAW Support & Crop Refinements
-
-📸 *Linux enters Alpha testing, RAW workflows arrive, and cropping becomes more precise and familiar.*
-
-### Key Updates
-
-#### 🐧 Linux Version Enters Alpha Testing
-- The **Linux version is now officially in Alpha testing**, bringing the iPhotron experience to a whole new platform.
-- Early Linux builds extend photo management workflows beyond Windows and macOS while broader compatibility work continues.
-
-#### 📷 Native RAW Image Support
-- Added support for **RAW format images**.
-- You can now seamlessly import, view, and manage uncompressed, high-quality RAW photos directly inside your library.
-
-#### ✂️ Aspect Ratio Constraints for Cropping
-- Added aspect ratio constraint options to the crop tool.
-- The cropping workflow now feels closer to the native macOS Photos experience, making edits more intuitive, precise, and familiar.
-
-#### 🐛 Fullscreen and General Bug Fixes
-- Fixed a bug affecting fullscreen mode to ensure a more seamless and reliable viewing experience.
-- Resolved a range of smaller issues under the hood to improve overall stability.
-
----
-
-## 🚀 v4.1.0 — MVVM Refinement & Major Scrolling Performance Boost
-
-📸 *A more complete MVVM foundation with dramatically smoother scrolling and more stable large-library browsing.*
-
-### Key Updates
-
-#### 🏗️ MVVM Architecture — More Complete, More Stable State-Driven UI
-- **Stronger MVVM boundaries:** Clearer responsibilities across View / ViewModel / Model reduce cross-layer coupling and implicit dependencies.
-- **Upgraded state management:** Standardized UI State (`Loading / Content / Empty / Error`) helps prevent edge-case rendering divergence.
-- **More consistent unidirectional data flow:** The View only subscribes to ViewModel outputs, while all mutations enter through the ViewModel.
-- **Better testability:** Critical logic moved into ViewModel plus UseCase/Service layers for finer unit testing and safer regression coverage.
-- **Lifecycle & resource governance:** Subscriptions and async tasks are properly scoped and disposed with lifecycle events to reduce leaks and background overhead.
-
-#### ⚡ Scrolling Performance Boost — Dramatically Smoother Browsing
-- **Lighter rendering pipeline:** Reduced unnecessary re-renders and layout recalculations for steadier high FPS while scrolling.
-- **Enhanced virtualization for lists and grids:** Improved visible-range computation and reuse strategy to lower UI workload on large datasets.
-- **Smarter thumbnail loading:** Prefetching and prioritization now focus on on-screen items, with progressive loading and better decode scheduling.
-- **Cache improvements:** Multi-level caching (`memory + disk`) with smarter eviction stabilizes hit rate and reduces redundant decoding.
-- **Async task coordination:** Better debouncing and coalescing for rapid scroll events helps avoid main-thread contention and request storms.
-- **Lower memory churn:** Fewer transient allocations during fast scrolling reduce GC/ARC pressure and micro-stutters.
-
----
-
-## 🚀 v4.00 — MVVM Architecture & Advanced Editing
-
-📸 *MVVM architecture for smooth performance, color curves support, and cluster-based map browsing.*
-
-### Key Updates
-
-#### 🏗️ MVVM Architecture — Dramatically Improved Performance
-- Complete architectural refactoring to **Model-View-ViewModel (MVVM)** design pattern.
-- Clear separation between UI presentation, business logic, and data management layers.
-- Reactive UI updates — ViewModel efficiently manages state changes and automatically updates the View.
-- Significantly lower UI freezing and lag during photo browsing, editing, and library management.
-- Improved memory usage and CPU efficiency through proper data binding and lifecycle management.
-
-#### 🎨 Advanced Color Grading Tools
-
-- **White Balance:** Dedicated panel with Neutral Gray / Skin Tone / Temp & Tint modes; eyedropper sampler for automatic reference white point estimation; Warmth slider with gradient track.
-- **Color Curves:** RGB Master curve + individual R/G/B channel curves; interactive editor with draggable control points; Bezier interpolation; histogram overlay.
-- **Selective Color:** Six hue-range targets (Red/Yellow/Green/Cyan/Blue/Magenta); independent Hue/Saturation/Luminance controls; feathered hue-distance masking.
-- **Levels:** 5-handle input-output tone mapping; per-channel control (RGB/R/G/B); histogram backdrop; smooth interpolation.
-
-#### 🗺️ Cluster-Based Map Browsing
-- Smart clustering: automatically groups nearby photos based on GPS coordinates.
-- Dynamic cluster sizing adapts to zoom level and photo density.
-- Efficient rendering of thousands of GPS-tagged photos.
-
----
-
-## 🚀 v3.00 — Performance Overhaul
-
-⚡ *Migration to SQLite with global database architecture, optimized for TB-level libraries.*
-
-### Key Updates
-
-#### ⚡ Backend Migration to SQLite with Global Database Architecture
-- Complete backend rewrite from JSON-based indexing to **SQLite-powered global database**.
-- Single database design — all metadata in one high-performance SQLite database at library root.
-- Massive scalability for TB-level photo libraries with hundreds of thousands of files.
-- Smart indexing on `parent_album_path`, `ts`, `media_type`, and `is_favorite`.
-
-#### 🏗️ Modular Architecture Refactoring
-- 1100+ line monolithic index store split into 5 focused modules: `engine.py`, `migrations.py`, `recovery.py`, `queries.py`, `repository.py`.
-- 100% backward compatible.
-
-#### 🛡️ Enhanced Robustness & Efficiency
-- Reduced RAM and CPU footprint.
-- Automatic recovery with graded repair strategies (REINDEX → Salvage → Reset).
-- WAL mode for better concurrency and crash recovery.
-
-#### 💾 Unified Global Cache System
-- Single global database replaces scattered `.iPhoto/index.jsonl` files.
-- Centralized management for easier backup and sync.
-
----
-
-## 🌓 v2.3.0 — Dark Mode
-
-📸 *Seamlessly switch between Light and Dark themes.*
-
-### Key Updates
-
-#### 🌓 Comprehensive Dark Mode Support
-- Three theme options: System Default, Light Mode, Dark Mode.
-- Intelligent theme application across the entire UI.
-- Edit mode automatically switches to dark theme for optimal color grading.
-- Instant theme switching — no restart required.
-- Theme-aware components: sidebar, asset grid, detail viewer, info panel, edit panels, context menus.
-
-#### Additional Improvements
-- Enhanced edit mode experience with consistent dark theme.
-- Refined color palette with improved accessibility contrast ratios.
-- Performance optimizations for faster theme switching.
-- Native detection of macOS and Windows system theme preferences.
-
----
-
-## 🐛 v2.1.1 — Bug Fixes and UI Improvements
-
-### Key Updates
-
-#### 🐛 Bug Fixes
-- **Fixed thumbnail synchronization:** After editing photos, thumbnails in aggregated albums now sync properly.
-- **Fixed gallery grid auto-sizing:** Grid view dynamically responds to window resizing.
-
-#### 🎨 UI Improvements
-- Refined album interface to more closely replicate the macOS Photos experience.
-- Improved visual consistency, layout spacing, transitions, and animations.
-
----
-
-## 🚀 v2.00 — Non-Destructive Photo Editing
-
-📸 *Comprehensive non-destructive editing suite with Adjust and Crop modes.*
-
-### Key Updates
-
-#### 🎨 Non-Destructive Photo Editing
-- **Adjust Mode:** Light adjustments (Brilliance, Exposure, Highlights, Shadows, Brightness, Contrast, Black Point), Color adjustments (Saturation, Vibrance, Cast), Black & White mode (Intensity, Neutrals, Tone, Grain).
-- **Crop Mode:** Perspective correction, Straighten tool (±45°), horizontal flip, interactive crop box with edge snapping.
-- All edits stored in `.ipo` sidecar files — originals remain untouched.
-- GPU-accelerated preview with real-time OpenGL 3.3 rendering.
-
-#### 💾 Export System
-- Export selected photos or all edited photos.
-- Configurable export destination (Basic Library or Ask Every Time).
-
----
-
-## 🚀 v1.00 — First Stable Release
-
-📸 *A modern, folder-native photo manager for Windows and macOS.*
-
-### Key Features
-- **🎥 Live Photo Support:** Auto-pairs HEIC/JPG + MOV files by content-ID or timestamp.
-- **🗺 Interactive Map View:** GPS metadata visualization on an interactive map.
-- **🗂 Folder = Album:** Each folder becomes an album via `.iphoto.album.json`.
-- **🧠 Smart Albums:** Library, All Photos, Videos, Favorites, Recently Deleted.
-- **🖼 Immersive Detail Viewer:** Filmstrip navigation and floating playback controls.
-- **ℹ️ Floating Metadata Panel:** EXIF, camera/lens info, exposure, aperture, file size.
-- **⚙️ Rich Interactions:** Drag-and-drop, context menus, incremental scanning, async thumbnail loading.
+### Pets runtime
+
+- Pets remains an optional bounded context with rebuildable `pet_index.db` and
+  durable `pet_state.db`.
+- The production clustering pipeline is `species-bounded-single-link-v3`.
+- Identity clustering is species-separated, applies cannot-link constraints,
+  and bounds cluster diameter to prevent uncontrolled single-link chaining.
+- People/Pets conflict filtering is geometry-based but is not an unconditional
+  “People always wins” rule. Strong face overlap normally suppresses a pet
+  candidate; a substantially larger plausible pet-body detection containing a
+  smaller face may be preserved by the runtime size/image-coverage exception.
+- People and Pets keep independent runtime/durable ownership while the combined
+  UI can compose them into cards, groups, gallery queries, and annotations.
+
+### Model trust and delivery
+
+- Production Pets inference does not execute arbitrary Torch Hub Python.
+- The pinned DINOv2 upstream revision is a release conversion/provenance input;
+  production runtime trust is the prebuilt TorchScript artifact plus manifest
+  SHA-256 and exact-size validation.
+- The current Pets manifest has `torchscript_url: null`; DINOv2 therefore must
+  be packaged or explicitly staged rather than being promised as a first-use
+  runtime download.
+- `src/extension/models/...` is a build/staging convention, not guaranteed
+  tracked content of a fresh clone.
+
+## Unreleased — Gallery / Detail GPU-first Rendering
+
+- Gallery browsing uses sparse asynchronous SQL-backed windows rather than
+  materializing entire collections.
+- Viewport demand separates visible, guard, speculative, and micro-thumbnail
+  work and rejects stale generations.
+- Normal Gallery-visible rows require ready thumbnail state and a non-empty
+  thumbnail key; repair/backfill rows do not masquerade as ready media.
+- Detail still/video opens share a generation-safe render transaction.
+- Static Detail and Edit share `PhotoRenderSessionHandle`, source surfaces, GPU
+  residency, and immutable edit state instead of restoring a parallel CPU
+  full-image preview path.
+- Platform decoding/rendering remains adapter-specific: QRhi/Metal is preferred
+  on macOS, QRhi/OpenGL on Windows/Linux, with platform decoder fallbacks inside
+  the existing worker lane.
+
+## Unreleased — Documentation & Packaging Contracts
+
+- `docs/architecture.md`, `AGENT.md`, and `docs/development.md` now use the
+  current desktop/recognition/session contracts.
+- Pets historical clustering requirements are explicitly marked as historical;
+  `docs/misc/PETS_RECOGNITION_RUNTIME.md` is the canonical runtime note.
+- `docs/requirements/README.md` defines Active, residual-debt,
+  Historical/Superseded, and Finished requirement states.
+- Debian packaging derives the version from `pyproject.toml` and wraps the
+  current `dist/entrypoint.dist/` standalone bundle.
+- AppImage has an in-repository build guide matching `scripts/build_appimage.sh`.
+- Flatpak documentation distinguishes the existing v6.6.8 release bundle from
+  current source-build support: this branch does not yet contain a maintained
+  Flatpak manifest/build driver.
+- Maintained English, Simplified Chinese, and German README files distinguish
+  published v6.6.8 binaries from development-branch / Unreleased capabilities.
+- Documentation CI validates local Markdown links and README release-artifact
+  parity to reduce future localization drift.
+
+## v6.6.8 — Published Release Baseline
+
+The download section in the maintained README files targets the published
+v6.6.8 artifacts. Those binaries are a release baseline and must not be assumed
+to include every feature described under the Unreleased sections above.
+
+Current development documentation intentionally describes the `edit-base`
+branch. When a feature is promoted into a release, move its user-facing release
+status from Unreleased into the corresponding versioned release notes and keep
+all maintained README languages aligned.
+
+For older detailed release history, use the repository's Git history and GitHub
+Releases. The pre-sync changelog remains available in commits prior to this
+documentation-contract cleanup.

@@ -300,6 +300,8 @@ class MarkerController(QObject):
     # always-on photo clusters.
     CITY_LABEL_FETCH_LEVEL = 5
     EXACT_PROJECTION_ASSET_LIMIT = 1_000
+    DENSITY_ADAPTATION_START_ASSET_COUNT = 1_000
+    DENSITY_ADAPTATION_FULL_ASSET_COUNT = 2_000
     TARGET_VISIBLE_CLUSTERS = 160.0
     ZOOM_THRESHOLD_REFERENCE = 7.0
     MAX_ZOOM_OUT_THRESHOLD_FACTOR = 6.0
@@ -381,7 +383,10 @@ class MarkerController(QObject):
                     self._thumbnail_loader.invalidate(incoming_asset.library_relative)
             for removed_rel in existing_by_rel.keys() - incoming_rels:
                 self._current_representative_rels.discard(removed_rel)
-                self._thumbnail_loader.invalidate(removed_rel)
+                self._thumbnail_loader.evict(
+                    removed_rel,
+                    existing_by_rel[removed_rel].absolute_path,
+                )
                 self.thumbnailInvalidated.emit(removed_rel)
 
         self._assets = normalized_assets
@@ -674,11 +679,11 @@ class MarkerController(QObject):
                 self.clustersUpdated.emit([])
             return
 
-        large_library = len(self._assets) > self.EXACT_PROJECTION_ASSET_LIMIT
+        density_factor = self._density_adaptation_factor(len(self._assets))
         threshold = self._cluster_threshold(
             width,
             height,
-            density_adaptive=large_library,
+            density_factor=density_factor,
         )
         cell_size = max(math.ceil(threshold), 1)
         margin = self._marker_size
@@ -751,7 +756,7 @@ class MarkerController(QObject):
         width: int,
         height: int,
         *,
-        density_adaptive: bool = False,
+        density_factor: float = 0.0,
     ) -> float:
         """Return a zoom- and viewport-aware marker clustering radius."""
 
@@ -762,14 +767,15 @@ class MarkerController(QObject):
             2.0 ** (zoom_delta / 2.0),
         )
         threshold = base_threshold * zoom_factor
-        if not density_adaptive:
+        density_factor = min(1.0, max(0.0, float(density_factor)))
+        if density_factor <= 0.0:
             return threshold
 
         viewport_area = float(max(1, width) * max(1, height))
         density_floor = math.sqrt(
             viewport_area / self.TARGET_VISIBLE_CLUSTERS
         )
-        density_weight = min(
+        density_weight = density_factor * min(
             1.0,
             zoom_delta / self.DENSITY_FULL_EFFECT_ZOOM_DELTA,
         )
@@ -777,6 +783,18 @@ class MarkerController(QObject):
             max(base_threshold, density_floor) - base_threshold
         ) * density_weight
         return max(threshold, density_threshold)
+
+    @classmethod
+    def _density_adaptation_factor(cls, asset_count: int) -> float:
+        """Return a smooth density ramp independent of projection dispatch."""
+
+        start = cls.DENSITY_ADAPTATION_START_ASSET_COUNT
+        full = cls.DENSITY_ADAPTATION_FULL_ASSET_COUNT
+        if asset_count <= start:
+            return 0.0
+        if asset_count >= full:
+            return 1.0
+        return float(asset_count - start) / float(full - start)
 
     def _publish_clusters(self, clusters: list[_MarkerCluster]) -> None:
         """Publish a stable cluster snapshot to the overlay and label layers."""
@@ -787,11 +805,14 @@ class MarkerController(QObject):
         }
         for cluster in clusters:
             cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
-            self._ensure_thumbnail(cluster.representative)
 
         self._clusters = clusters
         self._update_city_annotations_for_clusters(self._clusters)
         self.clustersUpdated.emit(self._clusters)
+        # Publish the cluster set before synchronous cache hits so the overlay
+        # can pin the new viewport's representatives before inserting pixmaps.
+        for cluster in self._clusters:
+            self._ensure_thumbnail(cluster.representative)
 
     def _build_exact_projection_clusters(
         self,

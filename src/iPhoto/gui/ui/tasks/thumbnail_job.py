@@ -181,6 +181,7 @@ class ThumbnailJob(QRunnable):
             self._emit_delivered(
                 self._make_local_key(actual_stamp),
                 image,
+                cache_path,
             )
         except RuntimeError:  # pragma: no cover - race with QObject deletion
             pass
@@ -216,6 +217,7 @@ class ThumbnailJob(QRunnable):
         self,
         key: Tuple[str, str, int, int, int],
         image: Optional[QImage],
+        cache_path: Optional[Path] = None,
     ) -> None:
         """Emit a result using the receiver's generation-aware signal shape."""
 
@@ -225,7 +227,13 @@ class ThumbnailJob(QRunnable):
         if self._generation_token is None:
             loader._delivered.emit(key, image, self._rel)
         else:
-            loader._delivered.emit(key, image, self._rel, self._generation_token)
+            loader._delivered.emit(
+                key,
+                image,
+                self._rel,
+                self._generation_token,
+                cache_path,
+            )
 
     def _render_media(self) -> Optional[QImage]:  # pragma: no cover - worker helper
         if self._is_video:

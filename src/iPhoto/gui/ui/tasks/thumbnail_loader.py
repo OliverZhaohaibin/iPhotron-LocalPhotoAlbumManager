@@ -33,7 +33,12 @@ from ....utils.pathutils import ensure_work_dir
 
 # Re-exported names – keep every symbol that downstream code may import
 # from ``iPhoto.gui.ui.tasks.thumbnail_loader``.
-from .thumbnail_cache import safe_unlink, stat_mtime_ns, generate_cache_path  # noqa: F401
+from .thumbnail_cache import (  # noqa: F401
+    generate_cache_path,
+    remove_cache_versions,
+    safe_unlink,
+    stat_mtime_ns,
+)
 from .thumbnail_job import ThumbnailJob  # noqa: F401
 
 
@@ -45,7 +50,7 @@ class ThumbnailLoader(QObject):
 
     ready = Signal(Path, str, QPixmap)
     cache_written = Signal(Path)
-    _delivered = Signal(object, object, str, object)
+    _delivered = Signal(object, object, str, object, object)
     _validation_success = Signal(object, object)
 
     class Priority(IntEnum):
@@ -90,6 +95,7 @@ class ThumbnailLoader(QObject):
         self._failures: Set[Tuple[str, str, int, int]] = set()
         self._missing: Set[Tuple[str, str, int, int]] = set()
         self._failure_counts: Dict[Tuple[str, str, int, int], int] = {}
+        self._disk_prune_needed: Set[Tuple[str, str, int, int]] = set()
         self._job_specs: Dict[
             Tuple[str, str, int, int],
             Tuple[
@@ -139,6 +145,7 @@ class ThumbnailLoader(QObject):
         self._failures.clear()
         self._missing.clear()
         self._failure_counts.clear()
+        self._disk_prune_needed.clear()
         self._job_specs.clear()
 
         # Ensure the thumbnail directory exists in the library root (if set)
@@ -335,12 +342,14 @@ class ThumbnailLoader(QObject):
         image: Optional[QImage],
         rel: str,
         generation_token: object | None = None,
+        cache_path: Path | None = None,
     ) -> None:
         base_key = full_key[:-1]
         stamp = full_key[-1]
 
         self._active_jobs_count = max(0, self._active_jobs_count - 1)
         if not self._is_current_generation(base_key, rel, generation_token):
+            self._discard_stale_cache_result(base_key, stamp, cache_path)
             self._drain_queue()
             return
 
@@ -369,6 +378,7 @@ class ThumbnailLoader(QObject):
             return
 
         self._failure_counts.pop(base_key, None)
+        self._remove_superseded_cache_versions(base_key, spec, stamp)
         self._job_specs.pop(base_key, None)
         self._memory[base_key] = (stamp, pixmap)
 
@@ -391,6 +401,8 @@ class ThumbnailLoader(QObject):
             self._drain_queue()
             return
         self._pending_keys.discard(base_key)
+        spec = self._job_specs.pop(base_key, None)
+        self._remove_superseded_cache_versions(base_key, spec, full_key[-1])
         self._drain_queue()
 
     def _generation_token(self, rel: str) -> tuple[int, int]:
@@ -411,22 +423,51 @@ class ThumbnailLoader(QObject):
         )
 
     def invalidate(self, rel: str) -> None:
+        """Invalidate in-flight work while preserving a stale cached thumbnail.
+
+        Keeping the memory entry lets the next request display the existing
+        pixmap immediately and pass its stamp to ``ThumbnailJob``.  The job can
+        then remove the old stamp-addressed disk file if the media changed.
+        """
+
+        if self._album_root is None:
+            return
+
+        base_key = self._base_key(rel, QSize(512, 512))
+        if base_key not in self._memory:
+            # The stale stamp is unavailable, so the accepted replacement job
+            # will prune sibling disk versions once, not on every cache load.
+            self._disk_prune_needed.add(base_key)
+        self._rel_generations[rel] = self._rel_generations.get(rel, 0) + 1
+        self._clear_rel_request_state(rel)
+
+    def evict(self, rel: str, abs_path: Path) -> None:
+        """Remove all known memory and disk cache state for a deleted asset."""
+
         if self._album_root is None:
             return
 
         self._rel_generations[rel] = self._rel_generations.get(rel, 0) + 1
-        to_remove = [k for k in self._memory if k[1] == rel]
+        library_root = self._library_root or self._album_root
+        matching_entries = [key for key in self._memory if key[1] == rel]
+        cached_sizes = {(512, 512)}
+        cached_sizes.update((key[2], key[3]) for key in matching_entries)
+        for key in matching_entries:
+            self._memory.pop(key, None)
+        for width, height in cached_sizes:
+            remove_cache_versions(
+                library_root,
+                abs_path,
+                QSize(width, height),
+            )
+        self._disk_prune_needed = {
+            key for key in self._disk_prune_needed if key[1] != rel
+        }
 
-        for k in to_remove:
-            entry = self._memory.pop(k, None)
-            if entry:
-                stamp, pixmap = entry
-                del pixmap
-                # We intentionally do not delete the disk cache here.
-                # Invalidation primarily means "clear from memory and force a check".
-                # If the disk file is stale, ThumbnailJob will detect the timestamp mismatch
-                # and clean it up. If the disk file is still valid (e.g. invalidation triggered
-                # by a false alarm or metadata update), we want to reuse it.
+        self._clear_rel_request_state(rel)
+
+    def _clear_rel_request_state(self, rel: str) -> None:
+        """Drop queued and terminal request state for one relative path."""
 
         self._pending_keys = {k for k in self._pending_keys if k[1] != rel}
         self._failures = {k for k in self._failures if k[1] != rel}
@@ -438,6 +479,59 @@ class ThumbnailLoader(QObject):
             (key, job) for key, job in self._pending_deque
             if key[1] != rel
         )
+
+    def _discard_stale_cache_result(
+        self,
+        base_key: Tuple[str, str, int, int],
+        stamp: int,
+        cache_path: Path | None,
+    ) -> None:
+        """Delete a stale job's disk output when it cannot be current data."""
+
+        if cache_path is None:
+            return
+        current_entry = self._memory.get(base_key)
+        if current_entry is not None:
+            if current_entry[0] != stamp:
+                safe_unlink(cache_path)
+            return
+        # A replacement job will prune sibling versions when it is accepted.
+        if base_key in self._pending_keys or base_key in self._job_specs:
+            return
+        safe_unlink(cache_path)
+
+    def _remove_superseded_cache_versions(
+        self,
+        base_key: Tuple[str, str, int, int],
+        spec: Optional[
+            Tuple[
+                str,
+                Path,
+                QSize,
+                Optional[int],
+                Path,
+                Path,
+                bool,
+                bool,
+                Optional[float],
+                Optional[float],
+                object,
+            ]
+        ],
+        current_stamp: int,
+    ) -> None:
+        """Remove orphaned disk versions after accepting a current job."""
+
+        if spec is None or base_key not in self._disk_prune_needed:
+            return
+        _, abs_path, size, _, _, library_root, *_ = spec
+        remove_cache_versions(
+            library_root,
+            abs_path,
+            size,
+            keep_stamp=current_stamp,
+        )
+        self._disk_prune_needed.discard(base_key)
 
     def _retry_after_failure(
         self,

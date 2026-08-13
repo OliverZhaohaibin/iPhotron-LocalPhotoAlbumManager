@@ -13,7 +13,7 @@ pytest.importorskip(
 pytest.importorskip("PySide6.QtTest", reason="Qt test utilities unavailable", exc_type=ImportError)
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
@@ -191,15 +191,123 @@ def test_thumbnail_loader_rejects_stale_generation_results(
     current_image.fill(Qt.GlobalColor.green)
     stale_image = QImage(2, 2, QImage.Format.Format_ARGB32)
     stale_image.fill(Qt.GlobalColor.red)
+    stale_cache_path = generate_cache_path(
+        tmp_path,
+        tmp_path / rel,
+        QSize(512, 512),
+        1,
+    )
+    stale_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_cache_path.write_bytes(b"stale")
     loader._active_jobs_count = 2
 
     loader._handle_result((*key, 2), current_image, rel, current_generation)
-    loader._handle_result((*key, 1), stale_image, rel, stale_generation)
+    loader._handle_result(
+        (*key, 1),
+        stale_image,
+        rel,
+        stale_generation,
+        stale_cache_path,
+    )
 
     stamp, pixmap = loader._memory[key]
     assert stamp == 2
     assert pixmap.toImage().pixelColor(0, 0) == current_image.pixelColor(0, 0)
     assert ready_spy.count() == 1
+    assert not stale_cache_path.exists()
+
+
+def test_thumbnail_loader_invalidation_preserves_stale_pixmap_and_stamp(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "changed.jpg"
+    path = tmp_path / rel
+    key = loader._base_key(rel, QSize(512, 512))
+    stale_pixmap = QPixmap(2, 2)
+    stale_pixmap.fill(Qt.GlobalColor.red)
+    loader._memory[key] = (123, stale_pixmap)
+    loader._max_active_jobs = 0
+
+    loader.invalidate(rel)
+    returned = loader.request(rel, path, QSize(192, 192), is_image=True)
+
+    assert loader._memory[key][0] == 123
+    assert returned is not None
+    assert returned.cacheKey() == stale_pixmap.cacheKey()
+    assert loader._job_specs[key][3] == 123
+    assert loader._job_specs[key][-1] == loader._generation_token(rel)
+
+
+def test_thumbnail_loader_accepted_result_removes_superseded_disk_versions(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "changed.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    key = loader._base_key(rel, size)
+    old_path = generate_cache_path(tmp_path, path, size, 1)
+    current_path = generate_cache_path(tmp_path, path, size, 2)
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_bytes(b"old")
+    current_path.write_bytes(b"current")
+    loader.invalidate(rel)
+    generation = loader._generation_token(rel)
+    loader._store_job_spec(
+        key,
+        rel,
+        path,
+        size,
+        1,
+        tmp_path,
+        tmp_path,
+        True,
+        False,
+        None,
+        None,
+        generation,
+    )
+    loader._pending_keys.add(key)
+    loader._active_jobs_count = 1
+    image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.green)
+
+    loader._handle_result((*key, 2), image, rel, generation)
+
+    assert not old_path.exists()
+    assert current_path.exists()
+
+
+def test_thumbnail_loader_evict_removes_all_known_disk_versions(
+    tmp_path: Path,
+) -> None:
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "removed.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    key = loader._base_key(rel, size)
+    pixmap = QPixmap(2, 2)
+    loader._memory[key] = (1, pixmap)
+    cache_paths = [
+        generate_cache_path(tmp_path, path, size, stamp)
+        for stamp in (1, 2)
+    ]
+    cache_paths[0].parent.mkdir(parents=True, exist_ok=True)
+    for cache_path in cache_paths:
+        cache_path.write_bytes(b"cached")
+
+    loader.evict(rel, path)
+
+    assert key not in loader._memory
+    assert all(not cache_path.exists() for cache_path in cache_paths)
 
 
 def test_stale_validation_does_not_clear_current_pending_job(tmp_path: Path) -> None:

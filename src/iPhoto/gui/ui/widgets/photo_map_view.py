@@ -90,6 +90,7 @@ class _MarkerLayer(QWidget):
         # events which are handled by :class:`PhotoMapView` and the map widget.
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._clusters: list[_MarkerCluster] = []
+        self._visible_rels: set[str] = set()
         self._pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
         self._placeholder = self._create_placeholder()
         self._badge_font = QFont()
@@ -120,6 +121,11 @@ class _MarkerLayer(QWidget):
         """Replace the rendered clusters and schedule a repaint."""
 
         self._clusters = list(items)
+        self._visible_rels = {
+            cluster.representative.library_relative
+            for cluster in self._clusters
+        }
+        self._trim_pixmaps()
         self.update()
 
     def set_thumbnail(self, rel: str, pixmap: QPixmap) -> None:
@@ -129,9 +135,24 @@ class _MarkerLayer(QWidget):
             return
         self._pixmaps[rel] = pixmap
         self._pixmaps.move_to_end(rel)
-        while len(self._pixmaps) > self.MAX_PIXMAPS:
-            self._pixmaps.popitem(last=False)
+        self._trim_pixmaps()
         self.update()
+
+    def _trim_pixmaps(self) -> None:
+        """Bound history entries without evicting currently visible markers."""
+
+        while len(self._pixmaps) > self.MAX_PIXMAPS:
+            eviction_rel = next(
+                (
+                    cached_rel
+                    for cached_rel in self._pixmaps
+                    if cached_rel not in self._visible_rels
+                ),
+                None,
+            )
+            if eviction_rel is None:
+                return
+            self._pixmaps.pop(eviction_rel, None)
 
     def remove_thumbnail(self, rel: str) -> None:
         """Remove one obsolete marker thumbnail without disturbing the rest."""

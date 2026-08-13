@@ -73,12 +73,47 @@ class _FixedExactMap(_CountingExactMap):
         return QPointF(self._point)
 
 
+class _MercatorExactMap:
+    zoom = 5.0
+
+    def __init__(self, width: int, height: int) -> None:
+        self._width = width
+        self._height = height
+        self.project_calls = 0
+
+    def width(self) -> int:
+        return self._width
+
+    def height(self) -> int:
+        return self._height
+
+    def prefers_exact_screen_projection(self) -> bool:
+        return True
+
+    def project_lonlat(self, lon: float, lat: float) -> QPointF:
+        self.project_calls += 1
+        world_size = 256.0 * (2.0 ** self.zoom)
+        top_left_x = world_size * 0.5 - self._width / 2.0
+        top_left_y = world_size * 0.5 - self._height / 2.0
+        world_x = (float(lon) + 180.0) / 360.0 * world_size
+        bounded_lat = max(min(float(lat), 85.05112878), -85.05112878)
+        sin_lat = math.sin(math.radians(bounded_lat))
+        world_y = (
+            0.5
+            - math.log((1.0 + sin_lat) / (1.0 - sin_lat)) / (4.0 * math.pi)
+        ) * world_size
+        return QPointF(world_x - top_left_x, world_y - top_left_y)
+
+
 class _NullThumbnailLoader(QObject):
     def reset_for_album(self, root: Path) -> None:
         del root
 
     def invalidate(self, rel: str) -> None:
         del rel
+
+    def evict(self, rel: str, abs_path: Path) -> None:
+        del rel, abs_path
 
     def request(self, *args, **kwargs):
         del args, kwargs
@@ -170,6 +205,32 @@ def test_production_dispatch_is_geometrically_stable_at_1000_boundary(
     assert hybrid_clusters[0].screen_pos.x() > 150.0
 
 
+def test_production_dispatch_preserves_membership_at_1000_boundary(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    _require_scale_contract()
+    exact_assets = _membership_boundary_assets(tmp_path, 1_000)
+    hybrid_assets = _membership_boundary_assets(tmp_path, 1_001)
+
+    exact_clusters, exact_calls = _run_membership_dispatch(
+        tmp_path,
+        exact_assets,
+        qapp,
+    )
+    hybrid_clusters, hybrid_calls = _run_membership_dispatch(
+        tmp_path,
+        hybrid_assets,
+        qapp,
+    )
+
+    assert exact_calls == 1_000
+    assert hybrid_calls == 2
+    assert len(exact_clusters) == len(hybrid_clusters) == 2
+    assert [len(cluster.assets) for cluster in exact_clusters] == [1, 1]
+    assert [len(cluster.assets) for cluster in hybrid_clusters] == [1, 1]
+
+
 def _exercise_scale(root: Path, count: int) -> dict[str, int]:
     width = 1_920
     height = 1_080
@@ -202,7 +263,7 @@ def _exercise_scale(root: Path, count: int) -> dict[str, int]:
     threshold = controller._cluster_threshold(
         width,
         height,
-        density_adaptive=True,
+        density_factor=1.0,
     )
     cell_size = max(math.ceil(threshold), 1)
     worker = _CountingClusterWorker()
@@ -285,6 +346,66 @@ def _boundary_assets(root: Path, count: int) -> list[GeotaggedAsset]:
         replace(
             asset,
             longitude=longitudes[index % 2],
+            latitude=0.0,
+        )
+        for index, asset in enumerate(assets)
+    ]
+
+
+def _run_membership_dispatch(
+    root: Path,
+    assets: list[GeotaggedAsset],
+    qapp: QApplication,
+) -> tuple[list[_MarkerCluster], int]:
+    map_widget = _MercatorExactMap(2_560, 1_440)
+    controller = MarkerController(
+        map_widget,
+        _NullThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=True,
+    )
+    controller._assets = assets
+    controller._library_root = root
+    controller._view_center_x = 0.5
+    controller._view_center_y = 0.5
+    controller._view_zoom = 5.0
+
+    try:
+        controller._rebuild_photo_clusters()
+        deadline = time.monotonic() + 5.0
+        while (
+            controller._cluster_request_context is not None
+            and time.monotonic() < deadline
+        ):
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert controller._cluster_request_context is None
+        return list(controller._clusters), map_widget.project_calls
+    finally:
+        controller.shutdown()
+
+
+def _membership_boundary_assets(
+    root: Path,
+    count: int,
+) -> list[GeotaggedAsset]:
+    assets = _synthetic_assets(root, count)
+    world_size = 256.0 * (2.0 ** 5.0)
+    top_left_x = world_size * 0.5 - 2_560.0 / 2.0
+
+    def longitude_at(screen_x: float) -> float:
+        return (screen_x + top_left_x) / world_size * 360.0 - 180.0
+
+    visible_longitudes = (longitude_at(100.0), longitude_at(205.0))
+    return [
+        replace(
+            asset,
+            longitude=(
+                visible_longitudes[index]
+                if index < len(visible_longitudes)
+                else 179.0
+            ),
             latitude=0.0,
         )
         for index, asset in enumerate(assets)

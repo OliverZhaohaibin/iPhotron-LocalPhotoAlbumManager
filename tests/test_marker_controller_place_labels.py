@@ -64,6 +64,7 @@ class _DummyThumbnailLoader(QObject):
         super().__init__()
         self.reset_calls: list[Path] = []
         self.invalidate_calls: list[str] = []
+        self.evict_calls: list[tuple[str, Path]] = []
 
     def reset_for_album(self, root: Path) -> None:
         self.reset_calls.append(root)
@@ -71,6 +72,9 @@ class _DummyThumbnailLoader(QObject):
 
     def invalidate(self, rel: str) -> None:
         self.invalidate_calls.append(rel)
+
+    def evict(self, rel: str, abs_path: Path) -> None:
+        self.evict_calls.append((rel, abs_path))
 
     def request(self, *args, **kwargs):
         return None
@@ -433,7 +437,7 @@ def test_marker_controller_threshold_grows_when_zooming_out(
         large_zoomed_in = controller._cluster_threshold(
             3_840,
             2_160,
-            density_adaptive=True,
+            density_factor=1.0,
         )
         zoomed_in_clusters = controller._build_exact_projection_clusters(
             width=800,
@@ -447,7 +451,7 @@ def test_marker_controller_threshold_grows_when_zooming_out(
         large_library_threshold = controller._cluster_threshold(
             3_840,
             2_160,
-            density_adaptive=True,
+            density_factor=1.0,
         )
     finally:
         controller.shutdown()
@@ -457,6 +461,49 @@ def test_marker_controller_threshold_grows_when_zooming_out(
     assert large_zoomed_in == 48.0
     assert large_library_threshold > small_library_threshold
     assert len(zoomed_out_clusters) < len(zoomed_in_clusters)
+
+
+def test_marker_controller_density_threshold_ramps_across_projection_boundary(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    controller = MarkerController(
+        _DummyMapWidget(zoom=5.0),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._view_zoom = 5.0
+
+    try:
+        factor_1000 = controller._density_adaptation_factor(1_000)
+        factor_1001 = controller._density_adaptation_factor(1_001)
+        factor_2000 = controller._density_adaptation_factor(2_000)
+        threshold_1000 = controller._cluster_threshold(
+            2_560,
+            1_440,
+            density_factor=factor_1000,
+        )
+        threshold_1001 = controller._cluster_threshold(
+            2_560,
+            1_440,
+            density_factor=factor_1001,
+        )
+        threshold_2000 = controller._cluster_threshold(
+            2_560,
+            1_440,
+            density_factor=factor_2000,
+        )
+    finally:
+        controller.shutdown()
+
+    assert factor_1000 == 0.0
+    assert factor_1001 == pytest.approx(0.001)
+    assert factor_2000 == 1.0
+    assert threshold_1000 == 96.0
+    assert threshold_1001 == threshold_1000
+    assert threshold_2000 > threshold_1001
 
 
 def test_marker_controller_rejects_stale_worker_results_after_pan(
@@ -604,7 +651,10 @@ def test_marker_controller_evicts_only_removed_same_library_thumbnails(
         controller.shutdown()
 
     assert removed == [assets[1].library_relative]
-    assert loader.invalidate_calls == [assets[1].library_relative]
+    assert loader.invalidate_calls == []
+    assert loader.evict_calls == [
+        (assets[1].library_relative, assets[1].absolute_path)
+    ]
     assert full_invalidations == [True]
 
 
@@ -640,6 +690,41 @@ def test_marker_controller_ignores_thumbnails_from_old_viewport(
         controller.shutdown()
 
     assert updates == [first.library_relative, second.library_relative]
+
+
+def test_marker_controller_publishes_clusters_before_cached_thumbnails(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    asset = _asset(tmp_path)
+    cached_pixmap = QPixmap(2, 2)
+
+    class _CachedThumbnailLoader(_DummyThumbnailLoader):
+        def request(self, *args, **kwargs):
+            del args, kwargs
+            return cached_pixmap
+
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _CachedThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._library_root = tmp_path
+    publication_order: list[str] = []
+    controller.clustersUpdated.connect(lambda _clusters: publication_order.append("clusters"))
+    controller.thumbnailUpdated.connect(lambda _rel, _pixmap: publication_order.append("thumbnail"))
+
+    try:
+        controller._publish_clusters(
+            [_MarkerCluster(representative=asset, screen_pos=QPointF(100.0, 100.0))]
+        )
+    finally:
+        controller.shutdown()
+
+    assert publication_order == ["clusters", "thumbnail"]
 
 
 def test_marker_controller_invalidates_all_thumbnails_when_library_changes(

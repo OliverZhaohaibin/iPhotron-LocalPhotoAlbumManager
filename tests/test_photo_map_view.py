@@ -152,6 +152,12 @@ class _DummyThumbnailLoader(QObject):
         del root
         return None
 
+    def invalidate(self, rel: str) -> None:
+        del rel
+
+    def evict(self, rel: str, abs_path: Path) -> None:
+        del rel, abs_path
+
     def request(self, *args, **kwargs):
         del args, kwargs
         return None
@@ -645,6 +651,53 @@ def test_marker_layer_uses_bounded_lru_and_supports_precise_removal(
     layer.remove_thumbnail("first.jpg")
 
     assert list(layer._pixmaps) == ["third.jpg"]
+
+
+def test_marker_layer_pins_all_visible_thumbnails_above_history_limit(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    layer = photo_map_view_module._MarkerLayer()
+    layer.MAX_PIXMAPS = 2
+
+    def cluster(rel: str, x: float) -> photo_map_view_module._MarkerCluster:
+        asset = photo_map_view_module.GeotaggedAsset(
+            library_relative=rel,
+            album_relative=rel,
+            absolute_path=tmp_path / rel,
+            album_path=tmp_path,
+            asset_id=rel,
+            latitude=0.0,
+            longitude=0.0,
+            is_image=True,
+            is_video=False,
+            still_image_time=None,
+            duration=None,
+            location_name=None,
+            live_photo_group_id=None,
+            live_partner_rel=None,
+        )
+        return photo_map_view_module._MarkerCluster(
+            representative=asset,
+            screen_pos=QPointF(x, 100.0),
+        )
+
+    clusters = [
+        cluster("first.jpg", 100.0),
+        cluster("second.jpg", 200.0),
+        cluster("third.jpg", 300.0),
+    ]
+    pixmap = QPixmap(2, 2)
+    layer.set_clusters(clusters)
+    for item in clusters:
+        layer.set_thumbnail(item.representative.library_relative, pixmap)
+
+    assert list(layer._pixmaps) == ["first.jpg", "second.jpg", "third.jpg"]
+
+    layer.set_clusters(clusters[1:])
+
+    assert list(layer._pixmaps) == ["second.jpg", "third.jpg"]
 
 
 def test_photo_map_view_routes_marker_assets_through_interaction_service(

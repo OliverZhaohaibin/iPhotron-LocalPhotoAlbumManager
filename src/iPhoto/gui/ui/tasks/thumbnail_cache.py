@@ -16,6 +16,13 @@ from ....utils.pathutils import ensure_work_dir
 LOGGER = logging.getLogger(__name__)
 
 
+def _cache_digest(abs_path: Path) -> str:
+    """Return the stable digest used by every cache version of an asset."""
+
+    path_str = str(abs_path.resolve())
+    return hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
+
+
 def safe_unlink(path: Path) -> None:
     """
     Safely delete a file, handling permission errors gracefully.
@@ -61,10 +68,37 @@ def generate_cache_path(library_root: Path, abs_path: Path, size: QSize, stamp: 
         Path: The path to the cache file for the thumbnail image.
     """
     # Use absolute path for global uniqueness
-    path_str = str(abs_path.resolve())
-    digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
+    digest = _cache_digest(abs_path)
     filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
     return ensure_work_dir(library_root) / "thumbs" / filename
+
+
+def remove_cache_versions(
+    library_root: Path,
+    abs_path: Path,
+    size: QSize,
+    *,
+    keep_stamp: int | None = None,
+) -> None:
+    """Delete stamp-addressed cache files for one asset and thumbnail size."""
+
+    try:
+        cache_dir = ensure_work_dir(library_root) / "thumbs"
+        digest = _cache_digest(abs_path)
+        pattern = f"{digest}_*_{size.width()}x{size.height()}.png"
+        candidates = list(cache_dir.glob(pattern))
+    except OSError:
+        return
+
+    keep_path = (
+        generate_cache_path(library_root, abs_path, size, keep_stamp)
+        if keep_stamp is not None
+        else None
+    )
+    for candidate in candidates:
+        if keep_path is not None and candidate == keep_path:
+            continue
+        safe_unlink(candidate)
 
 
 def write_cache(canvas: QImage, path: Path) -> bool:  # pragma: no cover - worker helper

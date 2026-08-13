@@ -1,291 +1,99 @@
 # 📸 iPhotron
-> 受 macOS *照片* 启发的文件夹原生照片管理器，支持 Windows、macOS 与 Linux，提供实况照片、地图和智能相册。
 
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![Language](https://img.shields.io/badge/language-Python%203.12%2B-blue)
-![Framework](https://img.shields.io/badge/framework-PySide6%20(Qt6)-orange)
-![License](https://img.shields.io/badge/license-MIT-green)
-[![GitHub Repo](https://img.shields.io/badge/github-iPhotron-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager)
+> 一款受 macOS「照片」启发、以文件夹为原生相册结构的 Windows / macOS / Linux 本地照片管理器。
 
-**语言 / Languages:**  
-[![English](https://img.shields.io/badge/English-Click-blue?style=flat)](../../README.md) | [![中文简体](https://img.shields.io/badge/中文简体-点击-red?style=flat)](README_zh-CN.md) | [![Deutsch](https://img.shields.io/badge/Deutsch-Klick-yellow?style=flat)](README_de.md)
+**语言：** [English](../../README.md) · [简体中文](README_zh-CN.md) · [Deutsch](README_de.md)
 
----
+## 发布版与开发分支说明
 
-## ☕ 支持
+**下面的下载链接对应已经发布的 v6.6.8 二进制文件。** 本 README 的功能概览同时描述当前
+`edit-base` 开发分支，因此可能包含尚未发布（Unreleased）的功能。开发分支中已经实现的功能，
+并不代表一定存在于 v6.6.8 二进制文件中。当前分支变更见
+[`docs/CHANGELOG.md`](../CHANGELOG.md)。
 
-[![请我喝杯咖啡](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-支持开发-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/oliverzhao)
-[![PayPal](https://img.shields.io/badge/PayPal-支持开发-blue?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=AJKMJMQA8YHPN)
+## v6.6.8 下载
 
-## 📥 下载与安装
+| 平台 | 发布文件 |
+| --- | --- |
+| Windows | [`v6.68-x86-setup.exe`](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/v6.68-x86-setup.exe) |
+| Debian | [`iphotron_6.6.8_amd64.deb`](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/iphotron_6.6.8_amd64.deb) |
+| AppImage | [`iPhotron-6.6.8-x86_64.AppImage`](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/iPhotron-6.6.8-x86_64.AppImage) |
+| Flatpak | [`com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak`](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak) |
 
-[![下载 Windows 版本](https://img.shields.io/badge/⬇️%20下载-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/v6.68-x86-setup.exe)
-[![下载 Linux 版本（.deb）](https://img.shields.io/badge/⬇️%20下载-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/iphotron_6.6.8_amd64.deb)
-[![下载 Linux 版本（.AppImage）](https://img.shields.io/badge/⬇️%20下载-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/iPhotron-6.6.8-x86_64.AppImage)
-[![下载 Linux 版本（.flatpak）](https://img.shields.io/badge/⬇️%20下载-Linux%20(.flatpak)-purple?style=for-the-badge&logo=flatpak&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.6.8/com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak)
+`v6.68-x86-setup.exe` 就是 v6.6.8 Release 中实际发布的 Windows 文件名，并非 README 笔误。
 
-**💡 快速安装：** 点击上方按钮直接下载最新安装程序。
+v6.6.8 已经存在 Flatpak 发布文件，但当前开发分支**没有**维护中的仓库内 Flatpak manifest / 构建流程。
+“已有可下载的 Release artifact”和“当前源码可以复现构建”是两件不同的事。详见
+[`BUILD_FLATPAK.md`](../misc/BUILD_FLATPAK.md)。当前仓库中可复现的 Linux 打包说明包括
+[Debian](../misc/BUILD_DEB.md) 和 [AppImage](../misc/BUILD_APPIMAGE.md)。
 
-- **Windows：** 直接运行 `.exe` 安装程序。
-- **Linux：** 安装命令为：
-
-```bash
-sudo apt install ./iphotron_6.6.8_amd64.deb
-```
-
-- **Linux（AppImage）：** 赋予执行权限后直接运行：
+## 从源码运行
 
 ```bash
-chmod +x iPhotron-6.6.8-x86_64.AppImage
-./iPhotron-6.6.8-x86_64.AppImage
-```
-
-- **Linux（Flatpak）：** 使用 Flatpak 安装 bundle：
-
-```bash
-flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak
-```
-
-**开发者安装：**
-
-```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
-```
-
----
-
-## 🚀 快速开始
-
-```bash
 iphoto-gui
 ```
 
-或直接打开特定相册：
+安装后的 GUI 入口为 `iPhoto.entrypoint:main`。
 
-```bash
-iphoto-gui /photos/LondonTrip
-```
+## 当前开发分支主要能力
 
----
+- 文件夹即相册，无需额外导入。
+- 基于 SQLite 的大型图库查询与稀疏异步 Gallery 窗口。
+- 按视口需求调度缩略图，并通过 generation 防止快速滚动时旧结果回写。
+- Live Photo 配对与播放。
+- 可选的离线 OsmAnd 地图运行时。
+- 可选 People 人脸识别：姓名、封面、群组、隐藏状态、手工人脸等。
+- 可选 Pets 猫/狗识别：身份聚类以及持久化姓名、封面、隐藏等用户状态。
+- GPU-first Detail 渲染，以及 Detail/Edit 共享渲染会话。
+- 基于 `.ipo` sidecar 的非破坏性编辑。
+- Assign Location：先保存本地状态，再尽力写回原文件 GPS 元数据。
 
-## 🌟 Star 历史
+![主界面](../picture/mainview.png)
 
-<a href="https://www.star-history.com/?repos=OliverZhaohaibin%2FiPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&theme=dark&legend=bottom-right&sealed_token=Lc1mEAZl71QksVWnIyQYzFqd7tdPL2k1R9gQrEO-qQNiQMfrYgwsdrFiWvaChH3Iuyimi_hZTg0bbigPlPFx8N09refu-FvmiY1Gg64fn7pD4mcLmFLZyw" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right&sealed_token=Lc1mEAZl71QksVWnIyQYzFqd7tdPL2k1R9gQrEO-qQNiQMfrYgwsdrFiWvaChH3Iuyimi_hZTg0bbigPlPFx8N09refu-FvmiY1Gg64fn7pD4mcLmFLZyw" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right&sealed_token=Lc1mEAZl71QksVWnIyQYzFqd7tdPL2k1R9gQrEO-qQNiQMfrYgwsdrFiWvaChH3Iuyimi_hZTg0bbigPlPFx8N09refu-FvmiY1Gg64fn7pD4mcLmFLZyw" />
- </picture>
-</a>
+## People & Pets
 
-## 🚀 Product Hunt
-<p align="center">
-  <a href="https://www.producthunt.com/products/iphotron/launches/iphotron?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-iphotron" target="_blank" rel="noopener noreferrer">
-    <img alt="iPhotron - A macOS Photos–style photo manager for Windows | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1067965&amp;theme=light&amp;t=1772225909629">
-  </a>
-</p>
+People 与 Pets 是两个独立的可选 bounded context。它们各自拥有独立的运行时索引和持久化状态，
+UI 可以在卡片、群组、Gallery 查询和 Detail 标注层进行组合。
 
-<p align="center">
-  <span style="color:#FF6154;"><strong>请为我们点赞支持</strong></span> •
-  <span style="color:#FF6154;"><strong>关注我们</strong></span> •
-  <span style="color:#FF6154;"><strong>在论坛参与讨论</strong></span>
-</p>
+当前 Pets 身份聚类版本为 `species-bounded-single-link-v3`：猫狗分开聚类，遵守 cannot-link
+约束，并限制 cluster diameter，避免单链式聚类无限扩张。
 
----
+People/Pets 冲突规则**不是**无条件的“People 永远优先”。当宠物框与人脸框强烈重叠时，通常会
+抑制宠物候选；但如果检测框明显更大、仍像完整宠物身体、只是包含了较小的人脸框，则满足当前
+尺寸/图像覆盖率例外时可以保留该宠物检测。
 
-## 🌟 概述
+识别推理也是按功能首次使用激活：只有用户真正打开 People 页面，并且第一个 viewport 已准备好后，
+才会启动 People/Pets 扫描；普通应用启动本身不会自动触发识别推理。
 
-**iPhotron** 是一款受 macOS *照片* 启发的**文件夹原生照片管理器**。  
-它保留文件夹作为相册结构，将文件夹本地清单与 library 级
-`.iPhoto/global_index.db` 结合使用，并区分可重建缓存事实与不可丢失的用户选择，
-同时让编辑操作保持非破坏性，不覆盖原始媒体内容。
+DINOv2 在生产运行时加载预先生成的 TorchScript artifact，并通过 model manifest 校验。
+当前 manifest 的 `torchscript_url: null`，因此 DINOv2 目前必须由打包流程包含或显式 staging；
+`src/extension/models` 只是打包/staging 约定，并不保证 fresh clone 中存在全部模型。
 
-核心亮点：
-- 🗂 文件夹原生设计 —— 每个文件夹*就是*一个相册，无需导入。
-- ⚙️ 文件夹本地清单记录封面、精选、排序等相册元数据。
-- ⚡ **SQLite 驱动的全局数据库**，为海量图库提供基于 session 的高速查询。
-- 🖼 按需驱动的 Gallery 滚动，支持稀疏异步窗口、微型缩略图兜底和内存感知的全尺寸缩略图预取。
-- 🧠 智能增量扫描，使用持久化 SQLite 索引。
-- 🎥 完整的**实况照片**配对和播放支持。
-- 🗺 可选地图视图，可视化所有照片和视频的 GPS 元数据；缺少 maps extension 时会优雅降级。
-- 👥 可选的 People 人脸扫描，支持 face cluster、人物命名、封面、隐藏人物与多人 group。
-- 🐾 可选的 Pets 扫描，支持猫狗检测、宠物个体 cluster、命名、封面、隐藏、置顶与 People & Pets group。
-![Main interface](../picture/mainview.png)
-![Preview interface](../picture/preview.png)
----
+详细运行时规则见 [`PETS_RECOGNITION_RUNTIME.md`](../misc/PETS_RECOGNITION_RUNTIME.md)。
 
-## 🗺 Maps Extension
+## 架构与打包状态
 
-iPhotron 的离线 OBF 地图运行时以自包含的 **maps extension** 形式提供，
-根目录位于 `src/maps/tiles/extension/`。本项目源码运行、Nuitka 打包产物、
-以及各平台安装产物都以这套目录结构作为运行时约定。
-即使缺少这套 extension，应用的图库浏览、编辑、People & Pets 和 Live Photo 功能仍可使用；
-地图相关视图和面板会通过运行时可用性边界显示优雅降级状态。
+`DesktopCoordinatorRuntime` 是当前桌面端 coordinator graph 的 production composition root；
+`main_coordinator.py` 仅保留 compatibility import。
 
-当前 extension 主要包含：
-- `World_basemap_2.obf` 离线地图数据
-- `misc/`、`poi/`、`rendering_styles/`、`routing/` 以及相关运行时资源目录
-- `search/geonames.sqlite3` 离线地点搜索数据
-- `bin/` 下的平台原生二进制
-  - Windows：`osmand_render_helper.exe`、`osmand_native_widget.dll`、
-    `OsmAndCore_shared.dll`、`OsmAndCoreTools_shared.dll` 以及所需 Qt DLL
-  - Linux：`osmand_render_helper`、`osmand_native_widget.so`、
-    `libOsmAndCore_shared.so`、`libOsmAndCoreTools_shared.so`
-  - macOS：`osmand_render_helper`、`osmand_native_widget.dylib` 以及复制到
-    `bin/` 下的非系统 Mach-O 依赖
+当前维护文档：
 
-平台地图运行时说明：
-- 当平台运行时可用时，iPhotron 既可使用 helper-backed OBF renderer，也可使用原生 OsmAnd widget。
-- 如果仓库旁边存在 `PySide6-OsmAnd-SDK/` 工作区，Linux 和 macOS 开发环境可优先使用其中 `tools/osmand_render_helper_native/dist-*` 的 widget 构建产物。
-- 原生 Linux widget 目前依赖 Qt 的 XCB + desktop OpenGL 路径；选择该后端时，iPhotron 会自动设置 `QT_QPA_PLATFORM=xcb`、`QT_OPENGL=desktop` 与 `QT_XCB_GL_INTEGRATION=xcb_glx`。
-- macOS 上 legacy OpenGL 地图使用 `QOpenGLWindow + createWindowContainer()`，以避开透明主窗口下 `QOpenGLWidget` 的合成问题；媒体预览默认走支持 Metal 的 QRhi 路径，可通过 `IPHOTO_RHI_BACKEND=opengl` 强制 OpenGL。
+- [`AGENT.md`](../../AGENT.md)
+- [`docs/architecture.md`](../architecture.md)
+- [`docs/development.md`](../development.md)
+- [`docs/security.md`](../security.md)
+- [`docs/requirements/README.md`](../requirements/README.md)
 
-| 未启用 maps extension | 启用 maps extension |
+| 打包目标 | 当前分支状态 |
 | --- | --- |
-| ![未启用 maps extension](../picture/without_extension.png) | ![启用 maps extension](../picture/maps_extension.png) |
+| Windows / Nuitka | 有维护中的构建说明 |
+| Debian | 有仓库内可复现说明 |
+| AppImage | 有仓库内可复现说明 |
+| Flatpak | v6.6.8 有下载文件；当前仓库内构建流程缺失 |
 
-这套 extension 的上游构建工作区是独立子项目
-[PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)。
-该仓库维护 vendored OsmAnd 源码、Windows、Linux 与 macOS 构建脚本、原生 Qt Widget bridge
-以及预览程序，本仓库消费的运行时产物正是由它生成。
+## License
 
-完整的“如何基于 side project 构建本仓库 maps extension”流程请参阅
-[Development](../development.md)；
-Nuitka 打包、runtime 同步与安装器说明请参阅
-[Executable Build](../misc/BUILD_EXE.md)。
-
-## ✨ 功能特性
-
-### 🗺 位置视图
-在交互式地图上显示您的照片足迹，根据 GPS 元数据聚类附近的照片。
-![Location interface](../picture/map1.png)
-![Location interface](../picture/map2.png)
-
-### 🎞 实况照片支持
-使用 Apple 的 `ContentIdentifier` 无缝配对 HEIC/JPG 和 MOV 文件。  
-静态照片上会显示"实况"徽章 —— 点击即可内联播放动态视频。
-![Live interface](../picture/live.png)
-
-### 🧩 智能相册
-侧边栏提供自动生成的**基础图库**，将照片分组为：
-`所有照片`、`视频`、`实况照片`、`收藏`和`最近删除`。
-
-### 👥🐾 People、Pets、Face Cluster 与 Group
-可选的 People 管线会检测照片中的人脸，生成 face cluster，并在 People 页面以人物卡片展示。
-您可以为人物命名、合并重复 cluster、隐藏或重新显示隐藏人物，并让选定封面在重新扫描后继续保留。
-
-独立的 Pets 管线使用 YOLOX 检测猫狗、使用 DINOv2 生成 embedding，并在同一页面展示宠物个体卡片。
-宠物可以命名、合并、隐藏、置顶、设置封面并打开对应图库。人物与宠物可以加入同一个 identity group，
-但当同一图片区域同时被识别为 People 人脸和 pet 时，People 结果优先；冲突的 pet 检测会从可重建的
-Pets 快照中移除，因此不会继续生成重复卡片、宠物图库结果、详情标注或 overlay。该规则只组合比较
-检测框，People 与 Pets 的模型、记录、索引和持久状态仍保持独立。
-
-将多个人物组成 group 后，可以查看这些人物共同出现的照片。Group 卡片支持设置封面、拖拽排序，
-未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，
-核心照片管理功能仍可使用。People 状态通过 library session 边界持久化，人物命名、封面、
-隐藏状态、group 和手动人脸标注都会在重新扫描后保留。宠物扫描依赖可选的 `pets-ai`；缺少依赖或模型时，
-候选资源会保持 pending，且不会阻塞应用的其他功能。
-![People and groups interface](<../picture/People & Group.png>)
-
-### ⚡ 大型图库 Gallery
-Gallery 使用稀疏异步 SQL 窗口，不会在打开集合时物化整个图库。
-滚动意图会分别驱动可见区、近端保护区与远端推测缩略图队列；
-高速连续滚动时优先保证输入响应，并使用已预热的微型缩略图。
-完整缩略图在 GUI 线程之外解码，内存与 worker 预算会根据平台和物理内存调整，
-过期 viewport 任务则通过 generation 校验取消或丢弃。
-
-### 🖼 沉浸式详细视图
-优雅的照片/视频查看器，带有胶片条导航器和浮动播放栏；GPU 渲染路径会按平台选择：
-macOS 默认 QRhi/Metal，Windows 与 Linux 使用 OpenGL-backed QRhi。
-
-### 🎨 非破坏性照片编辑
-全面的编辑套件，包含**调整**和**裁剪**模式：
-
-#### 调整模式
-- **光线调整：** 亮度、曝光、高光、阴影、明度、对比度、黑场
-- **颜色调整：** 饱和度、自然饱和度、色偏（白平衡校正）
-- **黑白：** 强度、中性、色调、颗粒，带有艺术胶片预设
-- **色彩曲线：** RGB 和单通道（R/G/B）曲线编辑器，可拖动控制点进行精确色调调整
-- **可选颜色：** 针对六个色相范围（红/黄/绿/青/蓝/品红）进行独立的色相/饱和度/亮度控制
-- **色阶：** 5 点输入-输出色调映射，带有直方图背景和单通道控制
-- **主滑块：** 每个部分都有一个智能主滑块，可在多个微调控件之间分配值
-- **实时缩略图：** 实时预览条显示每个调整的效果范围
-![edit interface](../picture/editview.png)
-![edit interface](../picture/professionaltools.png)
-#### 裁剪模式
-- **透视校正：** 垂直和水平梯形失真调整
-- **拉直工具：** ±45° 旋转，亚度精度
-- **翻转（水平）：** 水平翻转支持
-- **交互式裁剪框：** 拖动手柄、边缘吸附和宽高比约束
-- **黑边防止：** 自动验证确保透视变换后不出现黑边
-  
-![crop interface](../picture/cropview.png)
-所有编辑都通过编辑 session surface 存储在 `.ipo` 附属文件中，保持原始照片不被触动。
-
-### ℹ️ 浮动信息面板
-切换浮动元数据面板，查看 EXIF、相机/镜头信息、曝光、光圈、焦距、尺寸、文件大小和拍摄时间等。
-如果当前资源已有识别数据，面板与图片 overlay 会同时显示人脸和宠物标注，并通过各自服务支持删除、
-移动到其他身份或创建新身份。
-
-位置工具也集成在面板中：带 GPS 的资源可以显示内嵌地图；没有位置的资源可以通过
-“Assign a Location” 搜索、选择并确认地点。地点会始终保存到本机图库数据库；如果
-ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回失败时会给出提示。
-如果 maps extension 缺失，面板会提供下载入口，而不是静默失效。
-
-| 带地图的信息面板 | 详情页浮动信息面板 |
-| --- | --- |
-| ![带地图的信息面板](../picture/info.png) | ![详情页浮动信息面板](../picture/info2.png) |
-
-### 💬 丰富的交互
-- 从资源管理器/访达直接拖放文件到相册。
-- 多选和上下文菜单，用于复制、在文件夹中显示、移动、删除、恢复。
-- 流畅的缩略图过渡和 macOS 风格的相册导航。
-
----
-
-## 📚 文档
-
-详细技术文档请参阅（英文版）：
-
-[![Architecture](https://img.shields.io/badge/📐_Architecture-blue?style=for-the-badge)](../architecture.md)
-[![Development](https://img.shields.io/badge/🧰_Development-green?style=for-the-badge)](../development.md)
-[![Executable Build](https://img.shields.io/badge/🧱_Executable_Build-purple?style=for-the-badge)](../misc/BUILD_EXE.md)
-[![Security](https://img.shields.io/badge/🔒_Security-red?style=for-the-badge)](../security.md)
-[![Changelog](https://img.shields.io/badge/📋_Changelog-orange?style=for-the-badge)](../CHANGELOG.md)
-
-| 文档 | 说明 |
-|------|------|
-| [Architecture](../architecture.md) | 当前 vNext library-scoped modular monolith 架构、模块边界、legacy 隔离策略、数据流和关键设计决策 |
-| [Development](../development.md) | 开发环境、依赖、调试，以及面向 Windows / Linux / macOS 的 maps extension 构建流程 |
-| [Pets Runtime](../misc/PETS_RECOGNITION_RUNTIME.md) | 当前宠物模型、扫描调度、持久化、变更安全和 People & Pets 组合契约 |
-| [Executable Build](../misc/BUILD_EXE.md) | Nuitka 打包、AOT、QRhi shader 资源、maps extension 同步与平台运行时说明 |
-| [Security](../security.md) | 权限、加密、数据存储位置、威胁模型 |
-| [Changelog](../CHANGELOG.md) | 所有版本更新记录 |
-
----
-
-## 🧩 外部工具
-
-| 工具 | 用途 |
-|------|------|
-| **ExifTool** | 读取 EXIF、GPS、QuickTime 和实况照片元数据；在用户执行 Assign Location 时写入 GPS 元数据。 |
-| **FFmpeg / FFprobe** | 生成视频缩略图并解析视频信息。 |
-| **InsightFace / ONNXRuntime + `buffalo_s` 模型** | 可选的 People 人脸扫描：使用 `src/extension/models/buffalo_s/` 中的 `det_500m.onnx` 进行人脸检测，使用 `w600k_mbf.onnx` 生成人脸 embedding。 |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | 可选的 Pets 扫描：使用 `src/extension/models/pets/` 中的模型进行猫狗检测和宠物个体 embedding。 |
-
-> 请确保 FFmpeg/FFprobe 已加入系统 `PATH`；如果需要把指定地点的 GPS 写回原始媒体文件，
-> 也请安装 ExifTool。
-> AI 识别运行时是可选功能；源码安装可使用 `pip install -e ".[ai-demo,pets-ai]"`，
-> 离线打包版本需要保留 `extension/models`。
-
-Python 依赖（例如 `Pillow`、`reverse-geocoder`）会通过 `pyproject.toml` 自动安装。
-
----
-
-## 📄 许可证
-
-**MIT 许可证 © 2025**  
-由 **Haibin Zhao (OliverZhaohaibin)** 创建  
-
-> *iPhotron —— 一个文件夹原生、人类可读且完全可重建的照片系统。*  
-> *无需强制导入。没有专有锁定。只有您的照片，优雅地组织。*
+MIT，见 [`LICENSE`](../../LICENSE)。

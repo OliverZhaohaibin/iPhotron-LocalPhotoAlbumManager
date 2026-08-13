@@ -19,6 +19,7 @@ import threading
 import weakref
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
@@ -29,6 +30,7 @@ from PySide6.QtCore import (
     QRunnable,
     QSize,
     QThreadPool,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import QImage, QPixmap
@@ -50,6 +52,23 @@ from .thumbnail_job import ThumbnailJob  # noqa: F401
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _CacheCleanupOwnershipToken:
+    """Root activation and rel generation that own a deferred unlink."""
+
+    root_identity: str
+    root_epoch: int
+    rel_generation: int
+    rel_state: "_CacheCleanupRelState"
+
+
+@dataclass(slots=True)
+class _CacheCleanupRelState:
+    """Mutable generation state shared with cleanup guards for one rel."""
+
+    generation: int = 0
+
+
 class _ThumbnailCacheCleanupJob(QRunnable):
     """Low-priority batch cleanup that never scans the cache on the GUI path."""
 
@@ -57,6 +76,7 @@ class _ThumbnailCacheCleanupJob(QRunnable):
         self,
         library_root: Path,
         targets: Iterable[CacheCleanupTarget],
+        finished: Callable[[], None],
     ) -> None:
         super().__init__()
         self._library_root = library_root
@@ -69,9 +89,16 @@ class _ThumbnailCacheCleanupJob(QRunnable):
             )
             for target in targets
         )
+        self._finished = finished
 
     def run(self) -> None:  # pragma: no cover - executed in worker thread
-        remove_cache_versions_many(self._library_root, self._targets)
+        try:
+            remove_cache_versions_many(self._library_root, self._targets)
+        finally:
+            try:
+                self._finished()
+            except RuntimeError:
+                pass
 
 
 class ThumbnailLoader(QObject):
@@ -81,6 +108,9 @@ class ThumbnailLoader(QObject):
     cache_written = Signal(Path)
     _delivered = Signal(object, object, str, object, object)
     _validation_success = Signal(object, object)
+    _cache_cleanup_finished = Signal()
+
+    CACHE_CLEANUP_DEBOUNCE_MS = 100
 
     class Priority(IntEnum):
         """
@@ -116,6 +146,9 @@ class ThumbnailLoader(QObject):
         self._rel_generations: Dict[str, int] = {}
         self._generation_lock = threading.RLock()
         self._evicted_rels: set[str] = set()
+        self._root_activation_epochs: dict[str, int] = {}
+        self._active_root_epoch = 0
+        self._cleanup_rel_states: dict[str, _CacheCleanupRelState] = {}
 
         self._memory: OrderedDict[Tuple[str, str, int, int], Tuple[int, QPixmap]] = OrderedDict()
         self._max_memory_items = 500
@@ -144,14 +177,32 @@ class ThumbnailLoader(QObject):
             ],
         ] = {}
 
+        self._pending_cache_cleanup_targets: dict[
+            str,
+            tuple[Path, dict[tuple[str, int, int], CacheCleanupTarget]],
+        ] = {}
+        self._active_cache_cleanup_jobs = 0
+        self._cache_cleanup_timer = QTimer(self)
+        self._cache_cleanup_timer.setSingleShot(True)
+        self._cache_cleanup_timer.setInterval(self.CACHE_CLEANUP_DEBOUNCE_MS)
+        self._cache_cleanup_timer.timeout.connect(self._flush_cache_cleanup)
+
         self._delivered.connect(self._handle_result)
         self._validation_success.connect(self._handle_validation_success)
+        self._cache_cleanup_finished.connect(self._handle_cache_cleanup_finished)
 
     def shutdown(self) -> None:
         with self._generation_lock:
             self._album_generation += 1
         self._pending_deque.clear()
         self._pending_keys.clear()
+        self._cache_cleanup_timer.stop()
+        self._flush_cache_cleanup()
+        self._pool.waitForDone()
+        # A batch may have accumulated while a previous cleanup was active.
+        self._active_jobs_count = 0
+        self._active_cache_cleanup_jobs = 0
+        self._flush_cache_cleanup()
         self._pool.waitForDone()
 
     def set_library_root(self, root: Path) -> None:
@@ -167,12 +218,18 @@ class ThumbnailLoader(QObject):
     def reset_for_album(self, root: Path) -> None:
         if self._album_root and self._album_root == root:
             return
+        root_identity = str(root.resolve())
         with self._generation_lock:
             self._album_generation += 1
             self._rel_generations.clear()
             self._evicted_rels.clear()
+            self._cleanup_rel_states.clear()
+            self._active_root_epoch = (
+                self._root_activation_epochs.get(root_identity, 0) + 1
+            )
+            self._root_activation_epochs[root_identity] = self._active_root_epoch
         self._album_root = root
-        self._album_root_str = str(root.resolve())
+        self._album_root_str = root_identity
         self._memory.clear()
         self._pending_deque.clear()
         self._pending_keys.clear()
@@ -450,6 +507,7 @@ class ThumbnailLoader(QObject):
 
         with self._generation_lock:
             self._rel_generations[rel] = self._rel_generations.get(rel, 0) + 1
+            self._advance_cleanup_rel_generation_locked(rel)
             return self._album_generation, self._rel_generations[rel]
 
     def _reactivate_evicted_rel(self, rel: str) -> None:
@@ -460,6 +518,36 @@ class ThumbnailLoader(QObject):
                 return
             self._evicted_rels.discard(rel)
             self._rel_generations[rel] = self._rel_generations.get(rel, 0) + 1
+            self._advance_cleanup_rel_generation_locked(rel)
+
+    def _cleanup_rel_state_locked(self, rel: str) -> _CacheCleanupRelState:
+        state = self._cleanup_rel_states.get(rel)
+        if state is None:
+            state = _CacheCleanupRelState()
+            self._cleanup_rel_states[rel] = state
+        return state
+
+    def _advance_cleanup_rel_generation_locked(self, rel: str) -> int:
+        state = self._cleanup_rel_state_locked(rel)
+        state.generation += 1
+        return state.generation
+
+    def _cleanup_ownership_token_locked(
+        self,
+        rel: str,
+    ) -> _CacheCleanupOwnershipToken:
+        assert self._album_root_str is not None
+        state = self._cleanup_rel_state_locked(rel)
+        return _CacheCleanupOwnershipToken(
+            self._album_root_str,
+            self._active_root_epoch,
+            state.generation,
+            state,
+        )
+
+    def _cleanup_ownership_token(self, rel: str) -> _CacheCleanupOwnershipToken:
+        with self._generation_lock:
+            return self._cleanup_ownership_token_locked(rel)
 
     def _is_current_generation(
         self,
@@ -487,9 +575,11 @@ class ThumbnailLoader(QObject):
             return
 
         base_key = self._base_key(rel, QSize(512, 512))
-        # The current generation owns final disk reconciliation.  This also
-        # covers a stale active job that writes after invalidation.
-        self._disk_prune_needed.add(base_key)
+        if base_key not in self._memory:
+            # Without a known stamp, let the accepted generation reconcile
+            # unknown siblings.  A stale active result can also set this flag
+            # later if it finishes while its replacement is pending.
+            self._disk_prune_needed.add(base_key)
         self._advance_rel_generation(rel)
         self._clear_rel_request_state(rel)
 
@@ -514,15 +604,13 @@ class ThumbnailLoader(QObject):
             return
 
         removed_rels = set(removed_by_rel)
-        generation_tokens: dict[str, tuple[int, int]] = {}
+        cleanup_tokens: dict[str, _CacheCleanupOwnershipToken] = {}
         with self._generation_lock:
             for rel in removed_rels:
                 self._rel_generations[rel] = self._rel_generations.get(rel, 0) + 1
+                self._advance_cleanup_rel_generation_locked(rel)
                 self._evicted_rels.add(rel)
-                generation_tokens[rel] = (
-                    self._album_generation,
-                    self._rel_generations[rel],
-                )
+                cleanup_tokens[rel] = self._cleanup_ownership_token_locked(rel)
 
         library_root = self._library_root or self._album_root
         cached_sizes_by_rel = {
@@ -546,8 +634,7 @@ class ThumbnailLoader(QObject):
                 removed_by_rel[rel],
                 QSize(width, height),
                 unlink_candidate=self._generation_guarded_unlink(
-                    rel,
-                    generation_tokens[rel],
+                    cleanup_tokens[rel],
                 ),
             )
             for rel, sizes in cached_sizes_by_rel.items()
@@ -623,7 +710,7 @@ class ThumbnailLoader(QObject):
 
         if spec is None or base_key not in self._disk_prune_needed:
             return
-        rel, abs_path, size, _, _, library_root, *_, generation_token = spec
+        rel, abs_path, size, _, _, library_root, *_ = spec
         self._disk_prune_needed.discard(base_key)
         self._schedule_cache_cleanup(
             library_root,
@@ -632,24 +719,20 @@ class ThumbnailLoader(QObject):
                     abs_path,
                     size,
                     current_stamp,
-                    self._generation_guarded_unlink(rel, generation_token),
+                    self._generation_guarded_unlink(
+                        self._cleanup_ownership_token(rel),
+                    ),
                 )
             ],
         )
 
     def _generation_guarded_unlink(
         self,
-        rel: str,
-        generation_token: object,
+        ownership_token: _CacheCleanupOwnershipToken,
     ) -> Callable[[Path], None]:
-        """Return an unlink operation owned by one loader generation."""
+        """Return an unlink operation owned by one root activation and rel."""
 
         loader_ref = weakref.ref(self)
-        expected_rel_generation = (
-            generation_token[1]
-            if isinstance(generation_token, tuple) and len(generation_token) == 2
-            else generation_token
-        )
 
         def unlink_if_current(candidate: Path) -> None:
             loader = loader_ref()
@@ -657,7 +740,15 @@ class ThumbnailLoader(QObject):
                 safe_unlink(candidate)
                 return
             with loader._generation_lock:
-                if loader._rel_generations.get(rel, 0) == expected_rel_generation:
+                root_epoch = loader._root_activation_epochs.get(
+                    ownership_token.root_identity,
+                    0,
+                )
+                if (
+                    root_epoch == ownership_token.root_epoch
+                    and ownership_token.rel_state.generation
+                    == ownership_token.rel_generation
+                ):
                     safe_unlink(candidate)
 
         return unlink_if_current
@@ -667,10 +758,57 @@ class ThumbnailLoader(QObject):
         library_root: Path,
         targets: Iterable[CacheCleanupTarget],
     ) -> None:
-        """Run cache pruning off the GUI thread at low priority."""
+        """Accumulate cache pruning until a quiet window, then scan once."""
 
-        job = _ThumbnailCacheCleanupJob(library_root, targets)
-        self._pool.start(job, int(self.Priority.LOW))
+        root_identity = str(library_root)
+        root, pending_targets = self._pending_cache_cleanup_targets.setdefault(
+            root_identity,
+            (library_root, {}),
+        )
+        for target in targets:
+            target_key = (
+                str(target.abs_path),
+                target.size.width(),
+                target.size.height(),
+            )
+            pending_targets[target_key] = target
+        self._pending_cache_cleanup_targets[root_identity] = (root, pending_targets)
+        if self._active_cache_cleanup_jobs == 0:
+            self._cache_cleanup_timer.start()
+
+    def _flush_cache_cleanup(self) -> None:
+        """Start one cleanup scan per library root for the accumulated batch."""
+
+        if self._active_cache_cleanup_jobs > 0 or not self._pending_cache_cleanup_targets:
+            return
+        if self._active_jobs_count > 0:
+            # Validation/render results can keep adding targets.  Wait until
+            # that thumbnail wave settles so it produces one directory scan.
+            self._cache_cleanup_timer.start()
+            return
+        batches = tuple(self._pending_cache_cleanup_targets.values())
+        self._pending_cache_cleanup_targets.clear()
+        self._active_cache_cleanup_jobs = len(batches)
+        for library_root, targets in batches:
+            job = _ThumbnailCacheCleanupJob(
+                library_root,
+                targets.values(),
+                self._cache_cleanup_finished.emit,
+            )
+            self._pool.start(job, int(self.Priority.LOW))
+
+    def _handle_cache_cleanup_finished(self) -> None:
+        """Serialize cleanup batches and debounce targets received meanwhile."""
+
+        self._active_cache_cleanup_jobs = max(
+            0,
+            self._active_cache_cleanup_jobs - 1,
+        )
+        if (
+            self._active_cache_cleanup_jobs == 0
+            and self._pending_cache_cleanup_targets
+        ):
+            self._cache_cleanup_timer.start()
 
     def _retry_after_failure(
         self,

@@ -11,6 +11,36 @@ permissions:
   contents: read
 
 jobs:
+  maps-scale-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libpulse0
+
+      - name: Install Maps scale-contract dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run 1k, 10k, and 50k marker clustering contract
+        env:
+          IPHOTO_RUN_MAPS_SCALE_CONTRACT: "1"
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests/contracts/test_map_marker_scale_contract.py
+
   pets-scale-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 15

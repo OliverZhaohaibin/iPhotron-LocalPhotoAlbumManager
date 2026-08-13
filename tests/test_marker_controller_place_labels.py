@@ -65,6 +65,7 @@ class _DummyThumbnailLoader(QObject):
         self.reset_calls: list[Path] = []
         self.invalidate_calls: list[str] = []
         self.evict_calls: list[tuple[str, Path]] = []
+        self.evict_many_calls: list[list[tuple[str, Path]]] = []
 
     def reset_for_album(self, root: Path) -> None:
         self.reset_calls.append(root)
@@ -75,6 +76,9 @@ class _DummyThumbnailLoader(QObject):
 
     def evict(self, rel: str, abs_path: Path) -> None:
         self.evict_calls.append((rel, abs_path))
+
+    def evict_many(self, entries: list[tuple[str, Path]]) -> None:
+        self.evict_many_calls.append(list(entries))
 
     def request(self, *args, **kwargs):
         return None
@@ -638,7 +642,7 @@ def test_marker_controller_evicts_only_removed_same_library_thumbnails(
         thumbnail_size=192,
         provides_place_labels=False,
     )
-    assets = _assets_at(tmp_path, 2)
+    assets = _assets_at(tmp_path, 3)
     removed: list[str] = []
     full_invalidations: list[bool] = []
     controller.thumbnailInvalidated.connect(removed.append)
@@ -650,10 +654,17 @@ def test_marker_controller_evicts_only_removed_same_library_thumbnails(
     finally:
         controller.shutdown()
 
-    assert removed == [assets[1].library_relative]
+    assert removed == [
+        assets[1].library_relative,
+        assets[2].library_relative,
+    ]
     assert loader.invalidate_calls == []
-    assert loader.evict_calls == [
-        (assets[1].library_relative, assets[1].absolute_path)
+    assert loader.evict_calls == []
+    assert loader.evict_many_calls == [
+        [
+            (assets[1].library_relative, assets[1].absolute_path),
+            (assets[2].library_relative, assets[2].absolute_path),
+        ]
     ]
     assert full_invalidations == [True]
 

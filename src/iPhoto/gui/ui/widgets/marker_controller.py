@@ -381,13 +381,15 @@ class MarkerController(QObject):
                 existing_asset = existing_by_rel.get(incoming_asset.library_relative)
                 if existing_asset is not None and incoming_asset != existing_asset:
                     self._thumbnail_loader.invalidate(incoming_asset.library_relative)
-            for removed_rel in existing_by_rel.keys() - incoming_rels:
+            removed_entries = [
+                (removed_rel, existing_by_rel[removed_rel].absolute_path)
+                for removed_rel in sorted(existing_by_rel.keys() - incoming_rels)
+            ]
+            for removed_rel, _absolute_path in removed_entries:
                 self._current_representative_rels.discard(removed_rel)
-                self._thumbnail_loader.evict(
-                    removed_rel,
-                    existing_by_rel[removed_rel].absolute_path,
-                )
                 self.thumbnailInvalidated.emit(removed_rel)
+            if removed_entries:
+                self._thumbnail_loader.evict_many(removed_entries)
 
         self._assets = normalized_assets
         self._library_root = library_root

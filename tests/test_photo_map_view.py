@@ -158,6 +158,9 @@ class _DummyThumbnailLoader(QObject):
     def evict(self, rel: str, abs_path: Path) -> None:
         del rel, abs_path
 
+    def evict_many(self, entries: list[tuple[str, Path]]) -> None:
+        del entries
+
     def request(self, *args, **kwargs):
         del args, kwargs
         return None

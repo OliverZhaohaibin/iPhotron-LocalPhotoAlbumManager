@@ -62,6 +62,18 @@ class TestWALMode:
         finally:
             conn.close()
 
+    def test_create_connection_preserves_ten_second_busy_timeout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db = DatabaseManager(tmp_path / "test.db")
+        conn = db._create_connection()
+        try:
+            timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            assert timeout_ms == 10_000
+        finally:
+            conn.close()
+
     def test_transaction_uses_wal(self, tmp_path: Path) -> None:
         db = DatabaseManager(tmp_path / "test.db")
         with db.transaction() as conn:
@@ -104,6 +116,8 @@ class TestWALMode:
         assert connections[0].statements.count("PRAGMA journal_mode=WAL") == 1
         assert "PRAGMA journal_mode=WAL" not in connections[1].statements
         assert "PRAGMA synchronous=NORMAL" in connections[1].statements
+        assert "PRAGMA busy_timeout=10000" in connections[0].statements
+        assert "PRAGMA busy_timeout=10000" in connections[1].statements
         assert "PRAGMA cache_size=-8000" in connections[1].statements
 
 

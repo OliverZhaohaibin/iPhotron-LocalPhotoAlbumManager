@@ -11,6 +11,7 @@ from iPhoto.application.ports import AssetStateServicePort, EditServicePort
 from iPhoto.gui.detail_pipeline import AssetSourceIdentity
 from iPhoto.gui.detail_profile import emit_detail_event
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionState
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -26,6 +27,7 @@ class MediaSelectionPort(Protocol):
     def set_current_by_path(self, path: Path) -> bool: ...
     def current_row(self) -> int: ...
     def current_source(self) -> Optional[Path]: ...
+    def selection_state(self) -> MediaSelectionState: ...
     def next_row(self) -> Optional[int]: ...
     def previous_row(self) -> Optional[int]: ...
 
@@ -120,12 +122,16 @@ class DetailViewModel(BaseViewModel):
         restore_signal = getattr(self._media_session, "restoreRequested", None)
         if restore_signal is not None:
             restore_signal.connect(self._handle_restore_requested)
+        navigation_signal = getattr(self._media_session, "navigationRequested", None)
+        if navigation_signal is not None:
+            navigation_signal.connect(self._handle_navigation_requested)
         committed_signal = getattr(self._adjustment_commit_port, "adjustmentsCommitted", None)
         if committed_signal is not None:
             committed_signal.connect(self._handle_adjustments_committed)
 
         self.current_row = ObservableProperty(-1)
         self.current_path = ObservableProperty(None)
+        self.selection_state = ObservableProperty(MediaSelectionState.NONE)
         self.presentation = ObservableProperty(None)
 
         self.route_requested = Signal()
@@ -154,6 +160,7 @@ class DetailViewModel(BaseViewModel):
             return
         self.current_row.value = row
         self.current_path.value = source
+        self.selection_state.value = MediaSelectionState.RESOLVED
         emit_detail_event(
             "click_received",
             generation=request_generation,
@@ -188,13 +195,27 @@ class DetailViewModel(BaseViewModel):
             self.show_row(row)
 
     def toggle_favorite(self) -> None:
-        row = self.current_row.value
-        if row is None or row < 0 or self._asset_state_service is None:
+        if (
+            self._asset_state_service is None
+            or self._media_selection_state() is not MediaSelectionState.RESOLVED
+        ):
+            return
+        row = self._media_session.current_row()
+        if not isinstance(row, int) or row < 0:
+            row = self.current_row.value
+        if not isinstance(row, int) or row < 0:
+            return
+        presentation = self.presentation.value
+        if not isinstance(presentation, DetailPresentation):
             return
         dto = self._store.asset_at(row)
-        if dto is None:
+        if (
+            dto is None
+            or dto.abs_path != presentation.path
+            or str(dto.id) != str(presentation.asset_id)
+        ):
             return
-        new_state = self._asset_state_service.toggle_favorite(dto.abs_path)
+        new_state = self._asset_state_service.toggle_favorite(presentation.path)
         self._store.update_favorite_status(row, new_state)
         self._refresh_presentation()
 
@@ -299,11 +320,13 @@ class DetailViewModel(BaseViewModel):
     def _handle_store_changed(self) -> None:
         current_row = self._media_session.current_row()
         current_path = self._media_session.current_source()
+        selection_state = self._media_selection_state()
         presentation = self.presentation.value
         emit_detail_event(
             "detail_store_refresh",
             generation=self._request_generation,
             current_row=current_row,
+            selection_state=selection_state.value,
             has_current_source=isinstance(current_path, Path),
             presentation_row=(
                 presentation.row if isinstance(presentation, DetailPresentation) else None
@@ -314,6 +337,28 @@ class DetailViewModel(BaseViewModel):
                 else None
             ),
         )
+        self.selection_state.value = selection_state
+        if selection_state in {
+            MediaSelectionState.ANCHOR_RESOLVING,
+            MediaSelectionState.FALLBACK_PENDING,
+        }:
+            self.current_row.value = -1
+            if isinstance(current_path, Path):
+                self.current_path.value = current_path
+            if (
+                isinstance(presentation, DetailPresentation)
+                and isinstance(current_path, Path)
+                and presentation.path == current_path
+            ):
+                pending_presentation = replace(
+                    presentation,
+                    row=-1,
+                    can_toggle_favorite=False,
+                )
+                if pending_presentation != presentation:
+                    self.presentation.value = pending_presentation
+                    self.presentation_changed.emit(pending_presentation)
+            return
         if current_row < 0 or not isinstance(current_path, Path):
             return
         self.current_row.value = current_row
@@ -328,6 +373,24 @@ class DetailViewModel(BaseViewModel):
     def _handle_row_loaded(self, row: int) -> None:
         if self._pending_show_row == row:
             self.show_row(row)
+
+    def _handle_navigation_requested(self, row: int) -> None:
+        self.show_row(row)
+
+    def _media_selection_state(self) -> MediaSelectionState:
+        getter = getattr(self._media_session, "selection_state", None)
+        if callable(getter):
+            state = getter()
+            if isinstance(state, MediaSelectionState):
+                return state
+            try:
+                return MediaSelectionState(str(state))
+            except ValueError:
+                pass
+        row = self.current_row.value
+        if isinstance(row, int) and row >= 0:
+            return MediaSelectionState.RESOLVED
+        return MediaSelectionState.NONE
 
     def _handle_restore_requested(self, request: object) -> None:
         if not isinstance(request, MediaRestoreRequest):

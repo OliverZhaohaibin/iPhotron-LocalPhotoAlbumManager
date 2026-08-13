@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.gui.ui.media import MediaRestoreRequest, MediaSelectionSession
+from iPhoto.gui.ui.media import (
+    MediaRestoreRequest,
+    MediaSelectionSession,
+    MediaSelectionState,
+)
 from iPhoto.gui.viewmodels.signal import Signal
 
 
@@ -190,6 +194,7 @@ def test_scan_refresh_uses_only_anchor_cache_and_preserves_pending_source() -> N
 
     assert session.current_row() == -1
     assert session.current_source() == current
+    assert session.selection_state() is MediaSelectionState.ANCHOR_RESOLVING
     assert collection.sync_lookup_calls == 0
 
     collection.publish(
@@ -200,7 +205,52 @@ def test_scan_refresh_uses_only_anchor_cache_and_preserves_pending_source() -> N
 
     assert session.current_row() == 2
     assert session.current_source() == current
+    assert session.selection_state() is MediaSelectionState.RESOLVED
     assert collection.sync_lookup_calls == 0
+
+
+def test_retry_next_waits_for_resolved_anchor_instead_of_jumping_to_zero() -> None:
+    current = Path("/fake/current.jpg")
+    after = Path("/fake/after.jpg")
+    collection = _AnchoredCollection([Path("/fake/a.jpg"), current, after])
+    session = MediaSelectionSession()
+    requested: list[int] = []
+    session.navigationRequested.connect(requested.append)
+    session.bind_collection(collection)
+    session.set_current_row(1)
+
+    reordered = [Path("/fake/new.jpg"), Path("/fake/a.jpg"), current, after]
+    collection.publish(reordered, status="retry", cached_rows={0, 1, 2, 3})
+
+    assert session.next_row() is None
+    assert requested == []
+
+    collection.publish(reordered, status="resolved", cached_rows={0, 1, 2, 3})
+
+    assert session.current_row() == 2
+    assert requested == [3]
+
+
+def test_retry_previous_preserves_direction_until_anchor_resolves() -> None:
+    before = Path("/fake/before.jpg")
+    current = Path("/fake/current.jpg")
+    collection = _AnchoredCollection([before, current, Path("/fake/after.jpg")])
+    session = MediaSelectionSession()
+    requested: list[int] = []
+    session.navigationRequested.connect(requested.append)
+    session.bind_collection(collection)
+    session.set_current_row(1)
+
+    reordered = [Path("/fake/new.jpg"), before, current, Path("/fake/after.jpg")]
+    collection.publish(reordered, status="retry", cached_rows={0, 1, 2, 3})
+
+    assert session.previous_row() is None
+    assert requested == []
+
+    collection.publish(reordered, status="resolved", cached_rows={0, 1, 2, 3})
+
+    assert session.current_row() == 2
+    assert requested == [1]
 
 
 def test_confirmed_missing_anchor_falls_back_near_previous_row() -> None:
@@ -238,6 +288,7 @@ def test_confirmed_missing_anchor_waits_for_async_fallback_row() -> None:
 
     assert session.current_row() == -1
     assert session.current_source() == current
+    assert session.selection_state() is MediaSelectionState.FALLBACK_PENDING
     assert collection.ensure_calls[-1] == 1
 
     collection.cached_rows.add(1)

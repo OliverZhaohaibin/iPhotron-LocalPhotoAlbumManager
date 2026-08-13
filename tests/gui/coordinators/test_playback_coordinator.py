@@ -26,6 +26,7 @@ from iPhoto.gui.detail_render_coordinator import (
 )
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionState
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
 from iPhoto.people.repository import AssetFaceAnnotation
@@ -254,6 +255,45 @@ def test_fullscreen_restarts_still_after_terminal_without_render_session() -> No
     assert PlaybackCoordinator.prepare_fullscreen_asset(coordinator) is True
 
     coordinator._detail_vm.show_current.assert_called_once_with()
+
+
+def test_fullscreen_keeps_stable_pending_anchor_instead_of_opening_row_zero() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = replace(
+        _make_presentation(path="/fake/photo.jpg", is_video=False),
+        row=-1,
+    )
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator.current_row = Mock(return_value=-1)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = presentation
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(has_current_render_session=Mock(return_value=True))
+    coordinator.play_asset = Mock()
+
+    assert PlaybackCoordinator.prepare_fullscreen_asset(coordinator) is True
+
+    coordinator.play_asset.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("delta", "method_name"),
+    [(1, "next"), (-1, "previous")],
+)
+def test_relative_navigation_defers_while_selection_anchor_is_resolving(
+    delta: int,
+    method_name: str,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator._detail_vm = Mock()
+    coordinator._detail_vm.selection_state.value = MediaSelectionState.ANCHOR_RESOLVING
+    coordinator.play_asset = Mock()
+
+    PlaybackCoordinator._request_relative_asset(coordinator, delta)
+
+    getattr(coordinator._detail_vm, method_name).assert_called_once_with()
+    coordinator.play_asset.assert_not_called()
 
 
 def test_handle_presentation_changed_renders_video_and_updates_header() -> None:

@@ -30,3 +30,15 @@ def test_configure_sqlite_connection_initializes_wal_once_per_path(tmp_path: Pat
     assert "PRAGMA foreign_keys=ON" in second.statements
     assert "PRAGMA journal_mode=WAL" not in second.statements
     assert "PRAGMA synchronous=NORMAL" in second.statements
+
+
+def test_configure_sqlite_connection_accepts_explicit_busy_timeout(tmp_path: Path) -> None:
+    connection = _FakeConnection()
+
+    sqlite_utils.configure_sqlite_connection(
+        connection,
+        tmp_path / "index.db",
+        busy_timeout_ms=10_000,
+    )
+
+    assert connection.statements == ["PRAGMA busy_timeout=10000"]

@@ -45,6 +45,7 @@ from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.icons import load_icon
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionState
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.utils.ffmpeg import probe_video_rotation_info
@@ -704,7 +705,7 @@ class PlaybackCoordinator(QObject):
             return False
         current_row = self.current_row()
         target_row = current_row if current_row >= 0 else 0
-        if current_row < 0 or not self._router.is_detail_view_active():
+        if not self._router.is_detail_view_active():
             self.play_asset(target_row)
             return True
         presentation = getattr(self, "_current_presentation", None)
@@ -1033,6 +1034,9 @@ class PlaybackCoordinator(QObject):
                 asset_id=presentation.asset_id,
                 row=row,
             )
+            favorite_button = getattr(self, "_favorite_button", None)
+            if favorite_button is not None:
+                favorite_button.setEnabled(presentation.can_toggle_favorite)
             self._update_favorite_icon(presentation.is_favorite)
             if self._info_panel and presentation.info_panel_visible:
                 self._refresh_info_panel(presentation.info)
@@ -2333,6 +2337,18 @@ class PlaybackCoordinator(QObject):
 
         row_count = self._asset_model.rowCount()
         if row_count <= 0 or delta == 0:
+            return
+        detail_vm = getattr(self, "_detail_vm", None)
+        state_property = getattr(detail_vm, "selection_state", None)
+        selection_state = getattr(state_property, "value", None)
+        if selection_state in {
+            MediaSelectionState.ANCHOR_RESOLVING,
+            MediaSelectionState.FALLBACK_PENDING,
+        }:
+            if delta > 0:
+                detail_vm.next()
+            else:
+                detail_vm.previous()
             return
         pending_row = self._pending_play_row
         requested_row = getattr(self, "_requested_play_row", None)

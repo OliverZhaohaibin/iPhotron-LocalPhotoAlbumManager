@@ -7,6 +7,7 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.ports import EditRenderingState
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
 from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
+from iPhoto.gui.ui.media.media_selection_session import MediaSelectionState
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.signal import Signal
 
@@ -243,15 +244,61 @@ def test_pending_selection_anchor_keeps_existing_detail_presentation() -> None:
 
     assert session.current_row() == -1
     assert session.current_source() == Path("/tmp/visible.jpg")
-    assert vm.presentation.value is original
-    assert changes == [original]
+    assert vm.current_row.value == -1
+    assert vm.selection_state.value is MediaSelectionState.ANCHOR_RESOLVING
+    pending = vm.presentation.value
+    assert pending is not original
+    assert pending.path == original.path
+    assert pending.row == -1
+    assert pending.can_toggle_favorite is False
+    assert pending.render_key == original.render_key
+    assert changes == [original, pending]
 
     store.anchor_status = "resolved"
     store.data_changed.emit()
 
     assert session.current_row() == 0
+    assert vm.current_row.value == 0
+    assert vm.selection_state.value is MediaSelectionState.RESOLVED
     assert vm.presentation.value.request_generation == original.request_generation
     assert vm.presentation.value.render_key == original.render_key
+
+
+def test_retry_favorite_never_targets_the_asset_at_the_stale_row() -> None:
+    store = _AnchoredLazyCollection()
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    asset_state_service = Mock()
+    vm = DetailViewModel(
+        collection_store=store,
+        media_session=session,
+        asset_state_service=asset_state_service,
+        adjustment_commit_port=None,
+        edit_service_getter=None,
+    )
+    vm.show_row(0)
+    visible = vm.presentation.value
+    assert visible is not None
+
+    wrong = _make_dto("/tmp/wrong.jpg")
+    store._dtos = [wrong, store._dtos[0]]
+    store._loaded_rows = {0, 1}
+    store.anchor_status = "retry"
+    store.data_changed.emit()
+
+    assert store.asset_at(0).abs_path == wrong.abs_path
+    assert vm.presentation.value.path == visible.path
+    assert vm.current_row.value == -1
+    vm.toggle_favorite()
+
+    asset_state_service.toggle_favorite.assert_not_called()
+
+    store.anchor_status = "resolved"
+    store.data_changed.emit()
+
+    assert vm.current_row.value == 1
+    assert vm.presentation.value.path == visible.path
+    assert vm.presentation.value.can_toggle_favorite is True
 
 
 def test_toggle_favorite_updates_store_and_presentation():

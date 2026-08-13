@@ -12,6 +12,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for marker controller
 pytest.importorskip("PySide6.QtCore", reason="QtCore is required for marker controller tests", exc_type=ImportError)
 
 from PySide6.QtCore import QObject, QPointF, QRectF
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.marker_controller import (
@@ -298,11 +299,10 @@ def test_marker_controller_refines_and_merges_coarse_clusters_without_asset_walk
     tmp_path: Path,
 ) -> None:
     del qapp
-    first, second, outside = (
-        _assets_at(tmp_path, 1, latitude=10.0, longitude=10.0)[0],
-        _assets_at(tmp_path, 1, latitude=20.0, longitude=20.0)[0],
-        _assets_at(tmp_path, 1, latitude=30.0, longitude=30.0)[0],
-    )
+    first = _assets_at(tmp_path, 1, latitude=10.0, longitude=10.0)[0]
+    second_group = _assets_at(tmp_path, 3, latitude=20.0, longitude=20.0)
+    second = second_group[0]
+    outside = _assets_at(tmp_path, 1, latitude=30.0, longitude=30.0)[0]
     map_widget = _ExactProjectionMapWidget(
         {
             (10.0, 10.0): QPointF(100.0, 100.0),
@@ -319,7 +319,12 @@ def test_marker_controller_refines_and_merges_coarse_clusters_without_asset_walk
     )
     coarse_clusters = [
         _MarkerCluster(representative=first, assets=[first], screen_pos=QPointF(90.0, 90.0)),
-        _MarkerCluster(representative=second, assets=[second], screen_pos=QPointF(110.0, 90.0)),
+        _MarkerCluster(
+            representative=second,
+            assets=second_group,
+            screen_pos=QPointF(160.0, 90.0),
+            representative_screen_pos_approx=QPointF(110.0, 90.0),
+        ),
         _MarkerCluster(representative=outside, assets=[outside], screen_pos=QPointF(700.0, 90.0)),
     ]
 
@@ -328,8 +333,8 @@ def test_marker_controller_refines_and_merges_coarse_clusters_without_asset_walk
             coarse_clusters,
             width=800,
             height=600,
-            threshold=48.0,
-            cell_size=48,
+            threshold=100.0,
+            cell_size=100,
             margin=0,
         )
     finally:
@@ -337,7 +342,49 @@ def test_marker_controller_refines_and_merges_coarse_clusters_without_asset_walk
 
     assert len(refined) == 1
     assert {asset.latitude for asset in refined[0].assets} == {10.0, 20.0}
+    assert len(refined[0].assets) == 4
+    assert refined[0].screen_pos == QPointF(152.5, 100.0)
     assert len(map_widget.project_calls) == len(coarse_clusters)
+
+
+def test_marker_controller_refinement_preserves_corrected_coarse_centroid(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    first, second = _assets_at(tmp_path, 2)
+    map_widget = _ExactProjectionMapWidget(
+        {(first.longitude, first.latitude): QPointF(110.0, 100.0)}
+    )
+    controller = MarkerController(
+        map_widget,
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    coarse_cluster = _MarkerCluster(
+        representative=first,
+        assets=[first, second],
+        screen_pos=QPointF(200.0, 100.0),
+        representative_screen_pos_approx=QPointF(100.0, 100.0),
+    )
+
+    try:
+        refined = controller._refine_exact_projection_clusters(
+            [coarse_cluster],
+            width=800,
+            height=600,
+            threshold=271.0,
+            cell_size=271,
+            margin=72,
+        )
+    finally:
+        controller.shutdown()
+
+    assert len(refined) == 1
+    assert refined[0].screen_pos == QPointF(210.0, 100.0)
+    assert refined[0].screen_pos != QPointF(110.0, 100.0)
 
 
 def test_marker_controller_threshold_grows_when_zooming_out(
@@ -559,6 +606,40 @@ def test_marker_controller_evicts_only_removed_same_library_thumbnails(
     assert removed == [assets[1].library_relative]
     assert loader.invalidate_calls == [assets[1].library_relative]
     assert full_invalidations == [True]
+
+
+def test_marker_controller_ignores_thumbnails_from_old_viewport(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    first, second = _assets_at(tmp_path, 2)
+    controller = MarkerController(
+        _DummyMapWidget(),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    controller._library_root = tmp_path
+    updates: list[str] = []
+    controller.thumbnailUpdated.connect(lambda rel, _pixmap: updates.append(rel))
+    pixmap = QPixmap(2, 2)
+
+    try:
+        controller._publish_clusters(
+            [_MarkerCluster(representative=first, screen_pos=QPointF(100.0, 100.0))]
+        )
+        controller.handle_thumbnail_ready(tmp_path, first.library_relative, pixmap)
+        controller._publish_clusters(
+            [_MarkerCluster(representative=second, screen_pos=QPointF(200.0, 100.0))]
+        )
+        controller.handle_thumbnail_ready(tmp_path, first.library_relative, pixmap)
+        controller.handle_thumbnail_ready(tmp_path, second.library_relative, pixmap)
+    finally:
+        controller.shutdown()
+
+    assert updates == [first.library_relative, second.library_relative]
 
 
 def test_marker_controller_invalidates_all_thumbnails_when_library_changes(

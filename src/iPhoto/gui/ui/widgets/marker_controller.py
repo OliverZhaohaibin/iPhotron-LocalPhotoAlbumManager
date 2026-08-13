@@ -27,6 +27,7 @@ class _MarkerCluster:
     latitude_sum: float = 0.0
     longitude_sum: float = 0.0
     screen_pos: QPointF = field(default_factory=QPointF)
+    representative_screen_pos_approx: Optional[QPointF] = None
     screen_x_sum: float = 0.0
     screen_y_sum: float = 0.0
     bounding_rect: QRectF = field(default_factory=QRectF)
@@ -36,6 +37,8 @@ class _MarkerCluster:
 
         if not self.assets:
             self.assets.append(self.representative)
+        if self.representative_screen_pos_approx is None:
+            self.representative_screen_pos_approx = QPointF(self.screen_pos)
         self.latitude_sum = sum(asset.latitude for asset in self.assets)
         self.longitude_sum = sum(asset.longitude for asset in self.assets)
         count = len(self.assets)
@@ -321,6 +324,7 @@ class MarkerController(QObject):
         self._assets: list[GeotaggedAsset] = []
         self._library_root: Optional[Path] = None
         self._clusters: list[_MarkerCluster] = []
+        self._current_representative_rels: set[str] = set()
         self._city_annotations: list[CityAnnotation] = []
         self._view_center_x = 0.5
         self._view_center_y = 0.5
@@ -376,12 +380,14 @@ class MarkerController(QObject):
                 if existing_asset is not None and incoming_asset != existing_asset:
                     self._thumbnail_loader.invalidate(incoming_asset.library_relative)
             for removed_rel in existing_by_rel.keys() - incoming_rels:
+                self._current_representative_rels.discard(removed_rel)
                 self._thumbnail_loader.invalidate(removed_rel)
                 self.thumbnailInvalidated.emit(removed_rel)
 
         self._assets = normalized_assets
         self._library_root = library_root
         if not same_root:
+            self._current_representative_rels.clear()
             self._city_annotations = []
             self._thumbnail_loader.reset_for_album(library_root)
             self.thumbnailsInvalidated.emit()
@@ -394,6 +400,7 @@ class MarkerController(QObject):
         self._invalidate_cluster_request()
         self._assets = []
         self._clusters = []
+        self._current_representative_rels.clear()
         self._city_annotations = []
         self._library_root = None
         self._is_panning = False
@@ -500,6 +507,8 @@ class MarkerController(QObject):
 
         if self._library_root is None or root != self._library_root:
             return
+        if rel not in self._current_representative_rels:
+            return
         if pixmap.isNull():
             return
         self.thumbnailUpdated.emit(rel, pixmap)
@@ -564,6 +573,7 @@ class MarkerController(QObject):
         if not self._assets:
             self._invalidate_cluster_request()
             self._clusters = []
+            self._current_representative_rels.clear()
             if self._city_annotations:
                 self._city_annotations = []
                 self.citiesUpdated.emit([])
@@ -658,6 +668,7 @@ class MarkerController(QObject):
         width = self._map_widget.width()
         height = self._map_widget.height()
         if width <= 0 or height <= 0:
+            self._current_representative_rels.clear()
             if self._clusters:
                 self._clusters = []
                 self.clustersUpdated.emit([])
@@ -770,6 +781,10 @@ class MarkerController(QObject):
     def _publish_clusters(self, clusters: list[_MarkerCluster]) -> None:
         """Publish a stable cluster snapshot to the overlay and label layers."""
 
+        self._current_representative_rels = {
+            cluster.representative.library_relative
+            for cluster in clusters
+        }
         for cluster in clusters:
             cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
             self._ensure_thumbnail(cluster.representative)
@@ -860,19 +875,35 @@ class MarkerController(QObject):
 
         for coarse_cluster in coarse_clusters:
             representative = coarse_cluster.representative
-            point = self._map_widget.project_lonlat(
+            exact_representative = self._map_widget.project_lonlat(
                 representative.longitude,
                 representative.latitude,
             )
-            if point is None:
+            if exact_representative is None:
                 continue
-            if point.x() < -margin or point.y() < -margin:
+            approximate_representative = (
+                coarse_cluster.representative_screen_pos_approx
+            )
+            if approximate_representative is None:
+                approximate_representative = coarse_cluster.screen_pos
+            corrected_centroid = QPointF(
+                coarse_cluster.screen_pos.x()
+                + exact_representative.x()
+                - approximate_representative.x(),
+                coarse_cluster.screen_pos.y()
+                + exact_representative.y()
+                - approximate_representative.y(),
+            )
+            if corrected_centroid.x() < -margin or corrected_centroid.y() < -margin:
                 continue
-            if point.x() > width + margin or point.y() > height + margin:
+            if (
+                corrected_centroid.x() > width + margin
+                or corrected_centroid.y() > height + margin
+            ):
                 continue
 
-            cell_x = int(point.x() // cell_size)
-            cell_y = int(point.y() // cell_size)
+            cell_x = int(corrected_centroid.x() // cell_size)
+            cell_y = int(corrected_centroid.y() // cell_size)
             candidates: list[_MarkerCluster] = []
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
@@ -880,9 +911,16 @@ class MarkerController(QObject):
 
             assigned = False
             for target_cluster in candidates:
-                if self.distance(target_cluster.screen_pos, point) > threshold:
+                if (
+                    self.distance(target_cluster.screen_pos, corrected_centroid)
+                    > threshold
+                ):
                     continue
-                self._merge_coarse_cluster(target_cluster, coarse_cluster, point)
+                self._merge_coarse_cluster(
+                    target_cluster,
+                    coarse_cluster,
+                    corrected_centroid,
+                )
                 new_cell = (
                     int(target_cluster.screen_pos.x() // cell_size),
                     int(target_cluster.screen_pos.y() // cell_size),
@@ -903,9 +941,9 @@ class MarkerController(QObject):
                 continue
 
             asset_count = float(len(coarse_cluster.assets))
-            coarse_cluster.screen_pos = QPointF(point)
-            coarse_cluster.screen_x_sum = point.x() * asset_count
-            coarse_cluster.screen_y_sum = point.y() * asset_count
+            coarse_cluster.screen_pos = QPointF(corrected_centroid)
+            coarse_cluster.screen_x_sum = corrected_centroid.x() * asset_count
+            coarse_cluster.screen_y_sum = corrected_centroid.y() * asset_count
             coarse_cluster.cell = (cell_x, cell_y)  # type: ignore[attr-defined]
             refined_clusters.append(coarse_cluster)
             grid.setdefault((cell_x, cell_y), []).append(coarse_cluster)
@@ -916,7 +954,7 @@ class MarkerController(QObject):
     def _merge_coarse_cluster(
         target: _MarkerCluster,
         source: _MarkerCluster,
-        source_point: QPointF,
+        source_centroid: QPointF,
     ) -> None:
         """Merge an aggregate cluster without revisiting its individual assets."""
 
@@ -926,8 +964,8 @@ class MarkerController(QObject):
         target.assets.extend(source.assets)
         target.latitude_sum += source.latitude_sum
         target.longitude_sum += source.longitude_sum
-        target.screen_x_sum += source_point.x() * float(source_count)
-        target.screen_y_sum += source_point.y() * float(source_count)
+        target.screen_x_sum += source_centroid.x() * float(source_count)
+        target.screen_y_sum += source_centroid.y() * float(source_count)
         total_count = float(len(target.assets))
         target.screen_pos = QPointF(
             target.screen_x_sum / total_count,

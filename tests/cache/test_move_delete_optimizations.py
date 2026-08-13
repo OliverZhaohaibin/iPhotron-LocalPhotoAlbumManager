@@ -13,6 +13,8 @@ from typing import Dict
 
 import pytest
 
+from iPhoto import sqlite_utils
+from iPhoto.cache.index_store import engine as engine_module
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.cache.index_store.engine import DatabaseManager
 from iPhoto.cache.index_store.repository import AssetRepository
@@ -70,6 +72,39 @@ class TestWALMode:
         db = DatabaseManager(tmp_path / "test.db")
         with db.transaction(begin_mode="IMMEDIATE") as conn:
             assert conn.in_transaction is True
+
+    def test_short_connections_initialize_wal_only_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _FakeConnection:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+
+            def execute(self, statement: str):
+                self.statements.append(statement)
+                return self
+
+        connections: list[_FakeConnection] = []
+
+        def _connect(*args, **kwargs):
+            del args, kwargs
+            connection = _FakeConnection()
+            connections.append(connection)
+            return connection
+
+        sqlite_utils._WAL_INITIALIZED_PATHS.clear()
+        monkeypatch.setattr(engine_module.sqlite3, "connect", _connect)
+        manager = DatabaseManager(tmp_path / "test.db")
+
+        manager._create_connection()
+        manager._create_connection()
+
+        assert connections[0].statements.count("PRAGMA journal_mode=WAL") == 1
+        assert "PRAGMA journal_mode=WAL" not in connections[1].statements
+        assert "PRAGMA synchronous=NORMAL" in connections[1].statements
+        assert "PRAGMA cache_size=-8000" in connections[1].statements
 
 
 # ------------------------------------------------------------------
@@ -179,6 +214,7 @@ class TestIncrementalCacheUpdate:
     def cache_manager(self):
         from PySide6.QtCore import QSize
         from PySide6.QtGui import QPixmap
+
         from iPhoto.gui.ui.models.asset_cache_manager import AssetCacheManager
 
         mgr = AssetCacheManager(QSize(120, 120))

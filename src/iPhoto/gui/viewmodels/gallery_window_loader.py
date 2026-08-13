@@ -3,15 +3,36 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
+
+
+@dataclass(frozen=True, slots=True)
+class GallerySelectionAnchor:
+    """Path-stable selection identity carried across collection revisions."""
+
+    path: Path
+    asset_id: str
+    previous_row: int
+
+
+@dataclass(frozen=True, slots=True)
+class GallerySelectionAnchorResult:
+    """Authoritative result of resolving an anchor on the Gallery worker."""
+
+    anchor: GallerySelectionAnchor
+    status: Literal["resolved", "missing", "retry"]
+    row: int | None = None
+    dto: AssetDTO | None = None
+    elapsed_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +46,9 @@ class GalleryWindowRequest:
     limit: int
     pending_source_ids: frozenset[str] = frozenset()
     pending_source_count: int = 0
+    pending_source_rows: tuple[int, ...] = ()
     pending_insertions: tuple[AssetDTO, ...] = ()
+    selection_anchor: GallerySelectionAnchor | None = None
     request_backfill: bool = True
     collection_revision: int = 0
     demand_generation: int = 0
@@ -45,6 +68,7 @@ class GalleryWindowResult:
     requested_revision: int = 0
     demand_generation: int = 0
     priority: int = 1
+    selection_anchor_result: GallerySelectionAnchorResult | None = None
 
 
 class _GalleryWindowSignals(QObject):
@@ -59,6 +83,88 @@ def _dto_identity_keys(dto: AssetDTO) -> set[str]:
     if dto.id:
         keys.add(f"id:{dto.id}")
     return keys
+
+
+def _normalized_path(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _resolve_selection_anchor(
+    request: GalleryWindowRequest,
+    reader: Any,
+    rows: dict[int, AssetDTO],
+    collection_revision: int,
+) -> GallerySelectionAnchorResult | None:
+    anchor = request.selection_anchor
+    if anchor is None:
+        return None
+
+    started = time.perf_counter()
+    target = _normalized_path(anchor.path)
+    for view_row, dto in rows.items():
+        if _normalized_path(dto.abs_path) == target:
+            return GallerySelectionAnchorResult(
+                anchor=anchor,
+                status="resolved",
+                row=view_row,
+                dto=dto,
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            )
+
+    try:
+        find_row_by_path = getattr(request.query_service, "find_row_by_path", None)
+        if not callable(find_row_by_path):
+            raise RuntimeError("query service does not support anchor resolution")
+        raw_row = find_row_by_path(request.query, anchor.path)
+        if raw_row is None:
+            return GallerySelectionAnchorResult(
+                anchor=anchor,
+                status="missing",
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            )
+
+        raw_row = int(raw_row)
+        exact_window = reader(request.root, request.query, raw_row, 1)
+        if int(exact_window.collection_revision) != int(collection_revision):
+            raise RuntimeError("collection changed during anchor resolution")
+        dto: AssetDTO | None = None
+        for raw_asset in exact_window.rows:
+            rel = raw_asset.get("rel") if isinstance(raw_asset, dict) else None
+            if not isinstance(rel, str) or not rel:
+                continue
+            candidate = scan_row_to_dto(request.root, rel, raw_asset)
+            if candidate is None:
+                continue
+            if str(candidate.id) in request.pending_source_ids:
+                return GallerySelectionAnchorResult(
+                    anchor=anchor,
+                    status="missing",
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                )
+            if _normalized_path(candidate.abs_path) == target:
+                dto = candidate
+                break
+        if dto is None:
+            # The index changed between the row lookup and exact read. Let the
+            # next revision retry instead of falsely declaring the asset gone.
+            raise RuntimeError("anchor row changed during resolution")
+
+        hidden_before = sum(
+            1 for source_row in request.pending_source_rows if source_row < raw_row
+        )
+        return GallerySelectionAnchorResult(
+            anchor=anchor,
+            status="resolved",
+            row=max(0, raw_row - hidden_before),
+            dto=dto,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
+    except Exception:  # noqa: BLE001 - anchor failure must not fail the window
+        return GallerySelectionAnchorResult(
+            anchor=anchor,
+            status="retry",
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
 
 
 class _GalleryWindowWorker(QRunnable):
@@ -113,6 +219,12 @@ class _GalleryWindowWorker(QRunnable):
             for offset, dto in enumerate(pending_insertions):
                 rows[insertion_start + offset] = dto
 
+            selection_anchor_result = _resolve_selection_anchor(
+                request,
+                reader,
+                rows,
+                int(window.collection_revision),
+            )
             last = request.view_first + loaded_count - 1
             self._signals.completed.emit(
                 GalleryWindowResult(
@@ -125,6 +237,7 @@ class _GalleryWindowWorker(QRunnable):
                     requested_revision=request.collection_revision,
                     demand_generation=request.demand_generation,
                     priority=request.priority,
+                    selection_anchor_result=selection_anchor_result,
                 )
             )
             request_backfill = getattr(request.query_service, "request_thumbnail_backfill", None)
@@ -259,13 +372,17 @@ class GalleryWindowLoader(QObject):
             request.limit,
             request.pending_source_ids,
             request.pending_source_count,
+            request.pending_source_rows,
             request.pending_insertions,
+            request.selection_anchor,
             request.request_backfill,
             request.collection_revision,
         )
 
 
 __all__ = [
+    "GallerySelectionAnchor",
+    "GallerySelectionAnchorResult",
     "GalleryWindowLoader",
     "GalleryWindowRequest",
     "GalleryWindowResult",

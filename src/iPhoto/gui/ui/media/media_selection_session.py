@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Protocol
 
-from .media_restore_request import MediaRestoreRequest
 from iPhoto.gui.viewmodels.signal import Signal
+
+from .media_restore_request import MediaRestoreRequest
 
 
 class _CollectionReader(Protocol):
@@ -16,6 +17,8 @@ class _CollectionReader(Protocol):
     def asset_at(self, row: int): ...
     def ensure_row_loaded(self, row: int, *, emit_signals: bool = True) -> bool: ...
     def row_for_path(self, path: Path) -> int | None: ...
+    def cached_row_for_path(self, path: Path) -> int | None: ...
+    def selection_anchor_status(self, path: Path) -> str | None: ...
 
 
 class MediaSelectionSession:
@@ -28,6 +31,8 @@ class MediaSelectionSession:
         self._collection: _CollectionReader | None = None
         self._current_row = -1
         self._current_source: Optional[Path] = None
+        self._last_resolved_row = -1
+        self._pending_fallback_row: int | None = None
 
     def bind_collection(self, store_or_reader: _CollectionReader) -> None:
         if self._collection is store_or_reader:
@@ -37,8 +42,17 @@ class MediaSelectionSession:
                 self._collection.data_changed.disconnect(self._handle_collection_changed)
             except ValueError:
                 pass
+            row_loaded = getattr(self._collection, "row_loaded", None)
+            if row_loaded is not None:
+                try:
+                    row_loaded.disconnect(self._handle_row_loaded)
+                except ValueError:
+                    pass
         self._collection = store_or_reader
         self._collection.data_changed.connect(self._handle_collection_changed)
+        row_loaded = getattr(self._collection, "row_loaded", None)
+        if row_loaded is not None:
+            row_loaded.connect(self._handle_row_loaded)
         self._handle_collection_changed()
 
     def set_current_row(self, row: int) -> Optional[Path]:
@@ -56,6 +70,11 @@ class MediaSelectionSession:
             return None
         self._current_row = row
         self._current_source = dto.abs_path
+        self._last_resolved_row = row
+        self._pending_fallback_row = None
+        pin_path = getattr(self._collection, "pin_path", None)
+        if callable(pin_path):
+            pin_path(dto.abs_path, asset_id=str(dto.id), previous_row=row)
         self.currentChanged.emit(row, dto.abs_path)
         return dto.abs_path
 
@@ -100,24 +119,66 @@ class MediaSelectionSession:
             self.currentChanged.emit(-1, None)
             return
         if self._current_source is not None:
-            row = self._collection.row_for_path(self._current_source)
+            anchor_status = None
+            anchor_status_for = getattr(self._collection, "selection_anchor_status", None)
+            if callable(anchor_status_for):
+                anchor_status = anchor_status_for(self._current_source)
+            if anchor_status in {"pending", "retry"}:
+                self._current_row = -1
+                self._pending_fallback_row = None
+                return
+
+            cached_row_for_path = getattr(self._collection, "cached_row_for_path", None)
+            if anchor_status == "missing":
+                row = None
+            elif callable(cached_row_for_path):
+                row = cached_row_for_path(self._current_source)
+            else:
+                # Compatibility collections keep all rows in memory. The real
+                # Gallery store always takes the cache-only branch above.
+                row = self._collection.row_for_path(self._current_source)
             if row is not None:
                 self._current_row = row
+                self._last_resolved_row = row
+                self._pending_fallback_row = None
                 self.currentChanged.emit(row, self._current_source)
+                return
+            if callable(cached_row_for_path) and anchor_status != "missing":
+                self._current_row = -1
+                self._pending_fallback_row = None
                 return
         count = self._collection.count()
         if count <= 0:
             self._current_row = -1
             self._current_source = None
+            self._last_resolved_row = -1
+            self._pending_fallback_row = None
             self.currentChanged.emit(-1, None)
             return
-        fallback_row = min(max(self._current_row, 0), count - 1)
+        row_hint = self._last_resolved_row if self._last_resolved_row >= 0 else self._current_row
+        fallback_row = min(max(row_hint, 0), count - 1)
+        self._select_fallback_row(fallback_row)
+
+    def _select_fallback_row(self, fallback_row: int) -> None:
+        if self._collection is None:
+            return
         dto = self._collection.asset_at(fallback_row)
         if dto is None:
+            ensure_row_loaded = getattr(self._collection, "ensure_row_loaded", None)
+            if callable(ensure_row_loaded):
+                ensure_row_loaded(fallback_row)
             self._current_row = -1
-            self._current_source = None
-            self.currentChanged.emit(-1, None)
+            self._pending_fallback_row = fallback_row
             return
         self._current_row = fallback_row
         self._current_source = dto.abs_path
+        self._last_resolved_row = fallback_row
+        self._pending_fallback_row = None
+        pin_path = getattr(self._collection, "pin_path", None)
+        if callable(pin_path):
+            pin_path(dto.abs_path, asset_id=str(dto.id), previous_row=fallback_row)
         self.currentChanged.emit(fallback_row, dto.abs_path)
+
+    def _handle_row_loaded(self, row: int) -> None:
+        if self._pending_fallback_row == row:
+            self._select_fallback_row(row)

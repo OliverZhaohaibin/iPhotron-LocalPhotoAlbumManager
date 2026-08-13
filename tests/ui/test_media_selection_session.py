@@ -58,6 +58,60 @@ class _Collection:
         self.data_changed.emit()
 
 
+class _AnchoredCollection(_Collection):
+    def __init__(self, paths: list[Path]) -> None:
+        super().__init__(paths)
+        self.row_loaded = Signal()
+        self.anchor_status: str | None = None
+        self.anchor_path: Path | None = None
+        self.cached_rows = set(range(len(paths)))
+        self.sync_lookup_calls = 0
+
+    def row_for_path(self, path: Path) -> int | None:
+        del path
+        self.sync_lookup_calls += 1
+        raise AssertionError("refresh must not call the synchronous path lookup")
+
+    def asset_at(self, row: int):
+        if row not in self.cached_rows:
+            return None
+        return super().asset_at(row)
+
+    def cached_row_for_path(self, path: Path) -> int | None:
+        for index, candidate in enumerate(self._paths):
+            if index in self.cached_rows and candidate == path:
+                return index
+        return None
+
+    def selection_anchor_status(self, path: Path) -> str | None:
+        if path == self.anchor_path:
+            return self.anchor_status
+        return None
+
+    def pin_path(
+        self,
+        path: Path,
+        *,
+        asset_id: str = "",
+        previous_row: int | None = None,
+    ) -> None:
+        del asset_id, previous_row
+        self.anchor_path = path
+        self.anchor_status = "resolved"
+
+    def publish(
+        self,
+        paths: list[Path],
+        *,
+        status: str,
+        cached_rows: set[int],
+    ) -> None:
+        self._paths = list(paths)
+        self.cached_rows = set(cached_rows)
+        self.anchor_status = status
+        self.data_changed.emit()
+
+
 def test_session_tracks_current_row_and_source() -> None:
     session = MediaSelectionSession()
     collection = _Collection([Path("/fake/a.jpg"), Path("/fake/b.jpg")])
@@ -119,3 +173,75 @@ def test_session_emits_restore_request_payload() -> None:
     session.request_restore(request)
 
     assert emitted == [request]
+
+
+def test_scan_refresh_uses_only_anchor_cache_and_preserves_pending_source() -> None:
+    current = Path("/fake/current.jpg")
+    collection = _AnchoredCollection([Path("/fake/a.jpg"), current])
+    session = MediaSelectionSession()
+    session.bind_collection(collection)
+    session.set_current_row(1)
+
+    collection.publish(
+        [Path("/fake/new.jpg"), Path("/fake/a.jpg"), current],
+        status="retry",
+        cached_rows={0, 1, 2},
+    )
+
+    assert session.current_row() == -1
+    assert session.current_source() == current
+    assert collection.sync_lookup_calls == 0
+
+    collection.publish(
+        [Path("/fake/new.jpg"), Path("/fake/a.jpg"), current],
+        status="resolved",
+        cached_rows={0, 1, 2},
+    )
+
+    assert session.current_row() == 2
+    assert session.current_source() == current
+    assert collection.sync_lookup_calls == 0
+
+
+def test_confirmed_missing_anchor_falls_back_near_previous_row() -> None:
+    current = Path("/fake/current.jpg")
+    replacement = Path("/fake/replacement.jpg")
+    collection = _AnchoredCollection([Path("/fake/a.jpg"), current])
+    session = MediaSelectionSession()
+    session.bind_collection(collection)
+    session.set_current_row(1)
+
+    collection.publish(
+        [Path("/fake/a.jpg"), replacement],
+        status="missing",
+        cached_rows={0, 1},
+    )
+
+    assert session.current_row() == 1
+    assert session.current_source() == replacement
+    assert collection.sync_lookup_calls == 0
+
+
+def test_confirmed_missing_anchor_waits_for_async_fallback_row() -> None:
+    current = Path("/fake/current.jpg")
+    replacement = Path("/fake/replacement.jpg")
+    collection = _AnchoredCollection([Path("/fake/a.jpg"), current])
+    session = MediaSelectionSession()
+    session.bind_collection(collection)
+    session.set_current_row(1)
+
+    collection.publish(
+        [Path("/fake/a.jpg"), replacement],
+        status="missing",
+        cached_rows={0},
+    )
+
+    assert session.current_row() == -1
+    assert session.current_source() == current
+    assert collection.ensure_calls[-1] == 1
+
+    collection.cached_rows.add(1)
+    collection.row_loaded.emit(1)
+
+    assert session.current_row() == 1
+    assert session.current_source() == replacement

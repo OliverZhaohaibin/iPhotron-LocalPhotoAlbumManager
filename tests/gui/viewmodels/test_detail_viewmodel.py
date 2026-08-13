@@ -148,6 +148,33 @@ class _AsyncLazyCollection(_LazyCollection):
         self.row_loaded.emit(row)
 
 
+class _AnchoredLazyCollection(_LazyCollection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.anchor_path: Path | None = None
+        self.anchor_status: str | None = None
+
+    def cached_row_for_path(self, path: Path) -> int | None:
+        for row in self._loaded_rows:
+            if self._dtos[row].abs_path == path:
+                return row
+        return None
+
+    def selection_anchor_status(self, path: Path) -> str | None:
+        return self.anchor_status if path == self.anchor_path else None
+
+    def pin_path(
+        self,
+        path: Path,
+        *,
+        asset_id: str = "",
+        previous_row: int | None = None,
+    ) -> None:
+        del asset_id, previous_row
+        self.anchor_path = path
+        self.anchor_status = "resolved"
+
+
 def test_next_can_open_row_outside_current_store_window() -> None:
     store = _LazyCollection()
     session = MediaSelectionSession()
@@ -192,6 +219,39 @@ def test_show_row_retries_after_async_placeholder_load() -> None:
     assert vm.current_row.value == 1
     assert vm.current_path.value == Path("/tmp/deep.jpg")
     assert requested == ["detail"]
+
+
+def test_pending_selection_anchor_keeps_existing_detail_presentation() -> None:
+    store = _AnchoredLazyCollection()
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    vm = DetailViewModel(
+        collection_store=store,
+        media_session=session,
+        asset_state_service=Mock(),
+        adjustment_commit_port=None,
+        edit_service_getter=None,
+    )
+    changes = []
+    vm.presentation_changed.connect(changes.append)
+    vm.show_row(0)
+    original = vm.presentation.value
+    assert original is not None
+
+    store.anchor_status = "retry"
+    store.data_changed.emit()
+
+    assert session.current_row() == -1
+    assert session.current_source() == Path("/tmp/visible.jpg")
+    assert vm.presentation.value is original
+    assert changes == [original]
+
+    store.anchor_status = "resolved"
+    store.data_changed.emit()
+
+    assert session.current_row() == 0
+    assert vm.presentation.value.request_generation == original.request_generation
+    assert vm.presentation.value.render_key == original.render_key
 
 
 def test_toggle_favorite_updates_store_and_presentation():

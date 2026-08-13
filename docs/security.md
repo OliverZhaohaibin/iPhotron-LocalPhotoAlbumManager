@@ -1,198 +1,161 @@
 # 🔒 Security
 
-> Permissions, encryption, data storage locations, and threat model for **iPhotron**.
-
----
-
 ## Overview
 
-iPhotron is a **local-first photo manager**. It does not upload data to any cloud service, does not require an internet connection for core functionality, and does not collect user telemetry. All library data remains on the user's local filesystem. Network-facing flows are limited to optional extension/model downloads: a user-triggered maps-extension download on platforms where a published extension archive exists, and first-use People/Pets model downloads when local AI model caches are absent.
+iPhotron is a local-first photo manager. Core library browsing, editing, Live
+Photo handling, persisted People/Pets state, and offline Maps operation do not
+require a cloud account. User libraries and iPhotron state remain on local
+storage unless the user explicitly invokes a network-backed optional download.
 
----
+## Filesystem And External Tools
 
-## Permissions
+The application reads user-selected media libraries and writes managed local
+state such as `.iPhoto/`, folder manifests, thumbnails, recognition state, and
+`.ipo` sidecars. Normal editing is non-destructive.
 
-### Filesystem Access
+Assign Location is an explicit metadata-write exception: iPhotron saves local
+location state first and may then best-effort write GPS metadata back to the
+selected original through ExifTool. External-tool errors must not corrupt the
+local database/state transaction.
 
-| Access | Scope | Purpose |
-|--------|-------|---------|
-| **Read** | User-selected library folders | Scan photos/videos, read metadata (EXIF, GPS) |
-| **Write** | Library folders | Create `.iphoto.album.json` manifests, `.ipo` sidecar files |
-| **Write** | `.iPhoto/` directory at library root | Global SQLite database, thumbnail caches, and durable People/Pets state |
-| **Read/Write** | `extension/models/` or an explicit model override | Read bundled AI models and populate an allowed first-use model cache |
-| **Write** | Selected original media file | Best-effort GPS metadata write-back after an explicit Assign Location action |
-| **Read/Write** | Application settings directory | User preferences (theme, export destination) |
+ExifTool and FFmpeg/FFprobe are invoked through the repository wrappers rather
+than shell-concatenated user paths.
 
-### External Tool Access
+## Optional Network Access
 
-| Tool | Access | Purpose |
-|------|--------|---------|
-| **ExifTool** | Read/write on media files when requested | Extract EXIF, GPS, QuickTime metadata; write GPS coordinates for explicit Assign Location actions |
-| **FFmpeg / FFprobe** | Read-only on media files | Generate video thumbnails, parse video info |
+Normal library operation requires no network connection. Optional runtimes may
+have separately controlled download paths, for example a published Maps
+extension or model artifact with an explicit source/integrity contract.
 
-### Network Access
+A package that claims offline People/Pets or Maps capability must stage the
+required optional runtime/assets at build time rather than silently depend on a
+network request after installation.
 
-iPhotron requires **no network access for normal library operation**. Map rendering,
-reverse geocoding, and Assign Location search work offline when the maps
-extension is installed.
+## Model Asset Locations
 
-| Feature | Access | Purpose |
-|---------|--------|---------|
-| **Map rendering** | Offline (bundled OBF/vector map assets) | Render map tiles for the location view |
-| **Reverse geocoding** | Local database lookup | Convert GPS coordinates to place names (offline, via `reverse-geocoder` library) |
-| **Map extension download** | Optional HTTPS download | Fetch a published extension archive only when the user chooses the download path |
-| **People/Pets model download** | Optional HTTPS download | Populate missing local AI model caches before background recognition scans |
+`src/extension/models/...` is a build/staging convention used by packaging
+scripts. It is **not** a guarantee that a fresh source checkout contains every
+AI model.
 
-> **Note:** No telemetry or cloud sync is performed. A network connection is only
-> needed if the user chooses to download a missing map extension or lets a
-> background People/Pets scan populate a missing model cache.
+At runtime, model roots may be selected through the feature's configured cache
+or environment override. Packaging documentation must distinguish:
 
----
+- tracked application code/manifests;
+- locally staged model assets;
+- packaged assets;
+- runtime-downloaded assets with a declared download contract.
 
-## Encryption
+Do not treat a local staging directory as a trusted source merely because it is
+inside the repository checkout.
 
-### At Rest
+## Pets Model Trust Boundary
 
-iPhotron does **not** encrypt data at rest. The following files are stored in plaintext:
+Pets uses a YOLOX detector artifact and a DINOv2 TorchScript embedding artifact.
+The model manifest under `src/iPhoto/pets/model_manifest.json` defines the
+runtime integrity contract.
 
-| File | Format | Contents |
-|------|--------|----------|
-| `.iphoto.album.json` | JSON | Album metadata: cover image, featured photos, sort order |
-| `*.ipo` | JSON | Edit parameters: light, color, B&W, crop, perspective adjustments |
-| `global_index.db` | SQLite | Asset/index facts plus repository-backed user state such as favorites, hidden/trash flags, pinned/order data, and manual metadata |
-| `.iPhoto/faces/face_index.db` | SQLite | Rebuildable People runtime snapshot |
-| `.iPhoto/faces/face_state.db` | SQLite | Stable People decisions: names, covers, hidden flags, groups, ordering |
-| `.iPhoto/pets/pet_index.db` | SQLite | Rebuildable Pets runtime snapshot |
-| `.iPhoto/pets/pet_state.db` | SQLite | Stable Pets decisions: names, covers, hidden flags, rejected detections |
-| `extension/models/` | Model files | Local AI model cache for People and Pets recognition |
-| Thumbnail cache | Image files | Downscaled preview images |
-| `settings.json` | JSON | Theme, language, recent library, export destination, and other application preferences |
+### YOLOX detector
 
-**Rationale:** The data managed by iPhotron (album organization, edit parameters, file metadata) is non-sensitive in most contexts. Users who require encryption should use full-disk encryption (e.g., BitLocker, FileVault, LUKS).
+The detector entry declares a fixed HTTPS artifact source and SHA-256/size
+constraints. When first-use model downloads are enabled, the runtime may fetch
+that declared artifact and must validate it before use.
 
-### In Transit
+### DINOv2 embedder
 
-- No media, metadata, telemetry, or library state is transmitted by normal app
-  operation. Optional downloads retrieve only extension/model files; media and
-  library databases are not uploaded.
+The DINOv2 entry separates **source provenance** from **production runtime
+trust**:
 
----
+- `source_repository` and `source_revision` identify the upstream source used by
+  release conversion tooling;
+- `torchscript_sha256` and `torchscript_size` identify the exact prebuilt
+  TorchScript artifact accepted by production runtime;
+- the current `torchscript_url` is `null`.
 
-## Data Storage Locations
+Therefore the current production contract is package/prestage-first for DINOv2.
+A missing DINOv2 artifact cannot be described as automatically downloadable
+until a fixed runtime URL is explicitly added to the manifest and validated by
+the same integrity checks.
 
-```
-LibraryRoot/                          # User-selected photo library folder
-├── .iPhoto/
-│   ├── global_index.db               # SQLite database (all asset metadata)
-│   ├── cache/
-│   │   └── thumbs/                   # Rebuildable thumbnail cache
-│   ├── faces/
-│   │   ├── face_index.db             # Rebuildable People runtime snapshot
-│   │   ├── face_state.db             # Stable People user decisions
-│   │   └── thumbnails/               # Cropped face thumbnails
-│   └── pets/
-│       ├── pet_index.db              # Rebuildable Pets runtime snapshot
-│       ├── pet_state.db              # Stable Pets user decisions
-│       └── thumbnails/               # Cropped pet thumbnails
-├── Album1/
-│   ├── .iphoto.album.json            # Album manifest
-│   ├── photo.jpg                     # Original photo (edits are sidecar-only)
-│   └── photo.jpg.ipo                 # Edit sidecar (if edited)
-└── Album2/
-    └── ...
-```
+### Torch Hub boundary
 
-### Settings Storage
+Production runtime must not execute arbitrary Torch Hub repository Python to
+obtain DINOv2. A pinned Torch Hub/upstream revision may be used by controlled
+release tooling such as `tools/convert_dinov2_torchscript.py` to reproduce or
+validate a TorchScript artifact. That is a build/provenance operation, not a
+runtime trust mechanism.
 
-User settings, including theme, language, export destination, and recent library
-state, are stored in a validated `settings.json` file:
+The resulting prebuilt artifact is trusted only after the manifest's expected
+hash/size checks succeed. A source revision alone is not sufficient runtime
+integrity validation.
 
-| Platform | Location |
-|----------|----------|
-| **Windows** | `%APPDATA%\iPhoto\settings.json` |
-| **macOS** | `~/Library/Application Support/iPhoto/settings.json` |
-| **Linux** | `$XDG_CONFIG_HOME/iPhoto/settings.json`, or `~/.config/iPhoto/settings.json` when `XDG_CONFIG_HOME` is unset |
+## People Model Boundary
 
----
+People recognition uses the optional InsightFace/ONNX Runtime stack. Packaged
+People support must explicitly include or provision the required local model
+artifacts. Missing People AI dependencies/models must degrade the recognition
+feature without blocking the rest of the library application.
 
-## Threat Model
+Rebuildable People runtime data and durable People user state remain separate:
+`face_index.db` can be rebuilt, while `face_state.db` stores durable choices such
+as names/covers/groups/manual faces.
 
-### Assets Protected
+## Pets Persistence Boundary
 
-| Asset | Sensitivity | Protection |
-|-------|-------------|------------|
-| Original photos/videos | Personal (potentially high) | Edits are non-destructive; explicit Assign Location may best-effort write GPS metadata |
-| GPS coordinates in metadata | Location data (medium) | Stored in SQLite index and, when ExifTool write-back succeeds, in the original file metadata |
-| Album organization | Low | Stored in JSON manifests alongside photos |
-| Edit parameters | Low | Stored in `.ipo` sidecar files |
-| Durable library, People, and Pets choices | Personal | Stored in `global_index.db`, `.iPhoto/faces/face_state.db`, and `.iPhoto/pets/pet_state.db`; include `.iPhoto/` in backups |
+Pets follows the same rebuildable-versus-durable split:
 
-### Threat Scenarios
+- `.iPhoto/pets/pet_index.db`: rebuildable detections/identity snapshot;
+- `.iPhoto/pets/pet_state.db`: durable names, covers, hidden/rejected decisions,
+  redirects, and other explicit user choices;
+- `.iPhoto/pets/thumbnails/`: rebuildable crops subject to durable cover
+  references.
 
-#### T1: Unauthorized Access to Photo Library
+A runtime rebuild or model-version migration must not silently erase durable
+user decisions.
 
-| | |
-|---|---|
-| **Threat** | An attacker gains read access to the library folder |
-| **Impact** | Access to original photos, GPS metadata, album organization |
-| **Mitigation** | OS-level file permissions; full-disk encryption recommended for sensitive libraries |
-| **iPhotron's role** | iPhotron does not add or remove filesystem protections |
+## Recognition Activation And Resource Isolation
 
-#### T2: SQLite Database Tampering
+Recognition inference is feature-driven. Application startup may warm persisted
+recognition summaries, but People/Pets model inference is activated only after
+the People surface is actually shown and its first viewport is ready.
 
-| | |
-|---|---|
-| **Threat** | An attacker modifies `global_index.db` |
-| **Impact** | Corrupted display/index facts and possible loss of repository-backed user choices if no backup exists |
-| **Mitigation** | OS-level file permissions, SQLite recovery, and regular backup of the complete `.iPhoto/` workspace |
-| **Recovery** | Re-scan rebuilds asset facts and thumbnails; restore `.iPhoto/` from backup to recover durable choices that cannot be inferred from media files |
+This reduces unnecessary model execution during normal startup and keeps
+optional AI initialization out of the first-frame path. Missing or invalid model
+assets leave recognition unavailable/resumable according to its runtime status
+contract rather than turning into a desktop-startup failure.
 
-#### T3: Malicious Media Files
+## Database / Sidecar Safety
 
-| | |
-|---|---|
-| **Threat** | A crafted image/video exploits a vulnerability in a parsing library |
-| **Impact** | Potential code execution via Pillow, FFmpeg, or ExifTool |
-| **Mitigation** | Keep dependencies updated; use `pillow-heif` and `opencv-python-headless` (no GUI attack surface) |
+- Use SQLite transactions for multi-row state changes.
+- Keep scan merges idempotent and preserve durable user choices.
+- Use atomic writes for JSON manifests/settings and `.ipo` sidecars.
+- Treat `.iPhoto/global_index.db`, People/Pets state databases, and sidecars as
+  user-controlled local data; validate inputs and do not execute content from
+  them as code.
+- Keep rebuildable caches replaceable without making them authoritative durable
+  state.
 
-#### T4: Malicious Map Data
+## Maps Runtime
 
-| | |
-|---|---|
-| **Threat** | Crafted or corrupted bundled map data, resources, or search database |
-| **Impact** | Incorrect map display; potential parsing vulnerability |
-| **Mitigation** | Map assets are rendered through local native/helper renderers or Qt/OpenGL paths, not a web view; no script execution is performed; published extension archives should be validated before release |
+Maps is optional. Native helper/widget binaries and offline map/search data are
+packaging/runtime assets and must be discovered through the Maps runtime
+boundary. Missing native binaries must produce graceful fallback rather than
+cause core startup failure.
 
-#### T5: Supply Chain Attack via Dependencies
+## Packaging And Release Provenance
 
-| | |
-|---|---|
-| **Threat** | A compromised PyPI package is installed |
-| **Impact** | Arbitrary code execution |
-| **Mitigation** | Constrain dependencies in `pyproject.toml`; review resolved dependency updates; use isolated virtual environments and reproducible release lock inputs |
+Build outputs should preserve an auditable relationship between source,
+optional native/runtime assets, and the produced artifact. Current AppImage and
+Linux standalone tooling emit build-manifest provenance; Debian packaging wraps
+the standalone bundle rather than silently rebuilding different contents.
 
-#### T6: AI Model Supply Chain
-
-| | |
-|---|---|
-| **Threat** | A model or model-loader source changes upstream or is replaced in transit/cache |
-| **Impact** | Recognition failure, unsafe model parsing, or execution of changed loader code |
-| **Mitigation** | HTTPS downloads, a pinned immutable DINOv2 Torch Hub revision, explicit model-cache overrides, and offline release builds with reviewed files under `extension/models/` |
-| **Operator control** | Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` to require pre-provisioned Pets models |
-
----
-
-## Security Best Practices for Users
-
-1. **Use full-disk encryption** (BitLocker / FileVault / LUKS) if your photo library contains sensitive content.
-2. **Keep ExifTool and FFmpeg updated** to receive security patches.
-3. **Install ExifTool only from a trusted source** if you plan to use GPS write-back through Assign Location.
-4. **Run `pip install --upgrade`** periodically to update Python dependencies.
-5. **Use OS-level file permissions** to restrict access to your library folder.
-6. **Back up your library** regularly — iPhotron's `.iPhoto/` directory and `.ipo` files should be included in backups.
-
----
+A published release artifact does not prove a current source-build path exists.
+In particular, the v6.6.8 Flatpak download is distinct from current
+`edit-base` build support: this branch does not presently contain a maintained
+Flatpak manifest/build driver. See `misc/BUILD_FLATPAK.md`.
 
 ## Reporting Security Issues
 
-If you discover a security vulnerability, please report it via [GitHub Security Advisories](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/security/advisories) or email the maintainers directly. Do not open a public issue for security vulnerabilities.
+Do not publish sensitive exploit details, private library data, access tokens, or
+other credentials in public issues. Use the repository's available private
+security-reporting channel when the finding could materially compromise user
+files, packaged binaries, model delivery, or update/download integrity.

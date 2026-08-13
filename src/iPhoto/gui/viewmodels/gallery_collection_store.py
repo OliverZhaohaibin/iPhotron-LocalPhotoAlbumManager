@@ -38,6 +38,7 @@ from iPhoto.gui.viewmodels.asset_paging import (
 from iPhoto.gui.viewmodels.gallery_window_loader import (
     GallerySelectionAnchor,
     GallerySelectionAnchorResult,
+    GallerySelectionAnchorRetryTicket,
     GalleryWindowRequest,
     GalleryWindowResult,
 )
@@ -117,6 +118,7 @@ class GalleryCollectionStore:
     LOOKBEHIND_SCREENS = 1
     LOOKAHEAD_SCREENS = 2
     HYSTERESIS_RATIO = 0.25
+    ANCHOR_RETRY_DELAYS_MS = (100, 250, 500)
 
     def __init__(
         self,
@@ -130,6 +132,7 @@ class GalleryCollectionStore:
         self.row_loaded = Signal()
         self.thumbnail_backfill_scheduled = Signal()
         self.selection_anchor_changed = Signal()
+        self.selection_anchor_retry_requested = Signal()
 
         self._asset_query_service = asset_query_service
         self._library_root = library_root or getattr(asset_query_service, "library_root", None)
@@ -149,6 +152,14 @@ class GalleryCollectionStore:
         self._pinned_row: Optional[int] = None
         self._selection_anchor: GallerySelectionAnchor | None = None
         self._selection_anchor_status: str | None = None
+        self._selection_version = 0
+        self._selection_anchor_retry_ticket: (
+            GallerySelectionAnchorRetryTicket | None
+        ) = None
+        self._selection_anchor_retry_inflight: (
+            GallerySelectionAnchorRetryTicket | None
+        ) = None
+        self._selection_anchor_latest_result_generation = 0
         self._pending_scan_refresh = False
         self._pending_scan_rels: set[str] = set()
         self._pending_scan_sort_keys: set[tuple[str, str]] = set()
@@ -348,6 +359,13 @@ class GalleryCollectionStore:
             "pinned_row": self._pinned_row,
             "anchor_status": self._selection_anchor_status,
             "anchor_previous_row": anchor.previous_row if anchor is not None else None,
+            "anchor_retry_attempt": (
+                self._selection_anchor_retry_ticket.attempt
+                if self._selection_anchor_retry_ticket is not None
+                else self._selection_anchor_retry_inflight.attempt
+                if self._selection_anchor_retry_inflight is not None
+                else None
+            ),
             "pending_window_requests": len(self._pending_window_generations),
             "pending_row_loads": len(self._pending_row_loads),
             "pending_scan_refresh": self._pending_scan_refresh,
@@ -503,6 +521,7 @@ class GalleryCollectionStore:
                         path=self._selection_anchor.path,
                         asset_id=self._selection_anchor.asset_id,
                         previous_row=self._pinned_row,
+                        selection_version=self._selection_anchor.selection_version,
                     )
 
         if emit:
@@ -745,6 +764,7 @@ class GalleryCollectionStore:
         anchor_is_current = (
             result.collection_revision >= self._collection_revision
             and self._anchor_result_matches_current(anchor_result)
+            and result.generation >= self._selection_anchor_latest_result_generation
         )
         if (
             self._demand_generation > 0
@@ -762,16 +782,19 @@ class GalleryCollectionStore:
         old_total = self._total_count
         old_revision = self._collection_revision
         revision_advanced = result.collection_revision > old_revision
-        if (
-            old_revision > 0
-            and revision_advanced
-        ):
+        retry_inflight_before_revision = self._selection_anchor_retry_inflight
+        if revision_advanced:
+            self._cancel_selection_anchor_retry()
+        if old_revision > 0 and revision_advanced:
             self._row_cache.clear()
 
         anchor_state_changed = False
         request_anchor_followup = False
+        schedule_anchor_retry_attempt: int | None = None
         if anchor_is_current and anchor_result is not None:
+            self._selection_anchor_latest_result_generation = result.generation
             if anchor_result.status == "resolved":
+                self._cancel_selection_anchor_retry()
                 if anchor_result.row is not None and anchor_result.dto is not None:
                     resolved_row = int(anchor_result.row)
                     relevant_rows[resolved_row] = anchor_result.dto
@@ -780,6 +803,7 @@ class GalleryCollectionStore:
                         path=anchor_result.anchor.path,
                         asset_id=anchor_result.anchor.asset_id,
                         previous_row=resolved_row,
+                        selection_version=anchor_result.anchor.selection_version,
                     )
                     anchor_state_changed = self._selection_anchor_status != "resolved"
                     anchor_state_changed = (
@@ -803,6 +827,31 @@ class GalleryCollectionStore:
                     row=None,
                     elapsed_ms=anchor_result.elapsed_ms,
                 )
+                if anchor_result.status == "missing":
+                    self._cancel_selection_anchor_retry()
+                else:
+                    if result.purpose == "selection_anchor_retry":
+                        inflight = (
+                            self._selection_anchor_retry_inflight
+                            or retry_inflight_before_revision
+                        )
+                        completed_attempt = int(
+                            result.selection_anchor_retry_attempt
+                        )
+                        if (
+                            inflight is not None
+                            and inflight.anchor == anchor_result.anchor
+                            and inflight.attempt == completed_attempt
+                        ):
+                            self._selection_anchor_retry_inflight = None
+                            schedule_anchor_retry_attempt = (
+                                1 if revision_advanced else completed_attempt + 1
+                            )
+                    elif (
+                        self._selection_anchor_retry_ticket is None
+                        and self._selection_anchor_retry_inflight is None
+                    ):
+                        schedule_anchor_retry_attempt = 1
         elif revision_advanced and self._selection_anchor is not None:
             # This request predates the current selection. Do not attach the
             # current path to a stale numeric row while its own request catches up.
@@ -858,7 +907,10 @@ class GalleryCollectionStore:
                     row,
                     demand_generation=0,
                     priority=0,
+                    request_backfill=False,
                 )
+        if schedule_anchor_retry_attempt is not None:
+            self._schedule_selection_anchor_retry(schedule_anchor_retry_attempt)
         return True
 
     def _anchor_result_matches_current(
@@ -869,6 +921,8 @@ class GalleryCollectionStore:
         if anchor is None or result is None:
             return False
         if self._normalize_abs_key(anchor.path) != self._normalize_abs_key(result.anchor.path):
+            return False
+        if anchor.selection_version != result.anchor.selection_version:
             return False
         if anchor.asset_id and result.anchor.asset_id:
             return anchor.asset_id == result.anchor.asset_id
@@ -886,6 +940,8 @@ class GalleryCollectionStore:
         anchor = self._selection_anchor
         if anchor is None:
             return
+        if status in {"resolved", "missing"}:
+            self._cancel_selection_anchor_retry()
         self._selection_anchor_status = status
         self.selection_anchor_changed.emit(status, anchor, row)
         emit_detail_event(
@@ -896,6 +952,84 @@ class GalleryCollectionStore:
             elapsed_ms=round(float(elapsed_ms), 3),
         )
 
+    def _schedule_selection_anchor_retry(self, attempt: int) -> None:
+        anchor = self._selection_anchor
+        if anchor is None or self._selection_anchor_status != "retry":
+            return
+        if attempt > len(self.ANCHOR_RETRY_DELAYS_MS):
+            self._selection_anchor_retry_ticket = None
+            self._selection_anchor_retry_inflight = None
+            emit_detail_event(
+                "selection_anchor_retry_exhausted",
+                generation=self._request_generation,
+                asset_id=anchor.asset_id,
+                collection_revision=self._collection_revision,
+                attempt=len(self.ANCHOR_RETRY_DELAYS_MS),
+            )
+            return
+
+        active_ticket = (
+            self._selection_anchor_retry_ticket
+            or self._selection_anchor_retry_inflight
+        )
+        if (
+            active_ticket is not None
+            and active_ticket.anchor == anchor
+            and active_ticket.collection_revision == self._collection_revision
+        ):
+            return
+
+        self._cancel_selection_anchor_retry()
+        ticket = GallerySelectionAnchorRetryTicket(
+            anchor=anchor,
+            collection_revision=self._collection_revision,
+            attempt=attempt,
+            delay_ms=self.ANCHOR_RETRY_DELAYS_MS[attempt - 1],
+        )
+        self._selection_anchor_retry_ticket = ticket
+        self.selection_anchor_retry_requested.emit(ticket)
+
+    def retry_selection_anchor(
+        self,
+        ticket: GallerySelectionAnchorRetryTicket,
+    ) -> bool:
+        """Submit a still-valid retry ticket without querying on the GUI thread."""
+
+        if ticket != self._selection_anchor_retry_ticket:
+            return False
+        self._selection_anchor_retry_ticket = None
+        anchor = self._selection_anchor
+        if (
+            anchor is None
+            or anchor != ticket.anchor
+            or self._selection_anchor_status != "retry"
+            or self._collection_revision != ticket.collection_revision
+            or ticket.attempt < 1
+            or ticket.attempt > len(self.ANCHOR_RETRY_DELAYS_MS)
+        ):
+            return False
+
+        self._selection_anchor_retry_inflight = ticket
+        submitted = self._request_async_chunk(
+            max(0, anchor.previous_row),
+            max(0, anchor.previous_row),
+            demand_generation=0,
+            priority=0,
+            request_backfill=False,
+            purpose="selection_anchor_retry",
+            selection_anchor_retry_attempt=ticket.attempt,
+        )
+        if not submitted:
+            self._selection_anchor_retry_inflight = None
+        return submitted
+
+    def _cancel_selection_anchor_retry(self) -> None:
+        had_pending_ticket = self._selection_anchor_retry_ticket is not None
+        self._selection_anchor_retry_ticket = None
+        self._selection_anchor_retry_inflight = None
+        if had_pending_ticket:
+            self.selection_anchor_retry_requested.emit(None)
+
     def _resolve_selection_anchor_from_cache(self, *, missing_if_absent: bool) -> None:
         anchor = self._selection_anchor
         if anchor is None:
@@ -904,15 +1038,18 @@ class GalleryCollectionStore:
         if row is None:
             if missing_if_absent:
                 self._pinned_row = None
+                self._cancel_selection_anchor_retry()
                 self._selection_anchor_status = "missing"
                 self.selection_anchor_changed.emit("missing", anchor, None)
             return
         dto = self._row_cache.get(row)
         self._pinned_row = row
+        self._cancel_selection_anchor_retry()
         self._selection_anchor = GallerySelectionAnchor(
             path=anchor.path,
             asset_id=anchor.asset_id or (str(dto.id) if dto is not None else ""),
             previous_row=row,
+            selection_version=anchor.selection_version,
         )
         self._selection_anchor_status = "resolved"
         self.selection_anchor_changed.emit("resolved", self._selection_anchor, row)
@@ -957,6 +1094,8 @@ class GalleryCollectionStore:
     ) -> None:
         """Pin a path-stable selection anchor using only cached state."""
 
+        self._cancel_selection_anchor_retry()
+        self._selection_version += 1
         cached_row = self.cached_row_for_path(path)
         row = cached_row if cached_row is not None else previous_row
         if row is None:
@@ -965,6 +1104,7 @@ class GalleryCollectionStore:
             path=Path(path),
             asset_id=str(asset_id),
             previous_row=int(row),
+            selection_version=self._selection_version,
         )
         self._selection_anchor = anchor
         self._selection_anchor_status = "resolved" if cached_row is not None else "pending"
@@ -1004,20 +1144,23 @@ class GalleryCollectionStore:
         *,
         demand_generation: int,
         priority: int,
-    ) -> None:
+        request_backfill: bool = True,
+        purpose: str = "viewport",
+        selection_anchor_retry_attempt: int = 0,
+    ) -> bool:
         if (
             self._window_request_handler is None
             or self._current_query is None
             or self._asset_query_service is None
         ):
-            return
+            return False
         root = self._active_root or self._library_root
         if root is None:
-            return
+            return False
         view_first = max(0, int(first))
         limit = max(0, int(last) - view_first + 1)
         if limit <= 0:
-            return
+            return False
         self._request_generation += 1
         generation = self._request_generation
         self._pending_window_generations.add(generation)
@@ -1058,9 +1201,18 @@ class GalleryCollectionStore:
                 pending_source_rows=pending_source_rows,
                 pending_insertions=pending_insertions,
                 selection_anchor=self._selection_anchor,
+                request_backfill=bool(request_backfill),
                 collection_revision=self._collection_revision,
                 demand_generation=int(demand_generation),
                 priority=int(priority),
+                purpose=(
+                    "selection_anchor_retry"
+                    if purpose == "selection_anchor_retry"
+                    else "viewport"
+                ),
+                selection_anchor_retry_attempt=int(
+                    selection_anchor_retry_attempt
+                ),
             )
         )
         if self._selection_anchor is not None:
@@ -1071,6 +1223,7 @@ class GalleryCollectionStore:
                 collection_revision=self._collection_revision,
                 elapsed_ms=0.0,
             )
+        return True
 
     def _row_is_currently_relevant(self, row: int) -> bool:
         if row == self._pinned_row:
@@ -1149,6 +1302,7 @@ class GalleryCollectionStore:
             self._pinned_row = None
             self._selection_anchor = None
             self._selection_anchor_status = None
+            self._cancel_selection_anchor_retry()
             return
         self._pinned_row = row
         self.ensure_row_loaded(row, emit_signals=True)
@@ -2006,6 +2160,9 @@ class GalleryCollectionStore:
         return sorted(self._row_cache.items(), key=lambda item: item[0])
 
     def _reset_window_state(self, *, clear_pending: bool = False) -> None:
+        self._cancel_selection_anchor_retry()
+        self._selection_version += 1
+        self._selection_anchor_latest_result_generation = 0
         self._row_cache.clear()
         self._total_count = 0
         self._window_range = None

@@ -5,7 +5,9 @@ from pathlib import Path
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.ui.media import (
     MediaRestoreRequest,
+    MediaSelectionChangeReason,
     MediaSelectionSession,
+    MediaSelectionSnapshot,
     MediaSelectionState,
 )
 from iPhoto.gui.viewmodels.signal import Signal
@@ -126,6 +128,38 @@ def test_session_tracks_current_row_and_source() -> None:
     assert source == Path("/fake/b.jpg")
     assert session.current_row() == 1
     assert session.current_source() == Path("/fake/b.jpg")
+
+
+def test_session_publishes_one_coherent_snapshot_per_transition() -> None:
+    current = Path("/fake/current.jpg")
+    collection = _AnchoredCollection([Path("/fake/a.jpg"), current])
+    session = MediaSelectionSession()
+    changes: list[tuple[MediaSelectionSnapshot, MediaSelectionChangeReason]] = []
+    session.selectionChanged.connect(lambda snapshot, reason: changes.append((snapshot, reason)))
+    session.bind_collection(collection)
+    changes.clear()
+
+    session.set_current_row(1)
+    selected, selected_reason = changes[-1]
+    assert selected_reason is MediaSelectionChangeReason.USER_SELECTED
+    assert selected == session.selection_snapshot()
+    assert selected.state is MediaSelectionState.RESOLVED
+    assert selected.row == 1
+    assert selected.path == current
+    assert selected.asset_id == "1"
+
+    collection.publish(
+        [Path("/fake/new.jpg"), Path("/fake/a.jpg"), current],
+        status="retry",
+        cached_rows={0, 1, 2},
+    )
+    pending, pending_reason = changes[-1]
+    assert pending_reason is MediaSelectionChangeReason.ANCHOR_PENDING
+    assert pending.version == selected.version + 1
+    assert pending.state is MediaSelectionState.ANCHOR_RESOLVING
+    assert pending.row is None
+    assert pending.path == current
+    assert pending.asset_id == selected.asset_id
 
 
 def test_session_ensures_missing_row_before_setting_current() -> None:

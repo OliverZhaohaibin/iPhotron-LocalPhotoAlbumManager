@@ -48,7 +48,11 @@ from .gallery_thumbnail_hint_loader import (
     GalleryThumbnailHintResult,
 )
 from .gallery_tile import GalleryTileRecord, GalleryTileSnapshot
-from .gallery_window_loader import GalleryWindowLoader, GalleryWindowResult
+from .gallery_window_loader import (
+    GallerySelectionAnchorRetryTicket,
+    GalleryWindowLoader,
+    GalleryWindowResult,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -104,6 +108,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._thumbnail_hint_loader.resultReady.connect(self._on_thumbnail_hint_result)
         self._thumbnail_hint_request_id = 0
         self._pending_scan_batch_count = 0
+        self._pending_selection_anchor_retry: (
+            GallerySelectionAnchorRetryTicket | None
+        ) = None
         self._backfill_completion_source: Any | None = None
         self._startup_diag_logged_source = False
         self._startup_diag_logged_viewport = False
@@ -134,6 +141,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._scan_batch_timer.setSingleShot(True)
         self._scan_batch_timer.setInterval(150)
         self._scan_batch_timer.timeout.connect(self._flush_pending_scan_batches)
+        self._selection_anchor_retry_timer = QTimer(self)
+        self._selection_anchor_retry_timer.setSingleShot(True)
+        self._selection_anchor_retry_timer.timeout.connect(
+            self._retry_selection_anchor
+        )
         self._startup_gallery_heartbeat_timer = QTimer(self)
         self._startup_gallery_heartbeat_timer.setSingleShot(False)
         self._startup_gallery_heartbeat_timer.setInterval(250)
@@ -165,6 +177,14 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._store.window_changed.connect(self._on_window_changed)
         self._store.data_changed.connect(self._on_source_changed)
         self._store.row_changed.connect(self._on_row_changed)
+        anchor_retry_signal = getattr(
+            self._store,
+            "selection_anchor_retry_requested",
+            None,
+        )
+        anchor_retry_connect = getattr(anchor_retry_signal, "connect", None)
+        if callable(anchor_retry_connect):
+            anchor_retry_connect(self._schedule_selection_anchor_retry)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
         thumbnail_status_signal = getattr(self._thumbnails, "thumbnailStatusChanged", None)
         thumbnail_status_connect = getattr(thumbnail_status_signal, "connect", None)
@@ -601,6 +621,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         asset_query_service,
         library_root: Optional[Path],
     ) -> None:
+        self._selection_anchor_retry_timer.stop()
+        self._pending_selection_anchor_retry = None
         self._last_snapshot = None
         self._last_selection_signature = None
         self._last_window_identity_signature = None
@@ -612,6 +634,22 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._thumbnail_hint_loader.cancel_pending()
         self._store.rebind_asset_query_service(asset_query_service, library_root)
         self._bind_backfill_completion_signal(asset_query_service)
+
+    @Slot(object)
+    def _schedule_selection_anchor_retry(self, ticket: object) -> None:
+        self._selection_anchor_retry_timer.stop()
+        if not isinstance(ticket, GallerySelectionAnchorRetryTicket):
+            self._pending_selection_anchor_retry = None
+            return
+        self._pending_selection_anchor_retry = ticket
+        self._selection_anchor_retry_timer.start(max(0, int(ticket.delay_ms)))
+
+    @Slot()
+    def _retry_selection_anchor(self) -> None:
+        ticket = self._pending_selection_anchor_retry
+        self._pending_selection_anchor_retry = None
+        if ticket is not None:
+            self._store.retry_selection_anchor(ticket)
 
     def invalidate_thumbnail(
         self,

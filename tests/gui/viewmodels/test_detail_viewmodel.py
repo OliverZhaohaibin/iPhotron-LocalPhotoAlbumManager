@@ -6,8 +6,12 @@ from unittest.mock import Mock
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.ports import EditRenderingState
 from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
-from iPhoto.gui.ui.media.media_selection_session import MediaSelectionSession
-from iPhoto.gui.ui.media.media_selection_session import MediaSelectionState
+from iPhoto.gui.ui.media.media_selection_session import (
+    MediaSelectionChangeReason,
+    MediaSelectionSession,
+    MediaSelectionSnapshot,
+    MediaSelectionState,
+)
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.signal import Signal
 
@@ -152,8 +156,11 @@ class _AsyncLazyCollection(_LazyCollection):
 class _AnchoredLazyCollection(_LazyCollection):
     def __init__(self) -> None:
         super().__init__()
+        self.row_loaded = Signal()
         self.anchor_path: Path | None = None
         self.anchor_status: str | None = None
+        self.pin_calls: list[tuple[Path, str, int | None]] = []
+        self.favorite_updates: list[tuple[int, bool]] = []
 
     def cached_row_for_path(self, path: Path) -> int | None:
         for row in self._loaded_rows:
@@ -171,9 +178,14 @@ class _AnchoredLazyCollection(_LazyCollection):
         asset_id: str = "",
         previous_row: int | None = None,
     ) -> None:
-        del asset_id, previous_row
+        self.pin_calls.append((path, asset_id, previous_row))
         self.anchor_path = path
         self.anchor_status = "resolved"
+
+    def update_favorite_status(self, row: int, value: bool) -> None:
+        self._dtos[row].is_favorite = value
+        self.favorite_updates.append((row, value))
+        self.row_changed.emit(row)
 
 
 def test_next_can_open_row_outside_current_store_window() -> None:
@@ -194,6 +206,28 @@ def test_next_can_open_row_outside_current_store_window() -> None:
     assert vm.current_row.value == 1
     assert vm.current_path.value == Path("/tmp/deep.jpg")
     assert vm.presentation.value.path == Path("/tmp/deep.jpg")
+
+
+def test_show_row_hot_path_pins_once_and_never_looks_up_path() -> None:
+    store = _AnchoredLazyCollection()
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    store.pin_calls.clear()
+    store.row_for_path = Mock(side_effect=AssertionError("hot path path lookup"))
+    vm = DetailViewModel(
+        collection_store=store,
+        media_session=session,
+        asset_state_service=Mock(),
+        adjustment_commit_port=None,
+        edit_service_getter=None,
+    )
+
+    vm.show_row(0)
+
+    dto = store.asset_at(0)
+    assert dto is not None
+    assert store.pin_calls == [(dto.abs_path, str(dto.id), 0)]
+    store.row_for_path.assert_not_called()
 
 
 def test_show_row_retries_after_async_placeholder_load() -> None:
@@ -220,6 +254,73 @@ def test_show_row_retries_after_async_placeholder_load() -> None:
     assert vm.current_row.value == 1
     assert vm.current_path.value == Path("/tmp/deep.jpg")
     assert requested == ["detail"]
+    assert vm.presentation.value.request_generation == 1
+
+
+def test_async_fallback_resolution_atomically_converges_detail_and_actions() -> None:
+    store = _AnchoredLazyCollection()
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    asset_state_service = Mock()
+    asset_state_service.toggle_favorite.return_value = True
+    vm = DetailViewModel(
+        collection_store=store,
+        media_session=session,
+        asset_state_service=asset_state_service,
+        adjustment_commit_port=None,
+        edit_service_getter=None,
+    )
+    edits: list[Path] = []
+    rotations: list[tuple[Path, bool]] = []
+    vm.edit_requested.connect(edits.append)
+    vm.rotate_requested.connect(lambda path, is_video: rotations.append((path, is_video)))
+
+    vm.show_row(1)
+    original = vm.presentation.value
+    assert original.path == Path("/tmp/deep.jpg")
+
+    replacement = _make_dto("/tmp/replacement.jpg")
+    store._dtos = [_make_dto("/tmp/visible.jpg"), replacement]
+    store._loaded_rows = {0}
+    store.anchor_status = "missing"
+    store.data_changed.emit()
+
+    assert session.selection_state() is MediaSelectionState.FALLBACK_PENDING
+    assert vm.selection_state.value is MediaSelectionState.FALLBACK_PENDING
+    assert vm.current_row.value == -1
+    assert vm.current_path.value == original.path
+    assert vm.presentation.value.path == original.path
+    assert vm.presentation.value.request_generation == original.request_generation
+
+    vm.toggle_favorite()
+    vm.request_edit()
+    vm.rotate_current()
+    assert vm.current_asset_path() is None
+    asset_state_service.toggle_favorite.assert_not_called()
+    assert edits == []
+    assert rotations == []
+
+    store._loaded_rows.add(1)
+    store.row_loaded.emit(1)
+
+    snapshot = session.selection_snapshot()
+    assert snapshot.state is MediaSelectionState.RESOLVED
+    assert snapshot.row == 1
+    assert snapshot.path == replacement.abs_path
+    assert snapshot.asset_id == str(replacement.id)
+    assert vm.current_row.value == 1
+    assert vm.current_path.value == replacement.abs_path
+    assert vm.presentation.value.path == replacement.abs_path
+    assert vm.presentation.value.request_generation == original.request_generation + 1
+
+    vm.toggle_favorite()
+    vm.request_edit()
+    vm.rotate_current()
+    assert vm.current_asset_path() == replacement.abs_path
+    asset_state_service.toggle_favorite.assert_called_once_with(replacement.abs_path)
+    assert store.favorite_updates == [(1, True)]
+    assert edits == [replacement.abs_path]
+    assert rotations == [(replacement.abs_path, False)]
 
 
 def test_pending_selection_anchor_keeps_existing_detail_presentation() -> None:
@@ -536,12 +637,19 @@ def test_scan_row_relocation_keeps_render_generation() -> None:
     relocated.metadata["source_mtime_ns"] = 100
     store.asset_at.side_effect = [first, relocated]
     session.set_current_row.return_value = first.abs_path
-    session.current_row.return_value = 7
-    session.current_source.return_value = first.abs_path
 
     vm.show_row(0)
     initial = vm.presentation.value
-    vm._handle_store_changed()
+    vm._handle_selection_changed(
+        MediaSelectionSnapshot(
+            version=2,
+            state=MediaSelectionState.RESOLVED,
+            row=7,
+            path=relocated.abs_path,
+            asset_id=str(relocated.id),
+        ),
+        MediaSelectionChangeReason.ANCHOR_RESOLVED,
+    )
     refreshed = vm.presentation.value
 
     assert initial.render_key == refreshed.render_key

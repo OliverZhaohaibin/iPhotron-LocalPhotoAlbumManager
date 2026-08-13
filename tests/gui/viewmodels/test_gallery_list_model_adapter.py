@@ -22,6 +22,10 @@ from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
     GalleryThumbnailHintResult,
 )
 from iPhoto.gui.viewmodels.gallery_tile import GalleryTileSnapshot
+from iPhoto.gui.viewmodels.gallery_window_loader import (
+    GallerySelectionAnchor,
+    GallerySelectionAnchorRetryTicket,
+)
 from iPhoto.infrastructure.services.thumbnail_cache_service import (
     ThumbnailCacheService,
     ThumbnailLoadResult,
@@ -154,6 +158,50 @@ def test_detail_prefetch_descriptor_carries_indexed_source_identity(
 
 def test_adapter_init(adapter):
     assert adapter.rowCount() == 0
+
+
+def test_adapter_schedules_and_cancels_anchor_retry_on_gui_timer(
+    mock_thumb_service,
+    qapp,
+) -> None:
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = _Signal()
+    store.window_changed = _Signal()
+    store.row_changed = _Signal()
+    store.selection_anchor_retry_requested = _Signal()
+    store.count.return_value = 0
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    anchor = GallerySelectionAnchor(
+        path=Path("/library/current.jpg"),
+        asset_id="current",
+        previous_row=12,
+        selection_version=3,
+    )
+    immediate = GallerySelectionAnchorRetryTicket(
+        anchor=anchor,
+        collection_revision=8,
+        attempt=1,
+        delay_ms=0,
+    )
+
+    store.selection_anchor_retry_requested.emit(immediate)
+    qapp.processEvents()
+
+    store.retry_selection_anchor.assert_called_once_with(immediate)
+    delayed = GallerySelectionAnchorRetryTicket(
+        anchor=anchor,
+        collection_revision=8,
+        attempt=2,
+        delay_ms=500,
+    )
+    store.selection_anchor_retry_requested.emit(delayed)
+    assert adapter._selection_anchor_retry_timer.isActive()
+
+    store.selection_anchor_retry_requested.emit(None)
+
+    assert not adapter._selection_anchor_retry_timer.isActive()
+    assert adapter._pending_selection_anchor_retry is None
+    store.retry_selection_anchor.assert_called_once()
 
 
 def test_runtime_diagnostic_heartbeat_reports_privacy_safe_store_state(

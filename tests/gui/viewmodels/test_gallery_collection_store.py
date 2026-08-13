@@ -21,6 +21,7 @@ from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStor
 from iPhoto.gui.viewmodels.gallery_window_loader import (
     GallerySelectionAnchor,
     GallerySelectionAnchorResult,
+    GallerySelectionAnchorRetryTicket,
     GalleryWindowLoader,
     GalleryWindowRequest,
     GalleryWindowResult,
@@ -1260,6 +1261,8 @@ def test_anchor_retry_preserves_source_until_resolved_then_missing_falls_back() 
     session.bind_collection(store)
     session.set_current_row(10)
     requests.clear()
+    retry_tickets: list[GallerySelectionAnchorRetryTicket | None] = []
+    store.selection_anchor_retry_requested.connect(retry_tickets.append)
 
     store._request_async_chunk(0, 19, demand_generation=0, priority=0)
     retry_request = requests[-1]
@@ -1282,10 +1285,20 @@ def test_anchor_retry_preserves_source_until_resolved_then_missing_falls_back() 
     )
     assert session.current_row() == -1
     assert session.current_source() == current.abs_path
+    assert retry_tickets[-1] is not None
+    retry_ticket = retry_tickets[-1]
+    assert retry_ticket.attempt == 1
+    assert retry_ticket.delay_ms == 100
 
-    store._request_async_chunk(0, 19, demand_generation=0, priority=0)
+    assert store.retry_selection_anchor(retry_ticket)
     resolved_request = requests[-1]
     assert resolved_request.selection_anchor is not None
+    assert resolved_request.view_first == 10
+    assert resolved_request.limit == 1
+    assert resolved_request.request_backfill is False
+    assert resolved_request.demand_generation == 0
+    assert resolved_request.purpose == "selection_anchor_retry"
+    assert resolved_request.selection_anchor_retry_attempt == 1
     assert store.apply_window_result(
         GalleryWindowResult(
             generation=resolved_request.generation,
@@ -1293,13 +1306,17 @@ def test_anchor_retry_preserves_source_until_resolved_then_missing_falls_back() 
             last=0,
             rows={0: fallback},
             total_count=30,
-            collection_revision=22,
+            collection_revision=21,
             requested_revision=resolved_request.collection_revision,
             selection_anchor_result=GallerySelectionAnchorResult(
                 anchor=resolved_request.selection_anchor,
                 status="resolved",
                 row=11,
                 dto=current,
+            ),
+            purpose=resolved_request.purpose,
+            selection_anchor_retry_attempt=(
+                resolved_request.selection_anchor_retry_attempt
             ),
         )
     )
@@ -1326,6 +1343,146 @@ def test_anchor_retry_preserves_source_until_resolved_then_missing_falls_back() 
     )
     assert session.current_row() == 11
     assert session.current_source() == fallback.abs_path
+
+
+def test_anchor_retry_is_bounded_and_needs_no_new_scan_revision(
+    monkeypatch,
+) -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    assert current is not None
+    store._total_count = 30
+    store._collection_revision = 20
+    store._row_cache[10] = current
+    store.pin_path(current.abs_path, asset_id=str(current.id), previous_row=10)
+    requests.clear()
+
+    tickets: list[GallerySelectionAnchorRetryTicket | None] = []
+    events: list[tuple[str, dict]] = []
+    store.selection_anchor_retry_requested.connect(tickets.append)
+    monkeypatch.setattr(
+        "iPhoto.gui.viewmodels.gallery_collection_store.emit_detail_event",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    store._request_async_chunk(0, 0, demand_generation=0, priority=0)
+    initial = requests[-1]
+    assert initial.selection_anchor is not None
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=initial.generation,
+            first=0,
+            last=0,
+            rows={},
+            total_count=30,
+            collection_revision=20,
+            requested_revision=initial.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=initial.selection_anchor,
+                status="retry",
+            ),
+        )
+    )
+
+    for attempt, delay_ms in enumerate((100, 250, 500), start=1):
+        ticket = tickets[-1]
+        assert isinstance(ticket, GallerySelectionAnchorRetryTicket)
+        assert (ticket.attempt, ticket.delay_ms) == (attempt, delay_ms)
+        assert store.retry_selection_anchor(ticket)
+        request = requests[-1]
+        assert request.purpose == "selection_anchor_retry"
+        assert request.selection_anchor_retry_attempt == attempt
+        assert request.selection_anchor is not None
+        assert store.apply_window_result(
+            GalleryWindowResult(
+                generation=request.generation,
+                first=request.view_first,
+                last=request.view_first,
+                rows={},
+                total_count=30,
+                collection_revision=20,
+                requested_revision=request.collection_revision,
+                selection_anchor_result=GallerySelectionAnchorResult(
+                    anchor=request.selection_anchor,
+                    status="retry",
+                ),
+                purpose=request.purpose,
+                selection_anchor_retry_attempt=(
+                    request.selection_anchor_retry_attempt
+                ),
+            )
+        )
+
+    assert [ticket.attempt for ticket in tickets if ticket is not None] == [1, 2, 3]
+    assert store._selection_anchor_retry_ticket is None
+    assert store._selection_anchor_retry_inflight is None
+    exhausted = [item for item in events if item[0] == "selection_anchor_retry_exhausted"]
+    assert len(exhausted) == 1
+    assert exhausted[0][1]["collection_revision"] == 20
+    assert "path" not in exhausted[0][1]
+
+
+def test_new_selection_cancels_stale_anchor_retry_ticket() -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    first = scan_row_to_dto(
+        root,
+        "first.jpg",
+        {"id": "first", "rel": "first.jpg", "media_type": 0},
+    )
+    second = scan_row_to_dto(
+        root,
+        "second.jpg",
+        {"id": "second", "rel": "second.jpg", "media_type": 0},
+    )
+    assert first is not None and second is not None
+    store._total_count = 2
+    store._collection_revision = 7
+    store._row_cache.update({0: first, 1: second})
+    store.pin_path(first.abs_path, asset_id=str(first.id), previous_row=0)
+    requests.clear()
+    emitted: list[GallerySelectionAnchorRetryTicket | None] = []
+    store.selection_anchor_retry_requested.connect(emitted.append)
+
+    store._request_async_chunk(0, 0, demand_generation=0, priority=0)
+    request = requests[-1]
+    assert request.selection_anchor is not None
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=request.generation,
+            first=0,
+            last=0,
+            rows={0: first},
+            total_count=2,
+            collection_revision=7,
+            requested_revision=request.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=request.selection_anchor,
+                status="retry",
+            ),
+        )
+    )
+    stale_ticket = emitted[-1]
+    assert isinstance(stale_ticket, GallerySelectionAnchorRetryTicket)
+
+    store.pin_path(second.abs_path, asset_id=str(second.id), previous_row=1)
+
+    assert emitted[-1] is None
+    assert store.retry_selection_anchor(stale_ticket) is False
+    assert store.selection_anchor_status(second.abs_path) == "resolved"
 
 
 def test_row_for_path_uses_query_lookup_without_scanning_batches() -> None:

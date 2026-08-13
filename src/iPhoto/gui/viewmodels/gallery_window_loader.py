@@ -23,6 +23,17 @@ class GallerySelectionAnchor:
     path: Path
     asset_id: str
     previous_row: int
+    selection_version: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class GallerySelectionAnchorRetryTicket:
+    """One bounded, cancelable retry of a path-stable selection anchor."""
+
+    anchor: GallerySelectionAnchor
+    collection_revision: int
+    attempt: int
+    delay_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +65,8 @@ class GalleryWindowRequest:
     collection_revision: int = 0
     demand_generation: int = 0
     priority: int = 1
+    purpose: Literal["viewport", "selection_anchor_retry"] = "viewport"
+    selection_anchor_retry_attempt: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +83,8 @@ class GalleryWindowResult:
     demand_generation: int = 0
     priority: int = 1
     selection_anchor_result: GallerySelectionAnchorResult | None = None
+    purpose: Literal["viewport", "selection_anchor_retry"] = "viewport"
+    selection_anchor_retry_attempt: int = 0
 
 
 class _GalleryWindowSignals(QObject):
@@ -259,6 +274,10 @@ class _GalleryWindowWorker(QRunnable):
                     demand_generation=request.demand_generation,
                     priority=request.priority,
                     selection_anchor_result=selection_anchor_result,
+                    purpose=request.purpose,
+                    selection_anchor_retry_attempt=(
+                        request.selection_anchor_retry_attempt
+                    ),
                 )
             )
             request_backfill = getattr(request.query_service, "request_thumbnail_backfill", None)
@@ -289,6 +308,10 @@ class _GalleryWindowWorker(QRunnable):
                     requested_revision=request.collection_revision,
                     demand_generation=request.demand_generation,
                     priority=request.priority,
+                    purpose=request.purpose,
+                    selection_anchor_retry_attempt=(
+                        request.selection_anchor_retry_attempt
+                    ),
                 )
             )
 
@@ -405,12 +428,15 @@ class GalleryWindowLoader(QObject):
             request.selection_anchor,
             request.request_backfill,
             request.collection_revision,
+            request.purpose,
+            request.selection_anchor_retry_attempt,
         )
 
 
 __all__ = [
     "GallerySelectionAnchor",
     "GallerySelectionAnchorResult",
+    "GallerySelectionAnchorRetryTicket",
     "GalleryWindowLoader",
     "GalleryWindowRequest",
     "GalleryWindowResult",

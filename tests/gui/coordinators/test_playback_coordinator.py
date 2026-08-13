@@ -408,6 +408,26 @@ def test_same_render_pending_keeps_visual_row_and_reconciles_all_capabilities() 
     coordinator._share_button.setEnabled.assert_called_with(True)
 
 
+def test_filmstrip_selection_cancels_old_restore_before_deferred_center() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    source_index = Mock()
+    visual_index = Mock(isValid=Mock(return_value=True))
+    proxy_model = Mock(mapFromSource=Mock(return_value=visual_index))
+    coordinator._asset_model = Mock(index=Mock(return_value=source_index))
+    coordinator._filmstrip_view = Mock(
+        model=Mock(return_value=proxy_model),
+        select_index_for_centering=Mock(return_value=True),
+    )
+
+    result = PlaybackCoordinator._select_filmstrip_row(coordinator, 24)
+
+    assert result is visual_index
+    proxy_model.mapFromSource.assert_called_once_with(source_index)
+    coordinator._filmstrip_view.select_index_for_centering.assert_called_once_with(
+        visual_index
+    )
+
+
 def test_scan_row_relocation_reuses_preparing_still_without_covering_it() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     previous = replace(

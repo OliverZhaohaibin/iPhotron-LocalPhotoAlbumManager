@@ -61,6 +61,10 @@ class FilmstripView(AssetGrid):
         self._last_known_center_asset_id: str | None = None
         self._last_known_anchor_x: int | None = None
         self._restore_scheduled = False
+        self._restore_reason = "unknown"
+        self._restore_timer = QTimer(self)
+        self._restore_timer.setSingleShot(True)
+        self._restore_timer.timeout.connect(self._run_scheduled_restore)
         self._apply_scrollbar_style()
 
     def changeEvent(self, event: QEvent) -> None:
@@ -217,7 +221,11 @@ class FilmstripView(AssetGrid):
         ):
             return
         self._restore_scheduled = True
-        QTimer.singleShot(0, lambda: self._restore_scroll_state(reason or "unknown"))
+        self._restore_reason = reason or "unknown"
+        self._restore_timer.start(0)
+
+    def _run_scheduled_restore(self) -> None:
+        self._restore_scroll_state(self._restore_reason)
 
     def _restore_scroll_state(self, reason: str) -> None:
         self._restore_scheduled = False
@@ -513,6 +521,22 @@ class FilmstripView(AssetGrid):
     # ------------------------------------------------------------------
     # Programmatic scrolling helpers
     # ------------------------------------------------------------------
+    def select_index_for_centering(self, index: QModelIndex) -> bool:
+        """Select *index* and invalidate restoration from an older view state."""
+
+        if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
+            return False
+        self._clear_pending_scroll_restore()
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return False
+        if selection_model.currentIndex() != index:
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.ClearAndSelect,
+            )
+        return True
+
     def center_on_index(self, index: QModelIndex) -> None:
         """Scroll the view so *index* is visually centred in the viewport."""
         if not index.isValid():
@@ -520,11 +544,7 @@ class FilmstripView(AssetGrid):
 
         # Programmatic centering (e.g. entering playback from gallery) should
         # win over any delayed restore from a previous detail session.
-        self._pending_scroll_value = None
-        self._pending_center_row = None
-        self._pending_center_path = None
-        self._pending_center_asset_id = None
-        self._pending_anchor_x = None
+        self._clear_pending_scroll_restore()
 
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
@@ -538,3 +558,14 @@ class FilmstripView(AssetGrid):
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
+
+    def _clear_pending_scroll_restore(self) -> None:
+        """Cancel one stale restore transaction and discard its captured state."""
+
+        self._restore_timer.stop()
+        self._restore_scheduled = False
+        self._pending_scroll_value = None
+        self._pending_center_row = None
+        self._pending_center_path = None
+        self._pending_center_asset_id = None
+        self._pending_anchor_x = None

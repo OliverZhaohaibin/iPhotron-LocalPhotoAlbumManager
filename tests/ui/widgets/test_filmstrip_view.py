@@ -115,6 +115,43 @@ def test_center_on_index_overrides_pending_restore(qapp):
     assert view.selectionModel().currentIndex().row() == selected.row()
 
 
+def test_playback_selection_cancels_queued_show_restore_before_centering(qapp):
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(40)]
+    model = _AssetListModel(paths, paths[5])
+    proxy = SpacerProxyModel()
+    proxy.setSourceModel(model)
+    view = FilmstripView()
+    view.setItemDelegate(AssetGridDelegate(view, filmstrip_mode=True))
+    view.setModel(proxy)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+
+    stale = proxy.mapFromSource(model.index(5, 0))
+    target = proxy.mapFromSource(model.index(24, 0))
+    view.selectionModel().setCurrentIndex(
+        stale,
+        QItemSelectionModel.ClearAndSelect,
+    )
+    view.center_on_index(stale)
+    view._capture_scroll_state()
+    stale_scroll_value = view.horizontalScrollBar().value()
+    view._schedule_restore_scroll("show")
+    assert view._restore_timer.isActive()
+
+    assert view.select_index_for_centering(target) is True
+
+    assert not view._restore_timer.isActive()
+    assert view._pending_scroll_value is None
+    view.center_on_index(target)
+    target_scroll_value = view.horizontalScrollBar().value()
+    qapp.processEvents()
+
+    assert view.selectionModel().currentIndex() == target
+    assert view.horizontalScrollBar().value() == target_scroll_value
+    assert target_scroll_value != stale_scroll_value
+
+
 def test_scan_reset_restores_same_asset_at_same_viewport_position(qapp):
     paths = [Path(f"/library/photo-{index}.jpg") for index in range(40)]
     current_path = paths[12]

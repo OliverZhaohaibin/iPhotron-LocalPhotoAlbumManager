@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import (
-    QItemSelectionModel,
     QLocale,
     QModelIndex,
     QObject,
@@ -2220,9 +2219,7 @@ class PlaybackCoordinator(QObject):
         if hasattr(model, "mapFromSource"):
             idx = model.mapFromSource(idx)
         if idx.isValid():
-            self._filmstrip_view.selectionModel().setCurrentIndex(
-                idx, QItemSelectionModel.ClearAndSelect
-            )
+            self._filmstrip_view.select_index_for_centering(idx)
         return idx
 
     def _center_filmstrip_if_current(self, row: int, generation: int) -> None:

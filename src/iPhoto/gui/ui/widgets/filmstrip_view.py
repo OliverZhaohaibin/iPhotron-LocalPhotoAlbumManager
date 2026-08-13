@@ -157,7 +157,15 @@ class FilmstripView(AssetGrid):
             # Re-calculating layout is expensive, so check if we need it.
             # QListView with uniformItemSizes=False might need a nudge.
             self.scheduleDelayedItemsLayout()
-            self.refresh_spacers(top)
+            # Gallery publishes the old and new current rows separately. The
+            # old row is already narrow when its notification arrives, so using
+            # it as the active width briefly grows both spacers by half the
+            # selected-tile width delta. Windows QListView may commit that
+            # intermediate layout after centering, causing a second jump.
+            # Only the row whose semantic role is current may drive spacers;
+            # select_index_for_centering() supplies the final fallback.
+            if top == bottom and bool(top.data(Roles.IS_CURRENT)):
+                self.refresh_spacers(top)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -334,6 +342,7 @@ class FilmstripView(AssetGrid):
         if anchor_x is None:
             self.center_on_index(index)
             return
+        self._settle_index_geometry(index)
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
             return
@@ -469,17 +478,7 @@ class FilmstripView(AssetGrid):
     ) -> None:
         """Track the last non-spacer current row for capture/restore centering logic."""
         if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
-            self._last_known_center_row = current.row()
-            path = current.data(Roles.ABS)
-            if path:
-                self._last_known_center_path = Path(str(path))
-                asset_id = current.data(Roles.ASSET_ID)
-                self._last_known_center_asset_id = (
-                    str(asset_id) if asset_id is not None else None
-                )
-            rect = self.visualRect(current)
-            if rect.isValid():
-                self._last_known_anchor_x = int(rect.center().x())
+            self._remember_center_identity(current)
 
     # ------------------------------------------------------------------
     # Event handling
@@ -535,6 +534,10 @@ class FilmstripView(AssetGrid):
                 index,
                 QItemSelectionModel.ClearAndSelect,
             )
+        # The source model updates IS_CURRENT before Playback updates Qt's
+        # selection model. Reconcile spacer geometry from the target index so
+        # there is only one stable width during this selection transaction.
+        self.refresh_spacers(index)
         return True
 
     def center_on_index(self, index: QModelIndex) -> None:
@@ -545,6 +548,12 @@ class FilmstripView(AssetGrid):
         # Programmatic centering (e.g. entering playback from gallery) should
         # win over any delayed restore from a previous detail session.
         self._clear_pending_scroll_restore()
+
+        # SizeHintRole and spacer changes are delivered through QListView's
+        # delayed layout machinery. Force that pending geometry to settle in
+        # this callback, before reading visualRect and writing the scrollbar.
+        # No paint can occur between the layout and the final scroll position.
+        self._settle_index_geometry(index)
 
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
@@ -558,6 +567,30 @@ class FilmstripView(AssetGrid):
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
+        self._remember_center_identity(index)
+
+    def _settle_index_geometry(self, index: QModelIndex) -> None:
+        """Commit pending tile/spacer size changes before a scroll calculation."""
+
+        self.refresh_spacers(index)
+        self.executeDelayedItemsLayout()
+
+    def _remember_center_identity(self, index: QModelIndex) -> None:
+        """Record the stable identity and its actual post-layout viewport anchor."""
+
+        if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
+            return
+        self._last_known_center_row = index.row()
+        path = index.data(Roles.ABS)
+        if path:
+            self._last_known_center_path = Path(str(path))
+            asset_id = index.data(Roles.ASSET_ID)
+            self._last_known_center_asset_id = (
+                str(asset_id) if asset_id is not None else None
+            )
+        rect = self.visualRect(index)
+        if rect.isValid():
+            self._last_known_anchor_x = int(rect.center().x())
 
     def _clear_pending_scroll_restore(self) -> None:
         """Cancel one stale restore transaction and discard its captured state."""

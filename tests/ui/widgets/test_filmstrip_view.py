@@ -58,6 +58,15 @@ class _AssetListModel(QAbstractListModel):
         self.beginResetModel()
         self.endResetModel()
 
+    def set_current_path(self, path: Path) -> None:
+        old_row = self._paths.index(self._current_path)
+        new_row = self._paths.index(path)
+        self._current_path = path
+        roles = [Roles.IS_CURRENT, Qt.ItemDataRole.SizeHintRole]
+        self.dataChanged.emit(self.index(old_row, 0), self.index(old_row, 0), roles)
+        self.dataChanged.emit(self.index(new_row, 0), self.index(new_row, 0), roles)
+
+
 @pytest.fixture(scope="session")
 def qapp():
     app = QApplication.instance()
@@ -150,6 +159,101 @@ def test_playback_selection_cancels_queued_show_restore_before_centering(qapp):
     assert view.selectionModel().currentIndex() == target
     assert view.horizontalScrollBar().value() == target_scroll_value
     assert target_scroll_value != stale_scroll_value
+
+
+def test_centering_settles_current_tile_geometry_before_scroll(qapp):
+    """Model Windows processing a delayed item layout after the center request."""
+
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(40)]
+    model = _AssetListModel(paths, paths[5])
+    proxy = SpacerProxyModel()
+    proxy.setSourceModel(model)
+    view = FilmstripView()
+    view.setItemDelegate(AssetGridDelegate(view, filmstrip_mode=True))
+    view.setModel(proxy)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+
+    initial = proxy.mapFromSource(model.index(5, 0))
+    target = proxy.mapFromSource(model.index(24, 0))
+    view.select_index_for_centering(initial)
+    view.center_on_index(initial)
+    qapp.processEvents()
+
+    model.set_current_path(paths[24])
+    view.select_index_for_centering(target)
+    view.center_on_index(target)
+    centered_x = int(view.visualRect(target).center().x())
+
+    view.executeDelayedItemsLayout()
+    qapp.processEvents()
+
+    assert abs(int(view.visualRect(target).center().x()) - centered_x) <= 1
+
+
+def test_current_change_does_not_publish_transient_spacer_width(qapp):
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(40)]
+    model = _AssetListModel(paths, paths[5])
+    proxy = SpacerProxyModel()
+    proxy.setSourceModel(model)
+    view = FilmstripView()
+    view.setItemDelegate(AssetGridDelegate(view, filmstrip_mode=True))
+    view.setModel(proxy)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+
+    widths: list[int] = []
+    original_set_spacer_width = proxy.set_spacer_width
+
+    def record_spacer_width(width: int) -> None:
+        widths.append(width)
+        original_set_spacer_width(width)
+
+    proxy.set_spacer_width = record_spacer_width  # type: ignore[method-assign]
+    model.set_current_path(paths[24])
+    target = proxy.mapFromSource(model.index(24, 0))
+    view.select_index_for_centering(target)
+
+    expected = max(0, (view.viewport().width() - 120) // 2)
+    assert widths
+    assert set(widths) == {expected}
+
+
+def test_centering_executes_delayed_layout_before_reading_item_geometry(qapp):
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(20)]
+    model = _AssetListModel(paths, paths[5])
+    proxy = SpacerProxyModel()
+    proxy.setSourceModel(model)
+    view = FilmstripView()
+    view.setItemDelegate(AssetGridDelegate(view, filmstrip_mode=True))
+    view.setModel(proxy)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+    target = proxy.mapFromSource(model.index(5, 0))
+
+    calls: list[str] = []
+    execute_layout = view.executeDelayedItemsLayout
+    visual_rect = view.visualRect
+
+    def record_layout() -> None:
+        calls.append("layout")
+        execute_layout()
+
+    def record_rect(index: QModelIndex):
+        calls.append("rect")
+        return visual_rect(index)
+
+    view.executeDelayedItemsLayout = record_layout  # type: ignore[method-assign]
+    view.visualRect = record_rect  # type: ignore[method-assign]
+    view.center_on_index(target)
+
+    assert "layout" in calls
+    assert "rect" in calls
+    layout_position = calls.index("layout")
+    assert "rect" in calls[layout_position + 1 :]
 
 
 def test_scan_reset_restores_same_asset_at_same_viewport_position(qapp):

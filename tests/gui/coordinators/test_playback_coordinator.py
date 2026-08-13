@@ -25,8 +25,8 @@ from iPhoto.gui.detail_render_coordinator import (
     DetailSurfacePresentationResult,
 )
 from iPhoto.gui.services.location_file_write_queue import LocationFileWriteResult
-from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.media.media_selection_session import MediaSelectionState
+from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionAnnotation
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
 from iPhoto.people.repository import AssetFaceAnnotation
@@ -350,6 +350,62 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
 
     coordinator._render_presentation.assert_not_called()
     coordinator._update_favorite_icon.assert_called_once_with(True)
+
+
+def test_same_render_pending_keeps_visual_row_and_reconciles_all_capabilities() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    resolved = _make_presentation(path="/fake/photo.jpg", is_video=False)
+    pending = replace(
+        resolved,
+        row=-1,
+        can_edit=False,
+        can_rotate=False,
+        can_share=False,
+        can_toggle_favorite=False,
+    )
+    coordinator._current_presentation = resolved
+    coordinator._presented_still_source = resolved.path
+    coordinator._presented_still_generation = resolved.request_generation
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(
+        set_current_asset=Mock(side_effect=[4, 0]),
+    )
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = None
+    coordinator._favorite_button = Mock(setEnabled=Mock())
+    coordinator._edit_button = Mock(setEnabled=Mock())
+    coordinator._rotate_button = Mock(setEnabled=Mock())
+    coordinator._share_button = Mock(setEnabled=Mock())
+
+    PlaybackCoordinator._handle_presentation_changed(coordinator, pending)
+
+    coordinator._asset_model.set_current_asset.assert_called_once_with(
+        None,
+        resolved.path,
+    )
+    coordinator.assetChanged.emit.assert_not_called()
+    coordinator._select_filmstrip_row.assert_called_once_with(4)
+    coordinator._favorite_button.setEnabled.assert_called_once_with(False)
+    coordinator._edit_button.setEnabled.assert_called_once_with(False)
+    coordinator._rotate_button.setEnabled.assert_called_once_with(False)
+    coordinator._share_button.setEnabled.assert_called_once_with(False)
+    coordinator._render_presentation.assert_not_called()
+    coordinator._player_view.show_placeholder.assert_not_called()
+
+    PlaybackCoordinator._handle_presentation_changed(coordinator, resolved)
+
+    coordinator.assetChanged.emit.assert_called_once_with(0)
+    assert coordinator._select_filmstrip_row.call_args_list == [call(4), call(0)]
+    coordinator._favorite_button.setEnabled.assert_called_with(True)
+    coordinator._edit_button.setEnabled.assert_called_with(True)
+    coordinator._rotate_button.setEnabled.assert_called_with(True)
+    coordinator._share_button.setEnabled.assert_called_with(True)
 
 
 def test_scan_row_relocation_reuses_preparing_still_without_covering_it() -> None:

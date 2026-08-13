@@ -233,17 +233,6 @@ class MediaSelectionSession:
                 )
                 self._dispatch_pending_navigation(row)
                 return
-            if callable(cached_row_for_path) and anchor_status != "missing":
-                self._pending_fallback_row = None
-                self._publish_snapshot(
-                    state=MediaSelectionState.ANCHOR_RESOLVING,
-                    row=None,
-                    path=stable_path,
-                    asset_id=stable_asset_id,
-                    reason=MediaSelectionChangeReason.ANCHOR_PENDING,
-                )
-                return
-
         count = self._collection.count()
         if count <= 0:
             self._clear_selection()

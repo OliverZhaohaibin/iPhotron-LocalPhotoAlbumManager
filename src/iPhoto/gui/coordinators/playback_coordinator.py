@@ -1018,10 +1018,18 @@ class PlaybackCoordinator(QObject):
         self._current_presentation = presentation
         self._detail_request_generation = int(presentation.request_generation)
         row = presentation.row
-        self._asset_model.set_current_asset(row, presentation.path)
-        self.assetChanged.emit(row)
+        authoritative_row = row if row >= 0 else None
+        visual_row = self._asset_model.set_current_asset(
+            authoritative_row,
+            presentation.path,
+        )
+        if not isinstance(visual_row, int) or visual_row < 0:
+            visual_row = authoritative_row
+        if authoritative_row is not None:
+            self.assetChanged.emit(authoritative_row)
         self._update_header(presentation)
-        self._select_filmstrip_row(row)
+        if visual_row is not None:
+            self._select_filmstrip_row(visual_row)
         same_render_request = (
             previous is not None
             and previous.render_key == presentation.render_key
@@ -1034,9 +1042,7 @@ class PlaybackCoordinator(QObject):
                 asset_id=presentation.asset_id,
                 row=row,
             )
-            favorite_button = getattr(self, "_favorite_button", None)
-            if favorite_button is not None:
-                favorite_button.setEnabled(presentation.can_toggle_favorite)
+            self._reconcile_action_capabilities(presentation)
             self._update_favorite_icon(presentation.is_favorite)
             if self._info_panel and presentation.info_panel_visible:
                 self._refresh_info_panel(presentation.info)
@@ -1173,11 +1179,8 @@ class PlaybackCoordinator(QObject):
         self._active_live_still = None
         self._active_live_asset_id = ""
 
-        self._favorite_button.setEnabled(presentation.can_toggle_favorite)
+        self._reconcile_action_capabilities(presentation)
         self._info_button.setEnabled(True)
-        self._share_button.setEnabled(presentation.can_share)
-        self._edit_button.setEnabled(presentation.can_edit and presentation.is_video)
-        self._rotate_button.setEnabled(presentation.can_rotate)
         self._update_favorite_icon(presentation.is_favorite)
 
         self._zoom_slider.blockSignals(True)
@@ -1264,7 +1267,11 @@ class PlaybackCoordinator(QObject):
         if self._info_panel and presentation.info_panel_visible:
             self._refresh_info_panel(presentation.info)
             self._info_panel.show()
-        elif self._info_panel and self._info_panel.isVisible() and not presentation.info_panel_visible:
+        elif (
+            self._info_panel
+            and self._info_panel.isVisible()
+            and not presentation.info_panel_visible
+        ):
             self._info_panel.close()
         log_detail_profile(
             "playback",
@@ -1275,6 +1282,33 @@ class PlaybackCoordinator(QObject):
         )
         self._clear_play_profile(presentation.row)
         self._schedule_deferred_location(presentation)
+
+    def _reconcile_action_capabilities(
+        self,
+        presentation: DetailPresentation,
+    ) -> None:
+        """Apply one capability snapshot without changing the render session."""
+
+        capability_buttons = (
+            ("_favorite_button", presentation.can_toggle_favorite),
+            ("_share_button", presentation.can_share),
+            ("_rotate_button", presentation.can_rotate),
+        )
+        for attribute, enabled in capability_buttons:
+            button = getattr(self, attribute, None)
+            if button is not None:
+                button.setEnabled(bool(enabled))
+
+        edit_enabled = bool(presentation.can_edit)
+        if not presentation.is_video:
+            edit_enabled = edit_enabled and (
+                getattr(self, "_presented_still_source", None) == presentation.path
+                and getattr(self, "_presented_still_generation", 0)
+                == int(presentation.request_generation)
+            )
+        edit_button = getattr(self, "_edit_button", None)
+        if edit_button is not None:
+            edit_button.setEnabled(edit_enabled)
 
     def _schedule_deferred_location(self, presentation: DetailPresentation) -> None:
         if (
@@ -1575,9 +1609,7 @@ class PlaybackCoordinator(QObject):
             return
         self._presented_still_source = presented_source
         self._presented_still_generation = int(generation)
-        edit_button = getattr(self, "_edit_button", None)
-        if edit_button is not None:
-            edit_button.setEnabled(presentation.can_edit)
+        self._reconcile_action_capabilities(presentation)
         self._schedule_recognition_overlay(presentation, int(generation))
         if not getattr(self, "_active_live_motion", None):
             self._prefetch_neighbor_stills(presentation.row)

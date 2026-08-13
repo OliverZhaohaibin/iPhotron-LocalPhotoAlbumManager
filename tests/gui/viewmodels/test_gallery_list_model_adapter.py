@@ -204,6 +204,37 @@ def test_adapter_schedules_and_cancels_anchor_retry_on_gui_timer(
     store.retry_selection_anchor.assert_called_once()
 
 
+def test_rebind_leaves_anchor_retry_cancellation_to_store(
+    mock_thumb_service,
+) -> None:
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = _Signal()
+    store.window_changed = _Signal()
+    store.row_changed = _Signal()
+    store.selection_anchor_retry_requested = _Signal()
+    store.count.return_value = 0
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    ticket = GallerySelectionAnchorRetryTicket(
+        anchor=GallerySelectionAnchor(
+            path=Path("/library/current.jpg"),
+            asset_id="current",
+            previous_row=12,
+            selection_version=3,
+        ),
+        collection_revision=8,
+        attempt=2,
+        delay_ms=500,
+    )
+    store.selection_anchor_retry_requested.emit(ticket)
+    assert adapter._selection_anchor_retry_timer.isActive()
+
+    adapter.rebind_asset_query_service(_BackfillService(), Path("/library"))
+
+    assert adapter._selection_anchor_retry_timer.isActive()
+    assert adapter._pending_selection_anchor_retry == ticket
+    adapter._selection_anchor_retry_timer.stop()
+
+
 def test_runtime_diagnostic_heartbeat_reports_privacy_safe_store_state(
     adapter,
     mock_store,
@@ -288,12 +319,35 @@ def test_cached_row_for_path_never_uses_synchronous_lookup(adapter, mock_store):
 def test_setting_current_asset_does_not_resolve_its_path(adapter, mock_store):
     path = Path("/library/photo.jpg")
 
-    adapter.set_current_asset(3, path)
+    visual_row = adapter.set_current_asset(3, path)
 
+    assert visual_row == 3
     assert adapter._current_row == 3
     assert adapter._current_path == path
     mock_store.cached_row_for_path.assert_not_called()
     mock_store.row_for_path.assert_not_called()
+    mock_store.pin_row.assert_not_called()
+
+
+def test_pending_selection_keeps_cached_visual_row_without_geometry_change(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    mock_store.count.return_value = 10
+    assert adapter.set_current_asset(4, path) == 4
+    changed: list[tuple] = []
+    adapter.dataChanged.connect(lambda *args: changed.append(args))
+    mock_store.cached_row_for_path.return_value = 4
+
+    visual_row = adapter.set_current_asset(None, path)
+
+    assert visual_row == 4
+    assert adapter._current_row == 4
+    assert adapter.data(adapter.index(4, 0), Roles.IS_CURRENT) is True
+    assert changed == []
+    mock_store.row_for_path.assert_not_called()
+    mock_store.pin_row.assert_not_called()
 
 
 def test_scan_reset_reanchors_visual_current_asset_by_cached_path(

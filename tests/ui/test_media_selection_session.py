@@ -109,7 +109,7 @@ class _AnchoredCollection(_Collection):
         self,
         paths: list[Path],
         *,
-        status: str,
+        status: str | None,
         cached_rows: set[int],
     ) -> None:
         self._paths = list(paths)
@@ -301,6 +301,26 @@ def test_confirmed_missing_anchor_falls_back_near_previous_row() -> None:
         cached_rows={0, 1},
     )
 
+    assert session.current_row() == 1
+    assert session.current_source() == replacement
+    assert collection.sync_lookup_calls == 0
+
+
+def test_anchor_without_resolution_owner_falls_back_instead_of_stalling() -> None:
+    current = Path("/fake/current.jpg")
+    replacement = Path("/fake/replacement.jpg")
+    collection = _AnchoredCollection([Path("/fake/a.jpg"), current])
+    session = MediaSelectionSession()
+    session.bind_collection(collection)
+    session.set_current_row(1)
+
+    collection.publish(
+        [Path("/fake/a.jpg"), replacement],
+        status=None,
+        cached_rows={0, 1},
+    )
+
+    assert session.selection_state() is MediaSelectionState.RESOLVED
     assert session.current_row() == 1
     assert session.current_source() == replacement
     assert collection.sync_lookup_calls == 0

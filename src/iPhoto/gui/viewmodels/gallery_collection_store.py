@@ -203,8 +203,21 @@ class GalleryCollectionStore:
         asset_query_service: GalleryAssetQuerySurface | None,
         library_root: Optional[Path],
     ) -> None:
-        self.set_asset_query_service(asset_query_service)
-        self.set_library_root(library_root)
+        service_changed = self._asset_query_service is not asset_query_service
+        library_changed = not self._library_roots_match(
+            self._library_root,
+            library_root,
+        )
+        if not service_changed and not library_changed:
+            return
+
+        self._asset_query_service = asset_query_service
+        self._library_root = library_root
+        self._reset_window_state(
+            clear_pending=library_changed,
+            preserve_selection_anchor=not library_changed,
+        )
+        self.data_changed.emit()
 
     @property
     def asset_query_service(self) -> GalleryAssetQuerySurface | None:
@@ -253,19 +266,30 @@ class GalleryCollectionStore:
             self._load_direct_assets(
                 list(self._selection_direct_assets),
                 self._selection_library_root or self._library_root,
+                preserve_selection_anchor=True,
             )
             return
         if self._selection_query is not None:
-            self._load_query(self._selection_query)
+            self._load_query(
+                self._selection_query,
+                preserve_selection_anchor=True,
+            )
 
-    def _load_query(self, query: AssetQuery) -> None:
+    def _load_query(
+        self,
+        query: AssetQuery,
+        *,
+        preserve_selection_anchor: bool = False,
+    ) -> None:
         old_total = self._total_count
         self._selection_query = self._clone_query(query)
         self._selection_direct_assets = None
         self._selection_library_root = self._library_root
         self._current_query = self._clone_query(query)
         self._direct_mode = False
-        self._reset_window_state()
+        self._reset_window_state(
+            preserve_selection_anchor=preserve_selection_anchor,
+        )
         if self._window_request_handler is None:
             self._load_initial_window()
         else:
@@ -277,7 +301,13 @@ class GalleryCollectionStore:
             )
         self._emit_refresh(old_total)
 
-    def _load_direct_assets(self, assets: list, library_root: Path) -> None:
+    def _load_direct_assets(
+        self,
+        assets: list,
+        library_root: Path,
+        *,
+        preserve_selection_anchor: bool = False,
+    ) -> None:
         old_total = self._total_count
         stored_assets = list(assets)
         self._selection_query = None
@@ -286,7 +316,9 @@ class GalleryCollectionStore:
         self._current_query = None
         self._library_root = library_root
         self._direct_mode = True
-        self._reset_window_state()
+        self._reset_window_state(
+            preserve_selection_anchor=preserve_selection_anchor,
+        )
 
         next_index = 0
         for asset in stored_assets:
@@ -761,8 +793,12 @@ class GalleryCollectionStore:
         ):
             return False
         anchor_result = result.selection_anchor_result
+        anchor_request_is_current = (
+            result.requested_revision == self._collection_revision
+            or result.collection_revision >= self._collection_revision
+        )
         anchor_is_current = (
-            result.collection_revision >= self._collection_revision
+            anchor_request_is_current
             and self._anchor_result_matches_current(anchor_result)
             and result.generation >= self._selection_anchor_latest_result_generation
         )
@@ -1936,7 +1972,8 @@ class GalleryCollectionStore:
     ) -> Optional[AssetDTO]:
         return _scan_row_to_dto_fn(view_root, view_rel, row)
 
-    def _normalize_abs_key(self, path: Path) -> str:
+    @staticmethod
+    def _normalize_abs_key(path: Path) -> str:
         return os.path.normcase(os.path.abspath(os.fspath(path)))
 
     @staticmethod
@@ -2159,7 +2196,15 @@ class GalleryCollectionStore:
     def _iter_cached_rows(self) -> List[tuple[int, AssetDTO]]:
         return sorted(self._row_cache.items(), key=lambda item: item[0])
 
-    def _reset_window_state(self, *, clear_pending: bool = False) -> None:
+    def _reset_window_state(
+        self,
+        *,
+        clear_pending: bool = False,
+        preserve_selection_anchor: bool = False,
+    ) -> None:
+        preserved_anchor = (
+            self._selection_anchor if preserve_selection_anchor else None
+        )
         self._cancel_selection_anchor_retry()
         self._selection_version += 1
         self._selection_anchor_latest_result_generation = 0
@@ -2169,8 +2214,19 @@ class GalleryCollectionStore:
         self._visible_range = None
         self._warm_range = None
         self._pinned_row = None
-        self._selection_anchor = None
-        self._selection_anchor_status = None
+        self._selection_anchor = (
+            GallerySelectionAnchor(
+                path=preserved_anchor.path,
+                asset_id=preserved_anchor.asset_id,
+                previous_row=preserved_anchor.previous_row,
+                selection_version=self._selection_version,
+            )
+            if preserved_anchor is not None
+            else None
+        )
+        self._selection_anchor_status = (
+            "pending" if self._selection_anchor is not None else None
+        )
         self._path_cache.clear()
         if clear_pending:
             self._pending_moves.clear()
@@ -2185,3 +2241,21 @@ class GalleryCollectionStore:
         self._demand_generation = 0
         self._collection_revision += 1
         self._request_generation += 1
+        if self._selection_anchor is not None:
+            self.selection_anchor_changed.emit(
+                "pending",
+                self._selection_anchor,
+                None,
+            )
+
+    @classmethod
+    def _library_roots_match(
+        cls,
+        first: Path | None,
+        second: Path | None,
+    ) -> bool:
+        if first is None or second is None:
+            return first is second
+        return cls._normalize_abs_key(Path(first)) == cls._normalize_abs_key(
+            Path(second)
+        )

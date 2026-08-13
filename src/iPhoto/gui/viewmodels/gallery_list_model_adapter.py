@@ -621,8 +621,6 @@ class GalleryListModelAdapter(QAbstractListModel):
         asset_query_service,
         library_root: Optional[Path],
     ) -> None:
-        self._selection_anchor_retry_timer.stop()
-        self._pending_selection_anchor_retry = None
         self._last_snapshot = None
         self._last_selection_signature = None
         self._last_window_identity_signature = None
@@ -753,20 +751,35 @@ class GalleryListModelAdapter(QAbstractListModel):
 
         self._set_current_asset(row, path=self._current_path)
 
-    def set_current_asset(self, row: int, path: Path) -> None:
-        """Set the current asset while retaining its path-stable visual identity."""
+    def set_current_asset(
+        self,
+        authoritative_row: int | None,
+        path: Path,
+    ) -> int | None:
+        """Project semantic selection onto a cached Filmstrip visual row."""
 
-        self._set_current_asset(row, path=Path(path))
+        return self._set_current_asset(authoritative_row, path=Path(path))
 
-    def _set_current_asset(self, row: int, *, path: Path | None) -> None:
+    def _set_current_asset(
+        self,
+        authoritative_row: int | None,
+        *,
+        path: Path | None,
+    ) -> int | None:
+        visual_row = (
+            int(authoritative_row)
+            if authoritative_row is not None and int(authoritative_row) >= 0
+            else None
+        )
+        if visual_row is None and path is not None:
+            visual_row = self._store.cached_row_for_path(path)
+        row = visual_row if visual_row is not None and visual_row >= 0 else -1
         path_changed = path != self._current_path
         self._current_path = path
         if self._current_row == row and not path_changed:
-            return
+            return visual_row
         old_row = self._current_row
         self._current_row = row
-        if row >= 0:
-            self.pin_row(row)
         if old_row >= 0:
             idx = self.index(old_row, 0)
             if idx.isValid():
@@ -783,6 +796,7 @@ class GalleryListModelAdapter(QAbstractListModel):
                     idx,
                     [Roles.IS_CURRENT, Roles.TILE_SNAPSHOT, Qt.ItemDataRole.SizeHintRole],
                 )
+        return visual_row
 
     def metadata_for_path(self, path: Path) -> Optional[Dict[str, Any]]:
         dto = self._store.find_dto_by_path(path)

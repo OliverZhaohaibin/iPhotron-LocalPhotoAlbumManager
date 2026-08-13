@@ -238,6 +238,56 @@ class DetailViewModel(BaseViewModel):
         if row >= 0:
             self.show_row(row)
 
+    def recover_current_presentation(self) -> bool:
+        """Restart the stable visible asset without requiring an authoritative row.
+
+        Fullscreen may need to recover a terminal still render while Gallery is
+        resolving (or has exhausted) the asset's new row. Re-versioning the
+        immutable presentation starts a fresh render transaction without adding
+        database or filesystem work to the GUI path.
+        """
+
+        snapshot = self._media_selection_snapshot()
+        presentation = self.presentation.value
+        if (
+            not isinstance(presentation, DetailPresentation)
+            or presentation.is_video
+            or snapshot.state is MediaSelectionState.NONE
+            or snapshot.path != presentation.path
+            or (
+                snapshot.asset_id is not None
+                and snapshot.asset_id != str(presentation.asset_id)
+            )
+        ):
+            return False
+        if snapshot.is_resolved:
+            self.show_current()
+            return True
+        if snapshot.state not in {
+            MediaSelectionState.ANCHOR_RESOLVING,
+            MediaSelectionState.ANCHOR_UNRESOLVED,
+            MediaSelectionState.FALLBACK_PENDING,
+        }:
+            return False
+
+        self._request_generation = max(
+            int(self._request_generation),
+            int(presentation.request_generation),
+        ) + 1
+        recovered = replace(
+            presentation,
+            row=-1,
+            request_generation=self._request_generation,
+        )
+        emit_detail_event(
+            "stable_presentation_recovery_requested",
+            generation=self._request_generation,
+            asset_id=presentation.asset_id,
+            selection_state=snapshot.state.value,
+        )
+        self._publish_presentation_if_changed(recovered)
+        return True
+
     def next(self) -> None:
         row = self._media_session.next_row()
         if row is not None:
@@ -436,6 +486,7 @@ class DetailViewModel(BaseViewModel):
 
         if snapshot.state in {
             MediaSelectionState.ANCHOR_RESOLVING,
+            MediaSelectionState.ANCHOR_UNRESOLVED,
             MediaSelectionState.FALLBACK_PENDING,
         }:
             self._publish_pending_presentation(snapshot)
@@ -486,7 +537,10 @@ class DetailViewModel(BaseViewModel):
         ):
             return
         capabilities = {"can_toggle_favorite": False}
-        if snapshot.state is MediaSelectionState.FALLBACK_PENDING:
+        if snapshot.state in {
+            MediaSelectionState.ANCHOR_UNRESOLVED,
+            MediaSelectionState.FALLBACK_PENDING,
+        }:
             capabilities.update(
                 can_edit=False,
                 can_rotate=False,
@@ -581,6 +635,7 @@ class DetailViewModel(BaseViewModel):
         snapshot = self._media_selection_snapshot()
         if snapshot.state in {
             MediaSelectionState.NONE,
+            MediaSelectionState.ANCHOR_UNRESOLVED,
             MediaSelectionState.FALLBACK_PENDING,
         }:
             return None

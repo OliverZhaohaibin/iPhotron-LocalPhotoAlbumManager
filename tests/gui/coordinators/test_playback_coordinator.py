@@ -276,6 +276,35 @@ def test_fullscreen_keeps_stable_pending_anchor_instead_of_opening_row_zero() ->
     coordinator.play_asset.assert_not_called()
 
 
+def test_fullscreen_restarts_terminal_pending_still_from_stable_identity() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = replace(
+        _make_presentation(path="/fake/photo.jpg", is_video=False),
+        row=-1,
+    )
+    transaction = PlaybackCoordinator._transaction_for_presentation(presentation)
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_failed(transaction.generation, "abandoned")
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=5))
+    coordinator.current_row = Mock(return_value=-1)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = presentation
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(has_current_render_session=Mock(return_value=False))
+    coordinator._detail_render_coordinator = lifecycle
+    coordinator._detail_vm = Mock()
+    coordinator._detail_vm.selection_state.value = MediaSelectionState.ANCHOR_RESOLVING
+    coordinator._detail_vm.recover_current_presentation.return_value = True
+    coordinator.play_asset = Mock()
+
+    assert PlaybackCoordinator.prepare_fullscreen_asset(coordinator) is True
+
+    coordinator._detail_vm.recover_current_presentation.assert_called_once_with()
+    coordinator._detail_vm.show_current.assert_not_called()
+    coordinator.play_asset.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("delta", "method_name"),
     [(1, "next"), (-1, "previous")],

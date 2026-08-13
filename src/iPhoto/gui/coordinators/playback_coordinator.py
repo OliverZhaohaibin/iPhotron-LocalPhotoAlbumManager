@@ -740,6 +740,15 @@ class PlaybackCoordinator(QObject):
             asset_id=presentation.asset_id,
             state=snapshot.state.value if snapshot is not None else "missing",
         )
+        selection_state_property = getattr(self._detail_vm, "selection_state", None)
+        selection_state = getattr(selection_state_property, "value", None)
+        if selection_state in {
+            MediaSelectionState.ANCHOR_RESOLVING,
+            MediaSelectionState.ANCHOR_UNRESOLVED,
+            MediaSelectionState.FALLBACK_PENDING,
+        }:
+            recover = getattr(self._detail_vm, "recover_current_presentation", None)
+            return bool(recover()) if callable(recover) else False
         self._detail_vm.show_current()
         return True
 
@@ -2372,6 +2381,7 @@ class PlaybackCoordinator(QObject):
         selection_state = getattr(state_property, "value", None)
         if selection_state in {
             MediaSelectionState.ANCHOR_RESOLVING,
+            MediaSelectionState.ANCHOR_UNRESOLVED,
             MediaSelectionState.FALLBACK_PENDING,
         }:
             if delta > 0:

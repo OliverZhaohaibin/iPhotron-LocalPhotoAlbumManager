@@ -29,6 +29,7 @@ class MediaSelectionState(str, Enum):
     NONE = "none"
     RESOLVED = "resolved"
     ANCHOR_RESOLVING = "anchor_resolving"
+    ANCHOR_UNRESOLVED = "anchor_unresolved"
     FALLBACK_PENDING = "fallback_pending"
 
 
@@ -38,6 +39,7 @@ class MediaSelectionChangeReason(str, Enum):
     USER_SELECTED = "user_selected"
     ANCHOR_PENDING = "anchor_pending"
     ANCHOR_RESOLVED = "anchor_resolved"
+    ANCHOR_UNRESOLVED = "anchor_unresolved"
     FALLBACK_PENDING = "fallback_pending"
     FALLBACK_RESOLVED = "fallback_resolved"
     CLEARED = "cleared"
@@ -165,6 +167,8 @@ class MediaSelectionSession:
         }:
             self._pending_navigation_delta += 1
             return None
+        if self._snapshot.state is MediaSelectionState.ANCHOR_UNRESOLVED:
+            return self._relative_row_from_last_resolved(1)
         current_row = self.current_row()
         if current_row < 0:
             return 0 if self._collection.count() > 0 else None
@@ -182,6 +186,8 @@ class MediaSelectionSession:
         }:
             self._pending_navigation_delta -= 1
             return None
+        if self._snapshot.state is MediaSelectionState.ANCHOR_UNRESOLVED:
+            return self._relative_row_from_last_resolved(-1)
         current_row = self.current_row()
         if current_row <= 0:
             return None
@@ -208,6 +214,17 @@ class MediaSelectionSession:
                     asset_id=stable_asset_id,
                     reason=MediaSelectionChangeReason.ANCHOR_PENDING,
                 )
+                return
+            if anchor_status == "unresolved":
+                self._pending_fallback_row = None
+                self._publish_snapshot(
+                    state=MediaSelectionState.ANCHOR_UNRESOLVED,
+                    row=None,
+                    path=stable_path,
+                    asset_id=stable_asset_id,
+                    reason=MediaSelectionChangeReason.ANCHOR_UNRESOLVED,
+                )
+                self._dispatch_pending_navigation(self._last_resolved_row)
                 return
 
             cached_row_for_path = getattr(self._collection, "cached_row_for_path", None)
@@ -324,7 +341,25 @@ class MediaSelectionSession:
             return
         delta = self._pending_navigation_delta
         self._pending_navigation_delta = 0
-        target_row = resolved_row + delta
-        if target_row < 0 or target_row >= self._collection.count():
+        count = self._collection.count()
+        if count <= 0:
+            return
+        base_row = min(max(resolved_row, 0), count - 1)
+        target_row = min(max(base_row + delta, 0), count - 1)
+        if target_row == base_row:
             return
         self.navigationRequested.emit(target_row)
+
+    def _relative_row_from_last_resolved(self, delta: int) -> int | None:
+        """Navigate from the last authoritative position after anchor exhaustion."""
+
+        if self._collection is None or delta == 0:
+            return None
+        count = self._collection.count()
+        if count <= 0:
+            return None
+        if self._last_resolved_row < 0:
+            return 0 if delta > 0 else None
+        base_row = min(max(self._last_resolved_row, 0), count - 1)
+        target_row = min(max(base_row + delta, 0), count - 1)
+        return target_row if target_row != base_row else None

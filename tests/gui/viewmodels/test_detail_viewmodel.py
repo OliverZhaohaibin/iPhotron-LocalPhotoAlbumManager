@@ -12,7 +12,7 @@ from iPhoto.gui.ui.media.media_selection_session import (
     MediaSelectionSnapshot,
     MediaSelectionState,
 )
-from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
+from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.gui.viewmodels.signal import Signal
 
 _UNSET = object()
@@ -363,6 +363,40 @@ def test_pending_selection_anchor_keeps_existing_detail_presentation() -> None:
     assert vm.selection_state.value is MediaSelectionState.RESOLVED
     assert vm.presentation.value.request_generation == original.request_generation
     assert vm.presentation.value.render_key == original.render_key
+
+
+def test_pending_still_can_restart_render_from_stable_identity() -> None:
+    store = _AnchoredLazyCollection()
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    vm = DetailViewModel(
+        collection_store=store,
+        media_session=session,
+        asset_state_service=Mock(),
+        adjustment_commit_port=None,
+        edit_service_getter=None,
+    )
+    changes: list[DetailPresentation] = []
+    vm.presentation_changed.connect(changes.append)
+    vm.show_row(0)
+    original = vm.presentation.value
+    assert original is not None
+
+    store.anchor_status = "retry"
+    store.data_changed.emit()
+    pending = vm.presentation.value
+    assert pending is not None
+    assert pending.row == -1
+
+    assert vm.recover_current_presentation() is True
+
+    recovered = vm.presentation.value
+    assert recovered.path == original.path
+    assert recovered.asset_id == original.asset_id
+    assert recovered.row == -1
+    assert recovered.render_key == original.render_key
+    assert recovered.request_generation == original.request_generation + 1
+    assert changes[-1] == recovered
 
 
 def test_retry_favorite_never_targets_the_asset_at_the_stale_row() -> None:

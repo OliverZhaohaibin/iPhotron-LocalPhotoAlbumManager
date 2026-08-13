@@ -1481,6 +1481,9 @@ def test_anchor_retry_is_bounded_and_needs_no_new_scan_revision(
     store._collection_revision = 20
     store._row_cache[10] = current
     store.pin_path(current.abs_path, asset_id=str(current.id), previous_row=10)
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    assert session.set_current_row(10) == current.abs_path
     requests.clear()
 
     tickets: list[GallerySelectionAnchorRetryTicket | None] = []
@@ -1542,10 +1545,84 @@ def test_anchor_retry_is_bounded_and_needs_no_new_scan_revision(
     assert [ticket.attempt for ticket in tickets if ticket is not None] == [1, 2, 3]
     assert store._selection_anchor_retry_ticket is None
     assert store._selection_anchor_retry_inflight is None
+    assert store.selection_anchor_status(current.abs_path) == "resolved"
+    assert session.selection_state() is MediaSelectionState.RESOLVED
+    assert session.current_source() == current.abs_path
     exhausted = [item for item in events if item[0] == "selection_anchor_retry_exhausted"]
     assert len(exhausted) == 1
     assert exhausted[0][1]["collection_revision"] == 20
+    assert exhausted[0][1]["resolved_from_cache"] is True
     assert "path" not in exhausted[0][1]
+
+
+def test_anchor_retry_exhaustion_publishes_terminal_unresolved_state(
+    monkeypatch,
+) -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    assert current is not None
+    store._total_count = 30
+    store._collection_revision = 20
+    store._row_cache[10] = current
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    assert session.set_current_row(10) == current.abs_path
+    store._row_cache.clear()
+    requests.clear()
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "iPhoto.gui.viewmodels.gallery_collection_store.emit_detail_event",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    store._request_async_chunk(0, 0, demand_generation=0, priority=0)
+    request = requests[-1]
+    for attempt in range(4):
+        assert request.selection_anchor is not None
+        assert store.apply_window_result(
+            GalleryWindowResult(
+                generation=request.generation,
+                first=request.view_first,
+                last=request.view_first,
+                rows={},
+                total_count=30,
+                collection_revision=20,
+                requested_revision=request.collection_revision,
+                selection_anchor_result=GallerySelectionAnchorResult(
+                    anchor=request.selection_anchor,
+                    status="retry",
+                ),
+                purpose=request.purpose,
+                selection_anchor_retry_attempt=(
+                    request.selection_anchor_retry_attempt
+                ),
+            )
+        )
+        if attempt == 3:
+            break
+        ticket = store._selection_anchor_retry_ticket
+        assert isinstance(ticket, GallerySelectionAnchorRetryTicket)
+        assert store.retry_selection_anchor(ticket)
+        request = requests[-1]
+
+    assert store.selection_anchor_status(current.abs_path) == "unresolved"
+    assert store._selection_anchor_retry_ticket is None
+    assert store._selection_anchor_retry_inflight is None
+    assert session.selection_state() is MediaSelectionState.ANCHOR_UNRESOLVED
+    assert session.current_source() == current.abs_path
+    assert session.next_row() == 11
+    exhausted = [item for item in events if item[0] == "selection_anchor_retry_exhausted"]
+    assert len(exhausted) == 1
+    assert exhausted[0][1]["resolved_from_cache"] is False
 
 
 def test_new_selection_cancels_stale_anchor_retry_ticket() -> None:

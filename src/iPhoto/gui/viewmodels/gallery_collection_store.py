@@ -995,13 +995,29 @@ class GalleryCollectionStore:
         if attempt > len(self.ANCHOR_RETRY_DELAYS_MS):
             self._selection_anchor_retry_ticket = None
             self._selection_anchor_retry_inflight = None
+            resolved_from_cache = self._resolve_selection_anchor_from_cache(
+                missing_if_absent=False,
+            )
+            if not resolved_from_cache:
+                self._pinned_row = None
+                self._selection_anchor_status = "unresolved"
+                self.selection_anchor_changed.emit(
+                    "unresolved",
+                    anchor,
+                    None,
+                )
             emit_detail_event(
                 "selection_anchor_retry_exhausted",
                 generation=self._request_generation,
                 asset_id=anchor.asset_id,
                 collection_revision=self._collection_revision,
                 attempt=len(self.ANCHOR_RETRY_DELAYS_MS),
+                resolved_from_cache=resolved_from_cache,
             )
+            # The Session consumes the Store's coherent in-memory state from
+            # data_changed. Exhaustion happens after apply_window_result has
+            # already emitted its refresh, so publish this terminal transition.
+            self.data_changed.emit()
             return
 
         active_ticket = (
@@ -1066,29 +1082,35 @@ class GalleryCollectionStore:
         if had_pending_ticket:
             self.selection_anchor_retry_requested.emit(None)
 
-    def _resolve_selection_anchor_from_cache(self, *, missing_if_absent: bool) -> None:
+    def _resolve_selection_anchor_from_cache(self, *, missing_if_absent: bool) -> bool:
         anchor = self._selection_anchor
         if anchor is None:
-            return
+            return False
         row = self.cached_row_for_path(anchor.path)
-        if row is None:
+        dto = self._row_cache.get(row) if row is not None else None
+        identity_mismatch = bool(
+            dto is not None
+            and anchor.asset_id
+            and str(dto.id) != anchor.asset_id
+        )
+        if row is None or dto is None or identity_mismatch:
             if missing_if_absent:
                 self._pinned_row = None
                 self._cancel_selection_anchor_retry()
                 self._selection_anchor_status = "missing"
                 self.selection_anchor_changed.emit("missing", anchor, None)
-            return
-        dto = self._row_cache.get(row)
+            return False
         self._pinned_row = row
         self._cancel_selection_anchor_retry()
         self._selection_anchor = GallerySelectionAnchor(
             path=anchor.path,
-            asset_id=anchor.asset_id or (str(dto.id) if dto is not None else ""),
+            asset_id=anchor.asset_id or str(dto.id),
             previous_row=row,
             selection_version=anchor.selection_version,
         )
         self._selection_anchor_status = "resolved"
         self.selection_anchor_changed.emit("resolved", self._selection_anchor, row)
+        return True
 
     def discard_window_requests(self, generations: Iterable[int]) -> None:
         """Forget queued requests canceled before their worker started."""

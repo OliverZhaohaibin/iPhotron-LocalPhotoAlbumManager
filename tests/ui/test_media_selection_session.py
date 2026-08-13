@@ -135,7 +135,9 @@ def test_session_publishes_one_coherent_snapshot_per_transition() -> None:
     collection = _AnchoredCollection([Path("/fake/a.jpg"), current])
     session = MediaSelectionSession()
     changes: list[tuple[MediaSelectionSnapshot, MediaSelectionChangeReason]] = []
-    session.selectionChanged.connect(lambda snapshot, reason: changes.append((snapshot, reason)))
+    session.selectionChanged.connect(
+        lambda snapshot, reason: changes.append((snapshot, reason))
+    )
     session.bind_collection(collection)
     changes.clear()
 
@@ -285,6 +287,60 @@ def test_retry_previous_preserves_direction_until_anchor_resolves() -> None:
 
     assert session.current_row() == 2
     assert requested == [1]
+
+
+def test_pending_navigation_clamps_to_last_row_after_anchor_resolves() -> None:
+    paths = [Path(f"/fake/{row}.jpg") for row in range(1000)]
+    current = paths[998]
+    collection = _AnchoredCollection(paths)
+    session = MediaSelectionSession()
+    requested: list[int] = []
+    session.navigationRequested.connect(requested.append)
+    session.bind_collection(collection)
+    session.set_current_row(998)
+
+    collection.publish(paths, status="retry", cached_rows=set(range(1000)))
+    assert session.next_row() is None
+    assert session.next_row() is None
+
+    collection.publish(paths, status="resolved", cached_rows=set(range(1000)))
+
+    assert session.current_source() == current
+    assert requested == [999]
+
+
+def test_retry_exhaustion_is_terminal_and_navigation_remains_available() -> None:
+    current = Path("/fake/current.jpg")
+    collection = _AnchoredCollection(
+        [Path("/fake/before.jpg"), current, Path("/fake/after.jpg")]
+    )
+    session = MediaSelectionSession()
+    changes: list[tuple[MediaSelectionSnapshot, MediaSelectionChangeReason]] = []
+    requested: list[int] = []
+    session.selectionChanged.connect(lambda snapshot, reason: changes.append((snapshot, reason)))
+    session.navigationRequested.connect(requested.append)
+    session.bind_collection(collection)
+    session.set_current_row(1)
+
+    collection.publish(
+        collection._paths,
+        status="retry",
+        cached_rows=set(),
+    )
+    assert session.next_row() is None
+    collection.publish(
+        collection._paths,
+        status="unresolved",
+        cached_rows=set(),
+    )
+
+    snapshot, reason = changes[-1]
+    assert reason is MediaSelectionChangeReason.ANCHOR_UNRESOLVED
+    assert snapshot.state is MediaSelectionState.ANCHOR_UNRESOLVED
+    assert snapshot.row is None
+    assert snapshot.path == current
+    assert requested == [2]
+    assert session.previous_row() == 0
 
 
 def test_confirmed_missing_anchor_falls_back_near_previous_row() -> None:

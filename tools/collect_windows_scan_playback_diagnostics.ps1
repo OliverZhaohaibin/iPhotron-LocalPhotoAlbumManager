@@ -350,6 +350,19 @@ $diagnosticEnvironment = [ordered]@{
     PYTHONFAULTHANDLER = "1"
     QT_LOGGING_RULES = "qt.qpa.gl=true;qt.rhi.*=true;qt.multimedia.*=true"
 }
+if ($launch.Mode -eq "source") {
+    $sourceRoot = Join-Path $repositoryRoot "src"
+    $inheritedPythonPath = [Environment]::GetEnvironmentVariable(
+        "PYTHONPATH",
+        "Process"
+    )
+    $diagnosticEnvironment["PYTHONPATH"] = if ($inheritedPythonPath) {
+        "$sourceRoot$([IO.Path]::PathSeparator)$inheritedPythonPath"
+    }
+    else {
+        $sourceRoot
+    }
+}
 $previousEnvironment = @{}
 foreach ($key in $diagnosticEnvironment.Keys) {
     $previousEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, "Process")

@@ -16,6 +16,7 @@ def test_windows_collector_enables_required_runtime_probes() -> None:
         "IPHOTO_PERF_PRIVACY_SAFE",
         "IPHOTO_RUNTIME_DIAG",
         "IPHOTO_RUNTIME_DIAG_STACK_PATH",
+        "PYTHONPATH",
         "QT_LOGGING_RULES",
     ):
         assert variable in script

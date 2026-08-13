@@ -1,197 +1,206 @@
 # Building a Debian Package (.deb) for Linux
 
-This document describes how to build a Debian package (`.deb`) for iPhotron on Linux.
+This document describes how to wrap the current Nuitka standalone Linux build
+of iPhotron in a Debian package. Do not hard-code the application version in
+this guide: the package version must come from `pyproject.toml`.
 
 ## Overview
 
-A `.deb` package allows easy installation and removal on Debian-based
-distributions (Ubuntu, Mint, etc.) using standard package management tools
-such as `apt` and `dpkg`.
+The `.deb` stage is a packaging wrapper around the standalone bundle produced by
+`scripts/build_nuitka_fast.sh`. It must preserve the bundle contents rather than
+reconstructing Python dependencies independently.
 
-For iPhotron, Linux packaging should preserve the standalone application bundle
-and the offline maps extension together. The Location view's native Linux maps
-runtime depends on the helper binary plus the shared libraries under
-`maps/tiles/extension/bin/`.
+The current Linux standalone build is generated from `src/entrypoint.py` and is
+written below `dist/entrypoint.dist/`. The executable is normally one of:
 
-Builds that ship People/Pets recognition must also preserve the selected AI
-runtimes from the standalone bundle. People needs `insightface` and
-`onnxruntime`; Pets needs `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Offline builds also retain the shared `extension/models` cache.
-These are added at the Nuitka stage described in
-[`BUILD_EXE.md`](BUILD_EXE.md); the `.deb` stage must not strip them from
-`/opt/iPhotron/`.
+```text
+dist/entrypoint.dist/entrypoint.bin
+dist/entrypoint.dist/entrypoint
+```
+
+The build script also writes `dist/build-manifest.json`.
+
+Linux packages that claim offline Maps or People/Pets support must preserve the
+corresponding staged runtime data from the standalone bundle, including
+`maps/tiles/extension/` and `extension/models/`.
 
 ## Prerequisites
 
-- A Debian-based Linux distribution (Ubuntu, Debian, Mint, …)
-- `dpkg-deb` (usually pre-installed on Debian/Ubuntu systems)
-- A working standalone build of iPhotron (see [`BUILD_EXE.md`](BUILD_EXE.md))
+- Debian/Ubuntu/Mint or another environment with `dpkg-deb`
+- the project development/build dependencies required by
+  `scripts/build_nuitka_fast.sh`
+- a successful standalone build
 
-## Directory Structure
+Build the standalone application first:
 
-Create a staging directory that keeps the standalone bundle intact and exposes
-an `iPhotron` launcher on `PATH`:
-
+```bash
+bash scripts/build_nuitka_fast.sh
 ```
+
+## Resolve Version And Executable
+
+Read the release version from `pyproject.toml` instead of duplicating it:
+
+```bash
+VERSION="$(python - <<'PY'
+import tomllib
+from pathlib import Path
+print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])
+PY
+)"
+
+APP_DIST="dist/entrypoint.dist"
+if [[ -x "$APP_DIST/entrypoint.bin" ]]; then
+  APP_EXECUTABLE="entrypoint.bin"
+elif [[ -x "$APP_DIST/entrypoint" ]]; then
+  APP_EXECUTABLE="entrypoint"
+else
+  echo "Nuitka entrypoint not found; run scripts/build_nuitka_fast.sh first" >&2
+  exit 2
+fi
+
+PKG_ROOT="iPhotron_${VERSION}_amd64"
+APP_ROOT="$PKG_ROOT/opt/iPhotron"
+BIN_ROOT="$PKG_ROOT/usr/local/bin"
+```
+
+For another architecture, change the Debian architecture value and package
+suffix together; do not publish an `amd64` package built for another CPU.
+
+## Staging Layout
+
+```text
 iPhotron_VERSION_amd64/
 ├── DEBIAN/
 │   └── control
 ├── opt/
-│   └── iPhotron/                 ← standalone app bundle copied here
-│       ├── iPhotron             ← main executable (name may vary by build)
-│       └── maps/
-│           └── tiles/
-│               └── extension/
-│                   ├── World_basemap_2.obf
-│                   ├── misc/
-│                   ├── poi/
-│                   ├── rendering_styles/
-│                   ├── routing/
-│                   ├── search/
-│                   │   └── geonames.sqlite3
-│                   └── bin/
+│   └── iPhotron/
+│       └── ... complete contents of dist/entrypoint.dist/ ...
 └── usr/
     └── local/
         └── bin/
-            └── iPhotron          ← launcher script
+            └── iPhotron
 ```
 
-## The `control` File
+Stage the standalone bundle without stripping optional feature assets:
 
-The `DEBIAN/control` file contains the package metadata. Create it with content
-like the following:
-
+```bash
+mkdir -p "$PKG_ROOT/DEBIAN" "$APP_ROOT" "$BIN_ROOT"
+cp -a "$APP_DIST/." "$APP_ROOT/"
+printf '#!/bin/sh\nexec /opt/iPhotron/%s "$@"\n' "$APP_EXECUTABLE" > "$BIN_ROOT/iPhotron"
+chmod 755 "$BIN_ROOT/iPhotron" "$PKG_ROOT/DEBIAN"
 ```
-Package: iPhotron
-Version: 5.00
+
+## Debian Control Metadata
+
+Create `"$PKG_ROOT/DEBIAN/control"` with the resolved version:
+
+```bash
+cat > "$PKG_ROOT/DEBIAN/control" <<EOF
+Package: iphotron
+Version: ${VERSION}
 Section: graphics
 Priority: optional
 Architecture: amd64
 Maintainer: OliverZhao
 Description: Folder-native local photo album manager
- iPhotron is a folder-native photo manager inspired by macOS Photos.
- It organizes media using lightweight JSON manifests and provides rich
- album functionality while keeping destructive edits out of original media.
+ iPhotron is a local-first photo manager with folder-native albums,
+ non-destructive editing, optional People/Pets recognition, and offline maps.
+EOF
+chmod 644 "$PKG_ROOT/DEBIAN/control"
 ```
 
-> **Fields explained**
->
-> | Field | Value | Notes |
-> |-------|-------|-------|
-> | `Package` | `iPhotron` | Binary package name |
-> | `Version` | `5.00` | Upstream version; update to match your release |
-> | `Architecture` | `amd64` | Target CPU architecture (x86-64) |
-> | `Maintainer` | `OliverZhao` | Name (and optionally email) of the package maintainer |
-> | `Description` | short + long | First line is the synopsis; indented lines form the long description |
+Keep Debian's package identifier stable (`iphotron`) even if the product name is
+rendered as `iPhotron` in UI/documentation.
 
-## Build Steps
+## Validate Optional Runtime Payloads
 
-1. **Prepare the staging tree** — copy your compiled iPhotron binary into the correct location inside the staging directory:
+The Nuitka build already stages application data. The `.deb` step must not
+remove it.
 
-   ```bash
-   PKG_ROOT=iPhotron_5.00_amd64
-   APP_ROOT="$PKG_ROOT/opt/iPhotron"
-   BIN_ROOT="$PKG_ROOT/usr/local/bin"
-   APP_DIST=dist/YOUR_STANDALONE_DIR
-   APP_EXECUTABLE=YOUR_EXECUTABLE_NAME
+For Maps-enabled builds:
 
-   mkdir -p "$PKG_ROOT/DEBIAN" "$APP_ROOT" "$BIN_ROOT"
-   cp -a "$APP_DIST/." "$APP_ROOT/"
-   printf '#!/bin/sh\nexec /opt/iPhotron/%s "$@"\n' "$APP_EXECUTABLE" > "$BIN_ROOT/iPhotron"
-   chmod 755 "$BIN_ROOT/iPhotron"
-   ```
+```bash
+find "$APP_ROOT/maps/tiles/extension" -maxdepth 2 -type f | sort
+```
 
-   Replace `YOUR_STANDALONE_DIR` and `YOUR_EXECUTABLE_NAME` with the actual
-   Nuitka output names produced by your Linux build.
+Typical Linux map payloads include:
 
-   Before continuing, verify that the maps extension is still present inside
-   the staged app bundle:
+- `maps/tiles/extension/World_basemap_2.obf`
+- `maps/tiles/extension/bin/osmand_render_helper`
+- `maps/tiles/extension/bin/osmand_native_widget.so`
+- `maps/tiles/extension/bin/libOsmAndCore_shared.so`
+- `maps/tiles/extension/bin/libOsmAndCoreTools_shared.so`
+- `maps/tiles/extension/search/geonames.sqlite3`
 
-   ```bash
-   find "$APP_ROOT/maps/tiles/extension" -maxdepth 2 -type f | sort
-   ```
+For offline-ready People/Pets builds:
 
-   At minimum, Linux native maps should retain:
+```bash
+find "$APP_ROOT" -path '*insightface*' -o -path '*onnxruntime*'
+find "$APP_ROOT/extension/models" -type f | sort
+find "$APP_ROOT" -path '*torch*' -o -path '*torchvision*' -o -path '*usearch*'
+```
 
-   - `maps/tiles/extension/World_basemap_2.obf`
-   - `maps/tiles/extension/bin/osmand_render_helper`
-   - `maps/tiles/extension/bin/osmand_native_widget.so`
-   - `maps/tiles/extension/bin/libOsmAndCore_shared.so`
-   - `maps/tiles/extension/bin/libOsmAndCoreTools_shared.so`
-   - `maps/tiles/extension/search/geonames.sqlite3`
+`src/extension/models/` is a build-staging input, not guaranteed fresh-clone
+content. A release that advertises offline recognition must populate and verify
+that staging area before running Nuitka.
 
-   If this release includes offline-ready People/Pets scanning, also verify the
-   recognition runtime payload from the Nuitka bundle:
+## Build And Inspect The Package
 
-   ```bash
-   find "$APP_ROOT" -path '*insightface*' -o -path '*onnxruntime*'
-   find "$APP_ROOT/extension/models" -name 'det_500m.onnx' -o -name 'w600k_mbf.onnx'
-   find "$APP_ROOT" -path '*torch*' -o -path '*torchvision*' -o -path '*usearch*'
-   find "$APP_ROOT/extension/models/pets" -name 'yolox_nano_coco.onnx' -o -name 'dinov2_vits14.pt'
-   ```
+```bash
+dpkg-deb --build "$PKG_ROOT"
+dpkg-deb --info "${PKG_ROOT}.deb"
+dpkg-deb --contents "${PKG_ROOT}.deb"
+```
 
-2. **Create the `control` file** — save the content from the section above to `"$PKG_ROOT/DEBIAN/control"` and ensure it is not world-writable:
+Useful payload checks:
 
-   ```bash
-   chmod 644 "$PKG_ROOT/DEBIAN/control"
-   ```
-
-3. **Build the package**:
-
-   ```bash
-   dpkg-deb --build "$PKG_ROOT"
-   ```
-
-   This produces `"${PKG_ROOT}.deb"` in the current directory.
-
-4. **Verify the package**:
-
-   ```bash
-   dpkg-deb --info "${PKG_ROOT}.deb"
-   dpkg-deb --contents "${PKG_ROOT}.deb"
-   dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'maps/tiles/extension'
-   # If this build ships offline-ready People/Pets scanning:
-   dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'extension/models'
-   ```
-
-   After installing on a clean test machine, open a small image library and
-   verify that the People & Pets page can create each enabled cluster type. For
-   a fuller smoke test, name an identity, set a cover, create a group, restart
-   iPhotron, and confirm those user decisions persist.
+```bash
+dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'maps/tiles/extension' || true
+dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'extension/models' || true
+```
 
 ## Installation
-
-Install the generated package with:
 
 ```bash
 sudo apt install ./"${PKG_ROOT}.deb"
 ```
 
-If you open a new shell before installing, replace `${PKG_ROOT}` with the real
-package directory name you used in Step 1.
-
-Or using `dpkg` directly (and then resolving any missing dependencies):
+Or:
 
 ```bash
 sudo dpkg -i "${PKG_ROOT}.deb"
-sudo apt-get install -f   # fix missing dependencies if any
+sudo apt-get install -f
 ```
 
 ## Removal
 
 ```bash
-sudo apt remove iPhotron
+sudo apt remove iphotron
 ```
+
+## Release Smoke Test
+
+Validate the package on a clean target machine, not only from the source tree:
+
+1. launch `iPhotron` from `PATH`;
+2. open an existing and a small fresh library;
+3. verify Gallery -> Detail still/video opening;
+4. verify Maps if the package advertises offline Maps support;
+5. open People & Pets and confirm enabled recognition runtimes activate on
+   feature use rather than during application startup;
+6. if offline recognition is advertised, confirm People/Pets can initialize
+   with downloads disabled;
+7. create durable recognition state (for example a name/cover), restart, and
+   verify that it persists.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| `dpkg-deb: error: control directory has bad permissions` | `DEBIAN/` directory not mode 755 | `chmod 755 "$PKG_ROOT/DEBIAN"` |
-| `dpkg: dependency problems` after install | Missing runtime libraries | Add `Depends:` line to `control` listing required packages |
-| Binary not found after install | Wrong install path in staging tree, or launcher points to the wrong standalone executable | Ensure the launcher under `usr/local/bin/` points to the executable copied into `/opt/iPhotron/` |
-| Location view falls back unexpectedly after install | `maps/tiles/extension/` was not included in the package | Re-stage the standalone bundle and verify the `.deb` contents include `World_basemap_2.obf`, resources, and Linux map binaries |
-| Native maps fail with GLX/XCB startup errors | The runtime was installed correctly, but the desktop session lacks XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
-| People scan is unavailable in the installed app | The standalone build was produced without the optional face runtime | Rebuild the standalone app with `insightface`, `onnxruntime`, and `src/extension/models` included before staging the `.deb` |
-| People scan starts but never creates clusters | The model cache or an InsightFace submodel/dependency is missing from `/opt/iPhotron/` | Verify `extension/models`, exclude unused `albumentations`/`pydantic` packages at the Nuitka stage, and keep InsightFace limited to detection and recognition |
-| Pets scan is unavailable in the installed app | The standalone build omitted `pets-ai` packages or `extension/models/pets` | Rebuild the standalone app with `onnxruntime`, `torch`, `torchvision`, `usearch`, `certifi`, and both Pets model files before staging the `.deb` |
+| --- | --- | --- |
+| `dpkg-deb: error: control directory has bad permissions` | `DEBIAN/` mode is wrong | `chmod 755 "$PKG_ROOT/DEBIAN"` |
+| launcher exists but app does not start | launcher points at the wrong Nuitka executable | Re-resolve `entrypoint.bin` / `entrypoint` from `dist/entrypoint.dist/` |
+| Maps falls back after install | map extension stripped from standalone bundle | Verify `maps/tiles/extension/` inside `/opt/iPhotron/` |
+| native Maps fails with XCB/GLX errors | desktop lacks the expected X11/XWayland GL integration | Install/enable XWayland/XCB GL support or use the helper-backed map path |
+| People/Pets unavailable offline | optional runtime or model staging was omitted before Nuitka | Rebuild the standalone bundle with the required runtime and verified models |
+| package version disagrees with the application | version was duplicated manually | Regenerate `VERSION` from `pyproject.toml` |

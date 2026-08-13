@@ -10,13 +10,14 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for edit coordinator tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
+from PySide6.QtCore import QObject
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QSlider
 
 from iPhoto.core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
-from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import VideoSidebarPreviewResult
 from iPhoto.gui.ui.media import MediaRestoreRequest
+from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import VideoSidebarPreviewResult
 
 
 @pytest.fixture(scope="module")
@@ -235,6 +236,27 @@ def test_unexpected_library_rebind_safely_leaves_active_edit() -> None:
         restore_reason="library_invalidated",
         restore_detail=False,
     )
+
+
+def test_still_edit_without_presented_render_session_is_not_silent(qapp) -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    QObject.__init__(coordinator)
+    coordinator._session = None
+    coordinator._current_source = None
+    coordinator._render_session_controller = Mock(
+        acquire_render_session=Mock(return_value=None),
+        _request_generation=7,
+    )
+    coordinator._emit_video_trim_diag = Mock()
+    messages: list[str] = []
+    coordinator.editUnavailable.connect(messages.append)
+
+    EditCoordinator.enter_edit_mode(coordinator, Path("/fake/photo.jpg"))
+
+    assert coordinator._current_source is None
+    assert messages == [
+        "The photo is still loading. Try Edit again when it appears."
+    ]
 
 
 def test_leave_edit_mode_can_emit_edit_done_restore_reason() -> None:

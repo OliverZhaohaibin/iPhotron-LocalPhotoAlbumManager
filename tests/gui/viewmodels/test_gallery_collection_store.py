@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtGui import QImage
 from PIL import Image
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QImage
 
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.gallery_demand import MICRO_QUERY_CHUNK, MICRO_WARM_LIMIT, build_viewport_demand
+from iPhoto.gui.ui.media import MediaSelectionSession, MediaSelectionState
 from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_window_loader import (
+    GallerySelectionAnchor,
+    GallerySelectionAnchorResult,
+    GallerySelectionAnchorRetryTicket,
     GalleryWindowLoader,
     GalleryWindowRequest,
     GalleryWindowResult,
@@ -209,6 +216,24 @@ def test_scan_row_to_dto_ignores_invalid_micro_thumbnail_bytes() -> None:
 
     assert dto is not None
     assert dto.micro_thumbnail is None
+
+
+def test_diagnostic_snapshot_contains_only_in_memory_collection_state() -> None:
+    store = GalleryCollectionStore(
+        _FakeQueryService([]),
+        library_root=Path("/private/photos"),
+    )
+    store._total_count = 25
+    store._collection_revision = 9
+    store._pending_scan_rels.update({"secret/a.jpg", "secret/b.jpg"})
+
+    snapshot = store.diagnostic_snapshot()
+
+    assert snapshot["row_count"] == 25
+    assert snapshot["collection_revision"] == 9
+    assert snapshot["pending_scan_rows"] == 2
+    assert "private" not in str(snapshot)
+    assert "secret" not in str(snapshot)
 
 
 def test_load_initial_window_uses_sparse_cache() -> None:
@@ -1074,6 +1099,584 @@ def test_async_window_fetches_replacement_rows_for_pending_sources(qapp) -> None
     assert results[0].last == 2
     assert results[0].total_count == 3
     assert [dto.id for dto in results[0].rows.values()] == ["0", "2", "3"]
+
+
+def test_window_loader_resolves_blocked_anchor_off_gui_thread(tmp_path: Path, qapp) -> None:
+    current = tmp_path / "current.jpg"
+    entered = threading.Event()
+    release = threading.Event()
+    worker_threads: list[int] = []
+
+    class _BlockingAnchorService:
+        def read_gallery_asset_window(
+            self,
+            root: Path,
+            query: AssetQuery,
+            first: int,
+            limit: int,
+        ) -> WindowResult:
+            del root, query, limit
+            rel = "current.jpg" if first == 700 else "visible.jpg"
+            asset_id = "current" if first == 700 else "visible"
+            return WindowResult(
+                first=first,
+                rows=[{"id": asset_id, "rel": rel, "media_type": 0}],
+                total_count=1_000,
+                collection_revision=9,
+            )
+
+        def find_row_by_path(self, query: AssetQuery, path: Path) -> int:
+            del query
+            assert path == current
+            worker_threads.append(threading.get_ident())
+            entered.set()
+            assert release.wait(2.0)
+            return 700
+
+    loader = GalleryWindowLoader()
+    results: list[GalleryWindowResult] = []
+    loader.resultReady.connect(results.append)
+    loader.request(
+        GalleryWindowRequest(
+            generation=1,
+            root=tmp_path,
+            query=AssetQuery(),
+            query_service=_BlockingAnchorService(),
+            view_first=0,
+            raw_first=0,
+            limit=1,
+            request_backfill=False,
+            selection_anchor=GallerySelectionAnchor(current, "current", 700),
+        )
+    )
+
+    deadline = time.monotonic() + 2.0
+    while not entered.is_set() and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    assert entered.is_set()
+    assert worker_threads == [worker_threads[0]]
+    assert worker_threads[0] != threading.get_ident()
+
+    heartbeat: list[bool] = []
+    QTimer.singleShot(0, lambda: heartbeat.append(True))
+    qapp.processEvents()
+    assert heartbeat == [True]
+
+    release.set()
+    deadline = time.monotonic() + 2.0
+    while not results and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    loader.shutdown()
+
+    assert results
+    anchor_result = results[0].selection_anchor_result
+    assert anchor_result is not None
+    assert anchor_result.status == "resolved"
+    assert anchor_result.row == 700
+    assert anchor_result.dto is not None
+    assert anchor_result.dto.abs_path == current
+
+
+def test_scan_revisions_atomically_relocate_anchor_across_1000_assets() -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    first = scan_row_to_dto(
+        root,
+        "first.jpg",
+        {"id": "first", "rel": "first.jpg", "media_type": 0},
+    )
+    assert current is not None and first is not None
+    store._total_count = 500
+    store._collection_revision = 10
+    store._row_cache[0] = first
+    store._row_cache[300] = current
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    session.set_current_row(300)
+    requests.clear()
+
+    for revision, total_count, resolved_row in ((11, 500, 301), (12, 1_000, 302)):
+        store._request_async_chunk(0, 79, demand_generation=0, priority=0)
+        request = requests[-1]
+        assert request.selection_anchor is not None
+        assert store.apply_window_result(
+            GalleryWindowResult(
+                generation=request.generation,
+                first=0,
+                last=0,
+                rows={0: first},
+                total_count=total_count,
+                collection_revision=revision,
+                requested_revision=request.collection_revision,
+                selection_anchor_result=GallerySelectionAnchorResult(
+                    anchor=request.selection_anchor,
+                    status="resolved",
+                    row=resolved_row,
+                    dto=current,
+                    elapsed_ms=1.25,
+                ),
+            )
+        )
+        assert session.current_row() == resolved_row
+        assert session.current_source() == current.abs_path
+        assert store.cached_row_for_path(current.abs_path) == resolved_row
+        assert store.selection_anchor_status(current.abs_path) == "resolved"
+
+    assert service.row_lookup_calls == []
+
+
+def test_same_query_reload_preserves_deep_anchor_when_db_revision_is_unchanged() -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    initial_request = requests[-1]
+    first = scan_row_to_dto(
+        root,
+        "first.jpg",
+        {"id": "first", "rel": "first.jpg", "media_type": 0},
+    )
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    assert first is not None and current is not None
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=initial_request.generation,
+            first=0,
+            last=79,
+            rows={0: first, 700: current},
+            total_count=1_000,
+            collection_revision=42,
+            requested_revision=initial_request.collection_revision,
+        )
+    )
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    assert session.set_current_row(700) == current.abs_path
+    selected_anchor = store._selection_anchor
+    assert selected_anchor is not None
+    requests.clear()
+
+    store.reload_current_selection()
+
+    assert len(requests) == 1
+    reload_request = requests[0]
+    assert reload_request.selection_anchor is not None
+    assert reload_request.selection_anchor.path == current.abs_path
+    assert reload_request.selection_anchor.previous_row == 700
+    assert (
+        reload_request.selection_anchor.selection_version
+        > selected_anchor.selection_version
+    )
+    assert session.selection_state() is MediaSelectionState.ANCHOR_RESOLVING
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=reload_request.generation,
+            first=0,
+            last=79,
+            rows={0: first},
+            total_count=1_000,
+            # The database did not change; only the Store reset generation did.
+            collection_revision=42,
+            requested_revision=reload_request.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=reload_request.selection_anchor,
+                status="resolved",
+                row=700,
+                dto=current,
+            ),
+        )
+    )
+    assert session.current_row() == 700
+    assert session.current_source() == current.abs_path
+    assert store.selection_anchor_status(current.abs_path) == "resolved"
+
+
+def test_query_service_rebind_preserves_anchor_only_within_same_library() -> None:
+    root = Path("/library")
+    first_service = _FakeQueryService([], library_root=root)
+    second_service = _FakeQueryService([], library_root=root)
+    store = GalleryCollectionStore(first_service, library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    assert current is not None
+    store._total_count = 1_000
+    store._row_cache[700] = current
+    store.pin_path(current.abs_path, asset_id=str(current.id), previous_row=700)
+    previous_anchor = store._selection_anchor
+    assert previous_anchor is not None
+
+    store.rebind_asset_query_service(second_service, Path("/library/../library"))
+
+    preserved_anchor = store._selection_anchor
+    assert preserved_anchor is not None
+    assert preserved_anchor.path == current.abs_path
+    assert preserved_anchor.selection_version > previous_anchor.selection_version
+    assert store.selection_anchor_status(current.abs_path) == "pending"
+    requests.clear()
+    store.reload_current_selection()
+    assert requests[-1].selection_anchor == store._selection_anchor
+
+    store.load_selection(root, query=AssetQuery(is_favorite=True))
+
+    assert store._selection_anchor is None
+    assert store.selection_anchor_status(current.abs_path) is None
+
+    store._total_count = 1_000
+    store._row_cache[700] = current
+    store.pin_path(current.abs_path, asset_id=str(current.id), previous_row=700)
+    store.rebind_asset_query_service(second_service, Path("/other-library"))
+
+    assert store._selection_anchor is None
+    assert store.selection_anchor_status(current.abs_path) is None
+
+
+def test_anchor_retry_preserves_source_until_resolved_then_missing_falls_back() -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    fallback = scan_row_to_dto(
+        root,
+        "fallback.jpg",
+        {"id": "fallback", "rel": "fallback.jpg", "media_type": 0},
+    )
+    assert current is not None and fallback is not None
+    store._total_count = 30
+    store._collection_revision = 20
+    store._row_cache[10] = current
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    session.set_current_row(10)
+    requests.clear()
+    retry_tickets: list[GallerySelectionAnchorRetryTicket | None] = []
+    store.selection_anchor_retry_requested.connect(retry_tickets.append)
+
+    store._request_async_chunk(0, 19, demand_generation=0, priority=0)
+    retry_request = requests[-1]
+    assert retry_request.selection_anchor is not None
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=retry_request.generation,
+            first=0,
+            last=0,
+            rows={0: fallback},
+            total_count=30,
+            collection_revision=21,
+            requested_revision=retry_request.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=retry_request.selection_anchor,
+                status="retry",
+                elapsed_ms=10_000.0,
+            ),
+        )
+    )
+    assert session.current_row() == -1
+    assert session.current_source() == current.abs_path
+    assert retry_tickets[-1] is not None
+    retry_ticket = retry_tickets[-1]
+    assert retry_ticket.attempt == 1
+    assert retry_ticket.delay_ms == 100
+
+    assert store.retry_selection_anchor(retry_ticket)
+    resolved_request = requests[-1]
+    assert resolved_request.selection_anchor is not None
+    assert resolved_request.view_first == 10
+    assert resolved_request.limit == 1
+    assert resolved_request.request_backfill is False
+    assert resolved_request.demand_generation == 0
+    assert resolved_request.purpose == "selection_anchor_retry"
+    assert resolved_request.selection_anchor_retry_attempt == 1
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=resolved_request.generation,
+            first=0,
+            last=0,
+            rows={0: fallback},
+            total_count=30,
+            collection_revision=21,
+            requested_revision=resolved_request.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=resolved_request.selection_anchor,
+                status="resolved",
+                row=11,
+                dto=current,
+            ),
+            purpose=resolved_request.purpose,
+            selection_anchor_retry_attempt=(
+                resolved_request.selection_anchor_retry_attempt
+            ),
+        )
+    )
+    assert session.current_row() == 11
+    assert session.current_source() == current.abs_path
+
+    store._request_async_chunk(0, 19, demand_generation=0, priority=0)
+    missing_request = requests[-1]
+    assert missing_request.selection_anchor is not None
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=missing_request.generation,
+            first=11,
+            last=11,
+            rows={11: fallback},
+            total_count=30,
+            collection_revision=23,
+            requested_revision=missing_request.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=missing_request.selection_anchor,
+                status="missing",
+            ),
+        )
+    )
+    assert session.current_row() == 11
+    assert session.current_source() == fallback.abs_path
+
+
+def test_anchor_retry_is_bounded_and_needs_no_new_scan_revision(
+    monkeypatch,
+) -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    assert current is not None
+    store._total_count = 30
+    store._collection_revision = 20
+    store._row_cache[10] = current
+    store.pin_path(current.abs_path, asset_id=str(current.id), previous_row=10)
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    assert session.set_current_row(10) == current.abs_path
+    requests.clear()
+
+    tickets: list[GallerySelectionAnchorRetryTicket | None] = []
+    events: list[tuple[str, dict]] = []
+    store.selection_anchor_retry_requested.connect(tickets.append)
+    monkeypatch.setattr(
+        "iPhoto.gui.viewmodels.gallery_collection_store.emit_detail_event",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    store._request_async_chunk(0, 0, demand_generation=0, priority=0)
+    initial = requests[-1]
+    assert initial.selection_anchor is not None
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=initial.generation,
+            first=0,
+            last=0,
+            rows={},
+            total_count=30,
+            collection_revision=20,
+            requested_revision=initial.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=initial.selection_anchor,
+                status="retry",
+            ),
+        )
+    )
+
+    for attempt, delay_ms in enumerate((100, 250, 500), start=1):
+        ticket = tickets[-1]
+        assert isinstance(ticket, GallerySelectionAnchorRetryTicket)
+        assert (ticket.attempt, ticket.delay_ms) == (attempt, delay_ms)
+        assert store.retry_selection_anchor(ticket)
+        request = requests[-1]
+        assert request.purpose == "selection_anchor_retry"
+        assert request.selection_anchor_retry_attempt == attempt
+        assert request.selection_anchor is not None
+        assert store.apply_window_result(
+            GalleryWindowResult(
+                generation=request.generation,
+                first=request.view_first,
+                last=request.view_first,
+                rows={},
+                total_count=30,
+                collection_revision=20,
+                requested_revision=request.collection_revision,
+                selection_anchor_result=GallerySelectionAnchorResult(
+                    anchor=request.selection_anchor,
+                    status="retry",
+                ),
+                purpose=request.purpose,
+                selection_anchor_retry_attempt=(
+                    request.selection_anchor_retry_attempt
+                ),
+            )
+        )
+
+    assert [ticket.attempt for ticket in tickets if ticket is not None] == [1, 2, 3]
+    assert store._selection_anchor_retry_ticket is None
+    assert store._selection_anchor_retry_inflight is None
+    assert store.selection_anchor_status(current.abs_path) == "resolved"
+    assert session.selection_state() is MediaSelectionState.RESOLVED
+    assert session.current_source() == current.abs_path
+    exhausted = [item for item in events if item[0] == "selection_anchor_retry_exhausted"]
+    assert len(exhausted) == 1
+    assert exhausted[0][1]["collection_revision"] == 20
+    assert exhausted[0][1]["resolved_from_cache"] is True
+    assert "path" not in exhausted[0][1]
+
+
+def test_anchor_retry_exhaustion_publishes_terminal_unresolved_state(
+    monkeypatch,
+) -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    current = scan_row_to_dto(
+        root,
+        "current.jpg",
+        {"id": "current", "rel": "current.jpg", "media_type": 0},
+    )
+    assert current is not None
+    store._total_count = 30
+    store._collection_revision = 20
+    store._row_cache[10] = current
+    session = MediaSelectionSession()
+    session.bind_collection(store)
+    assert session.set_current_row(10) == current.abs_path
+    store._row_cache.clear()
+    requests.clear()
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "iPhoto.gui.viewmodels.gallery_collection_store.emit_detail_event",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    store._request_async_chunk(0, 0, demand_generation=0, priority=0)
+    request = requests[-1]
+    for attempt in range(4):
+        assert request.selection_anchor is not None
+        assert store.apply_window_result(
+            GalleryWindowResult(
+                generation=request.generation,
+                first=request.view_first,
+                last=request.view_first,
+                rows={},
+                total_count=30,
+                collection_revision=20,
+                requested_revision=request.collection_revision,
+                selection_anchor_result=GallerySelectionAnchorResult(
+                    anchor=request.selection_anchor,
+                    status="retry",
+                ),
+                purpose=request.purpose,
+                selection_anchor_retry_attempt=(
+                    request.selection_anchor_retry_attempt
+                ),
+            )
+        )
+        if attempt == 3:
+            break
+        ticket = store._selection_anchor_retry_ticket
+        assert isinstance(ticket, GallerySelectionAnchorRetryTicket)
+        assert store.retry_selection_anchor(ticket)
+        request = requests[-1]
+
+    assert store.selection_anchor_status(current.abs_path) == "unresolved"
+    assert store._selection_anchor_retry_ticket is None
+    assert store._selection_anchor_retry_inflight is None
+    assert session.selection_state() is MediaSelectionState.ANCHOR_UNRESOLVED
+    assert session.current_source() == current.abs_path
+    assert session.next_row() == 11
+    exhausted = [item for item in events if item[0] == "selection_anchor_retry_exhausted"]
+    assert len(exhausted) == 1
+    assert exhausted[0][1]["resolved_from_cache"] is False
+
+
+def test_new_selection_cancels_stale_anchor_retry_ticket() -> None:
+    root = Path("/library")
+    service = _FakeQueryService([], library_root=root)
+    requests: list[GalleryWindowRequest] = []
+    store = GalleryCollectionStore(service, library_root=root)
+    store.set_window_request_handler(requests.append)
+    store.load_selection(root, query=AssetQuery())
+    first = scan_row_to_dto(
+        root,
+        "first.jpg",
+        {"id": "first", "rel": "first.jpg", "media_type": 0},
+    )
+    second = scan_row_to_dto(
+        root,
+        "second.jpg",
+        {"id": "second", "rel": "second.jpg", "media_type": 0},
+    )
+    assert first is not None and second is not None
+    store._total_count = 2
+    store._collection_revision = 7
+    store._row_cache.update({0: first, 1: second})
+    store.pin_path(first.abs_path, asset_id=str(first.id), previous_row=0)
+    requests.clear()
+    emitted: list[GallerySelectionAnchorRetryTicket | None] = []
+    store.selection_anchor_retry_requested.connect(emitted.append)
+
+    store._request_async_chunk(0, 0, demand_generation=0, priority=0)
+    request = requests[-1]
+    assert request.selection_anchor is not None
+    assert store.apply_window_result(
+        GalleryWindowResult(
+            generation=request.generation,
+            first=0,
+            last=0,
+            rows={0: first},
+            total_count=2,
+            collection_revision=7,
+            requested_revision=request.collection_revision,
+            selection_anchor_result=GallerySelectionAnchorResult(
+                anchor=request.selection_anchor,
+                status="retry",
+            ),
+        )
+    )
+    stale_ticket = emitted[-1]
+    assert isinstance(stale_ticket, GallerySelectionAnchorRetryTicket)
+
+    store.pin_path(second.abs_path, asset_id=str(second.id), previous_row=1)
+
+    assert emitted[-1] is None
+    assert store.retry_selection_anchor(stale_ticket) is False
+    assert store.selection_anchor_status(second.abs_path) == "resolved"
 
 
 def test_row_for_path_uses_query_lookup_without_scanning_batches() -> None:

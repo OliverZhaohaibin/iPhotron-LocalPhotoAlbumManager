@@ -52,7 +52,9 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
 
 - `level_selected`：检查 `suffix`、`decode_level`、物理 viewport、请求原因；`full` 必须有可解释的
   极端 crop、未知旧库尺寸或 texture-limit 原因。
-- `backend_selected`：记录格式实际使用 `qt` 或 `rawpy`，不得从扩展名推断 backend。
+- `backend_selected`：记录格式实际使用 `qt`、`wic` 或 `rawpy` 以及 worker 解码耗时，
+  不得从扩展名推断 backend。Windows JPEG 路由变更必须在同一台机器、同一批样本上与变更前基线比较；
+  `jpeg-cold` 和 `jpeg-hot-gpu` 的 `click_to_image` P50/P95 均不得回退，并继续满足 150/80ms 绝对门槛。
 - `decode_fallback`：统计 `pillow`、`qt_full_scale`、`half`、`full`、`full_level`；没有 fallback
   的样本也要计入分母。
 - `surface_ready`：核对最终 detached surface 的宽高与 decode level。

@@ -77,7 +77,7 @@ def test_detail_benchmark_accepts_production_presented_and_reports_cache_tiers(t
             "stage": "backend_selected",
             "generation": 4,
             "monotonic_ms": 16.0,
-            "details": {"backend": "wic"},
+            "details": {"backend": "wic", "duration_ms": 12.5},
         },
         {
             "stage": "decode_fallback",
@@ -96,6 +96,14 @@ def test_detail_benchmark_accepts_production_presented_and_reports_cache_tiers(t
     assert result["diagnostics"]["surface_cache_hits"] == {"disk": 1}
     assert result["diagnostics"]["gpu_upload_count"] == 1
     assert result["diagnostics"]["backend_distribution"] == {"wic": 1}
+    assert result["diagnostics"]["backend_decode_ms"] == {
+        "wic": {
+            "count": 1,
+            "p50_ms": 12.5,
+            "p95_ms": 12.5,
+            "max_ms": 12.5,
+        }
+    }
     assert result["diagnostics"]["fallback_distribution"] == {"wic_to_qt": 1}
 
 

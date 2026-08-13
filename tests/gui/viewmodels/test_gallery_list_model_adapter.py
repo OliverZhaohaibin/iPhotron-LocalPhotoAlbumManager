@@ -22,6 +22,10 @@ from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
     GalleryThumbnailHintResult,
 )
 from iPhoto.gui.viewmodels.gallery_tile import GalleryTileSnapshot
+from iPhoto.gui.viewmodels.gallery_window_loader import (
+    GallerySelectionAnchor,
+    GallerySelectionAnchorRetryTicket,
+)
 from iPhoto.infrastructure.services.thumbnail_cache_service import (
     ThumbnailCacheService,
     ThumbnailLoadResult,
@@ -156,6 +160,118 @@ def test_adapter_init(adapter):
     assert adapter.rowCount() == 0
 
 
+def test_adapter_schedules_and_cancels_anchor_retry_on_gui_timer(
+    mock_thumb_service,
+    qapp,
+) -> None:
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = _Signal()
+    store.window_changed = _Signal()
+    store.row_changed = _Signal()
+    store.selection_anchor_retry_requested = _Signal()
+    store.count.return_value = 0
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    anchor = GallerySelectionAnchor(
+        path=Path("/library/current.jpg"),
+        asset_id="current",
+        previous_row=12,
+        selection_version=3,
+    )
+    immediate = GallerySelectionAnchorRetryTicket(
+        anchor=anchor,
+        collection_revision=8,
+        attempt=1,
+        delay_ms=0,
+    )
+
+    store.selection_anchor_retry_requested.emit(immediate)
+    qapp.processEvents()
+
+    store.retry_selection_anchor.assert_called_once_with(immediate)
+    delayed = GallerySelectionAnchorRetryTicket(
+        anchor=anchor,
+        collection_revision=8,
+        attempt=2,
+        delay_ms=500,
+    )
+    store.selection_anchor_retry_requested.emit(delayed)
+    assert adapter._selection_anchor_retry_timer.isActive()
+
+    store.selection_anchor_retry_requested.emit(None)
+
+    assert not adapter._selection_anchor_retry_timer.isActive()
+    assert adapter._pending_selection_anchor_retry is None
+    store.retry_selection_anchor.assert_called_once()
+
+
+def test_rebind_leaves_anchor_retry_cancellation_to_store(
+    mock_thumb_service,
+) -> None:
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = _Signal()
+    store.window_changed = _Signal()
+    store.row_changed = _Signal()
+    store.selection_anchor_retry_requested = _Signal()
+    store.count.return_value = 0
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    ticket = GallerySelectionAnchorRetryTicket(
+        anchor=GallerySelectionAnchor(
+            path=Path("/library/current.jpg"),
+            asset_id="current",
+            previous_row=12,
+            selection_version=3,
+        ),
+        collection_revision=8,
+        attempt=2,
+        delay_ms=500,
+    )
+    store.selection_anchor_retry_requested.emit(ticket)
+    assert adapter._selection_anchor_retry_timer.isActive()
+
+    adapter.rebind_asset_query_service(_BackfillService(), Path("/library"))
+
+    assert adapter._selection_anchor_retry_timer.isActive()
+    assert adapter._pending_selection_anchor_retry == ticket
+    adapter._selection_anchor_retry_timer.stop()
+
+
+def test_runtime_diagnostic_heartbeat_reports_privacy_safe_store_state(
+    adapter,
+    mock_store,
+    monkeypatch,
+) -> None:
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setenv("IPHOTO_RUNTIME_DIAG", "1")
+    monkeypatch.setattr(
+        adapter_module,
+        "emit_perf_event",
+        lambda name, **payload: emitted.append((name, payload)),
+    )
+    mock_store.diagnostic_snapshot.return_value = {
+        "row_count": 501,
+        "collection_revision": 12,
+        "anchor_status": "retry",
+    }
+    adapter._current_row = 7
+
+    adapter._log_runtime_diag_heartbeat()
+
+    assert emitted == [
+        (
+            "runtime_gui_heartbeat",
+            {
+                "heartbeat": 1,
+                "model_current_row": 7,
+                "viewport_generation": 0,
+                "pending_scan_batches": 0,
+                "row_count": 501,
+                "collection_revision": 12,
+                "anchor_status": "retry",
+            },
+        )
+    ]
+
+
 def test_info_role_contains_required_keys(adapter, mock_store):
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = _make_dto(
@@ -189,6 +305,91 @@ def test_row_for_path_delegates_to_store(adapter, mock_store):
 
     assert adapter.row_for_path(path) == 7
     mock_store.row_for_path.assert_called_once_with(path)
+
+
+def test_cached_row_for_path_never_uses_synchronous_lookup(adapter, mock_store):
+    path = Path("/library/photo.jpg")
+    mock_store.cached_row_for_path.return_value = 9
+
+    assert adapter.cached_row_for_path(path) == 9
+    mock_store.cached_row_for_path.assert_called_once_with(path)
+    mock_store.row_for_path.assert_not_called()
+
+
+def test_setting_current_asset_does_not_resolve_its_path(adapter, mock_store):
+    path = Path("/library/photo.jpg")
+
+    visual_row = adapter.set_current_asset(3, path)
+
+    assert visual_row == 3
+    assert adapter._current_row == 3
+    assert adapter._current_path == path
+    mock_store.cached_row_for_path.assert_not_called()
+    mock_store.row_for_path.assert_not_called()
+    mock_store.pin_row.assert_not_called()
+
+
+def test_pending_selection_keeps_cached_visual_row_without_geometry_change(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    mock_store.count.return_value = 10
+    assert adapter.set_current_asset(4, path) == 4
+    changed: list[tuple] = []
+    adapter.dataChanged.connect(lambda *args: changed.append(args))
+    mock_store.cached_row_for_path.return_value = 4
+
+    visual_row = adapter.set_current_asset(None, path)
+
+    assert visual_row == 4
+    assert adapter._current_row == 4
+    assert adapter.data(adapter.index(4, 0), Roles.IS_CURRENT) is True
+    assert changed == []
+    mock_store.row_for_path.assert_not_called()
+    mock_store.pin_row.assert_not_called()
+
+
+def test_scan_reset_reanchors_visual_current_asset_by_cached_path(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    adapter.set_current_asset(4, path)
+    adapter._last_snapshot = (10, (0, 9), 1)
+    adapter._last_selection_signature = ("", "", "")
+    adapter._last_window_identity_signature = ()
+    mock_store.count.return_value = 11
+    mock_store.snapshot_signature.return_value = (11, (0, 10), 2)
+    mock_store.cached_row_for_path.return_value = 7
+    mock_store.cached_rows.return_value = []
+
+    adapter._on_source_changed()
+
+    assert adapter._current_row == 7
+    assert adapter._current_path == path
+    mock_store.row_for_path.assert_not_called()
+
+
+def test_scan_retry_clears_only_visual_row_and_retains_stable_path(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    adapter.set_current_asset(4, path)
+    adapter._last_snapshot = (10, (0, 9), 1)
+    adapter._last_selection_signature = ("", "", "")
+    adapter._last_window_identity_signature = ()
+    mock_store.count.return_value = 10
+    mock_store.snapshot_signature.return_value = (10, (0, 9), 2)
+    mock_store.cached_row_for_path.return_value = None
+    mock_store.cached_rows.return_value = []
+
+    adapter._on_source_changed()
+
+    assert adapter._current_row == -1
+    assert adapter._current_path == path
+    mock_store.row_for_path.assert_not_called()
 
 
 def test_prioritize_rows_delegates_to_store(adapter, mock_store):

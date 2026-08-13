@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -51,6 +52,7 @@ MAX_STDERR_BYTES = 16 * 1024
 MAX_ALBUMS = 10_000
 MAX_REQUEST_BYTES = 256 * 1024
 ALBUM_SNAPSHOT_BUDGET_MS = 750.0
+_LOGGER = logging.getLogger(__name__)
 
 _FAILURE_MESSAGES = {
     "db_locked": (
@@ -775,9 +777,11 @@ class LibraryProbeController(QObject):
         if status == QProcess.ExitStatus.CrashExit:
             self.failed.emit(_failure(request.request_id, "process_crashed"))
             return
+        response_protocol: int | None = None
         try:
             envelope = json.loads(stdout)
-            if int(envelope.get("protocol_version", -1)) != PROBE_PROTOCOL_VERSION:
+            response_protocol = int(envelope.get("protocol_version", -1))
+            if response_protocol != PROBE_PROTOCOL_VERSION:
                 raise ValueError("protocol version mismatch")
             if envelope.get("request_path") != request.path:
                 self.failed.emit(_failure(request.request_id, "root_mismatch"))
@@ -819,7 +823,17 @@ class LibraryProbeController(QObject):
             ):
                 self.failed.emit(_failure(request.request_id, "root_mismatch"))
                 return
-        except Exception:  # noqa: BLE001 - child-process protocol boundary
+        except Exception as exc:  # noqa: BLE001 - child-process protocol boundary
+            _LOGGER.warning(
+                "Library helper protocol rejected: expected=%s response=%s "
+                "exit_code=%s stdout_bytes=%s stderr_bytes=%s exception=%s",
+                PROBE_PROTOCOL_VERSION,
+                response_protocol,
+                exit_code,
+                len(self._stdout),
+                len(self._stderr),
+                type(exc).__name__,
+            )
             self.failed.emit(_failure(request.request_id, "invalid_protocol"))
             return
         try:
@@ -837,6 +851,16 @@ class LibraryProbeController(QObject):
             self._on_finished(process, exit_code, status)
 
 
+def _source_probe_entrypoint() -> Path | None:
+    """Return the checkout entrypoint that imports the same source tree."""
+
+    candidate = Path(__file__).resolve().parents[2] / "entrypoint.py"
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError:
+        return None
+
+
 def _probe_process_command() -> tuple[str, list[str]]:
     """Return a helper command that survives renamed packaged executables.
 
@@ -849,6 +873,13 @@ def _probe_process_command() -> tuple[str, list[str]]:
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
         application_path = os.fspath(QCoreApplication.applicationFilePath())
         return application_path or sys.executable, [
+            "--startup-library-probe",
+            "--stdin",
+        ]
+    source_entrypoint = _source_probe_entrypoint()
+    if source_entrypoint is not None:
+        return sys.executable, [
+            os.fspath(source_entrypoint),
             "--startup-library-probe",
             "--stdin",
         ]

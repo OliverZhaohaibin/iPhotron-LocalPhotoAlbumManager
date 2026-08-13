@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -257,3 +258,24 @@ def test_canonical_milestone_is_emitted_once_per_generation(qapp, monkeypatch) -
     orchestrator.transition(StartupPhase.INTERACTIVE)
 
     assert events.count("startup.interactive") == 1
+
+
+def test_terminal_keeps_persistent_runtime_diagnostics_active(
+    qapp,
+    monkeypatch,
+) -> None:
+    cancel_dump = MagicMock()
+    monkeypatch.setattr(
+        "iPhoto.runtime_diagnostics.runtime_diagnostics_active",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "faulthandler.cancel_dump_traceback_later",
+        cancel_dump,
+    )
+    orchestrator = StartupOrchestrator()
+    orchestrator.begin()
+
+    orchestrator.complete()
+
+    cancel_dump.assert_not_called()

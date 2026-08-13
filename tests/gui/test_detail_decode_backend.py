@@ -153,7 +153,61 @@ def test_platform_registry_keeps_cancellation_terminal() -> None:
 
     with pytest.raises(DecodeCancelledError):
         DefaultStillDecodeBackend(registry).decode(
-            _request(Path("photo.jpg")),
+            _request(Path("photo.heic")),
+            _Token(),
+        )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [".jpg", ".jpeg", ".jpe", ".jfif", ".JPG"],
+)
+def test_windows_jpegs_bypass_wic(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    source = tmp_path / f"photo{suffix}"
+    image = QImage(64, 32, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF123456)
+    format_name = "JPEG"
+    if not image.save(str(source), format_name):
+        pytest.skip(f"Qt test runtime does not provide the {format_name} writer")
+
+    crashing_wic = MagicMock()
+    crashing_wic.decode.side_effect = AssertionError(
+        "common still format entered WIC"
+    )
+
+    registry = StillDecodeBackendRegistry(
+        platform="win32",
+        windows_backend=crashing_wic,
+    )
+
+    surface = DefaultStillDecodeBackend(registry).decode(_request(source), _Token())
+
+    crashing_wic.decode.assert_not_called()
+    assert surface.backend == "qt"
+    assert surface.fallback is None
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [".png", ".webp", ".tif", ".heic", ".heif", ".jxr"],
+)
+def test_windows_non_jpeg_formats_keep_wic_fallback(suffix: str) -> None:
+    class _MarkerWic:
+        def decode(self, request, cancellation):
+            del request, cancellation
+            raise DecodeCancelledError("wic selected")
+
+    registry = StillDecodeBackendRegistry(
+        platform="win32",
+        windows_backend=_MarkerWic(),
+    )
+
+    with pytest.raises(DecodeCancelledError, match="wic selected"):
+        DefaultStillDecodeBackend(registry).decode(
+            _request(Path(f"photo{suffix}")),
             _Token(),
         )
 

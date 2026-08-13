@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer, QItemSelectionModel
+import os
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
-from .asset_grid import AssetGrid
 from ..models.roles import Roles
 from ..styles import modern_scrollbar_style
+from .asset_grid import AssetGrid
 
 
 class FilmstripView(AssetGrid):
@@ -50,8 +53,18 @@ class FilmstripView(AssetGrid):
         self._updating_style = False
         self._pending_scroll_value: int | None = None
         self._pending_center_row: int | None = None
+        self._pending_center_path: Path | None = None
+        self._pending_center_asset_id: str | None = None
+        self._pending_anchor_x: int | None = None
         self._last_known_center_row: int | None = None
+        self._last_known_center_path: Path | None = None
+        self._last_known_center_asset_id: str | None = None
+        self._last_known_anchor_x: int | None = None
         self._restore_scheduled = False
+        self._restore_reason = "unknown"
+        self._restore_timer = QTimer(self)
+        self._restore_timer.setSingleShot(True)
+        self._restore_timer.timeout.connect(self._run_scheduled_restore)
         self._apply_scrollbar_style()
 
     def changeEvent(self, event: QEvent) -> None:
@@ -144,7 +157,15 @@ class FilmstripView(AssetGrid):
             # Re-calculating layout is expensive, so check if we need it.
             # QListView with uniformItemSizes=False might need a nudge.
             self.scheduleDelayedItemsLayout()
-            self.refresh_spacers(top)
+            # Gallery publishes the old and new current rows separately. The
+            # old row is already narrow when its notification arrives, so using
+            # it as the active width briefly grows both spacers by half the
+            # selected-tile width delta. Windows QListView may commit that
+            # intermediate layout after centering, causing a second jump.
+            # Only the row whose semantic role is current may drive spacers;
+            # select_index_for_centering() supplies the final fallback.
+            if top == bottom and bool(top.data(Roles.IS_CURRENT)):
+                self.refresh_spacers(top)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -163,22 +184,37 @@ class FilmstripView(AssetGrid):
         """Remember scroll position and current selection before model/layout changes."""
         scrollbar = self.horizontalScrollBar()
         current_row = None
+        anchor_x = None
         selection_model = self.selectionModel()
         if selection_model is not None:
             current = selection_model.currentIndex()
             if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
                 current_row = current.row()
+                rect = self.visualRect(current)
+                if rect.isValid():
+                    anchor_x = int(rect.center().x())
         scroll_value = scrollbar.value()
         if current_row is None and self._last_known_center_row is not None:
             current_row = self._last_known_center_row
+        if anchor_x is None:
+            anchor_x = self._last_known_anchor_x
 
-        if current_row is None and scroll_value == 0:
+        if (
+            current_row is None
+            and self._last_known_center_path is None
+            and scroll_value == 0
+        ):
             return
 
         self._pending_scroll_value = scroll_value
         self._pending_center_row = current_row
+        self._pending_center_path = self._last_known_center_path
+        self._pending_center_asset_id = self._last_known_center_asset_id
+        self._pending_anchor_x = anchor_x
         if current_row is not None:
             self._last_known_center_row = current_row
+        if anchor_x is not None:
+            self._last_known_anchor_x = anchor_x
 
     def _on_rows_removed(self, parent: QModelIndex, start: int, end: int) -> None:
         self._schedule_restore_scroll("rows_removed")
@@ -186,24 +222,46 @@ class FilmstripView(AssetGrid):
     def _schedule_restore_scroll(self, reason: str | None = None) -> None:
         if self._restore_scheduled:
             return
-        if self._pending_scroll_value is None and self._pending_center_row is None:
+        if (
+            self._pending_scroll_value is None
+            and self._pending_center_row is None
+            and self._pending_center_path is None
+        ):
             return
         self._restore_scheduled = True
-        QTimer.singleShot(0, lambda: self._restore_scroll_state(reason or "unknown"))
+        self._restore_reason = reason or "unknown"
+        self._restore_timer.start(0)
+
+    def _run_scheduled_restore(self) -> None:
+        self._restore_scroll_state(self._restore_reason)
 
     def _restore_scroll_state(self, reason: str) -> None:
         self._restore_scheduled = False
         model = self.model()
-        if self._pending_scroll_value is None and self._pending_center_row is None:
+        if (
+            self._pending_scroll_value is None
+            and self._pending_center_row is None
+            and self._pending_center_path is None
+        ):
             return
         if model is None or model.rowCount() == 0:
             return
 
         scroll_value = self._pending_scroll_value
         center_row = self._pending_center_row
+        center_path = self._pending_center_path
+        center_asset_id = self._pending_center_asset_id
+        anchor_x = self._pending_anchor_x
         scrollbar = self.horizontalScrollBar()
-        restored = False
-        if center_row is not None and 0 <= center_row < model.rowCount():
+        identity_index = self._cached_index_for_path(center_path, center_asset_id)
+        if identity_index.isValid():
+            self._restore_identity_at_anchor(identity_index, anchor_x)
+        elif center_path is not None:
+            # An unresolved scan anchor must never fall through to the old
+            # numeric row: that row may now represent a different photo.
+            if scroll_value is not None:
+                scrollbar.setValue(scroll_value)
+        elif center_row is not None and 0 <= center_row < model.rowCount():
             index = model.index(center_row, 0)
             if index.isValid() and not bool(index.data(Roles.IS_SPACER)):
                 selection_model = self.selectionModel()
@@ -218,6 +276,79 @@ class FilmstripView(AssetGrid):
 
         self._pending_scroll_value = None
         self._pending_center_row = None
+        self._pending_center_path = None
+        self._pending_center_asset_id = None
+        self._pending_anchor_x = None
+
+    def _cached_index_for_path(
+        self,
+        path: Path | None,
+        asset_id: str | None,
+    ) -> QModelIndex:
+        """Resolve a visual anchor through the model's in-memory row cache."""
+
+        model = self.model()
+        if path is None or model is None:
+            return QModelIndex()
+
+        source_model = model
+        source_getter = getattr(model, "sourceModel", None)
+        map_from_source = getattr(model, "mapFromSource", None)
+        if callable(source_getter):
+            candidate = source_getter()
+            if candidate is not None:
+                source_model = candidate
+
+        resolver = getattr(source_model, "cached_row_for_path", None)
+        if not callable(resolver):
+            return QModelIndex()
+        row = resolver(path)
+        if row is None or row < 0 or row >= source_model.rowCount():
+            return QModelIndex()
+
+        source_index = source_model.index(row, 0)
+        if not source_index.isValid():
+            return QModelIndex()
+        index = (
+            map_from_source(source_index)
+            if source_model is not model and callable(map_from_source)
+            else source_index
+        )
+        if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
+            return QModelIndex()
+        resolved_path = index.data(Roles.ABS)
+        if not resolved_path or os.path.normcase(
+            os.path.abspath(str(resolved_path))
+        ) != os.path.normcase(os.path.abspath(str(path))):
+            return QModelIndex()
+        resolved_asset_id = index.data(Roles.ASSET_ID)
+        if (
+            asset_id is not None
+            and resolved_asset_id is not None
+            and str(resolved_asset_id) != asset_id
+        ):
+            return QModelIndex()
+        return index
+
+    def _restore_identity_at_anchor(
+        self,
+        index: QModelIndex,
+        anchor_x: int | None,
+    ) -> None:
+        selection_model = self.selectionModel()
+        if selection_model is not None and selection_model.currentIndex() != index:
+            selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
+
+        if anchor_x is None:
+            self.center_on_index(index)
+            return
+        self._settle_index_geometry(index)
+        item_rect = self.visualRect(index)
+        if not item_rect.isValid():
+            return
+        scrollbar = self.horizontalScrollBar()
+        scrollbar.setValue(scrollbar.value() + int(item_rect.center().x()) - anchor_x)
+        self._last_known_anchor_x = anchor_x
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.
@@ -347,7 +478,7 @@ class FilmstripView(AssetGrid):
     ) -> None:
         """Track the last non-spacer current row for capture/restore centering logic."""
         if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
-            self._last_known_center_row = current.row()
+            self._remember_center_identity(current)
 
     # ------------------------------------------------------------------
     # Event handling
@@ -389,6 +520,26 @@ class FilmstripView(AssetGrid):
     # ------------------------------------------------------------------
     # Programmatic scrolling helpers
     # ------------------------------------------------------------------
+    def select_index_for_centering(self, index: QModelIndex) -> bool:
+        """Select *index* and invalidate restoration from an older view state."""
+
+        if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
+            return False
+        self._clear_pending_scroll_restore()
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return False
+        if selection_model.currentIndex() != index:
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.ClearAndSelect,
+            )
+        # The source model updates IS_CURRENT before Playback updates Qt's
+        # selection model. Reconcile spacer geometry from the target index so
+        # there is only one stable width during this selection transaction.
+        self.refresh_spacers(index)
+        return True
+
     def center_on_index(self, index: QModelIndex) -> None:
         """Scroll the view so *index* is visually centred in the viewport."""
         if not index.isValid():
@@ -396,8 +547,13 @@ class FilmstripView(AssetGrid):
 
         # Programmatic centering (e.g. entering playback from gallery) should
         # win over any delayed restore from a previous detail session.
-        self._pending_scroll_value = None
-        self._pending_center_row = None
+        self._clear_pending_scroll_restore()
+
+        # SizeHintRole and spacer changes are delivered through QListView's
+        # delayed layout machinery. Force that pending geometry to settle in
+        # this callback, before reading visualRect and writing the scrollbar.
+        # No paint can occur between the layout and the final scroll position.
+        self._settle_index_geometry(index)
 
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
@@ -411,3 +567,38 @@ class FilmstripView(AssetGrid):
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
+        self._remember_center_identity(index)
+
+    def _settle_index_geometry(self, index: QModelIndex) -> None:
+        """Commit pending tile/spacer size changes before a scroll calculation."""
+
+        self.refresh_spacers(index)
+        self.executeDelayedItemsLayout()
+
+    def _remember_center_identity(self, index: QModelIndex) -> None:
+        """Record the stable identity and its actual post-layout viewport anchor."""
+
+        if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
+            return
+        self._last_known_center_row = index.row()
+        path = index.data(Roles.ABS)
+        if path:
+            self._last_known_center_path = Path(str(path))
+            asset_id = index.data(Roles.ASSET_ID)
+            self._last_known_center_asset_id = (
+                str(asset_id) if asset_id is not None else None
+            )
+        rect = self.visualRect(index)
+        if rect.isValid():
+            self._last_known_anchor_x = int(rect.center().x())
+
+    def _clear_pending_scroll_restore(self) -> None:
+        """Cancel one stale restore transaction and discard its captured state."""
+
+        self._restore_timer.stop()
+        self._restore_scheduled = False
+        self._pending_scroll_value = None
+        self._pending_center_row = None
+        self._pending_center_path = None
+        self._pending_center_asset_id = None
+        self._pending_anchor_x = None

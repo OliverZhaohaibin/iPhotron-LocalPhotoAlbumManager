@@ -48,7 +48,11 @@ from .gallery_thumbnail_hint_loader import (
     GalleryThumbnailHintResult,
 )
 from .gallery_tile import GalleryTileRecord, GalleryTileSnapshot
-from .gallery_window_loader import GalleryWindowLoader, GalleryWindowResult
+from .gallery_window_loader import (
+    GallerySelectionAnchorRetryTicket,
+    GalleryWindowLoader,
+    GalleryWindowResult,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -58,6 +62,10 @@ _MAX_PUBLISHED_THUMBNAIL_OVERRIDES = 2048
 
 def _startup_hang_diag_enabled() -> bool:
     return os.environ.get("IPHOTO_STARTUP_HANG_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _runtime_diag_enabled() -> bool:
+    return os.environ.get("IPHOTO_RUNTIME_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
 
 
 class GalleryListModelAdapter(QAbstractListModel):
@@ -81,6 +89,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._edit_service_getter = edit_service_getter
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
+        self._current_path: Path | None = None
         self._last_snapshot: Optional[tuple[int, Optional[tuple[int, int]], int]] = None
         self._last_selection_signature: tuple[str, str, str] | None = None
         self._last_window_identity_signature: tuple[str, ...] | None = None
@@ -99,6 +108,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._thumbnail_hint_loader.resultReady.connect(self._on_thumbnail_hint_result)
         self._thumbnail_hint_request_id = 0
         self._pending_scan_batch_count = 0
+        self._pending_selection_anchor_retry: (
+            GallerySelectionAnchorRetryTicket | None
+        ) = None
         self._backfill_completion_source: Any | None = None
         self._startup_diag_logged_source = False
         self._startup_diag_logged_viewport = False
@@ -112,6 +124,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_gallery_viewport_seen = False
         self._startup_gallery_thumbnail_seen = False
         self._startup_gallery_heartbeat_count = 0
+        self._runtime_diag_heartbeat_count = 0
         self._prioritize_timer = QTimer(self)
         self._prioritize_timer.setSingleShot(True)
         self._prioritize_timer.setInterval(16)
@@ -128,11 +141,22 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._scan_batch_timer.setSingleShot(True)
         self._scan_batch_timer.setInterval(150)
         self._scan_batch_timer.timeout.connect(self._flush_pending_scan_batches)
+        self._selection_anchor_retry_timer = QTimer(self)
+        self._selection_anchor_retry_timer.setSingleShot(True)
+        self._selection_anchor_retry_timer.timeout.connect(
+            self._retry_selection_anchor
+        )
         self._startup_gallery_heartbeat_timer = QTimer(self)
         self._startup_gallery_heartbeat_timer.setSingleShot(False)
         self._startup_gallery_heartbeat_timer.setInterval(250)
         self._startup_gallery_heartbeat_timer.timeout.connect(
             self._log_startup_gallery_heartbeat
+        )
+        self._runtime_diag_heartbeat_timer = QTimer(self)
+        self._runtime_diag_heartbeat_timer.setSingleShot(False)
+        self._runtime_diag_heartbeat_timer.setInterval(1000)
+        self._runtime_diag_heartbeat_timer.timeout.connect(
+            self._log_runtime_diag_heartbeat
         )
         self._startup_gallery_timeout_timer = QTimer(self)
         self._startup_gallery_timeout_timer.setSingleShot(True)
@@ -153,12 +177,22 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._store.window_changed.connect(self._on_window_changed)
         self._store.data_changed.connect(self._on_source_changed)
         self._store.row_changed.connect(self._on_row_changed)
+        anchor_retry_signal = getattr(
+            self._store,
+            "selection_anchor_retry_requested",
+            None,
+        )
+        anchor_retry_connect = getattr(anchor_retry_signal, "connect", None)
+        if callable(anchor_retry_connect):
+            anchor_retry_connect(self._schedule_selection_anchor_retry)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
         thumbnail_status_signal = getattr(self._thumbnails, "thumbnailStatusChanged", None)
         thumbnail_status_connect = getattr(thumbnail_status_signal, "connect", None)
         if callable(thumbnail_status_connect):
             thumbnail_status_connect(self._on_thumbnail_status_changed)
         self._bind_backfill_completion_signal(self._current_asset_query_service())
+        if _runtime_diag_enabled():
+            self._runtime_diag_heartbeat_timer.start()
 
     @classmethod
     def create(
@@ -399,6 +433,11 @@ class GalleryListModelAdapter(QAbstractListModel):
     def row_for_path(self, path: Path) -> int | None:
         return self._store.row_for_path(path)
 
+    def cached_row_for_path(self, path: Path) -> int | None:
+        """Return a cached row without performing database or filesystem I/O."""
+
+        return self._store.cached_row_for_path(path)
+
     def begin_startup_gallery_warmup(self) -> None:
         """Prioritize startup Gallery demand without starving guard thumbnails."""
 
@@ -477,7 +516,25 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     @Slot(object)
     def _on_window_result(self, result: GalleryWindowResult) -> None:
-        if self._store.apply_window_result(result):
+        anchor_result = result.selection_anchor_result
+        emit_perf_event(
+            "gallery_window_result_received",
+            generation=result.generation,
+            requested_revision=result.requested_revision,
+            collection_revision=result.collection_revision,
+            rows=len(result.rows),
+            total_count=result.total_count,
+            error=result.error,
+            anchor_status=(anchor_result.status if anchor_result is not None else None),
+        )
+        applied = self._store.apply_window_result(result)
+        emit_perf_event(
+            "gallery_window_result_applied",
+            generation=result.generation,
+            collection_revision=result.collection_revision,
+            applied=applied,
+        )
+        if applied:
             if self._startup_gallery_warmup_active:
                 self._startup_gallery_window_seen = True
                 mark("gallery_startup_warmup.first_window_applied")
@@ -514,6 +571,14 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     @Slot(object)
     def _enqueue_scan_batch_on_ui_thread(self, batch: object) -> None:
+        rows = getattr(batch, "rows", None)
+        emit_perf_event(
+            "gallery_scan_batch_received",
+            collection_revision=getattr(batch, "collection_revision", None),
+            ready_count=getattr(batch, "ready_count", None),
+            row_count=len(rows) if isinstance(rows, (list, tuple)) else None,
+            pending_batches=self._pending_scan_batch_count,
+        )
         record_batch = getattr(self._store, "record_scan_batch", None)
         if callable(record_batch):
             if record_batch(batch):
@@ -530,7 +595,12 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _flush_pending_scan_batches(self) -> None:
         if self._pending_scan_batch_count <= 0:
             return
+        coalesced_count = self._pending_scan_batch_count
         self._pending_scan_batch_count = 0
+        emit_perf_event(
+            "gallery_scan_batches_flushed",
+            coalesced_count=coalesced_count,
+        )
         flush = getattr(self._store, "flush_pending_scan_refresh", None)
         if callable(flush):
             flush()
@@ -562,6 +632,22 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._thumbnail_hint_loader.cancel_pending()
         self._store.rebind_asset_query_service(asset_query_service, library_root)
         self._bind_backfill_completion_signal(asset_query_service)
+
+    @Slot(object)
+    def _schedule_selection_anchor_retry(self, ticket: object) -> None:
+        self._selection_anchor_retry_timer.stop()
+        if not isinstance(ticket, GallerySelectionAnchorRetryTicket):
+            self._pending_selection_anchor_retry = None
+            return
+        self._pending_selection_anchor_retry = ticket
+        self._selection_anchor_retry_timer.start(max(0, int(ticket.delay_ms)))
+
+    @Slot()
+    def _retry_selection_anchor(self) -> None:
+        ticket = self._pending_selection_anchor_retry
+        self._pending_selection_anchor_retry = None
+        if ticket is not None:
+            self._store.retry_selection_anchor(ticket)
 
     def invalidate_thumbnail(
         self,
@@ -661,12 +747,39 @@ class GalleryListModelAdapter(QAbstractListModel):
         return True
 
     def set_current_row(self, row: int) -> None:
-        if self._current_row == row:
-            return
+        """Set the positional current row for legacy callers."""
+
+        self._set_current_asset(row, path=self._current_path)
+
+    def set_current_asset(
+        self,
+        authoritative_row: int | None,
+        path: Path,
+    ) -> int | None:
+        """Project semantic selection onto a cached Filmstrip visual row."""
+
+        return self._set_current_asset(authoritative_row, path=Path(path))
+
+    def _set_current_asset(
+        self,
+        authoritative_row: int | None,
+        *,
+        path: Path | None,
+    ) -> int | None:
+        visual_row = (
+            int(authoritative_row)
+            if authoritative_row is not None and int(authoritative_row) >= 0
+            else None
+        )
+        if visual_row is None and path is not None:
+            visual_row = self._store.cached_row_for_path(path)
+        row = visual_row if visual_row is not None and visual_row >= 0 else -1
+        path_changed = path != self._current_path
+        self._current_path = path
+        if self._current_row == row and not path_changed:
+            return visual_row
         old_row = self._current_row
         self._current_row = row
-        if row >= 0:
-            self.pin_row(row)
         if old_row >= 0:
             idx = self.index(old_row, 0)
             if idx.isValid():
@@ -683,6 +796,7 @@ class GalleryListModelAdapter(QAbstractListModel):
                     idx,
                     [Roles.IS_CURRENT, Roles.TILE_SNAPSHOT, Qt.ItemDataRole.SizeHintRole],
                 )
+        return visual_row
 
     def metadata_for_path(self, path: Path) -> Optional[Dict[str, Any]]:
         dto = self._store.find_dto_by_path(path)
@@ -726,6 +840,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         return None, None
 
     def _on_source_changed(self) -> None:
+        # The store cache already contains the new revision when this callback
+        # runs.  Re-anchor the visual current item by its stable path before
+        # views receive modelAboutToBeReset; carrying the old numeric row into
+        # the reset would briefly expand/highlight a different asset.
+        self._reanchor_current_asset_from_cache()
         count = self._store.count()
         current_snapshot = self._store.snapshot_signature()
         current_selection_signature = self._selection_signature()
@@ -780,6 +899,13 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._current_row = -1
         if collection_revision_changed:
             self._republish_thumbnail_demand_for_collection_revision()
+
+    def _reanchor_current_asset_from_cache(self) -> None:
+        path = self._current_path
+        if path is None:
+            return
+        cached_row = self._store.cached_row_for_path(path)
+        self._current_row = -1 if cached_row is None else cached_row
 
     def _republish_thumbnail_demand_for_collection_revision(self) -> None:
         """Rebuild guard demand even when the viewport itself did not move."""
@@ -1093,6 +1219,25 @@ class GalleryListModelAdapter(QAbstractListModel):
         )
         if self._startup_gallery_heartbeat_count >= 12:
             self._startup_gallery_heartbeat_timer.stop()
+
+    @Slot()
+    def _log_runtime_diag_heartbeat(self) -> None:
+        if not _runtime_diag_enabled():
+            self._runtime_diag_heartbeat_timer.stop()
+            return
+        self._runtime_diag_heartbeat_count += 1
+        snapshot_getter = getattr(self._store, "diagnostic_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        emit_perf_event(
+            "runtime_gui_heartbeat",
+            heartbeat=self._runtime_diag_heartbeat_count,
+            model_current_row=self._current_row,
+            viewport_generation=self._viewport_generation,
+            pending_scan_batches=self._pending_scan_batch_count,
+            **snapshot,
+        )
 
     def _reconcile_full_thumbnail_demand(self) -> None:
         demand = self._viewport_demand

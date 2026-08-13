@@ -1029,7 +1029,7 @@ def test_controller_real_helper_round_trip(qapp, tmp_path: Path) -> None:
     assert controller._process is None
 
 
-def test_probe_process_command_uses_python_module_for_source(
+def test_probe_process_command_uses_checkout_entrypoint_for_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delitem(probe_module.__dict__, "__compiled__", raising=False)
@@ -1038,7 +1038,54 @@ def test_probe_process_command_uses_python_module_for_source(
     program, arguments = _probe_process_command()
 
     assert program == sys.executable
+    assert arguments == [
+        str(Path(probe_module.__file__).resolve().parents[2] / "entrypoint.py"),
+        "--startup-library-probe",
+        "--stdin",
+    ]
+
+
+def test_probe_process_command_falls_back_to_module_without_checkout_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(probe_module.__dict__, "__compiled__", raising=False)
+    monkeypatch.delattr(probe_module.sys, "frozen", raising=False)
+    monkeypatch.setattr(probe_module, "_source_probe_entrypoint", lambda: None)
+
+    program, arguments = _probe_process_command()
+
+    assert program == sys.executable
     assert arguments == ["-m", "iPhoto.bootstrap.library_probe", "--stdin"]
+
+
+def test_checkout_helper_ignores_stale_pythonpath_install(tmp_path: Path) -> None:
+    stale_package = tmp_path / "stale-install" / "iPhoto"
+    stale_package.mkdir(parents=True)
+    (stale_package / "__init__.py").write_text(
+        'raise RuntimeError("stale iPhoto install was imported")\n',
+        encoding="utf-8",
+    )
+    library = tmp_path / "library"
+    library.mkdir()
+    request = LibraryProbeRequest.create(library)
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(stale_package.parent)
+    program, arguments = _probe_process_command()
+
+    completed = subprocess.run(
+        [program, *arguments],
+        input=json.dumps(asdict(request)),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+        cwd=tmp_path,
+    )
+
+    envelope = json.loads(completed.stdout)
+    assert completed.returncode == 0
+    assert envelope["protocol_version"] == PROBE_PROTOCOL_VERSION
+    assert envelope["prepared"]["request_id"] == request.request_id
 
 
 def test_probe_process_command_uses_qt_application_path_when_packaged(

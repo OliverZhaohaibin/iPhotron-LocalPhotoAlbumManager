@@ -1641,54 +1641,73 @@ class AssetRepository:
     def find_row_by_path(self, query: CollectionQuery, path: Path) -> int | None:
         """Return a path's row number within *query* without scanning rows in Python."""
 
-        rel = self._library_relative_path(path)
-        row = self.get_rows_by_rels([rel]).get(rel)
-        if row is None:
-            return None
-        asset_id = str(row.get("id") or "")
-        asset_rel = str(row.get("rel") or "")
-        sort_col = QueryBuilder._collection_sort_column(query)
-        sort_value = row.get(sort_col)
-        if sort_value is None and sort_col == "sort_ts":
-            sort_value = row.get("ts")
-        if not asset_id or not asset_rel or sort_value is None:
-            return None
-
-        match_sql, match_params = QueryBuilder.build_collection_query(
-            query,
-            select_clause="SELECT COUNT(*)",
-            include_order=False,
-        )
-        match_sql += " AND rel = ?" if " WHERE " in match_sql else " WHERE rel = ?"
-        match_params.append(rel)
-
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
+        started = monotonic_ms()
+        outcome = "missing"
         try:
-            matched = conn.execute(match_sql, match_params).fetchone()
-            if not matched or int(matched[0] or 0) == 0:
+            rel = self._library_relative_path(path)
+            row = self.get_rows_by_rels([rel]).get(rel)
+            if row is None:
+                return None
+            asset_id = str(row.get("id") or "")
+            asset_rel = str(row.get("rel") or "")
+            sort_col = QueryBuilder._collection_sort_column(query)
+            sort_value = row.get(sort_col)
+            if sort_value is None and sort_col == "sort_ts":
+                sort_value = row.get("ts")
+            if not asset_id or not asset_rel or sort_value is None:
                 return None
 
-            before_where, before_params = QueryBuilder.build_collection_where(query)
-            if query.sort_direction.value == "ASC":
-                before_where.append(
-                    f"({sort_col} < ? OR ({sort_col} = ? AND "
-                    "(id < ? OR (id = ? AND rel < ?))))"
-                )
-            else:
-                before_where.append(
-                    f"({sort_col} > ? OR ({sort_col} = ? AND "
-                    "(id > ? OR (id = ? AND rel > ?))))"
-                )
-            before_params.extend(
-                [sort_value, sort_value, asset_id, asset_id, asset_rel]
+            match_sql, match_params = QueryBuilder.build_collection_query(
+                query,
+                select_clause="SELECT COUNT(*)",
+                include_order=False,
             )
-            before_sql = "SELECT COUNT(*) FROM assets WHERE " + " AND ".join(before_where)
-            before = conn.execute(before_sql, before_params).fetchone()
-            return int(before[0] if before else 0)
+            match_sql += " AND rel = ?" if " WHERE " in match_sql else " WHERE rel = ?"
+            match_params.append(rel)
+
+            conn = self._db_manager.get_connection()
+            should_close = conn != self._db_manager._conn
+            try:
+                matched = conn.execute(match_sql, match_params).fetchone()
+                if not matched or int(matched[0] or 0) == 0:
+                    return None
+
+                before_where, before_params = QueryBuilder.build_collection_where(query)
+                if query.sort_direction.value == "ASC":
+                    before_where.append(
+                        f"({sort_col} < ? OR ({sort_col} = ? AND "
+                        "(id < ? OR (id = ? AND rel < ?))))"
+                    )
+                else:
+                    before_where.append(
+                        f"({sort_col} > ? OR ({sort_col} = ? AND "
+                        "(id > ? OR (id = ? AND rel > ?))))"
+                    )
+                before_params.extend(
+                    [sort_value, sort_value, asset_id, asset_id, asset_rel]
+                )
+                before_sql = "SELECT COUNT(*) FROM assets WHERE " + " AND ".join(before_where)
+                before = conn.execute(before_sql, before_params).fetchone()
+                resolved_row = int(before[0] if before else 0)
+                outcome = "resolved"
+                return resolved_row
+            finally:
+                if should_close:
+                    conn.close()
+        except sqlite3.Error:
+            outcome = "sqlite_error"
+            raise
+        except Exception:
+            outcome = "error"
+            raise
         finally:
-            if should_close:
-                conn.close()
+            emit_perf_event(
+                "find_row_by_path_finished",
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                outcome=outcome,
+                on_main_thread=threading.current_thread() is threading.main_thread(),
+                thread=threading.current_thread().name,
+            )
 
     def find_live_partner(self, asset_id: str) -> Dict[str, Any] | None:
         """Return the row for an asset's Live Photo partner, if indexed."""

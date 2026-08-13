@@ -334,6 +334,10 @@ def _startup_hang_diagnostics_enabled() -> bool:
 def _enable_startup_hang_diagnostics() -> None:
     """Enable opt-in traceback dumps for startup freezes."""
 
+    from iPhoto.runtime_diagnostics import enable_runtime_diagnostics
+
+    if enable_runtime_diagnostics():
+        return
     if not _startup_hang_diagnostics_enabled():
         return
     try:

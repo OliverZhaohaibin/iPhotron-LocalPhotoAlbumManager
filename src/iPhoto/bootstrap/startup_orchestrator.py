@@ -192,6 +192,10 @@ class StartupOrchestrator(QObject):
 
     @staticmethod
     def _cancel_hang_diagnostics() -> None:
+        from iPhoto.runtime_diagnostics import runtime_diagnostics_active
+
+        if runtime_diagnostics_active():
+            return
         try:
             import faulthandler
 

@@ -439,6 +439,7 @@ class DesktopCoordinatorRuntime(QObject):
             zoom_handler=self._playback.zoom_handler,
         )
         self._edit.stillEditFinished.connect(self._playback.handle_still_edit_finished)
+        self._edit.editUnavailable.connect(self._status_bar.show_message)
         self._shortcut_manager.set_edit_coordinator(self._edit)
         return self._edit
 

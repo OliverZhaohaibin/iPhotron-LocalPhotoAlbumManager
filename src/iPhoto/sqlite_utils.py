@@ -28,10 +28,12 @@ def configure_sqlite_connection(
     *,
     foreign_keys: bool = False,
     wal: bool = False,
+    busy_timeout_ms: int = SQLITE_BUSY_TIMEOUT_MS,
 ) -> None:
     """Apply common per-connection pragmas, and initialize WAL once per DB path."""
 
-    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    timeout_ms = max(0, int(busy_timeout_ms))
+    conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
     if foreign_keys:
         conn.execute("PRAGMA foreign_keys=ON")
     if not wal:

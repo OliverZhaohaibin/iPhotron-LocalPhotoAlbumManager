@@ -838,6 +838,14 @@ class PlayerViewController(QObject):
         if metrics is None:
             if intent.reason != "prefetch" and intent.generation == self._request_generation:
                 self._pending_layout_intent = (intent, dict(adjustments))
+                emit_detail_event(
+                    "viewport_waiting",
+                    generation=int(intent.generation),
+                    asset_id=intent.asset_id,
+                )
+                # One queued retry covers the route/layout turn.  If the
+                # viewport is still zero-sized, viewportMetricsChanged wakes
+                # the request later without an unbounded 16 ms timer loop.
                 QTimer.singleShot(0, self._retry_pending_layout_intent)
                 return True
             return False
@@ -1000,6 +1008,9 @@ class PlayerViewController(QObject):
                 self._lod_timer.start()
 
     def _on_viewport_metrics_changed(self) -> None:
+        if self._pending_layout_intent is not None:
+            self._retry_pending_layout_intent()
+            return
         if self._active_source_identity is None:
             return
         zoom_getter = getattr(self._image_viewer, "zoom_factor", None)
@@ -1038,7 +1049,6 @@ class PlayerViewController(QObject):
             self._pending_layout_intent = None
             return
         if self._viewport_metrics() is None:
-            QTimer.singleShot(16, self._retry_pending_layout_intent)
             return
         self._pending_layout_intent = None
         self._dispatch_prepared_intent(intent, adjustments)
@@ -1445,15 +1455,26 @@ class PlayerViewController(QObject):
                     release_observations()
         self._render_sessions.clear()
         if current is not None:
-            self._render_sessions[self._render_session_key_for_surface(current.current_surface)] = current
+            current_key = self._render_session_key_for_surface(current.current_surface)
+            self._render_sessions[current_key] = current
+
+    def has_current_render_session(self, source: Path) -> bool:
+        """Return whether the source owns the currently drawn still texture."""
+
+        session = self._current_render_session
+        if session is None or session.source != Path(source).expanduser().absolute():
+            return False
+        if self._image_viewer.current_image_source() != session.current_texture_key:
+            return False
+        return True
 
     def acquire_render_session(self, source: Path) -> PhotoRenderSessionHandle | None:
         """Acquire the current still session without reading or decoding the source."""
 
-        session = self._current_render_session
-        if session is None or session.source != Path(source).expanduser().absolute():
+        if not self.has_current_render_session(source):
             return None
-        if self._image_viewer.current_image_source() != session.current_texture_key:
+        session = self._current_render_session
+        if session is None:  # Defensive narrowing for static type checkers.
             return None
         session.edit_references += 1
         self._touch_render_session(session)

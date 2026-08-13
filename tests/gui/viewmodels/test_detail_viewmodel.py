@@ -419,3 +419,45 @@ def test_store_row_change_refreshes_current_presentation():
     vm._handle_row_changed(0)
 
     assert vm.presentation.value.is_favorite is True
+
+
+def test_scan_row_relocation_keeps_render_generation() -> None:
+    vm, store, session, _ = _make_vm()
+    first = _make_dto("/tmp/photo.jpg", is_favorite=False)
+    relocated = _make_dto("/tmp/photo.jpg", is_favorite=True)
+    first.metadata["source_mtime_ns"] = 100
+    relocated.metadata["source_mtime_ns"] = 100
+    store.asset_at.side_effect = [first, relocated]
+    session.set_current_row.return_value = first.abs_path
+    session.current_row.return_value = 7
+    session.current_source.return_value = first.abs_path
+
+    vm.show_row(0)
+    initial = vm.presentation.value
+    vm._handle_store_changed()
+    refreshed = vm.presentation.value
+
+    assert initial.render_key == refreshed.render_key
+    assert refreshed.row == 7
+    assert refreshed.is_favorite is True
+    assert refreshed.request_generation == initial.request_generation
+
+
+def test_source_revision_refresh_allocates_new_render_generation() -> None:
+    vm, store, session, _ = _make_vm()
+    first = _make_dto("/tmp/photo.jpg")
+    revised = _make_dto("/tmp/photo.jpg")
+    first.metadata["source_mtime_ns"] = 100
+    revised.metadata["source_mtime_ns"] = 200
+    store.asset_at.side_effect = [first, revised]
+    session.set_current_row.return_value = first.abs_path
+    session.current_row.return_value = 0
+    session.current_source.return_value = first.abs_path
+
+    vm.show_row(0)
+    initial = vm.presentation.value
+    vm._handle_store_changed()
+    refreshed = vm.presentation.value
+
+    assert initial.render_key != refreshed.render_key
+    assert refreshed.request_generation == initial.request_generation + 1

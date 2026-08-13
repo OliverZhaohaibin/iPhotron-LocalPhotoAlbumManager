@@ -214,6 +214,48 @@ def test_relative_navigation_preserves_single_step_behavior() -> None:
     coordinator.play_asset.assert_called_once_with(2)
 
 
+def test_fullscreen_keeps_active_still_transaction() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = _make_presentation(path="/fake/photo.jpg", is_video=False)
+    transaction = PlaybackCoordinator._transaction_for_presentation(presentation)
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(transaction.generation)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=1))
+    coordinator.current_row = Mock(return_value=0)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = presentation
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(has_current_render_session=Mock(return_value=False))
+    coordinator._detail_render_coordinator = lifecycle
+    coordinator._detail_vm = Mock(show_current=Mock())
+
+    assert PlaybackCoordinator.prepare_fullscreen_asset(coordinator) is True
+
+    coordinator._detail_vm.show_current.assert_not_called()
+
+
+def test_fullscreen_restarts_still_after_terminal_without_render_session() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = _make_presentation(path="/fake/photo.jpg", is_video=False)
+    transaction = PlaybackCoordinator._transaction_for_presentation(presentation)
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_failed(transaction.generation, "abandoned")
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=1))
+    coordinator.current_row = Mock(return_value=0)
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._current_presentation = presentation
+    coordinator._active_live_motion = None
+    coordinator._player_view = Mock(has_current_render_session=Mock(return_value=False))
+    coordinator._detail_render_coordinator = lifecycle
+    coordinator._detail_vm = Mock(show_current=Mock())
+
+    assert PlaybackCoordinator.prepare_fullscreen_asset(coordinator) is True
+
+    coordinator._detail_vm.show_current.assert_called_once_with()
+
+
 def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._current_presentation = None
@@ -265,6 +307,76 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
 
     coordinator._render_presentation.assert_not_called()
     coordinator._update_favorite_icon.assert_called_once_with(True)
+
+
+def test_scan_row_relocation_reuses_preparing_still_without_covering_it() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    previous = replace(
+        _make_presentation(path="/fake/photo.jpg", is_video=False),
+        row=0,
+        source_identity=AssetSourceIdentity.create(
+            Path("/fake/photo.jpg"),
+            source_mtime_ns=10,
+        ),
+    )
+    relocated = replace(previous, row=7, is_favorite=True)
+    transaction = PlaybackCoordinator._transaction_for_presentation(previous)
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(transaction.generation)
+    active_token = object()
+    coordinator._current_presentation = previous
+    coordinator._detail_render_coordinator = lifecycle
+    coordinator._detail_render_transaction = transaction
+    coordinator._active_async_token = active_token
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(set_current_row=Mock())
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = None
+
+    PlaybackCoordinator._handle_presentation_changed(coordinator, relocated)
+
+    assert coordinator._current_presentation == relocated
+    assert coordinator._active_async_token is active_token
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.PREPARING
+    coordinator._select_filmstrip_row.assert_called_once_with(7)
+    coordinator._player_view.show_placeholder.assert_not_called()
+    coordinator._render_presentation.assert_not_called()
+
+
+def test_duplicate_lifecycle_transaction_never_covers_existing_surface() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = _make_presentation(path="/fake/photo.jpg", is_video=False)
+    transaction = PlaybackCoordinator._transaction_for_presentation(presentation)
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(transaction.generation)
+    active_token = object()
+    coordinator._current_presentation = None
+    coordinator._detail_render_coordinator = lifecycle
+    coordinator._detail_render_transaction = transaction
+    coordinator._active_async_token = active_token
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(set_current_row=Mock())
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._clear_play_profile = Mock()
+
+    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    assert coordinator._active_async_token is active_token
+    coordinator._player_view.show_placeholder.assert_not_called()
+    coordinator._render_presentation.assert_not_called()
 
 
 def test_handle_presentation_changed_rerenders_same_asset_for_new_generation() -> None:
@@ -732,7 +844,59 @@ def test_render_presentation_stops_video_area_before_showing_still() -> None:
         transaction=None,
     )
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
+    coordinator._edit_button.setEnabled.assert_called_once_with(False)
     coordinator._refresh_face_name_overlay_for_presentation.assert_not_called()
+
+
+def test_still_edit_enables_only_after_surface_is_presented() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.jpg")
+    presentation = _make_presentation(path=str(still), is_video=False)
+    transaction = PlaybackCoordinator._transaction_for_presentation(presentation)
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(transaction.generation)
+    coordinator._current_presentation = presentation
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_render_coordinator = lifecycle
+    coordinator._active_live_motion = None
+    coordinator._edit_button = Mock(setEnabled=Mock())
+    coordinator._schedule_recognition_overlay = Mock()
+    coordinator._prefetch_neighbor_stills = Mock()
+
+    PlaybackCoordinator._on_still_frame_presented(
+        coordinator,
+        still,
+        transaction.generation,
+    )
+
+    coordinator._edit_button.setEnabled.assert_called_once_with(True)
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.PRESENTED
+
+
+def test_still_loading_failure_marks_transaction_terminal_and_disables_edit() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    still = Path("/fake/photo.jpg")
+    presentation = _make_presentation(path=str(still), is_video=False)
+    transaction = PlaybackCoordinator._transaction_for_presentation(presentation)
+    lifecycle = DetailRenderCoordinator()
+    lifecycle.begin(transaction)
+    lifecycle.mark_preparing(transaction.generation)
+    coordinator._current_presentation = presentation
+    coordinator._detail_render_transaction = transaction
+    coordinator._detail_render_coordinator = lifecycle
+    coordinator._edit_button = Mock(setEnabled=Mock())
+
+    PlaybackCoordinator._on_still_loading_failed(
+        coordinator,
+        still,
+        "decoder failed",
+    )
+
+    assert lifecycle.snapshot is not None
+    assert lifecycle.snapshot.state is DetailRenderState.FAILED
+    coordinator._edit_button.setEnabled.assert_called_once_with(False)
 
 
 def test_live_photo_fallback_reuses_the_asset_identity() -> None:

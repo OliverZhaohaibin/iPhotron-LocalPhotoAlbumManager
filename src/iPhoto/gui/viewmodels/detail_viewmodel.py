@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
@@ -55,6 +55,38 @@ class DetailPresentation:
     request_generation: int = 0
     video_duration_hint: float | None = None
     source_identity: AssetSourceIdentity | None = None
+
+    @property
+    def render_key(self) -> tuple[object, ...]:
+        """Return the stable media identity for one visible render transaction.
+
+        Gallery rows are positional and can move whenever a scan publishes a
+        newly sorted batch.  They must therefore never participate in render
+        identity.  Metadata-only changes (favorite, title, location, and
+        similar chrome) also intentionally stay outside this key.
+        """
+
+        identity = self.source_identity or AssetSourceIdentity.from_info(
+            self.path,
+            self.info,
+        )
+        media_kind = "video" if self.is_video else "image"
+        if media_kind == "image" and self.is_live and self.live_motion_abs is not None:
+            media_kind = "live_motion"
+        live_motion = (
+            Path(self.live_motion_abs).expanduser().absolute()
+            if self.live_motion_abs is not None
+            else None
+        )
+        return (
+            str(self.asset_id),
+            identity.path,
+            media_kind,
+            identity.revision,
+            int(identity.orientation),
+            int(self.reload_token),
+            live_motion,
+        )
 
 
 class DetailViewModel(BaseViewModel):
@@ -240,6 +272,27 @@ class DetailViewModel(BaseViewModel):
             dto,
             request_generation=self._request_generation,
         )
+        previous = self.presentation.value
+        if (
+            isinstance(previous, DetailPresentation)
+            and previous.render_key != presentation.render_key
+        ):
+            # A store refresh normally changes only row/chrome metadata.  If a
+            # real render input changed, give it a fresh generation so a late
+            # result from the old source revision cannot be accepted as current.
+            self._request_generation = max(
+                int(self._request_generation),
+                int(previous.request_generation),
+            ) + 1
+            presentation = replace(
+                presentation,
+                request_generation=self._request_generation,
+            )
+            emit_detail_event(
+                "render_input_changed",
+                generation=self._request_generation,
+                asset_id=presentation.asset_id,
+            )
         self.presentation.value = presentation
         self.presentation_changed.emit(presentation)
 

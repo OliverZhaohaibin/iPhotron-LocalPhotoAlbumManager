@@ -38,6 +38,7 @@ from iPhoto.gui.detail_pipeline import (
 from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
 from iPhoto.gui.detail_render_coordinator import (
     DetailRenderCoordinator,
+    DetailRenderState,
     DetailSurfacePresentationResult,
 )
 from iPhoto.gui.i18n import tr
@@ -514,6 +515,28 @@ class PlaybackCoordinator(QObject):
             source_identity=identity,
         )
 
+    @staticmethod
+    def _transaction_for_presentation(
+        presentation: DetailPresentation,
+    ) -> DetailRenderTransaction:
+        identity = presentation.source_identity or AssetSourceIdentity.from_info(
+            presentation.path,
+            presentation.info,
+        )
+        media_kind = "video" if presentation.is_video else "image"
+        if (
+            media_kind == "image"
+            and presentation.is_live
+            and presentation.live_motion_abs is not None
+        ):
+            media_kind = "live_motion"
+        return DetailRenderTransaction(
+            generation=presentation.request_generation,
+            asset_id=presentation.asset_id,
+            media_kind=media_kind,
+            source_identity=identity,
+        )
+
     def _async_token_is_current(
         self,
         token: object,
@@ -683,6 +706,41 @@ class PlaybackCoordinator(QObject):
         target_row = current_row if current_row >= 0 else 0
         if current_row < 0 or not self._router.is_detail_view_active():
             self.play_asset(target_row)
+            return True
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None:
+            self.play_asset(target_row)
+            return True
+        if presentation.is_video or getattr(self, "_active_live_motion", None):
+            return True
+
+        has_session = getattr(self._player_view, "has_current_render_session", None)
+        if callable(has_session) and has_session(presentation.path):
+            return True
+
+        expected = self._transaction_for_presentation(presentation)
+        snapshot = self._render_transaction_coordinator().snapshot
+        if (
+            snapshot is not None
+            and snapshot.transaction == expected
+            and snapshot.state
+            in {
+                DetailRenderState.CREATED,
+                DetailRenderState.ROUTED,
+                DetailRenderState.PREPARING,
+            }
+        ):
+            # Fullscreen will emit viewportMetricsChanged; keep the one active
+            # decode rather than starting a competing request.
+            return True
+
+        emit_detail_event(
+            "fullscreen_still_recovery",
+            generation=presentation.request_generation,
+            asset_id=presentation.asset_id,
+            state=snapshot.state.value if snapshot is not None else "missing",
+        )
+        self._detail_vm.show_current()
         return True
 
     def show_placeholder_in_viewer(self) -> None:
@@ -699,6 +757,9 @@ class PlaybackCoordinator(QObject):
         still_presented = getattr(self._player_view, "stillFramePresented", None)
         if still_presented is not None:
             still_presented.connect(self._on_still_frame_presented)
+        still_failed = getattr(self._player_view, "imageLoadingFailed", None)
+        if still_failed is not None:
+            still_failed.connect(self._on_still_loading_failed)
         self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
         self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
         self._player_view.video_area.durationChanged.connect(self._on_video_duration_changed)
@@ -959,47 +1020,70 @@ class PlaybackCoordinator(QObject):
         self._asset_model.set_current_row(row)
         self.assetChanged.emit(row)
         self._update_header(presentation)
-        same_asset = (
+        self._select_filmstrip_row(row)
+        same_render_request = (
             previous is not None
-            and previous.row == presentation.row
-            and previous.path == presentation.path
-            and previous.reload_token == presentation.reload_token
+            and previous.render_key == presentation.render_key
             and previous.request_generation == presentation.request_generation
         )
-        if same_asset:
+        if same_render_request:
+            emit_detail_event(
+                "render_transaction_reused",
+                generation=presentation.request_generation,
+                asset_id=presentation.asset_id,
+                row=row,
+            )
             self._update_favorite_icon(presentation.is_favorite)
             if self._info_panel and presentation.info_panel_visible:
                 self._refresh_info_panel(presentation.info)
                 self._info_panel.show()
-            elif self._info_panel and self._info_panel.isVisible() and not presentation.info_panel_visible:
+            elif (
+                self._info_panel
+                and self._info_panel.isVisible()
+                and not presentation.info_panel_visible
+            ):
                 self._info_panel.close()
             self._clear_play_profile(presentation.row)
             return
-        identity = presentation.source_identity or AssetSourceIdentity.from_info(
-            presentation.path,
-            presentation.info,
-        )
-        media_kind = "video" if presentation.is_video else "image"
+        transaction = self._transaction_for_presentation(presentation)
+        lifecycle = self._render_transaction_coordinator()
+        active_snapshot = lifecycle.snapshot
         if (
-            media_kind == "image"
-            and presentation.is_live
-            and presentation.live_motion_abs is not None
+            active_snapshot is not None
+            and active_snapshot.transaction.generation == transaction.generation
+            and active_snapshot.transaction != transaction
         ):
-            media_kind = "live_motion"
-        transaction = DetailRenderTransaction(
-            generation=presentation.request_generation,
-            asset_id=presentation.asset_id,
-            media_kind=media_kind,
-            source_identity=identity,
-        )
+            emit_detail_event(
+                "render_generation_collision",
+                generation=transaction.generation,
+                asset_id=transaction.asset_id,
+                state=active_snapshot.state.value,
+            )
+            # A generation may identify only one immutable render input.  Ask
+            # the ViewModel for a new click-generation instead of letting old
+            # and new decoder results share an acceptance token.
+            QTimer.singleShot(0, self._detail_vm.show_current)
+            self._clear_play_profile(presentation.row)
+            return
+        if not lifecycle.begin(transaction):
+            snapshot = lifecycle.snapshot
+            emit_detail_event(
+                "render_transaction_duplicate",
+                generation=presentation.request_generation,
+                asset_id=presentation.asset_id,
+                state=snapshot.state.value if snapshot is not None else "missing",
+            )
+            # The current transaction already owns the decode/presentation.
+            # Never cover its surface or invalidate its async token merely
+            # because Gallery published another view of the same asset.
+            self._clear_play_profile(presentation.row)
+            return
         self._detail_render_transaction = transaction
         self._asset_generation = int(getattr(self, "_asset_generation", 0)) + 1
         self._library_epoch = self._read_library_epoch()
         self._active_async_token = self._token_for_presentation(presentation)
         self._pending_video_token = None
         self._pending_location_token = None
-        self._render_transaction_coordinator().begin(transaction)
-        self._select_filmstrip_row(row)
         self._player_view.show_placeholder("")
         QTimer.singleShot(
             0,
@@ -1048,7 +1132,7 @@ class PlaybackCoordinator(QObject):
         displayed asset instead of transiently degrading it to a still image.
         """
 
-        if previous.row != current.row or previous.path != current.path:
+        if previous.asset_id != current.asset_id or previous.path != current.path:
             return current
         if current.is_live and current.live_motion_abs is not None:
             return current
@@ -1088,7 +1172,7 @@ class PlaybackCoordinator(QObject):
         self._favorite_button.setEnabled(presentation.can_toggle_favorite)
         self._info_button.setEnabled(True)
         self._share_button.setEnabled(presentation.can_share)
-        self._edit_button.setEnabled(presentation.can_edit)
+        self._edit_button.setEnabled(presentation.can_edit and presentation.is_video)
         self._rotate_button.setEnabled(presentation.can_rotate)
         self._update_favorite_icon(presentation.is_favorite)
 
@@ -1487,9 +1571,34 @@ class PlaybackCoordinator(QObject):
             return
         self._presented_still_source = presented_source
         self._presented_still_generation = int(generation)
+        edit_button = getattr(self, "_edit_button", None)
+        if edit_button is not None:
+            edit_button.setEnabled(presentation.can_edit)
         self._schedule_recognition_overlay(presentation, int(generation))
         if not getattr(self, "_active_live_motion", None):
             self._prefetch_neighbor_stills(presentation.row)
+
+    @Slot(object, str)
+    def _on_still_loading_failed(self, source: object, message: str) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or presentation.is_video:
+            return
+        try:
+            failed_source = Path(source)
+        except TypeError:
+            return
+        if failed_source != presentation.path:
+            return
+        transaction = getattr(self, "_detail_render_transaction", None)
+        if transaction is None or transaction.source_identity.path != failed_source:
+            return
+        self._render_transaction_coordinator().mark_failed(
+            transaction.generation,
+            str(message),
+        )
+        edit_button = getattr(self, "_edit_button", None)
+        if edit_button is not None:
+            edit_button.setEnabled(False)
 
     def _prefetch_neighbor_stills(self, row: int) -> None:
         descriptor_getter = getattr(

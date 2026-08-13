@@ -99,6 +99,38 @@ def test_path_only_prefetch_uses_the_display_image_fallback_identity() -> None:
     assert intent.reason == "prefetch"
 
 
+def test_zero_sized_viewport_waits_for_metrics_signal_without_timer_loop() -> None:
+    intent = _PreparedRequestIntent(
+        asset_id="asset-1",
+        source_identity=AssetSourceIdentity.create(Path("/tmp/photo.jpg")),
+        generation=7,
+        reason="initial",
+    )
+    dispatch = Mock(return_value=True)
+    metrics = Mock(side_effect=[None, ((1200, 900), 1.0)])
+    controller = SimpleNamespace(
+        _pending_layout_intent=(intent, {"Exposure": 0.2}),
+        _request_generation=7,
+        _viewport_metrics=metrics,
+        _dispatch_prepared_intent=dispatch,
+        _active_source_identity=None,
+    )
+    controller._retry_pending_layout_intent = lambda: (
+        PlayerViewController._retry_pending_layout_intent(controller)
+    )
+
+    with patch(
+        "iPhoto.gui.ui.controllers.player_view_controller.QTimer.singleShot"
+    ) as single_shot:
+        PlayerViewController._retry_pending_layout_intent(controller)
+        assert controller._pending_layout_intent is not None
+        PlayerViewController._on_viewport_metrics_changed(controller)
+
+    single_shot.assert_not_called()
+    assert controller._pending_layout_intent is None
+    dispatch.assert_called_once_with(intent, {"Exposure": 0.2})
+
+
 def test_clear_frame_cache_invalidates_old_library_requests_before_rebind() -> None:
     calls: list[object] = []
     controller = SimpleNamespace(

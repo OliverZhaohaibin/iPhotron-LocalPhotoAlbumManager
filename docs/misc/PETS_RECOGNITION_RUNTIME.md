@@ -11,8 +11,8 @@ Pets is an independent bounded context under `src/iPhoto/pets/`.
 
 | Component | Responsibility |
 | --- | --- |
-| `PetClusterPipeline` | YOLOX detection, DINOv2 embeddings, species-aware clustering, and stable identity canonicalization. |
-| `PetScanWorker` | Low-pressure background batches, status transitions, model-version upgrades, and cancellation. |
+| `PetClusterPipeline` | YOLOX detection, DINOv2 embeddings, species-aware bounded single-link clustering, and stable identity canonicalization. |
+| `PetScanWorker` | Low-pressure feature-activated background batches, status transitions, model-version upgrades, and cancellation. |
 | `PetIndexCoordinator` | Serializes snapshot mutations, updates asset bookkeeping, and publishes committed revisions. |
 | `PetRepository` | Rebuildable detections and clustered pet records in `pet_index.db`. |
 | `PetStateRepository` | Durable profiles, names, covers, hidden flags, rejected keys, and redirects in `pet_state.db`. |
@@ -39,8 +39,7 @@ pip install -e ".[pets-ai]"
 ```
 
 The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Bundled models are read-only fallbacks; downloads are written to the
-platform user cache:
+`certifi`. Build-time model staging uses:
 
 ```text
 src/extension/models/pets/
@@ -48,14 +47,17 @@ src/extension/models/pets/
 └── embedding/dinov2_vits14/dinov2_vits14.pt
 ```
 
-`IPHOTO_PET_MODEL_DIR` overrides that root. Missing models may be populated on
-first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL defaults
-to the upstream YOLOX release and can be overridden with
-`IPHOTO_PET_DETECTOR_MODEL_URL`. Production does not execute Torch Hub. DINOv2
-must be supplied as the hash- and size-verified TorchScript artifact declared
-in `iPhoto/pets/model_manifest.json`; Torch Hub is restricted to the release
-conversion tool. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without
-disabling the rest of the application.
+That tree is a packaging/staging location, not a guarantee that a fresh source
+checkout contains the model binaries. Runtime model resolution may also use the
+platform user cache. `IPHOTO_PET_MODEL_DIR` overrides the model root.
+
+The detector may be populated on first use unless
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`; its URL defaults to the upstream YOLOX
+release and can be overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`. Production
+does not execute Torch Hub. DINOv2 must be supplied as the hash- and size-verified
+TorchScript artifact declared in `iPhoto/pets/model_manifest.json`; Torch Hub is
+only model provenance/conversion tooling. `IPHOTO_PET_SCAN_DISABLED=1` disables
+Pets scanning without disabling the rest of the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
 runtime and the two model files under `extension/models/pets`. A build that
@@ -71,12 +73,18 @@ and minimum-size thresholds.
 
 After species filtering and pet-to-pet deduplication, accepted pet boxes are
 compared with automatic and manual People face boxes for the same asset. People
-is authoritative when either intersection-over-union is at least `0.50`, or the
-intersection covers at least `90%` of the smaller box. Conflicting pet boxes are
-discarded before crop embedding and thumbnail generation. Confidence does not
-override People priority. The suppressed result is absent from dashboard cards,
-pet gallery queries, detail annotations, and overlays rather than being hidden
-only in the dashboard.
+normally remains authoritative for strong conflicts, but face overlap is not an
+unconditional pet-suppression rule. A plausible larger pet-body detection is
+preserved when it substantially contains a much smaller face box instead of
+behaving like a duplicate person detection. The current guard treats a pet box
+as materially larger at a pet-to-face area ratio of `1.5` or greater and avoids
+using this exception for image-filling/mural-like detections whose box covers at
+least `0.60` of the image area.
+
+The result of the People/Pets conflict filter is part of the committed Pets
+snapshot. Suppressed detections are absent from dashboard cards, pet gallery
+queries, detail annotations, and overlays rather than being hidden only in the
+dashboard.
 
 Each accepted crop receives:
 
@@ -86,19 +94,20 @@ Each accepted crop receives:
 - a cropped PNG under `.iPhoto/pets/thumbnails/`;
 - model, image-size, confidence, and species metadata.
 
-Clustering is species-separated and uses the current complete-link pipeline
-(`species-complete-link-v1`) with a default cosine distance threshold of
-`0.42`. Incremental identity matching uses a progressively expanded ANN
-shortlist followed by exact complete-link verification against every persisted
-member of each shortlisted candidate. Cats and dogs must never enter the same
-identity cluster. Stable state uses `pet_key` mappings and profile distance to
-preserve canonical `pet_id` values across rebuilds.
+Clustering is species-separated and uses the current
+`species-bounded-single-link-v3` pipeline. Candidate edges are formed from
+embedding similarity, but ordinary single-link chaining is constrained by
+cluster-diameter and cannot-link/anti-chain-merge checks so a sequence of
+locally similar detections cannot bridge identities that are globally too far
+apart. Cats and dogs must never enter the same identity cluster. Stable state
+uses `pet_key` mappings and profile distance to preserve canonical `pet_id`
+values across rebuilds.
 
 The detector and clustering pipeline versions are stored separately. A detector
 version change resets eligible `done` assets to `pending`; a clustering-only
 version change reclusters stored embeddings without resetting asset scan state.
-The People-priority filter is part of the detector pipeline version so existing
-libraries are re-evaluated after upgrading.
+The People/Pets conflict filter is part of the detector pipeline version so
+existing libraries are re-evaluated after relevant upgrades.
 
 When an exact `pet_key` carries a canonical identity into a new embedding
 contract, compatible detections from the same batch may join that staged anchor.
@@ -125,16 +134,14 @@ starts before the previous drain finishes.
 | `done` | Detection completed, including valid images with no pets. |
 | `skipped` | Video, non-primary Live Photo component, or another ineligible asset. |
 
-Interactive scans start Face and Pet workers alongside metadata scanning and
-enqueue rows only after their asset batches commit. When a saved library needs
-a startup metadata scan, startup first warms the gallery, runs that scan, then
-starts both AI workers with closed input so they drain persisted
-`pending`/`retry` rows. This avoids model initialization and competing AI work
-on the first-frame path. If the metadata scan scope is already complete, startup
-still starts the Pet backfill worker whenever persisted `pending` or `retry` rows
-need draining. With no metadata scan and no queued AI work, startup does not
-launch scan workers; an explicit rescan is only needed to reset or rediscover
-otherwise completed/failed assets.
+Application startup and metadata-scan completion do not by themselves start the
+People or Pets recognition workers. Startup may discover/persist pending work,
+but model initialization and recognition scanning remain outside the first-frame
+path. The recognition runtime is activated on first use of the recognition
+feature after its initial viewport is ready; the coordinator then starts only
+the required worker(s) and drains eligible persisted `pending`/`retry` work.
+Interactive rescans may enqueue newly committed assets for a recognition runtime
+that is already active, but they do not restore unconditional startup scanning.
 
 The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies/models are runtime-availability failures: pending rows are

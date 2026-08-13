@@ -299,6 +299,21 @@ class DetailViewModel(BaseViewModel):
     def _handle_store_changed(self) -> None:
         current_row = self._media_session.current_row()
         current_path = self._media_session.current_source()
+        presentation = self.presentation.value
+        emit_detail_event(
+            "detail_store_refresh",
+            generation=self._request_generation,
+            current_row=current_row,
+            has_current_source=isinstance(current_path, Path),
+            presentation_row=(
+                presentation.row if isinstance(presentation, DetailPresentation) else None
+            ),
+            presentation_generation=(
+                presentation.request_generation
+                if isinstance(presentation, DetailPresentation)
+                else None
+            ),
+        )
         if current_row < 0 or not isinstance(current_path, Path):
             return
         self.current_row.value = current_row

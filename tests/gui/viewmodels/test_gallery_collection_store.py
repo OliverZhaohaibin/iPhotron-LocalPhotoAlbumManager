@@ -217,6 +217,24 @@ def test_scan_row_to_dto_ignores_invalid_micro_thumbnail_bytes() -> None:
     assert dto.micro_thumbnail is None
 
 
+def test_diagnostic_snapshot_contains_only_in_memory_collection_state() -> None:
+    store = GalleryCollectionStore(
+        _FakeQueryService([]),
+        library_root=Path("/private/photos"),
+    )
+    store._total_count = 25
+    store._collection_revision = 9
+    store._pending_scan_rels.update({"secret/a.jpg", "secret/b.jpg"})
+
+    snapshot = store.diagnostic_snapshot()
+
+    assert snapshot["row_count"] == 25
+    assert snapshot["collection_revision"] == 9
+    assert snapshot["pending_scan_rows"] == 2
+    assert "private" not in str(snapshot)
+    assert "secret" not in str(snapshot)
+
+
 def test_load_initial_window_uses_sparse_cache() -> None:
     assets = [
         Asset(

@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
+from iPhoto.infrastructure.services.performance_events import emit_perf_event
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +177,7 @@ class _GalleryWindowWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - background Qt task
         request = self._request
+        started = time.perf_counter()
         try:
             reader = getattr(request.query_service, "read_gallery_asset_window", None)
             if not callable(reader):
@@ -226,6 +228,25 @@ class _GalleryWindowWorker(QRunnable):
                 int(window.collection_revision),
             )
             last = request.view_first + loaded_count - 1
+            emit_perf_event(
+                "gallery_window_worker_finished",
+                generation=request.generation,
+                requested_revision=request.collection_revision,
+                collection_revision=int(window.collection_revision),
+                elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                rows=len(rows),
+                total_count=total_count,
+                anchor_status=(
+                    selection_anchor_result.status
+                    if selection_anchor_result is not None
+                    else None
+                ),
+                anchor_elapsed_ms=(
+                    round(selection_anchor_result.elapsed_ms, 3)
+                    if selection_anchor_result is not None
+                    else None
+                ),
+            )
             self._signals.completed.emit(
                 GalleryWindowResult(
                     generation=request.generation,
@@ -249,6 +270,13 @@ class _GalleryWindowWorker(QRunnable):
                     request.limit,
                 )
         except Exception as exc:  # noqa: BLE001 - worker boundary
+            emit_perf_event(
+                "gallery_window_worker_failed",
+                generation=request.generation,
+                requested_revision=request.collection_revision,
+                elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                error=type(exc).__name__,
+            )
             self._signals.completed.emit(
                 GalleryWindowResult(
                     generation=request.generation,

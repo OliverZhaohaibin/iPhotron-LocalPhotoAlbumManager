@@ -335,6 +335,26 @@ class GalleryCollectionStore:
     def snapshot_signature(self) -> tuple[int, Optional[tuple[int, int]], int]:
         return (self._total_count, self._window_range, self._collection_revision)
 
+    def diagnostic_snapshot(self) -> dict[str, object]:
+        """Return privacy-safe in-memory state for opt-in runtime diagnostics."""
+
+        anchor = self._selection_anchor
+        return {
+            "row_count": self._total_count,
+            "cached_rows": len(self._row_cache),
+            "window": self._window_range,
+            "visible": self._visible_range,
+            "collection_revision": self._collection_revision,
+            "pinned_row": self._pinned_row,
+            "anchor_status": self._selection_anchor_status,
+            "anchor_previous_row": anchor.previous_row if anchor is not None else None,
+            "pending_window_requests": len(self._pending_window_generations),
+            "pending_row_loads": len(self._pending_row_loads),
+            "pending_scan_refresh": self._pending_scan_refresh,
+            "pending_scan_rows": len(self._pending_scan_rels),
+            "pending_moves": len(self._pending_moves),
+        }
+
     def live_partner_for(self, asset_id: str, root: Optional[Path] = None) -> Optional[AssetDTO]:
         find_live_partner = getattr(self._asset_query_service, "find_live_partner", None)
         if not callable(find_live_partner):

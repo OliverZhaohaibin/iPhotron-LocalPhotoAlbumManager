@@ -156,6 +156,43 @@ def test_adapter_init(adapter):
     assert adapter.rowCount() == 0
 
 
+def test_runtime_diagnostic_heartbeat_reports_privacy_safe_store_state(
+    adapter,
+    mock_store,
+    monkeypatch,
+) -> None:
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setenv("IPHOTO_RUNTIME_DIAG", "1")
+    monkeypatch.setattr(
+        adapter_module,
+        "emit_perf_event",
+        lambda name, **payload: emitted.append((name, payload)),
+    )
+    mock_store.diagnostic_snapshot.return_value = {
+        "row_count": 501,
+        "collection_revision": 12,
+        "anchor_status": "retry",
+    }
+    adapter._current_row = 7
+
+    adapter._log_runtime_diag_heartbeat()
+
+    assert emitted == [
+        (
+            "runtime_gui_heartbeat",
+            {
+                "heartbeat": 1,
+                "model_current_row": 7,
+                "viewport_generation": 0,
+                "pending_scan_batches": 0,
+                "row_count": 501,
+                "collection_revision": 12,
+                "anchor_status": "retry",
+            },
+        )
+    ]
+
+
 def test_info_role_contains_required_keys(adapter, mock_store):
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = _make_dto(

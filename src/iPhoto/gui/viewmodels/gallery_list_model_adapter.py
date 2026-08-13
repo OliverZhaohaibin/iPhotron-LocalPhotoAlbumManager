@@ -60,6 +60,10 @@ def _startup_hang_diag_enabled() -> bool:
     return os.environ.get("IPHOTO_STARTUP_HANG_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
 
 
+def _runtime_diag_enabled() -> bool:
+    return os.environ.get("IPHOTO_RUNTIME_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
+
+
 class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
 
@@ -112,6 +116,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_gallery_viewport_seen = False
         self._startup_gallery_thumbnail_seen = False
         self._startup_gallery_heartbeat_count = 0
+        self._runtime_diag_heartbeat_count = 0
         self._prioritize_timer = QTimer(self)
         self._prioritize_timer.setSingleShot(True)
         self._prioritize_timer.setInterval(16)
@@ -133,6 +138,12 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._startup_gallery_heartbeat_timer.setInterval(250)
         self._startup_gallery_heartbeat_timer.timeout.connect(
             self._log_startup_gallery_heartbeat
+        )
+        self._runtime_diag_heartbeat_timer = QTimer(self)
+        self._runtime_diag_heartbeat_timer.setSingleShot(False)
+        self._runtime_diag_heartbeat_timer.setInterval(1000)
+        self._runtime_diag_heartbeat_timer.timeout.connect(
+            self._log_runtime_diag_heartbeat
         )
         self._startup_gallery_timeout_timer = QTimer(self)
         self._startup_gallery_timeout_timer.setSingleShot(True)
@@ -159,6 +170,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         if callable(thumbnail_status_connect):
             thumbnail_status_connect(self._on_thumbnail_status_changed)
         self._bind_backfill_completion_signal(self._current_asset_query_service())
+        if _runtime_diag_enabled():
+            self._runtime_diag_heartbeat_timer.start()
 
     @classmethod
     def create(
@@ -477,7 +490,25 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     @Slot(object)
     def _on_window_result(self, result: GalleryWindowResult) -> None:
-        if self._store.apply_window_result(result):
+        anchor_result = result.selection_anchor_result
+        emit_perf_event(
+            "gallery_window_result_received",
+            generation=result.generation,
+            requested_revision=result.requested_revision,
+            collection_revision=result.collection_revision,
+            rows=len(result.rows),
+            total_count=result.total_count,
+            error=result.error,
+            anchor_status=(anchor_result.status if anchor_result is not None else None),
+        )
+        applied = self._store.apply_window_result(result)
+        emit_perf_event(
+            "gallery_window_result_applied",
+            generation=result.generation,
+            collection_revision=result.collection_revision,
+            applied=applied,
+        )
+        if applied:
             if self._startup_gallery_warmup_active:
                 self._startup_gallery_window_seen = True
                 mark("gallery_startup_warmup.first_window_applied")
@@ -514,6 +545,14 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     @Slot(object)
     def _enqueue_scan_batch_on_ui_thread(self, batch: object) -> None:
+        rows = getattr(batch, "rows", None)
+        emit_perf_event(
+            "gallery_scan_batch_received",
+            collection_revision=getattr(batch, "collection_revision", None),
+            ready_count=getattr(batch, "ready_count", None),
+            row_count=len(rows) if isinstance(rows, (list, tuple)) else None,
+            pending_batches=self._pending_scan_batch_count,
+        )
         record_batch = getattr(self._store, "record_scan_batch", None)
         if callable(record_batch):
             if record_batch(batch):
@@ -530,7 +569,12 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _flush_pending_scan_batches(self) -> None:
         if self._pending_scan_batch_count <= 0:
             return
+        coalesced_count = self._pending_scan_batch_count
         self._pending_scan_batch_count = 0
+        emit_perf_event(
+            "gallery_scan_batches_flushed",
+            coalesced_count=coalesced_count,
+        )
         flush = getattr(self._store, "flush_pending_scan_refresh", None)
         if callable(flush):
             flush()
@@ -1093,6 +1137,25 @@ class GalleryListModelAdapter(QAbstractListModel):
         )
         if self._startup_gallery_heartbeat_count >= 12:
             self._startup_gallery_heartbeat_timer.stop()
+
+    @Slot()
+    def _log_runtime_diag_heartbeat(self) -> None:
+        if not _runtime_diag_enabled():
+            self._runtime_diag_heartbeat_timer.stop()
+            return
+        self._runtime_diag_heartbeat_count += 1
+        snapshot_getter = getattr(self._store, "diagnostic_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        emit_perf_event(
+            "runtime_gui_heartbeat",
+            heartbeat=self._runtime_diag_heartbeat_count,
+            model_current_row=self._current_row,
+            viewport_generation=self._viewport_generation,
+            pending_scan_batches=self._pending_scan_batch_count,
+            **snapshot,
+        )
 
     def _reconcile_full_thumbnail_demand(self) -> None:
         demand = self._viewport_demand

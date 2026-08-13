@@ -9,7 +9,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for face overlay test
 import os
 
 from PySide6.QtCore import QEvent, QModelIndex, QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QCursor, QImage, QMouseEvent, QPixmap
+from PySide6.QtGui import QColor, QCursor, QImage, QMouseEvent, QPalette, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
@@ -315,6 +315,48 @@ def test_saved_name_editor_reuses_identity_dropdown_for_all_states(
     assert records[0][0].face_id == "face-1"
     assert records[0][1] == "person:person-a"
     assert _spy_records(rename_spy) == []
+
+
+def test_name_editor_and_dropdown_follow_application_palette(qapp) -> None:
+    original_palette = qapp.palette()
+    dark_palette = QPalette(original_palette)
+    dark_palette.setColor(QPalette.ColorRole.Window, QColor("#1C1C1E"))
+    dark_palette.setColor(QPalette.ColorRole.WindowText, QColor("#F5F5F7"))
+    dark_palette.setColor(QPalette.ColorRole.Base, QColor("#1C1C1E"))
+    dark_palette.setColor(QPalette.ColorRole.Text, QColor("#F5F5F7"))
+    dark_palette.setColor(QPalette.ColorRole.Highlight, QColor("#0A84FF"))
+    dark_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+
+    try:
+        qapp.setPalette(dark_palette)
+        _surface, viewer, overlay = _make_overlay(qapp)
+        overlay.set_annotations([_annotation(display_name="Bob")])
+        overlay.set_overlay_active(True)
+        viewer.viewTransformChanged.emit()
+        overlay._start_editing("face-1")
+        editor = overlay._editor
+        assert editor is not None
+
+        assert "background-color: rgba(28,28,30,244)" in editor.styleSheet()
+        popup = editor._completer.popup()
+        assert popup is not None
+        assert "background-color: rgba(28,28,30,246)" in popup.styleSheet()
+        assert "color: rgba(245,245,247,235)" in popup.styleSheet()
+
+        light_palette = QPalette(dark_palette)
+        light_palette.setColor(QPalette.ColorRole.Window, QColor("#F5F5F5"))
+        light_palette.setColor(QPalette.ColorRole.WindowText, QColor("#2B2B2B"))
+        light_palette.setColor(QPalette.ColorRole.Base, QColor("#F5F5F5"))
+        light_palette.setColor(QPalette.ColorRole.Text, QColor("#2B2B2B"))
+        qapp.setPalette(light_palette)
+        qapp.processEvents()
+
+        assert "background-color: rgba(245,245,245,244)" in editor.styleSheet()
+        assert "background-color: rgba(245,245,245,246)" in popup.styleSheet()
+        assert "color: rgba(43,43,43,235)" in popup.styleSheet()
+    finally:
+        qapp.setPalette(original_palette)
+        qapp.processEvents()
 
 
 @pytest.mark.parametrize("selection_method", ["mouse", "keyboard"])

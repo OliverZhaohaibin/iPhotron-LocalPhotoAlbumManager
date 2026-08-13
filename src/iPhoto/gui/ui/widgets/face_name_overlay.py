@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPalette,
     QPen,
     QPixmap,
     QStandardItem,
@@ -98,18 +99,13 @@ class _FaceNameEditor(QLineEdit):
         self._suggestions: list[_NameSuggestion] = []
         self._selected_identity_key: str | None = None
         self._selected_identity_name: str | None = None
+        self._applying_theme_styles = False
         self._model = QStandardItemModel(self)
         self._completer = QCompleter(self._model, self)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
         popup = QListView(self)
         popup.setUniformItemSizes(True)
-        popup.setStyleSheet(
-            "QListView { background-color: rgba(255,255,255,246); border: 1px solid rgba(0,0,0,40);"
-            " border-radius: 12px; padding: 6px; outline: none; }"
-            "QListView::item { min-height: 40px; padding: 6px 8px; border-radius: 8px; }"
-            "QListView::item:selected { background-color: rgba(33,108,255,32); color: rgba(18,18,18,235); }"
-        )
         self._completer.setPopup(popup)
         self._completer.activated[QModelIndex].connect(
             self._handle_completion_activated
@@ -119,11 +115,54 @@ class _FaceNameEditor(QLineEdit):
         self.setFrame(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setClearButtonEnabled(False)
-        self.setStyleSheet(
-            "QLineEdit { background-color: rgba(255,255,255,244); border: 1px solid rgba(0,0,0,40);"
-            " border-radius: 8px; padding: 4px 10px; color: rgba(16,16,16,235);"
-            " selection-background-color: rgba(32,110,255,140); }"
+        self._apply_theme_styles()
+
+    @staticmethod
+    def _rgba(color: QColor, alpha: int) -> str:
+        return f"rgba({color.red()},{color.green()},{color.blue()},{alpha})"
+
+    def _apply_theme_styles(self) -> None:
+        if self._applying_theme_styles:
+            return
+        app = QApplication.instance()
+        palette = app.palette() if app is not None else self.palette()
+        surface = palette.color(QPalette.ColorRole.Base)
+        text = palette.color(QPalette.ColorRole.Text)
+        border = palette.color(QPalette.ColorRole.WindowText)
+        accent = palette.color(QPalette.ColorRole.Highlight)
+        selected_text = palette.color(QPalette.ColorRole.HighlightedText)
+
+        popup = self._completer.popup()
+        popup_style = (
+                f"QListView {{ background-color: {self._rgba(surface, 246)};"
+                f" color: {self._rgba(text, 235)}; border: 1px solid {self._rgba(border, 40)};"
+                " border-radius: 12px; padding: 6px; outline: none; }"
+                "QListView::item { min-height: 40px; padding: 6px 8px; border-radius: 8px; }"
+                f"QListView::item:selected {{ background-color: {self._rgba(accent, 70)};"
+                f" color: {self._rgba(selected_text, 255)}; }}"
         )
+        editor_style = (
+            f"QLineEdit {{ background-color: {self._rgba(surface, 244)};"
+            f" border: 1px solid {self._rgba(border, 40)}; border-radius: 8px;"
+            f" padding: 4px 10px; color: {self._rgba(text, 235)};"
+            f" selection-background-color: {self._rgba(accent, 140)}; }}"
+        )
+        self._applying_theme_styles = True
+        try:
+            if popup is not None and popup.styleSheet() != popup_style:
+                popup.setStyleSheet(popup_style)
+            if self.styleSheet() != editor_style:
+                self.setStyleSheet(editor_style)
+        finally:
+            self._applying_theme_styles = False
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ) and hasattr(self, "_completer"):
+            self._apply_theme_styles()
 
     def set_name_suggestions(self, suggestions: list[_NameSuggestion]) -> None:
         self._suggestions = list(suggestions)
@@ -289,6 +328,17 @@ class FaceNameOverlayWidget(QWidget):
         self._saved_press_face_id: str | None = None
         self._cursor_override_active = False
         self._cursor_guard_widgets: dict[QWidget, QCursor | None] = {}
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() not in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ):
+            return
+        for editor in (self._editor, self._manual_editor):
+            if editor is not None:
+                editor._apply_theme_styles()
 
     def set_viewer(self, viewer: object | None) -> None:
         previous = self._viewer

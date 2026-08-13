@@ -228,6 +228,68 @@ def test_row_for_path_delegates_to_store(adapter, mock_store):
     mock_store.row_for_path.assert_called_once_with(path)
 
 
+def test_cached_row_for_path_never_uses_synchronous_lookup(adapter, mock_store):
+    path = Path("/library/photo.jpg")
+    mock_store.cached_row_for_path.return_value = 9
+
+    assert adapter.cached_row_for_path(path) == 9
+    mock_store.cached_row_for_path.assert_called_once_with(path)
+    mock_store.row_for_path.assert_not_called()
+
+
+def test_setting_current_asset_does_not_resolve_its_path(adapter, mock_store):
+    path = Path("/library/photo.jpg")
+
+    adapter.set_current_asset(3, path)
+
+    assert adapter._current_row == 3
+    assert adapter._current_path == path
+    mock_store.cached_row_for_path.assert_not_called()
+    mock_store.row_for_path.assert_not_called()
+
+
+def test_scan_reset_reanchors_visual_current_asset_by_cached_path(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    adapter.set_current_asset(4, path)
+    adapter._last_snapshot = (10, (0, 9), 1)
+    adapter._last_selection_signature = ("", "", "")
+    adapter._last_window_identity_signature = ()
+    mock_store.count.return_value = 11
+    mock_store.snapshot_signature.return_value = (11, (0, 10), 2)
+    mock_store.cached_row_for_path.return_value = 7
+    mock_store.cached_rows.return_value = []
+
+    adapter._on_source_changed()
+
+    assert adapter._current_row == 7
+    assert adapter._current_path == path
+    mock_store.row_for_path.assert_not_called()
+
+
+def test_scan_retry_clears_only_visual_row_and_retains_stable_path(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    adapter.set_current_asset(4, path)
+    adapter._last_snapshot = (10, (0, 9), 1)
+    adapter._last_selection_signature = ("", "", "")
+    adapter._last_window_identity_signature = ()
+    mock_store.count.return_value = 10
+    mock_store.snapshot_signature.return_value = (10, (0, 9), 2)
+    mock_store.cached_row_for_path.return_value = None
+    mock_store.cached_rows.return_value = []
+
+    adapter._on_source_changed()
+
+    assert adapter._current_row == -1
+    assert adapter._current_path == path
+    mock_store.row_for_path.assert_not_called()
+
+
 def test_prioritize_rows_delegates_to_store(adapter, mock_store):
     adapter.prioritize_rows(10, 25)
     adapter._flush_pending_prioritize_rows()

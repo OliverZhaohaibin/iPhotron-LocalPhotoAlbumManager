@@ -85,6 +85,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._edit_service_getter = edit_service_getter
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
+        self._current_path: Path | None = None
         self._last_snapshot: Optional[tuple[int, Optional[tuple[int, int]], int]] = None
         self._last_selection_signature: tuple[str, str, str] | None = None
         self._last_window_identity_signature: tuple[str, ...] | None = None
@@ -412,6 +413,11 @@ class GalleryListModelAdapter(QAbstractListModel):
     def row_for_path(self, path: Path) -> int | None:
         return self._store.row_for_path(path)
 
+    def cached_row_for_path(self, path: Path) -> int | None:
+        """Return a cached row without performing database or filesystem I/O."""
+
+        return self._store.cached_row_for_path(path)
+
     def begin_startup_gallery_warmup(self) -> None:
         """Prioritize startup Gallery demand without starving guard thumbnails."""
 
@@ -705,7 +711,19 @@ class GalleryListModelAdapter(QAbstractListModel):
         return True
 
     def set_current_row(self, row: int) -> None:
-        if self._current_row == row:
+        """Set the positional current row for legacy callers."""
+
+        self._set_current_asset(row, path=self._current_path)
+
+    def set_current_asset(self, row: int, path: Path) -> None:
+        """Set the current asset while retaining its path-stable visual identity."""
+
+        self._set_current_asset(row, path=Path(path))
+
+    def _set_current_asset(self, row: int, *, path: Path | None) -> None:
+        path_changed = path != self._current_path
+        self._current_path = path
+        if self._current_row == row and not path_changed:
             return
         old_row = self._current_row
         self._current_row = row
@@ -770,6 +788,11 @@ class GalleryListModelAdapter(QAbstractListModel):
         return None, None
 
     def _on_source_changed(self) -> None:
+        # The store cache already contains the new revision when this callback
+        # runs.  Re-anchor the visual current item by its stable path before
+        # views receive modelAboutToBeReset; carrying the old numeric row into
+        # the reset would briefly expand/highlight a different asset.
+        self._reanchor_current_asset_from_cache()
         count = self._store.count()
         current_snapshot = self._store.snapshot_signature()
         current_selection_signature = self._selection_signature()
@@ -824,6 +847,13 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._current_row = -1
         if collection_revision_changed:
             self._republish_thumbnail_demand_for_collection_revision()
+
+    def _reanchor_current_asset_from_cache(self) -> None:
+        path = self._current_path
+        if path is None:
+            return
+        cached_row = self._store.cached_row_for_path(path)
+        self._current_row = -1 if cached_row is None else cached_row
 
     def _republish_thumbnail_demand_for_collection_revision(self) -> None:
         """Rebuild guard demand even when the viewport itself did not move."""

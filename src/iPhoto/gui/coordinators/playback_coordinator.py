@@ -1018,7 +1018,7 @@ class PlaybackCoordinator(QObject):
         self._current_presentation = presentation
         self._detail_request_generation = int(presentation.request_generation)
         row = presentation.row
-        self._asset_model.set_current_row(row)
+        self._asset_model.set_current_asset(row, presentation.path)
         self.assetChanged.emit(row)
         self._update_header(presentation)
         self._select_filmstrip_row(row)

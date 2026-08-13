@@ -318,7 +318,10 @@ def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     ):
         PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
-    coordinator._asset_model.set_current_row.assert_called_once_with(0)
+    coordinator._asset_model.set_current_asset.assert_called_once_with(
+        0,
+        presentation.path,
+    )
     coordinator.assetChanged.emit.assert_called_once_with(0)
     coordinator._update_header.assert_called_once_with(presentation)
     coordinator._select_filmstrip_row.assert_called_once_with(0)

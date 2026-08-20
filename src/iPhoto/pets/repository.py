@@ -1108,9 +1108,10 @@ class PetRepository:
                     else None
                 )
             )
-            if candidate_id and not _species_compatible(detection_species, known_species):
-                candidate_id = ""
-            elif candidate_id and candidate_id not in existing_pets and durable_profile is None:
+            # An exact durable pet-key mapping is an identity anchor. Species
+            # compatibility remains an automatic matching constraint, but it must
+            # not undo a previously persisted/manual cross-species assignment.
+            if candidate_id and candidate_id not in existing_pets and durable_profile is None:
                 candidate_id = ""
             elif candidate_id and any(
                 asset_id == detection.asset_id

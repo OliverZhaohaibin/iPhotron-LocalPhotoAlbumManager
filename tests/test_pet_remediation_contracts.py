@@ -1101,6 +1101,30 @@ def test_incremental_rescan_preserves_manual_cross_species_identity(
     assert coordinator._journal.unfinished() == ()
     assert f"Preserving mixed-species Pet identity {dog_identity}" in caplog.text
 
+    # The non-dominant species member must also keep the durable identity.
+    # This is the regression case that previously fell through the species gate.
+    caplog.clear()
+    rescanned_cat = replace(
+        _detection("cat-rescan", asset_id="asset-cat"),
+        pet_key=cat.pet_key,
+        species_label="cat",
+    )
+    cat_event = coordinator.submit_detected_batch(
+        [DetectedAssetPets("asset-cat", "album/asset-cat.jpg", [rescanned_cat])],
+        distance_threshold=0.1,
+    )
+
+    assert cat_event is not None
+    assert cat_event.updated_pet_ids == (dog_identity,)
+    assert repository.get_detection("cat") is None
+    assert repository.get_detection("cat-rescan").pet_id == dog_identity  # type: ignore[union-attr]
+    assert repository.get_detection("dog-rescan").pet_id == dog_identity  # type: ignore[union-attr]
+    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {dog_identity}
+    assert cat_event.operation_id is not None
+    assert repository.get_runtime_commit(cat_event.operation_id)["state_synced"] is True  # type: ignore[index]
+    assert coordinator._journal.unfinished() == ()
+    assert f"Preserving mixed-species Pet identity {dog_identity}" in caplog.text
+
 
 def test_profile_candidate_index_has_strict_species_parity_with_usearch(
     monkeypatch,

@@ -17,7 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 import iPhoto.gui.ui.widgets.video_area as video_area_module
@@ -641,6 +641,51 @@ class TestVideoArea:
         va = VideoArea()
         assert va._renderer.parent() is va._surface_stack
         assert va._surface_stack.parent() is va
+
+    def test_staged_runtime_preserves_surface_hierarchy(self, qapp):
+        """Completing playback must not move either prepared QRhi widget."""
+
+        main_window = QMainWindow()
+        host = QWidget(main_window)
+        main_window.setCentralWidget(host)
+        va = VideoArea(host, staged=True)
+        va._test_main_window = main_window
+        surfaces = (va.renderer, va.edit_viewer)
+        parents_before = tuple(surface.parent() for surface in surfaces)
+        windows_before = tuple(surface.window() for surface in surfaces)
+
+        assert va._runtime_ready is False
+        va.complete_runtime()
+        player = va._player
+        va.complete_runtime()
+
+        assert va._runtime_ready is True
+        assert va._player is player
+        assert tuple(surface.parent() for surface in surfaces) == parents_before
+        assert tuple(surface.window() for surface in surfaces) == windows_before
+        assert all(surface.window() is main_window for surface in surfaces)
+
+    def test_staged_detail_preserves_all_three_surface_parents(self, qapp):
+        """Detail completion adds chrome without reparenting native surfaces."""
+
+        from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
+
+        main_window = QMainWindow()
+        stack = QStackedWidget(main_window)
+        main_window.setCentralWidget(stack)
+        detail = DetailPageWidget(main_window, parent=stack, staged=True)
+        stack.addWidget(detail)
+        surfaces = detail.native_surfaces()
+        parents_before = tuple(surface.parent() for surface in surfaces)
+        windows_before = tuple(surface.window() for surface in surfaces)
+
+        assert all(not surface.isWindow() for surface in surfaces)
+        assert all(surface.window() is main_window for surface in surfaces)
+        detail.complete_feature()
+        detail.complete_feature()
+
+        assert tuple(surface.parent() for surface in surfaces) == parents_before
+        assert tuple(surface.window() for surface in surfaces) == windows_before
 
     def test_has_video_sink(self, qapp):
         """VideoArea should use QVideoSink, not QGraphicsVideoItem."""

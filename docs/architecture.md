@@ -202,22 +202,27 @@ language has no bundled resource. The active stored language values are
 
 Desktop construction deliberately has two boundaries. The process first loads
 settings, configures graphics caches, creates `QApplication`, `RuntimeContext`,
-and the lightweight main-window shell, then calls `show()`. Only after the shell
-emits `firstPainted` may startup create hidden feature bundles, import and start
-`MainCoordinator`, resume library startup tasks, or select the initial
-collection. This is an architecture constraint rather than a timer-based
-optimization: optional feature imports must not migrate back above the first
-paint boundary.
+and the lightweight main-window shell. Before any widget that can force native
+handle creation (notably `QMenuBar`) is constructed, the hidden Detail surface
+shell and all three QRhi widgets are attached with their final parents. The
+window then calls `show()`. Only after the shell emits `firstPainted` may startup
+complete the Detail chrome/playback runtime, import and start `MainCoordinator`,
+resume library startup tasks, or select the initial collection. This is an
+architecture constraint rather than a timer-based optimization.
 
 `Ui_MainWindow.ensure_feature()` owns the on-demand lifetime of the detail,
 preview, Map, People, and Albums bundles. It caches each bundle and emits
 `featureCreated` so the window manager and coordinator can attach behavior to
 late-created widgets. Navigation may also call `ensure_feature()` if Map or the
-Albums dashboard was not constructed during the post-paint warm-up. On Windows
-and Linux, the QRhi-backed detail bundle is constructed before `show()` because
-inserting it into a visible top-level window can recreate the native window;
-preview and People remain post-paint. macOS keeps all three in the post-paint
-warm-up path.
+Albums dashboard was not constructed during the post-paint warm-up. Windows,
+macOS, and Linux share one QRhi lifecycle: the final native surface hierarchy is
+prepared pre-show, while `ensure_feature("detail")` completes its non-native UI
+and QtMultimedia runtime post-paint. Platform allowlists, post-show surface
+creation, parentless surface warm-up, and hide/show workarounds are forbidden.
+The pre-show hierarchy is part of shell construction: failure is terminal and
+non-recoverable for that process. Startup-generation retry applies only after a
+valid visible shell exists; it must not claim to reconstruct the native
+hierarchy after `QMenuBar` has already created the top-level handle.
 
 ## Layer Boundaries
 

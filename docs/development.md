@@ -995,10 +995,18 @@ See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and
 
 ## Desktop Startup Performance
 
-The GUI startup contract is “paint the window shell, then warm optional
-features.” Do not use a zero-delay timer as a substitute for the boundary:
-startup work must be connected to `MainWindow.firstPainted`. Widget creation
-still belongs on the GUI thread and should be split across event-loop turns.
+The GUI startup contract is “stabilize the native hierarchy, paint the window
+shell, then warm optional features.” All Detail QRhi widgets must have their
+final parents before `show()`, and that hierarchy must be created before
+`QMenuBar` or another widget forces a native top-level handle. Detail chrome,
+QtMultimedia, coordinators, and other optional work remain connected to
+`MainWindow.firstPainted`; a zero-delay timer is not a substitute for that
+boundary. Widget creation stays on the GUI thread and should be split across
+event-loop turns.
+
+Treat native-hierarchy preparation failure as `shell_initialization_failed`.
+It occurs before a valid retry-capable shell exists and must not be retried
+after a native menu or another widget has committed the top-level handle.
 
 Keep imports above that boundary narrow. In particular, importing
 `iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the
@@ -1039,9 +1047,10 @@ Run the focused startup guardrails with:
 python -m pytest tests/gui/test_startup_import_boundary.py tests/gui/test_main.py
 ```
 
-On Windows, also verify that startup shows one stable top-level window. The
-detail feature intentionally remains pre-show there because adding its QRhi
-widgets after the window is visible can recreate the native window.
+On Windows, macOS, and Linux, verify that startup shows one stable top-level
+window and that Gallery → Detail renders through the selected backend. Do not
+move QRhi creation after `show()`, pre-create parentless surfaces, use a
+platform allowlist, or hide/show the window to mask a native transition.
 
 ---
 

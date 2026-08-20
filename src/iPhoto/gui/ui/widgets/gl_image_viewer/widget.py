@@ -29,35 +29,105 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QRhiWidget
 
-try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
-except (ModuleNotFoundError, ImportError):  # pragma: no cover
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoFrameFormat = None  # type: ignore[assignment, misc]
-
-from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
-from iPhoto.gui.detail_surface_residency import (
-    SurfaceByteBreakdown,
-    SurfaceResidencyTracker,
-    surface_resource_id,
-)
 
-from ..gl_crop_controller import CropInteractionController
 from ..render_backend import is_opengl_api, qrhi_api_name, select_qrhi_widget_api
-from ..rhi_image_renderer import RhiImageRenderer
-from ..view_transform_controller import ViewTransformController
-from . import crop_viewport, geometry
-from .adjustment_applicator import AdjustmentApplicator
-from .components import LoadingOverlay
-from .fullscreen_handler import FullscreenHandler
-from .input_handler import InputEventHandler
-from .offscreen import OffscreenRenderer
-from .resources import TextureResourceManager
-from .utils import normalise_colour
-from .zoom_controller import ZoomController
+
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoFrameFormat = None  # type: ignore[assignment, misc]
+DecodedSurface = None
+SurfaceByteBreakdown = None
+SurfaceResidencyTracker = None
+surface_resource_id = None
+CropInteractionController = None
+RhiImageRenderer = None
+ViewTransformController = None
+crop_viewport = None
+geometry = None
+AdjustmentApplicator = None
+LoadingOverlay = None
+FullscreenHandler = None
+InputEventHandler = None
+OffscreenRenderer = None
+TextureResourceManager = None
+normalise_colour = None
+ZoomController = None
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _load_viewer_runtime_dependencies() -> None:
+    """Load NumPy-backed viewer services only after the first shell paint."""
+
+    global AdjustmentApplicator, CropInteractionController, DecodedSurface
+    global FullscreenHandler, InputEventHandler, LoadingOverlay, OffscreenRenderer
+    global RhiImageRenderer, SurfaceByteBreakdown, SurfaceResidencyTracker
+    global TextureResourceManager, ViewTransformController, ZoomController
+    global crop_viewport, geometry, normalise_colour, surface_resource_id
+    if TextureResourceManager is not None:
+        return
+
+    from iPhoto.gui.detail_decode_backend import DecodedSurface as _DecodedSurface
+    from iPhoto.gui.detail_surface_residency import (
+        SurfaceByteBreakdown as _SurfaceByteBreakdown,
+    )
+    from iPhoto.gui.detail_surface_residency import (
+        SurfaceResidencyTracker as _SurfaceResidencyTracker,
+    )
+    from iPhoto.gui.detail_surface_residency import (
+        surface_resource_id as _surface_resource_id,
+    )
+
+    from ..gl_crop_controller import CropInteractionController as _CropInteractionController
+    from ..rhi_image_renderer import RhiImageRenderer as _RhiImageRenderer
+    from ..view_transform_controller import ViewTransformController as _ViewTransformController
+    from . import crop_viewport as _crop_viewport
+    from . import geometry as _geometry
+    from .adjustment_applicator import AdjustmentApplicator as _AdjustmentApplicator
+    from .components import LoadingOverlay as _LoadingOverlay
+    from .fullscreen_handler import FullscreenHandler as _FullscreenHandler
+    from .input_handler import InputEventHandler as _InputEventHandler
+    from .offscreen import OffscreenRenderer as _OffscreenRenderer
+    from .resources import TextureResourceManager as _TextureResourceManager
+    from .utils import normalise_colour as _normalise_colour
+    from .zoom_controller import ZoomController as _ZoomController
+
+    DecodedSurface = _DecodedSurface
+    SurfaceByteBreakdown = _SurfaceByteBreakdown
+    SurfaceResidencyTracker = _SurfaceResidencyTracker
+    surface_resource_id = _surface_resource_id
+    CropInteractionController = _CropInteractionController
+    RhiImageRenderer = _RhiImageRenderer
+    ViewTransformController = _ViewTransformController
+    crop_viewport = _crop_viewport
+    geometry = _geometry
+    AdjustmentApplicator = _AdjustmentApplicator
+    LoadingOverlay = _LoadingOverlay
+    FullscreenHandler = _FullscreenHandler
+    InputEventHandler = _InputEventHandler
+    OffscreenRenderer = _OffscreenRenderer
+    TextureResourceManager = _TextureResourceManager
+    normalise_colour = _normalise_colour
+    ZoomController = _ZoomController
+
+
+def _load_video_frame_types() -> None:
+    """Load QtMultimedia frame types only when a decoded frame arrives."""
+
+    global QVideoFrame, QVideoFrameFormat
+    if QVideoFrame is not None and QVideoFrameFormat is not None:
+        return
+    try:
+        from PySide6.QtMultimedia import (
+            QVideoFrame as _QVideoFrame,
+        )
+        from PySide6.QtMultimedia import (
+            QVideoFrameFormat as _QVideoFrameFormat,
+        )
+    except (ModuleNotFoundError, ImportError):  # pragma: no cover
+        return
+    QVideoFrame = _QVideoFrame
+    QVideoFrameFormat = _QVideoFrameFormat
 
 # Crop preview must not reuse the persisted [0, 1] crop mask.  Straightened or
 # perspective-corrected source pixels can project outside that logical square;
@@ -141,7 +211,12 @@ class GLImageViewer(QRhiWidget):
     videoFramePresented = Signal()
     """Emitted after a newly uploaded video frame has been drawn."""
 
-    def __init__(self, parent: QRhiWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QRhiWidget | None = None,
+        *,
+        staged: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
 
@@ -198,6 +273,29 @@ class GLImageViewer(QRhiWidget):
         self._diag_video_render_count = 0
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
+        self._auto_crop_view_locked = False
+        self._auto_crop_center_locked = False
+        self._time_base = time.monotonic()
+        self._runtime_ready = False
+        self._texture_manager = None
+        self._adjustment_applicator = None
+        self._fullscreen_handler = None
+        self._loading_overlay = None
+        self._transform_controller = None
+        self._zoom_ctrl = None
+        self._crop_controller = None
+        self._input_handler = None
+        self._pending_surface_color_override: str | None = None
+
+        if not staged:
+            self.complete_runtime()
+
+    def complete_runtime(self) -> None:
+        """Create NumPy-backed viewer services without replacing the QRhi widget."""
+
+        if self._runtime_ready:
+            return
+        _load_viewer_runtime_dependencies()
 
         # Texture resource manager
         self._texture_manager = TextureResourceManager(
@@ -220,10 +318,11 @@ class GLImageViewer(QRhiWidget):
             set_stylesheet=self.setStyleSheet,
             request_update=self.update,
         )
+        if self._pending_surface_color_override is not None:
+            self._fullscreen_handler.set_surface_color_override(
+                self._pending_surface_color_override
+            )
         self._fullscreen_handler._apply()
-
-        # ``_time_base`` anchors the monotonic clock used by the shader grain generator.
-        self._time_base = time.monotonic()
 
         # Loading overlay component
         self._loading_overlay = LoadingOverlay(self)
@@ -258,8 +357,6 @@ class GLImageViewer(QRhiWidget):
             on_interaction_started=self.cropInteractionStarted.emit,
             on_interaction_finished=self.cropInteractionFinished.emit,
         )
-        self._auto_crop_view_locked: bool = False
-        self._auto_crop_center_locked: bool = False
         self._update_crop_perspective_state()
 
         # Input event handler
@@ -271,6 +368,7 @@ class GLImageViewer(QRhiWidget):
             on_fullscreen_toggle=self.fullscreenToggleRequested.emit,
             on_cancel_auto_crop_lock=self._cancel_auto_crop_lock,
         )
+        self._runtime_ready = True
 
     def render_backend_name(self) -> str:
         """Return the active QRhi backend name for diagnostics/tests."""
@@ -628,6 +726,7 @@ class GLImageViewer(QRhiWidget):
     ) -> None:
         """Display *frame* directly through the OpenGL shader pipeline."""
 
+        _load_video_frame_types()
         if QVideoFrame is None or frame is None or not frame.isValid():
             return
 
@@ -1041,6 +1140,9 @@ class GLImageViewer(QRhiWidget):
 
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the default."""
+        self._pending_surface_color_override = colour
+        if not self._runtime_ready:
+            return
         self._fullscreen_handler.set_surface_color_override(colour)
 
     def set_crop_framing_enabled(self, enabled: bool) -> None:
@@ -1309,6 +1411,7 @@ class GLImageViewer(QRhiWidget):
 
     def initialize(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: initialise renderer resources once."""
+        self.complete_runtime()
         if self._gl_initialized:
             return
         rhi = self.rhi()
@@ -1356,6 +1459,8 @@ class GLImageViewer(QRhiWidget):
     def releaseResources(self) -> None:  # type: ignore[override]
         """QRhiWidget override: release renderer resources."""
         self._gl_initialized = False
+        if not self._runtime_ready:
+            return
         if self._renderer is not None:
             rhi = self.rhi()
             if self._uses_raw_gl and rhi is not None:
@@ -1373,6 +1478,7 @@ class GLImageViewer(QRhiWidget):
 
     def render(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: render the current image/video frame."""
+        self.complete_runtime()
         if not self._uses_raw_gl:
             self._render_rhi(cb)
             return
@@ -1977,6 +2083,8 @@ class GLImageViewer(QRhiWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if not self._runtime_ready:
+            return
         self._loading_overlay.update_geometry(self.size())
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()

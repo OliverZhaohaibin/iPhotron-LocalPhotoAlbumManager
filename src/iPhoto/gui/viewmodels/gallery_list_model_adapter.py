@@ -112,7 +112,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._thumbnail_hint_loader.resultReady.connect(self._on_thumbnail_hint_result)
         self._thumbnail_hint_request_id = 0
         self._pending_scan_batch_count = 0
-        self._pending_thumbnail_backfill_completions: dict[Path, None] = {}
+        self._pending_thumbnail_backfill_completions: list[Path] = []
         self._pending_selection_anchor_retry: (
             GallerySelectionAnchorRetryTicket | None
         ) = None
@@ -668,7 +668,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             return
         path = Path(root)
         if refresh_pending:
-            self._pending_thumbnail_backfill_completions[path] = None
+            self._pending_thumbnail_backfill_completions.append(path)
         else:
             self.thumbnailBackfillCompleted.emit(path)
 

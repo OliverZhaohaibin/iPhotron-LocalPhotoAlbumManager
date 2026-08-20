@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from iPhoto.pets import pipeline as pet_pipeline
+from iPhoto.pets import service as pet_service
 
 
 def test_pet_embedder_download_url_prefers_environment(monkeypatch) -> None:
@@ -46,3 +49,19 @@ def test_pet_embedder_download_url_can_be_explicitly_configured_when_manifest_is
     )
     assert len(str(pet_pipeline._EMBEDDER_MANIFEST["torchscript_sha256"])) == 64
     assert int(pet_pipeline._EMBEDDER_MANIFEST["torchscript_size"]) > 0
+
+
+def test_shared_pet_model_dir_defaults_to_extension_root(tmp_path: Path, monkeypatch) -> None:
+    extension_root = tmp_path / "src" / "extension" / "models" / "pets"
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension_root)
+
+    assert pet_service.shared_pet_model_dir() == extension_root
+    assert pet_service.pet_library_paths(tmp_path / "library").model_dir == extension_root
+
+
+def test_shared_pet_model_dir_allows_explicit_override(tmp_path: Path, monkeypatch) -> None:
+    override_root = tmp_path / "custom-pet-models"
+    monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(override_root))
+
+    assert pet_service.shared_pet_model_dir() == override_root

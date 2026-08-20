@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -53,9 +54,13 @@ class _PetReadContext:
 
 
 def shared_pet_model_dir() -> Path:
-    from .pipeline import default_pet_model_dir
+    override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
 
-    return default_pet_model_dir()
+    from .pipeline import bundled_pet_model_dir
+
+    return bundled_pet_model_dir()
 
 
 def pet_library_paths(library_root: Path) -> PetLibraryPaths:

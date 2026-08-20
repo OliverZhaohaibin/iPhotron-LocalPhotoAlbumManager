@@ -39,23 +39,18 @@ pip install -e ".[pets-ai]"
 ```
 
 The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Bundled models are read-only fallbacks under
-`src/extension/models/pets/` during source/build staging. Models downloaded at
-runtime are written to the platform user cache instead:
+`certifi`. Pet models live under the extension model root, and first-use
+downloads are written there as well:
 
 ```text
-Windows: %LOCALAPPDATA%\iPhoto\models\pets
-macOS:   ~/Library/Caches/iPhoto/models/pets
-Linux:   ${XDG_CACHE_HOME:-~/.cache}/iPhoto/models/pets
-
-<model root>/
+src/extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
 └── embedding/dinov2_vits14/dinov2_vits14.pt
 ```
 
-`IPHOTO_PET_MODEL_DIR` overrides the model root. Missing models may be populated
-on first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL
-defaults to the upstream YOLOX release and can be overridden with
+`IPHOTO_PET_MODEL_DIR` explicitly overrides that model root. Missing models may
+be populated on first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector
+URL defaults to the upstream YOLOX release and can be overridden with
 `IPHOTO_PET_DETECTOR_MODEL_URL`.
 
 Production does not execute Torch Hub. DINOv2 must be the hash- and size-verified

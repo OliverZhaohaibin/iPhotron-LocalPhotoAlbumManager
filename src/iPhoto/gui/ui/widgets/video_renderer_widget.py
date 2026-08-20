@@ -48,16 +48,29 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QRhiWidget, QWidget
 
-try:
-    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat, QVideoSink
-except (ModuleNotFoundError, ImportError):  # pragma: no cover
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoFrameFormat = None  # type: ignore[assignment, misc]
-    QVideoSink = None  # type: ignore[assignment, misc]
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from .render_backend import qrhi_api_name, select_qrhi_widget_api
 
 _log = logging.getLogger(__name__)
+
+
+def _load_video_frame_types() -> None:
+    """Load QtMultimedia frame types only when playback begins."""
+
+    global QVideoFrame, QVideoFrameFormat
+    if QVideoFrame is not None and QVideoFrameFormat is not None:
+        return
+    try:
+        from PySide6.QtMultimedia import (
+            QVideoFrame as _QVideoFrame,
+            QVideoFrameFormat as _QVideoFrameFormat,
+        )
+    except (ModuleNotFoundError, ImportError):  # pragma: no cover
+        return
+    QVideoFrame = _QVideoFrame
+    QVideoFrameFormat = _QVideoFrameFormat
 
 # Shader .qsb files live next to this module.
 _SHADER_DIR = Path(__file__).resolve().parent
@@ -214,6 +227,7 @@ def _resolve_frame_rotation_cw(
 def _classify_frame_format(fmt: "QVideoFrameFormat") -> tuple[int, int, int, int]:
     """Return (format, colorspace, transfer, range) shader enum values for *fmt*."""
 
+    _load_video_frame_types()
     if QVideoFrameFormat is None:
         return _FMT_RGBA, _CS_BT709, _TF_SDR, _RANGE_LIMITED
 
@@ -426,6 +440,7 @@ class VideoRendererWidget(QRhiWidget):
 
     def update_frame(self, frame: "QVideoFrame") -> None:
         """Accept a new video frame and schedule a repaint."""
+        _load_video_frame_types()
         if frame is None or not frame.isValid():
             return
         self._current_frame = frame
@@ -808,6 +823,7 @@ class VideoRendererWidget(QRhiWidget):
         Returns ``True`` if the upload succeeded.  A return of ``False``
         means the frame should be retried on the next render cycle.
         """
+        _load_video_frame_types()
         frame = self._current_frame
         if frame is None:
             return False

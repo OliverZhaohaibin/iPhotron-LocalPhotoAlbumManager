@@ -40,11 +40,8 @@ from PySide6.QtGui import (
     QShader,
 )
 
-try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
-except (ModuleNotFoundError, ImportError):  # pragma: no cover
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoFrameFormat = None  # type: ignore[assignment, misc]
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from ....core.selective_color_resolver import NUM_RANGES, SAT_GATE_HI, SAT_GATE_LO
 from ....gui.detail_profile import emit_detail_event
@@ -52,6 +49,23 @@ from ....gui.detail_profile import emit_detail_event
 from .perspective_math import build_perspective_matrix
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _load_video_frame_types() -> None:
+    """Load QtMultimedia frame types only when playback submits a frame."""
+
+    global QVideoFrame, QVideoFrameFormat
+    if QVideoFrame is not None and QVideoFrameFormat is not None:
+        return
+    try:
+        from PySide6.QtMultimedia import (
+            QVideoFrame as _QVideoFrame,
+            QVideoFrameFormat as _QVideoFrameFormat,
+        )
+    except (ModuleNotFoundError, ImportError):  # pragma: no cover
+        return
+    QVideoFrame = _QVideoFrame
+    QVideoFrameFormat = _QVideoFrameFormat
 
 _SHADER_DIR = Path(__file__).resolve().parent
 _IMAGE_VERT_QSB = _SHADER_DIR / "image_viewer_rhi.vert.qsb"
@@ -94,6 +108,7 @@ def _qimage_to_rgba(image: QImage) -> QImage:
 def _classify_video_frame_format(
     fmt: "QVideoFrameFormat | None",
 ) -> tuple[int, int, int, int]:
+    _load_video_frame_types()
     if fmt is None or QVideoFrameFormat is None:
         return (_VIDEO_FMT_NONE, _CS_BT709, _TF_SDR, _RANGE_LIMITED)
 
@@ -436,6 +451,7 @@ class RhiImageRenderer:
             emit_detail_event("gpu_evict", generation=0, key=str(key), bytes=size, pressure=True)
 
     def upload_video_frame(self, frame: "QVideoFrame") -> tuple[int, int]:
+        _load_video_frame_types()
         if QVideoFrame is None or QVideoFrameFormat is None:
             raise RuntimeError("PySide6.QtMultimedia is required for video frame upload")
         if frame is None or not frame.isValid():

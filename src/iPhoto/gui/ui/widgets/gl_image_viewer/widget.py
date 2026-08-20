@@ -29,11 +29,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QRhiWidget
 
-try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
-except (ModuleNotFoundError, ImportError):  # pragma: no cover
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoFrameFormat = None  # type: ignore[assignment, misc]
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from iPhoto.gui.detail_decode_backend import DecodedSurface
 from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
@@ -58,6 +55,23 @@ from .utils import normalise_colour
 from .zoom_controller import ZoomController
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _load_video_frame_types() -> None:
+    """Load QtMultimedia frame types only when a decoded frame arrives."""
+
+    global QVideoFrame, QVideoFrameFormat
+    if QVideoFrame is not None and QVideoFrameFormat is not None:
+        return
+    try:
+        from PySide6.QtMultimedia import (
+            QVideoFrame as _QVideoFrame,
+            QVideoFrameFormat as _QVideoFrameFormat,
+        )
+    except (ModuleNotFoundError, ImportError):  # pragma: no cover
+        return
+    QVideoFrame = _QVideoFrame
+    QVideoFrameFormat = _QVideoFrameFormat
 
 # Crop preview must not reuse the persisted [0, 1] crop mask.  Straightened or
 # perspective-corrected source pixels can project outside that logical square;
@@ -628,6 +642,7 @@ class GLImageViewer(QRhiWidget):
     ) -> None:
         """Display *frame* directly through the OpenGL shader pipeline."""
 
+        _load_video_frame_types()
         if QVideoFrame is None or frame is None or not frame.isValid():
             return
 

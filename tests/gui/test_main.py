@@ -6,12 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QSurface
 
 from iPhoto.gui.main import (
     _bootstrap_macos_external_tool_path,
     _configure_qt_opengl_defaults,
     _prepare_qt_runtime_for_maps,
+    _prepare_top_level_rhi_surface,
     _startup_feature_plan,
     _startup_timing_plan,
     _StartupInputGuard,
@@ -275,12 +276,12 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
 @pytest.mark.parametrize(
     ("platform", "expected"),
     (
-        ("win32", (("detail",), ())),
+        ("win32", ((), ("detail",))),
         ("darwin", ((), ("detail",))),
-        ("linux", (("detail",), ())),
+        ("linux", ((), ("detail",))),
     ),
 )
-def test_startup_feature_plan_keeps_opengl_rhi_detail_before_show(
+def test_startup_feature_plan_completes_detail_after_show_on_every_platform(
     platform: str,
     expected: tuple[tuple[str, ...], tuple[str, ...]],
 ) -> None:
@@ -300,6 +301,58 @@ def test_startup_timing_plan_has_no_fixed_platform_delay(
     expected: tuple[int, int, int],
 ) -> None:
     assert tuple(_startup_timing_plan(platform)) == expected
+
+
+@pytest.mark.parametrize(
+    ("backend", "surface_type"),
+    (
+        ("metal", QSurface.SurfaceType.MetalSurface),
+        ("opengl", QSurface.SurfaceType.OpenGLSurface),
+    ),
+)
+def test_prepare_top_level_rhi_surface_only_verifies_precreated_handle(
+    backend: str,
+    surface_type: QSurface.SurfaceType,
+) -> None:
+    class _FakeHandle:
+        def surfaceType(self):  # noqa: N802 - Qt API
+            return surface_type
+
+    class _FakeWindow:
+        def windowHandle(self):  # noqa: N802 - Qt API
+            return _FakeHandle()
+
+        def isVisible(self) -> bool:  # noqa: N802 - Qt API
+            return False
+
+    assert _prepare_top_level_rhi_surface(_FakeWindow(), backend) == surface_type.name
+
+
+def test_prepare_top_level_rhi_surface_rejects_late_raster_handle() -> None:
+    class _RasterHandle:
+        def surfaceType(self):  # noqa: N802 - Qt API
+            return QSurface.SurfaceType.RasterSurface
+
+    class _FakeWindow:
+        def windowHandle(self):  # noqa: N802 - Qt API
+            return _RasterHandle()
+
+        def isVisible(self) -> bool:  # noqa: N802 - Qt API
+            return False
+
+    with pytest.raises(RuntimeError, match="RasterSurface; expected one of MetalSurface"):
+        _prepare_top_level_rhi_surface(_FakeWindow(), "metal")
+
+
+def test_prepare_top_level_rhi_surface_allows_platform_deferred_handle() -> None:
+    class _FakeWindow:
+        def windowHandle(self):  # noqa: N802 - Qt API
+            return None
+
+    assert (
+        _prepare_top_level_rhi_surface(_FakeWindow(), "opengl")
+        == "deferred:OpenGLSurface"
+    )
 
 
 def test_startup_input_guard_filters_only_window_startup_input() -> None:
@@ -472,6 +525,16 @@ def test_main_creates_required_features_in_platform_safe_order(
 
     startup_ready_signal = _FakeSignal()
 
+    class _FakeSurface:
+        def render_backend_name(self) -> str:
+            return "test"
+
+    class _FakeDetailPage:
+        def native_surfaces(self):
+            return (_FakeSurface(), _FakeSurface(), _FakeSurface())
+
+    detail_page = _FakeDetailPage()
+
     class _FakeUi:
         sidebar = type(
             "FakeSidebar",
@@ -484,8 +547,13 @@ def test_main_creates_required_features_in_platform_safe_order(
             },
         )()
 
-        def ensure_feature(self, feature: str) -> None:
+        def prepare_detail_native_hierarchy(self):
+            call_order.append("prepare:detail")
+            return detail_page
+
+        def ensure_feature(self, feature: str):
             call_order.append(f"feature:{feature}")
+            return detail_page
 
     class _FakeWindow:
         def __init__(self, _context) -> None:
@@ -646,25 +714,18 @@ def test_main_creates_required_features_in_platform_safe_order(
     assert main([]) == 0
 
     detail_index = call_order.index("feature:detail")
+    prepare_index = call_order.index("prepare:detail")
     show_index = call_order.index("show")
     coordinator_index = call_order.index("coordinator:create")
 
-    if platform in {"win32", "linux"}:
-        assert detail_index < show_index
-        assert "rhi_detail.before_create" in profile_marks
-        assert "rhi_detail.created" in profile_marks
-    else:
-        assert show_index < detail_index
-        assert "rhi_detail.before_create" not in profile_marks
-        assert "rhi_detail.created" not in profile_marks
+    assert prepare_index < show_index < detail_index < coordinator_index
+    assert "detail.native_hierarchy.before_prepare" in profile_marks
+    assert "detail.native_hierarchy.prepared" in profile_marks
+    assert "detail.feature.completed" in profile_marks
     assert "windows_detail.before_create" not in profile_marks
     assert "windows_detail.created" not in profile_marks
     assert "feature:preview" not in call_order
     assert "feature:people" not in call_order
-    if platform == "darwin":
-        assert show_index < detail_index < coordinator_index
-    else:
-        assert detail_index < show_index < coordinator_index
     # The shell becomes interactive immediately after the first-paint/watchdog
     # boundary; library probing and hidden feature creation must not retain the
     # global input filter.
@@ -736,7 +797,7 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
     )
     monkeypatch.setattr(
         "iPhoto.gui.main._startup_feature_plan",
-        lambda: (("detail",), ()),
+        lambda: ((), ()),
     )
     monkeypatch.setattr("iPhoto.gui.main.QApplication", _FakeApp)
     monkeypatch.setattr("iPhoto.gui.main.QPalette", _FakePalette)
@@ -770,6 +831,14 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
                 def ensure_feature(self, feature: str) -> None:
                     call_order.append(("ensure_feature", feature))
 
+                def prepare_detail_native_hierarchy(self):
+                    call_order.append(("prepare_detail_native_hierarchy", None))
+                    return type(
+                        "FakeDetailPage",
+                        (),
+                        {"native_surfaces": lambda self: ()},
+                    )()
+
             self.ui = _FakeUi()
             self.firstPainted = type("FakeSignal", (), {"connect": lambda *a, **k: None})()
 
@@ -798,5 +867,5 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
 
     assert call_order[0][0] == "prefer"
     assert not any(name == "apply_pending" for name, _value in call_order)
-    assert ("ensure_feature", "detail") in call_order
+    assert ("prepare_detail_native_hierarchy", None) in call_order
     assert call_order[1][0] == "prepare_maps"

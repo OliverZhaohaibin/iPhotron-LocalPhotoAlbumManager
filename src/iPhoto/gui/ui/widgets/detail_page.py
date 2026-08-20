@@ -50,6 +50,7 @@ class DetailPageWidget(QWidget):
         parent: QWidget | None = None,
         *,
         image_viewer: GLImageViewer | None = None,
+        staged: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("detailPage")
@@ -63,43 +64,29 @@ class DetailPageWidget(QWidget):
         # ``hide_rhi_init_cover()`` and ``resizeEvent`` always find the attr.
         self._rhi_init_cover: QWidget | None = None
         self._edit_bundle_created = False
+        self._feature_completed = False
         self._main_window = main_window
-
-        # Header widgets -----------------------------------------------------
-        self.back_button = QToolButton(self)
-        self.info_button = QToolButton(self)
-        self.share_button = QToolButton(self)
-        self.favorite_button = QToolButton(self)
-        self.favorite_button.setEnabled(False)
-        self.rotate_left_button = QToolButton(self)
-        self.edit_button = QPushButton(tr("DetailPage", "Edit"), self)
-        self.edit_button.setEnabled(False)
-
-        self.zoom_widget = QWidget(self)
-        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self.zoom_widget)
-        self.zoom_in_button = QToolButton(self.zoom_widget)
-        self.zoom_out_button = QToolButton(self.zoom_widget)
-
-        self.location_label = QLabel(self)
-        self.timestamp_label = QLabel(self)
 
         # Viewer widgets -----------------------------------------------------
         self.player_stack = QStackedWidget(self)
         self._placeholder_default_text = self.default_placeholder_text()
         self.player_placeholder = QLabel(self._placeholder_default_text, self.player_stack)
-        self.image_viewer = image_viewer or GLImageViewer()
-        if self.image_viewer.parent() not in (None, self.player_stack):
-            self.image_viewer.setParent(None)
-        self.video_area = VideoArea()
-        self.player_bar = self.video_area.player_bar
-        self.video_trim_bar = VideoTrimBar()
-        self.video_trim_bar.hide()
-        self.face_name_overlay = FaceNameOverlayWidget()
-
-        self.filmstrip_view = FilmstripView()
-
-        self.live_badge = LiveBadge(main_window)
-        self.live_badge.hide()
+        self.image_viewer = image_viewer or GLImageViewer(self.player_stack)
+        if self.image_viewer.parent() is not self.player_stack:
+            self.image_viewer.setParent(self.player_stack)
+        try:
+            self.video_area = VideoArea(self.player_stack, staged=True)
+        except TypeError as exc:
+            # Lightweight embedders and controller tests may replace
+            # VideoArea with the historical parent-only constructor.
+            if "staged" not in str(exc):
+                raise
+            self.video_area = VideoArea(self.player_stack)
+        self.player_bar = None
+        self.video_trim_bar = None
+        self.face_name_overlay = None
+        self.filmstrip_view = None
+        self.live_badge = None
         self.badge_host: QWidget | None = None
 
         # References controllers rely on when shuffling widgets.
@@ -114,15 +101,73 @@ class DetailPageWidget(QWidget):
         self.player_container: QWidget | None = None
         self.player_column: QWidget | None = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(6)
 
-        self._build_header(main_window, layout)
         self._build_player_area()
-        self._build_player_container(layout)
-        layout.addWidget(self.filmstrip_view)
+        self._build_player_container(self._root_layout)
+        if not staged:
+            self.complete_feature()
+
+    def complete_feature(self) -> None:
+        """Complete non-native Detail UI without moving prepared QRhi widgets."""
+
+        if self._feature_completed:
+            return
+
+        complete_runtime = getattr(self.video_area, "complete_runtime", None)
+        if callable(complete_runtime):
+            complete_runtime()
+        self.player_bar = self.video_area.player_bar
+
+        # Header widgets -----------------------------------------------------
+        self.back_button = QToolButton(self)
+        self.info_button = QToolButton(self)
+        self.share_button = QToolButton(self)
+        self.favorite_button = QToolButton(self)
+        self.favorite_button.setEnabled(False)
+        self.rotate_left_button = QToolButton(self)
+        self.edit_button = QPushButton(tr("DetailPage", "Edit"), self)
+        self.edit_button.setEnabled(False)
+        self.zoom_widget = QWidget(self)
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self.zoom_widget)
+        self.zoom_in_button = QToolButton(self.zoom_widget)
+        self.zoom_out_button = QToolButton(self.zoom_widget)
+        self.location_label = QLabel(self)
+        self.timestamp_label = QLabel(self)
+
+        self.video_trim_bar = VideoTrimBar(self)
+        self.video_trim_bar.hide()
+        self._player_column_layout.addWidget(self.video_trim_bar)
+
+        self.face_name_overlay = FaceNameOverlayWidget(self.player_container)
+        self.face_name_overlay.set_viewer(self.image_viewer)
+        player_layout = self.player_container.layout()
+        if player_layout is not None:
+            player_layout.addWidget(self.face_name_overlay, 0, 0)
+        self.face_name_overlay.hide()
+
+        self.live_badge = LiveBadge(self._main_window)
+        self.live_badge.setParent(self.player_container)
+        self.live_badge.hide()
+        self.badge_host = self.player_container
+
+        self.filmstrip_view = FilmstripView(self)
+        self._build_header(self._main_window, self._root_layout)
+        self._root_layout.addWidget(self.filmstrip_view)
+        self._feature_completed = True
+        self._raise_player_overlays()
         self.retranslate_ui()
+
+    def native_surfaces(self) -> tuple[QWidget, QWidget, QWidget]:
+        """Return the QRhi widgets whose final hierarchy is prepared pre-show."""
+
+        return (
+            self.image_viewer,
+            self.video_area.renderer,
+            self.video_area.edit_viewer,
+        )
 
     @classmethod
     def default_placeholder_text(cls) -> str:
@@ -179,7 +224,8 @@ class DetailPageWidget(QWidget):
         ):
             self.player_placeholder.setText(default_placeholder_text)
         self._placeholder_default_text = default_placeholder_text
-        self.player_bar.retranslate_ui()
+        if self.player_bar is not None:
+            self.player_bar.retranslate_ui()
         for child_name in ("video_trim_bar", "edit_sidebar", "face_name_overlay"):
             child = getattr(self, child_name, None)
             method = getattr(child, "retranslate_ui", None)
@@ -360,7 +406,7 @@ class DetailPageWidget(QWidget):
         detail_chrome_layout.addWidget(header_separator)
         self.detail_header_separator = header_separator
 
-        parent_layout.addWidget(detail_chrome_container)
+        parent_layout.insertWidget(0, detail_chrome_container)
         self.detail_chrome_container = detail_chrome_container
 
     def _build_player_area(self) -> None:
@@ -374,8 +420,6 @@ class DetailPageWidget(QWidget):
         self.player_placeholder.setMinimumHeight(320)
 
         self.player_stack.addWidget(self.player_placeholder)
-        if self.image_viewer.parent() is not self.player_stack:
-            self.image_viewer.setParent(self.player_stack)
         self.player_stack.addWidget(self.image_viewer)
         self.player_stack.addWidget(self.video_area)
         self.player_stack.setCurrentWidget(self.player_placeholder)
@@ -405,10 +449,6 @@ class DetailPageWidget(QWidget):
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(0)
         player_layout.addWidget(self.player_stack, 0, 0)
-        self.face_name_overlay.setParent(player_container)
-        self.face_name_overlay.set_viewer(self.image_viewer)
-        player_layout.addWidget(self.face_name_overlay, 0, 0)
-        self.face_name_overlay.hide()
         self.player_container = player_container
 
         # Opaque cover that hides the QRhiWidget area until its first frame
@@ -424,9 +464,6 @@ class DetailPageWidget(QWidget):
         player_layout.addWidget(self._rhi_init_cover, 0, 0)
         self._rhi_init_cover.raise_()
 
-        self.live_badge.setParent(player_container)
-        self.badge_host = player_container
-        self._raise_player_overlays()
 
     def _build_player_container(self, parent_layout: QVBoxLayout) -> None:
         """Install the playback host without constructing optional edit chrome."""
@@ -448,7 +485,7 @@ class DetailPageWidget(QWidget):
         player_column_layout.setContentsMargins(0, 0, 0, 0)
         player_column_layout.setSpacing(0)
         player_column_layout.addWidget(self.player_container, 1)
-        player_column_layout.addWidget(self.video_trim_bar)
+        self._player_column_layout = player_column_layout
 
         edit_body_layout.addWidget(self.player_column, 1)
         edit_layout.addWidget(edit_body, 1)
@@ -460,6 +497,7 @@ class DetailPageWidget(QWidget):
     def ensure_edit_bundle(self) -> None:
         """Create edit-only controls immediately before the first edit session."""
 
+        self.complete_feature()
         if self._edit_bundle_created:
             return
         from .edit_sidebar import EditSidebar
@@ -654,15 +692,19 @@ class DetailPageWidget(QWidget):
         cover.setStyleSheet("background-color: palette(window);")
 
     def _raise_player_overlays(self) -> None:
-        refresh_overlay = getattr(self.face_name_overlay, "refresh_view_state", None)
+        face_name_overlay = self.face_name_overlay
+        live_badge = self.live_badge
+        if face_name_overlay is None or live_badge is None:
+            return
+        refresh_overlay = getattr(face_name_overlay, "refresh_view_state", None)
         if callable(refresh_overlay):
             refresh_overlay()
-        raise_overlay_controls = getattr(self.face_name_overlay, "raise_interactive_controls", None)
+        raise_overlay_controls = getattr(face_name_overlay, "raise_interactive_controls", None)
         if callable(raise_overlay_controls):
             raise_overlay_controls()
         else:
-            self.face_name_overlay.raise_()
-        self.live_badge.raise_()
+            face_name_overlay.raise_()
+        live_badge.raise_()
 
 
 __all__ = ["DetailPageWidget"]

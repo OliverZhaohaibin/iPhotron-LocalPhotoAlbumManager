@@ -35,18 +35,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import (
-        QAudioOutput,
-        QMediaPlayer,
-        QVideoFrame,
-        QVideoSink,
-    )
-except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main window guard
-    QMediaPlayer = None
-    QAudioOutput = None
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoSink = None  # type: ignore[assignment, misc]
+# QtMultimedia is deliberately imported by ``complete_runtime()``.  The staged
+# startup path must be able to establish the final QRhiWidget hierarchy without
+# also starting the platform media backend before the main window is shown.
+QMediaPlayer = None
+QAudioOutput = None
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoSink = None  # type: ignore[assignment, misc]
 
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
@@ -61,14 +56,11 @@ from ....gui.detail_pipeline import (
     VideoPresentationState,
 )
 from ....gui.detail_profile import emit_detail_event, log_detail_profile
-from ....utils.ffmpeg import (  # noqa: F401 - V1 monkeypatch/test compatibility
-    get_linux_180_prerotate_hint,
-    probe_video_rotation,
-)
 from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
-from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget, _resolve_frame_rotation_cw
+
+PlayerBar = None
 
 _log = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -76,6 +68,57 @@ _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 def _startup_hang_diag_enabled() -> bool:
     return os.environ.get("IPHOTO_STARTUP_HANG_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _load_qt_multimedia_runtime() -> None:
+    """Load optional playback classes without replacing test-provided seams."""
+
+    global QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
+    if QMediaPlayer is None or QAudioOutput is None or QVideoSink is None:
+        try:
+            from PySide6.QtMultimedia import (
+                QAudioOutput as _QAudioOutput,
+                QMediaPlayer as _QMediaPlayer,
+                QVideoFrame as _QVideoFrame,
+                QVideoSink as _QVideoSink,
+            )
+        except (ModuleNotFoundError, ImportError):
+            return
+        if QMediaPlayer is None:
+            QMediaPlayer = _QMediaPlayer
+        if QAudioOutput is None:
+            QAudioOutput = _QAudioOutput
+        if QVideoFrame is None:
+            QVideoFrame = _QVideoFrame
+        if QVideoSink is None:
+            QVideoSink = _QVideoSink
+
+
+def _load_player_bar_class():
+    global PlayerBar
+    if PlayerBar is None:
+        from .player_bar import PlayerBar as _PlayerBar
+
+        PlayerBar = _PlayerBar
+    return PlayerBar
+
+
+def probe_video_rotation(*args, **kwargs):
+    """Lazy compatibility seam for tests and older callers."""
+
+    from ....utils.ffmpeg import probe_video_rotation as _probe_video_rotation
+
+    return _probe_video_rotation(*args, **kwargs)
+
+
+def get_linux_180_prerotate_hint(*args, **kwargs):
+    """Lazy compatibility seam for tests and older callers."""
+
+    from ....utils.ffmpeg import (
+        get_linux_180_prerotate_hint as _get_linux_180_prerotate_hint,
+    )
+
+    return _get_linux_180_prerotate_hint(*args, **kwargs)
 
 
 class VideoArea(QWidget):
@@ -111,7 +154,12 @@ class VideoArea(QWidget):
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        staged: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # Prevent the WA_TranslucentBackground cascade from the main window
@@ -119,11 +167,6 @@ class VideoArea(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setMouseTracking(True)
-
-        if QMediaPlayer is None or QVideoSink is None:
-            raise RuntimeError(
-                "PySide6.QtMultimedia is required for video playback."
-            )
 
         # --- Video Renderer Setup ---
         surface_color = viewer_surface_color(self)
@@ -194,8 +237,46 @@ class VideoArea(QWidget):
         self._renderer_zoom: float = 1.0
         self._edit_viewer_zoom: float = 1.0
 
+        # Playback-only objects are created after the first main-window paint
+        # on the staged startup path.  The QRhi widgets above already have
+        # their final parents and must never be reparented during completion.
+        self._runtime_ready = False
+        self._player = None
+        self._audio_output = None
+        self._video_sink = None
+        self._player_bar = None
+        self._fade_anim = None
+        self._hide_timer = None
+        self._overlay_margin = 48
+        self._controls_visible = False
+        self._target_opacity = 0.0
+        self._host_widget: QWidget | None = self._renderer
+        self._window_host: QWidget | None = None
+        self._controls_enabled = True
+
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
+
+        self._wire_edit_viewer()
+        self._renderer.nativeSizeChanged.connect(self.displaySizeChanged.emit)
+        self._renderer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
+        self._edit_viewer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
+
+        if not staged:
+            self.complete_runtime()
+
+    def complete_runtime(self) -> None:
+        """Create playback services while preserving the prepared surfaces."""
+
+        if self._runtime_ready:
+            return
+
+        _load_qt_multimedia_runtime()
+        player_bar_class = _load_player_bar_class()
+        if QMediaPlayer is None or QAudioOutput is None or QVideoSink is None:
+            raise RuntimeError(
+                "PySide6.QtMultimedia is required for video playback."
+            )
 
         # --- Media Player Setup ---
         self._player = QMediaPlayer(self)
@@ -215,16 +296,9 @@ class VideoArea(QWidget):
         self._player.errorOccurred.connect(self._on_error_occurred)
         # --- End Media Player Setup ---
 
-        self._overlay_margin = 48
-        self._player_bar = PlayerBar(self)
+        self._player_bar = player_bar_class(self)
         self._player_bar.hide()
         self._player_bar.setMouseTracking(True)
-
-        self._controls_visible = False
-        self._target_opacity = 0.0
-        self._host_widget: QWidget | None = self._renderer
-        self._window_host: QWidget | None = None
-        self._controls_enabled = True
 
         effect = QGraphicsOpacityEffect(self._player_bar)
         effect.setOpacity(0.0)
@@ -241,10 +315,7 @@ class VideoArea(QWidget):
 
         self._install_activity_filters()
         self._wire_player_bar()
-        self._wire_edit_viewer()
-        self._renderer.nativeSizeChanged.connect(self.displaySizeChanged.emit)
-        self._renderer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
-        self._edit_viewer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
+        self._runtime_ready = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -259,6 +330,8 @@ class VideoArea(QWidget):
     def player_bar(self) -> PlayerBar:
         """Return the floating :class:`PlayerBar`."""
 
+        if self._player_bar is None:
+            raise RuntimeError("VideoArea playback runtime has not been completed")
         return self._player_bar
 
     @property
@@ -593,7 +666,7 @@ class VideoArea(QWidget):
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
 
-        if not self._controls_enabled:
+        if not self._runtime_ready or not self._controls_enabled:
             return
         self._hide_timer.stop()
         if not self._controls_visible:
@@ -611,6 +684,8 @@ class VideoArea(QWidget):
     def hide_controls(self, *, animate: bool = True) -> None:
         """Fade the playback controls out."""
 
+        if not self._runtime_ready:
+            return
         if not self._controls_visible and self._current_opacity() <= 0.0:
             return
         self._hide_timer.stop()
@@ -624,7 +699,7 @@ class VideoArea(QWidget):
     def note_activity(self) -> None:
         """Treat external events as user activity to keep controls visible."""
 
-        if not self._controls_enabled:
+        if not self._runtime_ready or not self._controls_enabled:
             return
         if self._controls_visible:
             self._restart_hide_timer()
@@ -1323,7 +1398,7 @@ class VideoArea(QWidget):
 
     def leaveEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().leaveEvent(event)
-        if not self._player_bar.underMouse():
+        if self._player_bar is not None and not self._player_bar.underMouse():
             self.hide_controls()
 
     def mouseMoveEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -1357,7 +1432,7 @@ class VideoArea(QWidget):
         elsewhere in the window.  Space, M, and other transport shortcuts are
         handled globally by ``AppShortcutManager``.
         """
-        if self._edit_mode_active:
+        if not self._runtime_ready or self._edit_mode_active:
             super().keyPressEvent(event)
             return
 
@@ -1382,6 +1457,8 @@ class VideoArea(QWidget):
         self.hide_controls(animate=False)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # pragma: no cover - GUI behaviour
+        if not self._runtime_ready:
+            return super().eventFilter(watched, event)
         if event.type() in {
             QEvent.Type.MouseMove,
             QEvent.Type.HoverMove,
@@ -1442,7 +1519,7 @@ class VideoArea(QWidget):
             self.zoomChanged.emit(factor)
 
     def _on_mouse_activity(self) -> None:
-        if not self._controls_enabled:
+        if not self._runtime_ready or not self._controls_enabled:
             return
         self.mouseActive.emit()
         if self._controls_visible:
@@ -1492,7 +1569,7 @@ class VideoArea(QWidget):
             self._player_bar.hide()
 
     def _update_bar_geometry(self) -> None:
-        if not self.isVisible():
+        if self._player_bar is None or not self.isVisible():
             return
         rect = self.rect()
         available_width = max(0, rect.width() - (2 * self._overlay_margin))

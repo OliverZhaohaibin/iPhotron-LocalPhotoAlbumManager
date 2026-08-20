@@ -17,11 +17,14 @@ from iPhoto.bootstrap.startup_profile import mark
 
 mark("module.before_qt_imports")
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, Signal  # noqa: E402, I001
-from PySide6.QtGui import QColor, QPalette, QSurfaceFormat  # noqa: E402
+from PySide6.QtGui import QColor, QPalette, QSurface, QSurfaceFormat  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment  # noqa: E402
-from iPhoto.gui.render_backend import should_configure_global_desktop_opengl  # noqa: E402
+from iPhoto.gui.render_backend import (  # noqa: E402
+    selected_rhi_backend_name,
+    should_configure_global_desktop_opengl,
+)
 
 mark("module.imported")
 
@@ -458,20 +461,59 @@ def _configure_qt_opengl_defaults(library_root: Path | None = None) -> None:
 def _startup_feature_plan(
     platform: str | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return features created before and after the main window is shown.
+    """Return feature completion work scheduled after the first paint.
 
-    On OpenGL-backed desktop platforms, inserting the detail page's
-    ``QRhiWidget`` children into an already visible top-level widget can make
-    Qt recreate the native window. That appears as a short-lived first window
-    followed by the real one. Keep the GPU-backed detail page in the pre-show
-    phase there, while retaining the faster first-frame path on macOS.
+    Detail's final QRhi hierarchy is prepared separately before ``show()`` on
+    every desktop platform.  Only its non-native feature completion remains in
+    this plan; platform-specific exceptions are intentionally forbidden.
     """
 
-    target_platform = sys.platform if platform is None else platform
-    deferred = ("detail",)
-    if target_platform in {"win32", "linux"}:
-        return (("detail",), ())
-    return ((), deferred)
+    del platform
+    return ((), ("detail",))
+
+
+def _prepare_top_level_rhi_surface(window: object, backend_name: str) -> str:
+    """Create the native top-level with the surface type required by QRhi.
+
+    Ui_MainWindow attaches the QRhi hierarchy before QMenuBar causes native
+    QWindow creation.  This function is a read-only contract check: changing,
+    destroying, or recreating QWidget's internal QWindow here would detach its
+    backing store and leave QRhiWidget without the window-associated QRhi.
+    """
+
+    targets_by_backend = {
+        "metal": (QSurface.SurfaceType.MetalSurface,),
+        "opengl": (
+            QSurface.SurfaceType.OpenGLSurface,
+            QSurface.SurfaceType.RasterGLSurface,
+        ),
+    }
+    targets = targets_by_backend.get(str(backend_name).strip().lower())
+    if targets is None:
+        raise RuntimeError(f"Unsupported startup QRhi backend: {backend_name}")
+    preferred_target = targets[0]
+
+    window_handle_accessor = getattr(window, "windowHandle", None)
+    if not callable(window_handle_accessor):
+        return preferred_target.name
+    handle = window_handle_accessor()
+    if handle is None:
+        # QMenuBar creates a native handle during setup on macOS, while other
+        # platforms may correctly defer it until show().  The attached QRhi
+        # hierarchy will select the surface type when Qt creates that handle.
+        return f"deferred:{preferred_target.name}"
+
+    is_visible = getattr(window, "isVisible", None)
+    if callable(is_visible) and is_visible():
+        raise RuntimeError("Top-level QRhi surface must be configured before show()")
+    actual_surface_type = handle.surfaceType()
+    if actual_surface_type not in targets:
+        raise RuntimeError(
+            "Top-level surface was created with "
+            f"{actual_surface_type.name}; expected one of "
+            f"{', '.join(target.name for target in targets)}"
+        )
+    return actual_surface_type.name
 
 
 def _startup_timing_plan(platform: str | None = None) -> _StartupTimingPlan:
@@ -711,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
 
     startup.phaseChanged.connect(_handle_startup_phase_changed)
 
-    pre_show_features, post_show_features = _startup_feature_plan()
+    _pre_show_features, post_show_features = _startup_feature_plan()
     startup_timing = _startup_timing_plan()
 
     def _preload_startup_modules() -> object:
@@ -735,63 +777,107 @@ def main(argv: list[str] | None = None) -> int:
     def _startup_imports_ready(generation: int) -> bool:
         return coordinator_runtime is not None or startup_imports.ready(generation)
 
-    def _ensure_pre_show_features(generation: int) -> StartupFailure | None:
-        for feature in pre_show_features:
-            job_name = f"feature.{feature}.pre_show"
-            thread_name = threading.current_thread().name
-            mark(
-                "startup.gui_job.started",
-                job=job_name,
-                generation=generation,
-                duration_ms=0.0,
-                budget_ms=100.0,
-                over_budget=False,
-                thread=thread_name,
-                result="running",
+    def _prepare_pre_show_native_hierarchy(
+        generation: int,
+    ) -> StartupFailure | None:
+        job_name = "feature.detail.native_hierarchy.pre_show"
+        thread_name = threading.current_thread().name
+        mark(
+            "startup.gui_job.started",
+            job=job_name,
+            generation=generation,
+            duration_ms=0.0,
+            budget_ms=100.0,
+            over_budget=False,
+            thread=thread_name,
+            result="running",
+        )
+        mark("detail.native_hierarchy.before_prepare", generation=generation)
+        started_ns = time.perf_counter_ns()
+        prepare_exception: Exception | None = None
+        surface_count = 0
+        graphics_backends: tuple[str, ...] = ()
+        top_level_surface_type = "unknown"
+        try:
+            selected_backend = selected_rhi_backend_name()
+            top_level_surface_type = _prepare_top_level_rhi_surface(
+                window,
+                selected_backend,
             )
-            started_ns = time.perf_counter_ns()
-            feature_exception: Exception | None = None
-            try:
-                if feature == "detail":
-                    mark("rhi_detail.before_create")
-                window.ui.ensure_feature(feature)
-                if feature == "detail":
-                    mark("rhi_detail.created")
-            except Exception as exc:  # Startup recovery boundary.
-                feature_exception = exc
-                _logger.exception("Pre-show feature %s failed", feature)
-            finally:
-                duration_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
-                details = {
-                    "job": job_name,
-                    "generation": generation,
-                    "duration_ms": round(duration_ms, 3),
-                    "budget_ms": 100.0,
-                    "over_budget": duration_ms > 100.0,
-                    "thread": thread_name,
-                    "result": "error" if feature_exception is not None else "success",
-                }
-                mark("startup.gui_job.finished", **details)
-                if duration_ms > 100.0:
-                    mark("startup.gui_stall", **details)
-                    _logger.warning(
-                        "GUI startup job %s exceeded 100.0ms budget (%.1fms)",
-                        job_name,
-                        duration_ms,
-                    )
-            if feature_exception is not None:
-                return StartupFailure(
-                    phase=StartupPhase.APP_CREATED,
-                    message=str(feature_exception) or type(feature_exception).__name__,
-                    exception_type=type(feature_exception).__name__,
-                    recoverable=True,
-                    code=f"feature_{feature}_pre_show_failed",
-                    suggested_action="retry",
-                    operation=f"feature.{feature}.pre_show",
+            prepare = getattr(window.ui, "prepare_detail_native_hierarchy", None)
+            if not callable(prepare):
+                raise RuntimeError(
+                    "main window UI does not provide prepare_detail_native_hierarchy"
                 )
+            detail_page = prepare()
+            surfaces = tuple(detail_page.native_surfaces())
+            surface_count = len(surfaces)
+            graphics_backends = tuple(
+                sorted(
+                    {
+                        str(backend_name())
+                        for surface in surfaces
+                        if callable(
+                            backend_name := getattr(
+                                surface,
+                                "render_backend_name",
+                                None,
+                            )
+                        )
+                    }
+                )
+            )
+            mark(
+                "detail.native_hierarchy.prepared",
+                generation=generation,
+                surface_count=surface_count,
+                graphics_backends=graphics_backends,
+                top_level_surface_type=top_level_surface_type,
+            )
+        except Exception as exc:  # Startup recovery boundary.
+            prepare_exception = exc
+            _logger.exception("Pre-show Detail native hierarchy preparation failed")
+        finally:
+            measured_duration_ms = (
+                time.perf_counter_ns() - started_ns
+            ) / 1_000_000.0
+            prepared_duration_ms = float(
+                getattr(window.ui, "_detail_native_prepare_duration_ms", 0.0)
+            )
+            duration_ms = max(measured_duration_ms, prepared_duration_ms)
+            details = {
+                "job": job_name,
+                "generation": generation,
+                "duration_ms": round(duration_ms, 3),
+                "budget_ms": 100.0,
+                "over_budget": duration_ms > 100.0,
+                "thread": thread_name,
+                "result": "error" if prepare_exception is not None else "success",
+                "surface_count": surface_count,
+                "graphics_backends": graphics_backends,
+                "top_level_surface_type": top_level_surface_type,
+            }
+            mark("startup.gui_job.finished", **details)
+            if duration_ms > 100.0:
+                mark("startup.gui_stall", **details)
+                _logger.warning(
+                    "GUI startup job %s exceeded 100.0ms budget (%.1fms)",
+                    job_name,
+                    duration_ms,
+                )
+        if prepare_exception is not None:
+            return StartupFailure(
+                phase=StartupPhase.APP_CREATED,
+                message=str(prepare_exception) or type(prepare_exception).__name__,
+                exception_type=type(prepare_exception).__name__,
+                recoverable=True,
+                code="feature_detail_native_hierarchy_pre_show_failed",
+                suggested_action="retry",
+                operation=job_name,
+            )
         return None
 
-    pre_show_failure = _ensure_pre_show_features(startup.generation)
+    pre_show_failure = _prepare_pre_show_native_hierarchy(startup.generation)
 
     coordinator_runtime = None
     coordinator_started = False
@@ -1039,23 +1125,18 @@ def main(argv: list[str] | None = None) -> int:
             lambda: _start_startup_imports(generation),
         )
         for feature in post_show_features:
-            if feature == "detail":
-                prepare_surface = getattr(
-                    window.ui,
-                    "prepare_detail_surface",
-                    lambda: None,
-                )
-                _enqueue_startup_job(
-                    "feature.detail.surface",
-                    generation,
-                    prepare_surface,
-                    prerequisite=lambda: _startup_imports_ready(generation),
-                )
-
             def _create_feature(feature_name=feature) -> None:
                 mark("feature.before_create", feature=feature_name)
-                window.ui.ensure_feature(feature_name)
+                created = window.ui.ensure_feature(feature_name)
                 mark("feature.created", feature=feature_name)
+                if feature_name == "detail":
+                    native_surfaces = getattr(created, "native_surfaces", None)
+                    surfaces = tuple(native_surfaces()) if callable(native_surfaces) else ()
+                    mark(
+                        "detail.feature.completed",
+                        generation=generation,
+                        surface_count=len(surfaces),
+                    )
 
             _enqueue_startup_job(
                 f"feature.{feature}.post_show",
@@ -1099,7 +1180,7 @@ def main(argv: list[str] | None = None) -> int:
             return
         generation = startup.begin()
         _register_attempt_resources(generation)
-        pre_show_failure = _ensure_pre_show_features(generation)
+        pre_show_failure = _prepare_pre_show_native_hierarchy(generation)
         if pre_show_failure is not None:
             startup.fail(pre_show_failure)
             return

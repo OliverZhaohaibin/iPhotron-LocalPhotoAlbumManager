@@ -1050,9 +1050,12 @@ def test_still_loading_failure_marks_transaction_terminal_and_disables_edit() ->
 def test_live_photo_fallback_reuses_the_asset_identity() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     still = Path("/fake/photo.heic")
-    coordinator._active_live_motion = Path("/fake/photo.mov")
+    motion = Path("/fake/photo.mov")
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = motion
     coordinator._active_live_still = still
     coordinator._active_live_asset_id = "asset-1"
+    coordinator._active_live_media_generation = 11
     transaction = DetailRenderTransaction(
         generation=7,
         asset_id="asset-1",
@@ -1072,13 +1075,52 @@ def test_live_photo_fallback_reuses_the_asset_identity() -> None:
     coordinator._player_bar = Mock(setEnabled=Mock())
     coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
 
-    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._handle_playback_finished(coordinator, 7, motion, 11)
 
     coordinator._player_view.display_image.assert_called_once_with(
         still,
         transaction=transaction,
     )
     assert coordinator._active_live_asset_id == ""
+    assert coordinator._active_live_still is None
+    assert coordinator._active_live_media_generation is None
+
+
+def test_live_photo_finish_rejects_stale_rapid_navigation_events() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    motion_a = Path("/fake/a.mov")
+    motion_b = Path("/fake/b.mov")
+    motion_c = Path("/fake/c.mov")
+    coordinator._detail_request_generation = 23
+    coordinator._active_live_motion = motion_c
+    coordinator._active_live_media_generation = 103
+    coordinator._restore_live_still = Mock(return_value=True)
+
+    PlaybackCoordinator._handle_playback_finished(coordinator, 21, motion_a, 101)
+    PlaybackCoordinator._handle_playback_finished(coordinator, 22, motion_b, 102)
+
+    coordinator._restore_live_still.assert_not_called()
+
+    PlaybackCoordinator._handle_playback_finished(coordinator, 23, motion_c, 103)
+
+    coordinator._restore_live_still.assert_called_once_with()
+
+
+def test_live_photo_finish_rejects_previous_replay_of_same_motion() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    motion = Path("/fake/photo.mov")
+    coordinator._detail_request_generation = 7
+    coordinator._active_live_motion = motion
+    coordinator._active_live_media_generation = 12
+    coordinator._restore_live_still = Mock(return_value=True)
+
+    PlaybackCoordinator._handle_playback_finished(coordinator, 7, motion, 11)
+
+    coordinator._restore_live_still.assert_not_called()
+
+    PlaybackCoordinator._handle_playback_finished(coordinator, 7, motion, 12)
+
+    coordinator._restore_live_still.assert_called_once_with()
 
 
 def test_live_photo_motion_preparation_failure_restores_pending_still() -> None:
@@ -1118,6 +1160,7 @@ def test_live_photo_motion_preparation_failure_restores_pending_still() -> None:
     coordinator._active_live_motion = motion
     coordinator._active_live_still = still
     coordinator._active_live_asset_id = "asset-1"
+    coordinator._active_live_media_generation = 11
     coordinator._player_view = Mock(
         video_area=Mock(stop=Mock()),
         defer_still_updates=Mock(),
@@ -1340,6 +1383,7 @@ def test_live_photo_motion_to_still_runs_overlay_and_prefetch(
     coordinator._active_live_motion = motion
     coordinator._active_live_still = still
     coordinator._active_live_asset_id = "asset-1"
+    coordinator._active_live_media_generation = 11
     coordinator._current_presentation = _make_presentation(
         path=str(still),
         asset_id="asset-1",
@@ -1360,7 +1404,7 @@ def test_live_photo_motion_to_still_runs_overlay_and_prefetch(
     coordinator._prefetch_neighbor_stills = Mock()
 
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
-    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._handle_playback_finished(coordinator, 7, motion, 11)
     PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
 
     if has_pending_still:
@@ -1419,7 +1463,7 @@ def test_live_photo_second_replay_restores_overlay_without_reopening_transaction
     coordinator._current_presentation = presentation
     coordinator._face_name_overlay = Mock()
     coordinator._player_view = Mock(
-        video_area=Mock(begin_load=Mock()),
+        video_area=Mock(begin_load=Mock(side_effect=[11, 12])),
         defer_still_updates=Mock(),
         apply_pending_still=Mock(return_value=False),
         display_image=Mock(),
@@ -1435,12 +1479,12 @@ def test_live_photo_second_replay_restores_overlay_without_reopening_transaction
 
     PlaybackCoordinator._autoplay_live_motion(coordinator, presentation)
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
-    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._handle_playback_finished(coordinator, 7, motion, 11)
     PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
 
     PlaybackCoordinator.replay_live_photo(coordinator)
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
-    PlaybackCoordinator._handle_playback_finished(coordinator)
+    PlaybackCoordinator._handle_playback_finished(coordinator, 7, motion, 12)
     PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
 
     assert len(terminal_presentations) == 1

@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QFont,
+    QLinearGradient,
+    QPainter,
+)
 from PySide6.QtWidgets import (
     QFrame,
-    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -35,6 +42,88 @@ from .main_window_metrics import (
     HEADER_ICON_GLYPH_SIZE,
 )
 from .video_area import VideoArea
+
+
+class _PlaybackHeaderShadow(QWidget):
+    """Paint a downward shadow without taking space in the page layout."""
+
+    SHADOW_HEIGHT = 28
+
+    def __init__(
+        self,
+        anchor: QWidget,
+        visibility_source: QWidget,
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self._anchor = anchor
+        self._visibility_source = visibility_source
+        self._header_opacity = 1.0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        anchor.installEventFilter(self)
+        visibility_source.installEventFilter(self)
+        parent.installEventFilter(self)
+        self._sync_to_anchor()
+
+    def bind_opacity_effect(self, effect: QGraphicsOpacityEffect) -> None:
+        """Keep the overlay in step with the existing header fade animation."""
+
+        self._set_header_opacity(effect.opacity())
+        effect.opacityChanged.connect(self._set_header_opacity)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if event.type() in {
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+        }:
+            self._sync_to_anchor()
+        return super().eventFilter(watched, event)
+
+    def _sync_to_anchor(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        origin = self._anchor.mapTo(parent, QPoint(0, 0))
+        available_height = max(0, parent.height() - origin.y())
+        self.setGeometry(
+            origin.x(),
+            origin.y(),
+            self._anchor.width(),
+            min(self.SHADOW_HEIGHT, available_height),
+        )
+        self.setVisible(not self._visibility_source.isHidden())
+        self.raise_()
+
+    def _set_header_opacity(self, opacity: float) -> None:
+        self._header_opacity = max(0.0, min(1.0, float(opacity)))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if self.height() <= 1:
+            return
+        painter = QPainter(self)
+        painter.setOpacity(self._header_opacity)
+        painter.fillRect(
+            0,
+            0,
+            self.width(),
+            1,
+            QColor(0, 0, 0, 30),
+        )
+
+        gradient = QLinearGradient(0, 1, 0, self.height())
+        gradient.setColorAt(0.00, QColor(0, 0, 0, 46))
+        gradient.setColorAt(0.08, QColor(0, 0, 0, 35))
+        gradient.setColorAt(0.22, QColor(0, 0, 0, 22))
+        gradient.setColorAt(0.42, QColor(0, 0, 0, 11))
+        gradient.setColorAt(0.68, QColor(0, 0, 0, 4))
+        gradient.setColorAt(1.00, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect().adjusted(0, 1, 0, 0), gradient)
 
 
 class DetailPageWidget(QWidget):
@@ -97,8 +186,11 @@ class DetailPageWidget(QWidget):
         self.detail_header: QWidget | None = None
         self.detail_chrome_container: QWidget | None = None
         self.detail_header_separator: QFrame | None = None
+        self.detail_header_shadow: _PlaybackHeaderShadow | None = None
         self.player_container: QWidget | None = None
         self.player_column: QWidget | None = None
+        self.detail_playback_container: QWidget | None = None
+        self._detail_playback_layout: QVBoxLayout | None = None
 
         self._root_layout = QVBoxLayout(self)
         self._root_layout.setContentsMargins(0, 0, 0, 0)
@@ -161,7 +253,7 @@ class DetailPageWidget(QWidget):
         self.badge_host = self.player_container
 
         self.filmstrip_view = FilmstripView(self)
-        self._build_header(self._main_window, self._root_layout)
+        self._build_header(self._main_window)
         self._root_layout.addWidget(self.filmstrip_view)
         self._feature_completed = True
         self._raise_player_overlays()
@@ -239,7 +331,7 @@ class DetailPageWidget(QWidget):
             if callable(method):
                 method()
 
-    def _build_header(self, main_window: QWidget, parent_layout: QVBoxLayout) -> None:
+    def _build_header(self, main_window: QWidget) -> None:
         """Create the header row containing navigation and metadata controls."""
 
         header = QWidget(self)
@@ -397,24 +489,23 @@ class DetailPageWidget(QWidget):
         header_separator.setFrameShape(QFrame.Shape.HLine)
         header_separator.setFrameShadow(QFrame.Shadow.Plain)
         header_separator.setFixedHeight(2)
-        base_surface = viewer_surface_color(self)
-        separator_tint = QColor(base_surface).darker(108)
         header_separator.setStyleSheet(
             "QFrame#detailHeaderSeparator {"
-            f"  background-color: {separator_tint.name()};"
+            "  background-color: transparent;"
             "  border: none;"
             "}"
         )
-        separator_shadow = QGraphicsDropShadowEffect(header_separator)
-        separator_shadow.setBlurRadius(14)
-        separator_shadow.setColor(QColor(0, 0, 0, 45))
-        separator_shadow.setOffset(0, 1)
-        header_separator.setGraphicsEffect(separator_shadow)
         detail_chrome_layout.addWidget(header_separator)
         self.detail_header_separator = header_separator
 
-        parent_layout.insertWidget(0, detail_chrome_container)
+        assert self._detail_playback_layout is not None
+        self._detail_playback_layout.insertWidget(0, detail_chrome_container)
         self.detail_chrome_container = detail_chrome_container
+        self.detail_header_shadow = _PlaybackHeaderShadow(
+            header_separator,
+            detail_chrome_container,
+            self,
+        )
 
     def _build_player_area(self) -> None:
         """Create the stacked media viewer inside its container."""
@@ -499,7 +590,15 @@ class DetailPageWidget(QWidget):
         self._edit_layout = edit_layout
         self._edit_body_layout = edit_body_layout
 
-        parent_layout.addWidget(edit_container, 1)
+        detail_playback_container = QWidget(self)
+        detail_playback_layout = QVBoxLayout(detail_playback_container)
+        detail_playback_layout.setContentsMargins(0, 0, 0, 0)
+        detail_playback_layout.setSpacing(0)
+        detail_playback_layout.addWidget(edit_container, 1)
+        self.detail_playback_container = detail_playback_container
+        self._detail_playback_layout = detail_playback_layout
+
+        parent_layout.addWidget(detail_playback_container, 1)
 
     def ensure_edit_bundle(self) -> None:
         """Create edit-only controls immediately before the first edit session."""

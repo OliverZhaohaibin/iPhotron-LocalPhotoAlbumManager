@@ -291,7 +291,8 @@ future side design. The active query path is SQL-first and windowed:
 - Active surface demands are leases. Sparse row windows may be disjoint, while
   the global micro cache remains bounded. Thumbnail L1 keys include display size,
   so Gallery and Filmstrip buckets coexist under one byte budget; hiding a surface
-  releases only its exclusive pins and queued work.
+  suspends its viewport publishers and releases only its exclusive pins and queued
+  work. Late viewport query results for a released surface are discarded.
 - Delegates consume one `GalleryTileSnapshot` through `TILE_SNAPSHOT`. A paint
   miss must remain memory-only; it schedules bounded background work and paints
   an available micro thumbnail or placeholder instead of reading SQLite or L2.

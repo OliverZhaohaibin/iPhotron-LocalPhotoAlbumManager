@@ -115,10 +115,13 @@ class AssetGrid(QListView):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._scroll_controller.resume()
         self.viewportVisibilityChanged.emit(True)
         QTimer.singleShot(0, self._schedule_visible_rows_update)
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._update_timer.stop()
+        self._scroll_controller.suspend()
         self.viewportVisibilityChanged.emit(False)
         super().hideEvent(event)
 
@@ -283,7 +286,7 @@ class AssetGrid(QListView):
         return bool(buttons & Qt.MouseButton.LeftButton)
 
     def _schedule_visible_rows_update(self) -> None:
-        if not self._update_timer.isActive():
+        if self.isVisible() and not self._update_timer.isActive():
             self._update_timer.start()
 
     def _viewport_pos(self, event: QMouseEvent) -> QPoint:
@@ -331,6 +334,8 @@ class AssetGrid(QListView):
         return QPoint(event.x(), event.y())
 
     def _emit_visible_rows(self) -> None:
+        if not self.isVisible():
+            return
         model = self.model()
         if model is None:
             return

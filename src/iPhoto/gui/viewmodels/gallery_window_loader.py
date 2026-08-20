@@ -386,6 +386,25 @@ class GalleryWindowLoader(QObject):
             return
         self._start(request)
 
+    def discard_queued(self, surface_id: str) -> None:
+        """Drop queued viewport work owned only by *surface_id*."""
+
+        surface_id = str(surface_id)
+        dropped = tuple(
+            request.generation
+            for request in self._queued_requests
+            if request.surface_id == surface_id and int(request.demand_generation) > 0
+        )
+        if not dropped:
+            return
+        dropped_set = set(dropped)
+        self._queued_requests = [
+            request
+            for request in self._queued_requests
+            if request.generation not in dropped_set
+        ]
+        self.requestsDropped.emit(dropped)
+
     def shutdown(self) -> None:
         dropped = tuple(request.generation for request in self._queued_requests)
         self._queued_requests.clear()

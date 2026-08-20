@@ -40,6 +40,7 @@ class AssetScrollController(QObject):
         self._publish = publish
         self._surface_id = str(surface_id)
         self._axis = axis
+        self._suspended = not bool(self._view.isVisible())
         self._scrollbar = (
             self._view.horizontalScrollBar()
             if axis == "horizontal"
@@ -81,6 +82,8 @@ class AssetScrollController(QObject):
     def handle_wheel(self, event) -> bool:
         """Accumulate one wheel event without introducing inertial drag."""
 
+        if self._suspended:
+            return False
         now = time.monotonic()
         pixel_delta = event.pixelDelta()
         pixel_y = pixel_delta.y() if not pixel_delta.isNull() else 0
@@ -140,15 +143,43 @@ class AssetScrollController(QObject):
         return True
 
     def schedule_publish(self) -> None:
-        self._publish()
+        if not self._suspended:
+            self._publish()
+
+    def suspend(self) -> None:
+        """Stop delayed publications while the owning surface is hidden."""
+
+        self._suspended = True
+        self._pending_pixel_delta = 0.0
+        for timer in (
+            self._apply_timer,
+            self._idle_timer,
+            self._dwell_timer,
+            self._direction_expiry_timer,
+        ):
+            timer.stop()
+
+    def resume(self) -> None:
+        """Resume observation from the scrollbar's current position."""
+
+        self._suspended = False
+        self._last_value = int(self._scrollbar.value())
+        self._last_value_at = time.monotonic()
+        self._screens_per_second = 0.0
+        self._input_kind = "none"
+        self._intent = "idle"
+        self._clear_angle_cadence()
 
     def viewport_state(self, row_count: int) -> AssetViewportDemand | None:
-        if row_count <= 0:
+        if self._suspended or row_count <= 0:
             return None
         resolved = self._resolve_visible_range(row_count)
         if resolved is None:
             return None
         first, last = resolved
+        demand_row_count = self._demand_row_count(row_count)
+        if demand_row_count <= 0:
+            return None
         viewport = self._view.viewport()
         dpr = max(1.0, float(viewport.devicePixelRatioF()))
         display_bucket = resolve_display_thumbnail_bucket(
@@ -162,7 +193,7 @@ class AssetScrollController(QObject):
         demand = build_viewport_demand(
             surface_id=self._surface_id,
             generation=self._generation + 1,
-            row_count=row_count,
+            row_count=demand_row_count,
             visible_first=first,
             visible_last=max(first, last),
             direction=self._direction,
@@ -190,6 +221,9 @@ class AssetScrollController(QObject):
             display_bucket=display_bucket,
         )
         return demand
+
+    def _demand_row_count(self, proxy_row_count: int) -> int:
+        return max(0, int(proxy_row_count))
 
     def _resolve_visible_range(self, row_count: int) -> tuple[int, int] | None:
         """Return source-model rows visible on this controller's surface."""
@@ -223,6 +257,10 @@ class AssetScrollController(QObject):
         self.schedule_publish()
 
     def _on_scroll_value_changed(self, value: int) -> None:
+        if self._suspended:
+            self._last_value = int(value)
+            self._last_value_at = time.monotonic()
+            return
         now = time.monotonic()
         elapsed = max(1e-6, now - self._last_value_at)
         distance = int(value) - self._last_value

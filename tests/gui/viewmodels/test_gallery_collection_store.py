@@ -895,6 +895,40 @@ def test_window_loader_generation_is_isolated_per_surface(qapp) -> None:
     loader.shutdown()
 
 
+def test_window_loader_discards_only_released_surface_viewport_work(qapp) -> None:
+    del qapp
+    loader = GalleryWindowLoader()
+    loader._active_generation = 999
+    service = object()
+    dropped = []
+    loader.requestsDropped.connect(lambda generations: dropped.extend(generations))
+
+    def request(generation: int, surface_id: str, demand_generation: int) -> GalleryWindowRequest:
+        return GalleryWindowRequest(
+            generation=generation,
+            root=Path("."),
+            query=AssetQuery(),
+            query_service=service,
+            view_first=generation * 100,
+            raw_first=generation * 100,
+            limit=10,
+            demand_generation=demand_generation,
+            surface_id=surface_id,
+        )
+
+    loader.request(request(1, "gallery", 1))
+    loader.request(request(2, "filmstrip", 1))
+    loader.request(request(3, "filmstrip", 0))
+    loader.discard_queued("filmstrip")
+
+    assert [(item.surface_id, item.generation) for item in loader._queued_requests] == [
+        ("gallery", 1),
+        ("filmstrip", 3),
+    ]
+    assert dropped == [2]
+    loader.shutdown()
+
+
 def test_store_keeps_disjoint_surface_rows_relevant_and_reports_ranges() -> None:
     store = GalleryCollectionStore(None, library_root=Path("/library"))
     store._total_count = 2_000
@@ -939,6 +973,46 @@ def test_store_keeps_disjoint_surface_rows_relevant_and_reports_ranges() -> None
     store.release_viewport_demand("filmstrip")
     assert store._row_is_currently_relevant(10)
     assert not store._row_is_currently_relevant(1_000)
+
+
+def test_released_surface_rejects_inflight_viewport_result() -> None:
+    store = GalleryCollectionStore(None, library_root=Path("/library"))
+    store._total_count = 2_000
+    demand = build_viewport_demand(
+        surface_id="filmstrip",
+        generation=7,
+        row_count=2_000,
+        visible_first=1_000,
+        visible_last=1_005,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    store.reconcile_viewport_demand(demand)
+    dto = scan_row_to_dto(
+        Path("/library"),
+        "1000.jpg",
+        {"id": "1000", "rel": "1000.jpg", "media_type": 0},
+    )
+    assert dto is not None
+    store._pending_window_generations.add(42)
+    store.release_viewport_demand("filmstrip")
+
+    applied = store.apply_window_result(
+        GalleryWindowResult(
+            generation=42,
+            first=1_000,
+            last=1_000,
+            rows={1_000: dto},
+            total_count=2_000,
+            collection_revision=0,
+            demand_generation=demand.generation,
+            surface_id="filmstrip",
+        )
+    )
+
+    assert applied is False
+    assert store.asset_at(1_000) is None
 
 
 def test_window_loader_drops_duplicate_of_active_query_window(qapp) -> None:

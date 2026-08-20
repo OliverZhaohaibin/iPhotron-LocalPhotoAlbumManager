@@ -825,6 +825,12 @@ class GalleryCollectionStore:
         )
         current_surface_demand = self._surface_demands.get(result.surface_id)
         if (
+            result.purpose == "viewport"
+            and int(result.demand_generation) > 0
+            and current_surface_demand is None
+        ):
+            return False
+        if (
             current_surface_demand is not None
             and result.demand_generation < current_surface_demand.generation
         ):

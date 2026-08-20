@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QModelIndex, QPoint
 
-from ..models.proxy_mapping import map_to_root_source
+from ..models.proxy_mapping import map_to_root_source, root_source_model
 from ..models.roles import Roles
 from .gallery_scroll_controller import AssetScrollController
 
@@ -23,6 +23,11 @@ class FilmstripViewportController(AssetScrollController):
     def _display_edge(self) -> int:
         icon = self._view.iconSize()
         return max(1, int(icon.width()), int(icon.height()))
+
+    def _demand_row_count(self, proxy_row_count: int) -> int:
+        del proxy_row_count
+        source = root_source_model(self._view.model())
+        return int(source.rowCount()) if source is not None else 0
 
     def _resolve_visible_range(self, row_count: int) -> tuple[int, int] | None:
         model = self._view.model()

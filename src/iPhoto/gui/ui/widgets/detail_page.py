@@ -22,10 +22,7 @@ from PySide6.QtWidgets import (
 from ....gui.i18n import tr
 from ..icon import load_icon
 from ..palette import SIDEBAR_TEXT_COLOR, viewer_surface_color
-from .face_name_overlay import FaceNameOverlayWidget
-from .filmstrip_view import FilmstripView
 from .gl_image_viewer import GLImageViewer
-from .live_badge import LiveBadge
 from .main_window_metrics import (
     EDIT_DONE_BUTTON_BACKGROUND,
     EDIT_DONE_BUTTON_BACKGROUND_DISABLED,
@@ -38,7 +35,6 @@ from .main_window_metrics import (
     HEADER_ICON_GLYPH_SIZE,
 )
 from .video_area import VideoArea
-from .video_trim_bar import VideoTrimBar
 
 
 class DetailPageWidget(QWidget):
@@ -71,7 +67,10 @@ class DetailPageWidget(QWidget):
         self.player_stack = QStackedWidget(self)
         self._placeholder_default_text = self.default_placeholder_text()
         self.player_placeholder = QLabel(self._placeholder_default_text, self.player_stack)
-        self.image_viewer = image_viewer or GLImageViewer(self.player_stack)
+        self.image_viewer = image_viewer or GLImageViewer(
+            self.player_stack,
+            staged=staged,
+        )
         if self.image_viewer.parent() is not self.player_stack:
             self.image_viewer.setParent(self.player_stack)
         try:
@@ -116,6 +115,14 @@ class DetailPageWidget(QWidget):
         if self._feature_completed:
             return
 
+        from .face_name_overlay import FaceNameOverlayWidget
+        from .filmstrip_view import FilmstripView
+        from .live_badge import LiveBadge
+        from .video_trim_bar import VideoTrimBar
+
+        complete_image_viewer = getattr(self.image_viewer, "complete_runtime", None)
+        if callable(complete_image_viewer):
+            complete_image_viewer()
         complete_runtime = getattr(self.video_area, "complete_runtime", None)
         if callable(complete_runtime):
             complete_runtime()

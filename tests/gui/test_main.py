@@ -547,6 +547,9 @@ def test_main_creates_required_features_in_platform_safe_order(
             },
         )()
 
+        def __init__(self) -> None:
+            self._prepared_detail_page = self.prepare_detail_native_hierarchy()
+
         def prepare_detail_native_hierarchy(self):
             call_order.append("prepare:detail")
             return detail_page
@@ -719,7 +722,7 @@ def test_main_creates_required_features_in_platform_safe_order(
     coordinator_index = call_order.index("coordinator:create")
 
     assert prepare_index < show_index < detail_index < coordinator_index
-    assert "detail.native_hierarchy.before_prepare" in profile_marks
+    assert "detail.native_hierarchy.before_verify" in profile_marks
     assert "detail.native_hierarchy.prepared" in profile_marks
     assert "detail.feature.completed" in profile_marks
     assert "windows_detail.before_create" not in profile_marks
@@ -827,6 +830,9 @@ def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> Non
                     (),
                     {"select_all_photos": lambda *args, **kwargs: None},
                 )()
+
+                def __init__(self) -> None:
+                    self._prepared_detail_page = self.prepare_detail_native_hierarchy()
 
                 def ensure_feature(self, feature: str) -> None:
                     call_order.append(("ensure_feature", feature))

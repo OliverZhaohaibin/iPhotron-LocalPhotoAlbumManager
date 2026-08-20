@@ -36,21 +36,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# QtMultimedia is deliberately imported by ``complete_runtime()``.  The staged
-# startup path must be able to establish the final QRhiWidget hierarchy without
-# also starting the platform media backend before the main window is shown.
-QMediaPlayer = None
-QAudioOutput = None
-QVideoFrame = None  # type: ignore[assignment, misc]
-QVideoSink = None  # type: ignore[assignment, misc]
-
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
     PLAYER_FADE_IN_MS,
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
-from ....core.adjustment_mapping import normalise_video_trim, video_requires_adjusted_preview
 from ....gui.detail_pipeline import (
     AssetSourceIdentity,
     DetailRenderTransaction,
@@ -61,7 +52,16 @@ from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
 from .video_renderer_widget import VideoRendererWidget, _resolve_frame_rotation_cw
 
+# QtMultimedia is deliberately imported by ``complete_runtime()``.  The staged
+# startup path must be able to establish the final QRhiWidget hierarchy without
+# also starting the platform media backend before the main window is shown.
+QMediaPlayer = None
+QAudioOutput = None
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoSink = None  # type: ignore[assignment, misc]
 PlayerBar = None
+normalise_video_trim = None
+video_requires_adjusted_preview = None
 
 _log = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -79,8 +79,14 @@ def _load_qt_multimedia_runtime() -> None:
         try:
             from PySide6.QtMultimedia import (
                 QAudioOutput as _QAudioOutput,
+            )
+            from PySide6.QtMultimedia import (
                 QMediaPlayer as _QMediaPlayer,
+            )
+            from PySide6.QtMultimedia import (
                 QVideoFrame as _QVideoFrame,
+            )
+            from PySide6.QtMultimedia import (
                 QVideoSink as _QVideoSink,
             )
         except (ModuleNotFoundError, ImportError):
@@ -102,6 +108,21 @@ def _load_player_bar_class():
 
         PlayerBar = _PlayerBar
     return PlayerBar
+
+
+def _load_video_adjustment_helpers() -> None:
+    global normalise_video_trim, video_requires_adjusted_preview
+    if normalise_video_trim is not None and video_requires_adjusted_preview is not None:
+        return
+    from ....core.adjustment_mapping import (
+        normalise_video_trim as _normalise_video_trim,
+    )
+    from ....core.adjustment_mapping import (
+        video_requires_adjusted_preview as _video_requires_adjusted_preview,
+    )
+
+    normalise_video_trim = _normalise_video_trim
+    video_requires_adjusted_preview = _video_requires_adjusted_preview
 
 
 def probe_video_rotation(*args, **kwargs):
@@ -182,7 +203,7 @@ class VideoArea(QWidget):
         # Accept focus so keyboard navigation targets the video surface
         # without requiring the user to click a non-interactive element.
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._edit_viewer = GLImageViewer(self._surface_stack)
+        self._edit_viewer = GLImageViewer(self._surface_stack, staged=staged)
         self._edit_viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # In detail playback, crop framing is disabled but the crop region fills
         # the canvas (strength=1.0) so that crop-edited videos look the same as
@@ -275,6 +296,11 @@ class VideoArea(QWidget):
         if self._runtime_ready:
             return
 
+        complete_edit_viewer = getattr(self._edit_viewer, "complete_runtime", None)
+        if callable(complete_edit_viewer):
+            complete_edit_viewer()
+
+        _load_video_adjustment_helpers()
         _load_qt_multimedia_runtime()
         player_bar_class = _load_player_bar_class()
         if QMediaPlayer is None or QAudioOutput is None or QVideoSink is None:

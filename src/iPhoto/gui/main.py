@@ -777,7 +777,7 @@ def main(argv: list[str] | None = None) -> int:
     def _startup_imports_ready(generation: int) -> bool:
         return coordinator_runtime is not None or startup_imports.ready(generation)
 
-    def _prepare_pre_show_native_hierarchy(
+    def _verify_prepared_native_hierarchy(
         generation: int,
     ) -> StartupFailure | None:
         job_name = "feature.detail.native_hierarchy.pre_show"
@@ -792,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
             thread=thread_name,
             result="running",
         )
-        mark("detail.native_hierarchy.before_prepare", generation=generation)
+        mark("detail.native_hierarchy.before_verify", generation=generation)
         started_ns = time.perf_counter_ns()
         prepare_exception: Exception | None = None
         surface_count = 0
@@ -804,12 +804,11 @@ def main(argv: list[str] | None = None) -> int:
                 window,
                 selected_backend,
             )
-            prepare = getattr(window.ui, "prepare_detail_native_hierarchy", None)
-            if not callable(prepare):
+            detail_page = getattr(window.ui, "_prepared_detail_page", None)
+            if detail_page is None:
                 raise RuntimeError(
-                    "main window UI does not provide prepare_detail_native_hierarchy"
+                    "main window UI did not prepare the Detail native hierarchy"
                 )
-            detail_page = prepare()
             surfaces = tuple(detail_page.native_surfaces())
             surface_count = len(surfaces)
             graphics_backends = tuple(
@@ -834,9 +833,9 @@ def main(argv: list[str] | None = None) -> int:
                 graphics_backends=graphics_backends,
                 top_level_surface_type=top_level_surface_type,
             )
-        except Exception as exc:  # Startup recovery boundary.
+        except Exception as exc:  # Non-recoverable shell verification boundary.
             prepare_exception = exc
-            _logger.exception("Pre-show Detail native hierarchy preparation failed")
+            _logger.exception("Pre-show Detail native hierarchy verification failed")
         finally:
             measured_duration_ms = (
                 time.perf_counter_ns() - started_ns
@@ -870,14 +869,21 @@ def main(argv: list[str] | None = None) -> int:
                 phase=StartupPhase.APP_CREATED,
                 message=str(prepare_exception) or type(prepare_exception).__name__,
                 exception_type=type(prepare_exception).__name__,
-                recoverable=True,
-                code="feature_detail_native_hierarchy_pre_show_failed",
-                suggested_action="retry",
+                recoverable=False,
+                code="shell_initialization_failed",
+                suggested_action="continue_without_library",
                 operation=job_name,
             )
         return None
 
-    pre_show_failure = _prepare_pre_show_native_hierarchy(startup.generation)
+    shell_verification_failure = _verify_prepared_native_hierarchy(
+        startup.generation
+    )
+    if shell_verification_failure is not None:
+        startup.fail(shell_verification_failure)
+        startup_jobs.close()
+        startup_imports.close()
+        return 1
 
     coordinator_runtime = None
     coordinator_started = False
@@ -1175,15 +1181,10 @@ def main(argv: list[str] | None = None) -> int:
         _initialize_features_after_show(generation)
 
     def _retry_startup() -> None:
-        nonlocal pre_show_failure
         if startup.phase is StartupPhase.CANCELLED:
             return
         generation = startup.begin()
         _register_attempt_resources(generation)
-        pre_show_failure = _prepare_pre_show_native_hierarchy(generation)
-        if pre_show_failure is not None:
-            startup.fail(pre_show_failure)
-            return
         startup.transition(StartupPhase.INTERACTIVE, reason="retry")
         _initialize_features_after_show(generation)
 
@@ -1213,13 +1214,10 @@ def main(argv: list[str] | None = None) -> int:
 
     startup.startupCompleted.connect(_schedule_benchmark_exit)
     startup.startupDegraded.connect(_schedule_benchmark_exit)
-    if pre_show_failure is None:
-        window.firstPainted.connect(startup.first_painted)
-        # Arm before show(): test doubles and a few embedded Qt hosts can paint
-        # synchronously from show(), and that event must not be lost.
-        startup.shell_shown(_continue_after_shell)
-    else:
-        startup.fail(pre_show_failure)
+    window.firstPainted.connect(startup.first_painted)
+    # Arm before show(): test doubles and a few embedded Qt hosts can paint
+    # synchronously from show(), and that event must not be lost.
+    startup.shell_shown(_continue_after_shell)
     mark("startup.show", generation=startup.generation)
     window.show()
     mark("main_window.show_called")

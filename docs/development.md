@@ -1004,6 +1004,10 @@ QtMultimedia, coordinators, and other optional work remain connected to
 boundary. Widget creation stays on the GUI thread and should be split across
 event-loop turns.
 
+Treat native-hierarchy preparation failure as `shell_initialization_failed`.
+It occurs before a valid retry-capable shell exists and must not be retried
+after a native menu or another widget has committed the top-level handle.
+
 Keep imports above that boundary narrow. In particular, importing
 `iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the
 People/Pets AI pipelines, map rendering, asset-import services, edit-session models, or

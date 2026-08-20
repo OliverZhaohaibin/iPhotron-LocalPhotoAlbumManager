@@ -25,6 +25,10 @@ repaint work.
   far speculative, and micro-warm ranges. New heuristics belong in the demand
   policy, not as independent widget/viewmodel prefetch loops. Filmstrip ranges
   come from actual horizontal geometry and map through every proxy layer.
+- Gallery and Filmstrip both request the canonical 512px full-thumbnail bucket.
+  Their logical leases stay independent, but identical assets must converge on
+  one size-qualified physical key. Filmstrip geometry must never be inflated to
+  force this resolution.
 - Continuous medium/fast bursts prioritize input and visible recovery: they must
   not start hint queries or speculative L2 reads. Slow/dwell/idle work remains
   generation-aware and cancellable.
@@ -32,9 +36,12 @@ repaint work.
   urgent guard capacity, and newly visible requests must promote matching
   in-flight prefetch work rather than duplicate it.
 - L1 is one byte-budgeted multi-surface cache. Cache keys include display size;
-  bucket changes must not flush the pool. Preserve the union of visible pins,
+  never alias one QPixmap under multiple size keys. Preserve the union of visible pins,
   per-surface lease release, demand-aware eviction, staging caps, miss TTLs,
   low-memory release, and speculative backoff when changing cache behavior.
+- Filmstrip full demand stops at its existing two-screen guard; it does not add
+  far speculation at 512px. Gallery full speculation and both surfaces' micro
+  warm ranges remain unchanged.
 - Paint, model data, and peek paths remain memory-only for every surface. A
   missing Filmstrip full thumbnail is recovered by viewport demand, never by a
   request issued from the delegate.

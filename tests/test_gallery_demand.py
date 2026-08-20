@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from iPhoto.gui.gallery_demand import (
+    CANONICAL_FULL_THUMBNAIL_BUCKET,
     MICRO_WARM_LIMIT,
     build_viewport_demand,
     resolve_display_thumbnail_bucket,
+    resolve_surface_thumbnail_bucket,
 )
 
 
@@ -228,3 +230,55 @@ def test_display_thumbnail_bucket_never_requires_new_disk_sizes() -> None:
     assert resolve_display_thumbnail_bucket(300) == 384
     assert resolve_display_thumbnail_bucket(500) == 512
     assert resolve_display_thumbnail_bucket(900) == 512
+
+
+def test_gallery_and_filmstrip_use_canonical_full_thumbnail_bucket() -> None:
+    for surface_id in ("gallery", "filmstrip"):
+        assert resolve_surface_thumbnail_bucket(surface_id, 120) == 512
+        assert resolve_surface_thumbnail_bucket(surface_id, 240) == 512
+        assert resolve_surface_thumbnail_bucket(surface_id, 900) == 512
+    assert CANONICAL_FULL_THUMBNAIL_BUCKET == 512
+    assert resolve_surface_thumbnail_bucket("future-surface", 192) == 256
+    assert resolve_surface_thumbnail_bucket("future-surface", 300) == 384
+    direct = build_viewport_demand(
+        surface_id="gallery",
+        generation=1,
+        row_count=10,
+        visible_first=0,
+        visible_last=1,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+        display_bucket=256,
+    )
+    assert direct.display_bucket == 512
+
+
+def test_filmstrip_keeps_guard_but_drops_far_full_speculation() -> None:
+    filmstrip = build_viewport_demand(
+        surface_id="filmstrip",
+        generation=1,
+        row_count=1_000,
+        visible_first=100,
+        visible_last=102,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    gallery = build_viewport_demand(
+        surface_id="gallery",
+        generation=1,
+        row_count=1_000,
+        visible_first=100,
+        visible_last=102,
+        direction=1,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+
+    assert filmstrip.display_bucket == 512
+    assert filmstrip.full_guard_range == (94, 108)
+    assert filmstrip.full_prefetch_range == filmstrip.full_guard_range
+    assert tuple(filmstrip.iter_full_speculative_rows()) == ()
+    assert gallery.full_prefetch_range == (85, 117)
+    assert tuple(gallery.iter_full_speculative_rows())

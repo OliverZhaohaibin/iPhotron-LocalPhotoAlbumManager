@@ -656,14 +656,14 @@ def test_surface_snapshots_peek_their_own_bucket(adapter, mock_store, mock_thumb
     mock_store.asset_at.return_value = _make_dto(micro_thumbnail=micro)
     adapter._surface_sizes = {
         "gallery": QSize(512, 512),
-        "filmstrip": QSize(256, 256),
+        "filmstrip": QSize(512, 512),
     }
 
     adapter.tile_snapshot(0, "gallery")
     adapter.tile_snapshot(0, "filmstrip")
 
     sizes = [call.args[1] for call in mock_thumb_service.peek_full_thumbnail.call_args_list]
-    assert sizes == [QSize(512, 512), QSize(256, 256)]
+    assert sizes == [QSize(512, 512), QSize(512, 512)]
 
 
 def test_release_surface_discards_queued_window_and_hint_work(

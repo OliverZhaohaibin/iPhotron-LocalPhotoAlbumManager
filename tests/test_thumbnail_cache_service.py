@@ -443,33 +443,33 @@ def test_reconcile_demand_keeps_only_latest_visible_and_prefetch_queue(tmp_path:
     assert service._pinned_keys == {second_key}
 
 
-def test_surface_leases_keep_different_buckets_and_release_only_owner(tmp_path: Path) -> None:
+def test_surface_leases_support_future_different_bucket_without_aliasing(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     service._max_active_jobs = 0
     gallery_path = tmp_path / "gallery.jpg"
-    filmstrip_path = tmp_path / "filmstrip.jpg"
+    preview_path = tmp_path / "preview.jpg"
     gallery_size = QSize(512, 512)
-    filmstrip_size = QSize(256, 256)
+    preview_size = QSize(256, 256)
 
     service.upsert_surface_demand(
         "gallery",
         ThumbnailDemandSnapshot(1, gallery_size, (gallery_path,)),
     )
     service.upsert_surface_demand(
-        "filmstrip",
-        ThumbnailDemandSnapshot(1, filmstrip_size, (filmstrip_path,)),
+        "preview",
+        ThumbnailDemandSnapshot(1, preview_size, (preview_path,)),
     )
 
     gallery_key = service._cache_key(gallery_path, gallery_size)
-    filmstrip_key = service._cache_key(filmstrip_path, filmstrip_size)
-    assert service._pinned_keys == {gallery_key, filmstrip_key}
-    assert set(service._queued_tasks) == {gallery_key, filmstrip_key}
+    preview_key = service._cache_key(preview_path, preview_size)
+    assert service._pinned_keys == {gallery_key, preview_key}
+    assert set(service._queued_tasks) == {gallery_key, preview_key}
 
-    service.release_surface_demand("filmstrip")
+    service.release_surface_demand("preview")
 
     assert service._pinned_keys == {gallery_key}
     assert gallery_key in service._queued_tasks
-    assert filmstrip_key not in service._queued_tasks
+    assert preview_key not in service._queued_tasks
     service.shutdown()
 
 
@@ -477,7 +477,7 @@ def test_surface_leases_deduplicate_same_sized_visible_key(tmp_path: Path) -> No
     service = ThumbnailCacheService(tmp_path / "thumbs")
     service._max_active_jobs = 0
     path = tmp_path / "shared.jpg"
-    size = QSize(256, 256)
+    size = QSize(512, 512)
     snapshot = ThumbnailDemandSnapshot(1, size, (path,))
 
     service.upsert_surface_demand("gallery", snapshot)
@@ -499,11 +499,78 @@ def test_surface_bucket_change_does_not_release_l1_pool(tmp_path: Path) -> None:
             ThumbnailDemandSnapshot(1, QSize(512, 512), ()),
         )
         service.upsert_surface_demand(
-            "filmstrip",
+            "preview",
             ThumbnailDemandSnapshot(1, QSize(256, 256), ()),
         )
 
     release_slots.assert_not_called()
+    service.shutdown()
+
+
+def test_canonical_surface_handoff_reuses_one_resident_l1_slot(qapp, tmp_path: Path) -> None:
+    del qapp
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "shared.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    pixmap = QPixmap(512, 512)
+    pixmap.fill(QColor("blue"))
+    service._add_to_memory(key, pixmap)
+    allocations = service.memory_snapshot().slot_allocations
+    snapshot = ThumbnailDemandSnapshot(1, size, (path,))
+
+    with (
+        patch.object(service, "_start_generation") as start_generation,
+        patch.object(service, "_read_cached_thumbnail") as l2_read,
+        patch.object(service, "_store_image_in_l1") as publish_pixmap,
+        patch(
+            "iPhoto.infrastructure.services.thumbnail_cache_service.emit_perf_event"
+        ) as perf_event,
+    ):
+        service.upsert_surface_demand("gallery", snapshot)
+        service.upsert_surface_demand("filmstrip", snapshot)
+        gallery_pixmap = service.peek_full_thumbnail(path, size)
+        filmstrip_pixmap = service.peek_full_thumbnail(path, size)
+
+    assert start_generation.call_count == 0
+    l2_read.assert_not_called()
+    publish_pixmap.assert_not_called()
+    assert gallery_pixmap is filmstrip_pixmap
+    assert service._pinned_keys == {key}
+    assert service.memory_snapshot().slot_count == 1
+    assert service.memory_snapshot().slot_allocations == allocations
+    l1_hits = [
+        call
+        for call in perf_event.call_args_list
+        if call.args == ("thumbnail_cache_hit",)
+        and call.kwargs == {"tier": "L1", "key": key}
+    ]
+    assert len(l1_hits) == 2
+
+    service.release_surface_demand("gallery")
+    assert service._pinned_keys == {key}
+    service.release_surface_demand("filmstrip")
+    assert key not in service._pinned_keys
+    assert key not in (service._current_l1_demand_keys or set())
+    assert key in service._memory_cache
+    service.shutdown()
+
+
+def test_canonical_surface_concurrent_demand_starts_one_worker(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "shared.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    snapshot = ThumbnailDemandSnapshot(1, size, (path,))
+
+    with patch.object(service, "_start_generation", return_value=True) as start_generation:
+        service.upsert_surface_demand("gallery", snapshot)
+        service.upsert_surface_demand("filmstrip", snapshot)
+
+    start_generation.assert_called_once()
+    assert service._pending_tasks == {key}
+    assert service._queued_tasks == {}
+    assert service._publish_keys == set()
     service.shutdown()
 
 
@@ -1172,6 +1239,23 @@ def test_l2_512_file_decodes_directly_to_display_bucket_without_new_disk_file(
     assert image is not None
     assert image.size() == QSize(256, 256)
     assert not thumbnail_cache_file(tmp_path / "thumbs", path, (256, 256)).exists()
+
+
+def test_canonical_512_request_reuses_l2_without_variant_artifacts(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    disk_file = thumbnail_cache_file(tmp_path / "thumbs", path, (512, 512))
+    disk_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), "red").save(disk_file, format="JPEG")
+
+    image = service._load_cached_thumbnail_only(path, QSize(512, 512))
+
+    assert image is not None
+    assert image.size() == QSize(512, 512)
+    assert disk_file.exists()
+    assert not thumbnail_cache_file(tmp_path / "thumbs", path, (256, 256)).exists()
+    assert not thumbnail_cache_file(tmp_path / "thumbs", path, (384, 384)).exists()
+    service.shutdown()
 
 
 def test_known_l2_cache_key_drives_guard_request(tmp_path: Path) -> None:

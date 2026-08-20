@@ -5,11 +5,12 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QItemSelectionModel,
     QModelIndex,
+    QSize,
     QStringListModel,
     Qt,
 )
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
@@ -220,11 +221,35 @@ def test_horizontal_viewport_demand_maps_through_two_proxies(qapp):
     assert demand.surface_id == "filmstrip"
     assert demand.visible_first <= 1_000 <= demand.visible_last
     assert demand.visible_first > 900
-    assert demand.display_bucket == 256
+    assert demand.display_bucket == 512
 
     view._scroll_controller._publish_idle_state()
     view._emit_visible_rows()
-    assert emitted[-1].phase == "settled"
+    settled = emitted[-1]
+    assert settled.phase == "settled"
+    assert settled.full_prefetch_range == settled.full_guard_range
+    assert tuple(settled.iter_full_speculative_rows()) == ()
+
+
+def test_filmstrip_geometry_is_independent_from_thumbnail_bucket(qapp):
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(3)]
+    source = _AssetListModel(paths, paths[1])
+    view = FilmstripView()
+    delegate = AssetGridDelegate(view, filmstrip_mode=True)
+    view.setItemDelegate(delegate)
+    view.setModel(source)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+
+    option = QStyleOptionViewItem()
+    option.initFrom(view)
+    assert view.iconSize() == QSize(120, 120)
+    assert view.spacing() == 2
+    assert view.minimumHeight() == 132
+    assert view.maximumHeight() == 132
+    assert delegate.sizeHint(option, source.index(1, 0)) == QSize(120, 120)
+    assert delegate.sizeHint(option, source.index(0, 0)) == QSize(72, 120)
 
 
 def test_hidden_filmstrip_cancels_delayed_viewport_publication(qapp):

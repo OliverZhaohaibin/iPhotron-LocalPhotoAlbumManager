@@ -289,10 +289,14 @@ future side design. The active query path is SQL-first and windowed:
   generations, visible rows, full-thumbnail guards, speculative work, display
   buckets, and micro-thumbnail warm ranges.
 - Active surface demands are leases. Sparse row windows may be disjoint, while
-  the global micro cache remains bounded. Thumbnail L1 keys include display size,
-  so Gallery and Filmstrip buckets coexist under one byte budget; hiding a surface
-  suspends its viewport publishers and releases only its exclusive pins and queued
-  work. Late viewport query results for a released surface are discarded.
+  the global micro cache remains bounded. Gallery and Filmstrip both resolve to
+  one canonical 512px full-thumbnail key, so their independent leases share the
+  same L1 QPixmap and L2 artifact. Hiding a surface suspends its viewport publishers
+  and releases only its exclusive pins and queued work. Late viewport query results
+  for a released surface are discarded.
+- Filmstrip keeps visible and two-screen full-thumbnail guard demand at 512px,
+  but does not add far-speculative full work. Gallery retains its wider
+  full-prefetch policy, and Filmstrip micro warm-up remains unchanged.
 - Delegates consume one `GalleryTileSnapshot` through `TILE_SNAPSHOT`. A paint
   miss must remain memory-only; it schedules bounded background work and paints
   an available micro thumbnail or placeholder instead of reading SQLite or L2.
@@ -591,7 +595,8 @@ far work must not consume workers reserved for urgent visible/guard requests.
 `ThumbnailRuntimePolicy` derives worker, staging, publish, and byte-budget limits
 from platform and physical memory. L1 eviction accounts for actual image bytes,
 pins the union of active visible surface demand, and prefers old/far speculative
-entries. Different display buckets coexist instead of flushing the pool. Disk access
+entries. Gallery and Filmstrip naturally deduplicate at the same 512px key; the
+size-qualified key remains available to other future surfaces. Disk access
 and image decoding stay off the GUI thread; only bounded `QPixmap` publication
 runs there. Thumbnail infrastructure may apply edit state, but edit persistence
 remains behind session/edit sidecar services.

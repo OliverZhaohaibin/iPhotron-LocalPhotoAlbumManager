@@ -34,6 +34,8 @@ SCROLL_DIRECTIONAL_DWELL_MS = 75
 SCROLL_DIRECTION_RETENTION_MS = 600
 SCROLL_BURST_INTERVAL_MS = 75
 DISPLAY_THUMBNAIL_BUCKETS = (256, 384, 512)
+CANONICAL_FULL_THUMBNAIL_BUCKET = 512
+_CANONICAL_FULL_THUMBNAIL_SURFACES = frozenset({"gallery", "filmstrip"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +222,7 @@ def build_viewport_demand(
         last + visible_count * guard_after,
     )
     before_screens, after_screens = _full_prefetch_screens(
+        surface_id=surface_id,
         phase=phase,
         intent=intent,
         direction=direction,
@@ -265,7 +268,7 @@ def build_viewport_demand(
             if predicted_input_interval_ms is None
             else max(0.0, float(predicted_input_interval_ms))
         ),
-        display_bucket=resolve_display_thumbnail_bucket(display_bucket),
+        display_bucket=resolve_surface_thumbnail_bucket(surface_id, display_bucket),
         full_guard_first=full_guard_first,
         full_guard_last=full_guard_last,
         full_prefetch_first=full_prefetch_first,
@@ -278,6 +281,17 @@ def build_viewport_demand(
 def resolve_display_thumbnail_bucket(physical_edge: int | float) -> int:
     edge = max(1, int(round(float(physical_edge))))
     return next((bucket for bucket in DISPLAY_THUMBNAIL_BUCKETS if bucket >= edge), 512)
+
+
+def resolve_surface_thumbnail_bucket(
+    surface_id: str,
+    physical_edge: int | float,
+) -> int:
+    """Resolve storage resolution independently from surface geometry."""
+
+    if str(surface_id) in _CANONICAL_FULL_THUMBNAIL_SURFACES:
+        return CANONICAL_FULL_THUMBNAIL_BUCKET
+    return resolve_display_thumbnail_bucket(physical_edge)
 
 
 def _bounded_range(row_count: int, first: int, last: int) -> tuple[int, int]:
@@ -302,6 +316,7 @@ def _full_guard_screens(
 
 def _full_prefetch_screens(
     *,
+    surface_id: str,
     phase: GalleryScrollPhase,
     intent: GalleryScrollIntent,
     direction: int,
@@ -316,6 +331,8 @@ def _full_prefetch_screens(
     )
     if not guard_before and not guard_after:
         return 0, 0
+    if surface_id == "filmstrip":
+        return guard_before, guard_after
 
     if intent == "idle":
         screens = FULL_GUARD_SCREENS + FULL_SPECULATIVE_IDLE_SCREENS
@@ -354,6 +371,7 @@ def _warm_window(
 
 
 __all__ = [
+    "CANONICAL_FULL_THUMBNAIL_BUCKET",
     "FAST_SCROLL_SCREENS_PER_SECOND",
     "DISPLAY_THUMBNAIL_BUCKETS",
     "MICRO_QUERY_CHUNK",
@@ -374,4 +392,5 @@ __all__ = [
     "build_viewport_demand",
     "classify_scroll_phase",
     "resolve_display_thumbnail_bucket",
+    "resolve_surface_thumbnail_bucket",
 ]

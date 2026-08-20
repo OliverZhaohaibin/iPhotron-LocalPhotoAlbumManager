@@ -20,9 +20,10 @@ from iPhoto.gui.gallery_demand import (
     SCROLL_VELOCITY_EWMA_SECONDS,
     AssetViewportDemand,
     build_viewport_demand,
-    resolve_display_thumbnail_bucket,
+    resolve_surface_thumbnail_bucket,
 )
 from iPhoto.infrastructure.services.performance_events import emit_perf_event
+
 
 class AssetScrollController(QObject):
     """Track scroll intent and publish one surface demand per event-loop turn."""
@@ -182,7 +183,8 @@ class AssetScrollController(QObject):
             return None
         viewport = self._view.viewport()
         dpr = max(1.0, float(viewport.devicePixelRatioF()))
-        display_bucket = resolve_display_thumbnail_bucket(
+        display_bucket = resolve_surface_thumbnail_bucket(
+            self._surface_id,
             self._display_edge() * dpr
         )
         predicted_interval = (

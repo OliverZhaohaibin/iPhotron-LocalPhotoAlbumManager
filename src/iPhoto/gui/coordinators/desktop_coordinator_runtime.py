@@ -703,6 +703,12 @@ class DesktopCoordinatorRuntime(QObject):
         self._asset_list_vm.thumbnailBackfillProgress.connect(
             self._status_bar.handle_thumbnail_backfill_progress
         )
+        self._asset_list_vm.thumbnailBackfillCompleted.connect(
+            self._status_bar.handle_thumbnail_backfill_completed
+        )
+        self._asset_list_vm.thumbnailBackfillFailed.connect(
+            self._status_bar.handle_thumbnail_backfill_failed
+        )
 
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)

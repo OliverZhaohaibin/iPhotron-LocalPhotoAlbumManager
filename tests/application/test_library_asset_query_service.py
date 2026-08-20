@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
 from iPhoto.cache.index_store import IndexStore
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
@@ -537,6 +539,35 @@ def test_thumbnail_backfill_failed_rows_publish_empty_completion_batch(tmp_path:
     assert len(batches) == 1
     assert batches[0].ready_count == 0
     assert batches[0].rows == []
+    assert service.thumbnail_backfill_pending() is False
+
+
+def test_thumbnail_backfill_exception_emits_failed_terminal_event(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Trip"
+    album_root.mkdir(parents=True)
+    repo = _BackfillRepository()
+    service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
+    executor = _DeferredExecutor()
+    service._thumbnail_backfill_executor = executor  # type: ignore[assignment]
+    failures: list[tuple[Path, str]] = []
+    batches = []
+    service.thumbnail_backfill_failed.connect(
+        lambda root, error: failures.append((root, error))
+    )
+    service.thumbnail_backfill_completed.connect(batches.append)
+
+    with patch(
+        "iPhoto.bootstrap.library_asset_query_service.ensure_scan_thumbnail",
+        side_effect=RuntimeError("thumbnail decode crashed"),
+    ):
+        assert service.request_thumbnail_backfill(album_root, AssetQuery(), 0, 100) == 1
+        fn, args = executor.submitted[0]
+        with pytest.raises(RuntimeError, match="thumbnail decode crashed"):
+            fn(*args)
+
+    assert failures == [(album_root, "thumbnail decode crashed")]
+    assert batches == []
     assert service.thumbnail_backfill_pending() is False
 
 

@@ -424,6 +424,10 @@
             <translation>缩略图已更新。</translation>
         </message>
         <message>
+            <source>Thumbnail update failed.</source>
+            <translation>缩略图更新失败。</translation>
+        </message>
+        <message>
             <source>Loading items…</source>
             <translation>正在加载项目…</translation>
         </message>

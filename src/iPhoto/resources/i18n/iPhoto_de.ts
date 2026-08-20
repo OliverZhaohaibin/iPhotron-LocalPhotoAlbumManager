@@ -424,6 +424,10 @@
             <translation>Miniaturen aktualisiert.</translation>
         </message>
         <message>
+            <source>Thumbnail update failed.</source>
+            <translation>Miniaturen konnten nicht aktualisiert werden.</translation>
+        </message>
+        <message>
             <source>Loading items…</source>
             <translation>Elemente werden geladen …</translation>
         </message>

@@ -126,9 +126,14 @@ def _bootstrap_dinov2_from_pinned_source(model_path: Path) -> None:
         ) from exc
 
     try:
+        # Windows can transiently keep files from the cloned Torch Hub source
+        # open while TemporaryDirectory tears down. Cleanup is best-effort only:
+        # a cleanup failure must not roll back a model that already passed the
+        # manifest SHA-256 and size checks.
         with tempfile.TemporaryDirectory(
             prefix="iphoto-dinov2-bootstrap-",
             dir=model_path.parent,
+            ignore_cleanup_errors=True,
         ) as temp_dir:
             temp_root = Path(temp_dir)
             torch.hub.set_dir(str(temp_root / "torch-hub"))

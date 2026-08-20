@@ -16,6 +16,13 @@ def _stub_detector(monkeypatch, calls: list[tuple[str, Path | str]]) -> None:
     monkeypatch.setattr(pet_pipeline, "ensure_pet_detector_model", ensure_detector)
 
 
+def _unexpected_call(message: str):
+    def fail(*_args, **_kwargs):
+        raise AssertionError(message)
+
+    return fail
+
+
 def test_missing_models_trigger_detector_then_pinned_dinov2_bootstrap(
     tmp_path: Path,
     monkeypatch,
@@ -57,24 +64,25 @@ def test_configured_embedder_url_is_downloaded_before_scanning(
 
     changed = model_bootstrap.ensure_pet_model_artifacts(tmp_path)
 
+    expected_model_path = tmp_path / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"
     assert changed is True
-    assert calls[0] == ("detector", tmp_path / "detector" / "yolox_nano_coco.onnx")
-    assert calls[1] == (
-        "embedder-download",
-        f"{tmp_path / 'embedding' / 'dinov2_vits14' / 'dinov2_vits14.pt'}|{url}",
+    assert calls[0] == (
+        "detector",
+        tmp_path / "detector" / "yolox_nano_coco.onnx",
     )
+    assert calls[1] == ("embedder-download", f"{expected_model_path}|{url}")
 
 
 def test_model_auto_download_disabled_skips_acquisition(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         pet_pipeline,
         "ensure_pet_detector_model",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not download")),
+        _unexpected_call("must not download"),
     )
     monkeypatch.setattr(
         model_bootstrap,
         "_bootstrap_dinov2_from_pinned_source",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not bootstrap")),
+        _unexpected_call("must not bootstrap"),
     )
 
     assert (
@@ -110,16 +118,12 @@ def test_existing_verified_models_do_not_trigger_embedder_acquisition(
     monkeypatch.setattr(
         model_bootstrap,
         "_bootstrap_dinov2_from_pinned_source",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("verified model must be reused")
-        ),
+        _unexpected_call("verified model must be reused"),
     )
     monkeypatch.setattr(
         model_bootstrap,
         "_download_dinov2_release",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("verified model must be reused")
-        ),
+        _unexpected_call("verified model must be reused"),
     )
 
     assert model_bootstrap.ensure_pet_model_artifacts(tmp_path) is False

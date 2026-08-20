@@ -227,6 +227,67 @@ def test_horizontal_viewport_demand_maps_through_two_proxies(qapp):
     assert emitted[-1].phase == "settled"
 
 
+def test_hidden_filmstrip_cancels_delayed_viewport_publication(qapp):
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(80)]
+    source = _AssetListModel(paths, paths[10])
+    presentation = ThumbnailSurfaceProxyModel("filmstrip")
+    presentation.setSourceModel(source)
+    spacers = SpacerProxyModel()
+    spacers.setSourceModel(presentation)
+    view = FilmstripView()
+    view.setItemDelegate(AssetGridDelegate(view, filmstrip_mode=True))
+    view.setModel(spacers)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+
+    emitted = []
+    view.viewportStateChanged.connect(emitted.append)
+    view.schedule_viewport_publish()
+    view._scroll_controller._idle_timer.start(0)
+    view._scroll_controller._dwell_timer.start(0)
+    view._scroll_controller._direction_expiry_timer.start(0)
+    view.hide()
+    qapp.processEvents()
+    view._emit_visible_rows()
+
+    assert emitted == []
+    assert not view._update_timer.isActive()
+    assert not view._scroll_controller._idle_timer.isActive()
+    assert not view._scroll_controller._dwell_timer.isActive()
+    assert not view._scroll_controller._direction_expiry_timer.isActive()
+
+
+def test_filmstrip_demand_bounds_use_source_count_without_spacers(qapp):
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(1_200)]
+    source = _AssetListModel(paths, paths[-1])
+    presentation = ThumbnailSurfaceProxyModel("filmstrip")
+    presentation.setSourceModel(source)
+    spacers = SpacerProxyModel()
+    spacers.setSourceModel(presentation)
+    view = FilmstripView()
+    view.setItemDelegate(AssetGridDelegate(view, filmstrip_mode=True))
+    view.setModel(spacers)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+
+    emitted = []
+    view.viewportStateChanged.connect(emitted.append)
+    source_index = source.index(1_199, 0)
+    target = spacers.mapFromSource(presentation.mapFromSource(source_index))
+    view.select_index_for_centering(target)
+    view.center_on_index(target)
+    qapp.processEvents()
+
+    assert emitted
+    demand = emitted[-1]
+    assert demand.visible_last <= 1_199
+    assert demand.full_guard_last <= 1_199
+    assert demand.full_prefetch_last <= 1_199
+    assert demand.warm_last <= 1_199
+
+
 def test_current_change_does_not_publish_transient_spacer_width(qapp):
     paths = [Path(f"/library/photo-{index}.jpg") for index in range(40)]
     model = _AssetListModel(paths, paths[5])

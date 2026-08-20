@@ -666,6 +666,23 @@ def test_surface_snapshots_peek_their_own_bucket(adapter, mock_store, mock_thumb
     assert sizes == [QSize(512, 512), QSize(256, 256)]
 
 
+def test_release_surface_discards_queued_window_and_hint_work(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    with (
+        patch.object(adapter._window_loader, "discard_queued") as discard_windows,
+        patch.object(adapter._thumbnail_hint_loader, "discard_queued") as discard_hints,
+    ):
+        adapter.release_viewport_surface("filmstrip")
+
+    discard_windows.assert_called_once_with("filmstrip")
+    discard_hints.assert_called_once_with("filmstrip")
+    mock_store.release_viewport_demand.assert_called_once_with("filmstrip")
+    mock_thumb_service.release_surface_demand.assert_called_once_with("filmstrip")
+
+
 def test_stale_tile_never_exposes_old_full_or_micro_thumbnail(
     adapter,
     mock_store,

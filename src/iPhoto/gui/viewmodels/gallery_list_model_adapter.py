@@ -548,6 +548,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         """Release one view's row, hint, and thumbnail leases."""
 
         surface_id = str(surface_id)
+        self._window_loader.discard_queued(surface_id)
+        self._thumbnail_hint_loader.discard_queued(surface_id)
         self._demand_coordinator.release_viewport(surface_id)
         release_store = getattr(self._store, "release_viewport_demand", None)
         if callable(release_store):

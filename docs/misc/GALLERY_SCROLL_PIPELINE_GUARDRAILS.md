@@ -38,6 +38,13 @@ repaint work.
 - Paint, model data, and peek paths remain memory-only for every surface. A
   missing Filmstrip full thumbnail is recovered by viewport demand, never by a
   request issued from the delegate.
+- A hidden surface is suspended before its lease is released: coalescing and
+  scroll-intent timers cannot republish while hidden, and late viewport window
+  results for a released surface are discarded. Explicit detail-row requests
+  remain independent of these viewport leases.
+- Filmstrip geometry is measured in proxy rows, but every demand range is
+  bounded by the root source model's asset count; spacer rows never enter guard,
+  prefetch, or micro-warm ranges.
 - Gallery SQL projections stay narrow: tile windows omit wide metadata, while
   hint windows return only paths and existing full-thumbnail keys and do not
   repeat collection counts.

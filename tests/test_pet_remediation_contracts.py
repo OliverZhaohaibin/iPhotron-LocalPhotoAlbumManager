@@ -1058,6 +1058,50 @@ def test_cross_species_move_succeeds_and_journal_is_finalized(tmp_path: Path) ->
     assert coordinator._journal.unfinished() == ()
 
 
+def test_incremental_rescan_preserves_manual_cross_species_identity(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    cat = replace(_detection("cat", asset_id="asset-cat"), species_label="cat")
+    dog = _detection("dog", asset_id="asset-dog")
+    initial_event = coordinator.submit_detected_batch(
+        [
+            DetectedAssetPets("asset-cat", "album/asset-cat.jpg", [cat]),
+            DetectedAssetPets("asset-dog", "album/asset-dog.jpg", [dog]),
+        ],
+        distance_threshold=0.1,
+    )
+    assert initial_event is not None
+    dog_identity = repository.get_detection("dog").pet_id  # type: ignore[union-attr]
+
+    assert dog_identity is not None
+    assert coordinator.move_detection_to_pet("cat", dog_identity) is not None
+    caplog.clear()
+    caplog.set_level("INFO", logger="iPhoto.pets.pipeline")
+    rescanned_dog = replace(
+        _detection("dog-rescan", asset_id="asset-dog"),
+        pet_key=dog.pet_key,
+    )
+
+    event = coordinator.submit_detected_batch(
+        [DetectedAssetPets("asset-dog", "album/asset-dog.jpg", [rescanned_dog])],
+        distance_threshold=0.1,
+    )
+
+    assert event is not None
+    assert event.updated_pet_ids == (dog_identity,)
+    assert repository.get_detection("cat").pet_id == dog_identity  # type: ignore[union-attr]
+    assert repository.get_detection("dog") is None
+    assert repository.get_detection("dog-rescan").pet_id == dog_identity  # type: ignore[union-attr]
+    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {dog_identity}
+    assert event.operation_id is not None
+    assert repository.get_runtime_commit(event.operation_id)["state_synced"] is True  # type: ignore[index]
+    assert coordinator._journal.unfinished() == ()
+    assert f"Preserving mixed-species Pet identity {dog_identity}" in caplog.text
+
+
 def test_profile_candidate_index_has_strict_species_parity_with_usearch(
     monkeypatch,
 ) -> None:

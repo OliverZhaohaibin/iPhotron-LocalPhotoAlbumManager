@@ -657,6 +657,7 @@ class PetRepository:
                 runtime_detections,
                 names_by_pet_id=names,
                 created_at_by_pet_id=created_at,
+                allow_mixed_identity_members=True,
             )
             for chunk in _chunked(affected_pet_ids, 500):
                 placeholders = ", ".join("?" for _ in chunk)

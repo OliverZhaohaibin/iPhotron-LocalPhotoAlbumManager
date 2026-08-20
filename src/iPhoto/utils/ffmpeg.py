@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from PIL import Image
 
 _FFMPEG_LOG_LEVEL = "error"
+_FFPROBE_COMMAND_TIMEOUT_SECONDS = 15.0
+_FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS = 30.0
 _LINUX_180_HINT_CACHE: dict[str, bool] = {}
 _OPTIONAL_MODULE_UNSET = object()
 av: Any = _OPTIONAL_MODULE_UNSET
@@ -56,7 +58,11 @@ def _load_cv2() -> Any | None:
     return imported_cv2
 
 
-def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+def _run_command(
+    command: Sequence[str],
+    *,
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[bytes]:
     """Execute *command* and return the completed process."""
 
     # Define startupinfo to hide the window on Windows
@@ -74,9 +80,16 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
             stderr=subprocess.PIPE,
             startupinfo=startupinfo,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        tool_name = Path(command[0]).name if command else "external media tool"
+        raise ExternalToolError(
+            f"{tool_name} timed out after {timeout_seconds:g} seconds"
+        ) from exc
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
-        raise ExternalToolError("ffmpeg executable not found on PATH") from exc
+        tool_name = Path(command[0]).name if command else "External media tool"
+        raise ExternalToolError(f"{tool_name} executable not found on PATH") from exc
     return process
 
 
@@ -265,7 +278,10 @@ def _extract_with_ffmpeg(
         command += ["-q:v", "2"]
 
     command.append("pipe:1")
-    process = _run_command(command)
+    process = _run_command(
+        command,
+        timeout_seconds=_FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS,
+    )
 
     if process.returncode != 0 or not process.stdout:
         stderr = process.stderr.decode("utf-8", "ignore").strip()
@@ -572,7 +588,10 @@ def probe_media(source: Path) -> Dict[str, Any]:
     ]
 
     with media_access.read(source):
-        process = _run_command(command)
+        process = _run_command(
+            command,
+            timeout_seconds=_FFPROBE_COMMAND_TIMEOUT_SECONDS,
+        )
     if process.returncode != 0 or not process.stdout:
         stderr = process.stderr.decode("utf-8", "ignore").strip()
         raise ExternalToolError(

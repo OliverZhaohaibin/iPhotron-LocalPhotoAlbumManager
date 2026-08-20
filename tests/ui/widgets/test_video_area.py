@@ -790,6 +790,9 @@ class TestVideoArea:
         va = VideoArea()
         va._trim_in_ms = 1200
         va._trim_out_ms = 4200
+        va._detail_request_generation = 7
+        va._current_source = Path("/fake/live.mov")
+        va._media_generation = 9
 
         mock_pause = mocker.patch.object(va._player, "pause")
         mock_set_pos = mocker.patch.object(va._player, "setPosition")
@@ -798,11 +801,12 @@ class TestVideoArea:
         va.playbackFinished.connect(finished_spy)
 
         va._on_position_changed(4200)
+        va._on_position_changed(4200)
 
         mock_pause.assert_called_once()
         mock_set_pos.assert_called_once_with(4200 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
         mock_show_controls.assert_called_once()
-        finished_spy.assert_called_once_with()
+        finished_spy.assert_called_once_with(7, Path("/fake/live.mov"), 9)
         assert va._restart_from_trim_in_on_play is True
 
     def test_trim_out_hold_keeps_timeline_cursor_at_out_point(self, qapp) -> None:
@@ -947,12 +951,13 @@ class TestVideoArea:
             return_value=(90, 1920, 1440),
         )
 
-        va.begin_load(Path("/fake/portrait.mov"), 7)
+        media_generation = va.begin_load(Path("/fake/portrait.mov"), 7)
         va.commit_presentation(
             VideoPresentationState(7, {}, None, False, 90, 1920, 1440, False)
         )
 
         probe.assert_not_called()
+        assert media_generation == va._media_generation
         assert mock_set_rot.call_args_list[-1] == call(90, 1920, 1440)
 
     def test_load_video_handles_probe_failure(self, qapp, mocker):

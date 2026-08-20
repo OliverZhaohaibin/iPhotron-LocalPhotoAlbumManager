@@ -95,7 +95,7 @@ class VideoArea(QWidget):
     controlsVisibleChanged = Signal(bool)
     fullscreenExitRequested = Signal()
     playbackStateChanged = Signal(bool)
-    playbackFinished = Signal()
+    playbackFinished = Signal(int, object, int)
     mediaLoadFailed = Signal(Path, str)
     nextItemRequested = Signal()
     prevItemRequested = Signal()
@@ -693,13 +693,13 @@ class VideoArea(QWidget):
             )
         )
 
-    def begin_load(self, path: Path, request_generation: int) -> None:
-        """Set the source without probing or reading sidecars on the GUI thread."""
+    def begin_load(self, path: Path, request_generation: int) -> int:
+        """Set the source on the GUI thread and return its media generation."""
 
         load_started = time.perf_counter()
         prev_source = self._current_source
         previous_duration_ms = self._current_duration_ms
-        self._begin_media_generation()
+        media_generation = self._begin_media_generation()
         self._detach_video_output()
         if sys.platform == "darwin" and prev_source is not None:
             # AVFoundation can keep the previous audio session alive unless
@@ -745,6 +745,7 @@ class VideoArea(QWidget):
             media_type="video",
             suffix=path.suffix.lower(),
         )
+        return media_generation
 
     def commit_presentation(self, state: VideoPresentationState) -> bool:
         """Apply prepared metadata and begin accepting current video frames."""
@@ -1226,6 +1227,9 @@ class VideoArea(QWidget):
             return
         if self._suppress_trim_pause:
             return
+        finished_request_generation = self._detail_request_generation
+        finished_source = self._current_source
+        finished_media_generation = self._media_generation
         self._suppress_trim_pause = True
         self._end_hold_display_ms = end_pos
         self._restart_from_trim_in_on_play = True
@@ -1234,7 +1238,11 @@ class VideoArea(QWidget):
         self._suppress_trim_pause = False
         self._sync_position_display(end_pos)
         self.show_controls()
-        self.playbackFinished.emit()
+        self.playbackFinished.emit(
+            finished_request_generation,
+            finished_source,
+            finished_media_generation,
+        )
 
     def _on_volume_changed(self, value: int) -> None:
         """Handle volume changes from the player bar."""

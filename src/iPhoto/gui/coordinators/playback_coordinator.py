@@ -335,6 +335,7 @@ class PlaybackCoordinator(QObject):
         self._active_live_motion: Path | None = None
         self._active_live_still: Path | None = None
         self._active_live_asset_id: str = ""
+        self._active_live_media_generation: int | None = None
         self._resume_after_transition = False
         self._trim_in_ms = 0
         self._trim_out_ms = 0
@@ -468,6 +469,7 @@ class PlaybackCoordinator(QObject):
         self._active_live_motion = None
         self._active_live_still = None
         self._active_live_asset_id = ""
+        self._active_live_media_generation = None
         self._presented_still_generation = 0
         self._presented_still_source = None
         video_area = self._player_view.video_area
@@ -1186,6 +1188,7 @@ class PlaybackCoordinator(QObject):
         self._active_live_motion = None
         self._active_live_still = None
         self._active_live_asset_id = ""
+        self._active_live_media_generation = None
 
         self._reconcile_action_capabilities(presentation)
         self._info_button.setEnabled(True)
@@ -1512,7 +1515,7 @@ class PlaybackCoordinator(QObject):
         self._player_view.defer_still_updates(True)
         self._trim_in_ms = 0
         self._trim_out_ms = 0
-        self._player_view.video_area.begin_load(
+        self._active_live_media_generation = self._player_view.video_area.begin_load(
             motion_path,
             presentation.request_generation,
         )
@@ -1542,7 +1545,9 @@ class PlaybackCoordinator(QObject):
         if stop_motion:
             self._player_view.video_area.stop()
         self._active_live_motion = None
+        self._active_live_still = None
         self._active_live_asset_id = ""
+        self._active_live_media_generation = None
         self._player_view.defer_still_updates(False)
         if not self._player_view.apply_pending_still():
             if (
@@ -1562,7 +1567,23 @@ class PlaybackCoordinator(QObject):
         self._is_playing = False
         return True
 
-    def _handle_playback_finished(self) -> None:
+    @Slot(int, object, int)
+    def _handle_playback_finished(
+        self,
+        request_generation: int,
+        source: object,
+        media_generation: int,
+    ) -> None:
+        try:
+            finished_source = Path(source)
+        except TypeError:
+            return
+        if request_generation != getattr(self, "_detail_request_generation", 0):
+            return
+        if finished_source != getattr(self, "_active_live_motion", None):
+            return
+        if media_generation != getattr(self, "_active_live_media_generation", None):
+            return
         self._restore_live_still()
 
     def _hide_face_name_overlay(self, *, clear_annotations: bool) -> None:

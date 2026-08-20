@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.ui.models.thumbnail_surface_proxy_model import ThumbnailSurfaceProxyModel
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
 
@@ -190,6 +191,40 @@ def test_centering_settles_current_tile_geometry_before_scroll(qapp):
     qapp.processEvents()
 
     assert abs(int(view.visualRect(target).center().x()) - centered_x) <= 1
+
+
+def test_horizontal_viewport_demand_maps_through_two_proxies(qapp):
+    paths = [Path(f"/library/photo-{index}.jpg") for index in range(1_200)]
+    source = _AssetListModel(paths, paths[10])
+    presentation = ThumbnailSurfaceProxyModel("filmstrip")
+    presentation.setSourceModel(source)
+    spacers = SpacerProxyModel()
+    spacers.setSourceModel(presentation)
+    view = FilmstripView()
+    view.setItemDelegate(AssetGridDelegate(view, filmstrip_mode=True))
+    view.setModel(spacers)
+    view.resize(420, 132)
+    view.show()
+    qapp.processEvents()
+
+    emitted = []
+    view.viewportStateChanged.connect(emitted.append)
+    target_source = source.index(1_000, 0)
+    target = spacers.mapFromSource(presentation.mapFromSource(target_source))
+    view.select_index_for_centering(target)
+    view.center_on_index(target)
+    qapp.processEvents()
+
+    assert emitted
+    demand = emitted[-1]
+    assert demand.surface_id == "filmstrip"
+    assert demand.visible_first <= 1_000 <= demand.visible_last
+    assert demand.visible_first > 900
+    assert demand.display_bucket == 256
+
+    view._scroll_controller._publish_idle_state()
+    view._emit_visible_rows()
+    assert emitted[-1].phase == "settled"
 
 
 def test_current_change_does_not_publish_transient_spacer_width(qapp):

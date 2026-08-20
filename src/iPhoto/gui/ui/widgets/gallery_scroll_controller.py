@@ -6,6 +6,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable
+from typing import Literal
 
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication
@@ -17,29 +18,43 @@ from iPhoto.gui.gallery_demand import (
     SCROLL_DIRECTIONAL_DWELL_MS,
     SCROLL_SETTLED_TIMEOUT_MS,
     SCROLL_VELOCITY_EWMA_SECONDS,
-    GalleryViewportDemand,
+    AssetViewportDemand,
     build_viewport_demand,
     resolve_display_thumbnail_bucket,
 )
 from iPhoto.infrastructure.services.performance_events import emit_perf_event
 
-class GalleryScrollController(QObject):
-    """Keep wheel input responsive and publish at most one viewport state per event-loop turn."""
+class AssetScrollController(QObject):
+    """Track scroll intent and publish one surface demand per event-loop turn."""
 
-    def __init__(self, view, publish: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        view,
+        publish: Callable[[], None],
+        *,
+        surface_id: str,
+        axis: Literal["horizontal", "vertical"],
+    ) -> None:
         super().__init__(view)
         self._view = view
         self._publish = publish
+        self._surface_id = str(surface_id)
+        self._axis = axis
+        self._scrollbar = (
+            self._view.horizontalScrollBar()
+            if axis == "horizontal"
+            else self._view.verticalScrollBar()
+        )
         self._pending_pixel_delta = 0.0
         self._generation = 0
-        self._last_value = int(self._view.verticalScrollBar().value())
+        self._last_value = int(self._scrollbar.value())
         self._last_value_at = time.monotonic()
         self._direction = 0
         self._screens_per_second = 0.0
         self._input_kind = "none"
         self._intent = "idle"
         self._last_input_at = 0.0
-        self._last_demand: GalleryViewportDemand | None = None
+        self._last_demand: AssetViewportDemand | None = None
         self._angle_intervals_ms: deque[float] = deque(maxlen=4)
 
         self._apply_timer = QTimer(self)
@@ -61,7 +76,7 @@ class GalleryScrollController(QObject):
         self._direction_expiry_timer.setInterval(SCROLL_DIRECTION_RETENTION_MS)
         self._direction_expiry_timer.timeout.connect(self._publish_expired_direction)
 
-        self._view.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
+        self._scrollbar.valueChanged.connect(self._on_scroll_value_changed)
 
     def handle_wheel(self, event) -> bool:
         """Accumulate one wheel event without introducing inertial drag."""
@@ -127,21 +142,17 @@ class GalleryScrollController(QObject):
     def schedule_publish(self) -> None:
         self._publish()
 
-    def viewport_state(self, row_count: int) -> GalleryViewportDemand | None:
+    def viewport_state(self, row_count: int) -> AssetViewportDemand | None:
         if row_count <= 0:
             return None
-        cell_height = max(1, self._view.gridSize().height() or self._view.iconSize().height())
-        cell_width = max(1, self._view.gridSize().width() or self._view.iconSize().width())
+        resolved = self._resolve_visible_range(row_count)
+        if resolved is None:
+            return None
+        first, last = resolved
         viewport = self._view.viewport()
-        columns = max(1, viewport.width() // cell_width)
-        scroll_y = max(0, self._view.verticalScrollBar().value())
-        first_grid_row = scroll_y // cell_height
-        visible_grid_rows = max(1, math.ceil(viewport.height() / cell_height) + 1)
-        first = min(row_count - 1, first_grid_row * columns)
-        last = min(row_count - 1, (first_grid_row + visible_grid_rows) * columns - 1)
         dpr = max(1.0, float(viewport.devicePixelRatioF()))
         display_bucket = resolve_display_thumbnail_bucket(
-            max(1, self._view.iconSize().width()) * dpr
+            self._display_edge() * dpr
         )
         predicted_interval = (
             sum(self._angle_intervals_ms) / len(self._angle_intervals_ms)
@@ -149,6 +160,7 @@ class GalleryScrollController(QObject):
             else None
         )
         demand = build_viewport_demand(
+            surface_id=self._surface_id,
             generation=self._generation + 1,
             row_count=row_count,
             visible_first=first,
@@ -168,6 +180,7 @@ class GalleryScrollController(QObject):
         self._last_demand = demand
         emit_perf_event(
             "gallery_scroll_intent",
+            surface_id=self._surface_id,
             generation=demand.generation,
             input_kind=self._input_kind,
             intent=demand.intent,
@@ -178,12 +191,29 @@ class GalleryScrollController(QObject):
         )
         return demand
 
+    def _resolve_visible_range(self, row_count: int) -> tuple[int, int] | None:
+        """Return source-model rows visible on this controller's surface."""
+
+        cell_height = max(1, self._view.gridSize().height() or self._view.iconSize().height())
+        cell_width = max(1, self._view.gridSize().width() or self._view.iconSize().width())
+        viewport = self._view.viewport()
+        columns = max(1, viewport.width() // cell_width)
+        scroll_y = max(0, self._view.verticalScrollBar().value())
+        first_grid_row = scroll_y // cell_height
+        visible_grid_rows = max(1, math.ceil(viewport.height() / cell_height) + 1)
+        first = min(row_count - 1, first_grid_row * columns)
+        last = min(row_count - 1, (first_grid_row + visible_grid_rows) * columns - 1)
+        return first, max(first, last)
+
+    def _display_edge(self) -> int:
+        return max(1, int(self._view.iconSize().width()))
+
     def _apply_pending_scroll(self) -> None:
         delta = self._pending_pixel_delta
         self._pending_pixel_delta = 0.0
         if not delta:
             return
-        scrollbar = self._view.verticalScrollBar()
+        scrollbar = self._scrollbar
         target = max(
             scrollbar.minimum(),
             min(scrollbar.maximum(), scrollbar.value() + round(delta)),
@@ -197,8 +227,13 @@ class GalleryScrollController(QObject):
         elapsed = max(1e-6, now - self._last_value_at)
         distance = int(value) - self._last_value
         self._direction = 1 if distance > 0 else (-1 if distance < 0 else self._direction)
-        viewport_height = max(1, self._view.viewport().height())
-        instantaneous = abs(float(distance)) / elapsed / viewport_height
+        viewport_extent = max(
+            1,
+            self._view.viewport().width()
+            if self._axis == "horizontal"
+            else self._view.viewport().height(),
+        )
+        instantaneous = abs(float(distance)) / elapsed / viewport_extent
         alpha = 1.0 - math.exp(-elapsed / SCROLL_VELOCITY_EWMA_SECONDS)
         self._screens_per_second += alpha * (instantaneous - self._screens_per_second)
         recent_wheel_input = now - self._last_input_at <= 0.05
@@ -243,4 +278,11 @@ class GalleryScrollController(QObject):
         self._angle_intervals_ms.clear()
 
 
-__all__ = ["GalleryScrollController", "GalleryViewportDemand"]
+class GalleryScrollController(AssetScrollController):
+    """Vertical Gallery controller with low-latency wheel accumulation."""
+
+    def __init__(self, view, publish: Callable[[], None]) -> None:
+        super().__init__(view, publish, surface_id="gallery", axis="vertical")
+
+
+__all__ = ["AssetScrollController", "AssetViewportDemand", "GalleryScrollController"]

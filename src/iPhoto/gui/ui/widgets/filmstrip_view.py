@@ -9,9 +9,11 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QSize, Qt, 
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
+from ..models.proxy_mapping import map_from_root_source, root_source_model
 from ..models.roles import Roles
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
+from .filmstrip_viewport_controller import FilmstripViewportController
 
 
 class FilmstripView(AssetGrid):
@@ -26,7 +28,7 @@ class FilmstripView(AssetGrid):
     )
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
-        super().__init__(parent)
+        super().__init__(parent, scroll_controller_type=FilmstripViewportController)
         self._base_height = 120
         self._spacing = 2
         self._default_ratio = 0.6
@@ -291,13 +293,7 @@ class FilmstripView(AssetGrid):
         if path is None or model is None:
             return QModelIndex()
 
-        source_model = model
-        source_getter = getattr(model, "sourceModel", None)
-        map_from_source = getattr(model, "mapFromSource", None)
-        if callable(source_getter):
-            candidate = source_getter()
-            if candidate is not None:
-                source_model = candidate
+        source_model = root_source_model(model)
 
         resolver = getattr(source_model, "cached_row_for_path", None)
         if not callable(resolver):
@@ -309,11 +305,7 @@ class FilmstripView(AssetGrid):
         source_index = source_model.index(row, 0)
         if not source_index.isValid():
             return QModelIndex()
-        index = (
-            map_from_source(source_index)
-            if source_model is not model and callable(map_from_source)
-            else source_index
-        )
+        index = map_from_root_source(model, source_index)
         if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
             return QModelIndex()
         resolved_path = index.data(Roles.ABS)

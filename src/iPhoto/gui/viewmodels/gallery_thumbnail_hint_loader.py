@@ -38,6 +38,7 @@ class GalleryThumbnailHintRequest:
     limit: int
     ordered_rows: tuple[int, ...]
     guard_rows: frozenset[int]
+    surface_id: str = "gallery"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,7 @@ class GalleryThumbnailHintResult:
     candidates: tuple[GalleryThumbnailCandidate, ...]
     elapsed_ms: float
     error: str | None = None
+    surface_id: str = "gallery"
 
 
 class _HintSignals(QObject):
@@ -133,6 +135,7 @@ class _HintWorker(QRunnable):
                 limit=request.limit,
                 candidates=candidates,
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                surface_id=request.surface_id,
             )
         except Exception as exc:  # noqa: BLE001 - worker boundary
             result = GalleryThumbnailHintResult(
@@ -146,6 +149,7 @@ class _HintWorker(QRunnable):
                 candidates=(),
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 error=f"{type(exc).__name__}: {exc}",
+                surface_id=request.surface_id,
             )
         self._signals.completed.emit(result)
 
@@ -160,26 +164,34 @@ class GalleryThumbnailHintLoader(QObject):
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
         self._active = False
-        self._queued: GalleryThumbnailHintRequest | None = None
+        self._active_surface_id: str | None = None
+        self._queued: dict[str, GalleryThumbnailHintRequest] = {}
         self._signals: _HintSignals | None = None
         self._latest_request_id = 0
-        self._minimum_valid_request_id = 0
+        self._minimum_valid_request_ids: dict[str, int] = {}
 
     def request(self, request: GalleryThumbnailHintRequest) -> None:
         self._latest_request_id = max(self._latest_request_id, int(request.request_id))
         if self._active:
-            self._queued = request
+            self._queued[request.surface_id] = request
             return
         self._start(request)
 
-    def discard_queued(self) -> None:
+    def discard_queued(self, surface_id: str | None = None) -> None:
         """Drop coalesced work without invalidating the active read."""
 
-        self._queued = None
+        if surface_id is None:
+            self._queued.clear()
+        else:
+            self._queued.pop(str(surface_id), None)
 
     def cancel_pending(self) -> None:
+        surface_ids = set(self._queued)
         self.discard_queued()
-        self._minimum_valid_request_id = self._latest_request_id + 1
+        if self._active_surface_id is not None:
+            surface_ids.add(self._active_surface_id)
+        for surface_id in surface_ids or {"gallery", "filmstrip"}:
+            self._minimum_valid_request_ids[surface_id] = self._latest_request_id + 1
         self._pool.clear()
 
     def shutdown(self) -> None:
@@ -187,6 +199,7 @@ class GalleryThumbnailHintLoader(QObject):
 
     def _start(self, request: GalleryThumbnailHintRequest) -> None:
         self._active = True
+        self._active_surface_id = request.surface_id
         signals = _HintSignals()
         signals.completed.connect(self._handle_completed)
         self._signals = signals
@@ -197,9 +210,9 @@ class GalleryThumbnailHintLoader(QObject):
             self._signals.deleteLater()
         self._signals = None
         self._active = False
-        if result.request_id < self._minimum_valid_request_id:
-            queued = self._queued
-            self._queued = None
+        self._active_surface_id = None
+        if result.request_id < self._minimum_valid_request_ids.get(result.surface_id, 0):
+            queued = self._pop_queued()
             if queued is not None:
                 self._start(queued)
             return
@@ -211,10 +224,15 @@ class GalleryThumbnailHintLoader(QObject):
             error=result.error,
         )
         self.resultReady.emit(result)
-        queued = self._queued
-        self._queued = None
+        queued = self._pop_queued()
         if queued is not None:
             self._start(queued)
+
+    def _pop_queued(self) -> GalleryThumbnailHintRequest | None:
+        if not self._queued:
+            return None
+        surface_id = next(iter(self._queued))
+        return self._queued.pop(surface_id)
 
 
 __all__ = [

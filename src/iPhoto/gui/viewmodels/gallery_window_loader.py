@@ -67,6 +67,7 @@ class GalleryWindowRequest:
     priority: int = 1
     purpose: Literal["viewport", "selection_anchor_retry"] = "viewport"
     selection_anchor_retry_attempt: int = 0
+    surface_id: str = "gallery"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ class GalleryWindowResult:
     selection_anchor_result: GallerySelectionAnchorResult | None = None
     purpose: Literal["viewport", "selection_anchor_retry"] = "viewport"
     selection_anchor_retry_attempt: int = 0
+    surface_id: str = "gallery"
 
 
 class _GalleryWindowSignals(QObject):
@@ -278,6 +280,7 @@ class _GalleryWindowWorker(QRunnable):
                     selection_anchor_retry_attempt=(
                         request.selection_anchor_retry_attempt
                     ),
+                    surface_id=request.surface_id,
                 )
             )
             request_backfill = getattr(request.query_service, "request_thumbnail_backfill", None)
@@ -312,6 +315,7 @@ class _GalleryWindowWorker(QRunnable):
                     selection_anchor_retry_attempt=(
                         request.selection_anchor_retry_attempt
                     ),
+                    surface_id=request.surface_id,
                 )
             )
 
@@ -329,17 +333,22 @@ class GalleryWindowLoader(QObject):
         self._active_generation: int | None = None
         self._active_request: GalleryWindowRequest | None = None
         self._queued_requests: list[GalleryWindowRequest] = []
-        self._latest_demand_generation = 0
+        self._latest_demand_generations: dict[str, int] = {}
+        self._last_started_surface: str | None = None
         self._signals: dict[int, _GalleryWindowSignals] = {}
 
     def request(self, request: GalleryWindowRequest) -> None:
         demand_generation = int(request.demand_generation)
-        if demand_generation > self._latest_demand_generation:
-            self._latest_demand_generation = demand_generation
+        surface_id = str(request.surface_id)
+        latest_generation = self._latest_demand_generations.get(surface_id, 0)
+        if demand_generation > latest_generation:
+            self._latest_demand_generations[surface_id] = demand_generation
             dropped = [
                 queued.generation
                 for queued in self._queued_requests
                 if (
+                    queued.surface_id == surface_id
+                    and
                     int(queued.demand_generation) < demand_generation
                     and int(queued.demand_generation) > 0
                 )
@@ -348,13 +357,14 @@ class GalleryWindowLoader(QObject):
                 queued
                 for queued in self._queued_requests
                 if (
-                    int(queued.demand_generation) >= demand_generation
+                    queued.surface_id != surface_id
+                    or int(queued.demand_generation) >= demand_generation
                     or int(queued.demand_generation) == 0
                 )
             ]
             if dropped:
                 self.requestsDropped.emit(tuple(dropped))
-        elif demand_generation > 0 and demand_generation < self._latest_demand_generation:
+        elif demand_generation > 0 and demand_generation < latest_generation:
             self.requestsDropped.emit((request.generation,))
             return
 
@@ -379,7 +389,10 @@ class GalleryWindowLoader(QObject):
     def shutdown(self) -> None:
         dropped = tuple(request.generation for request in self._queued_requests)
         self._queued_requests.clear()
-        self._latest_demand_generation += 1
+        self._latest_demand_generations = {
+            surface_id: generation + 1
+            for surface_id, generation in self._latest_demand_generations.items()
+        }
         self._pool.clear()
         if dropped:
             self.requestsDropped.emit(dropped)
@@ -387,6 +400,7 @@ class GalleryWindowLoader(QObject):
     def _start(self, request: GalleryWindowRequest) -> None:
         self._active_generation = request.generation
         self._active_request = request
+        self._last_started_surface = request.surface_id
         signals = _GalleryWindowSignals()
         signals.completed.connect(self._handle_completed)
         self._signals[request.generation] = signals
@@ -408,7 +422,11 @@ class GalleryWindowLoader(QObject):
             return
         best_index = min(
             range(len(self._queued_requests)),
-            key=lambda index: self._queued_requests[index].priority,
+            key=lambda index: (
+                self._queued_requests[index].priority,
+                self._queued_requests[index].surface_id == self._last_started_surface,
+                -int(self._queued_requests[index].demand_generation),
+            ),
         )
         self._start(self._queued_requests.pop(best_index))
 
@@ -430,6 +448,7 @@ class GalleryWindowLoader(QObject):
             request.collection_revision,
             request.purpose,
             request.selection_anchor_retry_attempt,
+            request.surface_id,
         )
 
 

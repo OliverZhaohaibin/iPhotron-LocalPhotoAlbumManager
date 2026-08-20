@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PySide6.QtCore import QModelIndex, Qt, QTimer
+from PySide6.QtCore import QModelIndex, QSize, Qt, QTimer
 from PySide6.QtGui import QImage
 
 from iPhoto.application.dtos import AssetDTO
@@ -649,6 +649,21 @@ def test_tile_snapshot_is_micro_first_and_memory_only(adapter, mock_store, mock_
     assert snapshot.full_pixmap is None
     mock_store.ensure_row_loaded.assert_not_called()
     mock_thumb_service.request_many.assert_not_called()
+
+
+def test_surface_snapshots_peek_their_own_bucket(adapter, mock_store, mock_thumb_service):
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.asset_at.return_value = _make_dto(micro_thumbnail=micro)
+    adapter._surface_sizes = {
+        "gallery": QSize(512, 512),
+        "filmstrip": QSize(256, 256),
+    }
+
+    adapter.tile_snapshot(0, "gallery")
+    adapter.tile_snapshot(0, "filmstrip")
+
+    sizes = [call.args[1] for call in mock_thumb_service.peek_full_thumbnail.call_args_list]
+    assert sizes == [QSize(512, 512), QSize(256, 256)]
 
 
 def test_stale_tile_never_exposes_old_full_or_micro_thumbnail(
@@ -1325,7 +1340,7 @@ def test_continuous_burst_discards_queued_thumbnail_hint(adapter):
     with patch.object(adapter._thumbnail_hint_loader, "discard_queued") as discard:
         adapter._request_thumbnail_hints(demand)
 
-    discard.assert_called_once_with()
+    discard.assert_called_once_with("gallery")
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):

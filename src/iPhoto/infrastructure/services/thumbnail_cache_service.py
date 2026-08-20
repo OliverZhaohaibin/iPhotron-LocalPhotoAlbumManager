@@ -335,7 +335,10 @@ class ThumbnailCacheService(QObject):
         self._pinned_keys: Set[str] = set()
         self._current_l1_demand_keys: Set[str] | None = None
         self._current_guard_keys: Set[str] = set()
-        self._current_cache_size: tuple[int, int] | None = None
+        self._surface_demands: Dict[str, ThumbnailDemandSnapshot] = {}
+        self._surface_activity: Dict[str, int] = {}
+        self._surface_activity_serial = 0
+        self._demand_revision = 0
         self._slot_allocations = 0
         self._slot_reuses = 0
         self._slot_releases = 0
@@ -454,6 +457,8 @@ class ThumbnailCacheService(QObject):
         self._active_decode_reservations.clear()
         self._active_decode_kinds.clear()
         self._visible_active_tokens.clear()
+        self._surface_demands.clear()
+        self._surface_activity.clear()
         self._staging_used_bytes = 0
         self._release_all_l1_slots("shutdown")
         self._eviction_timer.stop()
@@ -474,7 +479,9 @@ class ThumbnailCacheService(QObject):
         self._pinned_keys.clear()
         self._current_l1_demand_keys = None
         self._current_guard_keys.clear()
-        self._current_cache_size = None
+        self._surface_demands.clear()
+        self._surface_activity.clear()
+        self._demand_revision = 0
         self._eviction_timer.stop()
         self._pending_eviction_target_bytes = None
         self._pending_stale_eviction = False
@@ -682,74 +689,167 @@ class ThumbnailCacheService(QObject):
         self,
         demand: ThumbnailDemandSnapshot,
     ) -> None:
-        """Atomically replace visible, guard, and best-effort thumbnail demand."""
+        """Compatibility entry point for the primary Gallery surface."""
 
-        self._current_phase = demand.phase
-        self._current_intent = demand.intent
-        cache_size = (int(demand.size.width()), int(demand.size.height()))
-        if self._current_cache_size is not None and cache_size != self._current_cache_size:
-            self._release_all_l1_slots("display_bucket_changed")
-        self._current_cache_size = cache_size
-        visible = list(dict.fromkeys(Path(path) for path in demand.visible_paths))
-        visible_set = set(visible)
-        candidate_by_path = {
-            Path(candidate.path): candidate for candidate in demand.candidates
-        }
-        guard = [
-            Path(path)
-            for path in dict.fromkeys(Path(path) for path in demand.guard_paths)
-            if Path(path) not in visible_set
-        ]
-        guard_set = set(guard)
-        speculative = [
-            Path(path)
-            for path in dict.fromkeys(Path(path) for path in demand.speculative_paths)
-            if Path(path) not in visible_set and Path(path) not in guard_set
-        ]
-        if self._motion_blocks_prefetch(
-            self._current_phase,
-            self._current_intent,
-        ):
-            guard = []
-            speculative = []
-        self._current_generation = max(self._current_generation, int(demand.revision))
-        self.pin_visible(visible, demand.size)
-        guard, speculative = self._admit_prefetch_paths(
-            visible,
-            guard,
-            speculative,
-            demand.size,
+        self.upsert_surface_demand("gallery", demand)
+
+    def upsert_surface_demand(
+        self,
+        surface_id: str,
+        demand: ThumbnailDemandSnapshot,
+    ) -> None:
+        """Create or replace one surface lease and reconcile aggregate demand."""
+
+        surface_id = str(surface_id)
+        previous = self._surface_demands.get(surface_id)
+        self._surface_demands[surface_id] = demand
+        interaction_changed = previous is None or int(previous.revision) != int(demand.revision)
+        if interaction_changed:
+            self._surface_activity_serial += 1
+            self._surface_activity[surface_id] = self._surface_activity_serial
+        self._reconcile_surface_demands(
+            updated_surface=surface_id if interaction_changed else None
         )
-        prefetch = guard + speculative
-        desired_visible_keys = {self._cache_key(path, demand.size) for path in visible}
-        desired_guard_keys = {self._cache_key(path, demand.size) for path in guard}
-        desired_prefetch_keys = {
-            self._cache_key(path, demand.size) for path in prefetch
-        }
-        self._current_guard_keys = set(desired_guard_keys)
-        record_perf = perf_logging_enabled()
-        pending_before = set(self._pending_tasks) if record_perf else set()
-        resident = len(desired_visible_keys.intersection(self._memory_cache)) if record_perf else 0
-        if record_perf:
-            for path in visible:
-                emit_perf_event(
-                    "thumbnail_visible_entry",
-                    path=path,
-                    generation=demand.revision,
-                    phase=demand.phase,
-                    intent=self._current_intent,
-                    full=self._cache_key(path, demand.size) in self._memory_cache,
-                    miss_reason=self._visible_miss_reason(
-                        self._cache_key(path, demand.size)
+
+    def release_surface_demand(self, surface_id: str) -> None:
+        """Release one surface without disturbing keys leased by other surfaces."""
+
+        surface_id = str(surface_id)
+        self._surface_demands.pop(surface_id, None)
+        self._surface_activity.pop(surface_id, None)
+        self._reconcile_surface_demands(updated_surface=None)
+
+    @staticmethod
+    def _round_robin_requests(
+        lanes: list[list[ThumbnailRequest]],
+    ) -> list[ThumbnailRequest]:
+        ordered: list[ThumbnailRequest] = []
+        offsets = [0] * len(lanes)
+        while True:
+            emitted = False
+            for lane_index, lane in enumerate(lanes):
+                offset = offsets[lane_index]
+                if offset >= len(lane):
+                    continue
+                ordered.append(lane[offset])
+                offsets[lane_index] += 1
+                emitted = True
+            if not emitted:
+                return ordered
+
+    def _reconcile_surface_demands(self, *, updated_surface: str | None) -> None:
+        self._demand_revision += 1
+        revision = max(
+            self._current_generation + 1,
+            self._demand_revision,
+            *(int(demand.revision) for demand in self._surface_demands.values()),
+        )
+        self._demand_revision = revision
+        surfaces = sorted(
+            self._surface_demands,
+            key=lambda item: self._surface_activity.get(item, 0),
+            reverse=True,
+        )
+        if updated_surface in surfaces:
+            surfaces.remove(updated_surface)
+            surfaces.insert(0, updated_surface)
+
+        visible_lanes: list[list[ThumbnailRequest]] = []
+        guard_lanes: list[list[ThumbnailRequest]] = []
+        speculative_lanes: list[list[ThumbnailRequest]] = []
+        latest = self._surface_demands[surfaces[0]] if surfaces else None
+        self._current_phase = latest.phase if latest is not None else "settled"
+        self._current_intent = latest.intent if latest is not None else "idle"
+
+        for surface_id in surfaces:
+            demand = self._surface_demands[surface_id]
+            visible = list(dict.fromkeys(Path(path) for path in demand.visible_paths))
+            visible_set = set(visible)
+            candidate_by_path = {
+                Path(candidate.path): candidate for candidate in demand.candidates
+            }
+            guard = [
+                Path(path)
+                for path in dict.fromkeys(Path(path) for path in demand.guard_paths)
+                if Path(path) not in visible_set
+            ]
+            guard_set = set(guard)
+            speculative = [
+                Path(path)
+                for path in dict.fromkeys(Path(path) for path in demand.speculative_paths)
+                if Path(path) not in visible_set and Path(path) not in guard_set
+            ]
+            if self._motion_blocks_prefetch(demand.phase, demand.intent):
+                guard = []
+                speculative = []
+            guard, speculative = self._admit_prefetch_paths(
+                visible,
+                guard,
+                speculative,
+                demand.size,
+            )
+
+            def request(path: Path, kind: ThumbnailRequestKind, rank: int) -> ThumbnailRequest:
+                candidate = candidate_by_path.get(path)
+                return ThumbnailRequest(
+                    path,
+                    demand.size,
+                    kind,
+                    revision,
+                    l2_cache_key=(candidate.l2_cache_key if candidate is not None else None),
+                    rank=(candidate.rank if candidate is not None else rank),
+                    thumbnail_state=(
+                        candidate.thumbnail_state if candidate is not None else "ready"
                     ),
+                    thumb_revision=(candidate.thumb_revision if candidate is not None else None),
                 )
-        self._prefetch_key_order = [
-            self._cache_key(path, demand.size) for path in prefetch
-        ]
-        self._refresh_l1_for_demand(
-            desired_visible_keys,
-            desired_prefetch_keys,
+
+            visible_lanes.append(
+                [request(path, ThumbnailRequestKind.VISIBLE, rank) for rank, path in enumerate(visible)]
+            )
+            guard_lanes.append(
+                [request(path, ThumbnailRequestKind.GUARD, rank) for rank, path in enumerate(guard)]
+            )
+            speculative_lanes.append(
+                [
+                    request(path, ThumbnailRequestKind.PREFETCH, rank)
+                    for rank, path in enumerate(speculative)
+                ]
+            )
+
+        def strongest_unique(requests: list[ThumbnailRequest], excluded: set[str]) -> list[ThumbnailRequest]:
+            unique: list[ThumbnailRequest] = []
+            for request in requests:
+                key = self._cache_key(request.path, request.size)
+                if key in excluded:
+                    continue
+                excluded.add(key)
+                unique.append(request)
+            return unique
+
+        occupied: set[str] = set()
+        visible_requests = strongest_unique(self._round_robin_requests(visible_lanes), occupied)
+        guard_requests = strongest_unique(self._round_robin_requests(guard_lanes), occupied)
+        speculative_requests = strongest_unique(
+            self._round_robin_requests(speculative_lanes), occupied
         )
+        desired_visible_keys = {
+            self._cache_key(request.path, request.size) for request in visible_requests
+        }
+        desired_guard_keys = {
+            self._cache_key(request.path, request.size) for request in guard_requests
+        }
+        prefetch_requests = guard_requests + speculative_requests
+        desired_prefetch_keys = {
+            self._cache_key(request.path, request.size) for request in prefetch_requests
+        }
+        self._current_generation = revision
+        self._pinned_keys = set(desired_visible_keys)
+        self._current_guard_keys = set(desired_guard_keys)
+        self._prefetch_key_order = [
+            self._cache_key(request.path, request.size) for request in prefetch_requests
+        ]
+        self._refresh_l1_for_demand(desired_visible_keys, desired_prefetch_keys)
         self._apply_low_memory_pressure_if_needed()
         self._demote_stale_promotions(desired_visible_keys)
 
@@ -765,86 +865,32 @@ class ThumbnailCacheService(QObject):
         self._replace_prefetch_demand(
             desired_prefetch_keys,
             desired_visible_keys,
-            demand.revision,
+            revision,
         )
-
-        self.request_many(
-            (
-                ThumbnailRequest(
-                    path,
-                    demand.size,
-                    ThumbnailRequestKind.VISIBLE,
-                    demand.revision,
-                    l2_cache_key=(
-                        candidate_by_path[path].l2_cache_key
-                        if path in candidate_by_path
-                        else None
-                    ),
-                    thumbnail_state=(
-                        candidate_by_path[path].thumbnail_state
-                        if path in candidate_by_path
-                        else "ready"
-                    ),
-                    thumb_revision=(
-                        candidate_by_path[path].thumb_revision
-                        if path in candidate_by_path
-                        else None
-                    ),
-                )
-                for path in visible
-            ),
-            generation=demand.revision,
-        )
-        for rank, path in enumerate(prefetch):
-            candidate = candidate_by_path.get(path)
-            kind = (
-                ThumbnailRequestKind.GUARD
-                if path in guard
-                else ThumbnailRequestKind.PREFETCH
-            )
-            if (
-                kind is ThumbnailRequestKind.PREFETCH
-                and self._low_memory_pressure
-            ):
+        self.request_many(visible_requests, generation=revision)
+        for request in prefetch_requests:
+            if request.kind is ThumbnailRequestKind.PREFETCH and self._low_memory_pressure:
                 continue
-            self._queue_prefetch(
-                ThumbnailRequest(
-                    path,
-                    demand.size,
-                    kind,
-                    demand.revision,
-                    l2_cache_key=(candidate.l2_cache_key if candidate is not None else None),
-                    rank=(candidate.rank if candidate is not None else rank),
-                    thumbnail_state=(
-                        candidate.thumbnail_state if candidate is not None else "ready"
-                    ),
-                    thumb_revision=(
-                        candidate.thumb_revision if candidate is not None else None
-                    ),
-                )
-            )
+            self._queue_prefetch(request)
         self._discard_stale_staged_results(desired_visible_keys, desired_prefetch_keys)
-        if record_perf:
-            emit_perf_event(
-                "thumbnail_demand_reconciled",
-                generation=demand.revision,
-                visible=len(visible),
-                guard=len(guard),
-                speculative=len(speculative),
-                requested=len(
-                    (set(self._pending_tasks) - pending_before).intersection(desired_visible_keys)
-                ),
-                resident=resident,
-                canceled=len(drop_keys),
-                queued=len(self._queued_tasks),
-                active=self._active_tasks,
-                prefetch_queued=len(self._prefetch_queued),
-                prefetch_active=self._prefetch_active_tasks,
-                phase=demand.phase,
-                intent=self._current_intent,
-                guard_resident=len(desired_guard_keys.intersection(self._memory_cache)),
-                guard_total=len(desired_guard_keys),
-            )
+        emit_perf_event(
+            "thumbnail_demand_reconciled",
+            generation=revision,
+            surface_id=updated_surface,
+            surfaces=len(surfaces),
+            visible=len(visible_requests),
+            guard=len(guard_requests),
+            speculative=len(speculative_requests),
+            canceled=len(drop_keys),
+            queued=len(self._queued_tasks),
+            active=self._active_tasks,
+            prefetch_queued=len(self._prefetch_queued),
+            prefetch_active=self._prefetch_active_tasks,
+            phase=self._current_phase,
+            intent=self._current_intent,
+            guard_resident=len(desired_guard_keys.intersection(self._memory_cache)),
+            guard_total=len(desired_guard_keys),
+        )
         self._drain_generation_queue()
 
     def pin_visible(self, paths: Iterable[Path], size: QSize) -> None:

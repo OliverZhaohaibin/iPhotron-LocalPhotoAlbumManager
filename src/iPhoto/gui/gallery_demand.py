@@ -37,9 +37,10 @@ DISPLAY_THUMBNAIL_BUCKETS = (256, 384, 512)
 
 
 @dataclass(frozen=True, slots=True)
-class GalleryViewportDemand:
-    """One immutable description of visible, full-prefetch, and micro-warm demand."""
+class AssetViewportDemand:
+    """One surface's immutable visible, full-prefetch, and micro-warm demand."""
 
+    surface_id: str
     generation: int
     visible_first: int
     visible_last: int
@@ -174,6 +175,7 @@ def classify_scroll_phase(
 
 def build_viewport_demand(
     *,
+    surface_id: str = "gallery",
     generation: int,
     row_count: int,
     visible_first: int,
@@ -185,7 +187,7 @@ def build_viewport_demand(
     prefetch_direction: int | None = None,
     predicted_input_interval_ms: float | None = None,
     display_bucket: int = 512,
-) -> GalleryViewportDemand:
+) -> AssetViewportDemand:
     """Build bounded visible, full-prefetch, and micro-warm ranges."""
 
     row_count = max(1, int(row_count))
@@ -244,7 +246,8 @@ def build_viewport_demand(
         direction=direction if intent != "idle" else 0,
     )
 
-    return GalleryViewportDemand(
+    return AssetViewportDemand(
+        surface_id=str(surface_id),
         generation=int(generation),
         visible_first=first,
         visible_last=last,
@@ -367,7 +370,7 @@ __all__ = [
     "SLOW_SCROLL_SCREENS_PER_SECOND",
     "GalleryScrollIntent",
     "GalleryScrollPhase",
-    "GalleryViewportDemand",
+    "AssetViewportDemand",
     "build_viewport_demand",
     "classify_scroll_phase",
     "resolve_display_thumbnail_bucket",

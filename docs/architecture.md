@@ -284,9 +284,14 @@ future side design. The active query path is SQL-first and windowed:
   window: `read_gallery_collection_window()` returns tile-rendering fields, and
   `read_thumbnail_hint_window()` returns only paths and existing full-thumbnail
   keys without repeating the collection count.
-- `GalleryViewportDemand` is the contract between scrolling, sparse row loading,
-  and thumbnail scheduling. It separates visible rows, the full-thumbnail guard,
-  far speculative full-thumbnail work, and the wider micro-thumbnail warm range.
+- `AssetViewportDemand` is the per-surface contract between scrolling, sparse row
+  loading, and thumbnail scheduling. Gallery and Filmstrip keep independent
+  generations, visible rows, full-thumbnail guards, speculative work, display
+  buckets, and micro-thumbnail warm ranges.
+- Active surface demands are leases. Sparse row windows may be disjoint, while
+  the global micro cache remains bounded. Thumbnail L1 keys include display size,
+  so Gallery and Filmstrip buckets coexist under one byte budget; hiding a surface
+  releases only its exclusive pins and queued work.
 - Delegates consume one `GalleryTileSnapshot` through `TILE_SNAPSHOT`. A paint
   miss must remain memory-only; it schedules bounded background work and paints
   an available micro thumbnail or placeholder instead of reading SQLite or L2.
@@ -437,8 +442,8 @@ sequenceDiagram
     participant Query as Asset Query Surface
     participant Repo as AssetRepositoryPort
 
-    Grid->>Demand: viewport + intent + generation
-    Demand->>Store: visible and micro-warm ranges
+    Grid->>Demand: surface + viewport + intent + generation
+    Demand->>Store: disjoint visible and micro-warm ranges
     Store->>Loader: bounded async requests
     Loader->>Query: gallery window / thumbnail hints
     Query->>Repo: narrow SQL projections
@@ -561,7 +566,7 @@ session.
 ```mermaid
 sequenceDiagram
     participant Paint as Delegate Paint
-    participant Demand as Gallery Demand
+    participant Demand as Surface Demands
     participant Thumb as Thumbnail Cache Service
     participant Worker as Visible/Guard/Far Workers
     participant L2 as Disk Cache
@@ -569,13 +574,13 @@ sequenceDiagram
 
     Paint->>Thumb: peek_full_thumbnail()
     Thumb-->>Paint: memory pixmap or miss
-    Demand->>Thumb: request_many(generation, priority)
+    Demand->>Thumb: upsert/release surface lease
     Thumb->>Worker: deduplicate/promote/schedule
     Worker->>L2: decode existing thumbnail to QImage
     Worker-->>GUI: bounded staging result
     GUI->>GUI: QImage to QPixmap within frame budget
     GUI-->>Paint: coalesced exact-row update
-    alt stale or superseded demand
+    alt surface key is no longer leased or revision is superseded
         Thumb->>Worker: cancel, back off, or discard result
     end
 ```
@@ -584,7 +589,8 @@ Visible recovery, near guard, and far speculation use separate scheduling lanes;
 far work must not consume workers reserved for urgent visible/guard requests.
 `ThumbnailRuntimePolicy` derives worker, staging, publish, and byte-budget limits
 from platform and physical memory. L1 eviction accounts for actual image bytes,
-pins active visible demand, and prefers old/far speculative entries. Disk access
+pins the union of active visible surface demand, and prefers old/far speculative
+entries. Different display buckets coexist instead of flushing the pool. Disk access
 and image decoding stay off the GUI thread; only bounded `QPixmap` publication
 runs there. Thumbnail infrastructure may apply edit state, but edit persistence
 remains behind session/edit sidecar services.

@@ -15,7 +15,7 @@ from iPhoto.gui.detail_profile import emit_detail_event
 from iPhoto.gui.gallery_demand import (
     MICRO_QUERY_CHUNK,
     MICRO_WARM_LIMIT,
-    GalleryViewportDemand,
+    AssetViewportDemand,
 )
 from iPhoto.gui.viewmodels.asset_dto_converter import (
     geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
@@ -145,6 +145,7 @@ class GalleryCollectionStore:
         self._window_range: Optional[tuple[int, int]] = None
         self._visible_range: Optional[tuple[int, int]] = None
         self._warm_range: Optional[tuple[int, int]] = None
+        self._surface_demands: dict[str, AssetViewportDemand] = {}
         self._active_root: Optional[Path] = None
         self._path_cache = PathExistsCache()
         self._pending_moves: List[_PendingMove] = []
@@ -375,8 +376,11 @@ class GalleryCollectionStore:
         self._reload_window_for_visible_range(row, row, emit_signals=emit_signals)
         return row in self._row_cache
 
-    def snapshot_signature(self) -> tuple[int, Optional[tuple[int, int]], int]:
-        return (self._total_count, self._window_range, self._collection_revision)
+    def snapshot_signature(
+        self,
+    ) -> tuple[int, Optional[tuple[tuple[int, int], ...]], int]:
+        ranges = self._cache_window_ranges()
+        return (self._total_count, ranges or None, self._collection_revision)
 
     def diagnostic_snapshot(self) -> dict[str, object]:
         """Return privacy-safe in-memory state for opt-in runtime diagnostics."""
@@ -386,6 +390,7 @@ class GalleryCollectionStore:
             "row_count": self._total_count,
             "cached_rows": len(self._row_cache),
             "window": self._window_range,
+            "window_ranges": self._cache_window_ranges(),
             "visible": self._visible_range,
             "collection_revision": self._collection_revision,
             "pinned_row": self._pinned_row,
@@ -697,12 +702,14 @@ class GalleryCollectionStore:
                 emit_source_changed=should_refresh,
             )
 
-    def reconcile_viewport_demand(self, demand: GalleryViewportDemand) -> None:
+    def reconcile_viewport_demand(self, demand: AssetViewportDemand) -> None:
         """Warm visible, hot, and micro ranges without replacing cached rows."""
 
-        self._visible_range = demand.visible_range
-        self._warm_range = demand.warm_range
-        self._window_range = demand.warm_range
+        self._surface_demands[demand.surface_id] = demand
+        primary = self._surface_demands.get("gallery", demand)
+        self._visible_range = primary.visible_range
+        self._warm_range = primary.warm_range
+        self._window_range = self._cache_window_range()
         self._demand_generation = max(self._demand_generation, int(demand.generation))
         if self._direct_mode or self._current_query is None:
             return
@@ -761,6 +768,7 @@ class GalleryCollectionStore:
                 chunk_last,
                 demand_generation=demand.generation,
                 priority=priority,
+                surface_id=demand.surface_id,
             )
         self.trim_row_cache_step()
         emit_perf_event(
@@ -775,7 +783,20 @@ class GalleryCollectionStore:
             warm_count=demand.warm_last - demand.warm_first + 1,
             cached_count=len(self._row_cache),
             queued_chunks=len(chunks),
+            surface_id=demand.surface_id,
         )
+
+    def release_viewport_demand(self, surface_id: str) -> None:
+        """Release one surface while retaining other sparse-window leases."""
+
+        self._surface_demands.pop(str(surface_id), None)
+        primary = self._surface_demands.get("gallery")
+        if primary is None and self._surface_demands:
+            primary = next(reversed(self._surface_demands.values()))
+        self._visible_range = primary.visible_range if primary is not None else None
+        self._warm_range = primary.warm_range if primary is not None else None
+        self._window_range = self._cache_window_range()
+        self.trim_row_cache_step()
 
     def apply_window_result(self, result: GalleryWindowResult) -> bool:
         """Publish one background-loaded window on the owning GUI thread."""
@@ -802,9 +823,10 @@ class GalleryCollectionStore:
             and self._anchor_result_matches_current(anchor_result)
             and result.generation >= self._selection_anchor_latest_result_generation
         )
+        current_surface_demand = self._surface_demands.get(result.surface_id)
         if (
-            self._demand_generation > 0
-            and result.demand_generation < self._demand_generation
+            current_surface_demand is not None
+            and result.demand_generation < current_surface_demand.generation
         ):
             relevant_rows = {
                 row: dto
@@ -1205,6 +1227,7 @@ class GalleryCollectionStore:
         request_backfill: bool = True,
         purpose: str = "viewport",
         selection_anchor_retry_attempt: int = 0,
+        surface_id: str = "gallery",
     ) -> bool:
         if (
             self._window_request_handler is None
@@ -1271,6 +1294,7 @@ class GalleryCollectionStore:
                 selection_anchor_retry_attempt=int(
                     selection_anchor_retry_attempt
                 ),
+                surface_id=str(surface_id),
             )
         )
         if self._selection_anchor is not None:
@@ -1288,9 +1312,21 @@ class GalleryCollectionStore:
             return True
         if row in self._pending_row_loads:
             return True
+        if any(
+            demand.warm_first <= row <= demand.warm_last
+            or demand.full_guard_first <= row <= demand.full_guard_last
+            for demand in self._surface_demands.values()
+        ):
+            return True
         if self._warm_range is None:
             return False
         return self._warm_range[0] <= row <= self._warm_range[1]
+
+    def _row_is_critical(self, row: int) -> bool:
+        return row == self._pinned_row or row in self._pending_row_loads or any(
+            demand.full_guard_first <= row <= demand.full_guard_last
+            for demand in self._surface_demands.values()
+        )
 
     def row_cache_needs_trim(self) -> bool:
         max_items = MICRO_WARM_LIMIT + (1 if self._pinned_row is not None else 0)
@@ -1317,6 +1353,11 @@ class GalleryCollectionStore:
                 ),
                 None,
             )
+            if evict is None:
+                evict = next(
+                    (row for row in self._row_cache if not self._row_is_critical(row)),
+                    None,
+                )
             if evict is None:
                 evict = next(
                     (row for row in self._row_cache if row != self._pinned_row),
@@ -1350,10 +1391,23 @@ class GalleryCollectionStore:
     def _cache_window_range(self) -> tuple[int, int] | None:
         if not self._row_cache or self._total_count <= 0:
             return None
-        if self._warm_range is not None:
-            return self._warm_range
         rows = self._row_cache.keys()
         return min(rows), max(rows)
+
+    def _cache_window_ranges(self) -> tuple[tuple[int, int], ...]:
+        rows = sorted(self._row_cache)
+        if not rows:
+            return ()
+        ranges: list[tuple[int, int]] = []
+        first = last = rows[0]
+        for row in rows[1:]:
+            if row == last + 1:
+                last = row
+                continue
+            ranges.append((first, last))
+            first = last = row
+        ranges.append((first, last))
+        return tuple(ranges)
 
     def pin_row(self, row: int) -> None:
         if row < 0 or row >= self._total_count:
@@ -2235,6 +2289,7 @@ class GalleryCollectionStore:
         self._window_range = None
         self._visible_range = None
         self._warm_range = None
+        self._surface_demands.clear()
         self._pinned_row = None
         self._selection_anchor = (
             GallerySelectionAnchor(

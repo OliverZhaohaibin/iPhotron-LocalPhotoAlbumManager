@@ -443,6 +443,70 @@ def test_reconcile_demand_keeps_only_latest_visible_and_prefetch_queue(tmp_path:
     assert service._pinned_keys == {second_key}
 
 
+def test_surface_leases_keep_different_buckets_and_release_only_owner(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    gallery_path = tmp_path / "gallery.jpg"
+    filmstrip_path = tmp_path / "filmstrip.jpg"
+    gallery_size = QSize(512, 512)
+    filmstrip_size = QSize(256, 256)
+
+    service.upsert_surface_demand(
+        "gallery",
+        ThumbnailDemandSnapshot(1, gallery_size, (gallery_path,)),
+    )
+    service.upsert_surface_demand(
+        "filmstrip",
+        ThumbnailDemandSnapshot(1, filmstrip_size, (filmstrip_path,)),
+    )
+
+    gallery_key = service._cache_key(gallery_path, gallery_size)
+    filmstrip_key = service._cache_key(filmstrip_path, filmstrip_size)
+    assert service._pinned_keys == {gallery_key, filmstrip_key}
+    assert set(service._queued_tasks) == {gallery_key, filmstrip_key}
+
+    service.release_surface_demand("filmstrip")
+
+    assert service._pinned_keys == {gallery_key}
+    assert gallery_key in service._queued_tasks
+    assert filmstrip_key not in service._queued_tasks
+    service.shutdown()
+
+
+def test_surface_leases_deduplicate_same_sized_visible_key(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "shared.jpg"
+    size = QSize(256, 256)
+    snapshot = ThumbnailDemandSnapshot(1, size, (path,))
+
+    service.upsert_surface_demand("gallery", snapshot)
+    service.upsert_surface_demand("filmstrip", snapshot)
+
+    key = service._cache_key(path, size)
+    assert service._pinned_keys == {key}
+    assert list(service._queued_tasks) == [key]
+    service.release_surface_demand("filmstrip")
+    assert service._pinned_keys == {key}
+    service.shutdown()
+
+
+def test_surface_bucket_change_does_not_release_l1_pool(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    with patch.object(service, "_release_all_l1_slots") as release_slots:
+        service.upsert_surface_demand(
+            "gallery",
+            ThumbnailDemandSnapshot(1, QSize(512, 512), ()),
+        )
+        service.upsert_surface_demand(
+            "filmstrip",
+            ThumbnailDemandSnapshot(1, QSize(256, 256), ()),
+        )
+
+    release_slots.assert_not_called()
+    service.shutdown()
+
+
 def test_stale_worker_result_is_discarded_before_pixmap_conversion(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     path = tmp_path / "photo.jpg"

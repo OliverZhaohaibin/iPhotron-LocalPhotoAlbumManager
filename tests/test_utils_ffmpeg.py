@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from iPhoto.utils import ffmpeg
-from iPhoto.errors import ExternalToolError
+from iPhoto.errors import ExternalToolError, ExternalToolTimeoutError
 
 
 def _fake_completed_process(command: list[str], stdout: bytes = b"") -> subprocess.CompletedProcess[bytes]:
@@ -41,7 +41,7 @@ def test_run_command_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     ("tool_name", "timeout_seconds"),
     [("ffprobe", 15.0), ("ffmpeg", 30.0)],
 )
-def test_run_command_converts_timeout_to_external_tool_error(
+def test_run_command_converts_timeout_to_external_tool_timeout_error(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     timeout_seconds: float,
@@ -55,7 +55,7 @@ def test_run_command_converts_timeout_to_external_tool_error(
     monkeypatch.setattr(subprocess, "run", raise_timeout)
 
     with pytest.raises(
-        ExternalToolError,
+        ExternalToolTimeoutError,
         match=rf"{tool_name} timed out after {int(timeout_seconds)} seconds",
     ):
         ffmpeg._run_command([tool_name, "movie.mov"], timeout_seconds=timeout_seconds)
@@ -599,6 +599,30 @@ def test_extract_video_frame_falls_back_to_opencv(monkeypatch: pytest.MonkeyPatc
     data = ffmpeg.extract_video_frame(input_path, at=0.1, scale=(100, 100), format="jpeg")
 
     assert data is fallback_data
+
+
+def test_extract_video_frame_timeout_does_not_fall_back_to_opencv(
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,
+    tmp_path: Path,
+) -> None:
+    """A bounded ffmpeg timeout must not enter the unbounded OpenCV path."""
+
+    input_path = tmp_path / "stalled.mov"
+    input_path.touch()
+    timeout_error = ExternalToolTimeoutError("ffmpeg timed out after 30 seconds")
+
+    def fake_ffmpeg(*args: object, **kwargs: object) -> bytes:
+        raise timeout_error
+
+    monkeypatch.setattr(ffmpeg, "_extract_with_ffmpeg", fake_ffmpeg)
+    fallback = mocker.patch.object(ffmpeg, "_extract_with_opencv")
+
+    with pytest.raises(ExternalToolTimeoutError) as exc_info:
+        ffmpeg.extract_video_frame(input_path, format="jpeg")
+
+    assert exc_info.value is timeout_error
+    fallback.assert_not_called()
 
 
 def test_extract_video_frame_propagates_error_when_no_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

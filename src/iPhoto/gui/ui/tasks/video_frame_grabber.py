@@ -9,7 +9,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
 
 from ....config import THUMBNAIL_SEEK_GUARD_SEC
-from ....errors import ExternalToolError
+from ....errors import ExternalToolError, ExternalToolTimeoutError
 from ....utils import image_loader
 from ....utils.ffmpeg import extract_frame_with_pyav, extract_video_frame
 
@@ -48,6 +48,8 @@ def grab_video_frame(
             )
             if frame_data:
                 return image_loader.qimage_from_bytes(frame_data)
+        except ExternalToolTimeoutError:
+            return None
         except ExternalToolError:
             continue
 

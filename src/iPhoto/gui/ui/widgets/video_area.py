@@ -173,6 +173,9 @@ class VideoArea(QWidget):
         self._video_frame_dispatch_pending = False
         self._video_frame_dispatch_generation: int | None = None
         self._media_generation = 0
+        self._end_detection_armed_media_generation: int | None = None
+        self._position_changed_handler = None
+        self._media_status_changed_handler = None
         self._detail_request_generation = 0
         self._presentation_committed = False
         self._awaiting_first_gpu_frame_generation: int | None = None
@@ -208,11 +211,10 @@ class VideoArea(QWidget):
         self._video_output_attached = True
         self._bind_video_sink_generation(self._media_generation)
 
-        self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
-        self._player.mediaStatusChanged.connect(self._on_media_status_changed)
         self._player.errorOccurred.connect(self._on_error_occurred)
+        self._bind_end_detection_generation(self._media_generation)
         # --- End Media Player Setup ---
 
         self._overlay_margin = 48
@@ -909,6 +911,8 @@ class VideoArea(QWidget):
         """Invalidate queued frames and release every downstream frame owner."""
 
         self._media_generation += 1
+        self._end_detection_armed_media_generation = None
+        self._bind_end_detection_generation(self._media_generation)
         self._accept_video_frames = False
         self._resize_refit_timer.stop()
         self._resize_refit_pending = False
@@ -920,6 +924,46 @@ class VideoArea(QWidget):
         self._renderer.clear_frame()
         self._edit_viewer.clear()
         return self._media_generation
+
+    def _bind_end_detection_generation(self, generation: int) -> None:
+        """Bind end-producing player callbacks to one media generation."""
+
+        previous_position_handler = self._position_changed_handler
+        if previous_position_handler is not None:
+            try:
+                self._player.positionChanged.disconnect(previous_position_handler)
+            except (RuntimeError, TypeError):
+                pass
+
+        previous_status_handler = self._media_status_changed_handler
+        if previous_status_handler is not None:
+            try:
+                self._player.mediaStatusChanged.disconnect(previous_status_handler)
+            except (RuntimeError, TypeError):
+                pass
+
+        def _handle_position(position: int, *, bound_generation: int = generation) -> None:
+            self._on_position_changed(position, media_generation=bound_generation)
+
+        def _handle_status(
+            status: QMediaPlayer.MediaStatus,
+            *,
+            bound_generation: int = generation,
+        ) -> None:
+            self._on_media_status_changed(status, media_generation=bound_generation)
+
+        self._position_changed_handler = _handle_position
+        self._media_status_changed_handler = _handle_status
+        self._player.positionChanged.connect(_handle_position)
+        self._player.mediaStatusChanged.connect(_handle_status)
+
+    def _end_detection_is_armed(self, media_generation: int) -> bool:
+        """Return whether end detection belongs to the current presented media."""
+
+        return (
+            int(media_generation) == self._media_generation
+            and self._end_detection_armed_media_generation == self._media_generation
+        )
 
     def _bind_video_sink_generation(self, generation: int) -> None:
         """Bind sink delivery to one media generation so old queued calls expire."""
@@ -1122,17 +1166,46 @@ class VideoArea(QWidget):
         generation = self._awaiting_first_gpu_frame_generation
         if generation is None or generation != self._detail_request_generation:
             return
+        media_generation = self._media_generation
         self._awaiting_first_gpu_frame_generation = None
+        self._end_detection_armed_media_generation = media_generation
         self.mediaFirstFrameReady.emit(generation)
 
-    def _on_position_changed(self, position: int) -> None:
+        if not self._end_detection_is_armed(media_generation):
+            return
+        position = self._player.position()
         if self._trim_out_ms > self._trim_in_ms and position >= self._trim_out_ms:
+            self._on_position_changed(position, media_generation=media_generation)
+            return
+        if self._player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._on_media_status_changed(
+                QMediaPlayer.MediaStatus.EndOfMedia,
+                media_generation=media_generation,
+            )
+
+    def _on_position_changed(
+        self,
+        position: int,
+        *,
+        media_generation: int | None = None,
+    ) -> None:
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if event_generation != self._media_generation:
+            return
+        if (
+            self._end_detection_is_armed(event_generation)
+            and self._trim_out_ms > self._trim_in_ms
+            and position >= self._trim_out_ms
+        ):
             self._enter_end_hold(
                 end_pos=self._trim_out_ms,
                 hold_pos=max(
                     self._trim_in_ms,
                     self._trim_out_ms - VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
                 ),
+                media_generation=event_generation,
             )
             return
         display_position = self._display_position(position)
@@ -1177,9 +1250,25 @@ class VideoArea(QWidget):
         if not is_playing and state == QMediaPlayer.PlaybackState.StoppedState:
             self.show_controls()
 
-    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+    def _on_media_status_changed(
+        self,
+        status: QMediaPlayer.MediaStatus,
+        *,
+        media_generation: int | None = None,
+    ) -> None:
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if event_generation != self._media_generation:
+            return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            duration = self._trim_out_ms if self._trim_out_ms > self._trim_in_ms else self._player.duration()
+            if not self._end_detection_is_armed(event_generation):
+                return
+            duration = (
+                self._trim_out_ms
+                if self._trim_out_ms > self._trim_in_ms
+                else self._player.duration()
+            )
             if duration <= 0:
                 return
             position = self._player.position()
@@ -1190,6 +1279,7 @@ class VideoArea(QWidget):
             self._enter_end_hold(
                 end_pos=int(duration),
                 hold_pos=max(0, int(duration) - VIDEO_COMPLETE_HOLD_BACKSTEP_MS),
+                media_generation=event_generation,
             )
 
     def _on_error_occurred(self, _error: object, message: str) -> None:
@@ -1217,9 +1307,20 @@ class VideoArea(QWidget):
         self._player_bar.set_position(position)
         self.positionChanged.emit(position)
 
-    def _enter_end_hold(self, *, end_pos: int, hold_pos: int) -> None:
+    def _enter_end_hold(
+        self,
+        *,
+        end_pos: int,
+        hold_pos: int,
+        media_generation: int | None = None,
+    ) -> None:
         """Pause on the last frame while keeping the timeline cursor at the end."""
 
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if not self._end_detection_is_armed(event_generation):
+            return
         end_pos = max(0, int(end_pos))
         hold_pos = max(0, min(int(hold_pos), end_pos))
         if self._restart_from_trim_in_on_play and self._end_hold_display_ms == end_pos:
@@ -1229,7 +1330,7 @@ class VideoArea(QWidget):
             return
         finished_request_generation = self._detail_request_generation
         finished_source = self._current_source
-        finished_media_generation = self._media_generation
+        finished_media_generation = event_generation
         self._suppress_trim_pause = True
         self._end_hold_display_ms = end_pos
         self._restart_from_trim_in_on_play = True

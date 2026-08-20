@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING
 
-from ..errors import ExternalToolError
+from ..errors import ExternalToolError, ExternalToolTimeoutError
 from .media_access import media_access
 
 if TYPE_CHECKING:
@@ -84,7 +84,7 @@ def _run_command(
         )
     except subprocess.TimeoutExpired as exc:
         tool_name = Path(command[0]).name if command else "external media tool"
-        raise ExternalToolError(
+        raise ExternalToolTimeoutError(
             f"{tool_name} timed out after {timeout_seconds:g} seconds"
         ) from exc
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
@@ -211,6 +211,8 @@ def extract_video_frame(
     with media_access.read(source):
         try:
             return _extract_with_ffmpeg(source, at=at, scale=scale, format=fmt)
+        except ExternalToolTimeoutError:
+            raise
         except ExternalToolError as exc:
             fallback = _extract_with_opencv(source, at=at, scale=scale, format=fmt)
             if fallback is not None:

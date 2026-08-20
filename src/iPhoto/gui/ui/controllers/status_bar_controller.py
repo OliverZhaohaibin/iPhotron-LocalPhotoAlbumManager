@@ -33,6 +33,8 @@ class StatusBarController(QObject):
         self._rescan_action = rescan_action
         self._progress_context: Optional[str] = None
         self._scan_active: bool = False
+        self._thumbnail_backfill_active_requests: int = 0
+        self._thumbnail_backfill_session_failed: bool = False
         # ``_move_context_delete`` keeps track of whether the current move feedback refers
         # to a deletion into Recently Deleted so we can surface "Delete" specific copy.
         self._move_context_delete: bool = False
@@ -130,11 +132,25 @@ class StatusBarController(QObject):
     ) -> None:
         """Surface lazy thumbnail migration/backfill progress."""
 
+        # Every service request publishes one 0/N discovery event before its
+        # worker begins. Count those requests independently from the visible
+        # status-bar context so an older delayed terminal event cannot close a
+        # newer request that has already started.
+        if current == 0:
+            if self._thumbnail_backfill_active_requests == 0:
+                self._thumbnail_backfill_session_failed = False
+            self._thumbnail_backfill_active_requests += 1
+        elif self._thumbnail_backfill_active_requests == 0:
+            # Compatibility for embedders/tests that attach after discovery
+            # and therefore first observe an in-flight non-zero update.
+            self._thumbnail_backfill_active_requests = 1
+            self._thumbnail_backfill_session_failed = False
+
         if self._progress_context not in {"thumbnail", None}:
             return
         # The producer reports the exact candidate count, so (0, 0) means
-        # there is no work.  Treating it as an unknown total would start an
-        # indeterminate progress bar with nothing left to stop it.
+        # there is no work.  Track the request for terminal ordering, but do
+        # not show an indeterminate progress bar for an empty batch.
         if current == 0 and total == 0:
             return
         self._progress_context = "thumbnail"
@@ -154,24 +170,44 @@ class StatusBarController(QObject):
         self._progress_bar.setVisible(True)
 
     def handle_thumbnail_backfill_completed(self, _root: Path) -> None:
-        """End thumbnail feedback when the service reports terminal completion."""
+        """End thumbnail feedback once the whole active backfill session is idle."""
 
-        if self._progress_context != "thumbnail":
-            return
-        self._progress_bar.setVisible(False)
-        self._progress_bar.setRange(0, 0)
-        self._progress_context = None
-        self.show_message(self._tr("Thumbnails updated."), 3000)
+        self._finish_thumbnail_backfill_request(failed=False)
 
     def handle_thumbnail_backfill_failed(self, _root: Path, _error: str) -> None:
-        """End thumbnail feedback when background backfill fails."""
+        """Record a failed request and finish feedback when the session is idle."""
 
+        self._finish_thumbnail_backfill_request(failed=True)
+
+    def _finish_thumbnail_backfill_request(self, *, failed: bool) -> None:
+        """Consume one terminal event without hiding newer in-flight work."""
+
+        if failed:
+            self._thumbnail_backfill_session_failed = True
+
+        if self._thumbnail_backfill_active_requests > 0:
+            self._thumbnail_backfill_active_requests -= 1
+        elif self._progress_context != "thumbnail":
+            # No observed request and no thumbnail UI to finish. This covers
+            # empty/foreign terminal events without manufacturing feedback.
+            self._thumbnail_backfill_session_failed = False
+            return
+
+        if self._thumbnail_backfill_active_requests > 0:
+            return
+
+        session_failed = self._thumbnail_backfill_session_failed
+        self._thumbnail_backfill_session_failed = False
         if self._progress_context != "thumbnail":
             return
+
         self._progress_bar.setVisible(False)
         self._progress_bar.setRange(0, 0)
         self._progress_context = None
-        self.show_message(self._tr("Thumbnail update failed."), 5000)
+        if session_failed:
+            self.show_message(self._tr("Thumbnail update failed."), 5000)
+        else:
+            self.show_message(self._tr("Thumbnails updated."), 3000)
 
     def handle_load_started(self, root: Path) -> None:
         """Show an indeterminate progress indicator while assets load."""

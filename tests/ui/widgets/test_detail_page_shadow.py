@@ -5,6 +5,11 @@ from PySide6.QtWidgets import QFrame, QMainWindow, QStackedWidget, QWidget
 from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget, _PlaybackHeaderShadow
 
 
+class _StubPlayerBar(QWidget):
+    def retranslate_ui(self) -> None:
+        pass
+
+
 def test_playback_header_shadow_extends_beyond_chrome_without_changing_layout(qapp):
     root = QWidget()
     root.resize(200, 80)
@@ -36,13 +41,24 @@ def test_playback_header_shadow_extends_beyond_chrome_without_changing_layout(qa
     assert below == 255
 
 
-def test_playback_surface_touches_header_separator_but_keeps_filmstrip_gap(qapp):
+def test_playback_surface_touches_header_separator_but_keeps_filmstrip_gap(
+    qapp,
+    monkeypatch,
+):
     window = QMainWindow()
     window.resize(1200, 800)
     stack = QStackedWidget(window)
     window.setCentralWidget(stack)
     detail = DetailPageWidget(window, parent=stack, staged=True)
     stack.addWidget(detail)
+
+    # This is a layout contract, not a multimedia integration test. Keep the
+    # staged native surfaces in place but avoid constructing QMediaPlayer /
+    # QAudioOutput / QVideoSink on headless Linux CI.
+    monkeypatch.setattr(detail.image_viewer, "complete_runtime", lambda: None)
+    monkeypatch.setattr(detail.video_area, "complete_runtime", lambda: None)
+    detail.video_area._player_bar = _StubPlayerBar(detail.video_area)
+
     detail.complete_feature()
     window.show()
     qapp.processEvents()

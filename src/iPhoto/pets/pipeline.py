@@ -107,6 +107,7 @@ DEFAULT_PET_TINY_MAX_CONFIDENCE = 0.45
 DEFAULT_PET_DETECTOR_MODEL_URL = str(_DETECTOR_MANIFEST["url"])
 PET_MODEL_AUTO_DOWNLOAD_ENV = "IPHOTO_PET_MODEL_AUTO_DOWNLOAD"
 PET_DETECTOR_MODEL_URL_ENV = "IPHOTO_PET_DETECTOR_MODEL_URL"
+PET_EMBEDDER_MODEL_URL_ENV = "IPHOTO_PET_EMBEDDER_MODEL_URL"
 PET_DETECTOR_MODEL_SHA256_ENV = "IPHOTO_PET_DETECTOR_MODEL_SHA256"
 DEFAULT_PET_DETECTOR_MODEL_SHA256 = str(_DETECTOR_MANIFEST["sha256"])
 DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES = int(_DETECTOR_MANIFEST["max_bytes"])
@@ -1326,12 +1327,14 @@ class _DinoV2Embedder:
         return normalize_vector(vector.astype(np.float32))
 
     def _download_dinov2_model(self, model_path: Path):
-        url = str(_EMBEDDER_MANIFEST.get("torchscript_url") or "").strip()
+        url = pet_embedder_model_url()
         if not url:
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: the fixed DINOv2 TorchScript release "
-                "artifact has not been configured. Install a package containing the "
-                "verified model or set IPHOTO_PET_MODEL_DIR."
+                "artifact has no configured download source. Set "
+                f"{PET_EMBEDDER_MODEL_URL_ENV} to an HTTPS URL serving the exact "
+                "hash- and size-verified artifact, install a package containing the "
+                "verified model, or set IPHOTO_PET_MODEL_DIR."
             )
         try:
             _install_certifi_environment()
@@ -1369,7 +1372,9 @@ class _DinoV2Embedder:
             _dinov2_metadata_path(model_path).unlink(missing_ok=True)
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: failed to download the verified DINOv2 "
-                f"TorchScript model ({_error_reason(exc)})."
+                f"TorchScript model from {url} ({_error_reason(exc)}). Set "
+                f"{PET_EMBEDDER_MODEL_URL_ENV} to another HTTPS source serving the "
+                "same verified artifact, or install the model manually."
             ) from exc
 
         model.eval()
@@ -1828,6 +1833,14 @@ def pet_model_auto_download_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def pet_embedder_model_url() -> str:
+    return str(
+        os.environ.get(PET_EMBEDDER_MODEL_URL_ENV)
+        or _EMBEDDER_MANIFEST.get("torchscript_url")
+        or ""
+    ).strip()
+
+
 def ensure_pet_detector_model(
     model_path: Path,
     *,
@@ -2010,8 +2023,8 @@ def _download_file(
             raise
         raise RuntimeError(
             f"Pet scanning unavailable: failed to download {label} from {url} "
-            f"({_error_reason(exc)}). Check your network connection, set "
-            f"{PET_DETECTOR_MODEL_URL_ENV}, or install the model manually."
+            f"({_error_reason(exc)}). Check your network connection or install "
+            "the model manually."
         ) from exc
 
 

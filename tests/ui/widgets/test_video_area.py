@@ -82,6 +82,7 @@ class _FakeMediaPlayer:
         self._position = 0
         self._duration = 0
         self._state = QMediaPlayer.PlaybackState.StoppedState
+        self._media_status = QMediaPlayer.MediaStatus.NoMedia
         self._source = None
         self._audio_output = None
         self._video_output = None
@@ -106,6 +107,9 @@ class _FakeMediaPlayer:
 
     def playbackState(self):
         return self._state
+
+    def mediaStatus(self):
+        return self._media_status
 
     def play(self) -> None:
         self._state = QMediaPlayer.PlaybackState.PlayingState
@@ -750,6 +754,7 @@ class TestVideoArea:
     def test_end_of_media_backsteps_and_pauses(self, qapp, mocker):
         """When EndOfMedia fires, the player should backstep and pause."""
         va = VideoArea()
+        va._end_detection_armed_media_generation = va._media_generation
 
         mocker.patch.object(va._player, "duration", return_value=5000)
         mocker.patch.object(va._player, "position", return_value=5000)
@@ -790,6 +795,10 @@ class TestVideoArea:
         va = VideoArea()
         va._trim_in_ms = 1200
         va._trim_out_ms = 4200
+        va._detail_request_generation = 7
+        va._current_source = Path("/fake/live.mov")
+        va._media_generation = 9
+        va._end_detection_armed_media_generation = 9
 
         mock_pause = mocker.patch.object(va._player, "pause")
         mock_set_pos = mocker.patch.object(va._player, "setPosition")
@@ -798,11 +807,12 @@ class TestVideoArea:
         va.playbackFinished.connect(finished_spy)
 
         va._on_position_changed(4200)
+        va._on_position_changed(4200)
 
         mock_pause.assert_called_once()
         mock_set_pos.assert_called_once_with(4200 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
         mock_show_controls.assert_called_once()
-        finished_spy.assert_called_once_with()
+        finished_spy.assert_called_once_with(7, Path("/fake/live.mov"), 9)
         assert va._restart_from_trim_in_on_play is True
 
     def test_trim_out_hold_keeps_timeline_cursor_at_out_point(self, qapp) -> None:
@@ -811,6 +821,7 @@ class TestVideoArea:
         va = VideoArea()
         va._trim_in_ms = 1200
         va._trim_out_ms = 4200
+        va._end_detection_armed_media_generation = va._media_generation
         position_spy = Mock()
         va.positionChanged.connect(position_spy)
 
@@ -885,6 +896,7 @@ class TestVideoArea:
         """The playhead should remain at the duration marker after EndOfMedia."""
 
         va = VideoArea()
+        va._end_detection_armed_media_generation = va._media_generation
         position_spy = Mock()
         va.positionChanged.connect(position_spy)
 
@@ -920,6 +932,116 @@ class TestVideoArea:
             call(5000),
         ]
 
+    def test_stale_bound_end_callbacks_are_rejected_after_new_first_frame(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        """Late callbacks retain A's media generation after B is presented."""
+
+        va = VideoArea()
+        va.begin_load(Path("/fake/a.mov"), 21)
+        stale_position_handler = va._position_changed_handler
+        stale_status_handler = va._media_status_changed_handler
+
+        media_generation_b = va.begin_load(Path("/fake/b.mov"), 23)
+        va._trim_in_ms = 0
+        va._trim_out_ms = 5000
+        va._player._duration = 5000
+        va._player._position = 0
+        va._player._media_status = QMediaPlayer.MediaStatus.LoadedMedia
+        va._awaiting_first_gpu_frame_generation = 23
+        va._on_gpu_video_frame_presented()
+
+        pause = mocker.patch.object(va._player, "pause")
+        set_position = mocker.patch.object(va._player, "setPosition")
+        finished_spy = mocker.Mock()
+        va.playbackFinished.connect(finished_spy)
+
+        stale_position_handler(5000)
+        stale_status_handler(QMediaPlayer.MediaStatus.EndOfMedia)
+
+        pause.assert_not_called()
+        set_position.assert_not_called()
+        finished_spy.assert_not_called()
+
+        va._position_changed_handler(5000)
+
+        pause.assert_called_once_with()
+        set_position.assert_called_once_with(5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+        finished_spy.assert_called_once_with(
+            23,
+            Path("/fake/b.mov"),
+            media_generation_b,
+        )
+
+    def test_current_end_is_caught_up_only_after_first_gpu_frame(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        """A legitimate early B end waits until B has presented a frame."""
+
+        va = VideoArea()
+        media_generation = va.begin_load(Path("/fake/short.mov"), 31)
+        va._trim_in_ms = 0
+        va._trim_out_ms = 100
+        va._player._duration = 100
+        va._player._position = 100
+        va._player._media_status = QMediaPlayer.MediaStatus.EndOfMedia
+        pause = mocker.patch.object(va._player, "pause")
+        set_position = mocker.patch.object(va._player, "setPosition")
+        finished_spy = mocker.Mock()
+        va.playbackFinished.connect(finished_spy)
+
+        va._position_changed_handler(100)
+        va._media_status_changed_handler(QMediaPlayer.MediaStatus.EndOfMedia)
+
+        pause.assert_not_called()
+        set_position.assert_not_called()
+        finished_spy.assert_not_called()
+
+        va._awaiting_first_gpu_frame_generation = 31
+        va._on_gpu_video_frame_presented()
+
+        pause.assert_called_once_with()
+        set_position.assert_called_once_with(100 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+        finished_spy.assert_called_once_with(
+            31,
+            Path("/fake/short.mov"),
+            media_generation,
+        )
+
+    def test_same_source_replay_rejects_stale_gpu_completion(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        """Replay A's queued GPU completion cannot arm replay B of the same source."""
+
+        va = VideoArea()
+        source = Path("/fake/live.mov")
+        va.begin_load(source, 7)
+        stale_gpu_handler = va._gpu_video_frame_presented_handler
+
+        media_generation_b = va.begin_load(source, 7)
+        current_gpu_handler = va._gpu_video_frame_presented_handler
+        va._awaiting_first_gpu_frame_generation = 7
+        first_frame_spy = mocker.Mock()
+        va.mediaFirstFrameReady.connect(first_frame_spy)
+
+        stale_gpu_handler()
+
+        assert va._awaiting_first_gpu_frame_generation == 7
+        assert va._end_detection_armed_media_generation is None
+        first_frame_spy.assert_not_called()
+
+        current_gpu_handler()
+
+        assert va._awaiting_first_gpu_frame_generation is None
+        assert va._end_detection_armed_media_generation == media_generation_b
+        first_frame_spy.assert_called_once_with(7)
+
     def test_load_video_clears_frame(self, qapp, mocker):
         """load_video should clear the renderer frame."""
         va = VideoArea()
@@ -947,12 +1069,15 @@ class TestVideoArea:
             return_value=(90, 1920, 1440),
         )
 
-        va.begin_load(Path("/fake/portrait.mov"), 7)
+        va._end_detection_armed_media_generation = va._media_generation
+        media_generation = va.begin_load(Path("/fake/portrait.mov"), 7)
         va.commit_presentation(
             VideoPresentationState(7, {}, None, False, 90, 1920, 1440, False)
         )
 
         probe.assert_not_called()
+        assert media_generation == va._media_generation
+        assert va._end_detection_armed_media_generation is None
         assert mock_set_rot.call_args_list[-1] == call(90, 1920, 1440)
 
     def test_load_video_handles_probe_failure(self, qapp, mocker):
@@ -1078,6 +1203,7 @@ class TestVideoArea:
         mock_set_source = mocker.patch.object(va._player, "setSource")
         mock_set_output = mocker.patch.object(va._player, "setVideoOutput")
         mock_clear = mocker.patch.object(va._renderer, "clear_frame")
+        va._end_detection_armed_media_generation = va._media_generation
 
         va.stop()
 
@@ -1089,6 +1215,7 @@ class TestVideoArea:
         mock_set_output.assert_called_once_with(None)
         # Renderer frame should be cleared
         mock_clear.assert_called_once()
+        assert va._end_detection_armed_media_generation is None
 
     def test_stop_releases_frames_and_detaches_sink_before_source_clear(self, qapp, mocker):
         """No backend teardown API may run while downstream frames are retained."""

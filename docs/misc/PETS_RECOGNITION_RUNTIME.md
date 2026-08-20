@@ -49,16 +49,22 @@ src/extension/models/pets/
 ```
 
 `IPHOTO_PET_MODEL_DIR` explicitly overrides that model root. Missing models may
-be populated on first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector
-URL defaults to the upstream YOLOX release and can be overridden with
-`IPHOTO_PET_DETECTOR_MODEL_URL`.
+be populated on first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. Before the
+first pet scan batch, the worker acquires missing model artifacts so model
+availability failures do not short-circuit the automatic download path. The
+YOLOX detector is downloaded from the manifest URL by default and can be
+overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`.
 
-Production does not execute Torch Hub. DINOv2 must be the hash- and size-verified
-TorchScript artifact declared in `iPhoto/pets/model_manifest.json`. When the
-manifest does not provide a built-in `torchscript_url`, deployments may set
-`IPHOTO_PET_EMBEDDER_MODEL_URL` to an HTTPS mirror serving those exact verified
-bytes. Changing the URL does not relax the manifest SHA-256 or size checks.
-Torch Hub remains restricted to the release conversion tool.
+DINOv2 must resolve to the hash- and size-verified TorchScript artifact declared
+in `iPhoto/pets/model_manifest.json`. When a built-in `torchscript_url` or
+`IPHOTO_PET_EMBEDDER_MODEL_URL` is available, that exact artifact is downloaded
+directly. If neither URL is configured, first-use acquisition falls back to
+Torch Hub only at the immutable `source_repository:source_revision` declared by
+the manifest, reproduces the release TorchScript locally, and installs it only
+when its SHA-256 and size exactly match the manifest. Torch Hub source and weight
+caches are staged in a temporary directory under the selected Pets model root
+and removed after conversion. Mutable Torch Hub refs are not used in production.
+Changing a download URL does not relax the manifest integrity checks.
 `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without disabling the rest of
 the application.
 
@@ -190,6 +196,7 @@ coerced into a face or person record.
 ## Focused Verification
 
 ```bash
+.venv/bin/python -m pytest -q tests/test_pet_model_download_config.py tests/test_pet_model_bootstrap.py
 .venv/bin/python -m pytest -q tests/test_pet_service.py
 .venv/bin/python -m pytest -q tests/test_people_service.py tests/test_people_repository.py
 .venv/bin/python -m pytest -q tests/gui/widgets/test_people_dashboard_widget.py

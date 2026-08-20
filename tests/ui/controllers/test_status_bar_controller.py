@@ -100,3 +100,33 @@ def test_album_load_progress_still_hides_when_no_scan_is_active(qapp: QApplicati
     assert progress.minimum() == 0
     assert progress.maximum() == 0
     assert status_bar.currentMessage() == "Album loaded."
+
+
+def test_empty_thumbnail_backfill_does_not_show_progress(qapp: QApplication) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 0, 0)
+    controller.handle_thumbnail_backfill_completed(Path("/library"))
+
+    assert progress.isHidden()
+    assert controller._progress_context is None
+    assert status_bar.currentMessage() == ""
+
+
+def test_thumbnail_completion_hides_progress_before_count_reaches_total(
+    qapp: QApplication,
+) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 2, 5)
+    assert not progress.isHidden()
+
+    controller.handle_thumbnail_backfill_completed(Path("/library"))
+
+    assert progress.isHidden()
+    assert progress.minimum() == 0
+    assert progress.maximum() == 0
+    assert controller._progress_context is None
+    assert status_bar.currentMessage() == "Thumbnails updated."

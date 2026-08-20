@@ -73,6 +73,7 @@ class GalleryListModelAdapter(QAbstractListModel):
 
     _scan_batch_received = QtSignal(object)
     thumbnailBackfillProgress = QtSignal(Path, int, int)
+    thumbnailBackfillCompleted = QtSignal(Path)
     startupGalleryReady = QtSignal()
     startupFirstFrameReady = QtSignal()
 
@@ -1644,7 +1645,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         old_disconnect = getattr(old_signal, "disconnect", None)
         if callable(old_disconnect):
             try:
-                old_disconnect(self.handle_scan_batch)
+                old_disconnect(self._handle_thumbnail_backfill_completed)
             except (RuntimeError, TypeError, ValueError):
                 pass
         old_progress = getattr(
@@ -1663,7 +1664,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         new_signal = getattr(asset_query_service, "thumbnail_backfill_completed", None)
         new_connect = getattr(new_signal, "connect", None)
         if callable(new_connect):
-            new_connect(self.handle_scan_batch)
+            new_connect(self._handle_thumbnail_backfill_completed)
         new_progress = getattr(asset_query_service, "thumbnail_backfill_progress", None)
         new_progress_connect = getattr(new_progress, "connect", None)
         if callable(new_progress_connect):
@@ -1676,6 +1677,14 @@ class GalleryListModelAdapter(QAbstractListModel):
         total: int,
     ) -> None:
         self.thumbnailBackfillProgress.emit(Path(root), int(current), int(total))
+
+    def _handle_thumbnail_backfill_completed(self, batch: object) -> None:
+        """Refresh changed rows and relay the backfill's terminal event."""
+
+        self.handle_scan_batch(batch)
+        root = getattr(batch, "root", None)
+        if root is not None:
+            self.thumbnailBackfillCompleted.emit(Path(root))
 
     def _snapshot_hash(self, count: int) -> bytes:
         del count

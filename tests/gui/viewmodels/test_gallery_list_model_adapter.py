@@ -429,13 +429,16 @@ def test_backfill_completion_event_queues_scan_batch(mock_thumb_service):
     store.asset_query_service = service
     store.record_scan_batch.return_value = True
     adapter = GalleryListModelAdapter(store, mock_thumb_service)
-    batch = SimpleNamespace(rows=[{"rel": "ready.jpg"}])
+    batch = SimpleNamespace(root=Path("/library"), rows=[{"rel": "ready.jpg"}])
+    completed: list[Path] = []
+    adapter.thumbnailBackfillCompleted.connect(completed.append)
 
     service.thumbnail_backfill_completed.emit(batch)
     adapter._flush_pending_scan_batches()
 
     store.record_scan_batch.assert_called_once_with(batch)
     store.flush_pending_scan_refresh.assert_called_once_with()
+    assert completed == [Path("/library")]
 
 
 def test_startup_window_backfill_and_thumbnail_publish_keep_event_loop_responsive(
@@ -546,8 +549,14 @@ def test_rebind_asset_query_service_moves_backfill_completion_signal(
 
     adapter.rebind_asset_query_service(new_service, Path("/library"))
 
-    assert adapter.handle_scan_batch not in old_service.thumbnail_backfill_completed.handlers
-    assert adapter.handle_scan_batch in new_service.thumbnail_backfill_completed.handlers
+    assert (
+        adapter._handle_thumbnail_backfill_completed
+        not in old_service.thumbnail_backfill_completed.handlers
+    )
+    assert (
+        adapter._handle_thumbnail_backfill_completed
+        in new_service.thumbnail_backfill_completed.handlers
+    )
     assert (
         adapter._handle_thumbnail_backfill_progress
         not in old_service.thumbnail_backfill_progress.handlers

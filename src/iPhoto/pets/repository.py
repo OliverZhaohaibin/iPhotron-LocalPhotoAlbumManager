@@ -1093,7 +1093,6 @@ class PetRepository:
             key=lambda value: (value.asset_id, value.pet_key, value.detection_id),
         )
         for detection in ordered:
-            detection_species = _normalize_species_label(detection.species_label)
             mapped_id = key_map.get(detection.pet_key, "")
             candidate_id = redirects.get(mapped_id, mapped_id)
             durable_profile = durable_profiles.get(candidate_id)

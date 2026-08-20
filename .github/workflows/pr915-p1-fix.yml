@@ -24,27 +24,17 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Apply P1 fix and regression coverage
+      - name: Finalize P1 fix and regression coverage
         shell: python
         run: |
           from pathlib import Path
 
           repository_path = Path("src/iPhoto/pets/repository.py")
           repository_text = repository_path.read_text(encoding="utf-8")
-          old_assignment = (
+          unused_species_line = (
               "            detection_species = _normalize_species_label(detection.species_label)\n"
-              "            mapped_id = key_map.get(detection.pet_key, \"\")\n"
-              "            candidate_id = redirects.get(mapped_id, mapped_id)\n"
-              "            durable_profile = durable_profiles.get(candidate_id)\n"
           )
-          new_assignment = (
-              "            mapped_id = key_map.get(detection.pet_key, \"\")\n"
-              "            candidate_id = redirects.get(mapped_id, mapped_id)\n"
-              "            durable_profile = durable_profiles.get(candidate_id)\n"
-          )
-          if old_assignment not in repository_text:
-              raise SystemExit("expected detection-species assignment block not found")
-          repository_text = repository_text.replace(old_assignment, new_assignment, 1)
+          repository_text = repository_text.replace(unused_species_line, "", 1)
 
           old_guard = (
               "            if candidate_id and not _species_compatible(detection_species, known_species):\n"
@@ -61,50 +51,53 @@ jobs:
               "                candidate_id = \"\"\n"
               "            elif candidate_id and any(\n"
           )
-          if old_guard not in repository_text:
-              raise SystemExit("expected species guard not found")
-          repository_text = repository_text.replace(old_guard, new_guard, 1)
+          if old_guard in repository_text:
+              repository_text = repository_text.replace(old_guard, new_guard, 1)
+          if new_guard not in repository_text:
+              raise SystemExit("durable pet-key identity guard is not in the expected state")
           repository_path.write_text(repository_text, encoding="utf-8")
 
           test_path = Path("tests/test_pet_remediation_contracts.py")
           test_text = test_path.read_text(encoding="utf-8")
-          marker = (
-              "    assert f\"Preserving mixed-species Pet identity {dog_identity}\" in caplog.text\n"
-              "\n\n"
-              "def test_profile_candidate_index_has_strict_species_parity_with_usearch(\n"
-          )
-          added_case = (
-              "    assert f\"Preserving mixed-species Pet identity {dog_identity}\" in caplog.text\n"
-              "\n"
-              "    # The non-dominant species member must also keep the durable identity.\n"
-              "    # This is the regression case that previously fell through the species gate.\n"
-              "    caplog.clear()\n"
-              "    rescanned_cat = replace(\n"
-              "        _detection(\"cat-rescan\", asset_id=\"asset-cat\"),\n"
-              "        pet_key=cat.pet_key,\n"
-              "        species_label=\"cat\",\n"
-              "    )\n"
-              "    cat_event = coordinator.submit_detected_batch(\n"
-              "        [DetectedAssetPets(\"asset-cat\", \"album/asset-cat.jpg\", [rescanned_cat])],\n"
-              "        distance_threshold=0.1,\n"
-              "    )\n"
-              "\n"
-              "    assert cat_event is not None\n"
-              "    assert cat_event.updated_pet_ids == (dog_identity,)\n"
-              "    assert repository.get_detection(\"cat\") is None\n"
-              "    assert repository.get_detection(\"cat-rescan\").pet_id == dog_identity  # type: ignore[union-attr]\n"
-              "    assert repository.get_detection(\"dog-rescan\").pet_id == dog_identity  # type: ignore[union-attr]\n"
-              "    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {dog_identity}\n"
-              "    assert cat_event.operation_id is not None\n"
-              "    assert repository.get_runtime_commit(cat_event.operation_id)[\"state_synced\"] is True  # type: ignore[index]\n"
-              "    assert coordinator._journal.unfinished() == ()\n"
-              "    assert f\"Preserving mixed-species Pet identity {dog_identity}\" in caplog.text\n"
-              "\n\n"
-              "def test_profile_candidate_index_has_strict_species_parity_with_usearch(\n"
-          )
-          if marker not in test_text:
-              raise SystemExit("expected regression-test marker not found")
-          test_path.write_text(test_text.replace(marker, added_case, 1), encoding="utf-8")
+          if 'rescanned_cat = replace(' not in test_text:
+              marker = (
+                  "    assert f\"Preserving mixed-species Pet identity {dog_identity}\" in caplog.text\n"
+                  "\n\n"
+                  "def test_profile_candidate_index_has_strict_species_parity_with_usearch(\n"
+              )
+              added_case = (
+                  "    assert f\"Preserving mixed-species Pet identity {dog_identity}\" in caplog.text\n"
+                  "\n"
+                  "    # The non-dominant species member must also keep the durable identity.\n"
+                  "    # This is the regression case that previously fell through the species gate.\n"
+                  "    caplog.clear()\n"
+                  "    rescanned_cat = replace(\n"
+                  "        _detection(\"cat-rescan\", asset_id=\"asset-cat\"),\n"
+                  "        pet_key=cat.pet_key,\n"
+                  "        species_label=\"cat\",\n"
+                  "    )\n"
+                  "    cat_event = coordinator.submit_detected_batch(\n"
+                  "        [DetectedAssetPets(\"asset-cat\", \"album/asset-cat.jpg\", [rescanned_cat])],\n"
+                  "        distance_threshold=0.1,\n"
+                  "    )\n"
+                  "\n"
+                  "    assert cat_event is not None\n"
+                  "    assert cat_event.updated_pet_ids == (dog_identity,)\n"
+                  "    assert repository.get_detection(\"cat\") is None\n"
+                  "    assert repository.get_detection(\"cat-rescan\").pet_id == dog_identity  # type: ignore[union-attr]\n"
+                  "    assert repository.get_detection(\"dog-rescan\").pet_id == dog_identity  # type: ignore[union-attr]\n"
+                  "    assert {pet.pet_id for pet in repository.get_all_pet_records()} == {dog_identity}\n"
+                  "    assert cat_event.operation_id is not None\n"
+                  "    assert repository.get_runtime_commit(cat_event.operation_id)[\"state_synced\"] is True  # type: ignore[index]\n"
+                  "    assert coordinator._journal.unfinished() == ()\n"
+                  "    assert f\"Preserving mixed-species Pet identity {dog_identity}\" in caplog.text\n"
+                  "\n\n"
+                  "def test_profile_candidate_index_has_strict_species_parity_with_usearch(\n"
+              )
+              if marker not in test_text:
+                  raise SystemExit("expected regression-test insertion point not found")
+              test_text = test_text.replace(marker, added_case, 1)
+              test_path.write_text(test_text, encoding="utf-8")
 
       - name: Install Linux system dependencies
         run: |
@@ -123,6 +116,7 @@ jobs:
         run: |
           python -m compileall -q src/iPhoto/pets/repository.py tests/test_pet_remediation_contracts.py
           git diff --check
+          python -m ruff check src/iPhoto/pets/repository.py tests/test_pet_remediation_contracts.py
           python -m pytest -q tests/test_pet_remediation_contracts.py -k "incremental_rescan_preserves_manual_cross_species_identity or manual_actions_override_generation_contract or cross_species_move_succeeds_and_journal_is_finalized or unstable_profile_only_reuses_identity_by_exact_pet_key"
 
       - name: Commit and push fix

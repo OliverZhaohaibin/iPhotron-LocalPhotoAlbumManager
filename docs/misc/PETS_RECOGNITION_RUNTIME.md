@@ -61,12 +61,15 @@ in `iPhoto/pets/model_manifest.json`. When a built-in `torchscript_url` or
 directly. If neither URL is configured, first-use acquisition falls back to
 Torch Hub only at the immutable `source_repository:source_revision` declared by
 the manifest, reproduces the release TorchScript locally, and installs it only
-when its SHA-256 and size exactly match the manifest. Torch Hub source and weight
-caches are staged in a temporary directory under the selected Pets model root
-and removed after conversion. Mutable Torch Hub refs are not used in production.
-Changing a download URL does not relax the manifest integrity checks.
-`IPHOTO_PET_SCAN_DISABLED=1` disables the worker without disabling the rest of
-the application.
+when its SHA-256 and size exactly match the manifest. If the locally generated
+bytes differ (for example because the installed PyTorch serializer produces a
+different archive), acquisition fails closed and instructs the deployment to
+provide the exact manifest artifact through `IPHOTO_PET_EMBEDDER_MODEL_URL`.
+Torch Hub source and weight caches are staged in a temporary directory under the
+selected Pets model root and removed after conversion. Mutable Torch Hub refs are
+not used in production. Changing a download URL does not relax the manifest
+integrity checks. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without
+disabling the rest of the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
 runtime and the two model files under `extension/models/pets`. A build that

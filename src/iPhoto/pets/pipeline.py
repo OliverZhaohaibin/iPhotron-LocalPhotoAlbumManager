@@ -646,9 +646,16 @@ def build_pet_records_from_detections(
             for label in (_normalize_species_label(member.species_label) for member in members)
             if label is not None
         }
-        if len(species_labels) > 1 and not allow_mixed_identity_members:
-            raise ValueError(
-                f"Pet {pet_id} mixes incompatible species labels: {sorted(species_labels)}"
+        if len(species_labels) > 1:
+            if not allow_mixed_identity_members:
+                raise ValueError(
+                    f"Pet {pet_id} mixes incompatible species labels: "
+                    f"{sorted(species_labels)}"
+                )
+            _LOGGER.info(
+                "Preserving mixed-species Pet identity %s: species=%s",
+                pet_id,
+                sorted(species_labels),
             )
         contract_groups: dict[tuple[str, int, int], list[PetDetectionRecord]] = defaultdict(list)
         for member in members:
@@ -659,10 +666,16 @@ def build_pet_records_from_detections(
                     int(member.generation_id),
                 )
             ].append(member)
-        if len(contract_groups) != 1 and not allow_mixed_identity_members:
-            raise ValueError(
-                f"Pet {pet_id} mixes incompatible embedding contracts: "
-                f"{sorted(contract_groups)}"
+        if len(contract_groups) != 1:
+            if not allow_mixed_identity_members:
+                raise ValueError(
+                    f"Pet {pet_id} mixes incompatible embedding contracts: "
+                    f"{sorted(contract_groups)}"
+                )
+            _LOGGER.info(
+                "Preserving mixed-contract Pet identity %s: contracts=%s",
+                pet_id,
+                sorted(contract_groups),
             )
         _profile_contract, profile_members = max(
             contract_groups.items(),

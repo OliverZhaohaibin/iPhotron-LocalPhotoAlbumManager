@@ -657,6 +657,7 @@ class PetRepository:
                 runtime_detections,
                 names_by_pet_id=names,
                 created_at_by_pet_id=created_at,
+                allow_mixed_identity_members=True,
             )
             for chunk in _chunked(affected_pet_ids, 500):
                 placeholders = ", ".join("?" for _ in chunk)
@@ -1092,7 +1093,6 @@ class PetRepository:
             key=lambda value: (value.asset_id, value.pet_key, value.detection_id),
         )
         for detection in ordered:
-            detection_species = _normalize_species_label(detection.species_label)
             mapped_id = key_map.get(detection.pet_key, "")
             candidate_id = redirects.get(mapped_id, mapped_id)
             durable_profile = durable_profiles.get(candidate_id)
@@ -1107,9 +1107,10 @@ class PetRepository:
                     else None
                 )
             )
-            if candidate_id and not _species_compatible(detection_species, known_species):
-                candidate_id = ""
-            elif candidate_id and candidate_id not in existing_pets and durable_profile is None:
+            # An exact durable pet-key mapping is an identity anchor. Species
+            # compatibility remains an automatic matching constraint, but it must
+            # not undo a previously persisted/manual cross-species assignment.
+            if candidate_id and candidate_id not in existing_pets and durable_profile is None:
                 candidate_id = ""
             elif candidate_id and any(
                 asset_id == detection.asset_id

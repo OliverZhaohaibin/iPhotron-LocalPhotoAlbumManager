@@ -39,3 +39,26 @@ def test_timeout_stops_additional_seek_attempts(mocker) -> None:
     assert result is None
     pyav.assert_called_once()
     ffmpeg.assert_called_once()
+
+
+def test_pyav_timeout_stops_before_ffmpeg_fallback(mocker) -> None:
+    """A timed-out PyAV decode cannot fall through to another decoder."""
+
+    source = Path("/fake/stalled-pyav.mov")
+    pyav = mocker.patch.object(
+        video_frame_grabber,
+        "extract_frame_with_pyav",
+        side_effect=ExternalToolTimeoutError("PyAV timed out after 30 seconds"),
+    )
+    ffmpeg = mocker.patch.object(video_frame_grabber, "extract_video_frame")
+
+    result = video_frame_grabber.grab_video_frame(
+        source,
+        QSize(320, 240),
+        still_image_time=1.0,
+        duration=10.0,
+    )
+
+    assert result is None
+    pyav.assert_called_once()
+    ffmpeg.assert_not_called()

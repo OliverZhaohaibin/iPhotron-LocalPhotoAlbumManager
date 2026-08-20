@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+import weakref
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -176,6 +177,7 @@ class VideoArea(QWidget):
         self._end_detection_armed_media_generation: int | None = None
         self._position_changed_handler = None
         self._media_status_changed_handler = None
+        self._gpu_video_frame_presented_handler = None
         self._detail_request_generation = 0
         self._presentation_committed = False
         self._awaiting_first_gpu_frame_generation: int | None = None
@@ -245,8 +247,7 @@ class VideoArea(QWidget):
         self._wire_player_bar()
         self._wire_edit_viewer()
         self._renderer.nativeSizeChanged.connect(self.displaySizeChanged.emit)
-        self._renderer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
-        self._edit_viewer.videoFramePresented.connect(self._on_gpu_video_frame_presented)
+        self._bind_gpu_presentation_generation(self._media_generation)
 
     # ------------------------------------------------------------------
     # Public API
@@ -913,6 +914,7 @@ class VideoArea(QWidget):
         self._media_generation += 1
         self._end_detection_armed_media_generation = None
         self._bind_end_detection_generation(self._media_generation)
+        self._bind_gpu_presentation_generation(self._media_generation)
         self._accept_video_frames = False
         self._resize_refit_timer.stop()
         self._resize_refit_pending = False
@@ -964,6 +966,31 @@ class VideoArea(QWidget):
             int(media_generation) == self._media_generation
             and self._end_detection_armed_media_generation == self._media_generation
         )
+
+    def _bind_gpu_presentation_generation(self, generation: int) -> None:
+        """Bind GPU frame completion to the media generation that queued it."""
+
+        previous = self._gpu_video_frame_presented_handler
+        if previous is not None:
+            for signal in (
+                self._renderer.videoFramePresented,
+                self._edit_viewer.videoFramePresented,
+            ):
+                try:
+                    signal.disconnect(previous)
+                except (RuntimeError, TypeError):
+                    pass
+
+        owner_ref = weakref.ref(self)
+
+        def _handle_presented(*, bound_generation: int = generation) -> None:
+            owner = owner_ref()
+            if owner is not None:
+                owner._on_gpu_video_frame_presented(media_generation=bound_generation)
+
+        self._gpu_video_frame_presented_handler = _handle_presented
+        self._renderer.videoFramePresented.connect(_handle_presented)
+        self._edit_viewer.videoFramePresented.connect(_handle_presented)
 
     def _bind_video_sink_generation(self, generation: int) -> None:
         """Bind sink delivery to one media generation so old queued calls expire."""
@@ -1160,27 +1187,35 @@ class VideoArea(QWidget):
         else:
             self._renderer.update_frame(frame)
 
-    def _on_gpu_video_frame_presented(self) -> None:
+    def _on_gpu_video_frame_presented(
+        self,
+        *,
+        media_generation: int | None = None,
+    ) -> None:
         """Release loading UI only after the current frame completed QRhi draw."""
 
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if event_generation != self._media_generation:
+            return
         generation = self._awaiting_first_gpu_frame_generation
         if generation is None or generation != self._detail_request_generation:
             return
-        media_generation = self._media_generation
         self._awaiting_first_gpu_frame_generation = None
-        self._end_detection_armed_media_generation = media_generation
+        self._end_detection_armed_media_generation = event_generation
         self.mediaFirstFrameReady.emit(generation)
 
-        if not self._end_detection_is_armed(media_generation):
+        if not self._end_detection_is_armed(event_generation):
             return
         position = self._player.position()
         if self._trim_out_ms > self._trim_in_ms and position >= self._trim_out_ms:
-            self._on_position_changed(position, media_generation=media_generation)
+            self._on_position_changed(position, media_generation=event_generation)
             return
         if self._player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
             self._on_media_status_changed(
                 QMediaPlayer.MediaStatus.EndOfMedia,
-                media_generation=media_generation,
+                media_generation=event_generation,
             )
 
     def _on_position_changed(

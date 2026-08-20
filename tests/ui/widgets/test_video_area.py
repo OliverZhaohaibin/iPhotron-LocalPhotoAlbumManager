@@ -1012,6 +1012,36 @@ class TestVideoArea:
             media_generation,
         )
 
+    def test_same_source_replay_rejects_stale_gpu_completion(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        """Replay A's queued GPU completion cannot arm replay B of the same source."""
+
+        va = VideoArea()
+        source = Path("/fake/live.mov")
+        va.begin_load(source, 7)
+        stale_gpu_handler = va._gpu_video_frame_presented_handler
+
+        media_generation_b = va.begin_load(source, 7)
+        current_gpu_handler = va._gpu_video_frame_presented_handler
+        va._awaiting_first_gpu_frame_generation = 7
+        first_frame_spy = mocker.Mock()
+        va.mediaFirstFrameReady.connect(first_frame_spy)
+
+        stale_gpu_handler()
+
+        assert va._awaiting_first_gpu_frame_generation == 7
+        assert va._end_detection_armed_media_generation is None
+        first_frame_spy.assert_not_called()
+
+        current_gpu_handler()
+
+        assert va._awaiting_first_gpu_frame_generation is None
+        assert va._end_detection_armed_media_generation == media_generation_b
+        first_frame_spy.assert_called_once_with(7)
+
     def test_load_video_clears_frame(self, qapp, mocker):
         """load_video should clear the renderer frame."""
         va = VideoArea()

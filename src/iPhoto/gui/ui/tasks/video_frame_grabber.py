@@ -34,7 +34,10 @@ def grab_video_frame(
         trim_out_sec=trim_out_sec,
     ):
         # 1. Try PyAV first (direct memory access, faster)
-        pil_image = extract_frame_with_pyav(path, at=target, scale=target_size)
+        try:
+            pil_image = extract_frame_with_pyav(path, at=target, scale=target_size)
+        except ExternalToolTimeoutError:
+            return None
         if pil_image:
             return image_loader.qimage_from_pil(pil_image)
 

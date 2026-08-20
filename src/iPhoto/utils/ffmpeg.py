@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 _FFMPEG_LOG_LEVEL = "error"
 _FFPROBE_COMMAND_TIMEOUT_SECONDS = 15.0
 _FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS = 30.0
+_PYAV_FRAME_TIMEOUT_SECONDS = 30.0
 _LINUX_180_HINT_CACHE: dict[str, bool] = {}
 _OPTIONAL_MODULE_UNSET = object()
 av: Any = _OPTIONAL_MODULE_UNSET
@@ -120,7 +122,11 @@ def extract_frame_with_pyav(
         return None
 
     try:
-        with av_module.open(str(source)) as container:
+        deadline = time.monotonic() + _PYAV_FRAME_TIMEOUT_SECONDS
+        with av_module.open(
+            str(source),
+            timeout=(_PYAV_FRAME_TIMEOUT_SECONDS, _PYAV_FRAME_TIMEOUT_SECONDS),
+        ) as container:
             if not container.streams.video:
                 return None
             stream = container.streams.video[0]
@@ -134,6 +140,11 @@ def extract_frame_with_pyav(
                 container.seek(target_pts, stream=stream)
 
             for frame in container.decode(stream):
+                if time.monotonic() >= deadline:
+                    raise ExternalToolTimeoutError(
+                        f"PyAV frame extraction timed out after "
+                        f"{_PYAV_FRAME_TIMEOUT_SECONDS:g} seconds"
+                    )
                 # We seeked to the nearest keyframe, so we may need to decode
                 # forward to reach the exact target time.
                 if frame.pts is None or frame.pts < target_pts:
@@ -165,8 +176,20 @@ def extract_frame_with_pyav(
 
                 return image
 
+            if time.monotonic() >= deadline:
+                raise ExternalToolTimeoutError(
+                    f"PyAV frame extraction timed out after "
+                    f"{_PYAV_FRAME_TIMEOUT_SECONDS:g} seconds"
+                )
             return None
 
+    except ExternalToolTimeoutError:
+        raise
+    except TimeoutError as exc:
+        raise ExternalToolTimeoutError(
+            f"PyAV frame extraction timed out after "
+            f"{_PYAV_FRAME_TIMEOUT_SECONDS:g} seconds"
+        ) from exc
     except Exception:
         # Fallback to other methods if PyAV fails for any reason
         return None

@@ -63,6 +63,7 @@ class PetScanWorker(QThread):
         self._queued_ids: set[str] = set()
         self._input_closed = False
         self._cancelled = False
+        self._model_artifacts_ready = False
 
     def enqueue_rows(self, rows: Iterable[dict]) -> None:
         for row in rows:
@@ -93,12 +94,6 @@ class PetScanWorker(QThread):
 
         paths = pet_library_paths(self._library_root)
         self._cleanup_stale_thumbnail_staging(paths.thumbnail_dir)
-        try:
-            ensure_pet_model_artifacts(paths.model_dir)
-        except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
-            LOGGER.warning("Pet model acquisition unavailable: %s", exc)
-            self.statusChanged.emit(str(exc))
-            return
         pipeline = PetClusterPipeline(model_root=paths.model_dir)
         if self._cancelled:
             return
@@ -225,6 +220,7 @@ class PetScanWorker(QThread):
         if self._cancelled:
             self._mark_rows_retry(batch)
             return False
+        self._ensure_model_artifacts_ready()
         batch_asset_ids = [str(row.get("id") or "") for row in batch if row.get("id")]
         people_boxes = self._pet_service.people_boxes_by_asset_ids(batch_asset_ids)
         staging_dir = thumbnail_dir / ".staging" / uuid.uuid4().hex
@@ -301,6 +297,12 @@ class PetScanWorker(QThread):
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
         return event is not None
+
+    def _ensure_model_artifacts_ready(self) -> None:
+        if self._model_artifacts_ready:
+            return
+        ensure_pet_model_artifacts(pet_library_paths(self._library_root).model_dir)
+        self._model_artifacts_ready = True
 
     def _prepare_clustering_pipeline(self) -> bool:
         coordinator = self._pet_service.coordinator

@@ -68,20 +68,23 @@ if loaded:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_detail_surface_modules_keep_post_paint_dependencies_unloaded() -> None:
+def test_detail_runtime_stays_deferred_through_first_shell_paint() -> None:
     project_root = Path(__file__).resolve().parents[2]
     env = dict(os.environ)
     env["PYTHONPATH"] = str(project_root / "src")
     env["QT_QPA_PLATFORM"] = "offscreen"
     script = """
 import sys
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
 
 app = QApplication.instance() or QApplication([])
 window = QMainWindow()
 stack = QStackedWidget(window)
 window.setCentralWidget(stack)
+gallery = QWidget(stack)
+stack.addWidget(gallery)
+stack.setCurrentWidget(gallery)
 detail = DetailPageWidget(window, parent=stack, staged=True)
 stack.addWidget(detail)
 blocked = (
@@ -91,7 +94,27 @@ blocked = (
 )
 loaded = [name for name in blocked if name in sys.modules]
 if loaded:
-    raise SystemExit(','.join(loaded))
+    raise SystemExit('construct:' + ','.join(loaded))
+if detail.image_viewer._runtime_ready:
+    raise SystemExit('construct:image-runtime-ready')
+
+window.show()
+app.processEvents()
+
+loaded = [name for name in blocked if name in sys.modules]
+if loaded:
+    raise SystemExit('first-paint:' + ','.join(loaded))
+if detail.image_viewer._runtime_ready:
+    raise SystemExit('first-paint:image-runtime-ready')
+
+detail.complete_feature()
+app.processEvents()
+
+missing = [name for name in blocked if name not in sys.modules]
+if missing:
+    raise SystemExit('complete:missing:' + ','.join(missing))
+if not detail.image_viewer._runtime_ready:
+    raise SystemExit('complete:image-runtime-not-ready')
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

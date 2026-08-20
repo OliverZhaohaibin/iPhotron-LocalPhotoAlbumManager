@@ -17,6 +17,7 @@ from ...pets.index_coordinator import (
     PetIndexCoordinator,
     PetSnapshotCommittedError,
 )
+from ...pets.model_bootstrap import ensure_pet_model_artifacts
 from ...pets.pipeline import (
     PET_CLUSTERING_PIPELINE_VERSION,
     PET_DETECTOR_PIPELINE_VERSION,
@@ -92,6 +93,12 @@ class PetScanWorker(QThread):
 
         paths = pet_library_paths(self._library_root)
         self._cleanup_stale_thumbnail_staging(paths.thumbnail_dir)
+        try:
+            ensure_pet_model_artifacts(paths.model_dir)
+        except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
+            LOGGER.warning("Pet model acquisition unavailable: %s", exc)
+            self.statusChanged.emit(str(exc))
+            return
         pipeline = PetClusterPipeline(model_root=paths.model_dir)
         if self._cancelled:
             return

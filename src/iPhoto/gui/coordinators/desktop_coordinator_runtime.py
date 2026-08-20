@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QObject,
     Qt,
     QThreadPool,
+    QTimer,
 )
 from PySide6.QtGui import QAction
 
@@ -43,6 +44,7 @@ from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
 from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.ui.models.thumbnail_surface_proxy_model import ThumbnailSurfaceProxyModel
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
@@ -323,8 +325,13 @@ class DesktopCoordinatorRuntime(QObject):
         window.ui.grid_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         # Use SpacerProxyModel for Filmstrip to allow centering of first/last items
+        self._filmstrip_thumbnail_proxy = ThumbnailSurfaceProxyModel(
+            "filmstrip",
+            window.ui.filmstrip_view,
+        )
+        self._filmstrip_thumbnail_proxy.setSourceModel(self._asset_list_vm)
         self._filmstrip_proxy = SpacerProxyModel(window.ui.filmstrip_view)
-        self._filmstrip_proxy.setSourceModel(self._asset_list_vm)
+        self._filmstrip_proxy.setSourceModel(self._filmstrip_thumbnail_proxy)
         window.ui.filmstrip_view.setModel(self._filmstrip_proxy)
 
         # Assign Delegate for Filmstrip View
@@ -552,6 +559,12 @@ class DesktopCoordinatorRuntime(QObject):
             self._shutdown_complete = True
             self._is_shutting_down = False
 
+    def _handle_thumbnail_surface_visibility(self, surface_id: str, view, visible: bool) -> None:
+        if not visible:
+            self._asset_list_vm.release_viewport_surface(surface_id)
+            return
+        QTimer.singleShot(0, view.schedule_viewport_publish)
+
     def _connect_signals(self) -> None:
         """Connect application signals."""
         ui = self._window.ui
@@ -576,6 +589,17 @@ class DesktopCoordinatorRuntime(QObject):
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
         ui.grid_view.viewportStateChanged.connect(self._asset_list_vm.update_viewport)
+        ui.filmstrip_view.viewportStateChanged.connect(self._asset_list_vm.update_viewport)
+        ui.grid_view.viewportVisibilityChanged.connect(
+            lambda visible: self._handle_thumbnail_surface_visibility(
+                "gallery", ui.grid_view, visible
+            )
+        )
+        ui.filmstrip_view.viewportVisibilityChanged.connect(
+            lambda visible: self._handle_thumbnail_surface_visibility(
+                "filmstrip", ui.filmstrip_view, visible
+            )
+        )
         if hasattr(ui.grid_view, "detailPrefetchRequested"):
             ui.grid_view.detailPrefetchRequested.connect(
                 self._playback.prefetch_descriptor

@@ -45,6 +45,7 @@ from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.icons import load_icon
 from iPhoto.gui.ui.media.media_selection_session import MediaSelectionState
+from iPhoto.gui.ui.models.proxy_mapping import map_from_root_source, map_to_root_source
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.utils.ffmpeg import probe_video_rotation_info
@@ -844,13 +845,8 @@ class PlaybackCoordinator(QObject):
 
     @Slot(QModelIndex)
     def _on_filmstrip_clicked(self, index: QModelIndex) -> None:
-        model = self._filmstrip_view.model()
-        if hasattr(model, "mapToSource"):
-            source_idx = model.mapToSource(index)
-            if source_idx.isValid():
-                self.play_asset(source_idx.row())
-                return
-        self.play_asset(index.row())
+        source_idx = map_to_root_source(index)
+        self.play_asset(source_idx.row() if source_idx.isValid() else index.row())
 
     @Slot(int)
     @Slot()
@@ -2246,8 +2242,10 @@ class PlaybackCoordinator(QObject):
 
         idx = self._asset_model.index(row, 0)
         model = self._filmstrip_view.model()
-        if hasattr(model, "mapFromSource"):
-            idx = model.mapFromSource(idx)
+        mapped = map_from_root_source(model, idx)
+        if not mapped.isValid() and hasattr(model, "mapFromSource"):
+            mapped = model.mapFromSource(idx)
+        idx = mapped
         if idx.isValid():
             self._filmstrip_view.select_index_for_centering(idx)
         return idx
@@ -2262,8 +2260,10 @@ class PlaybackCoordinator(QObject):
             return
         idx = self._asset_model.index(row, 0)
         model = self._filmstrip_view.model()
-        if hasattr(model, "mapFromSource"):
-            idx = model.mapFromSource(idx)
+        mapped = map_from_root_source(model, idx)
+        if not mapped.isValid() and hasattr(model, "mapFromSource"):
+            mapped = model.mapFromSource(idx)
+        idx = mapped
         if idx.isValid():
             self._filmstrip_view.center_on_index(idx)
 

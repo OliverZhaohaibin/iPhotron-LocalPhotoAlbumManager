@@ -316,7 +316,8 @@ Thumbnail Workers
   -> far speculative reads use one low/background-priority lane
   -> continuous burst / medium / fast immediately stop all non-visible work
   -> open the existing 512px L2 once with QFile and decoder-scale via QImageReader
-  -> return 256/384/512 display-bucket QImage results without writing extra L2 files
+  -> return the requested display-bucket QImage without writing extra L2 files;
+     Gallery and Filmstrip both request the canonical 512 bucket
   -> GUI publishes visible, predictive, then far results under a strict time budget
 ```
 
@@ -329,9 +330,10 @@ Thumbnail Workers
   direction for 600ms, and completes the next screen before spending work behind the
   viewport. A burst at 75ms cadence or faster, trackpad fast input, and scrollbar fast
   movement prohibit predictive reads and speculative QPixmap conversion.
-- Disk L2 remains one flat 512px JPEG per ready asset. L1 keys combine that stable L2
-  identity with a display bucket selected from 256/384/512 physical pixels using the
-  current tile size and DPR. No rescan or multi-size disk migration is required.
+- Disk L2 remains one flat 512px JPEG per ready asset. L1 keys remain size-qualified,
+  but Gallery and Filmstrip both select the canonical 512 bucket and therefore share
+  one physical entry. Other future surfaces may still resolve 256/384/512 from their
+  physical size and DPR. No rescan or multi-size disk migration is required.
 - Predictive concurrency is deadline/backpressure driven: Windows starts at two lanes and
   may use three; Linux uses at most two; macOS remains one. Visible queue wait above 12ms,
   publisher pressure, or cancellation pressure pauses non-visible work.

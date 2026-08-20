@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping
 from PySide6.QtCore import QSize
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.gui.gallery_demand import GalleryViewportDemand
+from iPhoto.gui.gallery_demand import AssetViewportDemand
 from iPhoto.infrastructure.services.thumbnail_cache_service import (
     ThumbnailDemandSnapshot,
     ThumbnailPrefetchCandidate,
@@ -25,26 +25,28 @@ class GalleryDemandCoordinator:
     """Merge viewport, row snapshots, and reusable hint results into one demand."""
 
     def __init__(self) -> None:
-        self.viewport: GalleryViewportDemand | None = None
+        self.viewports: dict[str, AssetViewportDemand] = {}
+        self._latest_surface_id = "gallery"
         self.root: Path | None = None
         self.query: Any | None = None
         self.collection_revision = 0
         self.revision = 0
-        self._scheduling_identity: tuple[object, ...] | None = None
+        self._scheduling_identities: dict[str, tuple[object, ...]] = {}
         self.hint_candidates_by_row: dict[int, GalleryThumbnailCandidate] = {}
 
     def reset(self) -> None:
-        self.viewport = None
+        self.viewports.clear()
+        self._latest_surface_id = "gallery"
         self.root = None
         self.query = None
         self.collection_revision = 0
         self.revision = 0
-        self._scheduling_identity = None
+        self._scheduling_identities.clear()
         self.hint_candidates_by_row.clear()
 
     def update_viewport(
         self,
-        viewport: GalleryViewportDemand,
+        viewport: AssetViewportDemand,
         *,
         root: Path | None,
         query: Any | None,
@@ -68,34 +70,53 @@ class GalleryDemandCoordinator:
             query,
             int(collection_revision),
         )
-        if scheduling_identity != self._scheduling_identity:
+        surface_id = viewport.surface_id
+        if scheduling_identity != self._scheduling_identities.get(surface_id):
             self.revision = max(self.revision + 1, int(viewport.generation))
-            self._scheduling_identity = scheduling_identity
+            self._scheduling_identities[surface_id] = scheduling_identity
         effective_viewport = (
             viewport
             if viewport.generation == self.revision
             else replace(viewport, generation=self.revision)
         )
-        self.viewport = effective_viewport
+        self.viewports[surface_id] = effective_viewport
+        self._latest_surface_id = surface_id
         self.root = root
         self.query = query
         self.collection_revision = int(collection_revision)
         self.prune_hints()
 
     def prune_hints(self) -> None:
-        if self.viewport is None or not self.hint_candidates_by_row:
+        if not self.viewports or not self.hint_candidates_by_row:
             return
-        first, last = self.viewport.full_prefetch_range
         self.hint_candidates_by_row = {
             row: candidate
             for row, candidate in self.hint_candidates_by_row.items()
-            if first <= row <= last
+            if any(
+                viewport.full_prefetch_first <= row <= viewport.full_prefetch_last
+                for viewport in self.viewports.values()
+            )
         }
+
+    @property
+    def viewport(self) -> AssetViewportDemand | None:
+        return self.viewports.get(self._latest_surface_id)
+
+    def viewport_for(self, surface_id: str) -> AssetViewportDemand | None:
+        return self.viewports.get(str(surface_id))
+
+    def release_viewport(self, surface_id: str) -> None:
+        surface_id = str(surface_id)
+        self.viewports.pop(surface_id, None)
+        self._scheduling_identities.pop(surface_id, None)
+        if self._latest_surface_id == surface_id:
+            self._latest_surface_id = next(reversed(self.viewports), "gallery")
+        self.prune_hints()
 
     def merge_hint_result(self, result: GalleryThumbnailHintResult) -> int:
         """Accept old-generation work when it still covers the current demand."""
 
-        viewport = self.viewport
+        viewport = self.viewport_for(getattr(result, "surface_id", "gallery"))
         if (
             viewport is None
             or result.error is not None
@@ -121,11 +142,12 @@ class GalleryDemandCoordinator:
     def build_thumbnail_snapshot(
         self,
         *,
+        surface_id: str = "gallery",
         visible_rows: Iterable[tuple[int, AssetDTO]],
         prefetched_rows: Mapping[int, AssetDTO],
         size: QSize,
     ) -> ThumbnailDemandSnapshot | None:
-        viewport = self.viewport
+        viewport = self.viewport_for(surface_id)
         if viewport is None:
             return None
         visible_rows = tuple(visible_rows)

@@ -11,8 +11,9 @@ repaint work.
   memory-only. Never add SQLite queries, `Path.exists()`, L2 reads, image decode,
   blocking waits, synchronous layout, or `repaint()` to these paths.
 - Window rows and thumbnail hints are loaded by `GalleryWindowLoader` and
-  `GalleryThumbnailHintLoader`. Results must carry collection revision and
-  demand generation; stale results do not mutate the active viewport.
+  `GalleryThumbnailHintLoader`. Results carry collection revision, surface id,
+  and that surface's demand generation. A newer Filmstrip request must not
+  invalidate still-relevant Gallery work, or vice versa.
 - Workers decode to `QImage`. `QPixmap` creation remains on the GUI thread and
   is drained through the bounded item/time publish budget.
 - Thumbnail-ready updates are coalesced into exact row ranges and roles. Do not
@@ -20,18 +21,37 @@ repaint work.
 
 ## Demand And Cache Contract
 
-- `GalleryViewportDemand` is the single source for visible, full guard, far
-  speculative, and micro-warm ranges. New heuristics belong in the demand policy,
-  not as independent widget/viewmodel prefetch loops.
+- `AssetViewportDemand` is the single per-surface source for visible, full guard,
+  far speculative, and micro-warm ranges. New heuristics belong in the demand
+  policy, not as independent widget/viewmodel prefetch loops. Filmstrip ranges
+  come from actual horizontal geometry and map through every proxy layer.
+- Gallery and Filmstrip both request the canonical 512px full-thumbnail bucket.
+  Their logical leases stay independent, but identical assets must converge on
+  one size-qualified physical key. Filmstrip geometry must never be inflated to
+  force this resolution.
 - Continuous medium/fast bursts prioritize input and visible recovery: they must
   not start hint queries or speculative L2 reads. Slow/dwell/idle work remains
   generation-aware and cancellable.
 - Keep visible, guard, and far speculative lanes isolated. Far work cannot use
   urgent guard capacity, and newly visible requests must promote matching
   in-flight prefetch work rather than duplicate it.
-- L1 is a byte-budgeted cache. Preserve visible pinning, demand-aware eviction,
-  staging caps, miss TTLs, low-memory release, and speculative backoff when
-  changing cache behavior.
+- L1 is one byte-budgeted multi-surface cache. Cache keys include display size;
+  never alias one QPixmap under multiple size keys. Preserve the union of visible pins,
+  per-surface lease release, demand-aware eviction, staging caps, miss TTLs,
+  low-memory release, and speculative backoff when changing cache behavior.
+- Filmstrip full demand stops at its existing two-screen guard; it does not add
+  far speculation at 512px. Gallery full speculation and both surfaces' micro
+  warm ranges remain unchanged.
+- Paint, model data, and peek paths remain memory-only for every surface. A
+  missing Filmstrip full thumbnail is recovered by viewport demand, never by a
+  request issued from the delegate.
+- A hidden surface is suspended before its lease is released: coalescing and
+  scroll-intent timers cannot republish while hidden, and late viewport window
+  results for a released surface are discarded. Explicit detail-row requests
+  remain independent of these viewport leases.
+- Filmstrip geometry is measured in proxy rows, but every demand range is
+  bounded by the root source model's asset count; spacer rows never enter guard,
+  prefetch, or micro-warm ranges.
 - Gallery SQL projections stay narrow: tile windows omit wide metadata, while
   hint windows return only paths and existing full-thumbnail keys and do not
   repeat collection counts.

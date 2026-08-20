@@ -152,11 +152,6 @@ class StatusBarController(QObject):
                 )
             )
         self._progress_bar.setVisible(True)
-        if total > 0 and current >= total:
-            self._progress_bar.setVisible(False)
-            self._progress_bar.setRange(0, 0)
-            self._progress_context = None
-            self.show_message(self._tr("Thumbnails updated."), 3000)
 
     def handle_thumbnail_backfill_completed(self, _root: Path) -> None:
         """End thumbnail feedback when the service reports terminal completion."""
@@ -167,6 +162,16 @@ class StatusBarController(QObject):
         self._progress_bar.setRange(0, 0)
         self._progress_context = None
         self.show_message(self._tr("Thumbnails updated."), 3000)
+
+    def handle_thumbnail_backfill_failed(self, _root: Path, _error: str) -> None:
+        """End thumbnail feedback when background backfill fails."""
+
+        if self._progress_context != "thumbnail":
+            return
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setRange(0, 0)
+        self._progress_context = None
+        self.show_message(self._tr("Thumbnail update failed."), 5000)
 
     def handle_load_started(self, root: Path) -> None:
         """Show an indeterminate progress indicator while assets load."""

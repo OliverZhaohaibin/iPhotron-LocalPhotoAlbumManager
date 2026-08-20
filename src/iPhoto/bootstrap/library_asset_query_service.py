@@ -90,6 +90,7 @@ class LibraryAssetQueryService:
         self._thumbnail_backfill_pending: set[tuple[str, int, int, str]] = set()
         self._thumbnail_backfill_shutdown = False
         self.thumbnail_backfill_completed = _CallbackSignal()
+        self.thumbnail_backfill_failed = _CallbackSignal()
         self.thumbnail_backfill_progress = _CallbackSignal()
 
     def count_assets(
@@ -549,9 +550,12 @@ class LibraryAssetQueryService:
                 self.album_path_for(root),
                 candidates,
             )
-        except Exception:
+        except Exception as exc:
             with self._thumbnail_backfill_lock:
                 self._thumbnail_backfill_pending.discard(request_key)
+                should_emit = not self._thumbnail_backfill_shutdown
+            if should_emit:
+                self.thumbnail_backfill_failed.emit(root, str(exc))
             raise
 
     def find_row_by_path(self, query: CollectionQuery | AssetQuery, path: Path) -> int | None:

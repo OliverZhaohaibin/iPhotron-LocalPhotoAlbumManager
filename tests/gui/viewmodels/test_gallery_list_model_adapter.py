@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +53,7 @@ class _Signal:
 class _BackfillService:
     def __init__(self) -> None:
         self.thumbnail_backfill_completed = _Signal()
+        self.thumbnail_backfill_failed = _Signal()
         self.thumbnail_backfill_progress = _Signal()
 
 
@@ -434,9 +436,45 @@ def test_backfill_completion_event_queues_scan_batch(mock_thumb_service):
     adapter.thumbnailBackfillCompleted.connect(completed.append)
 
     service.thumbnail_backfill_completed.emit(batch)
+    assert completed == []
+
     adapter._flush_pending_scan_batches()
 
     store.record_scan_batch.assert_called_once_with(batch)
+    store.flush_pending_scan_refresh.assert_called_once_with()
+    assert completed == [Path("/library")]
+
+
+def test_worker_backfill_completion_waits_for_ui_refresh(qapp, mock_thumb_service):
+    service = _BackfillService()
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = MagicMock()
+    store.window_changed = MagicMock()
+    store.row_changed = MagicMock()
+    store.count.return_value = 0
+    store.asset_query_service = service
+    store.record_scan_batch.return_value = True
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    adapter._scan_batch_timer.setInterval(60_000)
+    batch = SimpleNamespace(root=Path("/library"), rows=[{"rel": "ready.jpg"}])
+    completed: list[Path] = []
+    adapter.thumbnailBackfillCompleted.connect(completed.append)
+
+    worker = threading.Thread(
+        target=service.thumbnail_backfill_completed.emit,
+        args=(batch,),
+    )
+    worker.start()
+    worker.join()
+
+    store.record_scan_batch.assert_not_called()
+    assert completed == []
+
+    qapp.processEvents()
+    store.record_scan_batch.assert_called_once_with(batch)
+    assert completed == []
+
+    adapter._flush_pending_scan_batches()
     store.flush_pending_scan_refresh.assert_called_once_with()
     assert completed == [Path("/library")]
 
@@ -565,6 +603,14 @@ def test_rebind_asset_query_service_moves_backfill_completion_signal(
         adapter._handle_thumbnail_backfill_progress
         in new_service.thumbnail_backfill_progress.handlers
     )
+    assert (
+        adapter._handle_thumbnail_backfill_failed
+        not in old_service.thumbnail_backfill_failed.handlers
+    )
+    assert (
+        adapter._handle_thumbnail_backfill_failed
+        in new_service.thumbnail_backfill_failed.handlers
+    )
     mock_store.rebind_asset_query_service.assert_called_once_with(
         new_service,
         Path("/library"),
@@ -588,6 +634,25 @@ def test_backfill_progress_is_relayed_from_query_service(mock_thumb_service):
     service.thumbnail_backfill_progress.emit(Path("/library"), 2, 5)
 
     assert progress == [(Path("/library"), 2, 5)]
+
+
+def test_backfill_failure_is_relayed_from_query_service(mock_thumb_service):
+    service = _BackfillService()
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = MagicMock()
+    store.window_changed = MagicMock()
+    store.row_changed = MagicMock()
+    store.count.return_value = 0
+    store.asset_query_service = service
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    failures: list[tuple[Path, str]] = []
+    adapter.thumbnailBackfillFailed.connect(
+        lambda root, error: failures.append((root, error))
+    )
+
+    service.thumbnail_backfill_failed.emit(Path("/library"), "decode crashed")
+
+    assert failures == [(Path("/library"), "decode crashed")]
 
 
 def test_decoration_role_uses_full_size_thumbnail_even_with_micro_fallback(

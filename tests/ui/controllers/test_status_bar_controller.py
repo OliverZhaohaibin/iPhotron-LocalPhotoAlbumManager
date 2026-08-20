@@ -130,3 +130,35 @@ def test_thumbnail_completion_hides_progress_before_count_reaches_total(
     assert progress.maximum() == 0
     assert controller._progress_context is None
     assert status_bar.currentMessage() == "Thumbnails updated."
+
+
+def test_thumbnail_final_progress_waits_for_model_completion(qapp: QApplication) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 5, 5)
+
+    assert not progress.isHidden()
+    assert progress.value() == 5
+    assert controller._progress_context == "thumbnail"
+    assert status_bar.currentMessage() == "Updating thumbnails… (5/5)"
+
+    controller.handle_thumbnail_backfill_completed(Path("/library"))
+
+    assert progress.isHidden()
+    assert controller._progress_context is None
+    assert status_bar.currentMessage() == "Thumbnails updated."
+
+
+def test_thumbnail_failure_hides_in_progress_feedback(qapp: QApplication) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 2, 5)
+    controller.handle_thumbnail_backfill_failed(Path("/library"), "decode crashed")
+
+    assert progress.isHidden()
+    assert progress.minimum() == 0
+    assert progress.maximum() == 0
+    assert controller._progress_context is None
+    assert status_bar.currentMessage() == "Thumbnail update failed."

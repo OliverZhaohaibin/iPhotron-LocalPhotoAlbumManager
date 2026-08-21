@@ -81,6 +81,7 @@ def test_existing_verified_models_do_not_trigger_embedder_acquisition(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(tmp_path))
     detector_path = tmp_path / "detector" / "yolox_nano_coco.onnx"
     detector_path.parent.mkdir(parents=True)
     detector_path.write_bytes(b"detector")
@@ -99,12 +100,57 @@ def test_existing_verified_models_do_not_trigger_embedder_acquisition(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
+        pet_pipeline,
+        "_validate_downloaded_file",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
         model_bootstrap,
         "_download_dinov2_release",
         _unexpected_call("verified model must be reused"),
     )
 
     assert model_bootstrap.ensure_pet_model_artifacts(tmp_path) is False
+
+
+def test_existing_cache_models_are_reused_before_extension_install(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    detector_path = cache / "detector" / "yolox_nano_coco.onnx"
+    embedder_path = cache / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"
+    detector_path.parent.mkdir(parents=True)
+    embedder_path.parent.mkdir(parents=True)
+    detector_path.write_bytes(b"detector")
+    embedder_path.write_bytes(b"embedder")
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "_validate_downloaded_file",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        pet_pipeline,
+        "_validate_dinov2_cache_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        model_bootstrap,
+        "_download_dinov2_release",
+        _unexpected_call("valid fallback models must be reused"),
+    )
+    monkeypatch.setattr(
+        pet_pipeline,
+        "ensure_pet_detector_model",
+        _unexpected_call("valid fallback detector must be reused"),
+    )
+
+    assert model_bootstrap.ensure_pet_model_artifacts() is False
 
 
 def test_explicit_override_is_authoritative_without_fallback(
@@ -134,12 +180,20 @@ def test_invalid_embedder_is_replaced_by_fixed_download(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    detector_path = tmp_path / "detector" / "yolox_nano_coco.onnx"
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    detector_path = cache / "detector" / "yolox_nano_coco.onnx"
     detector_path.parent.mkdir(parents=True)
     detector_path.write_bytes(b"detector")
-    embedder_path = tmp_path / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"
-    embedder_path.parent.mkdir(parents=True)
-    embedder_path.write_bytes(b"invalid")
+
+    invalid_embedder_dir = cache / "embedding" / "dinov2_vits14"
+    invalid_embedder = invalid_embedder_dir / "dinov2_vits14.pt"
+    invalid_embedder_dir.mkdir(parents=True)
+    invalid_embedder.write_bytes(b"invalid")
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
 
     monkeypatch.setattr(
         pet_pipeline,
@@ -148,11 +202,16 @@ def test_invalid_embedder_is_replaced_by_fixed_download(
     )
 
     def _validate(path, **_kwargs):
-        if Path(path) == embedder_path:
+        if Path(path) == invalid_embedder:
             raise RuntimeError("invalid")
 
     downloaded: list[Path] = []
     monkeypatch.setattr(pet_pipeline, "_validate_dinov2_cache_metadata", _validate)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "_validate_downloaded_file",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(pet_pipeline, "pet_embedder_model_url", lambda: "https://models.example")
     monkeypatch.setattr(
         model_bootstrap,
@@ -160,6 +219,7 @@ def test_invalid_embedder_is_replaced_by_fixed_download(
         lambda path, **_kwargs: downloaded.append(Path(path)),
     )
 
-    assert model_bootstrap.ensure_pet_model_artifacts(tmp_path) is True
-    assert not embedder_path.exists()
-    assert downloaded == [embedder_path]
+    assert model_bootstrap.ensure_pet_model_artifacts() is True
+    assert not invalid_embedder.exists()
+    expected_embedder = extension / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"
+    assert downloaded == [expected_embedder]

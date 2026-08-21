@@ -1931,8 +1931,13 @@ def pet_model_install_root() -> Path:
     preferred = bundled_pet_model_dir()
     if _directory_is_writable(preferred):
         return preferred
+
     fallback = user_pet_model_cache_dir()
-    _directory_is_writable(fallback)
+    if not _directory_is_writable(fallback):
+        raise PetModelUnavailableError(
+            "Pet scanning unavailable: neither the extension model directory nor "
+            "the user model cache is writable."
+        )
     return fallback
 
 
@@ -1955,10 +1960,9 @@ def pet_model_search_roots() -> tuple[Path, ...]:
     if override is not None:
         return (override,)
     return roots
-    return tuple(dict.fromkeys(roots))
 
 
-def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> Path:
+def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> Path | None:
     relative = Path(relative_path)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Pet model path must be relative to a configured model root.")
@@ -2009,7 +2013,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
             # Bundled artifacts are read-only. An invalid one must never become
             # a download target and must not shadow a later valid artifact.
             continue
-    return user_pet_model_cache_dir() / relative
+    return None
 
 
 def _download_file(

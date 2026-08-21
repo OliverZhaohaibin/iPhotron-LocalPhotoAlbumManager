@@ -31,9 +31,14 @@ def ensure_pet_model_artifacts(
     if not allow_download:
         return False
 
-    override_root, default_roots = pet_pipeline.pet_model_storage_roots()
-    roots = (override_root,) if override_root is not None else default_roots
-    root = Path(model_root) if model_root is not None else pet_pipeline.pet_model_install_root()
+    override_root, _default_roots = pet_pipeline.pet_model_storage_roots()
+    requested_root = Path(model_root) if model_root is not None else None
+    if override_root is not None and requested_root is not None and requested_root != override_root:
+        raise PetModelUnavailableError(
+            "Pet scanning unavailable: IPHOTO_PET_MODEL_DIR is authoritative and "
+            "does not fall back automatically."
+        )
+    root = requested_root or pet_pipeline.pet_model_install_root()
     if override_root is not None and root != override_root:
         raise PetModelUnavailableError(
             "Pet scanning unavailable: IPHOTO_PET_MODEL_DIR is authoritative and "
@@ -43,31 +48,34 @@ def ensure_pet_model_artifacts(
     detector_manifest = pet_pipeline.PET_MODEL_MANIFEST["detector"]
     embedder_manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
 
-    detector_path = root / Path(str(detector_manifest["filename"]))
-    detector_missing = not detector_path.is_file()
-    try:
-        pet_pipeline.ensure_pet_detector_model(
-            detector_path,
-            allow_model_download=True,
-        )
-    except Exception as exc:  # noqa: BLE001 - normalize model acquisition errors
-        raise PetModelUnavailableError(
-            "Pet scanning unavailable: failed to acquire the YOLOX detector model "
-            f"({_error_reason(exc)})."
-        ) from exc
+    detector_relative = Path(str(detector_manifest["filename"]))
+    resolved_detector = pet_pipeline.resolve_pet_model_path(detector_relative)
+    detector_path = resolved_detector or root / detector_relative
+    detector_missing = resolved_detector is None
 
-    embedder_path = root / Path(str(embedder_manifest["filename"]))
-    embedder_missing = not embedder_path.is_file()
-    if not embedder_missing:
+    if detector_missing:
         try:
-            pet_pipeline._validate_dinov2_cache_metadata(
-                embedder_path,
-                model_name=str(embedder_manifest["model_name"]),
+            pet_pipeline.ensure_pet_detector_model(
+                detector_path,
+                allow_model_download=True,
             )
-            return detector_missing
-        except (OSError, RuntimeError):
-            _remove_dinov2_artifact(embedder_path)
-            embedder_missing = True
+        except Exception as exc:  # noqa: BLE001 - normalize acquisition errors
+            raise PetModelUnavailableError(
+                "Pet scanning unavailable: failed to acquire the YOLOX detector "
+                f"model ({_error_reason(exc)})."
+            ) from exc
+
+    embedder_relative = Path(str(embedder_manifest["filename"]))
+    resolved_embedder = pet_pipeline.resolve_pet_model_path(
+        embedder_relative.parent,
+        directory=True,
+    )
+    embedder_path = (
+        resolved_embedder / embedder_relative.name
+        if resolved_embedder
+        else root / embedder_relative
+    )
+    embedder_missing = resolved_embedder is None
 
     url = pet_pipeline.pet_embedder_model_url()
     if not url:
@@ -76,7 +84,9 @@ def ensure_pet_model_artifacts(
             "is configured. Set IPHOTO_PET_EMBEDDER_MODEL_URL or install the "
             "verified model in IPHOTO_PET_MODEL_DIR."
         )
-    _download_dinov2_release(embedder_path, url=url)
+    if embedder_missing:
+        _download_dinov2_release(embedder_path, url=url)
+
     return detector_missing or embedder_missing
 
 

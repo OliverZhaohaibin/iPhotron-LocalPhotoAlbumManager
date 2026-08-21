@@ -54,21 +54,12 @@ class _PetReadContext:
 
 
 def shared_pet_model_dir() -> Path:
-    override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
-    if override:
-        return Path(override).expanduser()
+    from .pipeline import pet_model_install_root, pet_model_override_dir
 
-    from .pipeline import bundled_pet_model_dir, default_pet_model_dir
-
-    preferred_root = bundled_pet_model_dir()
-    try:
-        preferred_root.mkdir(parents=True, exist_ok=True)
-        probe = preferred_root / ".write-test"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink(missing_ok=True)
-        return preferred_root
-    except OSError:
-        return default_pet_model_dir()
+    override = pet_model_override_dir()
+    if override is not None:
+        return override
+    return pet_model_install_root()
 
 
 def pet_library_paths(library_root: Path) -> PetLibraryPaths:

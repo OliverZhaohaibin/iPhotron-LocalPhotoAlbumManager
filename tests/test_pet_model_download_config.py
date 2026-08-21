@@ -75,20 +75,13 @@ def test_shared_pet_model_dir_falls_back_when_extension_is_unwritable(
     cache_root = tmp_path / "cache" / "pets"
     monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
     monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension_root)
-    monkeypatch.setattr(pet_pipeline, "default_pet_model_dir", lambda: cache_root)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache_root)
 
-    original_mkdir = Path.mkdir
-
-    def fail_mkdir(path, *args, **kwargs):
-        if path == extension_root:
-            raise OSError("read-only root")
-        return original_mkdir(path, *args, **kwargs)
-
-    def fail_write_text(path, *_args, **_kwargs):
-        raise OSError("read-only root")
-
-    monkeypatch.setattr(Path, "mkdir", fail_mkdir)
-    monkeypatch.setattr(Path, "write_text", fail_write_text)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "_directory_is_writable",
+        lambda path: path != extension_root,
+    )
 
     assert pet_service.shared_pet_model_dir() == cache_root
 

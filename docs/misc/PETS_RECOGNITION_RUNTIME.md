@@ -39,37 +39,44 @@ pip install -e ".[pets-ai]"
 ```
 
 The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Pet models live under the extension model root, and first-use
-downloads are written there as well:
+`certifi`. The extension model root is the canonical and preferred Pets model
+store so development checkouts and writable portable installations remain
+self-contained. Read-only packaged installations transparently fall back to the
+platform user model cache:
 
 ```text
 src/extension/models/pets/
+~/.cache/iPhoto/models/pets/  # Linux fallback
 ├── detector/yolox_nano_coco.onnx
 └── embedding/dinov2_vits14/dinov2_vits14.pt
 ```
 
-`IPHOTO_PET_MODEL_DIR` explicitly overrides that model root. Missing models may
-be populated on first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. Before the
-first pet scan batch, the worker acquires missing model artifacts so model
-availability failures do not short-circuit the automatic download path. The
-YOLOX detector is downloaded from the manifest URL by default and can be
-overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`.
+Model lookup and installation are separate decisions. Existing artifacts are
+resolved extension-first, then from the user cache. Bundled artifacts are
+immutable: an invalid bundled artifact is skipped, never deleted or rewritten,
+while an invalid user-cache artifact is repaired by replacement. If both roots
+are missing an artifact, it is installed into the extension root when a real
+write probe succeeds and into the platform user cache otherwise. Network, TLS,
+HTTP, hash, and model-validation failures never trigger a storage fallback.
+
+`IPHOTO_PET_MODEL_DIR` is an authoritative override: lookup and installation use
+only that directory, and an invalid override fails closed instead of silently
+falling back. Missing models may be populated on first use unless
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. Before the first pet scan batch, the worker
+acquires missing model artifacts so model availability failures do not
+short-circuit the automatic download path. The YOLOX detector is downloaded from
+the manifest URL by default and can be overridden with
+`IPHOTO_PET_DETECTOR_MODEL_URL`.
 
 DINOv2 must resolve to the hash- and size-verified TorchScript artifact declared
 in `iPhoto/pets/model_manifest.json`. When a built-in `torchscript_url` or
 `IPHOTO_PET_EMBEDDER_MODEL_URL` is available, that exact artifact is downloaded
-directly. If neither URL is configured, first-use acquisition falls back to
-Torch Hub only at the immutable `source_repository:source_revision` declared by
-the manifest, reproduces the release TorchScript locally, and installs it only
-when its SHA-256 and size exactly match the manifest. If the locally generated
-bytes differ (for example because the installed PyTorch serializer produces a
-different archive), acquisition fails closed and instructs the deployment to
-provide the exact manifest artifact through `IPHOTO_PET_EMBEDDER_MODEL_URL`.
-Torch Hub source and weight caches are staged in a temporary directory under the
-selected Pets model root and removed after conversion. Mutable Torch Hub refs are
-not used in production. Changing a download URL does not relax the manifest
-integrity checks. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without
-disabling the rest of the application.
+directly. Production does not use Torch Hub or local source bootstrap. If no
+fixed release URL is configured, acquisition fails closed and instructs the
+deployment to install the exact manifest artifact or set
+`IPHOTO_PET_EMBEDDER_MODEL_URL`. Runtime acquisition never rewrites the checked-
+in manifest SHA-256 or size. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker
+without disabling the rest of the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
 runtime and the two model files under `extension/models/pets`. A build that

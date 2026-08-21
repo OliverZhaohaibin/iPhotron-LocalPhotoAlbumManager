@@ -301,7 +301,7 @@ class PetScanWorker(QThread):
     def _ensure_model_artifacts_ready(self) -> None:
         if self._model_artifacts_ready:
             return
-        ensure_pet_model_artifacts(pet_library_paths(self._library_root).model_dir)
+        ensure_pet_model_artifacts()
         self._model_artifacts_ready = True
 
     def _prepare_clustering_pipeline(self) -> bool:

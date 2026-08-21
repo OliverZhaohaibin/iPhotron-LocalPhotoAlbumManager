@@ -538,7 +538,7 @@ class PetClusterPipeline:
         return self._embedder
 
     def _resolve_model_path(self, relative_path: Path, *, directory: bool = False) -> Path:
-        if self._model_root == default_pet_model_dir():
+        if self._model_root in {default_pet_model_dir(), bundled_pet_model_dir()}:
             return resolve_pet_model_path(relative_path, directory=directory)
         return self._model_root / relative_path
 
@@ -1898,6 +1898,12 @@ def bundled_pet_model_dir() -> Path:
     return package_root / "extension" / "models" / "pets"
 
 
+def pet_model_storage_roots() -> tuple[Path | None, tuple[Path, ...]]:
+    """Return the authoritative override and extension-first search roots."""
+    override = pet_model_override_dir()
+    return override, (bundled_pet_model_dir(), user_pet_model_cache_dir())
+
+
 def user_pet_model_cache_dir() -> Path:
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Caches"
@@ -1908,12 +1914,47 @@ def user_pet_model_cache_dir() -> Path:
     return base / "iPhoto" / "models" / "pets"
 
 
-def pet_model_search_roots() -> tuple[Path, ...]:
-    roots: list[Path] = []
+def pet_model_override_dir() -> Path | None:
     override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
-    if override:
-        roots.append(Path(override).expanduser())
-    roots.extend((user_pet_model_cache_dir(), bundled_pet_model_dir()))
+    if not override:
+        return None
+    return Path(override).expanduser()
+
+
+def pet_model_install_root() -> Path:
+    """Choose a writable acquisition target without treating network failures
+    as permission failures."""
+    override = pet_model_override_dir()
+    if override is not None:
+        return override
+
+    preferred = bundled_pet_model_dir()
+    if _directory_is_writable(preferred):
+        return preferred
+    fallback = user_pet_model_cache_dir()
+    _directory_is_writable(fallback)
+    return fallback
+
+
+def _directory_is_writable(path: Path) -> bool:
+    import uuid
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".iphoto-write-probe-{uuid.uuid4().hex}"
+        with probe.open("xb"):
+            pass
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def pet_model_search_roots() -> tuple[Path, ...]:
+    override, roots = pet_model_storage_roots()
+    if override is not None:
+        return (override,)
+    return roots
     return tuple(dict.fromkeys(roots))
 
 

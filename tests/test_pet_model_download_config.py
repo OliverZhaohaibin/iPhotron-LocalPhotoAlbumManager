@@ -65,3 +65,50 @@ def test_shared_pet_model_dir_allows_explicit_override(tmp_path: Path, monkeypat
     monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(override_root))
 
     assert pet_service.shared_pet_model_dir() == override_root
+
+
+def test_shared_pet_model_dir_falls_back_when_extension_is_unwritable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension_root = tmp_path / "read-only" / "pets"
+    cache_root = tmp_path / "cache" / "pets"
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension_root)
+    monkeypatch.setattr(pet_pipeline, "default_pet_model_dir", lambda: cache_root)
+
+    original_mkdir = Path.mkdir
+
+    def fail_mkdir(path, *args, **kwargs):
+        if path == extension_root:
+            raise OSError("read-only root")
+        return original_mkdir(path, *args, **kwargs)
+
+    def fail_write_text(path, *_args, **_kwargs):
+        raise OSError("read-only root")
+
+    monkeypatch.setattr(Path, "mkdir", fail_mkdir)
+    monkeypatch.setattr(Path, "write_text", fail_write_text)
+
+    assert pet_service.shared_pet_model_dir() == cache_root
+
+
+def test_pet_model_install_root_uses_real_write_probe(tmp_path: Path, monkeypatch) -> None:
+    extension_root = tmp_path / "extension" / "pets"
+    cache_root = tmp_path / "cache" / "pets"
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension_root)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache_root)
+
+    assert pet_pipeline.pet_model_install_root() == extension_root
+    assert any(path.name.startswith(".iphoto-write-probe-") for path in extension_root.iterdir()) is False
+
+
+def test_pet_model_search_roots_are_extension_first(tmp_path: Path, monkeypatch) -> None:
+    extension_root = tmp_path / "extension" / "pets"
+    cache_root = tmp_path / "cache" / "pets"
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension_root)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache_root)
+
+    assert pet_pipeline.pet_model_search_roots() == (extension_root, cache_root)

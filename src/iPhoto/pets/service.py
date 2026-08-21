@@ -58,9 +58,17 @@ def shared_pet_model_dir() -> Path:
     if override:
         return Path(override).expanduser()
 
-    from .pipeline import bundled_pet_model_dir
+    from .pipeline import bundled_pet_model_dir, default_pet_model_dir
 
-    return bundled_pet_model_dir()
+    preferred_root = bundled_pet_model_dir()
+    try:
+        preferred_root.mkdir(parents=True, exist_ok=True)
+        probe = preferred_root / ".write-test"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return preferred_root
+    except OSError:
+        return default_pet_model_dir()
 
 
 def pet_library_paths(library_root: Path) -> PetLibraryPaths:

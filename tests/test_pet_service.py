@@ -1861,6 +1861,47 @@ def test_pet_scan_worker_empty_drain_skips_consolidation(
     assert finalized == [None]
 
 
+def test_pet_scan_worker_empty_drain_does_not_probe_model_storage_writability(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    assert repository is not None
+    repository.set_scan_metadata_many(
+        {
+            "detector_pipeline_version": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_state": "complete",
+            "clustering_pipeline_version": PET_CLUSTERING_PIPELINE_VERSION,
+            "clustering_pipeline_target": PET_CLUSTERING_PIPELINE_VERSION,
+            "clustering_consolidation_state": "clean",
+        }
+    )
+
+    statuses = []
+
+    def _fail_install_root():
+        raise PetModelUnavailableError("writable install root must not be probed")
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", _fail_install_root)
+    monkeypatch.setattr(pet_pipeline, "_directory_is_writable", lambda _path: False)
+
+    worker = PetScanWorker(tmp_path, pet_service=service)
+    worker.statusChanged.connect(statuses.append)
+    monkeypatch.setattr(worker, "_top_up_pending_rows", lambda: None)
+    monkeypatch.setattr(worker, "_mark_backfill_complete_if_drained", lambda: None)
+    monkeypatch.setattr(
+        "iPhoto.library.workers.pet_scan_worker.PetClusterPipeline",
+        lambda **_kwargs: SimpleNamespace(distance_threshold=0.42),
+    )
+    worker.finish_input()
+    worker.run()
+
+    assert statuses == []
+
+
 def test_pet_scan_worker_cancelled_scan_skips_consolidation(
     tmp_path: Path,
     monkeypatch,

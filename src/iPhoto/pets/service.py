@@ -54,12 +54,12 @@ class _PetReadContext:
 
 
 def shared_pet_model_dir() -> Path:
-    from .pipeline import pet_model_install_root, pet_model_override_dir
+    from .pipeline import default_pet_model_dir, pet_model_override_dir
 
     override = pet_model_override_dir()
     if override is not None:
         return override
-    return pet_model_install_root()
+    return default_pet_model_dir()
 
 
 def pet_library_paths(library_root: Path) -> PetLibraryPaths:

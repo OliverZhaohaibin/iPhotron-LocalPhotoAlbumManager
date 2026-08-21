@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,63 @@ def test_missing_models_trigger_detector_then_fixed_dinov2_download(
         ("detector", tmp_path / "detector" / "yolox_nano_coco.onnx"),
         ("embedder-download", f"{expected_model_path}|{url}"),
     ]
+
+
+def test_existing_bundled_models_do_not_require_any_writable_install_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundled = tmp_path / "bundled" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    detector_relative = Path("detector/yolox_nano_coco.onnx")
+    embedder_relative = Path("embedding/dinov2_vits14/dinov2_vits14.pt")
+    detector_path = bundled / detector_relative
+    embedder_path = bundled / embedder_relative
+    detector_path.parent.mkdir(parents=True)
+    embedder_path.parent.mkdir(parents=True)
+    detector_path.write_bytes(b"detector")
+    embedder_path.write_bytes(b"embedder")
+
+    manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
+    digest = hashlib.sha256(embedder_path.read_bytes()).hexdigest()
+    monkeypatch.setitem(manifest, "torchscript_sha256", digest)
+    monkeypatch.setitem(manifest, "torchscript_size", embedder_path.stat().st_size)
+    embedder_path.with_name("dinov2_vits14.pt.metadata.json").write_text(
+        json.dumps(
+            {
+                "model_name": "dinov2_vits14",
+                "source_repository": manifest["source_repository"],
+                "source_revision": manifest["source_revision"],
+                "torchscript_sha256": digest,
+                "torchscript_size": embedder_path.stat().st_size,
+                "input_shape": manifest["input_shape"],
+                "output_shape": manifest["output_shape"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: bundled)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_pipeline, "_validate_downloaded_file", lambda *_args, **_: None)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "_directory_is_writable",
+        lambda _path: pytest.fail("existing artifacts must not probe writability"),
+    )
+    monkeypatch.setattr(
+        pet_pipeline,
+        "ensure_pet_detector_model",
+        _unexpected_call("verified bundled detector must be reused"),
+    )
+    monkeypatch.setattr(
+        model_bootstrap,
+        "_download_dinov2_release",
+        _unexpected_call("verified bundled embedder must be reused"),
+    )
+
+    assert model_bootstrap.ensure_pet_model_artifacts() is False
 
 
 def test_missing_dinov2_url_fails_closed(tmp_path: Path, monkeypatch) -> None:
@@ -111,6 +170,42 @@ def test_existing_verified_models_do_not_trigger_embedder_acquisition(
     )
 
     assert model_bootstrap.ensure_pet_model_artifacts(tmp_path) is False
+
+
+def test_explicit_model_root_is_authoritative_for_lookup_and_acquisition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    explicit = tmp_path / "explicit"
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "pet_model_search_roots",
+        _unexpected_call("explicit root must bypass global resolver"),
+    )
+
+    calls: list[tuple[str, Path]] = []
+    _stub_detector(monkeypatch, calls)
+    url = "https://models.example/dinov2_vits14.pt"
+    monkeypatch.setattr(pet_pipeline, "pet_embedder_model_url", lambda: url)
+    monkeypatch.setattr(
+        model_bootstrap,
+        "_download_dinov2_release",
+        lambda path, *, url: calls.append(("embedder", path)),
+    )
+
+    changed = model_bootstrap.ensure_pet_model_artifacts(explicit)
+
+    assert changed is True
+    assert calls == [
+        ("detector", explicit / "detector" / "yolox_nano_coco.onnx"),
+        ("embedder", explicit / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"),
+    ]
 
 
 def test_existing_cache_models_are_reused_before_extension_install(

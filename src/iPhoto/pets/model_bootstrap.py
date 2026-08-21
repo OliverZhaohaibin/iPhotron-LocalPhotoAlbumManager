@@ -43,15 +43,11 @@ def ensure_pet_model_artifacts(
     embedder_manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
 
     detector_relative = Path(str(detector_manifest["filename"]))
-    resolved_detector = pet_pipeline.resolve_pet_model_path(detector_relative)
-    detector_root = _acquisition_root(
-        model_root,
+    resolved_detector = _resolve_artifact(detector_relative, model_root=requested_root)
+    detector_path = resolved_detector.path or _acquisition_path(
+        requested_root,
         resolved_detector.invalid_bundled,
-    )
-    detector_path = (
-        resolved_detector.path
-        if resolved_detector.path is not None
-        else detector_root / detector_relative
+        detector_relative,
     )
     detector_missing = resolved_detector.path is None
 
@@ -68,16 +64,17 @@ def ensure_pet_model_artifacts(
             ) from exc
 
     embedder_relative = Path(str(embedder_manifest["filename"]))
-    resolved_embedder = pet_pipeline.resolve_pet_model_path(
+    resolved_embedder = _resolve_artifact(
         embedder_relative.parent,
         directory=True,
+        model_root=requested_root,
     )
-    embedder_path = (
-        resolved_embedder.path / embedder_relative.name
-        if resolved_embedder.path is not None
-        else _acquisition_root(model_root, resolved_embedder.invalid_bundled)
-        / embedder_relative
+    embedder_directory = resolved_embedder.path or _acquisition_path(
+        requested_root,
+        resolved_embedder.invalid_bundled,
+        embedder_relative.parent,
     )
+    embedder_path = embedder_directory / embedder_relative.name
     embedder_missing = resolved_embedder.path is None
 
     url = pet_pipeline.pet_embedder_model_url()
@@ -117,12 +114,39 @@ def _download_dinov2_release(model_path: Path, *, url: str) -> None:
         ) from exc
 
 
-def _acquisition_root(model_root: Path | None, invalid_bundled: bool) -> Path:
+def _acquisition_path(
+    model_root: Path | None,
+    invalid_bundled: bool,
+    relative_path: Path,
+) -> Path:
     if model_root is not None:
-        return model_root
+        return model_root / relative_path
     if invalid_bundled:
-        return pet_pipeline.user_pet_model_cache_dir()
-    return pet_pipeline.pet_model_install_root()
+        return pet_pipeline.user_pet_model_cache_dir() / relative_path
+    return pet_pipeline.pet_model_install_root() / relative_path
+
+
+def _resolve_artifact(
+    relative_path: Path,
+    *,
+    directory: bool = False,
+    model_root: Path | None,
+) -> pet_pipeline.PetArtifactResolution:
+    if model_root is None:
+        return pet_pipeline.resolve_pet_model_path(relative_path, directory=directory)
+    try:
+        return pet_pipeline.resolve_pet_model_path(
+            relative_path,
+            directory=directory,
+            search_roots=(model_root,),
+        )
+    except PetModelUnavailableError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise PetModelUnavailableError(
+            "Pet scanning unavailable: invalid explicit model artifact at "
+            f"{model_root / relative_path}."
+        ) from exc
 
 
 def _write_dinov2_metadata(model_path: Path) -> None:

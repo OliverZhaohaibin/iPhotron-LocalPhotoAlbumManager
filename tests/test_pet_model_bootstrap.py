@@ -223,3 +223,76 @@ def test_invalid_embedder_is_replaced_by_fixed_download(
     assert not invalid_embedder.exists()
     expected_embedder = extension / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"
     assert downloaded == [expected_embedder]
+
+
+def test_invalid_bundled_artifacts_install_to_user_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    invalid_detector = extension / "detector" / "yolox_nano_coco.onnx"
+    invalid_embedder_dir = extension / "embedding" / "dinov2_vits14"
+    invalid_embedder = invalid_embedder_dir / "dinov2_vits14.pt"
+    invalid_detector.parent.mkdir(parents=True)
+    invalid_embedder_dir.mkdir(parents=True)
+    invalid_detector.write_bytes(b"invalid-detector")
+    invalid_embedder.write_bytes(b"invalid-embedder")
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", lambda: extension)
+
+    detector_calls: list[Path] = []
+
+    def _ensure_detector(path, **_kwargs):
+        detector_calls.append(Path(path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"detector")
+        return path
+
+    def _validate_detector(path, **_kwargs):
+        if Path(path) == invalid_detector:
+            raise RuntimeError("invalid detector")
+
+    def _validate_embedder(path, **_kwargs):
+        if Path(path) == invalid_embedder:
+            raise RuntimeError("invalid embedder")
+
+    downloaded: list[Path] = []
+    monkeypatch.setattr(pet_pipeline, "ensure_pet_detector_model", _ensure_detector)
+    monkeypatch.setattr(pet_pipeline, "_validate_downloaded_file", _validate_detector)
+    monkeypatch.setattr(pet_pipeline, "_validate_dinov2_cache_metadata", _validate_embedder)
+    monkeypatch.setattr(pet_pipeline, "pet_embedder_model_url", lambda: "https://models.example")
+    monkeypatch.setattr(
+        model_bootstrap,
+        "_download_dinov2_release",
+        lambda path, **_kwargs: downloaded.append(Path(path)),
+    )
+
+    assert model_bootstrap.ensure_pet_model_artifacts() is True
+    assert invalid_detector.read_bytes() == b"invalid-detector"
+    assert invalid_embedder.read_bytes() == b"invalid-embedder"
+    assert detector_calls == [cache / "detector" / "yolox_nano_coco.onnx"]
+    expected_embedder = cache / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"
+    assert downloaded == [expected_embedder]
+
+
+def test_pipeline_missing_model_with_downloads_disabled_fails_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: tmp_path / "extension")
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: tmp_path / "cache")
+    pipeline = pet_pipeline.PetClusterPipeline(
+        model_root=tmp_path / "extension",
+        allow_model_download=False,
+    )
+
+    with pytest.raises(
+        pet_pipeline.PetModelUnavailableError,
+        match="missing model artifact",
+    ):
+        pipeline._resolve_model_path(Path("detector/yolox_nano_coco.onnx"))

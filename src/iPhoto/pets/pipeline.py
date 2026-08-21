@@ -539,7 +539,14 @@ class PetClusterPipeline:
 
     def _resolve_model_path(self, relative_path: Path, *, directory: bool = False) -> Path:
         if self._model_root in {default_pet_model_dir(), bundled_pet_model_dir()}:
-            return resolve_pet_model_path(relative_path, directory=directory)
+            resolved = resolve_pet_model_path(relative_path, directory=directory)
+            if resolved.path is not None:
+                return resolved.path
+            raise PetModelUnavailableError(
+                "Pet scanning unavailable: missing model artifact "
+                f"{relative_path}. Enable model downloads or run first-use "
+                "acquisition before scanning."
+            )
         return self._model_root / relative_path
 
 
@@ -1914,6 +1921,12 @@ def user_pet_model_cache_dir() -> Path:
     return base / "iPhoto" / "models" / "pets"
 
 
+@dataclass(frozen=True)
+class PetArtifactResolution:
+    path: Path | None
+    invalid_bundled: bool = False
+
+
 def pet_model_override_dir() -> Path | None:
     override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
     if not override:
@@ -1962,12 +1975,17 @@ def pet_model_search_roots() -> tuple[Path, ...]:
     return roots
 
 
-def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> Path | None:
+def resolve_pet_model_path(
+    relative_path: Path,
+    *,
+    directory: bool = False,
+) -> PetArtifactResolution:
     relative = Path(relative_path)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Pet model path must be relative to a configured model root.")
     override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
     user_cache = user_pet_model_cache_dir()
+    invalid_bundled = False
     for root in pet_model_search_roots():
         candidate = root / relative
         exists = candidate.is_dir() if directory else candidate.is_file()
@@ -1992,12 +2010,14 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                     ),
                     max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
                 )
-            return candidate
+            return PetArtifactResolution(candidate)
         except (OSError, RuntimeError) as exc:
             if override and root == Path(override).expanduser():
                 raise RuntimeError(
                     f"Pet scanning unavailable: invalid model override artifact at {candidate}."
                 ) from exc
+            if root == bundled_pet_model_dir() and not invalid_bundled:
+                invalid_bundled = True
             if root == user_cache:
                 model_path = candidate / f"{relative.name}.pt" if directory else candidate
                 try:
@@ -2013,7 +2033,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
             # Bundled artifacts are read-only. An invalid one must never become
             # a download target and must not shadow a later valid artifact.
             continue
-    return None
+    return PetArtifactResolution(None, invalid_bundled=invalid_bundled)
 
 
 def _download_file(

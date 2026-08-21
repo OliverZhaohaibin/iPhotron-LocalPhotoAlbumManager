@@ -38,20 +38,22 @@ def ensure_pet_model_artifacts(
             "Pet scanning unavailable: IPHOTO_PET_MODEL_DIR is authoritative and "
             "does not fall back automatically."
         )
-    root = requested_root or pet_pipeline.pet_model_install_root()
-    if override_root is not None and root != override_root:
-        raise PetModelUnavailableError(
-            "Pet scanning unavailable: IPHOTO_PET_MODEL_DIR is authoritative and "
-            "does not fall back automatically."
-        )
 
     detector_manifest = pet_pipeline.PET_MODEL_MANIFEST["detector"]
     embedder_manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
 
     detector_relative = Path(str(detector_manifest["filename"]))
     resolved_detector = pet_pipeline.resolve_pet_model_path(detector_relative)
-    detector_path = resolved_detector or root / detector_relative
-    detector_missing = resolved_detector is None
+    detector_root = _acquisition_root(
+        model_root,
+        resolved_detector.invalid_bundled,
+    )
+    detector_path = (
+        resolved_detector.path
+        if resolved_detector.path is not None
+        else detector_root / detector_relative
+    )
+    detector_missing = resolved_detector.path is None
 
     if detector_missing:
         try:
@@ -71,11 +73,12 @@ def ensure_pet_model_artifacts(
         directory=True,
     )
     embedder_path = (
-        resolved_embedder / embedder_relative.name
-        if resolved_embedder
-        else root / embedder_relative
+        resolved_embedder.path / embedder_relative.name
+        if resolved_embedder.path is not None
+        else _acquisition_root(model_root, resolved_embedder.invalid_bundled)
+        / embedder_relative
     )
-    embedder_missing = resolved_embedder is None
+    embedder_missing = resolved_embedder.path is None
 
     url = pet_pipeline.pet_embedder_model_url()
     if not url:
@@ -112,6 +115,14 @@ def _download_dinov2_release(model_path: Path, *, url: str) -> None:
             "Pet scanning unavailable: failed to download the verified DINOv2 "
             f"TorchScript model from {url} ({_error_reason(exc)})."
         ) from exc
+
+
+def _acquisition_root(model_root: Path | None, invalid_bundled: bool) -> Path:
+    if model_root is not None:
+        return model_root
+    if invalid_bundled:
+        return pet_pipeline.user_pet_model_cache_dir()
+    return pet_pipeline.pet_model_install_root()
 
 
 def _write_dinov2_metadata(model_path: Path) -> None:

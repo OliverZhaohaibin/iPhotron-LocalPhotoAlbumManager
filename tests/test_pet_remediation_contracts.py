@@ -1521,7 +1521,9 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
         lambda: (cache, bundled),
     )
 
-    assert pet_pipeline.resolve_pet_model_path(relative, directory=True) == bundled_dir
+    resolution = pet_pipeline.resolve_pet_model_path(relative, directory=True)
+    assert resolution.path == bundled_dir
+    assert resolution.invalid_bundled is False
 
 
 def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
@@ -1551,7 +1553,9 @@ def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
         lambda: (cache, bundled),
     )
 
-    assert pet_pipeline.resolve_pet_model_path(relative) == bundled_model
+    resolution = pet_pipeline.resolve_pet_model_path(relative)
+    assert resolution.path == bundled_model
+    assert resolution.invalid_bundled is False
     assert not cached_model.exists()
 
 

@@ -6,49 +6,59 @@ from iPhoto.pets import pipeline as pet_pipeline
 from iPhoto.pets import service as pet_service
 
 
+OFFICIAL_DINOV2_VITS14_URL = (
+    "https://dl.fbaipublicfiles.com/dinov2/"
+    "dinov2_vits14/dinov2_vits14_pretrain.pth"
+)
+OFFICIAL_DINOV2_VITS14_SHA256 = (
+    "b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9"
+)
+OFFICIAL_DINOV2_VITS14_SIZE = 88283115
+
+
 def test_pet_embedder_download_url_prefers_environment(monkeypatch) -> None:
     monkeypatch.setitem(
         pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_url",
-        "https://manifest.example/dinov2_vits14.pt",
+        "weights_url",
+        OFFICIAL_DINOV2_VITS14_URL,
     )
     monkeypatch.setenv(
         pet_pipeline.PET_EMBEDDER_MODEL_URL_ENV,
-        "https://mirror.example/dinov2_vits14.pt",
+        "https://mirror.example/dinov2_vits14_pretrain.pth",
     )
 
     assert pet_pipeline.pet_embedder_model_url() == (
-        "https://mirror.example/dinov2_vits14.pt"
+        "https://mirror.example/dinov2_vits14_pretrain.pth"
     )
 
 
-def test_pet_embedder_download_url_falls_back_to_manifest(monkeypatch) -> None:
+def test_pet_embedder_download_url_falls_back_to_official_manifest(monkeypatch) -> None:
     monkeypatch.delenv(pet_pipeline.PET_EMBEDDER_MODEL_URL_ENV, raising=False)
     monkeypatch.setitem(
         pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_url",
-        "https://manifest.example/dinov2_vits14.pt",
+        "weights_url",
+        OFFICIAL_DINOV2_VITS14_URL,
     )
 
-    assert pet_pipeline.pet_embedder_model_url() == (
-        "https://manifest.example/dinov2_vits14.pt"
-    )
+    assert pet_pipeline.pet_embedder_model_url() == OFFICIAL_DINOV2_VITS14_URL
 
 
-def test_pet_embedder_download_url_can_be_explicitly_configured_when_manifest_is_empty(
-    monkeypatch,
-) -> None:
-    monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "torchscript_url", None)
-    monkeypatch.setenv(
-        pet_pipeline.PET_EMBEDDER_MODEL_URL_ENV,
-        "https://models.example/dinov2_vits14.pt",
-    )
+def test_pet_embedder_manifest_pins_official_download_artifact() -> None:
+    manifest = pet_pipeline._EMBEDDER_MANIFEST
 
-    assert pet_pipeline.pet_embedder_model_url() == (
-        "https://models.example/dinov2_vits14.pt"
-    )
-    assert len(str(pet_pipeline._EMBEDDER_MANIFEST["torchscript_sha256"])) == 64
-    assert int(pet_pipeline._EMBEDDER_MANIFEST["torchscript_size"]) > 0
+    assert manifest["weights_url"] == OFFICIAL_DINOV2_VITS14_URL
+    assert manifest["weights_sha256"] == OFFICIAL_DINOV2_VITS14_SHA256
+    assert int(manifest["weights_size"]) == OFFICIAL_DINOV2_VITS14_SIZE
+    assert str(manifest.get("torchscript_url") or "") == ""
+
+
+def test_pet_embedder_download_url_can_use_verified_mirror(monkeypatch) -> None:
+    mirror = "https://models.example/dinov2_vits14_pretrain.pth"
+    monkeypatch.setenv(pet_pipeline.PET_EMBEDDER_MODEL_URL_ENV, mirror)
+
+    assert pet_pipeline.pet_embedder_model_url() == mirror
+    assert len(str(pet_pipeline._EMBEDDER_MANIFEST["weights_sha256"])) == 64
+    assert int(pet_pipeline._EMBEDDER_MANIFEST["weights_size"]) > 0
 
 
 def test_shared_pet_model_dir_defaults_to_cache_lookup_root(
@@ -101,7 +111,13 @@ def test_pet_model_install_root_uses_real_write_probe(tmp_path: Path, monkeypatc
     monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache_root)
 
     assert pet_pipeline.pet_model_install_root() == extension_root
-    assert any(path.name.startswith(".iphoto-write-probe-") for path in extension_root.iterdir()) is False
+    assert (
+        any(
+            path.name.startswith(".iphoto-pet-model-write-probe-")
+            for path in extension_root.iterdir()
+        )
+        is False
+    )
 
 
 def test_pet_model_search_roots_are_extension_first(tmp_path: Path, monkeypatch) -> None:

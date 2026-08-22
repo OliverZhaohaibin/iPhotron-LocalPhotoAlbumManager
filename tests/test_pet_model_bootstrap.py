@@ -453,7 +453,6 @@ def test_dinov2_storage_permission_failure_falls_back_to_cache(
 ) -> None:
     extension = tmp_path / "extension" / "pets"
     cache = tmp_path / "cache" / "pets"
-    detector_relative = Path("detector/yolox_nano_coco.onnx")
     embedder_relative = Path("embedding/dinov2_vits14/dinov2_vits14.pt")
     requested_embedder = extension / embedder_relative
     fallback_embedder = cache / embedder_relative
@@ -462,34 +461,28 @@ def test_dinov2_storage_permission_failure_falls_back_to_cache(
     monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
     monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
     monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
-    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", lambda: extension)
     monkeypatch.setattr(
         pet_pipeline,
         "ensure_pet_detector_model",
         lambda path, **_kwargs: _write_detector(path),
     )
 
-    def _download(_url, destination, **_kwargs):
-        attempts.append(Path(destination))
-        if Path(destination) == requested_embedder:
+    def _download(path, *, url):
+        path = Path(path)
+        attempts.append(path)
+        if path == requested_embedder:
             raise pet_pipeline._ModelStoragePermissionError(
                 errno.EROFS,
                 "Read-only file system",
             )
-        Path(destination).parent.mkdir(parents=True, exist_ok=True)
-        Path(destination).write_bytes(b"embedder")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"embedder")
 
-    monkeypatch.setattr(pet_pipeline, "_download_file", _download)
-    monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
-    monkeypatch.setattr(
-        pet_pipeline,
-        "_validate_dinov2_cache_metadata",
-        lambda *_args, **_kwargs: None,
-    )
+    monkeypatch.setattr(model_bootstrap, "_download_dinov2_release", _download)
     monkeypatch.setattr(
         pet_pipeline,
         "pet_embedder_model_url",
-        lambda: "https://models.example",
+        lambda: "https://models.example/dinov2_vits14_pretrain.pth",
     )
 
     assert model_bootstrap.ensure_pet_model_artifacts() is True

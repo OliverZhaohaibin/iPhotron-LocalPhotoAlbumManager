@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
 from . import pipeline as pet_pipeline
-from .errors import PetModelUnavailableError
+from .errors import PetModelUnavailableError, PetRuntimeUnavailableError
 
 
 def ensure_pet_model_artifacts(
@@ -18,12 +19,10 @@ def ensure_pet_model_artifacts(
 ) -> bool:
     """Ensure missing Pets artifacts use extension-first storage.
 
-    Existing artifacts are resolved from the preferred extension root and then
-    the user cache. An explicit override is authoritative: it is neither
-    supplemented by nor silently replaced by another storage root. Missing
-    artifacts install to the selected writable root without changing bundled
-    artifacts. Packaged macOS app bundles are immutable acquisition sources and
-    are never selected as first-use download targets.
+    DINOv2 is acquired from Meta's official checkpoint and converted locally to
+    a TorchScript cache. The derived TorchScript bytes are deliberately not
+    pinned by SHA-256 because serialization can vary across supported PyTorch
+    versions; source identity and loadability are validated instead.
     """
 
     allow_download = (
@@ -83,9 +82,9 @@ def ensure_pet_model_artifacts(
     url = pet_pipeline.pet_embedder_model_url()
     if not url:
         raise PetModelUnavailableError(
-            "Pet scanning unavailable: no fixed DINOv2 TorchScript release artifact "
-            "is configured. Set IPHOTO_PET_EMBEDDER_MODEL_URL or install the "
-            "verified model in IPHOTO_PET_MODEL_DIR."
+            "Pet scanning unavailable: no DINOv2 checkpoint source is configured. "
+            "Set IPHOTO_PET_EMBEDDER_MODEL_URL or install the model in "
+            "IPHOTO_PET_MODEL_DIR."
         )
     if embedder_missing:
         _download_dinov2_release_with_fallback(
@@ -160,6 +159,7 @@ def _ensure_dino_metadata_writable(model_path: Path) -> None:
         f".{metadata_path.name}.{uuid.uuid4().hex}.probe"
     )
     try:
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
         probe_path.write_text("", encoding="utf-8")
     except OSError as exc:
         pet_pipeline._raise_if_model_storage_error(exc, metadata_path)
@@ -171,18 +171,60 @@ def _ensure_dino_metadata_writable(model_path: Path) -> None:
 
 
 def _download_dinov2_release(model_path: Path, *, url: str) -> None:
+    """Build a local TorchScript cache from the configured DINOv2 checkpoint."""
+
     manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
     try:
+        import torch
+    except ImportError as exc:
+        raise PetRuntimeUnavailableError(
+            "Pet scanning unavailable: torch is required to build the DINOv2 cache. "
+            'Install the optional Pets AI runtime with: pip install -e ".[pets-ai]"'
+        ) from exc
+
+    source = f"{manifest['source_repository']}:{manifest['source_revision']}"
+    input_shape = tuple(int(value) for value in manifest["input_shape"])
+    expected_shape = tuple(int(value) for value in manifest["output_shape"])
+    model_path = Path(model_path)
+
+    try:
         pet_pipeline._install_certifi_environment()
-        pet_pipeline._download_file(
-            url,
-            model_path,
-            label="DINOv2 TorchScript model",
-            expected_sha256=str(manifest["torchscript_sha256"]),
-            max_bytes=int(manifest["torchscript_size"]),
-        )
         _ensure_dino_metadata_writable(model_path)
-        _write_dinov2_metadata(model_path)
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        model = torch.hub.load(
+            source,
+            str(manifest["model_name"]),
+            source="github",
+            trust_repo=True,
+            weights=url,
+        ).eval().cpu()
+        example = torch.zeros(input_shape, dtype=torch.float32)
+
+        with tempfile.TemporaryDirectory(
+            prefix="iphoto-dinov2-build-",
+            dir=model_path.parent,
+        ) as temp_dir:
+            candidate = Path(temp_dir) / model_path.name
+            with torch.no_grad():
+                eager_output = model(example)
+                traced = torch.jit.trace(model, example, strict=False)
+                traced.save(str(candidate))
+                scripted = torch.jit.load(str(candidate), map_location="cpu").eval()
+                scripted_output = scripted(example)
+
+            if isinstance(eager_output, (list, tuple)):
+                eager_output = eager_output[0]
+            if isinstance(scripted_output, (list, tuple)):
+                scripted_output = scripted_output[0]
+            if tuple(scripted_output.shape) != expected_shape:
+                raise RuntimeError(
+                    "DINOv2 output shape mismatch: "
+                    f"{tuple(scripted_output.shape)} != {expected_shape}"
+                )
+            torch.testing.assert_close(scripted_output, eager_output, rtol=1e-4, atol=1e-5)
+            candidate.replace(model_path)
+
+        _write_dinov2_metadata(model_path, weights_url=url)
         pet_pipeline._validate_dinov2_cache_metadata(
             model_path,
             model_name=str(manifest["model_name"]),
@@ -190,11 +232,13 @@ def _download_dinov2_release(model_path: Path, *, url: str) -> None:
     except pet_pipeline._ModelStoragePermissionError:
         _remove_dinov2_artifact(model_path)
         raise
-    except Exception as exc:  # noqa: BLE001 - urllib/SSL/runtime failures vary
+    except Exception as exc:  # noqa: BLE001 - hub/SSL/torch failures vary
         _remove_dinov2_artifact(model_path)
+        if isinstance(exc, (PetModelUnavailableError, PetRuntimeUnavailableError)):
+            raise
         raise PetModelUnavailableError(
-            "Pet scanning unavailable: failed to download the verified DINOv2 "
-            f"TorchScript model from {url} ({_error_reason(exc)})."
+            "Pet scanning unavailable: failed to build DINOv2 from the configured "
+            f"checkpoint {url} ({_error_reason(exc)})."
         ) from exc
 
 
@@ -241,7 +285,6 @@ def _acquire_to(path: Path, *, acquire, allow_fallback: bool) -> Path | None:
             return fallback
         except Exception as fallback_exc:
             raise fallback_exc from exc
-    return None
 
 
 def _acquire_detector_with_fallback(
@@ -284,16 +327,16 @@ def _download_dinov2_release_with_fallback(
             allow_fallback=allow_storage_fallback,
         )
     except Exception as exc:
-        if isinstance(exc, PetModelUnavailableError):
+        if isinstance(exc, (PetModelUnavailableError, PetRuntimeUnavailableError)):
             raise
         if isinstance(exc, (PermissionError, pet_pipeline._ModelStoragePermissionError)):
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: filesystem permission denied while "
-                f"storing the verified DINOv2 TorchScript model ({_error_reason(exc)})."
+                f"storing the DINOv2 cache ({_error_reason(exc)})."
             ) from exc
         raise PetModelUnavailableError(
-            "Pet scanning unavailable: failed to download the verified DINOv2 "
-            f"TorchScript model from {url} ({_error_reason(exc)})."
+            "Pet scanning unavailable: failed to acquire the DINOv2 checkpoint from "
+            f"{url} ({_error_reason(exc)})."
         ) from exc
 
 
@@ -320,15 +363,15 @@ def _resolve_artifact(
         ) from exc
 
 
-def _write_dinov2_metadata(model_path: Path) -> None:
+def _write_dinov2_metadata(model_path: Path, *, weights_url: str) -> None:
     manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
     metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
     payload = {
         "model_name": manifest["model_name"],
         "source_repository": manifest["source_repository"],
         "source_revision": manifest["source_revision"],
-        "torchscript_sha256": manifest["torchscript_sha256"],
-        "torchscript_size": int(manifest["torchscript_size"]),
+        "weights_url": weights_url,
+        "derived_torchscript_size": int(Path(model_path).stat().st_size),
         "input_shape": manifest["input_shape"],
         "output_shape": manifest["output_shape"],
     }
@@ -352,8 +395,13 @@ def _write_dinov2_metadata(model_path: Path) -> None:
 
 
 def _remove_dinov2_artifact(model_path: Path) -> None:
-    if model_path.exists():
-        return
+    model_path = Path(model_path)
+    metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
+    for artifact in (model_path, metadata_path):
+        try:
+            artifact.unlink(missing_ok=True)
+        except OSError:
+            pass
     for parent in (model_path.parent, model_path.parent.parent):
         try:
             parent.rmdir()

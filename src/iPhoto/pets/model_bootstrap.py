@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import errno
 import json
-import os
+import uuid
 from pathlib import Path
 
 from . import pipeline as pet_pipeline
@@ -103,7 +102,9 @@ def _storage_root(path: Path, relative_path: Path) -> Path:
 
 def _ensure_dino_metadata_writable(model_path: Path) -> None:
     metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
-    probe_path = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.probe")
+    probe_path = metadata_path.with_name(
+        f".{metadata_path.name}.{uuid.uuid4().hex}.probe"
+    )
     try:
         probe_path.write_text("", encoding="utf-8")
     except OSError as exc:
@@ -268,7 +269,6 @@ def _resolve_artifact(
 def _write_dinov2_metadata(model_path: Path) -> None:
     manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
     metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "model_name": manifest["model_name"],
         "source_repository": manifest["source_repository"],
@@ -278,16 +278,28 @@ def _write_dinov2_metadata(model_path: Path) -> None:
         "input_shape": manifest["input_shape"],
         "output_shape": manifest["output_shape"],
     }
-    metadata_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    temp_path = metadata_path.with_name(
+        f".{metadata_path.name}.{uuid.uuid4().hex}.tmp"
     )
+    try:
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(metadata_path)
+    except OSError as exc:
+        pet_pipeline._raise_if_model_storage_error(exc, metadata_path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _remove_dinov2_artifact(model_path: Path) -> None:
     if model_path.exists():
         return
-    pet_pipeline._dinov2_metadata_path(model_path).unlink(missing_ok=True)
     for parent in (model_path.parent, model_path.parent.parent):
         try:
             parent.rmdir()

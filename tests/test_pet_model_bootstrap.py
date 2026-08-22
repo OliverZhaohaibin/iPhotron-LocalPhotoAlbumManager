@@ -350,7 +350,7 @@ def test_direct_pipeline_accepts_matching_authoritative_override(
     assert pipeline._model_root == tmp_path
 
 
-def test_bundled_permission_failure_falls_back_to_cache(
+def test_wrapped_detector_toctou_permission_failure_falls_back_to_cache(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -369,7 +369,10 @@ def test_bundled_permission_failure_falls_back_to_cache(
 
     def _ensure(path, **_kwargs):
         if Path(path) == requested_detector:
-            raise OSError(errno.EACCES, "Permission denied")
+            raise RuntimeError(
+                "Pet scanning unavailable: filesystem permission denied for "
+                "the YOLOX detector model."
+            ) from OSError(errno.EACCES, "Permission denied")
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(b"detector")
 
@@ -384,6 +387,90 @@ def test_bundled_permission_failure_falls_back_to_cache(
     assert model_bootstrap.ensure_pet_model_artifacts() is True
     assert fallback_detector.read_bytes() == b"detector"
     assert fallback_embedder.read_bytes() == b"embedder"
+
+
+@pytest.mark.parametrize("errno_value", [errno.EACCES, errno.EROFS])
+def test_dinov2_download_wrapped_filesystem_error_falls_back_to_cache(
+    tmp_path: Path,
+    monkeypatch,
+    errno_value,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    detector_relative = Path("detector/yolox_nano_coco.onnx")
+    embedder_relative = Path("embedding/dinov2_vits14/dinov2_vits14.pt")
+    requested_embedder = extension / embedder_relative
+    fallback_embedder = cache / embedder_relative
+    requested_embedder.parent.mkdir(parents=True)
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", lambda: extension)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "ensure_pet_detector_model",
+        lambda path, **_kwargs: _write_detector(path),
+    )
+
+    def _download(_url, destination, **_kwargs):
+        if Path(destination) == requested_embedder:
+            raise RuntimeError(
+                f"filesystem permission denied for {destination.name}."
+            ) from OSError(errno_value, "Filesystem denied")
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_bytes(b"embedder")
+
+    monkeypatch.setattr(pet_pipeline, "_download_file", _download)
+    monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "_validate_dinov2_cache_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        pet_pipeline,
+        "pet_embedder_model_url",
+        lambda: "https://models.example",
+    )
+
+    assert model_bootstrap.ensure_pet_model_artifacts() is True
+    assert not requested_embedder.exists()
+    assert fallback_embedder.read_bytes() == b"embedder"
+
+
+def _write_detector(path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"detector")
+
+
+def test_dinov2_permission_failure_preserves_wrapped_cause(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original = OSError(errno.EACCES, "Permission denied")
+    model_path = tmp_path / "dinov2_vits14.pt"
+
+    def _download(*_args, **_kwargs):
+        raise RuntimeError("filesystem permission denied.") from original
+
+    monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
+    monkeypatch.setattr(pet_pipeline, "_download_file", _download)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "_validate_dinov2_cache_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(PermissionError) as exc_info:
+        model_bootstrap._download_dinov2_release(
+            model_path,
+            url="https://models.example",
+        )
+
+    assert exc_info.value.__cause__ is not None
+    assert exc_info.value.__cause__.__cause__ is original
 
 
 def test_validation_failure_does_not_fall_back_to_cache(

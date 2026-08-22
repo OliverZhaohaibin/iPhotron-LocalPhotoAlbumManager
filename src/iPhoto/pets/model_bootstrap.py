@@ -109,9 +109,10 @@ def _download_dinov2_release(model_path: Path, *, url: str) -> None:
             model_name=str(manifest["model_name"]),
         )
     except Exception as exc:  # noqa: BLE001 - urllib/SSL/runtime failures vary
-        if _is_permission_error(exc) or _is_permission_error(exc.__cause__):
+        if _is_permission_failure(exc):
             _remove_dinov2_artifact(model_path)
-            raise PermissionError(str(exc)) from exc.__cause__ or exc
+            cause = exc.__cause__ if isinstance(exc.__cause__, OSError) else exc
+            raise PermissionError(str(cause)) from exc
         _remove_dinov2_artifact(model_path)
         raise PetModelUnavailableError(
             "Pet scanning unavailable: failed to download the verified DINOv2 "
@@ -137,6 +138,16 @@ def _is_permission_error(exc: BaseException) -> bool:
         errno.EPERM,
         errno.EROFS,
     }
+
+
+def _is_permission_failure(exc: BaseException | None) -> bool:
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if _is_permission_error(exc):
+            return True
+        exc = exc.__cause__
+    return False
 
 
 def _fallback_artifact_path(path: Path) -> Path | None:
@@ -170,29 +181,22 @@ def _acquire_to(path: Path, *, acquire, is_fallback_error) -> Path | None:
 
 
 def _acquire_detector_with_fallback(path: Path) -> Path | None:
-    original_error: BaseException | None = None
-
     def _acquire(target: Path) -> None:
-        nonlocal original_error
-        try:
-            pet_pipeline.ensure_pet_detector_model(
-                target,
-                allow_model_download=True,
-            )
-        except Exception as exc:
-            original_error = exc
-            raise
-
-    def _should_fallback(_exc: BaseException) -> bool:
-        return original_error is not None and _is_permission_error(original_error)
+        pet_pipeline.ensure_pet_detector_model(
+            target,
+            allow_model_download=True,
+        )
 
     try:
-        return _acquire_to(path, acquire=_acquire, is_fallback_error=_should_fallback)
+        return _acquire_to(
+            path,
+            acquire=_acquire,
+            is_fallback_error=_is_permission_failure,
+        )
     except Exception as exc:
-        reason = original_error or exc
         raise PetModelUnavailableError(
             "Pet scanning unavailable: failed to acquire the YOLOX detector "
-            f"model ({_error_reason(reason)})."
+            f"model ({_error_reason(exc)})."
         ) from exc
 
 
@@ -203,9 +207,7 @@ def _download_dinov2_release_with_fallback(path: Path, *, url: str) -> Path | No
     _acquire_to(
         path,
         acquire=_acquire,
-        is_fallback_error=lambda exc: (
-            _is_permission_error(exc) or _is_permission_error(exc.__cause__)
-        ),
+        is_fallback_error=_is_permission_failure,
     )
 
 

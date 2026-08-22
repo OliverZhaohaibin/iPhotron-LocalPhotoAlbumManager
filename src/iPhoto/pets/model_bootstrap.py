@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from pathlib import Path
 
@@ -21,7 +22,8 @@ def ensure_pet_model_artifacts(
     the user cache. An explicit override is authoritative: it is neither
     supplemented by nor silently replaced by another storage root. Missing
     artifacts install to the selected writable root without changing bundled
-    artifacts.
+    artifacts. Packaged macOS app bundles are immutable acquisition sources and
+    are never selected as first-use download targets.
     """
 
     allow_download = (
@@ -100,6 +102,58 @@ def _storage_root(path: Path, relative_path: Path) -> Path:
     return path.parents[depth]
 
 
+def _is_macos_app_bundle_path(path: Path) -> bool:
+    if sys.platform != "darwin":
+        return False
+    parts = Path(path).parts
+    for index, part in enumerate(parts[:-1]):
+        if (
+            part.lower().endswith(".app")
+            and index + 1 < len(parts)
+            and parts[index + 1] == "Contents"
+        ):
+            return True
+    return False
+
+
+def _directory_is_writable_for_install(path: Path) -> bool:
+    path = Path(path)
+    probe_path = path / f".iphoto-pet-model-write-probe-{uuid.uuid4().hex}"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with probe_path.open("xb"):
+            pass
+        probe_path.unlink()
+        return True
+    except OSError as exc:
+        if exc.errno in pet_pipeline._MODEL_STORAGE_ERRNOS:
+            return False
+        raise
+    finally:
+        try:
+            probe_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _default_install_root() -> Path:
+    override = pet_pipeline.pet_model_override_dir()
+    if override is not None:
+        return override
+
+    preferred = pet_pipeline.bundled_pet_model_dir()
+    if not _is_macos_app_bundle_path(preferred) and _directory_is_writable_for_install(preferred):
+        return preferred
+
+    fallback = pet_pipeline.user_pet_model_cache_dir()
+    if not _directory_is_writable_for_install(fallback):
+        raise PetModelUnavailableError(
+            "Pet scanning unavailable: neither the extension model directory nor "
+            "the user model cache is writable."
+        )
+    return fallback
+
+
 def _ensure_dino_metadata_writable(model_path: Path) -> None:
     metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
     probe_path = metadata_path.with_name(
@@ -153,7 +207,7 @@ def _acquisition_path(
         return model_root / relative_path
     if invalid_bundled:
         return pet_pipeline.user_pet_model_cache_dir() / relative_path
-    return pet_pipeline.pet_model_install_root() / relative_path
+    return _default_install_root() / relative_path
 
 
 def _fallback_artifact_path(path: Path) -> Path | None:

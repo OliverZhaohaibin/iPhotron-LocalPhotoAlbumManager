@@ -627,16 +627,34 @@ class ScanCoordinatorMixin:
             self._start_next_deferred_scan()
             return
 
-        # A startup metadata scan only prepares the Gallery index.  People and
-        # Pets are feature-scoped services and their model workers are started
-        # by ``activate_recognition_services`` on first use.  Starting them here
-        # used to add model pressure immediately after startup completion and
-        # made a quick window close race QThread destruction.
+        # Startup metadata enumeration stays AI-free so the first window is not
+        # competing with model initialization.  Once it has committed, Pets must
+        # drain the persisted pending backlog so the first non-empty batch reaches
+        # the lazy model-acquisition path.  People remains feature-scoped.
+        startup_pet_backfill_generation = (
+            int(getattr(self, "_recognition_generation", 0))
+            if defer_ai_workers
+            else None
+        )
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.
         self.scanFinished.emit(root, True)
         self._start_next_deferred_scan()
+
+        # scanFinished listeners may synchronously close/rebind the runtime.  In
+        # that case stop_scanning() advances the recognition generation; do not
+        # create a new QThread during teardown.  A queued metadata scan also gets
+        # priority and will schedule its own recognition work when appropriate.
+        if (
+            startup_pet_backfill_generation is not None
+            and int(getattr(self, "_recognition_generation", 0))
+            == startup_pet_backfill_generation
+            and self._current_scanner_worker is None
+        ):
+            library_root = getattr(self, "_root", None)
+            if library_root is not None:
+                self._start_pet_backfill_worker(Path(library_root))
 
         # Persist live-photo pairings in the background to avoid blocking the
         # main thread while downstream listeners start refreshing.

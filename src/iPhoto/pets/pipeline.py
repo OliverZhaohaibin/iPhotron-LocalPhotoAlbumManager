@@ -1,7 +1,7 @@
 """Pets recognition pipeline compatibility surface.
 
 The stable public import path remains ``iPhoto.pets.pipeline`` while the bulk of
-legacy recognition logic lives in ``_pipeline_impl``.  First-use model
+legacy recognition logic lives in ``_pipeline_impl``. First-use model
 acquisition hardening is expressed here with normal inheritance and composition;
 this module never replaces itself in ``sys.modules`` and never mutates classes or
 function globals in the implementation module.
@@ -20,7 +20,7 @@ from ._pipeline_impl import *  # noqa: F403
 
 
 # Private implementation helpers intentionally re-exported for the established
-# test/debug surface.  Keeping real module attributes here also means targeted
+# test/debug surface. Keeping real module attributes here also means targeted
 # monkeypatches used by model-acquisition tests affect the hardened code below
 # without modifying the implementation module globally.
 _EMBEDDER_MANIFEST = _impl._EMBEDDER_MANIFEST
@@ -116,6 +116,20 @@ class _DinoV2Embedder(_LegacyDinoV2Embedder):
     """Build a verified DINOv2 cache without coupling it to device activation."""
 
     def _build_dinov2_cache(self, model_path: Path):
+        loaded = self._build_verified_dinov2_cpu_cache(model_path)
+        try:
+            loaded.eval()
+            loaded.to(self._device)
+        except Exception as exc:  # noqa: BLE001 - backend failures vary by runtime
+            raise _impl.PetModelUnavailableError(
+                "Pet scanning unavailable: DINOv2 cache was built and verified, "
+                f"but the runtime device could not load it ({_error_reason(exc)})."
+            ) from exc
+        return loaded
+
+    def _build_verified_dinov2_cpu_cache(self, model_path: Path):
+        """Build, publish, validate, and reload a DINOv2 cache entirely on CPU."""
+
         published = False
         try:
             _install_certifi_environment()
@@ -206,7 +220,7 @@ class _DinoV2Embedder(_LegacyDinoV2Embedder):
                 _publish_dinov2_cache_pair(candidate, metadata_path, model_path)
                 _validate_dinov2_cache_metadata(model_path, model_name=self._model_name)
                 published = True
-                loaded = self._torch.jit.load(str(model_path), map_location="cpu")
+                return self._torch.jit.load(str(model_path), map_location="cpu")
         except _ModelStoragePermissionError:
             raise
         except Exception as exc:
@@ -217,16 +231,6 @@ class _DinoV2Embedder(_LegacyDinoV2Embedder):
                 "Pet scanning unavailable: failed to build the verified DINOv2 "
                 f"model cache ({_error_reason(exc)})."
             ) from exc
-
-        try:
-            loaded.eval()
-            loaded.to(self._device)
-        except Exception as exc:  # noqa: BLE001 - backend failures vary by runtime
-            raise _impl.PetModelUnavailableError(
-                "Pet scanning unavailable: DINOv2 cache was built and verified, "
-                f"but the runtime device could not load it ({_error_reason(exc)})."
-            ) from exc
-        return loaded
 
 
 class _LazyDinoV2Embedder:

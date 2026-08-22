@@ -1205,7 +1205,6 @@ class _YoloxOnnxPetDetector:
         *,
         score_threshold: float = 0.30,
         allow_model_download: bool = True,
-        allow_storage_fallback: bool = True,
         enable_tiled_detection: bool = True,
         tile_scan_min_confidence: float | None = None,
         tile_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
@@ -1227,11 +1226,9 @@ class _YoloxOnnxPetDetector:
                 "Pet scanning unavailable: missing onnxruntime. Install the optional "
                 'Pets AI runtime with: pip install -e ".[pets-ai]"'
             ) from exc
-        ensure_pet_detector_model(
+        self._model_path = ensure_pet_detector_model(
             self._model_path,
             allow_model_download=allow_model_download,
-            allow_storage_fallback=allow_storage_fallback,
-            assign_path=self._set_model_path,
         )
         try:
             providers = list(execution_providers or _resolve_execution_providers(ort))
@@ -1315,9 +1312,6 @@ class _YoloxOnnxPetDetector:
             for box in boxes
         )
 
-    def _set_model_path(self, path: Path) -> None:
-        self._model_path = Path(path)
-
 
 class _DinoV2Embedder:
     def __init__(
@@ -1377,26 +1371,40 @@ class _DinoV2Embedder:
         try:
             return self._build_dinov2_cache(model_path)
         except _ModelStoragePermissionError as exc:
-            fallback = user_pet_model_cache_dir() / model_path.relative_to(
-                bundled_pet_model_dir()
-            )
-            if not self._allow_storage_fallback or fallback == model_path:
-                raise
+            fallback = _model_storage_fallback_path(model_path)
+            if fallback is None:
+                raise PetModelUnavailableError(
+                    "Pet scanning unavailable: model storage is not writable at "
+                    f"{model_path.parent}."
+                ) from exc
             _LOGGER.warning(
                 "Falling back to the user Pets model cache after %s was not writable",
                 model_path.parent,
                 exc_info=exc,
             )
-            return self._build_dinov2_cache(fallback)
+            try:
+                return self._build_dinov2_cache(fallback)
+            except _ModelStoragePermissionError as fallback_exc:
+                raise PetModelUnavailableError(
+                    "Pet scanning unavailable: model storage is not writable at "
+                    f"{fallback.parent}."
+                ) from fallback_exc
 
     def _build_dinov2_cache(self, model_path: Path):
         try:
             _install_certifi_environment()
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(
-                prefix="iphoto-dinov2-build-",
-                dir=model_path.parent,
-            ) as temp_dir:
+            try:
+                model_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                _raise_if_model_storage_error(exc, model_path.parent)
+            try:
+                temp_context = tempfile.TemporaryDirectory(
+                    prefix="iphoto-dinov2-build-",
+                    dir=model_path.parent,
+                )
+            except OSError as exc:
+                _raise_if_model_storage_error(exc, model_path.parent)
+            with temp_context as temp_dir:
                 checkpoint = Path(temp_dir) / "dinov2_vits14_pretrain.pth"
                 candidate = Path(temp_dir) / model_path.name
                 metadata_path = _dinov2_metadata_path(candidate)
@@ -1408,7 +1416,10 @@ class _DinoV2Embedder:
                     max_bytes=_DINO_WEIGHTS_SIZE,
                     exact_size=_DINO_WEIGHTS_SIZE,
                 )
-                source = f"facebookresearch/dinov2:{_DINO_SOURCE_REVISION}"
+                source = (
+                    f"{_EMBEDDER_MANIFEST['source_repository']}:"
+                    f"{_DINO_SOURCE_REVISION}"
+                )
                 model = self._torch.hub.load(
                     source,
                     self._model_name,
@@ -1454,19 +1465,27 @@ class _DinoV2Embedder:
                     "input_shape": list(_EMBEDDER_MANIFEST["input_shape"]),
                     "output_shape": list(output_shape),
                 }
-                metadata_path.write_text(
-                    json.dumps(metadata, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-                candidate.replace(model_path)
+                try:
+                    metadata_path.write_text(
+                        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                except OSError as exc:
+                    _raise_if_model_storage_error(exc, metadata_path)
+                final_metadata_path = _dinov2_metadata_path(model_path)
+                try:
+                    candidate.replace(model_path)
+                    metadata_path.replace(final_metadata_path)
+                except OSError as exc:
+                    _raise_if_model_storage_error(exc, model_path.parent)
                 _validate_dinov2_cache_metadata(model_path, model_name=self._model_name)
                 loaded = self._torch.jit.load(str(model_path), map_location=self._device)
             loaded.eval()
             loaded.to(self._device)
             return loaded
+        except _ModelStoragePermissionError:
+            raise
         except Exception as exc:
-            if isinstance(exc, _ModelStoragePermissionError):
-                raise
             model_path.unlink(missing_ok=True)
             _dinov2_metadata_path(model_path).unlink(missing_ok=True)
             raise PetModelUnavailableError(
@@ -1931,8 +1950,6 @@ def ensure_pet_detector_model(
     *,
     allow_model_download: bool = True,
     model_url: str | None = None,
-    allow_storage_fallback: bool = True,
-    assign_path=None,
 ) -> Path:
     target = Path(model_path)
     custom_url = str(model_url or os.environ.get(PET_DETECTOR_MODEL_URL_ENV) or "").strip()
@@ -1970,7 +1987,7 @@ def ensure_pet_detector_model(
             f"{target} and no pet detector download URL is configured."
         )
     try:
-        downloaded = _download_file(
+        return _download_file(
             url,
             target,
             label="YOLOX pet detector model",
@@ -1978,24 +1995,30 @@ def ensure_pet_detector_model(
             max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
         )
     except _ModelStoragePermissionError as exc:
-        fallback = user_pet_model_cache_dir() / "detector" / target.name
-        if not allow_storage_fallback or fallback == target:
-            raise
+        fallback = _model_storage_fallback_path(target)
+        if fallback is None:
+            raise RuntimeError(
+                "Pet scanning unavailable: model storage is not writable at "
+                f"{target.parent}."
+            ) from exc
         _LOGGER.warning(
             "Falling back to %s after model storage failure",
             fallback.parent,
             exc_info=exc,
         )
-        downloaded = _download_file(
-            url,
-            fallback,
-            label="YOLOX pet detector model",
-            expected_sha256=expected_sha256,
-            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-        )
-    if assign_path is not None:
-        assign_path(downloaded)
-    return downloaded
+        try:
+            return _download_file(
+                url,
+                fallback,
+                label="YOLOX pet detector model",
+                expected_sha256=expected_sha256,
+                max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+            )
+        except _ModelStoragePermissionError as fallback_exc:
+            raise RuntimeError(
+                "Pet scanning unavailable: model storage is not writable at "
+                f"{fallback.parent}."
+            ) from fallback_exc
 
 
 def default_pet_model_dir() -> Path:
@@ -2025,7 +2048,7 @@ def pet_model_search_roots() -> tuple[Path, ...]:
 
 
 def pet_model_override_dir() -> Path | None:
-    override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
+    override = str(os.environ.get(IPHOTO_PET_MODEL_DIR_ENV) or "").strip()
     if not override:
         return None
     return Path(override).expanduser()
@@ -2051,8 +2074,10 @@ def _directory_is_writable(path: Path) -> bool:
             pass
         probe.unlink(missing_ok=True)
         return True
-    except OSError:
-        return False
+    except OSError as exc:
+        if exc.errno in _MODEL_STORAGE_ERRNOS:
+            return False
+        raise
 
 
 def pet_model_install_root() -> Path:
@@ -2064,6 +2089,21 @@ def pet_model_install_root() -> Path:
     if not _is_packaged_macos_app_path(bundled) and _directory_is_writable(bundled):
         return bundled
     return user_pet_model_cache_dir()
+
+
+def _model_storage_fallback_path(path: Path) -> Path | None:
+    if pet_model_override_dir() is not None:
+        return None
+    target = Path(path)
+    bundled = bundled_pet_model_dir()
+    try:
+        relative = target.relative_to(bundled)
+    except ValueError:
+        return None
+    fallback = user_pet_model_cache_dir() / relative
+    if fallback == target:
+        return None
+    return fallback
 
 
 def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> Path:
@@ -2138,9 +2178,6 @@ def _download_file(
         raise RuntimeError(f"Pet scanning unavailable: {label} URL must use HTTPS.")
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _raise_if_model_storage_error(exc, destination.parent)
-    try:
         with tempfile.TemporaryDirectory(
             prefix="iphoto-pet-model-",
             dir=destination.parent,
@@ -2178,10 +2215,20 @@ def _download_file(
             except OSError as exc:
                 _raise_if_model_storage_error(exc, destination)
             return destination
+    except _ModelStoragePermissionError:
+        raise
     except TimeoutError as exc:
         raise RuntimeError(
             f"Pet scanning unavailable: downloading {label} timed out. "
             "Check your network connection or install the model manually."
+        ) from exc
+    except OSError as exc:
+        if exc.errno in _MODEL_STORAGE_ERRNOS:
+            _raise_if_model_storage_error(exc, destination.parent)
+        raise RuntimeError(
+            f"Pet scanning unavailable: failed to download {label} from {url} "
+            f"({_error_reason(exc)}). Check your network connection, set "
+            f"{PET_DETECTOR_MODEL_URL_ENV}, or install the model manually."
         ) from exc
     except Exception as exc:
         if isinstance(exc, RuntimeError) and str(exc).startswith("Pet scanning unavailable:"):
@@ -2191,8 +2238,6 @@ def _download_file(
             f"({_error_reason(exc)}). Check your network connection, set "
             f"{PET_DETECTOR_MODEL_URL_ENV}, or install the model manually."
         ) from exc
-
-
 
 
 def _validate_downloaded_file(

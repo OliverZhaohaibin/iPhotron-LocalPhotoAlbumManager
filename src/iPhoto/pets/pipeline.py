@@ -2194,26 +2194,24 @@ def _download_file(
                 handle = tmp_path.open("wb")
             except OSError as exc:
                 _raise_if_model_storage_error(exc, tmp_path)
-            with (
-                request.urlopen(  # noqa: S310
+            with handle:
+                with request.urlopen(  # noqa: S310
                     url,
                     timeout=_DOWNLOAD_TIMEOUT_SECONDS,
                     context=_download_ssl_context(url),
-                ) as response,
-                handle,
-            ):
-                total = 0
-                while True:
-                    chunk = response.read(_DOWNLOAD_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > int(max_bytes):
-                        raise RuntimeError(f"Downloaded {label} exceeds its size limit.")
-                    try:
-                        handle.write(chunk)
-                    except OSError as exc:
-                        _raise_if_model_storage_error(exc, tmp_path)
+                ) as response:
+                    total = 0
+                    while True:
+                        chunk = response.read(_DOWNLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > int(max_bytes):
+                            raise RuntimeError(f"Downloaded {label} exceeds its size limit.")
+                        try:
+                            handle.write(chunk)
+                        except OSError as exc:
+                            _raise_if_model_storage_error(exc, tmp_path)
             try:
                 _validate_downloaded_file(
                     tmp_path,

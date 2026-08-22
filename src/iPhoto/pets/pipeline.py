@@ -217,6 +217,12 @@ class PetClusterPipeline:
         tiny_area_ratio: float = DEFAULT_PET_TINY_AREA_RATIO,
         tiny_max_confidence: float = DEFAULT_PET_TINY_MAX_CONFIDENCE,
     ) -> None:
+        override_root = pet_model_override_dir()
+        if override_root is not None and Path(model_root) != override_root:
+            raise PetModelUnavailableError(
+                "Pet scanning unavailable: IPHOTO_PET_MODEL_DIR is authoritative "
+                "and does not fall back automatically."
+            )
         self._model_root = Path(model_root)
         self._detector_model_name = detector_model_name
         self._embedding_model_name = embedding_model_name
@@ -553,10 +559,15 @@ class PetClusterPipeline:
         if self._allow_model_download:
             from .model_bootstrap import ensure_pet_model_artifacts
 
+            default_root = self._model_root in default_roots
             ensure_pet_model_artifacts(
-                None if self._model_root in default_roots else self._model_root
+                None if default_root else self._model_root
             )
-            if _exists(candidate):
+            if default_root:
+                resolved = resolve_pet_model_path(relative_path, directory=directory)
+                if resolved.path is not None:
+                    return resolved.path
+            elif _exists(candidate):
                 return candidate
         raise PetModelUnavailableError(
             "Pet scanning unavailable: missing model artifact "
@@ -2100,6 +2111,8 @@ def _download_file(
             f"Pet scanning unavailable: downloading {label} timed out. "
             "Check your network connection or install the model manually."
         ) from exc
+    except PermissionError as exc:
+        raise RuntimeError(f"filesystem permission denied for {label}.") from exc
     except Exception as exc:
         if isinstance(exc, RuntimeError) and str(exc).startswith("Pet scanning unavailable:"):
             raise

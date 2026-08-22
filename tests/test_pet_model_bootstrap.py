@@ -1,11 +1,14 @@
+from pathlib import Path
+import errno
+
 import hashlib
 import json
-from pathlib import Path
 
 import pytest
 
-from iPhoto.pets import model_bootstrap
 from iPhoto.pets import pipeline as pet_pipeline
+from iPhoto.pets.errors import PetModelUnavailableError
+from iPhoto.pets import model_bootstrap
 
 
 def _unexpected_call(reason: str):
@@ -318,6 +321,93 @@ def test_invalid_embedder_is_replaced_by_fixed_download(
     assert not invalid_embedder.exists()
     expected_embedder = extension / "embedding" / "dinov2_vits14" / "dinov2_vits14.pt"
     assert downloaded == [expected_embedder]
+
+
+def test_direct_pipeline_rejects_conflicting_authoritative_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(tmp_path / "authoritative"))
+
+    with pytest.raises(
+        pet_pipeline.PetModelUnavailableError,
+        match="IPHOTO_PET_MODEL_DIR is authoritative",
+    ):
+        pet_pipeline.PetClusterPipeline(model_root=tmp_path)
+
+
+def test_direct_pipeline_accepts_matching_authoritative_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(tmp_path))
+
+    pipeline = pet_pipeline.PetClusterPipeline(
+        model_root=tmp_path,
+        allow_model_download=False,
+    )
+
+    assert pipeline._model_root == tmp_path
+
+
+def test_bundled_permission_failure_falls_back_to_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    detector_relative = Path("detector/yolox_nano_coco.onnx")
+    embedder_relative = Path("embedding/dinov2_vits14/dinov2_vits14.pt")
+    requested_detector = extension / detector_relative
+    fallback_detector = cache / detector_relative
+    fallback_embedder = cache / embedder_relative
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", lambda: extension)
+
+    def _ensure(path, **_kwargs):
+        if Path(path) == requested_detector:
+            raise OSError(errno.EACCES, "Permission denied")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"detector")
+
+    def _download(path, *, url):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"embedder")
+
+    monkeypatch.setattr(pet_pipeline, "ensure_pet_detector_model", _ensure)
+    monkeypatch.setattr(model_bootstrap, "_download_dinov2_release", _download)
+    monkeypatch.setattr(pet_pipeline, "pet_embedder_model_url", lambda: "https://models.example")
+
+    assert model_bootstrap.ensure_pet_model_artifacts() is True
+    assert fallback_detector.read_bytes() == b"detector"
+    assert fallback_embedder.read_bytes() == b"embedder"
+
+
+def test_validation_failure_does_not_fall_back_to_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    requested_detector = extension / "detector/yolox_nano_coco.onnx"
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", lambda: extension)
+
+    def _ensure(_path, **_kwargs):
+        raise RuntimeError("SHA-256 verification failed")
+
+    monkeypatch.setattr(pet_pipeline, "ensure_pet_detector_model", _ensure)
+
+    with pytest.raises(PetModelUnavailableError, match="SHA-256 verification failed"):
+        model_bootstrap.ensure_pet_model_artifacts()
+
+    assert not (cache / "detector").exists()
 
 
 def test_invalid_bundled_artifacts_install_to_user_cache(

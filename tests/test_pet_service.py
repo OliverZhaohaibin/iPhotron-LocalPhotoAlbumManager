@@ -1920,6 +1920,72 @@ def test_pet_scan_worker_cancelled_scan_skips_consolidation(
     assert worker._consolidate_pending_clustering(SimpleNamespace(distance_threshold=0.42)) is False
 
 
+def test_pipeline_default_root_resolves_extension_after_bootstrap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    relative = Path("detector/yolox_nano_coco.onnx")
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "pet_model_install_root",
+        lambda: extension,
+    )
+    monkeypatch.setattr(pet_pipeline, "_validate_downloaded_file", lambda *_args, **_: None)
+
+    def _bootstrap(model_root=None, **_kwargs):
+        path = (model_root or extension) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"downloaded")
+
+    monkeypatch.setattr("iPhoto.pets.model_bootstrap.ensure_pet_model_artifacts", _bootstrap)
+
+    pipeline = PetClusterPipeline(
+        model_root=cache,
+        allow_model_download=True,
+    )
+
+    assert pipeline._resolve_model_path(relative) == extension / relative
+
+
+def test_pipeline_bundled_root_resolves_cache_after_bootstrap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    relative = Path("detector/yolox_nano_coco.onnx")
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "pet_model_install_root",
+        lambda: cache,
+    )
+    monkeypatch.setattr(pet_pipeline, "_validate_downloaded_file", lambda *_args, **_: None)
+
+    def _bootstrap(model_root=None, **_kwargs):
+        path = (model_root or cache) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"downloaded")
+
+    monkeypatch.setattr("iPhoto.pets.model_bootstrap.ensure_pet_model_artifacts", _bootstrap)
+
+    pipeline = PetClusterPipeline(
+        model_root=extension,
+        allow_model_download=True,
+    )
+
+    assert pipeline._resolve_model_path(relative) == cache / relative
+
+
 def test_pet_merge_redirect_chain_keeps_all_alias_clusters_linked(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     detections = [

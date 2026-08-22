@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -51,17 +52,11 @@ def ensure_pet_model_artifacts(
     )
     detector_missing = resolved_detector.path is None
 
+    acquired_root: Path | None = None
     if detector_missing:
-        try:
-            pet_pipeline.ensure_pet_detector_model(
-                detector_path,
-                allow_model_download=True,
-            )
-        except Exception as exc:  # noqa: BLE001 - normalize acquisition errors
-            raise PetModelUnavailableError(
-                "Pet scanning unavailable: failed to acquire the YOLOX detector "
-                f"model ({_error_reason(exc)})."
-            ) from exc
+        acquired_path = _acquire_detector_with_fallback(detector_path)
+        if acquired_path is not None and acquired_path != detector_path:
+            acquired_root = _storage_root(acquired_path, detector_relative)
 
     embedder_relative = Path(str(embedder_manifest["filename"]))
     resolved_embedder = _resolve_artifact(
@@ -74,6 +69,8 @@ def ensure_pet_model_artifacts(
         resolved_embedder.invalid_bundled,
         embedder_relative.parent,
     )
+    if acquired_root is not None:
+        embedder_directory = acquired_root / embedder_relative.parent
     embedder_path = embedder_directory / embedder_relative.name
     embedder_missing = resolved_embedder.path is None
 
@@ -85,9 +82,14 @@ def ensure_pet_model_artifacts(
             "verified model in IPHOTO_PET_MODEL_DIR."
         )
     if embedder_missing:
-        _download_dinov2_release(embedder_path, url=url)
+        _download_dinov2_release_with_fallback(embedder_path, url=url)
 
     return detector_missing or embedder_missing
+
+
+def _storage_root(path: Path, relative_path: Path) -> Path:
+    depth = len(relative_path.parts) - 1
+    return path.parents[depth]
 
 
 def _download_dinov2_release(model_path: Path, *, url: str) -> None:
@@ -107,6 +109,9 @@ def _download_dinov2_release(model_path: Path, *, url: str) -> None:
             model_name=str(manifest["model_name"]),
         )
     except Exception as exc:  # noqa: BLE001 - urllib/SSL/runtime failures vary
+        if _is_permission_error(exc) or _is_permission_error(exc.__cause__):
+            _remove_dinov2_artifact(model_path)
+            raise PermissionError(str(exc)) from exc.__cause__ or exc
         _remove_dinov2_artifact(model_path)
         raise PetModelUnavailableError(
             "Pet scanning unavailable: failed to download the verified DINOv2 "
@@ -124,6 +129,84 @@ def _acquisition_path(
     if invalid_bundled:
         return pet_pipeline.user_pet_model_cache_dir() / relative_path
     return pet_pipeline.pet_model_install_root() / relative_path
+
+
+def _is_permission_error(exc: BaseException) -> bool:
+    return isinstance(exc, OSError) and exc.errno in {
+        errno.EACCES,
+        errno.EPERM,
+        errno.EROFS,
+    }
+
+
+def _fallback_artifact_path(path: Path) -> Path | None:
+    override_root = pet_pipeline.pet_model_override_dir()
+    bundled_root = pet_pipeline.bundled_pet_model_dir()
+    user_cache = pet_pipeline.user_pet_model_cache_dir()
+    path = Path(path)
+    try:
+        relative = path.resolve().relative_to(bundled_root.resolve())
+    except (OSError, ValueError):
+        return None
+    if override_root is not None or relative == Path("."):
+        return None
+    return user_cache / relative
+
+
+def _acquire_to(path: Path, *, acquire, is_fallback_error) -> Path | None:
+    try:
+        acquire(path)
+        return path
+    except Exception as exc:
+        fallback = _fallback_artifact_path(path)
+        if fallback is None or not is_fallback_error(exc):
+            raise
+        try:
+            acquire(fallback)
+            return fallback
+        except Exception as fallback_exc:
+            raise fallback_exc from exc
+    return None
+
+
+def _acquire_detector_with_fallback(path: Path) -> Path | None:
+    original_error: BaseException | None = None
+
+    def _acquire(target: Path) -> None:
+        nonlocal original_error
+        try:
+            pet_pipeline.ensure_pet_detector_model(
+                target,
+                allow_model_download=True,
+            )
+        except Exception as exc:
+            original_error = exc
+            raise
+
+    def _should_fallback(_exc: BaseException) -> bool:
+        return original_error is not None and _is_permission_error(original_error)
+
+    try:
+        return _acquire_to(path, acquire=_acquire, is_fallback_error=_should_fallback)
+    except Exception as exc:
+        reason = original_error or exc
+        raise PetModelUnavailableError(
+            "Pet scanning unavailable: failed to acquire the YOLOX detector "
+            f"model ({_error_reason(reason)})."
+        ) from exc
+
+
+def _download_dinov2_release_with_fallback(path: Path, *, url: str) -> Path | None:
+    def _acquire(target: Path) -> None:
+        _download_dinov2_release(target, url=url)
+
+    _acquire_to(
+        path,
+        acquire=_acquire,
+        is_fallback_error=lambda exc: (
+            _is_permission_error(exc) or _is_permission_error(exc.__cause__)
+        ),
+    )
 
 
 def _resolve_artifact(

@@ -2177,19 +2177,30 @@ def _download_file(
     if urlparse(url).scheme.lower() != "https":
         raise RuntimeError(f"Pet scanning unavailable: {label} URL must use HTTPS.")
     try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix="iphoto-pet-model-",
-            dir=destination.parent,
-        ) as tmp_dir:
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _raise_if_model_storage_error(exc, destination.parent)
+        try:
+            temp_context = tempfile.TemporaryDirectory(
+                prefix="iphoto-pet-model-",
+                dir=destination.parent,
+            )
+        except OSError as exc:
+            _raise_if_model_storage_error(exc, destination.parent)
+        with temp_context as tmp_dir:
             tmp_path = Path(tmp_dir) / destination.name
+            try:
+                handle = tmp_path.open("wb")
+            except OSError as exc:
+                _raise_if_model_storage_error(exc, tmp_path)
             with (
                 request.urlopen(  # noqa: S310
                     url,
                     timeout=_DOWNLOAD_TIMEOUT_SECONDS,
                     context=_download_ssl_context(url),
                 ) as response,
-                tmp_path.open("wb") as handle,
+                handle,
             ):
                 total = 0
                 while True:
@@ -2203,13 +2214,16 @@ def _download_file(
                         handle.write(chunk)
                     except OSError as exc:
                         _raise_if_model_storage_error(exc, tmp_path)
-            _validate_downloaded_file(
-                tmp_path,
-                label=label,
-                expected_sha256=expected_sha256,
-                max_bytes=max_bytes,
-                exact_size=exact_size,
-            )
+            try:
+                _validate_downloaded_file(
+                    tmp_path,
+                    label=label,
+                    expected_sha256=expected_sha256,
+                    max_bytes=max_bytes,
+                    exact_size=exact_size,
+                )
+            except OSError as exc:
+                _raise_if_model_storage_error(exc, tmp_path)
             try:
                 tmp_path.replace(destination)
             except OSError as exc:
@@ -2223,8 +2237,6 @@ def _download_file(
             "Check your network connection or install the model manually."
         ) from exc
     except OSError as exc:
-        if exc.errno in _MODEL_STORAGE_ERRNOS:
-            _raise_if_model_storage_error(exc, destination.parent)
         raise RuntimeError(
             f"Pet scanning unavailable: failed to download {label} from {url} "
             f"({_error_reason(exc)}). Check your network connection, set "

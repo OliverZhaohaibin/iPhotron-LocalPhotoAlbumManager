@@ -45,7 +45,9 @@ platform user cache:
 ```text
 src/extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
-└── embedding/dinov2_vits14/dinov2_vits14.pt
+└── embedding/dinov2_vits14/
+    ├── dinov2_vits14.pt
+    └── dinov2_vits14.pt.metadata.json
 ```
 
 Lookup uses the bundled extension first and then the platform user cache. A
@@ -59,18 +61,21 @@ Missing models may be populated lazily on the first non-empty scan unless
 YOLOX release and can be overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`.
 DINOv2 acquisition downloads the official checkpoint declared by SHA-256 and
 exact size, builds TorchScript at the pinned source revision, validates output
-shape and numeric equivalence, then publishes an atomically replaced derived
-cache. Bundled TorchScript integrity remains governed by the manifest; derived
-caches are validated against their locally recorded hash and size. Only local
-`EACCES`, `EPERM`, or `EROFS` storage failures fall back to the user cache;
+shape and numeric equivalence, atomically replaces the generated `.pt`
+artifact, then publishes its matching metadata sidecar. The metadata sidecar is
+required for both packaged/prebuilt TorchScript and first-use derived caches.
+Bundled TorchScript integrity remains governed by the fixed manifest values;
+derived caches are validated against their locally recorded hash and size. Only
+local `EACCES`, `EPERM`, or `EROFS` storage failures fall back to the user cache;
 network, TLS, disk-full, I/O, hash, or conversion failures fail without retry.
 `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without disabling the rest of
 the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
-runtime and the two model files under `extension/models/pets`. A build that
-omits them must preserve graceful degradation: core browsing, People, Maps,
-editing, and library state remain usable.
+runtime, the YOLOX detector, the DINOv2 TorchScript artifact, and its
+`dinov2_vits14.pt.metadata.json` sidecar under `extension/models/pets`. A build
+that omits them must preserve graceful degradation: core browsing, People,
+Maps, editing, and library state remain usable.
 
 ## Detection And Clustering Contract
 

@@ -64,8 +64,8 @@ def test_device_failure_does_not_delete_published_dino_cache(
         return FakeModel()
 
     monkeypatch.setattr(
-        pet_pipeline._LegacyDinoV2Embedder,
-        "_build_dinov2_cache",
+        pet_pipeline._DinoV2Embedder,
+        "_build_verified_dinov2_cpu_cache",
         fake_verified_cpu_build,
     )
     embedder = pet_pipeline._DinoV2Embedder.__new__(pet_pipeline._DinoV2Embedder)
@@ -89,9 +89,7 @@ def test_dino_download_error_does_not_suggest_detector_override(
             f"{pet_pipeline.PET_DETECTOR_MODEL_URL_ENV}, or install the model manually."
         )
 
-    # The facade keeps the original helper in its function globals. Replace that
-    # cell through the function globals so the public wrapper can be exercised.
-    monkeypatch.setitem(pet_pipeline._download_file.__globals__, "_original_download_file", fail_download)
+    monkeypatch.setattr(pet_pipeline, "_original_download_file", fail_download)
 
     with pytest.raises(RuntimeError) as raised:
         pet_pipeline._download_file(

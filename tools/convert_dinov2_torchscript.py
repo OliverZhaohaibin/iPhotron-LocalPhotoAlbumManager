@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Build and verify the fixed DINOv2 TorchScript release artifact.
 
-This is a development/release tool. Production code must never execute Torch Hub.
+This is a development/release tool. Production first-use acquisition may also
+build from the pinned checkpoint and source revision when no verified artifact
+is available.
 """
 
 from __future__ import annotations
@@ -48,7 +50,13 @@ def main() -> int:
 
     torch.manual_seed(0)
     example = torch.randn(tuple(manifest["input_shape"]), dtype=torch.float32)
-    model = torch.hub.load(source, model_name, source="github", trust_repo=True).eval().cpu()
+    model = torch.hub.load(
+        source,
+        model_name,
+        source="github",
+        trust_repo=True,
+        skip_validation=True,
+    ).eval().cpu()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="iphoto-dinov2-release-") as temp_dir:

@@ -399,6 +399,7 @@ class TestDownloadsAndMetadata:
                 *,
                 source: str,
                 trust_repo: bool,
+                skip_validation: bool,
                 weights: str,
             ):
                 assert repo_or_dir == (
@@ -408,6 +409,7 @@ class TestDownloadsAndMetadata:
                 assert requested_model_name == model_name
                 assert source == "github"
                 assert trust_repo is True
+                assert skip_validation is True
                 assert Path(weights).read_bytes() == checkpoint_bytes
                 return FakeModel()
 

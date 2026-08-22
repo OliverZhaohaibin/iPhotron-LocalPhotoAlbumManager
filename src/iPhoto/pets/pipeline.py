@@ -1278,7 +1278,7 @@ class _YoloxOnnxPetDetector:
         )
         try:
             outputs = self._session.run(None, {self._input_name: preprocessed.tensor})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider failures vary by backend
             raise PetInferenceError(f"Pet detector inference failed: {_error_reason(exc)}") from exc
         predictions = _flatten_predictions(outputs)
         boxes: list[_DetectedPetBox] = []
@@ -1355,7 +1355,7 @@ class _DinoV2Embedder:
                 if isinstance(output, (list, tuple)):
                     output = output[0]
                 vector = output.detach().cpu().numpy().reshape(-1)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - backend failures vary by device/runtime
             raise PetInferenceError(
                 f"Pet embedding inference failed: {_error_reason(exc)}"
             ) from exc
@@ -1425,6 +1425,7 @@ class _DinoV2Embedder:
                     self._model_name,
                     source="github",
                     trust_repo=True,
+                    skip_validation=True,
                     weights=str(checkpoint),
                 ).eval().cpu()
                 example = self._torch.randn(

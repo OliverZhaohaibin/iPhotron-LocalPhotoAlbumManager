@@ -1,0 +1,35 @@
+name: Pets DINO source contract
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, edit-base]
+
+permissions:
+  contents: read
+
+jobs:
+  dino-source-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install focused dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy pillow certifi torch torchvision
+
+      - name: Run real pinned DINOv2 source contract
+        env:
+          PYTHONPATH: src
+          IPHOTO_RUN_PETS_DINO_SOURCE_CONTRACT: "1"
+          XFORMERS_DISABLED: "1"
+        run: python -m pytest -q -s tests/contracts/test_pets_dino_source_contract.py

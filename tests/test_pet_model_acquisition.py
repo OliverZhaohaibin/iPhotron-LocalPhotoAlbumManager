@@ -393,15 +393,22 @@ class TestDownloadsAndMetadata:
 
         class FakeHub:
             @staticmethod
-            def load(source: str, requested_model_name: str, **kwargs):
-                assert source == (
+            def load(
+                repo_or_dir: str,
+                requested_model_name: str,
+                *,
+                source: str,
+                trust_repo: bool,
+                weights: str,
+            ):
+                assert repo_or_dir == (
                     f"{pet_pipeline._EMBEDDER_MANIFEST['source_repository']}:"
                     f"{pet_pipeline._DINO_SOURCE_REVISION}"
                 )
                 assert requested_model_name == model_name
-                assert kwargs["source"] == "github"
-                assert kwargs["trust_repo"] is True
-                assert Path(kwargs["weights"]).read_bytes() == checkpoint_bytes
+                assert source == "github"
+                assert trust_repo is True
+                assert Path(weights).read_bytes() == checkpoint_bytes
                 return FakeModel()
 
         class FakeTesting:

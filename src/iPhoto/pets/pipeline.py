@@ -1426,8 +1426,14 @@ class _DinoV2Embedder:
                     source="github",
                     trust_repo=True,
                     skip_validation=True,
-                    weights=str(checkpoint),
+                    pretrained=False,
                 ).eval().cpu()
+                state_dict = self._torch.load(
+                    str(checkpoint),
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                model.load_state_dict(state_dict, strict=True)
                 example = self._torch.randn(
                     tuple(_EMBEDDER_MANIFEST["input_shape"]),
                     dtype=self._torch.float32,
@@ -1473,12 +1479,7 @@ class _DinoV2Embedder:
                     )
                 except OSError as exc:
                     _raise_if_model_storage_error(exc, metadata_path)
-                final_metadata_path = _dinov2_metadata_path(model_path)
-                try:
-                    candidate.replace(model_path)
-                    metadata_path.replace(final_metadata_path)
-                except OSError as exc:
-                    _raise_if_model_storage_error(exc, model_path.parent)
+                _publish_dinov2_cache_pair(candidate, metadata_path, model_path)
                 _validate_dinov2_cache_metadata(model_path, model_name=self._model_name)
                 loaded = self._torch.jit.load(str(model_path), map_location=self._device)
             loaded.eval()
@@ -2281,6 +2282,34 @@ def _file_sha256(path: Path) -> str:
 
 def _dinov2_metadata_path(model_path: Path) -> Path:
     return Path(model_path).with_suffix(f"{Path(model_path).suffix}.metadata.json")
+
+
+def _publish_dinov2_cache_pair(
+    candidate: Path,
+    metadata_path: Path,
+    model_path: Path,
+) -> None:
+    candidate = Path(candidate)
+    metadata_path = Path(metadata_path)
+    model_path = Path(model_path)
+    final_metadata_path = _dinov2_metadata_path(model_path)
+    published_model = False
+    try:
+        candidate.replace(model_path)
+        published_model = True
+        metadata_path.replace(final_metadata_path)
+    except OSError as exc:
+        if published_model:
+            try:
+                model_path.unlink(missing_ok=True)
+                final_metadata_path.unlink(missing_ok=True)
+            except OSError:
+                _LOGGER.warning(
+                    "Failed to roll back partial DINOv2 cache publish at %s",
+                    model_path.parent,
+                    exc_info=True,
+                )
+        _raise_if_model_storage_error(exc, model_path.parent)
 
 
 def _validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> None:

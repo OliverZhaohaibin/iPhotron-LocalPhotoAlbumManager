@@ -356,6 +356,7 @@ class TestDownloadsAndMetadata:
     ) -> None:
         model_bytes = b"derived-torchscript"
         checkpoint_bytes = b"checkpoint"
+        checkpoint_state = {"checkpoint": "verified"}
         model_name = "dinov2_vits14"
         model_path = tmp_path / EMBEDDER_RELATIVE / f"{model_name}.pt"
 
@@ -371,6 +372,11 @@ class TestDownloadsAndMetadata:
 
             def to(self, _device):
                 return self
+
+            def load_state_dict(self, state_dict, *, strict: bool):
+                assert state_dict is checkpoint_state
+                assert strict is True
+                return None
 
             def __call__(self, _example):
                 return FakeTensor()
@@ -400,7 +406,7 @@ class TestDownloadsAndMetadata:
                 source: str,
                 trust_repo: bool,
                 skip_validation: bool,
-                weights: str,
+                pretrained: bool,
             ):
                 assert repo_or_dir == (
                     f"{pet_pipeline._EMBEDDER_MANIFEST['source_repository']}:"
@@ -410,7 +416,7 @@ class TestDownloadsAndMetadata:
                 assert source == "github"
                 assert trust_repo is True
                 assert skip_validation is True
-                assert Path(weights).read_bytes() == checkpoint_bytes
+                assert pretrained is False
                 return FakeModel()
 
         class FakeTesting:
@@ -425,10 +431,21 @@ class TestDownloadsAndMetadata:
             def __exit__(self, *_args):
                 return False
 
+        loaded_checkpoints: list[Path] = []
+
+        def fake_torch_load(path, *, map_location, weights_only: bool):
+            checkpoint_path = Path(path)
+            loaded_checkpoints.append(checkpoint_path)
+            assert checkpoint_path.read_bytes() == checkpoint_bytes
+            assert map_location == "cpu"
+            assert weights_only is True
+            return checkpoint_state
+
         fake_torch = SimpleNamespace(
             hub=FakeHub(),
             jit=FakeJit(),
             testing=FakeTesting(),
+            load=fake_torch_load,
             float32=object(),
             randn=lambda *_args, **_kwargs: object(),
             no_grad=lambda: FakeNoGrad(),
@@ -451,12 +468,46 @@ class TestDownloadsAndMetadata:
         loaded = embedder._build_dinov2_cache(model_path)
         metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
         assert isinstance(loaded, FakeModel)
+        assert len(loaded_checkpoints) == 1
+        assert loaded_checkpoints[0].name == "dinov2_vits14_pretrain.pth"
         assert model_path.read_bytes() == model_bytes
         assert metadata_path.is_file()
         pet_pipeline._validate_dinov2_cache_metadata(model_path, model_name=model_name)
         metadata = hashlib_json_load(metadata_path)
         assert metadata["derived_torchscript_sha256"] == hashlib.sha256(model_bytes).hexdigest()
         assert metadata["derived_torchscript_size"] == len(model_bytes)
+
+    def test_dino_publish_rolls_back_model_when_metadata_publish_is_denied(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        candidate = tmp_path / "candidate.pt"
+        candidate_metadata = tmp_path / "candidate.pt.metadata.json"
+        model_path = tmp_path / "published" / "dinov2_vits14.pt"
+        final_metadata = pet_pipeline._dinov2_metadata_path(model_path)
+        model_path.parent.mkdir(parents=True)
+        candidate.write_bytes(b"candidate")
+        candidate_metadata.write_text("{}", encoding="utf-8")
+
+        real_replace = Path.replace
+
+        def fail_metadata_replace(self: Path, target: Path):
+            if self == candidate_metadata:
+                raise OSError(errno.EACCES, "denied")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", fail_metadata_replace)
+
+        with pytest.raises(pet_pipeline._ModelStoragePermissionError):
+            pet_pipeline._publish_dinov2_cache_pair(
+                candidate,
+                candidate_metadata,
+                model_path,
+            )
+
+        assert not model_path.exists()
+        assert not final_metadata.exists()
 
 
 class ShortResponse:

@@ -22,7 +22,8 @@ def ensure_pet_model_artifacts(
     DINOv2 is acquired from Meta's official checkpoint and converted locally to
     a TorchScript cache. The derived TorchScript bytes are deliberately not
     pinned by SHA-256 because serialization can vary across supported PyTorch
-    versions; source identity and loadability are validated instead.
+    versions; source identity is validated at download time and secondary-cache
+    loadability is left to the runtime loader.
     """
 
     allow_download = (
@@ -82,7 +83,7 @@ def ensure_pet_model_artifacts(
     url = pet_pipeline.pet_embedder_model_url()
     if not url:
         raise PetModelUnavailableError(
-            "Pet scanning unavailable: no DINOv2 checkpoint source is configured. "
+            "Pet scanning unavailable: no fixed DINOv2 checkpoint source is configured. "
             "Set IPHOTO_PET_EMBEDDER_MODEL_URL or install the model in "
             "IPHOTO_PET_MODEL_DIR."
         )
@@ -411,3 +412,12 @@ def _remove_dinov2_artifact(model_path: Path) -> None:
 
 def _error_reason(exc: Exception) -> str:
     return str(exc).strip() or exc.__class__.__name__
+
+
+# Install the official-checkpoint contract only when the bootstrap module itself
+# is imported. Importing the lightweight ``iPhoto.pets`` package must not pull
+# in either AI pipeline; that boundary is covered by coordinator architecture
+# tests and keeps recognition read surfaces dependency-light.
+from .model_runtime import install_pet_model_runtime as _install_pet_model_runtime  # noqa: E402
+
+_install_pet_model_runtime(pet_pipeline)

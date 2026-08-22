@@ -6,7 +6,10 @@ from collections.abc import Generator
 from types import ModuleType
 
 import pytest
-from _pytest.monkeypatch import MonkeyPatch, notset
+from _pytest.monkeypatch import MonkeyPatch
+
+
+_UNSET = object()
 
 
 def _same_legacy_export(left: object, right: object) -> bool:
@@ -33,20 +36,23 @@ class _PetsFacadeAwareMonkeyPatch(MonkeyPatch):
     acquisition still resolves the implementation global.
     """
 
-    def setattr(self, target, name, value=notset, raising: bool = True) -> None:
+    def setattr(self, target, name, value=_UNSET, raising: bool = True) -> None:
         mirror_target: ModuleType | None = None
         attribute_name: str | None = None
 
-        if value is notset:
-            super().setattr(target, name, value, raising=raising)
+        # Preserve MonkeyPatch's two-argument dotted-path overload without
+        # depending on pytest's private ``notset`` sentinel, which is no longer
+        # importable in pytest 9.
+        if value is _UNSET:
+            super().setattr(target, name, raising=raising)
             return
 
         if isinstance(target, ModuleType) and target.__name__ == "iPhoto.pets.pipeline":
             attribute_name = str(name)
             implementation = getattr(target, "_impl", None)
             if isinstance(implementation, ModuleType) and hasattr(implementation, attribute_name):
-                facade_before = getattr(target, attribute_name, notset)
-                impl_before = getattr(implementation, attribute_name, notset)
+                facade_before = getattr(target, attribute_name, _UNSET)
+                impl_before = getattr(implementation, attribute_name, _UNSET)
                 if attribute_name == "_download_file" or _same_legacy_export(
                     facade_before,
                     impl_before,

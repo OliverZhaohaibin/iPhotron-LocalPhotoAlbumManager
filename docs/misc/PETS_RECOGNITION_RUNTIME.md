@@ -48,14 +48,24 @@ src/extension/models/pets/
 └── embedding/dinov2_vits14/dinov2_vits14.pt
 ```
 
-`IPHOTO_PET_MODEL_DIR` overrides that root. Missing models may be populated on
-first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL defaults
-to the upstream YOLOX release and can be overridden with
-`IPHOTO_PET_DETECTOR_MODEL_URL`. Production does not execute Torch Hub. DINOv2
-must be supplied as the hash- and size-verified TorchScript artifact declared
-in `iPhoto/pets/model_manifest.json`; Torch Hub is restricted to the release
-conversion tool. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without
-disabling the rest of the application.
+Lookup uses the bundled extension first and then the platform user cache. A
+writable development extension directory is preferred for installation; signed
+macOS app bundles install directly into the user cache without a writability
+probe. `IPHOTO_PET_MODEL_DIR` is authoritative: when set, both lookup and
+installation use only that root.
+
+Missing models may be populated lazily on the first non-empty scan unless
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL defaults to the upstream
+YOLOX release and can be overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`.
+DINOv2 acquisition downloads the official checkpoint declared by SHA-256 and
+exact size, builds TorchScript at the pinned source revision, validates output
+shape and numeric equivalence, then publishes an atomically replaced derived
+cache. Bundled TorchScript integrity remains governed by the manifest; derived
+caches are validated against their locally recorded hash and size. Only local
+`EACCES`, `EPERM`, or `EROFS` storage failures fall back to the user cache;
+network, TLS, disk-full, I/O, hash, or conversion failures fail without retry.
+`IPHOTO_PET_SCAN_DISABLED=1` disables the worker without disabling the rest of
+the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
 runtime and the two model files under `extension/models/pets`. A build that

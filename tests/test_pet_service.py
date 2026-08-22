@@ -34,7 +34,6 @@ from iPhoto.pets.pipeline import (
     _decode_yolox_predictions,
     _dedupe_supported_species_boxes,
     _DetectedPetBox,
-    _DinoV2Embedder,
     _map_yolox_box_to_source,
     _pet_box_overlaps_people_boxes,
     _preprocess_yolox,
@@ -2447,59 +2446,16 @@ def test_pet_detector_model_downloads_when_missing(tmp_path: Path, monkeypatch) 
     assert not temporary_directories[0].exists()
 
 
-def test_dinov2_runtime_downloads_only_the_fixed_torchscript_artifact(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    class FakeModel:
-        def eval(self):
-            return self
-
-        def to(self, _device):
-            return self
-
-    class FakeJit:
-        @staticmethod
-        def load(path: str, *, map_location: str):
-            assert Path(path).read_bytes() == b"fixed-torchscript"
-            assert map_location == "cpu"
-            return FakeModel()
-
-    embedder = _DinoV2Embedder.__new__(_DinoV2Embedder)
-    embedder._torch = SimpleNamespace(jit=FakeJit())
-    embedder._device = "cpu"
-    embedder._model_name = "dinov2_vits14"
-    monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_url",
-        "https://models.example.test/dinov2_vits14.pt",
+def test_dinov2_manifest_declares_official_checkpoint_source() -> None:
+    embedder = PET_MODEL_MANIFEST["embedder"]
+    assert embedder["weights_url"] == (
+        "https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/"
+        "dinov2_vits14_pretrain.pth"
     )
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_sha256",
-        hashlib.sha256(b"fixed-torchscript").hexdigest(),
+    assert embedder["weights_sha256"] == (
+        "b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9"
     )
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_size",
-        len(b"fixed-torchscript"),
-    )
-
-    def fake_download(url, path, **kwargs):
-        assert url == "https://models.example.test/dinov2_vits14.pt"
-        assert kwargs["expected_sha256"] == hashlib.sha256(b"fixed-torchscript").hexdigest()
-        assert kwargs["max_bytes"] == len(b"fixed-torchscript")
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_bytes(b"fixed-torchscript")
-
-    monkeypatch.setattr(pet_pipeline, "_download_file", fake_download)
-    model_path = tmp_path / "dinov2_vits14.pt"
-    model = embedder._download_dinov2_model(model_path)
-
-    assert isinstance(model, FakeModel)
-    assert model_path.read_bytes() == b"fixed-torchscript"
-    assert pet_pipeline._dinov2_metadata_path(model_path).is_file()
+    assert embedder["weights_size"] == 88283115
 
 
 def test_pet_embedding_source_is_pinned_to_commit() -> None:

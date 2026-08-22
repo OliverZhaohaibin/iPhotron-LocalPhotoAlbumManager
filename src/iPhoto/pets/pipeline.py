@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -50,6 +51,26 @@ from .repository_utils import (
 from .state_repository import PetStateRepository
 
 
+class _ModelStoragePermissionError(OSError):
+    pass
+
+
+_MODEL_STORAGE_ERRNOS = {
+    errno.EACCES,
+    errno.EPERM,
+    errno.EROFS,
+}
+
+
+def _raise_if_model_storage_error(exc: OSError, path: Path) -> None:
+    if exc.errno in _MODEL_STORAGE_ERRNOS:
+        raise _ModelStoragePermissionError(
+            exc.errno,
+            f"model storage is not writable: {path}",
+        ) from exc
+    raise exc
+
+
 def _load_pet_model_manifest() -> dict:
     manifest_path = Path(__file__).with_name("model_manifest.json")
     try:
@@ -72,6 +93,16 @@ def _load_pet_model_manifest() -> dict:
         raise PetPipelineInvariantError("Pets detector manifest input contract is invalid.")
     if embedder.get("input_shape") != [1, 3, 224, 224]:
         raise PetPipelineInvariantError("Pets embedder manifest input contract is invalid.")
+    weights_url = str(embedder.get("weights_url") or "").strip()
+    if urlparse(weights_url).scheme.lower() != "https":
+        raise PetPipelineInvariantError("Pets embedder checkpoint URL must use HTTPS.")
+    weights_sha256 = str(embedder.get("weights_sha256") or "")
+    if len(weights_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in weights_sha256.lower()
+    ):
+        raise PetPipelineInvariantError("Pets embedder checkpoint SHA-256 is invalid.")
+    if int(embedder.get("weights_size") or 0) <= 0:
+        raise PetPipelineInvariantError("Pets embedder checkpoint size is invalid.")
     torchscript_url = str(embedder.get("torchscript_url") or "").strip()
     if torchscript_url and urlparse(torchscript_url).scheme.lower() != "https":
         raise PetPipelineInvariantError("Pets embedder TorchScript URL must use HTTPS.")
@@ -106,13 +137,18 @@ DEFAULT_PET_TINY_AREA_RATIO = 0.001
 DEFAULT_PET_TINY_MAX_CONFIDENCE = 0.45
 DEFAULT_PET_DETECTOR_MODEL_URL = str(_DETECTOR_MANIFEST["url"])
 PET_MODEL_AUTO_DOWNLOAD_ENV = "IPHOTO_PET_MODEL_AUTO_DOWNLOAD"
+IPHOTO_PET_MODEL_DIR_ENV = "IPHOTO_PET_MODEL_DIR"
 PET_DETECTOR_MODEL_URL_ENV = "IPHOTO_PET_DETECTOR_MODEL_URL"
 PET_DETECTOR_MODEL_SHA256_ENV = "IPHOTO_PET_DETECTOR_MODEL_SHA256"
 DEFAULT_PET_DETECTOR_MODEL_SHA256 = str(_DETECTOR_MANIFEST["sha256"])
 DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES = int(_DETECTOR_MANIFEST["max_bytes"])
 # The development conversion tool uses this immutable source revision. The
-# production runtime only loads the fixed, hash-verified TorchScript artifact.
+# production runtime builds a local cache from the fixed, hash-verified Meta
+# checkpoint when no valid bundled artifact is available.
 _DINO_SOURCE_REVISION = str(_EMBEDDER_MANIFEST["source_revision"])
+_DINO_WEIGHTS_URL = str(_EMBEDDER_MANIFEST["weights_url"])
+_DINO_WEIGHTS_SHA256 = str(_EMBEDDER_MANIFEST["weights_sha256"]).lower()
+_DINO_WEIGHTS_SIZE = int(_EMBEDDER_MANIFEST["weights_size"])
 _DOWNLOAD_TIMEOUT_SECONDS = 60
 _DOWNLOAD_CHUNK_SIZE = 1024 * 256
 _YOLOX_STRIDES = (8, 16, 32)
@@ -537,6 +573,12 @@ class PetClusterPipeline:
         return self._embedder
 
     def _resolve_model_path(self, relative_path: Path, *, directory: bool = False) -> Path:
+        override = pet_model_override_dir()
+        if override is not None and self._model_root != override:
+            raise PetModelUnavailableError(
+                "Pet scanning unavailable: model root does not match "
+                f"{IPHOTO_PET_MODEL_DIR_ENV}."
+            )
         if self._model_root == default_pet_model_dir():
             return resolve_pet_model_path(relative_path, directory=directory)
         return self._model_root / relative_path
@@ -1163,6 +1205,7 @@ class _YoloxOnnxPetDetector:
         *,
         score_threshold: float = 0.30,
         allow_model_download: bool = True,
+        allow_storage_fallback: bool = True,
         enable_tiled_detection: bool = True,
         tile_scan_min_confidence: float | None = None,
         tile_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
@@ -1187,6 +1230,8 @@ class _YoloxOnnxPetDetector:
         ensure_pet_detector_model(
             self._model_path,
             allow_model_download=allow_model_download,
+            allow_storage_fallback=allow_storage_fallback,
+            assign_path=self._set_model_path,
         )
         try:
             providers = list(execution_providers or _resolve_execution_providers(ort))
@@ -1195,7 +1240,7 @@ class _YoloxOnnxPetDetector:
             shape = self._session.get_inputs()[0].shape
             self._input_size = _input_size_from_shape(shape)
             _validate_yolox_session_contract(self._session)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider failures vary by backend
             if isinstance(exc, PetPipelineInvariantError):
                 raise
             raise PetModelUnavailableError(
@@ -1236,7 +1281,7 @@ class _YoloxOnnxPetDetector:
         )
         try:
             outputs = self._session.run(None, {self._input_name: preprocessed.tensor})
-        except Exception as exc:  # noqa: BLE001 - provider failures vary by backend
+        except Exception as exc:
             raise PetInferenceError(f"Pet detector inference failed: {_error_reason(exc)}") from exc
         predictions = _flatten_predictions(outputs)
         boxes: list[_DetectedPetBox] = []
@@ -1269,6 +1314,9 @@ class _YoloxOnnxPetDetector:
             and box.confidence >= self._tile_scan_min_confidence
             for box in boxes
         )
+
+    def _set_model_path(self, path: Path) -> None:
+        self._model_path = Path(path)
 
 
 class _DinoV2Embedder:
@@ -1313,7 +1361,7 @@ class _DinoV2Embedder:
                 if isinstance(output, (list, tuple)):
                     output = output[0]
                 vector = output.detach().cpu().numpy().reshape(-1)
-        except Exception as exc:  # noqa: BLE001 - provider failures vary by backend
+        except Exception as exc:
             raise PetInferenceError(
                 f"Pet embedding inference failed: {_error_reason(exc)}"
             ) from exc
@@ -1326,55 +1374,105 @@ class _DinoV2Embedder:
         return normalize_vector(vector.astype(np.float32))
 
     def _download_dinov2_model(self, model_path: Path):
-        url = str(_EMBEDDER_MANIFEST.get("torchscript_url") or "").strip()
-        if not url:
-            raise PetModelUnavailableError(
-                "Pet scanning unavailable: the fixed DINOv2 TorchScript release "
-                "artifact has not been configured. Install a package containing the "
-                "verified model or set IPHOTO_PET_MODEL_DIR."
+        try:
+            return self._build_dinov2_cache(model_path)
+        except _ModelStoragePermissionError as exc:
+            fallback = user_pet_model_cache_dir() / model_path.relative_to(
+                bundled_pet_model_dir()
             )
+            if not self._allow_storage_fallback or fallback == model_path:
+                raise
+            _LOGGER.warning(
+                "Falling back to the user Pets model cache after %s was not writable",
+                model_path.parent,
+                exc_info=exc,
+            )
+            return self._build_dinov2_cache(fallback)
+
+    def _build_dinov2_cache(self, model_path: Path):
         try:
             _install_certifi_environment()
-            _download_file(
-                url,
-                model_path,
-                label="DINOv2 TorchScript model",
-                expected_sha256=str(_EMBEDDER_MANIFEST["torchscript_sha256"]),
-                max_bytes=int(_EMBEDDER_MANIFEST["torchscript_size"]),
-            )
-            _dinov2_metadata_path(model_path).write_text(
-                json.dumps(
-                    {
-                        "model_name": self._model_name,
-                        "source_repository": _EMBEDDER_MANIFEST["source_repository"],
-                        "source_revision": _DINO_SOURCE_REVISION,
-                        "torchscript_sha256": _EMBEDDER_MANIFEST["torchscript_sha256"],
-                        "torchscript_size": _EMBEDDER_MANIFEST["torchscript_size"],
-                        "input_shape": _EMBEDDER_MANIFEST["input_shape"],
-                        "output_shape": _EMBEDDER_MANIFEST["output_shape"],
-                    },
-                    indent=2,
-                    sort_keys=True,
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix="iphoto-dinov2-build-",
+                dir=model_path.parent,
+            ) as temp_dir:
+                checkpoint = Path(temp_dir) / "dinov2_vits14_pretrain.pth"
+                candidate = Path(temp_dir) / model_path.name
+                metadata_path = _dinov2_metadata_path(candidate)
+                _download_file(
+                    _DINO_WEIGHTS_URL,
+                    checkpoint,
+                    label="DINOv2 checkpoint",
+                    expected_sha256=_DINO_WEIGHTS_SHA256,
+                    max_bytes=_DINO_WEIGHTS_SIZE,
+                    exact_size=_DINO_WEIGHTS_SIZE,
                 )
-                + "\n",
-                encoding="utf-8",
-            )
-            _validate_dinov2_cache_metadata(
-                model_path,
-                model_name=self._model_name,
-            )
-            model = self._torch.jit.load(str(model_path), map_location=self._device)
+                source = f"facebookresearch/dinov2:{_DINO_SOURCE_REVISION}"
+                model = self._torch.hub.load(
+                    source,
+                    self._model_name,
+                    source="github",
+                    trust_repo=True,
+                    weights=str(checkpoint),
+                ).eval().cpu()
+                example = self._torch.randn(
+                    tuple(_EMBEDDER_MANIFEST["input_shape"]),
+                    dtype=self._torch.float32,
+                )
+                with self._torch.no_grad():
+                    eager_output = model(example)
+                    traced = self._torch.jit.trace(model, example, strict=False)
+                    traced.save(str(candidate))
+                    scripted = self._torch.jit.load(str(candidate), map_location="cpu").eval()
+                    scripted_output = scripted(example)
+                if isinstance(eager_output, (list, tuple)):
+                    eager_output = eager_output[0]
+                if isinstance(scripted_output, (list, tuple)):
+                    scripted_output = scripted_output[0]
+                output_shape = tuple(_EMBEDDER_MANIFEST["output_shape"])
+                actual_shape = tuple(scripted_output.shape)
+                if actual_shape != output_shape:
+                    raise RuntimeError(
+                        f"DINOv2 output shape mismatch: {actual_shape} != {output_shape}"
+                    )
+                self._torch.testing.assert_close(
+                    scripted_output,
+                    eager_output,
+                    rtol=1e-4,
+                    atol=1e-5,
+                )
+                metadata = {
+                    "artifact_kind": "derived_checkpoint_cache",
+                    "model_name": self._model_name,
+                    "source_repository": str(_EMBEDDER_MANIFEST["source_repository"]),
+                    "source_revision": _DINO_SOURCE_REVISION,
+                    "weights_sha256": _DINO_WEIGHTS_SHA256,
+                    "weights_size": _DINO_WEIGHTS_SIZE,
+                    "derived_torchscript_sha256": _file_sha256(candidate).lower(),
+                    "derived_torchscript_size": candidate.stat().st_size,
+                    "input_shape": list(_EMBEDDER_MANIFEST["input_shape"]),
+                    "output_shape": list(output_shape),
+                }
+                metadata_path.write_text(
+                    json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                candidate.replace(model_path)
+                _validate_dinov2_cache_metadata(model_path, model_name=self._model_name)
+                loaded = self._torch.jit.load(str(model_path), map_location=self._device)
+            loaded.eval()
+            loaded.to(self._device)
+            return loaded
         except Exception as exc:
+            if isinstance(exc, _ModelStoragePermissionError):
+                raise
             model_path.unlink(missing_ok=True)
             _dinov2_metadata_path(model_path).unlink(missing_ok=True)
             raise PetModelUnavailableError(
-                "Pet scanning unavailable: failed to download the verified DINOv2 "
-                f"TorchScript model ({_error_reason(exc)})."
+                "Pet scanning unavailable: failed to build the verified DINOv2 "
+                f"model cache ({_error_reason(exc)})."
             ) from exc
-
-        model.eval()
-        model.to(self._device)
-        return model
 
 
 def _resolve_execution_providers(ort) -> list[str]:
@@ -1833,6 +1931,8 @@ def ensure_pet_detector_model(
     *,
     allow_model_download: bool = True,
     model_url: str | None = None,
+    allow_storage_fallback: bool = True,
+    assign_path=None,
 ) -> Path:
     target = Path(model_path)
     custom_url = str(model_url or os.environ.get(PET_DETECTOR_MODEL_URL_ENV) or "").strip()
@@ -1847,13 +1947,16 @@ def ensure_pet_detector_model(
             f"{PET_DETECTOR_MODEL_SHA256_ENV}."
         )
     if target.is_file():
-        _validate_downloaded_file(
-            target,
-            label="YOLOX pet detector model",
-            expected_sha256=expected_sha256,
-            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-        )
-        return target
+        try:
+            _validate_downloaded_file(
+                target,
+                label="YOLOX pet detector model",
+                expected_sha256=expected_sha256,
+                max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+            )
+            return target
+        except OSError as exc:
+            _raise_if_model_storage_error(exc, target)
     if not allow_model_download:
         raise RuntimeError(
             "Pet scanning unavailable: missing YOLOX model at "
@@ -1866,14 +1969,33 @@ def ensure_pet_detector_model(
             "Pet scanning unavailable: missing YOLOX model at "
             f"{target} and no pet detector download URL is configured."
         )
-    _download_file(
-        url,
-        target,
-        label="YOLOX pet detector model",
-        expected_sha256=expected_sha256,
-        max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-    )
-    return target
+    try:
+        downloaded = _download_file(
+            url,
+            target,
+            label="YOLOX pet detector model",
+            expected_sha256=expected_sha256,
+            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+        )
+    except _ModelStoragePermissionError as exc:
+        fallback = user_pet_model_cache_dir() / "detector" / target.name
+        if not allow_storage_fallback or fallback == target:
+            raise
+        _LOGGER.warning(
+            "Falling back to %s after model storage failure",
+            fallback.parent,
+            exc_info=exc,
+        )
+        downloaded = _download_file(
+            url,
+            fallback,
+            label="YOLOX pet detector model",
+            expected_sha256=expected_sha256,
+            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+        )
+    if assign_path is not None:
+        assign_path(downloaded)
+    return downloaded
 
 
 def default_pet_model_dir() -> Path:
@@ -1896,20 +2018,61 @@ def user_pet_model_cache_dir() -> Path:
 
 
 def pet_model_search_roots() -> tuple[Path, ...]:
-    roots: list[Path] = []
+    override = pet_model_override_dir()
+    if override is not None:
+        return (override,)
+    return (bundled_pet_model_dir(), user_pet_model_cache_dir())
+
+
+def pet_model_override_dir() -> Path | None:
     override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
-    if override:
-        roots.append(Path(override).expanduser())
-    roots.extend((user_pet_model_cache_dir(), bundled_pet_model_dir()))
-    return tuple(dict.fromkeys(roots))
+    if not override:
+        return None
+    return Path(override).expanduser()
+
+
+def _is_packaged_macos_app_path(path: Path) -> bool:
+    if sys.platform != "darwin":
+        return False
+    parts = path.parts
+    return any(
+        part.lower().endswith(".app")
+        and index + 1 < len(parts)
+        and parts[index + 1] == "Contents"
+        for index, part in enumerate(parts)
+    )
+
+
+def _directory_is_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".iphoto-write-probe-{uuid.uuid4().hex}"
+        with probe.open("xb"):
+            pass
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def pet_model_install_root() -> Path:
+    override = pet_model_override_dir()
+    if override is not None:
+        return override
+
+    bundled = bundled_pet_model_dir()
+    if not _is_packaged_macos_app_path(bundled) and _directory_is_writable(bundled):
+        return bundled
+    return user_pet_model_cache_dir()
 
 
 def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> Path:
     relative = Path(relative_path)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Pet model path must be relative to a configured model root.")
-    override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
+    override = pet_model_override_dir()
     user_cache = user_pet_model_cache_dir()
+    bundled_invalid = False
     for root in pet_model_search_roots():
         candidate = root / relative
         exists = candidate.is_dir() if directory else candidate.is_file()
@@ -1936,7 +2099,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                 )
             return candidate
         except (OSError, RuntimeError) as exc:
-            if override and root == Path(override).expanduser():
+            if override is not None and root == override:
                 raise RuntimeError(
                     f"Pet scanning unavailable: invalid model override artifact at {candidate}."
                 ) from exc
@@ -1952,10 +2115,13 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                         candidate,
                         exc_info=True,
                     )
-            # Bundled artifacts are read-only. An invalid one must never become
-            # a download target and must not shadow a later valid artifact.
-            continue
-    return user_pet_model_cache_dir() / relative
+            if root == bundled_pet_model_dir():
+                bundled_invalid = True
+    if override is not None:
+        return override / relative
+    if bundled_invalid:
+        return user_cache / relative
+    return pet_model_install_root() / relative
 
 
 def _download_file(
@@ -1965,11 +2131,15 @@ def _download_file(
     label: str,
     expected_sha256: str,
     max_bytes: int,
-) -> None:
+    exact_size: int | None = None,
+) -> Path:
     destination = Path(destination)
     if urlparse(url).scheme.lower() != "https":
         raise RuntimeError(f"Pet scanning unavailable: {label} URL must use HTTPS.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _raise_if_model_storage_error(exc, destination.parent)
     try:
         with tempfile.TemporaryDirectory(
             prefix="iphoto-pet-model-",
@@ -1992,14 +2162,22 @@ def _download_file(
                     total += len(chunk)
                     if total > int(max_bytes):
                         raise RuntimeError(f"Downloaded {label} exceeds its size limit.")
-                    handle.write(chunk)
+                    try:
+                        handle.write(chunk)
+                    except OSError as exc:
+                        _raise_if_model_storage_error(exc, tmp_path)
             _validate_downloaded_file(
                 tmp_path,
                 label=label,
                 expected_sha256=expected_sha256,
                 max_bytes=max_bytes,
+                exact_size=exact_size,
             )
-            tmp_path.replace(destination)
+            try:
+                tmp_path.replace(destination)
+            except OSError as exc:
+                _raise_if_model_storage_error(exc, destination)
+            return destination
     except TimeoutError as exc:
         raise RuntimeError(
             f"Pet scanning unavailable: downloading {label} timed out. "
@@ -2015,18 +2193,23 @@ def _download_file(
         ) from exc
 
 
+
+
 def _validate_downloaded_file(
     path: Path,
     *,
     label: str,
     expected_sha256: str,
     max_bytes: int,
+    exact_size: int | None = None,
 ) -> None:
     size = Path(path).stat().st_size
     if size <= 0:
         raise RuntimeError(f"Downloaded {label} is empty.")
     if size > int(max_bytes):
         raise RuntimeError(f"Downloaded {label} exceeds its size limit.")
+    if exact_size is not None and size != int(exact_size):
+        raise RuntimeError(f"Downloaded {label} has the wrong file size.")
     digest = _file_sha256(path)
     if not expected_sha256 or digest != expected_sha256.lower():
         raise RuntimeError(f"Downloaded {label} failed SHA-256 verification.")
@@ -2061,8 +2244,6 @@ def _validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> Non
         "model_name": model_name,
         "source_repository": _EMBEDDER_MANIFEST["source_repository"],
         "source_revision": _DINO_SOURCE_REVISION,
-        "torchscript_sha256": _EMBEDDER_MANIFEST["torchscript_sha256"],
-        "torchscript_size": _EMBEDDER_MANIFEST["torchscript_size"],
         "input_shape": _EMBEDDER_MANIFEST["input_shape"],
         "output_shape": _EMBEDDER_MANIFEST["output_shape"],
     }
@@ -2070,8 +2251,33 @@ def _validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> Non
         raise RuntimeError(
             f"Pet scanning unavailable: DINOv2 metadata contract mismatch at {metadata_path}."
         )
-    size_matches = int(metadata.get("torchscript_size") or -1) == model_path.stat().st_size
-    hash_matches = str(metadata.get("torchscript_sha256") or "").lower() == _file_sha256(model_path)
+    manifest_matches = (
+        metadata.get("torchscript_sha256")
+        == str(_EMBEDDER_MANIFEST["torchscript_sha256"]).lower()
+        and int(metadata.get("torchscript_size") or -1)
+        == int(_EMBEDDER_MANIFEST["torchscript_size"])
+    )
+    derived_matches = (
+        metadata.get("artifact_kind") == "derived_checkpoint_cache"
+        and metadata.get("weights_sha256") == _DINO_WEIGHTS_SHA256
+        and int(metadata.get("weights_size") or -1) == _DINO_WEIGHTS_SIZE
+        and isinstance(metadata.get("derived_torchscript_sha256"), str)
+        and len(metadata.get("derived_torchscript_sha256")) == 64
+        and isinstance(metadata.get("derived_torchscript_size"), int)
+        and int(metadata.get("derived_torchscript_size")) > 0
+    )
+    if manifest_matches:
+        size = int(metadata["torchscript_size"])
+        digest = str(metadata["torchscript_sha256"])
+    elif derived_matches:
+        size = int(metadata["derived_torchscript_size"])
+        digest = str(metadata["derived_torchscript_sha256"]).lower()
+    else:
+        raise RuntimeError(
+            f"Pet scanning unavailable: DINOv2 cache integrity contract failed for {model_path}."
+        )
+    size_matches = size == model_path.stat().st_size
+    hash_matches = digest.lower() == _file_sha256(model_path)
     if not size_matches or not hash_matches:
         raise RuntimeError(
             f"Pet scanning unavailable: DINOv2 cache integrity check failed for {model_path}."

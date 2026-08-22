@@ -220,14 +220,13 @@ class _DinoV2Embedder(_LegacyDinoV2Embedder):
     def _build_verified_dinov2_cpu_cache(self, model_path: Path):
         """Build, publish, validate, and reload a DINOv2 cache entirely on CPU."""
 
-        published = False
+        _install_certifi_environment()
         try:
-            _install_certifi_environment()
-            try:
-                model_path.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                _raise_if_model_storage_error(exc, model_path.parent)
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _raise_if_model_storage_error(exc, model_path.parent)
 
+        try:
             with _dinov2_acquisition_lock(model_path):
                 existing = self._load_verified_dinov2_cpu_cache(model_path)
                 if existing is not None:
@@ -239,99 +238,121 @@ class _DinoV2Embedder(_LegacyDinoV2Embedder):
                     except OSError as exc:
                         _raise_if_model_storage_error(exc, stale_path)
 
+                published = False
                 try:
-                    temp_context = tempfile.TemporaryDirectory(
-                        prefix="iphoto-dinov2-build-",
-                        dir=model_path.parent,
-                    )
-                except OSError as exc:
-                    _raise_if_model_storage_error(exc, model_path.parent)
-
-                with temp_context as temp_dir:
-                    checkpoint = Path(temp_dir) / "dinov2_vits14_pretrain.pth"
-                    candidate = Path(temp_dir) / model_path.name
-                    metadata_path = _dinov2_metadata_path(candidate)
-                    _download_file(
-                        _DINO_WEIGHTS_URL,
-                        checkpoint,
-                        label="DINOv2 checkpoint",
-                        expected_sha256=_DINO_WEIGHTS_SHA256,
-                        max_bytes=_DINO_WEIGHTS_SIZE,
-                        exact_size=_DINO_WEIGHTS_SIZE,
-                    )
-                    source = f"{_EMBEDDER_MANIFEST['source_repository']}:{_DINO_SOURCE_REVISION}"
-                    model = self._torch.hub.load(
-                        source,
-                        self._model_name,
-                        source="github",
-                        trust_repo=True,
-                        skip_validation=True,
-                        pretrained=False,
-                    ).eval().cpu()
-                    state_dict = self._torch.load(
-                        str(checkpoint),
-                        map_location="cpu",
-                        weights_only=True,
-                    )
-                    model.load_state_dict(state_dict, strict=True)
-                    example = self._torch.randn(
-                        tuple(_EMBEDDER_MANIFEST["input_shape"]),
-                        dtype=self._torch.float32,
-                    )
-                    with self._torch.no_grad():
-                        eager_output = model(example)
-                        traced = self._torch.jit.trace(model, example, strict=False)
-                        traced.save(str(candidate))
-                        scripted = self._torch.jit.load(str(candidate), map_location="cpu").eval()
-                        scripted_output = scripted(example)
-                    if isinstance(eager_output, (list, tuple)):
-                        eager_output = eager_output[0]
-                    if isinstance(scripted_output, (list, tuple)):
-                        scripted_output = scripted_output[0]
-                    output_shape = tuple(_EMBEDDER_MANIFEST["output_shape"])
-                    actual_shape = tuple(scripted_output.shape)
-                    if actual_shape != output_shape:
-                        raise RuntimeError(
-                            f"DINOv2 output shape mismatch: {actual_shape} != {output_shape}"
-                        )
-                    self._torch.testing.assert_close(
-                        scripted_output,
-                        eager_output,
-                        rtol=1e-4,
-                        atol=1e-5,
-                    )
-                    metadata = {
-                        "artifact_kind": "derived_checkpoint_cache",
-                        "model_name": self._model_name,
-                        "source_repository": str(_EMBEDDER_MANIFEST["source_repository"]),
-                        "source_revision": _DINO_SOURCE_REVISION,
-                        "weights_sha256": _DINO_WEIGHTS_SHA256,
-                        "weights_size": _DINO_WEIGHTS_SIZE,
-                        "derived_torchscript_sha256": _file_sha256(candidate).lower(),
-                        "derived_torchscript_size": candidate.stat().st_size,
-                        "input_shape": list(_EMBEDDER_MANIFEST["input_shape"]),
-                        "output_shape": list(output_shape),
-                    }
                     try:
-                        metadata_path.write_text(
-                            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
-                            encoding="utf-8",
+                        temp_context = tempfile.TemporaryDirectory(
+                            prefix="iphoto-dinov2-build-",
+                            dir=model_path.parent,
                         )
                     except OSError as exc:
-                        _raise_if_model_storage_error(exc, metadata_path)
-                    _publish_dinov2_cache_pair(candidate, metadata_path, model_path)
-                    _validate_dinov2_cache_metadata(model_path, model_name=self._model_name)
-                    published = True
-                    return self._torch.jit.load(str(model_path), map_location="cpu")
+                        _raise_if_model_storage_error(exc, model_path.parent)
+
+                    with temp_context as temp_dir:
+                        checkpoint = Path(temp_dir) / "dinov2_vits14_pretrain.pth"
+                        candidate = Path(temp_dir) / model_path.name
+                        metadata_path = _dinov2_metadata_path(candidate)
+                        _download_file(
+                            _DINO_WEIGHTS_URL,
+                            checkpoint,
+                            label="DINOv2 checkpoint",
+                            expected_sha256=_DINO_WEIGHTS_SHA256,
+                            max_bytes=_DINO_WEIGHTS_SIZE,
+                            exact_size=_DINO_WEIGHTS_SIZE,
+                        )
+                        source = (
+                            f"{_EMBEDDER_MANIFEST['source_repository']}:"
+                            f"{_DINO_SOURCE_REVISION}"
+                        )
+                        model = self._torch.hub.load(
+                            source,
+                            self._model_name,
+                            source="github",
+                            trust_repo=True,
+                            skip_validation=True,
+                            pretrained=False,
+                        ).eval().cpu()
+                        state_dict = self._torch.load(
+                            str(checkpoint),
+                            map_location="cpu",
+                            weights_only=True,
+                        )
+                        model.load_state_dict(state_dict, strict=True)
+                        example = self._torch.randn(
+                            tuple(_EMBEDDER_MANIFEST["input_shape"]),
+                            dtype=self._torch.float32,
+                        )
+                        with self._torch.no_grad():
+                            eager_output = model(example)
+                            traced = self._torch.jit.trace(model, example, strict=False)
+                            traced.save(str(candidate))
+                            scripted = self._torch.jit.load(
+                                str(candidate), map_location="cpu"
+                            ).eval()
+                            scripted_output = scripted(example)
+                        if isinstance(eager_output, (list, tuple)):
+                            eager_output = eager_output[0]
+                        if isinstance(scripted_output, (list, tuple)):
+                            scripted_output = scripted_output[0]
+                        output_shape = tuple(_EMBEDDER_MANIFEST["output_shape"])
+                        actual_shape = tuple(scripted_output.shape)
+                        if actual_shape != output_shape:
+                            raise RuntimeError(
+                                f"DINOv2 output shape mismatch: {actual_shape} != {output_shape}"
+                            )
+                        self._torch.testing.assert_close(
+                            scripted_output,
+                            eager_output,
+                            rtol=1e-4,
+                            atol=1e-5,
+                        )
+                        metadata = {
+                            "artifact_kind": "derived_checkpoint_cache",
+                            "model_name": self._model_name,
+                            "source_repository": str(_EMBEDDER_MANIFEST["source_repository"]),
+                            "source_revision": _DINO_SOURCE_REVISION,
+                            "weights_sha256": _DINO_WEIGHTS_SHA256,
+                            "weights_size": _DINO_WEIGHTS_SIZE,
+                            "derived_torchscript_sha256": _file_sha256(candidate).lower(),
+                            "derived_torchscript_size": candidate.stat().st_size,
+                            "input_shape": list(_EMBEDDER_MANIFEST["input_shape"]),
+                            "output_shape": list(output_shape),
+                        }
+                        try:
+                            metadata_path.write_text(
+                                json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+                                encoding="utf-8",
+                            )
+                        except OSError as exc:
+                            _raise_if_model_storage_error(exc, metadata_path)
+                        _publish_dinov2_cache_pair(candidate, metadata_path, model_path)
+                        _validate_dinov2_cache_metadata(
+                            model_path,
+                            model_name=self._model_name,
+                        )
+                        published = True
+                        return self._torch.jit.load(str(model_path), map_location="cpu")
+                except _ModelStoragePermissionError:
+                    raise
+                except Exception as exc:
+                    if not published:
+                        for final_path in (model_path, _dinov2_metadata_path(model_path)):
+                            try:
+                                final_path.unlink(missing_ok=True)
+                            except OSError as cleanup_exc:
+                                _raise_if_model_storage_error(cleanup_exc, final_path)
+                    raise _impl.PetModelUnavailableError(
+                        "Pet scanning unavailable: failed to build the verified DINOv2 "
+                        f"model cache ({_error_reason(exc)})."
+                    ) from exc
         except _ModelStoragePermissionError:
             raise
+        except _impl.PetModelUnavailableError:
+            raise
         except Exception as exc:
-            if not published:
-                model_path.unlink(missing_ok=True)
-                _dinov2_metadata_path(model_path).unlink(missing_ok=True)
             raise _impl.PetModelUnavailableError(
-                "Pet scanning unavailable: failed to build the verified DINOv2 "
-                f"model cache ({_error_reason(exc)})."
+                "Pet scanning unavailable: failed to acquire the DINOv2 model cache "
+                f"({_error_reason(exc)})."
             ) from exc
 
 

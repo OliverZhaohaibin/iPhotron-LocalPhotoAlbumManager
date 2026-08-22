@@ -9,6 +9,8 @@ import pytest
 
 from iPhoto.pets import pipeline as pet_pipeline
 
+pet_impl = pet_pipeline._impl
+
 DETECTOR_RELATIVE = Path("detector") / "yolox_nano_coco.onnx"
 EMBEDDER_RELATIVE = Path("embedding") / "dinov2_vits14"
 _FAKE_DETECTOR_BYTES = b"detector"
@@ -42,7 +44,7 @@ def _clear_override(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def _fake_detector_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        pet_pipeline,
+        pet_impl,
         "DEFAULT_PET_DETECTOR_MODEL_SHA256",
         _FAKE_DETECTOR_SHA256,
     )
@@ -60,15 +62,15 @@ class TestStoragePolicy:
         bundled_model = _valid_detector(bundled / DETECTOR_RELATIVE)
         _valid_detector(cache / DETECTOR_RELATIVE)
 
-        monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: bundled)
-        monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+        monkeypatch.setattr(pet_impl, "bundled_pet_model_dir", lambda: bundled)
+        monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
         probed: list[Path] = []
 
         def record_probe(path: Path) -> bool:
             probed.append(path)
             return True
 
-        monkeypatch.setattr(pet_pipeline, "_directory_is_writable", record_probe)
+        monkeypatch.setattr(pet_impl, "_directory_is_writable", record_probe)
         resolved = pet_pipeline.resolve_pet_model_path(DETECTOR_RELATIVE)
         assert resolved == bundled_model
         assert not probed
@@ -83,8 +85,8 @@ class TestStoragePolicy:
         cache = tmp_path / "cache"
         _invalid_detector(bundled / DETECTOR_RELATIVE)
         model = _valid_detector(cache / DETECTOR_RELATIVE)
-        monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: bundled)
-        monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+        monkeypatch.setattr(pet_impl, "bundled_pet_model_dir", lambda: bundled)
+        monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
         assert pet_pipeline.resolve_pet_model_path(DETECTOR_RELATIVE) == model
         assert (bundled / DETECTOR_RELATIVE).exists()
 
@@ -94,9 +96,9 @@ class TestStoragePolicy:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         bundled = tmp_path / "extension"
-        monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: bundled)
+        monkeypatch.setattr(pet_impl, "bundled_pet_model_dir", lambda: bundled)
         monkeypatch.setattr(
-            pet_pipeline,
+            pet_impl,
             "_directory_is_writable",
             lambda path: path == bundled,
         )
@@ -110,13 +112,13 @@ class TestStoragePolicy:
         bundled = tmp_path / "iPhoto.app" / "Contents" / "Resources" / "models"
         cache = tmp_path / "cache"
         monkeypatch.setattr(pet_pipeline.sys, "platform", "darwin")
-        monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: bundled)
-        monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+        monkeypatch.setattr(pet_impl, "bundled_pet_model_dir", lambda: bundled)
+        monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
 
         def fail_probe(_path: Path) -> bool:
             raise AssertionError("packaged app bundles must not be probed")
 
-        monkeypatch.setattr(pet_pipeline, "_directory_is_writable", fail_probe)
+        monkeypatch.setattr(pet_impl, "_directory_is_writable", fail_probe)
         assert pet_pipeline.pet_model_install_root() == cache
         assert pet_pipeline.resolve_pet_model_path(DETECTOR_RELATIVE) == cache / DETECTOR_RELATIVE
 
@@ -172,8 +174,8 @@ class TestStoragePolicy:
         bundled = tmp_path / "extension"
         cache = tmp_path / "cache"
         target = bundled / EMBEDDER_RELATIVE / "dinov2_vits14.pt"
-        monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: bundled)
-        monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+        monkeypatch.setattr(pet_impl, "bundled_pet_model_dir", lambda: bundled)
+        monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
         assert pet_pipeline._model_storage_fallback_path(target) == (
             cache / EMBEDDER_RELATIVE / "dinov2_vits14.pt"
         )
@@ -216,7 +218,7 @@ class TestOverrideAuthority:
             calls.append(Path(destination))
             raise pet_pipeline._ModelStoragePermissionError(errno.EACCES, "denied")
 
-        monkeypatch.setattr(pet_pipeline, "_download_file", fail_download)
+        monkeypatch.setattr(pet_impl, "_download_file", fail_download)
         with pytest.raises(RuntimeError, match="not writable"):
             pet_pipeline.ensure_pet_detector_model(target)
         assert calls == [target]

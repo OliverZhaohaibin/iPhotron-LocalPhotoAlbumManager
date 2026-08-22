@@ -32,6 +32,8 @@ from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 from iPhoto.pets.status import is_pet_scan_candidate
 from iPhoto.utils.pathutils import LibraryAssetPathError, resolve_library_asset_path
 
+pet_impl = pet_pipeline._impl
+
 
 class _AssetStore:
     def __init__(self, asset_id: str) -> None:
@@ -396,7 +398,7 @@ def test_second_bbox_failure_rolls_back_thumbnails_and_metric(
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_bytes(b"thumbnail")
 
-    monkeypatch.setattr(pet_pipeline, "save_pet_thumbnail", save_then_fail)
+    monkeypatch.setattr(pet_impl, "save_pet_thumbnail", save_then_fail)
     thumbnail_dir = tmp_path / ".iPhoto" / "pets" / "thumbnails" / ".staging" / "op"
     results = pipeline.detect_pets_for_rows(
         [{"id": "asset-a", "rel": "album/a.jpg"}],
@@ -1101,8 +1103,6 @@ def test_incremental_rescan_preserves_manual_cross_species_identity(
     assert coordinator._journal.unfinished() == ()
     assert f"Preserving mixed-species Pet identity {dog_identity}" in caplog.text
 
-    # The non-dominant species member must also keep the durable identity.
-    # This is the regression case that previously fell through the species gate.
     caplog.clear()
     rescanned_cat = replace(
         _detection("cat-rescan", asset_id="asset-cat"),
@@ -1514,9 +1514,9 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
     monkeypatch.setattr(
-        pet_pipeline,
+        pet_impl,
         "pet_model_search_roots",
         lambda: (cache, bundled),
     )
@@ -1543,10 +1543,10 @@ def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
         if Path(path) == cached_model:
             raise RuntimeError("bad hash")
 
-    monkeypatch.setattr(pet_pipeline, "_validate_downloaded_file", validate)
-    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_impl, "_validate_downloaded_file", validate)
+    monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
     monkeypatch.setattr(
-        pet_pipeline,
+        pet_impl,
         "pet_model_search_roots",
         lambda: (cache, bundled),
     )

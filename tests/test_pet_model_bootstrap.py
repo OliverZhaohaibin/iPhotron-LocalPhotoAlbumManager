@@ -457,7 +457,7 @@ def test_dinov2_storage_permission_failure_falls_back_to_cache(
     embedder_relative = Path("embedding/dinov2_vits14/dinov2_vits14.pt")
     requested_embedder = extension / embedder_relative
     fallback_embedder = cache / embedder_relative
-    requested_embedder.parent.mkdir(parents=True)
+    attempts: list[Path] = []
 
     monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
     monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
@@ -470,6 +470,7 @@ def test_dinov2_storage_permission_failure_falls_back_to_cache(
     )
 
     def _download(_url, destination, **_kwargs):
+        attempts.append(Path(destination))
         if Path(destination) == requested_embedder:
             raise pet_pipeline._ModelStoragePermissionError(
                 errno.EROFS,
@@ -492,6 +493,7 @@ def test_dinov2_storage_permission_failure_falls_back_to_cache(
     )
 
     assert model_bootstrap.ensure_pet_model_artifacts() is True
+    assert attempts == [requested_embedder, fallback_embedder]
     assert not requested_embedder.exists()
     assert fallback_embedder.read_bytes() == b"embedder"
 
@@ -502,35 +504,16 @@ def _write_detector(path: Path) -> None:
     path.write_bytes(b"detector")
 
 
-def test_dinov2_permission_failure_preserves_wrapped_cause(
+def test_dinov2_storage_error_preserves_typed_semantics(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     original = OSError(errno.EACCES, "Permission denied")
     model_path = tmp_path / "dinov2_vits14.pt"
 
-    def _download(*_args, **_kwargs):
-        raise pet_pipeline._ModelStoragePermissionError(
-            errno.EACCES,
-            "Permission denied",
-        ) from original
+    with pytest.raises(pet_pipeline._ModelStoragePermissionError) as exc_info:
+        pet_pipeline._raise_if_model_storage_error(original, model_path)
 
-    monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
-    monkeypatch.setattr(pet_pipeline, "_download_file", _download)
-    monkeypatch.setattr(
-        pet_pipeline,
-        "_validate_dinov2_cache_metadata",
-        lambda *_args, **_kwargs: None,
-    )
-
-    with pytest.raises(PermissionError) as exc_info:
-        model_bootstrap._download_dinov2_release(
-            model_path,
-            url="https://models.example",
-        )
-
-    assert exc_info.value.__cause__ is not None
-    assert exc_info.value.__cause__.__cause__ is original
+    assert exc_info.value.__cause__ is original
 
 
 def test_dinov2_unfallback_permission_failure_is_domain_error(

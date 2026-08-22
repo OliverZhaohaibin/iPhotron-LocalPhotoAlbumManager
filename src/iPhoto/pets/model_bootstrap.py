@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 from pathlib import Path
 
 from . import pipeline as pet_pipeline
@@ -102,13 +103,16 @@ def _storage_root(path: Path, relative_path: Path) -> Path:
 
 def _ensure_dino_metadata_writable(model_path: Path) -> None:
     metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
+    probe_path = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.probe")
     try:
-        metadata_path.write_text("", encoding="utf-8")
-    except PermissionError as exc:
-        raise pet_pipeline._ModelStoragePermissionError(
-            errno.EACCES,
-            f"filesystem permission denied for {metadata_path}",
-        ) from exc
+        probe_path.write_text("", encoding="utf-8")
+    except OSError as exc:
+        pet_pipeline._raise_if_model_storage_error(exc, metadata_path)
+    finally:
+        try:
+            probe_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _download_dinov2_release(model_path: Path, *, url: str) -> None:
@@ -128,11 +132,10 @@ def _download_dinov2_release(model_path: Path, *, url: str) -> None:
             model_path,
             model_name=str(manifest["model_name"]),
         )
+    except pet_pipeline._ModelStoragePermissionError:
+        _remove_dinov2_artifact(model_path)
+        raise
     except Exception as exc:  # noqa: BLE001 - urllib/SSL/runtime failures vary
-        if isinstance(exc, pet_pipeline._ModelStoragePermissionError):
-            _remove_dinov2_artifact(model_path)
-            cause = exc.__cause__ if isinstance(exc.__cause__, OSError) else exc
-            raise PermissionError(str(cause)) from exc
         _remove_dinov2_artifact(model_path)
         raise PetModelUnavailableError(
             "Pet scanning unavailable: failed to download the verified DINOv2 "
@@ -282,7 +285,8 @@ def _write_dinov2_metadata(model_path: Path) -> None:
 
 
 def _remove_dinov2_artifact(model_path: Path) -> None:
-    model_path.unlink(missing_ok=True)
+    if model_path.exists():
+        return
     pet_pipeline._dinov2_metadata_path(model_path).unlink(missing_ok=True)
     for parent in (model_path.parent, model_path.parent.parent):
         try:

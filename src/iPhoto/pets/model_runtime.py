@@ -4,7 +4,7 @@ The upstream artifact is Meta's official state-dict checkpoint. The TorchScript
 file stored by iPhotron is a local derived cache, so its serialized bytes are
 not treated as a cross-PyTorch stable identity. Integrity verification applies
 to the downloaded official checkpoint only; the derived cache is validated by
-loadability and runtime shape/behavior checks.
+metadata during discovery and by TorchScript/runtime checks when it is loaded.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -55,13 +56,24 @@ def install_pet_model_runtime(pipeline) -> None:
     )
 
     def pet_embedder_model_url() -> str:
+        # A deliberately configured prebuilt TorchScript URL remains supported
+        # for compatibility/offline packaging. The checked-in default is empty,
+        # so normal first-use acquisition always selects Meta's official weights.
         return str(
             os.environ.get(pipeline.PET_EMBEDDER_MODEL_URL_ENV)
+            or manifest.get("torchscript_url")
             or manifest.get("weights_url")
             or ""
         ).strip()
 
     def validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> None:
+        """Validate discovery metadata without importing the optional AI runtime.
+
+        The derived TorchScript bytes are intentionally not hashed here. A broken
+        or incompatible secondary artifact is reported later by torch.jit.load or
+        by the embedder's runtime shape/behavior checks.
+        """
+
         model_path = Path(model_path)
         metadata_path = pipeline._dinov2_metadata_path(model_path)
         if not metadata_path.is_file():
@@ -87,25 +99,71 @@ def install_pet_model_runtime(pipeline) -> None:
             raise RuntimeError(
                 f"Pet scanning unavailable: DINOv2 metadata contract mismatch at {metadata_path}."
             )
-        if model_path.stat().st_size <= 0:
+
+        # New checkpoint-derived caches record the verified upstream identity.
+        # Legacy bundled TorchScript metadata does not, and remains discoverable;
+        # loadability is deliberately deferred to the actual runtime loader.
+        recorded_sha256 = metadata.get("weights_sha256")
+        if recorded_sha256 is not None and str(recorded_sha256).lower() != weights_sha256:
+            raise RuntimeError(
+                f"Pet scanning unavailable: DINOv2 checkpoint identity mismatch at {metadata_path}."
+            )
+        recorded_size = metadata.get("weights_size")
+        if recorded_size is not None and int(recorded_size) != weights_size:
+            raise RuntimeError(
+                f"Pet scanning unavailable: DINOv2 checkpoint size contract mismatch at {metadata_path}."
+            )
+
+        try:
+            cache_size = model_path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(
+                f"Pet scanning unavailable: DINOv2 TorchScript cache is unreadable at {model_path}."
+            ) from exc
+        if cache_size <= 0:
             raise RuntimeError(
                 f"Pet scanning unavailable: DINOv2 TorchScript cache is empty at {model_path}."
             )
 
-        # The derived TorchScript cache is intentionally not hash-pinned.
-        # Serialization is not byte-stable across all supported PyTorch builds.
-        try:
-            import torch
+    def write_prebuilt_torchscript_metadata(
+        model_path: Path,
+        *,
+        download_url: str,
+        download_sha256: str,
+        download_size: int,
+    ) -> None:
+        """Publish metadata for an explicitly configured prebuilt cache artifact."""
 
-            torch.jit.load(str(model_path), map_location="cpu").eval()
-        except ImportError as exc:
-            raise RuntimeError(
-                "Pet scanning unavailable: torch is required to validate the DINOv2 cache."
-            ) from exc
-        except Exception as exc:  # noqa: BLE001 - torch loader errors vary by version
-            raise RuntimeError(
-                f"Pet scanning unavailable: DINOv2 TorchScript cache is not loadable at {model_path}."
-            ) from exc
+        model_path = Path(model_path)
+        metadata_path = pipeline._dinov2_metadata_path(model_path)
+        payload = {
+            "model_name": manifest["model_name"],
+            "source_repository": manifest["source_repository"],
+            "source_revision": manifest["source_revision"],
+            "download_url": download_url,
+            "download_sha256": download_sha256,
+            "download_size": int(download_size),
+            "derived_torchscript_size": int(model_path.stat().st_size),
+            "input_shape": manifest["input_shape"],
+            "output_shape": manifest["output_shape"],
+        }
+        temp_path = metadata_path.with_name(
+            f".{metadata_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            temp_path.replace(metadata_path)
+        except OSError as exc:
+            pipeline._raise_if_model_storage_error(exc, metadata_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     pipeline.pet_embedder_model_url = pet_embedder_model_url
     pipeline._validate_dinov2_cache_metadata = validate_dinov2_cache_metadata
@@ -124,7 +182,46 @@ def install_pet_model_runtime(pipeline) -> None:
             raise RuntimeError(
                 "Pet scanning unavailable: no DINOv2 weights download source is configured."
             )
-        _download_dinov2_release(Path(model_path), url=url)
+
+        model_path = Path(model_path)
+        legacy_torchscript_url = str(manifest.get("torchscript_url") or "").strip()
+        if legacy_torchscript_url and url == legacy_torchscript_url:
+            # This path is only used when a deployment explicitly configures a
+            # prebuilt TorchScript artifact. Here that file is the downloaded
+            # product itself, so validating its download hash does not reintroduce
+            # a hash identity for locally derived TorchScript caches.
+            legacy_sha256 = str(manifest.get("torchscript_sha256") or "").strip().lower()
+            legacy_size = int(manifest.get("torchscript_size") or 0)
+            if len(legacy_sha256) != 64 or legacy_size <= 0:
+                raise RuntimeError(
+                    "Pet scanning unavailable: configured prebuilt DINOv2 "
+                    "TorchScript integrity metadata is invalid."
+                )
+            pipeline._install_certifi_environment()
+            pipeline._download_file(
+                url,
+                model_path,
+                label="DINOv2 TorchScript model",
+                expected_sha256=legacy_sha256,
+                max_bytes=legacy_size,
+            )
+            actual_size = model_path.stat().st_size
+            if actual_size != legacy_size:
+                raise RuntimeError(
+                    "Pet scanning unavailable: DINOv2 TorchScript download size mismatch "
+                    f"({actual_size} != {legacy_size})."
+                )
+            write_prebuilt_torchscript_metadata(
+                model_path,
+                download_url=url,
+                download_sha256=legacy_sha256,
+                download_size=legacy_size,
+            )
+        else:
+            _download_dinov2_release(model_path, url=url)
+
+        # Secondary-artifact validation belongs to the runtime loader, not to
+        # the upstream checkpoint hash stage.
         model = self._torch.jit.load(str(model_path), map_location=self._device)
         model.eval()
         model.to(self._device)
@@ -191,14 +288,6 @@ def _install_bootstrap_runtime(
     def download_dinov2_release(model_path: Path, *, url: str) -> None:
         """Download and verify Meta's checkpoint, then build a local TorchScript cache."""
 
-        try:
-            import torch
-        except ImportError as exc:
-            raise PetRuntimeUnavailableError(
-                "Pet scanning unavailable: torch is required to build the DINOv2 cache. "
-                'Install the optional Pets AI runtime with: pip install -e ".[pets-ai]"'
-            ) from exc
-
         source = f"{manifest['source_repository']}:{manifest['source_revision']}"
         input_shape = tuple(int(value) for value in manifest["input_shape"])
         expected_shape = tuple(int(value) for value in manifest["output_shape"])
@@ -236,6 +325,18 @@ def _install_bootstrap_runtime(
                         "Pet scanning unavailable: DINOv2 checkpoint size mismatch "
                         f"({actual_size} != {weights_size})."
                     )
+
+                # Import the optional AI runtime only after the checkpoint has
+                # completed the download-integrity stage. This keeps integrity
+                # tests and model discovery independent of an installed torch.
+                try:
+                    import torch
+                except ImportError as exc:
+                    raise PetRuntimeUnavailableError(
+                        "Pet scanning unavailable: torch is required to build the "
+                        "DINOv2 cache. Install the optional Pets AI runtime with: "
+                        'pip install -e ".[pets-ai]"'
+                    ) from exc
 
                 model = torch.hub.load(
                     source,

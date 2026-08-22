@@ -369,10 +369,10 @@ def test_wrapped_detector_toctou_permission_failure_falls_back_to_cache(
 
     def _ensure(path, **_kwargs):
         if Path(path) == requested_detector:
-            raise RuntimeError(
-                "Pet scanning unavailable: filesystem permission denied for "
-                "the YOLOX detector model."
-            ) from OSError(errno.EACCES, "Permission denied")
+            raise pet_pipeline._ModelStoragePermissionError(
+                errno.EACCES,
+                "Permission denied",
+            )
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(b"detector")
 
@@ -389,11 +389,67 @@ def test_wrapped_detector_toctou_permission_failure_falls_back_to_cache(
     assert fallback_embedder.read_bytes() == b"embedder"
 
 
-@pytest.mark.parametrize("errno_value", [errno.EACCES, errno.EROFS])
-def test_dinov2_download_wrapped_filesystem_error_falls_back_to_cache(
+def test_network_permission_failure_does_not_fall_back_to_cache(
     tmp_path: Path,
     monkeypatch,
-    errno_value,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    detector_relative = Path("detector/yolox_nano_coco.onnx")
+    requested_detector = extension / detector_relative
+    attempts: list[Path] = []
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", lambda: extension)
+
+    def _ensure(path, **_kwargs):
+        attempts.append(Path(path))
+        raise PermissionError(errno.EACCES, "Network permission denied")
+
+    monkeypatch.setattr(pet_pipeline, "ensure_pet_detector_model", _ensure)
+
+    with pytest.raises(PetModelUnavailableError, match="Network permission denied"):
+        model_bootstrap.ensure_pet_model_artifacts()
+
+    assert attempts == [requested_detector]
+    assert not (cache / detector_relative).exists()
+
+
+def test_explicit_bundled_root_does_not_fall_back_to_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    detector_relative = Path("detector/yolox_nano_coco.onnx")
+    requested_detector = extension / detector_relative
+    attempts: list[Path] = []
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+
+    def _ensure(path, **_kwargs):
+        attempts.append(Path(path))
+        raise pet_pipeline._ModelStoragePermissionError(
+            errno.EROFS,
+            "Read-only file system",
+        )
+
+    monkeypatch.setattr(pet_pipeline, "ensure_pet_detector_model", _ensure)
+
+    with pytest.raises(PetModelUnavailableError, match="Read-only file system"):
+        model_bootstrap.ensure_pet_model_artifacts(extension)
+
+    assert attempts == [requested_detector]
+    assert not (cache / detector_relative).exists()
+
+
+def test_dinov2_storage_permission_failure_falls_back_to_cache(
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     extension = tmp_path / "extension" / "pets"
     cache = tmp_path / "cache" / "pets"
@@ -415,9 +471,10 @@ def test_dinov2_download_wrapped_filesystem_error_falls_back_to_cache(
 
     def _download(_url, destination, **_kwargs):
         if Path(destination) == requested_embedder:
-            raise RuntimeError(
-                f"filesystem permission denied for {destination.name}."
-            ) from OSError(errno_value, "Filesystem denied")
+            raise pet_pipeline._ModelStoragePermissionError(
+                errno.EROFS,
+                "Read-only file system",
+            )
         Path(destination).parent.mkdir(parents=True, exist_ok=True)
         Path(destination).write_bytes(b"embedder")
 
@@ -453,7 +510,10 @@ def test_dinov2_permission_failure_preserves_wrapped_cause(
     model_path = tmp_path / "dinov2_vits14.pt"
 
     def _download(*_args, **_kwargs):
-        raise RuntimeError("filesystem permission denied.") from original
+        raise pet_pipeline._ModelStoragePermissionError(
+            errno.EACCES,
+            "Permission denied",
+        ) from original
 
     monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
     monkeypatch.setattr(pet_pipeline, "_download_file", _download)
@@ -471,6 +531,101 @@ def test_dinov2_permission_failure_preserves_wrapped_cause(
 
     assert exc_info.value.__cause__ is not None
     assert exc_info.value.__cause__.__cause__ is original
+
+
+def test_dinov2_unfallback_permission_failure_is_domain_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "extension" / "pets"
+    cache = tmp_path / "cache" / "pets"
+    embedder_relative = Path("embedding/dinov2_vits14/dinov2_vits14.pt")
+    requested_embedder = extension / embedder_relative
+    fallback_embedder = cache / embedder_relative
+    attempts: list[Path] = []
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pet_pipeline, "bundled_pet_model_dir", lambda: extension)
+    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_pipeline, "pet_model_install_root", lambda: extension)
+    monkeypatch.setattr(
+        pet_pipeline,
+        "ensure_pet_detector_model",
+        lambda path, **_kwargs: _write_detector(path),
+    )
+
+    def _download(path, *, url):
+        attempts.append(Path(path))
+        raise pet_pipeline._ModelStoragePermissionError(
+            errno.EROFS,
+            "Read-only file system",
+        )
+
+    monkeypatch.setattr(model_bootstrap, "_download_dinov2_release", _download)
+
+    with pytest.raises(PetModelUnavailableError, match="Read-only file system"):
+        model_bootstrap.ensure_pet_model_artifacts()
+
+    assert attempts == [requested_embedder, fallback_embedder]
+    assert not fallback_embedder.exists()
+
+
+def test_download_file_network_permission_error_has_no_storage_semantics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original = PermissionError(errno.EACCES, "Network permission denied")
+
+    def _urlopen(*_args, **_kwargs):
+        raise original
+
+    monkeypatch.setattr(pet_pipeline.request, "urlopen", _urlopen)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pet_pipeline._download_file(
+            "https://models.example/model.pt",
+            tmp_path / "model.pt",
+            label="test model",
+            expected_sha256="0" * 64,
+            max_bytes=1,
+        )
+
+    assert exc_info.value.__cause__ is original
+    assert not isinstance(
+        exc_info.value.__cause__,
+        pet_pipeline._ModelStoragePermissionError,
+    )
+    assert not list(tmp_path.iterdir())
+
+
+def test_download_file_temp_directory_permission_error_is_typed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original = PermissionError(errno.EROFS, "Read-only file system")
+
+    class _ReadOnlyTemporaryDirectory:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            raise original
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(pet_pipeline.tempfile, "TemporaryDirectory", _ReadOnlyTemporaryDirectory)
+
+    with pytest.raises(pet_pipeline._ModelStoragePermissionError) as exc_info:
+        pet_pipeline._download_file(
+            "https://models.example/model.pt",
+            tmp_path / "model.pt",
+            label="test model",
+            expected_sha256="0" * 64,
+            max_bytes=1,
+        )
+
+    assert exc_info.value.__cause__ is original
 
 
 def test_validation_failure_does_not_fall_back_to_cache(

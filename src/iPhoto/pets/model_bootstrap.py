@@ -50,11 +50,15 @@ def ensure_pet_model_artifacts(
         resolved_detector.invalid_bundled,
         detector_relative,
     )
+    allow_storage_fallback = requested_root is None and override_root is None
     detector_missing = resolved_detector.path is None
 
     acquired_root: Path | None = None
     if detector_missing:
-        acquired_path = _acquire_detector_with_fallback(detector_path)
+        acquired_path = _acquire_detector_with_fallback(
+            detector_path,
+            allow_storage_fallback=allow_storage_fallback,
+        )
         if acquired_path is not None and acquired_path != detector_path:
             acquired_root = _storage_root(acquired_path, detector_relative)
 
@@ -82,7 +86,11 @@ def ensure_pet_model_artifacts(
             "verified model in IPHOTO_PET_MODEL_DIR."
         )
     if embedder_missing:
-        _download_dinov2_release_with_fallback(embedder_path, url=url)
+        _download_dinov2_release_with_fallback(
+            embedder_path,
+            url=url,
+            allow_storage_fallback=allow_storage_fallback,
+        )
 
     return detector_missing or embedder_missing
 
@@ -90,6 +98,17 @@ def ensure_pet_model_artifacts(
 def _storage_root(path: Path, relative_path: Path) -> Path:
     depth = len(relative_path.parts) - 1
     return path.parents[depth]
+
+
+def _ensure_dino_metadata_writable(model_path: Path) -> None:
+    metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
+    try:
+        metadata_path.write_text("", encoding="utf-8")
+    except PermissionError as exc:
+        raise pet_pipeline._ModelStoragePermissionError(
+            errno.EACCES,
+            f"filesystem permission denied for {metadata_path}",
+        ) from exc
 
 
 def _download_dinov2_release(model_path: Path, *, url: str) -> None:
@@ -103,13 +122,14 @@ def _download_dinov2_release(model_path: Path, *, url: str) -> None:
             expected_sha256=str(manifest["torchscript_sha256"]),
             max_bytes=int(manifest["torchscript_size"]),
         )
+        _ensure_dino_metadata_writable(model_path)
         _write_dinov2_metadata(model_path)
         pet_pipeline._validate_dinov2_cache_metadata(
             model_path,
             model_name=str(manifest["model_name"]),
         )
     except Exception as exc:  # noqa: BLE001 - urllib/SSL/runtime failures vary
-        if _is_permission_failure(exc):
+        if isinstance(exc, pet_pipeline._ModelStoragePermissionError):
             _remove_dinov2_artifact(model_path)
             cause = exc.__cause__ if isinstance(exc.__cause__, OSError) else exc
             raise PermissionError(str(cause)) from exc
@@ -132,24 +152,6 @@ def _acquisition_path(
     return pet_pipeline.pet_model_install_root() / relative_path
 
 
-def _is_permission_error(exc: BaseException) -> bool:
-    return isinstance(exc, OSError) and exc.errno in {
-        errno.EACCES,
-        errno.EPERM,
-        errno.EROFS,
-    }
-
-
-def _is_permission_failure(exc: BaseException | None) -> bool:
-    seen: set[int] = set()
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        if _is_permission_error(exc):
-            return True
-        exc = exc.__cause__
-    return False
-
-
 def _fallback_artifact_path(path: Path) -> Path | None:
     override_root = pet_pipeline.pet_model_override_dir()
     bundled_root = pet_pipeline.bundled_pet_model_dir()
@@ -164,13 +166,17 @@ def _fallback_artifact_path(path: Path) -> Path | None:
     return user_cache / relative
 
 
-def _acquire_to(path: Path, *, acquire, is_fallback_error) -> Path | None:
+def _acquire_to(path: Path, *, acquire, allow_fallback: bool) -> Path | None:
     try:
         acquire(path)
         return path
     except Exception as exc:
         fallback = _fallback_artifact_path(path)
-        if fallback is None or not is_fallback_error(exc):
+        storage_permission = isinstance(
+            exc,
+            (pet_pipeline._ModelStoragePermissionError,),
+        )
+        if fallback is None or not storage_permission or not allow_fallback:
             raise
         try:
             acquire(fallback)
@@ -180,7 +186,11 @@ def _acquire_to(path: Path, *, acquire, is_fallback_error) -> Path | None:
     return None
 
 
-def _acquire_detector_with_fallback(path: Path) -> Path | None:
+def _acquire_detector_with_fallback(
+    path: Path,
+    *,
+    allow_storage_fallback: bool,
+) -> Path | None:
     def _acquire(target: Path) -> None:
         pet_pipeline.ensure_pet_detector_model(
             target,
@@ -191,7 +201,7 @@ def _acquire_detector_with_fallback(path: Path) -> Path | None:
         return _acquire_to(
             path,
             acquire=_acquire,
-            is_fallback_error=_is_permission_failure,
+            allow_fallback=allow_storage_fallback,
         )
     except Exception as exc:
         raise PetModelUnavailableError(
@@ -200,15 +210,33 @@ def _acquire_detector_with_fallback(path: Path) -> Path | None:
         ) from exc
 
 
-def _download_dinov2_release_with_fallback(path: Path, *, url: str) -> Path | None:
+def _download_dinov2_release_with_fallback(
+    path: Path,
+    *,
+    url: str,
+    allow_storage_fallback: bool,
+) -> Path | None:
     def _acquire(target: Path) -> None:
         _download_dinov2_release(target, url=url)
 
-    _acquire_to(
-        path,
-        acquire=_acquire,
-        is_fallback_error=_is_permission_failure,
-    )
+    try:
+        return _acquire_to(
+            path,
+            acquire=_acquire,
+            allow_fallback=allow_storage_fallback,
+        )
+    except Exception as exc:
+        if isinstance(exc, PetModelUnavailableError):
+            raise
+        if isinstance(exc, (PermissionError, pet_pipeline._ModelStoragePermissionError)):
+            raise PetModelUnavailableError(
+                "Pet scanning unavailable: filesystem permission denied while "
+                f"storing the verified DINOv2 TorchScript model ({_error_reason(exc)})."
+            ) from exc
+        raise PetModelUnavailableError(
+            "Pet scanning unavailable: failed to download the verified DINOv2 "
+            f"TorchScript model from {url} ({_error_reason(exc)})."
+        ) from exc
 
 
 def _resolve_artifact(

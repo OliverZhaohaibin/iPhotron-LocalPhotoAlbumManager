@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -48,6 +50,10 @@ from .repository_utils import (
     utc_now_iso,
 )
 from .state_repository import PetStateRepository
+
+
+class _ModelStoragePermissionError(OSError):
+    """A filesystem permission failure while storing a model artifact."""
 
 
 def _load_pet_model_manifest() -> dict:
@@ -2075,20 +2081,44 @@ def _download_file(
     destination = Path(destination)
     if urlparse(url).scheme.lower() != "https":
         raise RuntimeError(f"Pet scanning unavailable: {label} URL must use HTTPS.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with tempfile.TemporaryDirectory(
-            prefix="iphoto-pet-model-",
-            dir=destination.parent,
-        ) as tmp_dir:
-            tmp_path = Path(tmp_dir) / destination.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise _ModelStoragePermissionError(
+            errno.EACCES,
+            f"filesystem permission denied for {destination.parent}",
+        ) from exc
+    try:
+        with contextlib.ExitStack() as stack:
+            try:
+                tmp_dir = stack.enter_context(
+                    tempfile.TemporaryDirectory(
+                        prefix="iphoto-pet-model-",
+                        dir=destination.parent,
+                    )
+                )
+            except PermissionError as exc:
+                raise _ModelStoragePermissionError(
+                    errno.EACCES,
+                    f"filesystem permission denied for {destination.parent}",
+                ) from exc
+            except TypeError as exc:
+                raise RuntimeError(f"Invalid temporary directory returned for {label}.") from exc
+            try:
+                tmp_path = Path(tmp_dir) / destination.name
+                handle = stack.enter_context(tmp_path.open("wb"))
+            except PermissionError as exc:
+                raise _ModelStoragePermissionError(
+                    errno.EACCES,
+                    f"filesystem permission denied for {tmp_path}",
+                ) from exc
             with (
                 request.urlopen(  # noqa: S310
                     url,
                     timeout=_DOWNLOAD_TIMEOUT_SECONDS,
                     context=_download_ssl_context(url),
                 ) as response,
-                tmp_path.open("wb") as handle,
+                handle,
             ):
                 total = 0
                 while True:
@@ -2098,28 +2128,45 @@ def _download_file(
                     total += len(chunk)
                     if total > int(max_bytes):
                         raise RuntimeError(f"Downloaded {label} exceeds its size limit.")
-                    handle.write(chunk)
+                    _write_download_chunk(handle, chunk, label)
             _validate_downloaded_file(
                 tmp_path,
                 label=label,
                 expected_sha256=expected_sha256,
                 max_bytes=max_bytes,
             )
-            tmp_path.replace(destination)
+            try:
+                tmp_path.replace(destination)
+            except PermissionError as exc:
+                raise _ModelStoragePermissionError(
+                    errno.EACCES,
+                    f"filesystem permission denied for {destination}",
+                ) from exc
     except TimeoutError as exc:
         raise RuntimeError(
             f"Pet scanning unavailable: downloading {label} timed out. "
             "Check your network connection or install the model manually."
         ) from exc
-    except PermissionError as exc:
-        raise RuntimeError(f"filesystem permission denied for {label}.") from exc
     except Exception as exc:
+        if isinstance(exc, _ModelStoragePermissionError):
+            raise
         if isinstance(exc, RuntimeError) and str(exc).startswith("Pet scanning unavailable:"):
             raise
         raise RuntimeError(
             f"Pet scanning unavailable: failed to download {label} from {url} "
             f"({_error_reason(exc)}). Check your network connection or install "
             "the model manually."
+        ) from exc
+
+
+def _write_download_chunk(handle, chunk: bytes, label: str) -> None:
+    try:
+        handle.write(chunk)
+    except PermissionError as exc:
+        path = getattr(handle, "name", "<model download>")
+        raise _ModelStoragePermissionError(
+            errno.EACCES,
+            f"filesystem permission denied while writing {path}",
         ) from exc
 
 

@@ -113,6 +113,49 @@ def _download_file(*args, **kwargs):
         ) from exc
 
 
+def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> Path:
+    """Resolve Pets models without mutating a DINOv2 cache from the read path."""
+
+    if not directory:
+        return _impl.resolve_pet_model_path(relative_path, directory=False)
+
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("Pet model path must be relative to a configured model root.")
+
+    override = _impl.pet_model_override_dir()
+    user_cache = _impl.user_pet_model_cache_dir()
+    bundled = _impl.bundled_pet_model_dir()
+    bundled_invalid = False
+    for root in _impl.pet_model_search_roots():
+        candidate = root / relative
+        if not candidate.is_dir():
+            continue
+        try:
+            model_name = relative.name
+            model_path = candidate / f"{model_name}.pt"
+            if not model_path.is_file():
+                raise RuntimeError("DINOv2 model file is missing")
+            _validate_dinov2_cache_metadata(model_path, model_name=model_name)
+            return candidate
+        except (OSError, RuntimeError) as exc:
+            if override is not None and root == override:
+                raise RuntimeError(
+                    f"Pet scanning unavailable: invalid model override artifact at {candidate}."
+                ) from exc
+            # DINOv2 cache cleanup is intentionally deferred to the acquisition
+            # owner. A resolver can race with metadata-first publication, so it
+            # must never unlink either side of the cache pair here.
+            if root == bundled:
+                bundled_invalid = True
+
+    if override is not None:
+        return override / relative
+    if bundled_invalid:
+        return user_cache / relative
+    return _impl.pet_model_install_root() / relative
+
+
 @contextmanager
 def _dinov2_acquisition_lock(model_path: Path):
     """Serialize DINOv2 cache acquisition across threads and processes."""
@@ -374,6 +417,17 @@ class _LazyDinoV2Embedder:
 
 class PetClusterPipeline(_impl.PetClusterPipeline):
     """Pipeline with DINOv2 construction deferred until the first accepted crop."""
+
+    def _resolve_model_path(self, relative_path: Path, *, directory: bool = False) -> Path:
+        override = _impl.pet_model_override_dir()
+        if override is not None and self._model_root != override:
+            raise _impl.PetModelUnavailableError(
+                "Pet scanning unavailable: model root does not match "
+                f"{_impl.IPHOTO_PET_MODEL_DIR_ENV}."
+            )
+        if self._model_root == _impl.default_pet_model_dir():
+            return resolve_pet_model_path(relative_path, directory=directory)
+        return self._model_root / relative_path
 
     def _ensure_embedder(self):
         if self._embedder is None:

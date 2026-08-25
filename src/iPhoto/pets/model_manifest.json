@@ -30,8 +30,8 @@
     "producer_torch_version": "2.12.1",
     "producer_torchvision_version": "0.27.1",
     "torchscript_url": "https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/pet-models-v1/dinov2_vits14.pt",
-    "torchscript_sha256": "36e01591cfd52d194845d5b23b870dcb698f79c33f6140144180568f2155ab94",
-    "torchscript_size": 88587286,
+    "torchscript_sha256": "89c6277634c82b6b983c626f7173c33ab20016c6608c35f24c1d7e8f4b33ba92",
+    "torchscript_size": 88566230,
     "input_shape": [1, 3, 224, 224],
     "output_shape": [1, 384]
   }

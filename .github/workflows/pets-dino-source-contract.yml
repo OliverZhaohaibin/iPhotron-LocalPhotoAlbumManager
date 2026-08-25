@@ -49,6 +49,7 @@ jobs:
       - name: Build one verified TorchScript candidate
         env:
           XFORMERS_DISABLED: "1"
+          IPHOTO_MODEL_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: >-
           python tools/convert_dinov2_torchscript.py
           model-dist/dinov2_vits14.pt
@@ -56,6 +57,7 @@ jobs:
           --checkpoint .model-build/dinov2_vits14_pretrain.pth
           --runtime-metadata model-dist/dinov2_vits14.pt.metadata.json
           --build-manifest model-dist/dinov2_vits14.build.json
+          --require-manifest-identity
       - name: Record artifact checksum
         run: sha256sum model-dist/dinov2_vits14.pt > model-dist/SHA256SUMS
       - uses: actions/upload-artifact@v4

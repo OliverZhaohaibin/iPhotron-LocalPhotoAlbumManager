@@ -140,7 +140,8 @@ def main() -> int:
 
     build_manifest = {
         **runtime_metadata,
-        "repository_commit": os.environ.get("GITHUB_SHA"),
+        "repository_commit": os.environ.get("IPHOTO_MODEL_BUILD_COMMIT")
+        or os.environ.get("GITHUB_SHA"),
         "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
         "python_runtime": platform.python_version(),
         "torch_runtime": torch.__version__,

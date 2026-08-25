@@ -19,8 +19,9 @@
 因此之前记录的 Pets 自动化完成结论已经撤回。对 Pets 模型契约、大图库
 复杂度、跨库一致性、升级回填、打包模型目录和身份语义的复审已完成本机自动化
 核心修复。完整问题、裁决和验收要求见 `PETS_REVIEW_REMEDIATION_LEDGER.md`。项目固定
-`pet-models-v1` TorchScript Release 尚未发布；远端 CI 已在
-`e0001ee646e95fadc33659ebe277eb067e79a084` 上 9/9 成功。只读 packaged 安装、
+[`pet-models-v1`](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/tag/pet-models-v1)
+TorchScript Release 已发布，并由 [run 32801774572](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/32801774572)
+在 Ubuntu、macOS、Windows 验证同一资产。只读 packaged 安装、
 真实升级库、网络失败和跨平台 50k 报告仍为
 `manual_validation_pending`，因此不得恢复 `engineering_complete`。
 
@@ -45,7 +46,7 @@ Windows 实机复测表明前次 WIC fresh-decode 修复会被已持久化的错
 - `DesktopCoordinatorRuntime` 是唯一桌面组合根，Recognition、Location/Info、Edit 与地图能力均延迟到首次使用；People dashboard 快照只在 People feature 首次创建时预热。
 - settings/shell 同步初始化和 Windows/Linux pre-show Detail 异常也进入唯一 terminal 协议；pre-show Detail 使用可重试降级窗口。
 - 模块预载使用 generation-aware owner 和完成信号，不再依赖持续轮询 timer；退出时等待预载线程收口。
-- People/Pets 的模型扫描不再在 startup completed 后自动启动；首次进入识别功能才构造服务与 worker，消除快速关窗的 QThread 竞争。
+- People/Pets 在主 metadata scan 成功后通过 1500 ms 交互空闲门控自动启动；worker 使用最低优先级，切库、取消和 shutdown generation 阻止迟到启动。
 
 ### Probe、数据库与慢存储
 

@@ -70,7 +70,7 @@ Metal 与 OpenGL 分开采集：
 | --- | --- | --- | --- |
 | 只读安装目录与首次模型落盘 | macOS Apple Silicon、macOS Intel、Windows `Program Files`、Linux AppImage | bundled root 保持只读；查找顺序为 override、用户 cache、bundled；缺失模型只写用户 cache；首次识别成功 | `pending_manual_validation` |
 | 模型获取与自愈 | 在线下载、离线 bundled fallback、损坏 cache、代理失败、证书失败 | 在线文件 hash/size/shape 正确；离线可用 bundled；损坏 cache 可重取；代理/证书失败给出可操作提示且不污染 cache | `pending_manual_validation` |
-| 固定 DINO Release 产物 | 使用固定 source commit 的受控构建环境和本仓库不可变 `pet-models-v1` 标签 | 生产 Torch Hub 路径已删除；仍须发布 `dinov2_vits14.pt`、记录 artifact/build manifest SHA、填写 Release HTTPS URL，并重新通过 hash/shape/packaging 门禁 | `pending_manual_validation` |
+| 固定 DINO Release 产物 | 使用固定 source commit 的受控构建环境和本仓库不可变 `pet-models-v1` 标签 | 生产 Torch Hub 路径已删除；Release 包含 `.pt`、runtime metadata、build manifest 与 SHA 清单；公开 URL/SHA/size 已复核，三平台加载/shape 门禁通过 | `automated_release_contract_pass`（[Release](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/tag/pet-models-v1)，[run 32801774572](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/32801774572)） |
 | 真实旧图库升级 | 含 name、cover、hidden、rejection、pet merge、跨类型 merge 的脱敏副本 | interactive 不被 backfill 阻塞；后台清空 pending/retry；durable state 不丢；失败资产明确显示 stale/source generation | `pending_manual_validation` |
 | 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
 | Windows Live Photo 静态图方向 | Windows packaged，优先复测 `IMG_3684.HEIC` 的脱敏副本，并覆盖 iPhone Orientation 5/6/7/8 的 HEIC+MOV/JPEG+MOV | 静态图与动态视频视觉方向一致；静态图无二次 EXIF 旋转；JPEG 等 WIC 未预转正格式仍正确应用 EXIF；首次展示、Live Motion 返回静帧和连续切换均通过 | `user_verified_original_sample_pass / formal_artifact_evidence_pending` |

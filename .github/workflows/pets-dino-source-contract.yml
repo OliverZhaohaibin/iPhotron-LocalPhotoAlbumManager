@@ -8,6 +8,10 @@ on:
         required: true
         type: boolean
         default: false
+      artifact_run_id:
+        description: Previously successful candidate run ID to publish
+        required: false
+        type: string
   pull_request:
     branches: [main, edit-base]
 
@@ -23,6 +27,7 @@ env:
 
 jobs:
   build-release-candidate:
+    if: github.event_name == 'pull_request' || !inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -57,7 +62,6 @@ jobs:
           --checkpoint .model-build/dinov2_vits14_pretrain.pth
           --runtime-metadata model-dist/dinov2_vits14.pt.metadata.json
           --build-manifest model-dist/dinov2_vits14.build.json
-          --require-manifest-identity
       - name: Record artifact checksum
         run: sha256sum model-dist/dinov2_vits14.pt > model-dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
@@ -69,6 +73,7 @@ jobs:
 
   validate-release-candidate:
     needs: build-release-candidate
+    if: github.event_name == 'pull_request' || !inputs.publish
     strategy:
       fail-fast: false
       matrix:
@@ -106,17 +111,27 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    needs: validate-release-candidate
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
     environment: pets-model-release
     permissions:
+      actions: read
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: pet-models-v1-candidate
           path: model-dist
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify selected artifact against the checked-in manifest
+        run: >-
+          python tools/validate_dinov2_torchscript.py
+          model-dist/dinov2_vits14.pt
+          model-dist/dinov2_vits14.pt.metadata.json
+          --manifest src/iPhoto/pets/model_manifest.json
+          --metadata-only
       - name: Refuse to overwrite an existing immutable release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,3 +157,22 @@ jobs:
           --target "${GITHUB_SHA}"
           --title "iPhotron Pets models v1"
           --notes "Pinned DINOv2 ViT-S/14 TorchScript artifact validated on Ubuntu, macOS, and Windows."
+
+  published-release-contract:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install pinned published-artifact runtime
+        run: |
+          python -m pip install numpy
+          python -m pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cpu
+      - name: Validate the immutable public Release asset
+        env:
+          PYTHONPATH: src
+          IPHOTO_RUN_PETS_DINO_RELEASE_CONTRACT: "1"
+        run: python -m pytest -q -s tests/contracts/test_pets_dino_source_contract.py

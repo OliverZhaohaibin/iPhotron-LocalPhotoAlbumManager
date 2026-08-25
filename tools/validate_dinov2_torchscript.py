@@ -9,8 +9,6 @@ import json
 import sys
 from pathlib import Path
 
-import torch
-
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -24,6 +22,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact", type=Path)
     parser.add_argument("metadata", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--metadata-only", action="store_true")
     args = parser.parse_args()
 
     metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
@@ -31,6 +31,30 @@ def main() -> int:
     size = args.artifact.stat().st_size
     if digest != metadata["torchscript_sha256"] or size != metadata["torchscript_size"]:
         raise RuntimeError("TorchScript artifact does not match its release metadata")
+    if args.manifest is not None:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))["embedder"]
+        for key in (
+            "artifact_kind",
+            "cache_schema_version",
+            "model_name",
+            "release_tag",
+            "producer_python_version",
+            "producer_torch_version",
+            "producer_torchvision_version",
+            "torchscript_url",
+            "torchscript_sha256",
+            "torchscript_size",
+            "input_shape",
+            "output_shape",
+        ):
+            if metadata.get(key) != manifest.get(key):
+                raise RuntimeError(f"release metadata does not match manifest field {key}")
+    if args.metadata_only:
+        print(json.dumps({"artifact_sha256": digest, "artifact_size": size}, sort_keys=True))
+        return 0
+
+    import torch
+
     runtime_version = str(torch.__version__).split("+", 1)[0]
     if runtime_version != metadata["producer_torch_version"]:
         raise RuntimeError(

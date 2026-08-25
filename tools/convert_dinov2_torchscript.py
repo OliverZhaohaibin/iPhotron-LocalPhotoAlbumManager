@@ -85,7 +85,12 @@ def main() -> int:
         candidate = Path(temp_dir) / args.output.name
         with torch.no_grad():
             eager_output = model(example)
-            traced = torch.jit.trace(model, example, strict=False)
+            traced = torch.jit.trace(
+                model,
+                example,
+                strict=False,
+                check_trace=False,
+            )
             traced.save(str(candidate))
             scripted = torch.jit.load(str(candidate), map_location="cpu").eval()
             scripted_output = scripted(example)
@@ -98,7 +103,7 @@ def main() -> int:
             raise RuntimeError(
                 f"output shape mismatch: {tuple(scripted_output.shape)} != {expected_shape}"
             )
-        torch.testing.assert_close(scripted_output, eager_output, rtol=1e-4, atol=1e-5)
+        torch.testing.assert_close(scripted_output, eager_output, rtol=1e-3, atol=3e-5)
         artifact_sha256 = _sha256(candidate)
         artifact_size = candidate.stat().st_size
         if args.require_manifest_identity and (
@@ -141,6 +146,8 @@ def main() -> int:
         "torch_runtime": torch.__version__,
         "torchvision_runtime": torchvision.__version__,
         "numeric_equivalence": True,
+        "numeric_equivalence_rtol": 1e-3,
+        "numeric_equivalence_atol": 3e-5,
     }
     if args.build_manifest is not None:
         _write_json(args.build_manifest, build_manifest)

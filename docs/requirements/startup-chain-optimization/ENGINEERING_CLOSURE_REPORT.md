@@ -20,7 +20,7 @@
 复杂度、跨库一致性、升级回填、打包模型目录和身份语义的复审已完成本机自动化
 核心修复。完整问题、裁决和验收要求见 `PETS_REVIEW_REMEDIATION_LEDGER.md`。项目固定
 [`pet-models-v1`](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/tag/pet-models-v1)
-TorchScript Release 已发布，并由 [run 32801774572](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/32801774572)
+TorchScript Release 已发布，并由 [run 32807111211](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/32807111211)
 在 Ubuntu、macOS、Windows 验证同一资产。只读 packaged 安装、
 真实升级库、网络失败和跨平台 50k 报告仍为
 `manual_validation_pending`，因此不得恢复 `engineering_complete`。

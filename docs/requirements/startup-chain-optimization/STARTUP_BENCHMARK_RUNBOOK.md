@@ -99,11 +99,14 @@ Repeat with scenarios `recognition-auto-missing-models` (empty isolated model
 root plus `--set-env IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`),
 `recognition-auto-50k-pending` (prepared 50k
 status backlog), and `recognition-quick-close` (`--auto-exit-delay-ms 250`).
+Quick-close collection also uses `--allow-degraded`, because it intentionally
+exits before a usable thumbnail is required.
 The JSON/Markdown summary records CPU time, RSS, read bytes, and write bytes at
 interactive, recognition activation, activation +1.5 s, and activation +5 s.
 First-gallery/thumbnail P50 and P95 must not regress, post-interactive GUI jobs
-remain below 100 ms, and quick-close must have no recognition worker start or
-late QThread diagnostics.
+are reported against the same-commit baseline, post-recognition GUI jobs remain
+below 100 ms, and quick-close must have no recognition worker start or late
+QThread diagnostics.
 
 Windows packaged runs use the same CLI under PowerShell, with the Nuitka `.exe`
 after `--`. Keep Defender enabled. Collect separate `local-ssd-indexed`,

@@ -56,6 +56,7 @@ METRIC_ORDER = (
     "probe_ms",
     "max_gui_job_ms",
     "max_post_interactive_gui_stall_ms",
+    "max_post_recognition_gui_stall_ms",
     "interactive_recognition_activation_ms",
 )
 RESOURCE_SNAPSHOT_NAMES = (
@@ -418,11 +419,15 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
         event["stage"] == "recognition.worker.started" for event in events
     ):
         errors.append("quick-close started a recognition worker")
+    feature_scoped_ab = (
+        "IPHOTO_STARTUP_RECOGNITION_AUTO_START"
+        in str(context.get("scenario_env_names", "")).split(",")
+    )
     if scenario in {
         "recognition-auto-models-present",
         "recognition-auto-missing-models",
         "recognition-auto-50k-pending",
-    }:
+    } and not feature_scoped_ab:
         if recognition_activated is None:
             errors.append("recognition activation event is missing")
         snapshots = _resource_snapshots(events)
@@ -432,6 +437,12 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
                 "recognition resource snapshots are missing: "
                 + ", ".join(missing_snapshots)
             )
+    if feature_scoped_ab and any(
+        event["stage"] == "recognition.worker.started"
+        and bool(_details(event).get("startup", False))
+        for event in events
+    ):
+        errors.append("feature-scoped A/B arm started a startup recognition worker")
 
     metrics = {
         "process_start_app_created_ms": process_app_ms,
@@ -464,6 +475,22 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
         ),
         "max_post_interactive_gui_stall_ms": (
             round(max(post_interactive_durations), 3) if post_interactive_durations else 0.0
+        ),
+        "max_post_recognition_gui_stall_ms": (
+            round(
+                max(
+                    (
+                        float(_details(event).get("duration_ms", 0.0))
+                        for event in events
+                        if event["stage"] == "startup.gui_job.finished"
+                        and recognition_activated is not None
+                        and float(event["elapsed_ms"])
+                        >= float(recognition_activated["elapsed_ms"])
+                    ),
+                    default=0.0,
+                ),
+                3,
+            )
         ),
         "interactive_recognition_activation_ms": _duration(
             interactive,
@@ -572,7 +599,13 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
     matching_context_keys = tuple(
         key
         for key in BATCH_CONTEXT_KEYS
-        if key not in {"revision", "artifact_sha256", "manifest_source_revision"}
+        if key
+        not in {
+            "revision",
+            "artifact_sha256",
+            "manifest_source_revision",
+            "scenario_env_names",
+        }
     )
     mismatched_context = {
         key: (baseline_context.get(key), candidate_context.get(key))
@@ -632,6 +665,19 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
         mismatched_context or "matched",
         "same platform/backend/scenario/cache/build context",
     )
+    if str(candidate_context.get("scenario", "")).startswith("recognition-"):
+        add(
+            "recognition_policy_arms_are_distinct",
+            "IPHOTO_STARTUP_RECOGNITION_AUTO_START"
+            in str(baseline_context.get("scenario_env_names", "")).split(",")
+            and "IPHOTO_STARTUP_RECOGNITION_AUTO_START"
+            not in str(candidate_context.get("scenario_env_names", "")).split(","),
+            (
+                baseline_context.get("scenario_env_names"),
+                candidate_context.get("scenario_env_names"),
+            ),
+            "feature-scoped baseline vs automatic candidate",
+        )
     add(
         "baseline_has_30_eligible_samples",
         baseline.get("eligible_count", 0) >= 30,

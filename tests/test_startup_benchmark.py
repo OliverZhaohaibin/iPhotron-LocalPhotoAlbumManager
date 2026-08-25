@@ -29,6 +29,7 @@ def _write_profile(
     revision: str = "candidate",
     artifact_sha256: str = "a" * 64,
     build_environment_fingerprint: str = "f" * 64,
+    scenario_env_names: str = "",
 ) -> None:
     context = {
         "run_id": path.stem,
@@ -42,6 +43,7 @@ def _write_profile(
         "cache_controlled": controlled,
         "cache_eviction_method": "purge" if controlled else "uncontrolled",
         "scenario": scenario,
+        "scenario_env_names": scenario_env_names,
         "build_environment_fingerprint": build_environment_fingerprint,
         "artifact_sha256": artifact_sha256,
         "manifest_source_revision": revision,
@@ -155,6 +157,7 @@ def test_recognition_resource_snapshots_are_correlated_to_activation(tmp_path) -
     summary = summarize_profiles([path])
 
     assert run["metrics"]["interactive_recognition_activation_ms"] == 400.0
+    assert run["metrics"]["max_post_recognition_gui_stall_ms"] == 0.0
     assert run["resource_snapshots"]["interactive"]["rss_bytes"] == 300000
     assert run["resource_snapshots"]["recognition_activation"]["rss_bytes"] == 700000
     assert run["resource_snapshots"]["recognition_plus_1500ms"]["rss_bytes"] == 2200000
@@ -231,6 +234,19 @@ def test_quick_close_rejects_recognition_worker_start(tmp_path) -> None:
 
     assert run["valid"] is False
     assert "quick-close started a recognition worker" in run["errors"]
+
+
+def test_feature_scoped_ab_arm_does_not_require_auto_activation(tmp_path) -> None:
+    path = tmp_path / "feature-scoped.jsonl"
+    _write_profile(
+        path,
+        scenario="recognition-auto-models-present",
+        scenario_env_names="IPHOTO_STARTUP_RECOGNITION_AUTO_START",
+    )
+
+    run = analyse_run(path)
+
+    assert run["valid"] is True
 
 
 def test_mixed_batch_contexts_are_rejected(tmp_path) -> None:

@@ -2,6 +2,21 @@ name: Pets DINO Release contract
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Run the protected one-time v1 repair job
+        required: true
+        type: boolean
+        default: false
+      artifact_run_id:
+        description: Successful candidate workflow run ID
+        required: false
+        type: string
+      repair_existing_v1:
+        description: Confirm the guarded pre-merge v1 repair
+        required: true
+        type: boolean
+        default: false
   pull_request:
     branches: [main, edit-base]
 
@@ -17,6 +32,7 @@ env:
 
 jobs:
   build-release-candidate:
+    if: github.event_name == 'pull_request' || !inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -64,6 +80,7 @@ jobs:
 
   validate-release-candidate:
     needs: build-release-candidate
+    if: github.event_name == 'pull_request' || !inputs.publish
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +116,75 @@ jobs:
           name: pet-models-v1-validation-${{ runner.os }}
           path: model-dist/validation-*.json
           if-no-files-found: error
+
+  repair-release-v1:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.repair_existing_v1
+    runs-on: ubuntu-latest
+    environment: pets-model-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Require an explicit artifact run
+        run: |
+          if [ -z "${{ inputs.artifact_run_id }}" ]; then
+            echo "artifact_run_id is required" >&2
+            exit 1
+          fi
+      - name: Resolve candidate run provenance
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${{ inputs.artifact_run_id }}" > candidate-run.json
+          head_sha=$(python -c 'import json; print(json.load(open("candidate-run.json"))["head_sha"])')
+          echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.candidate.outputs.head_sha }}
+          path: builder
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: pet-models-v1-candidate
+          path: model-dist
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify artifact and builder provenance
+        run: |
+          builder_commit=$(git -C builder rev-parse HEAD)
+          python release/tools/model_release_provenance.py \
+            --run-json candidate-run.json \
+            --build-manifest model-dist/dinov2_vits14.build.json \
+            --builder-commit "${builder_commit}" \
+            --expected-repository "${GITHUB_REPOSITORY}" \
+            --expected-workflow-id "340207631" \
+            --expected-workflow-path ".github/workflows/pets-dino-source-contract.yml"
+          python release/tools/validate_dinov2_torchscript.py \
+            model-dist/dinov2_vits14.pt \
+            model-dist/dinov2_vits14.pt.metadata.json \
+            --manifest release/src/iPhoto/pets/model_manifest.json \
+            --metadata-only
+      - name: Guard the exact pre-repair v1 state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_tag=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/pet-models-v1" --jq .object.sha)
+          test "${current_tag}" = "8805b1057391663781828d25b70297addb4e3fd4"
+          mkdir old-release
+          gh release download pet-models-v1 --repo "${GITHUB_REPOSITORY}" --pattern dinov2_vits14.pt --dir old-release
+          test "$(stat -c %s old-release/dinov2_vits14.pt)" = "88566230"
+          test "$(sha256sum old-release/dinov2_vits14.pt | cut -d ' ' -f 1)" = "89c6277634c82b6b983c626f7173c33ab20016c6608c35f24c1d7e8f4b33ba92"
+      - name: Replace v1 assets once and retarget the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload pet-models-v1 model-dist/dinov2_vits14.pt.metadata.json model-dist/dinov2_vits14.build.json model-dist/SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload pet-models-v1 model-dist/dinov2_vits14.pt --repo "${GITHUB_REPOSITORY}" --clobber
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/pet-models-v1" -f sha="${{ steps.candidate.outputs.head_sha }}" -F force=true
 
   published-release-contract:
     if: github.event_name == 'pull_request'

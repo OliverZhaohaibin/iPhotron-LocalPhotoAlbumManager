@@ -413,6 +413,44 @@ def test_packaged_collect_requires_matching_build_manifest(tmp_path) -> None:
     assert result == 2
 
 
+def test_template_restore_is_confined_to_output_active_library(tmp_path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    outside = tmp_path / "outside"
+    output = tmp_path / "output"
+
+    result = benchmark_main(
+        [
+            "collect",
+            "--revision",
+            "candidate",
+            "--scenario",
+            "recognition-auto-models-present",
+            "--library",
+            str(outside),
+            "--library-template",
+            str(template),
+            "--confirm-dedicated-library",
+            "--confirm-template-restore",
+            "--runtime",
+            "source",
+            "--cache-state",
+            "hot",
+            "--samples",
+            "1",
+            "--output-dir",
+            str(output),
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        ]
+    )
+
+    assert result == 2
+    assert not outside.exists()
+
+
 def test_comparison_rejects_environment_mismatch(tmp_path) -> None:
     baseline_path = tmp_path / "baseline.jsonl"
     candidate_path = tmp_path / "candidate.jsonl"

@@ -76,6 +76,7 @@ BATCH_CONTEXT_KEYS = (
     "cache_eviction_method",
     "scenario",
     "scenario_env_names",
+    "library_restored_per_sample",
     "build_environment_fingerprint",
     "artifact_sha256",
     "manifest_source_revision",
@@ -901,8 +902,6 @@ def collect(args: argparse.Namespace) -> int:
             cwd=args.cwd,
         )
     benchmark_library = args.library.expanduser().resolve()
-    if not benchmark_library.is_dir():
-        raise ProfileError(f"benchmark library is not a directory: {benchmark_library}")
     controlled = args.cache_state != "cold" or bool(args.confirm_controlled_cold_cache)
     method = args.cache_eviction_method.strip() or "uncontrolled"
     if args.cache_state == "cold" and (not controlled or method == "uncontrolled"):
@@ -910,7 +909,30 @@ def collect(args: argparse.Namespace) -> int:
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    library_template = (
+        args.library_template.expanduser().resolve()
+        if args.library_template is not None
+        else None
+    )
+    if library_template is None:
+        if not benchmark_library.is_dir():
+            raise ProfileError(f"benchmark library is not a directory: {benchmark_library}")
+    else:
+        if not args.confirm_template_restore:
+            raise ProfileError("library template restore requires --confirm-template-restore")
+        if not library_template.is_dir():
+            raise ProfileError(f"library template is not a directory: {library_template}")
+        if benchmark_library != output_dir / "active-library":
+            raise ProfileError(
+                "restored benchmark library must be OUTPUT_DIR/active-library"
+            )
+        if benchmark_library == library_template:
+            raise ProfileError("benchmark library and template must be different directories")
     for index in range(1, args.samples + 1):
+        if library_template is not None:
+            if benchmark_library.exists():
+                shutil.rmtree(benchmark_library)
+            shutil.copytree(library_template, benchmark_library)
         run_id = (
             f"{args.revision}-{args.scenario}-{args.cache_state}-{index:03d}-{uuid.uuid4().hex[:8]}"
         )
@@ -935,6 +957,7 @@ def collect(args: argparse.Namespace) -> int:
             "cache_eviction_method": method,
             "scenario": args.scenario,
             "scenario_env_names": ",".join(sorted(environment_overrides)),
+            "library_restored_per_sample": library_template is not None,
             **build_identity,
         }
         launched_wall = time.time()
@@ -1045,6 +1068,8 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--revision", required=True)
     collect_parser.add_argument("--scenario", required=True)
     collect_parser.add_argument("--library", type=Path, required=True)
+    collect_parser.add_argument("--library-template", type=Path)
+    collect_parser.add_argument("--confirm-template-restore", action="store_true")
     collect_parser.add_argument("--confirm-dedicated-library", action="store_true")
     collect_parser.add_argument("--runtime", choices=("source", "packaged"), required=True)
     collect_parser.add_argument("--build-manifest", type=Path)

@@ -89,6 +89,12 @@ activation and enable child-process resource sampling:
   -- .venv/bin/python -m iPhoto.gui.main
 ```
 
+For repeated recognition runs, preserve one read-only prepared template and use
+`--library-template TEMPLATE --library OUTPUT_DIR/active-library
+--confirm-template-restore`. The collector refuses any other restore target,
+recreates only that disposable path before each sample, and never mutates the
+template or operator photo library.
+
 Repeat with scenarios `recognition-auto-missing-models` (empty isolated model
 root plus `--set-env IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`),
 `recognition-auto-50k-pending` (prepared 50k

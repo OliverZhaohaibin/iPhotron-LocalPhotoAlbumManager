@@ -226,13 +226,13 @@ def _duration(start: dict[str, Any] | None, end: dict[str, Any] | None) -> float
 
 def _nearest_resource_sample(
     samples: Sequence[dict[str, Any]],
-    target_elapsed_ms: float,
+    target_wall_time: float,
 ) -> dict[str, Any] | None:
     if not samples:
         return None
     return min(
         samples,
-        key=lambda item: abs(float(item["elapsed_ms"]) - float(target_elapsed_ms)),
+        key=lambda item: abs(float(item["wall_time"]) - float(target_wall_time)),
     )
 
 
@@ -244,15 +244,15 @@ def _resource_snapshots(events: Sequence[dict[str, Any]]) -> dict[str, dict[str,
         None,
     )
     targets = {
-        "interactive": float(interactive["elapsed_ms"]) if interactive is not None else None,
+        "interactive": float(interactive["wall_time"]) if interactive is not None else None,
         "recognition_activation": (
-            float(activation["elapsed_ms"]) if activation is not None else None
+            float(activation["wall_time"]) if activation is not None else None
         ),
         "recognition_plus_1500ms": (
-            float(activation["elapsed_ms"]) + 1500.0 if activation is not None else None
+            float(activation["wall_time"]) + 1.5 if activation is not None else None
         ),
         "recognition_plus_5000ms": (
-            float(activation["elapsed_ms"]) + 5000.0 if activation is not None else None
+            float(activation["wall_time"]) + 5.0 if activation is not None else None
         ),
     }
     snapshots: dict[str, dict[str, Any] | None] = {}
@@ -308,6 +308,8 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
 
     previous_elapsed = -1.0
     for event in events:
+        if event["stage"] == "launcher.resource_sample":
+            continue
         elapsed = float(event["elapsed_ms"])
         if elapsed < previous_elapsed:
             errors.append("event elapsed_ms is out of order")
@@ -830,12 +832,21 @@ def _wait_with_resource_sampling(
         try:
             memory = observed.memory_info()
             cpu = observed.cpu_times()
-            io = observed.io_counters()
+            io_getter = getattr(observed, "io_counters", None)
+            io = io_getter() if callable(io_getter) else None
             details = {
                 "cpu_ms": round((float(cpu.user) + float(cpu.system)) * 1000.0, 3),
                 "rss_bytes": int(memory.rss),
-                "read_bytes": int(getattr(io, "read_bytes", 0)),
-                "write_bytes": int(getattr(io, "write_bytes", 0)),
+                "read_bytes": (
+                    int(getattr(io, "read_bytes"))
+                    if io is not None and hasattr(io, "read_bytes")
+                    else None
+                ),
+                "write_bytes": (
+                    int(getattr(io, "write_bytes"))
+                    if io is not None and hasattr(io, "write_bytes")
+                    else None
+                ),
             }
             _append_event(
                 profile_path,

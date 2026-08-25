@@ -64,8 +64,9 @@ elevate privileges or purge caches itself.
 
 ### Recognition idle-start evidence
 
-Use fixed commit `1590fdbb928af3608f93f09e87747081a8445ee0` as the
-feature-scoped baseline and the candidate head for the automatic policy. Keep
+Use the same candidate commit for both arms. The default is the automatic
+policy; add `--set-env IPHOTO_STARTUP_RECOGNITION_AUTO_START=0` for the
+feature-scoped baseline. Explicit People-page activation remains enabled. Keep
 the application alive long enough to observe five seconds after recognition
 activation and enable child-process resource sampling:
 

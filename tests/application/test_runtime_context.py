@@ -70,6 +70,7 @@ class _FakeLibrary:
         self.bound_location_services: list[object | None] = []
         self.asset_query_service_during_bind: object | None = None
         self.state_repository_during_bind: object | None = None
+        self.startup_recognition_requests = 0
 
     def bind_path(self, root: Path) -> None:
         self.asset_query_service_during_bind = (
@@ -129,6 +130,9 @@ class _FakeLibrary:
         exclude: list[str],
     ) -> None:
         self.scan_requests.append((root, list(include), list(exclude)))
+
+    def request_startup_recognition_after_idle(self) -> None:
+        self.startup_recognition_requests += 1
 
     def bind_scan_service(self, scan_service: object | None) -> None:
         self.bound_scan_services.append(scan_service)
@@ -315,6 +319,21 @@ def test_resume_startup_tasks_can_defer_scan_until_gallery_opens(
     assert context.facade.scan_requests == [
         (library_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), True)
     ]
+
+
+def test_idle_startup_recognition_policy_can_be_disabled_for_controlled_ab(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    context, library, _asset_runtime = _runtime_context(library_root)
+    context.resume_startup_tasks(defer_scan=True)
+    monkeypatch.setenv("IPHOTO_STARTUP_RECOGNITION_AUTO_START", "0")
+
+    context.schedule_idle_startup_jobs()
+
+    assert library.startup_recognition_requests == 0
 
 
 def test_resume_startup_tasks_skips_scan_when_scope_complete(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ from PySide6.QtCore import (
     Signal,
 )
 
+from ..bootstrap.startup_profile import mark
 from ..errors import LibraryUnavailableError
 from ..utils.logging import get_logger
 
@@ -694,9 +695,15 @@ class LibraryRuntimeController(
         generation = int(self._recognition_generation)
         self._startup_recognition_request = (Path(root), generation)
         scanner = self._current_scanner_worker
-        if scanner is not None and getattr(
+        waits_for_scan = scanner is not None and getattr(
             scanner, "_defer_ai_workers_until_scan_finished", False
-        ):
+        )
+        mark(
+            "recognition.startup.requested",
+            generation=generation,
+            waits_for_scan=waits_for_scan,
+        )
+        if waits_for_scan:
             return
         self._arm_startup_recognition_idle_timer(Path(root), generation)
 
@@ -707,6 +714,11 @@ class LibraryRuntimeController(
         if request is None or not self._startup_recognition_timer.isActive():
             return
         self._startup_recognition_timer.start(_STARTUP_RECOGNITION_IDLE_MS)
+        mark(
+            "recognition.startup.idle_reset",
+            generation=request[1],
+            delay_ms=_STARTUP_RECOGNITION_IDLE_MS,
+        )
 
     def _arm_startup_recognition_idle_timer(self, root: Path, generation: int) -> None:
         request = self._startup_recognition_request
@@ -717,10 +729,22 @@ class LibraryRuntimeController(
         ):
             return
         self._startup_recognition_timer.start(_STARTUP_RECOGNITION_IDLE_MS)
+        mark(
+            "recognition.startup.idle_armed",
+            generation=generation,
+            delay_ms=_STARTUP_RECOGNITION_IDLE_MS,
+        )
 
-    def _cancel_startup_recognition_request(self) -> None:
+    def _cancel_startup_recognition_request(self, *, reason: str = "cancelled") -> None:
+        request = self._startup_recognition_request
         self._startup_recognition_timer.stop()
         self._startup_recognition_request = None
+        if request is not None:
+            mark(
+                "recognition.startup.cancelled",
+                generation=request[1],
+                reason=reason,
+            )
 
     def _activate_startup_recognition_after_idle(self) -> None:
         request = self._startup_recognition_request
@@ -737,6 +761,7 @@ class LibraryRuntimeController(
         session = self._library_session
         if session is None or Path(session.library_root) != root:
             return
+        mark("recognition.startup.activated", generation=generation)
         self.bind_recognition_services(session.people, session.pets)
         self.activate_recognition_scans()
 

@@ -325,15 +325,62 @@ class _RecognitionIdleActivityFilter(QObject):
         return False
 
     def _belongs_to_window(self, watched: QObject) -> bool:
-        if watched is self._window:
+        if self._object_is_owned_by_window(watched):
             return True
-        is_ancestor = getattr(self._window, "isAncestorOf", None)
-        if callable(is_ancestor):
-            try:
-                return bool(is_ancestor(watched))
-            except (RuntimeError, TypeError):
-                return False
+        for getter_name in ("activePopupWidget", "activeModalWidget"):
+            getter = getattr(self._app, getter_name, None)
+            active = getter() if callable(getter) else None
+            if active is None or not self._object_contains(active, watched):
+                continue
+            if self._object_is_owned_by_window(active):
+                return True
         return False
+
+    def _object_is_owned_by_window(self, value: object) -> bool:
+        main_handle_getter = getattr(self._window, "windowHandle", None)
+        main_handle = main_handle_getter() if callable(main_handle_getter) else None
+        pending = [value]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            if current is self._window or current is main_handle:
+                return True
+            is_ancestor = getattr(self._window, "isAncestorOf", None)
+            if callable(is_ancestor):
+                try:
+                    if is_ancestor(current):
+                        return True
+                except (RuntimeError, TypeError):
+                    pass
+            for getter_name in ("parent", "parentWidget", "transientParent"):
+                getter = getattr(current, getter_name, None)
+                if callable(getter):
+                    try:
+                        pending.append(getter())
+                    except RuntimeError:
+                        pass
+            window_handle_getter = getattr(current, "windowHandle", None)
+            if callable(window_handle_getter):
+                try:
+                    pending.append(window_handle_getter())
+                except RuntimeError:
+                    pass
+        return False
+
+    @staticmethod
+    def _object_contains(container: object, watched: object) -> bool:
+        if container is watched:
+            return True
+        is_ancestor = getattr(container, "isAncestorOf", None)
+        if not callable(is_ancestor):
+            return False
+        try:
+            return bool(is_ancestor(watched))
+        except (RuntimeError, TypeError):
+            return False
 
 
 def _bootstrap_macos_external_tool_path() -> None:

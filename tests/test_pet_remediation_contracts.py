@@ -1526,7 +1526,7 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
     assert pet_pipeline.resolve_pet_model_path(relative, directory=True) == bundled_dir
 
 
-def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
+def test_model_resolver_preserves_corrupt_user_cache_and_uses_bundled(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1554,7 +1554,7 @@ def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
     )
 
     assert pet_pipeline.resolve_pet_model_path(relative) == bundled_model
-    assert not cached_model.exists()
+    assert cached_model.exists()
 
 
 def test_thumbnail_publish_compensates_when_later_replace_fails(

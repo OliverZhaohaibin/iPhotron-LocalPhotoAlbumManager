@@ -62,6 +62,42 @@ and add both `--cache-eviction-method METHOD` and
 `--confirm-controlled-cold-cache`. The tool records but intentionally does not
 elevate privileges or purge caches itself.
 
+### Recognition idle-start evidence
+
+Use fixed commit `1590fdbb928af3608f93f09e87747081a8445ee0` as the
+feature-scoped baseline and the candidate head for the automatic policy. Keep
+the application alive long enough to observe five seconds after recognition
+activation and enable child-process resource sampling:
+
+```bash
+.venv/bin/python tools/startup_benchmark.py collect \
+  --revision CURRENT_SHA \
+  --scenario recognition-auto-models-present \
+  --runtime source \
+  --qt-backend cocoa \
+  --graphics-backend metal \
+  --cache-state hot \
+  --samples 30 \
+  --auto-exit-delay-ms 10000 \
+  --timeout-seconds 30 \
+  --sample-resources \
+  --resource-sample-interval-ms 100 \
+  --library /absolute/path/to/dedicated-recognition-library \
+  --confirm-dedicated-library \
+  --output-dir benchmark-output/recognition/candidate/models-present \
+  -- .venv/bin/python -m iPhoto.gui.main
+```
+
+Repeat with scenarios `recognition-auto-missing-models` (empty isolated model
+root plus `--set-env IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`),
+`recognition-auto-50k-pending` (prepared 50k
+status backlog), and `recognition-quick-close` (`--auto-exit-delay-ms 250`).
+The JSON/Markdown summary records CPU time, RSS, read bytes, and write bytes at
+interactive, recognition activation, activation +1.5 s, and activation +5 s.
+First-gallery/thumbnail P50 and P95 must not regress, post-interactive GUI jobs
+remain below 100 ms, and quick-close must have no recognition worker start or
+late QThread diagnostics.
+
 Windows packaged runs use the same CLI under PowerShell, with the Nuitka `.exe`
 after `--`. Keep Defender enabled. Collect separate `local-ssd-indexed`,
 `offline-removable`, and `delayed-smb` scenarios and verify after the batch that

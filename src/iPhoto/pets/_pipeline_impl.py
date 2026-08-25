@@ -1926,37 +1926,44 @@ def ensure_pet_detector_model(
             "Pet scanning unavailable: a custom detector URL requires "
             f"{PET_DETECTOR_MODEL_SHA256_ENV}."
         )
-    if target.is_file():
-        try:
-            _validate_downloaded_file(
+    url = str(custom_url or DEFAULT_PET_DETECTOR_MODEL_URL).strip()
+    try:
+        with _model_acquisition_lock(target):
+            if target.is_file():
+                try:
+                    _validate_downloaded_file(
+                        target,
+                        label="YOLOX pet detector model",
+                        expected_sha256=expected_sha256,
+                        max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+                    )
+                    return target
+                except RuntimeError:
+                    if not allow_model_download:
+                        raise
+                    try:
+                        target.unlink()
+                    except OSError as exc:
+                        _raise_if_model_storage_error(exc, target)
+                except OSError as exc:
+                    _raise_if_model_storage_error(exc, target)
+            if not allow_model_download:
+                raise RuntimeError(
+                    "Pet scanning unavailable: missing YOLOX model at "
+                    f"{target}. Set IPHOTO_PET_MODEL_DIR or enable pet model downloads."
+                )
+            if not url:
+                raise RuntimeError(
+                    "Pet scanning unavailable: missing YOLOX model at "
+                    f"{target} and no pet detector download URL is configured."
+                )
+            return _download_file(
+                url,
                 target,
                 label="YOLOX pet detector model",
                 expected_sha256=expected_sha256,
                 max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
             )
-            return target
-        except OSError as exc:
-            _raise_if_model_storage_error(exc, target)
-    if not allow_model_download:
-        raise RuntimeError(
-            "Pet scanning unavailable: missing YOLOX model at "
-            f"{target}. Set IPHOTO_PET_MODEL_DIR or enable pet model downloads."
-        )
-
-    url = str(custom_url or DEFAULT_PET_DETECTOR_MODEL_URL).strip()
-    if not url:
-        raise RuntimeError(
-            "Pet scanning unavailable: missing YOLOX model at "
-            f"{target} and no pet detector download URL is configured."
-        )
-    try:
-        return _download_file(
-            url,
-            target,
-            label="YOLOX pet detector model",
-            expected_sha256=expected_sha256,
-            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-        )
     except _ModelStoragePermissionError as exc:
         fallback = _model_storage_fallback_path(target)
         if fallback is None:
@@ -2074,8 +2081,13 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Pet model path must be relative to a configured model root.")
     override = pet_model_override_dir()
+    if override is not None and not directory:
+        # Override lookup and repair are authoritative. Read-only resolution must
+        # never delete the candidate or consult another model root.
+        return override / relative
     user_cache = user_pet_model_cache_dir()
     bundled_invalid = False
+    invalid_user_candidate: Path | None = None
     for root in pet_model_search_roots():
         candidate = root / relative
         exists = candidate.is_dir() if directory else candidate.is_file()
@@ -2106,12 +2118,14 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                 raise RuntimeError(
                     f"Pet scanning unavailable: invalid model override artifact at {candidate}."
                 ) from exc
+            if root == user_cache and not directory:
+                invalid_user_candidate = candidate
+                continue
             if root == user_cache:
-                model_path = candidate / f"{relative.name}.pt" if directory else candidate
+                model_path = candidate / f"{relative.name}.pt"
                 try:
                     model_path.unlink(missing_ok=True)
-                    if directory:
-                        _dinov2_metadata_path(model_path).unlink(missing_ok=True)
+                    _dinov2_metadata_path(model_path).unlink(missing_ok=True)
                 except OSError:
                     _LOGGER.warning(
                         "Failed to quarantine invalid Pets model cache %s",
@@ -2122,6 +2136,8 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                 bundled_invalid = True
     if override is not None:
         return override / relative
+    if invalid_user_candidate is not None:
+        return invalid_user_candidate
     if bundled_invalid:
         return user_cache / relative
     return pet_model_install_root() / relative
@@ -2246,7 +2262,7 @@ def _dinov2_metadata_path(model_path: Path) -> Path:
 
 
 @contextmanager
-def _dinov2_acquisition_lock(model_path: Path):
+def _model_acquisition_lock(model_path: Path):
     """Serialize one cache artifact across threads and processes."""
 
     lock_path = Path(model_path).with_suffix(f"{Path(model_path).suffix}.acquire.lock")
@@ -2291,6 +2307,9 @@ def _dinov2_acquisition_lock(model_path: Path):
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
+
+
+_dinov2_acquisition_lock = _model_acquisition_lock
 
 
 def _publish_dinov2_cache_pair(

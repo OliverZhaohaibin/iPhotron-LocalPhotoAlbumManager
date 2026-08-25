@@ -36,6 +36,7 @@ _install_certifi_environment = _impl._install_certifi_environment
 _dinov2_metadata_path = _impl._dinov2_metadata_path
 _validate_dinov2_cache_metadata = _impl._validate_dinov2_cache_metadata
 _dinov2_release_metadata = _impl._dinov2_release_metadata
+_model_acquisition_lock = _impl._model_acquisition_lock
 _dinov2_acquisition_lock = _impl._dinov2_acquisition_lock
 _publish_dinov2_cache_pair = _impl._publish_dinov2_cache_pair
 _file_sha256 = _impl._file_sha256

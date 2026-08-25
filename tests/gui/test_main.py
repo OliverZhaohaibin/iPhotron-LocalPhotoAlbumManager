@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtGui import QCloseEvent, QSurface
+from PySide6.QtGui import QCloseEvent, QSurface, QWindow
+from PySide6.QtWidgets import QDialog, QMainWindow, QMenu, QWidget
 
 from iPhoto.gui.main import (
     _bootstrap_macos_external_tool_path,
@@ -453,6 +454,40 @@ def test_recognition_idle_filter_resets_only_for_active_window_input() -> None:
     activity_filter.release()
     assert installed_filters == [activity_filter]
     assert removed_filters == [activity_filter]
+
+
+def test_recognition_idle_filter_includes_owned_popup_modal_and_transient_windows(qapp) -> None:
+    activity: list[str] = []
+    window = QMainWindow()
+    child = QWidget(window)
+    context_menu = QMenu(child)
+    modal = QDialog(window)
+    external = QDialog()
+    window.show()
+    qapp.processEvents()
+    transient = QWindow()
+    transient.setTransientParent(window.windowHandle())
+    activity_filter = _RecognitionIdleActivityFilter(
+        window,
+        qapp,
+        lambda: activity.append("active"),
+    )
+    activity_filter.install()
+    event = QEvent(QEvent.Type.KeyPress)
+    try:
+        assert activity_filter.eventFilter(context_menu, event) is False
+        assert activity_filter.eventFilter(modal, event) is False
+        assert activity_filter.eventFilter(transient, event) is False
+        assert activity == ["active", "active", "active"]
+        assert activity_filter.eventFilter(external, event) is False
+        assert activity == ["active", "active", "active"]
+    finally:
+        activity_filter.release()
+        transient.close()
+        external.close()
+        modal.close()
+        context_menu.close()
+        window.close()
 
 
 def test_settings_initialization_failure_emits_one_failed_terminal(

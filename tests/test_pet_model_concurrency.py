@@ -1,12 +1,35 @@
 from __future__ import annotations
 
 import multiprocessing
+import hashlib
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from iPhoto.pets import pipeline as pet_pipeline
+
+
+_DETECTOR_BYTES = b"concurrent-detector"
+_DETECTOR_SHA256 = hashlib.sha256(_DETECTOR_BYTES).hexdigest()
+
+
+def _acquire_detector_once(model_path: str, start, downloads) -> None:
+    from iPhoto.pets import pipeline
+
+    pipeline._impl.DEFAULT_PET_DETECTOR_MODEL_SHA256 = _DETECTOR_SHA256
+
+    def fake_download(_url: str, destination: Path, **_kwargs) -> Path:
+        with downloads.get_lock():
+            downloads.value += 1
+        time.sleep(0.2)
+        Path(destination).write_bytes(_DETECTOR_BYTES)
+        return Path(destination)
+
+    pipeline._impl._download_file = fake_download
+    start.wait(10)
+    pipeline.ensure_pet_detector_model(Path(model_path))
 
 
 def _hold_dino_lock(model_path: str, ready, release) -> None:
@@ -53,6 +76,34 @@ def test_dino_acquisition_lock_serializes_processes(tmp_path: Path) -> None:
     finally:
         release.set()
         for process in (holder, waiter):
+            if process.is_alive():
+                process.terminate()
+            process.join(5)
+
+
+def test_detector_acquisition_lock_downloads_once_across_processes(tmp_path: Path) -> None:
+    model_path = tmp_path / "detector" / "yolox_nano_coco.onnx"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    downloads = context.Value("i", 0)
+    processes = [
+        context.Process(
+            target=_acquire_detector_once,
+            args=(str(model_path), start, downloads),
+        )
+        for _ in range(2)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(15)
+            assert process.exitcode == 0
+        assert downloads.value == 1
+        assert model_path.read_bytes() == _DETECTOR_BYTES
+    finally:
+        for process in processes:
             if process.is_alive():
                 process.terminate()
             process.join(5)

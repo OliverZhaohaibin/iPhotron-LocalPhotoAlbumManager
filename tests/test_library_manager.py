@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -1008,7 +1008,23 @@ def test_startup_ai_workers_close_input_after_metadata_scan(
     ):
         manager._start_ai_scan_workers(root, startup=True)
 
-    profile_mark.assert_called_once_with("startup_ai_scan.started", root=root)
+    profile_mark.assert_has_calls(
+        [
+            call("startup_ai_scan.started", root=root),
+            call(
+                "recognition.worker.started",
+                generation=manager._recognition_generation,
+                worker="face",
+                startup=True,
+            ),
+            call(
+                "recognition.worker.started",
+                generation=manager._recognition_generation,
+                worker="pet",
+                startup=True,
+            ),
+        ]
+    )
     prepare_runtime.assert_called_once_with()
     assert len(created) == 2
     assert all(worker.input_closed for worker in created)

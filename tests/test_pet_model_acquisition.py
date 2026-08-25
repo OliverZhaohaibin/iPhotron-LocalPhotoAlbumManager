@@ -245,6 +245,80 @@ class TestOverrideAuthority:
             pet_pipeline.ensure_pet_detector_model(target)
         assert calls == [target]
 
+    def test_invalid_detector_override_is_repaired_in_place_without_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        _fake_detector_manifest: None,
+    ) -> None:
+        override = tmp_path / "override"
+        target = override / DETECTOR_RELATIVE
+        _invalid_detector(target)
+        monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(override))
+        monkeypatch.setattr(
+            pet_impl,
+            "user_pet_model_cache_dir",
+            lambda: (_ for _ in ()).throw(AssertionError("override must not fall back")),
+        )
+        downloads: list[Path] = []
+
+        def repair(_url: str, destination: Path, **_kwargs) -> Path:
+            downloads.append(Path(destination))
+            Path(destination).write_bytes(_FAKE_DETECTOR_BYTES)
+            return Path(destination)
+
+        monkeypatch.setattr(pet_impl, "_download_file", repair)
+
+        resolved = pet_pipeline.resolve_pet_model_path(DETECTOR_RELATIVE)
+        assert resolved == target
+        assert pet_pipeline.ensure_pet_detector_model(resolved) == target
+        assert downloads == [target]
+        assert target.read_bytes() == _FAKE_DETECTOR_BYTES
+
+    def test_invalid_detector_is_preserved_when_download_is_disabled(
+        self,
+        tmp_path: Path,
+        _fake_detector_manifest: None,
+    ) -> None:
+        target = tmp_path / "override" / DETECTOR_RELATIVE
+        _invalid_detector(target)
+
+        with pytest.raises(RuntimeError, match="SHA-256"):
+            pet_pipeline.ensure_pet_detector_model(
+                target,
+                allow_model_download=False,
+            )
+
+        assert target.read_bytes() == b"invalid"
+
+    def test_detector_repair_non_permission_unlink_error_does_not_retry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        _fake_detector_manifest: None,
+    ) -> None:
+        target = tmp_path / "override" / DETECTOR_RELATIVE
+        _invalid_detector(target)
+        real_unlink = Path.unlink
+
+        def fail_unlink(self: Path, *args, **kwargs):
+            if self == target:
+                raise OSError(errno.ENOSPC, "full")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_unlink)
+        monkeypatch.setattr(
+            pet_impl,
+            "_download_file",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("non-permission repair errors must not download")
+            ),
+        )
+
+        with pytest.raises(OSError) as raised:
+            pet_pipeline.ensure_pet_detector_model(target)
+        assert raised.value.errno == errno.ENOSPC
+
     def test_dino_override_permission_error_does_not_fallback(
         self,
         tmp_path: Path,

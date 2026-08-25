@@ -2,16 +2,6 @@ name: Pets DINO Release contract
 
 on:
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Publish the immutable pet-models-v1 Release after validation
-        required: true
-        type: boolean
-        default: false
-      artifact_run_id:
-        description: Previously successful candidate run ID to publish
-        required: false
-        type: string
   pull_request:
     branches: [main, edit-base]
 
@@ -27,11 +17,12 @@ env:
 
 jobs:
   build-release-candidate:
-    if: github.event_name == 'pull_request' || !inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/checkout@v4
         with:
           repository: facebookresearch/dinov2
@@ -73,7 +64,6 @@ jobs:
 
   validate-release-candidate:
     needs: build-release-candidate
-    if: github.event_name == 'pull_request' || !inputs.publish
     strategy:
       fail-fast: false
       matrix:
@@ -109,54 +99,6 @@ jobs:
           name: pet-models-v1-validation-${{ runner.os }}
           path: model-dist/validation-*.json
           if-no-files-found: error
-
-  publish-release:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
-    runs-on: ubuntu-latest
-    environment: pets-model-release
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: pet-models-v1-candidate
-          path: model-dist
-          run-id: ${{ inputs.artifact_run_id }}
-          github-token: ${{ github.token }}
-      - name: Verify selected artifact against the checked-in manifest
-        run: >-
-          python tools/validate_dinov2_torchscript.py
-          model-dist/dinov2_vits14.pt
-          model-dist/dinov2_vits14.pt.metadata.json
-          --manifest src/iPhoto/pets/model_manifest.json
-          --metadata-only
-      - name: Refuse to overwrite an existing immutable release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view pet-models-v1 --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "pet-models-v1 already exists; publish a new versioned tag instead" >&2
-            exit 1
-          fi
-          if git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" refs/tags/pet-models-v1 >/dev/null 2>&1; then
-            echo "pet-models-v1 tag already exists; refusing to overwrite it" >&2
-            exit 1
-          fi
-      - name: Publish pet-models-v1
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create pet-models-v1
-          model-dist/dinov2_vits14.pt
-          model-dist/dinov2_vits14.pt.metadata.json
-          model-dist/dinov2_vits14.build.json
-          model-dist/SHA256SUMS
-          --repo "${GITHUB_REPOSITORY}"
-          --target "${GITHUB_SHA}"
-          --title "iPhotron Pets models v1"
-          --notes "Pinned DINOv2 ViT-S/14 TorchScript artifact validated on Ubuntu, macOS, and Windows."
 
   published-release-contract:
     if: github.event_name == 'pull_request'

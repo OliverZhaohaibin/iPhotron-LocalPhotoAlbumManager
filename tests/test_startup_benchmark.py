@@ -110,6 +110,58 @@ def test_analyse_and_summarize_valid_profiles(tmp_path) -> None:
     assert summary["metrics"]["first_usable_thumbnail_ms"]["p95"] == 768.0
 
 
+def test_recognition_resource_snapshots_are_correlated_to_activation(tmp_path) -> None:
+    path = tmp_path / "resources.jsonl"
+    _write_profile(path)
+    payloads = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    payloads = [item for item in payloads if item["stage"] != "launcher.process_finished"]
+    payloads.extend(
+        [
+            {
+                "stage": "recognition.startup.activated",
+                "elapsed_ms": 700.0,
+                "wall_time": 1000.7,
+                "pid": 123,
+                "details": {"generation": 1},
+            },
+            *[
+                {
+                    "stage": "launcher.resource_sample",
+                    "elapsed_ms": elapsed,
+                    "wall_time": 1000.0 + elapsed / 1000.0,
+                    "pid": 123,
+                    "details": {
+                        "cpu_ms": elapsed / 10.0,
+                        "rss_bytes": int(elapsed * 1000),
+                        "read_bytes": int(elapsed * 10),
+                        "write_bytes": int(elapsed * 5),
+                    },
+                }
+                for elapsed in (300.0, 700.0, 2200.0, 5700.0)
+            ],
+            {
+                "stage": "launcher.process_finished",
+                "elapsed_ms": 6000.0,
+                "wall_time": 1006.0,
+                "pid": 123,
+                "details": {"return_code": 0, "timed_out": False},
+            },
+        ]
+    )
+    payloads.sort(key=lambda item: float(item["elapsed_ms"]))
+    path.write_text("".join(json.dumps(item) + "\n" for item in payloads), encoding="utf-8")
+
+    run = analyse_run(path)
+    summary = summarize_profiles([path])
+
+    assert run["metrics"]["interactive_recognition_activation_ms"] == 400.0
+    assert run["resource_snapshots"]["interactive"]["rss_bytes"] == 300000
+    assert run["resource_snapshots"]["recognition_activation"]["rss_bytes"] == 700000
+    assert run["resource_snapshots"]["recognition_plus_1500ms"]["rss_bytes"] == 2200000
+    assert run["resource_snapshots"]["recognition_plus_5000ms"]["rss_bytes"] == 5700000
+    assert summary["resources"]["recognition_plus_5000ms"]["cpu_ms"]["p95"] == 570.0
+
+
 def test_missing_terminal_and_path_leak_are_rejected(tmp_path) -> None:
     path = tmp_path / "broken.jsonl"
     _write_profile(path, include_terminal=False)
@@ -157,6 +209,28 @@ def test_nonzero_or_timed_out_process_is_rejected(tmp_path) -> None:
     assert any("exited with code 3" in error for error in crashed_run["errors"])
     assert timed_out_run["eligible"] is False
     assert any("timed out" in error for error in timed_out_run["errors"])
+
+
+def test_quick_close_rejects_recognition_worker_start(tmp_path) -> None:
+    path = tmp_path / "quick-close.jsonl"
+    _write_profile(path, scenario="recognition-quick-close")
+    payloads = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    payloads.append(
+        {
+            "stage": "recognition.worker.started",
+            "elapsed_ms": 610.0,
+            "wall_time": 1000.61,
+            "pid": 123,
+            "details": {"generation": 1, "worker": "face"},
+        }
+    )
+    payloads.sort(key=lambda item: float(item["elapsed_ms"]))
+    path.write_text("".join(json.dumps(item) + "\n" for item in payloads), encoding="utf-8")
+
+    run = analyse_run(path)
+
+    assert run["valid"] is False
+    assert "quick-close started a recognition worker" in run["errors"]
 
 
 def test_mixed_batch_contexts_are_rejected(tmp_path) -> None:
@@ -212,6 +286,7 @@ import time
 from pathlib import Path
 
 assert os.environ["IPHOTO_STARTUP_BENCHMARK_AUTO_EXIT_MS"] == "25"
+assert os.environ["IPHOTO_TEST_SCENARIO"] == "enabled"
 path = Path(os.environ["IPHOTO_STARTUP_PROFILE_PATH"])
 context = {
     "run_id": os.environ["IPHOTO_STARTUP_RUN_ID"],
@@ -292,6 +367,8 @@ with path.open("a", encoding="utf-8") as stream:
             "1",
             "--auto-exit-delay-ms",
             "25",
+            "--set-env",
+            "IPHOTO_TEST_SCENARIO=enabled",
             "--output-dir",
             str(output),
             "--",

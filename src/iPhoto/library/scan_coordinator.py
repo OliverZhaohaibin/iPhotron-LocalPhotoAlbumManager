@@ -232,6 +232,14 @@ class ScanCoordinatorMixin:
                     worker.start(QThread.Priority.LowestPriority)
                 else:
                     worker.start()
+                mark(
+                    "recognition.worker.started",
+                    generation=generation,
+                    worker=(
+                        "face" if worker is self._current_face_scanner else "pet"
+                    ),
+                    startup=bool(startup),
+                )
             except Exception:  # noqa: BLE001
                 all_started = False
                 if self._current_face_scanner is worker:
@@ -310,10 +318,20 @@ class ScanCoordinatorMixin:
         if deferred_queue is not None:
             deferred_queue.clear()
         if self._current_face_scanner is not None:
+            mark(
+                "recognition.worker.cancelled",
+                generation=self._recognition_generation,
+                worker="face",
+            )
             self._current_face_scanner.cancel()
             self._retiring_recognition_workers.add(self._current_face_scanner)
             self._current_face_scanner = None
         if self._current_pet_scanner is not None:
+            mark(
+                "recognition.worker.cancelled",
+                generation=self._recognition_generation,
+                worker="pet",
+            )
             self._current_pet_scanner.cancel()
             self._retiring_recognition_workers.add(self._current_pet_scanner)
             self._current_pet_scanner = None
@@ -666,6 +684,11 @@ class ScanCoordinatorMixin:
             if defer_ai_workers
             else None
         )
+        if startup_recognition_generation is not None:
+            mark(
+                "recognition.startup.scan_ready",
+                generation=startup_recognition_generation,
+            )
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.

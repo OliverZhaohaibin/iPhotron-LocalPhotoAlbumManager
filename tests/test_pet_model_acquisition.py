@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -204,6 +205,27 @@ class TestOverrideAuthority:
         with pytest.raises(pet_pipeline.PetModelUnavailableError):
             pipeline_instance._resolve_model_path(DETECTOR_RELATIVE)
 
+    def test_invalid_dino_override_is_repaired_in_place_without_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        override = tmp_path / "override"
+        model_dir = override / EMBEDDER_RELATIVE
+        model_dir.mkdir(parents=True)
+        (model_dir / "dinov2_vits14.pt").write_bytes(b"legacy")
+        monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(override))
+        monkeypatch.setattr(
+            pet_impl,
+            "user_pet_model_cache_dir",
+            lambda: (_ for _ in ()).throw(AssertionError("override must not fall back")),
+        )
+
+        assert pet_pipeline.resolve_pet_model_path(
+            EMBEDDER_RELATIVE,
+            directory=True,
+        ) == model_dir
+
     def test_detector_override_permission_error_does_not_fallback(
         self,
         tmp_path: Path,
@@ -245,6 +267,21 @@ class TestOverrideAuthority:
 
 
 class TestDownloadsAndMetadata:
+    def test_embedder_rejects_an_unpinned_torch_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(__version__="2.11.0"))
+        with pytest.raises(
+            pet_pipeline.PetRuntimeUnavailableError,
+            match="requires torch==2.12.1",
+        ):
+            pet_pipeline._DinoV2Embedder(
+                tmp_path,
+                model_name="dinov2_vits14",
+            )
+
     def test_exact_size_is_enforced(self, tmp_path: Path, monkeypatch) -> None:
         target = tmp_path / "model.bin"
         payload = b"exact-size"
@@ -322,9 +359,16 @@ class TestDownloadsAndMetadata:
             "b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9"
         )
         assert manifest["weights_size"] == 88283115
-        assert manifest["torchscript_url"] is None
+        assert manifest["artifact_kind"] == "release_torchscript"
+        assert manifest["release_tag"] == "pet-models-v1"
+        assert manifest["cache_schema_version"] == 2
+        assert manifest["producer_torch_version"] == "2.12.1"
+        assert manifest["producer_torchvision_version"] == "0.27.1"
+        assert manifest["torchscript_url"].endswith(
+            "/releases/download/pet-models-v1/dinov2_vits14.pt"
+        )
 
-    def test_derived_metadata_requires_local_integrity(self, tmp_path: Path) -> None:
+    def test_legacy_derived_metadata_is_rejected(self, tmp_path: Path) -> None:
         content = b"derived-torchscript"
         metadata = {
             "artifact_kind": "derived_checkpoint_cache",
@@ -343,22 +387,18 @@ class TestDownloadsAndMetadata:
         pet_pipeline._dinov2_metadata_path(model_path).write_text(
             hashlib_json(metadata), encoding="utf-8"
         )
-        pet_pipeline._validate_dinov2_cache_metadata(model_path, model_name="dinov2_vits14")
-        model_path.write_bytes(content + b"corrupt")
-        with pytest.raises(RuntimeError, match="integrity check failed"):
+        with pytest.raises(RuntimeError, match="metadata contract mismatch"):
             pet_pipeline._validate_dinov2_cache_metadata(
                 model_path,
                 model_name="dinov2_vits14",
             )
 
-    def test_dino_build_publishes_model_and_metadata_together(
+    def test_dino_release_download_publishes_model_and_metadata_together(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        model_bytes = b"derived-torchscript"
-        checkpoint_bytes = b"checkpoint"
-        checkpoint_state = {"checkpoint": "verified"}
+        model_bytes = b"release-torchscript"
         model_name = "dinov2_vits14"
         model_path = tmp_path / EMBEDDER_RELATIVE / f"{model_name}.pt"
 
@@ -369,62 +409,18 @@ class TestDownloadsAndMetadata:
             def eval(self):
                 return self
 
-            def cpu(self):
-                return self
-
             def to(self, _device):
                 return self
-
-            def load_state_dict(self, state_dict, *, strict: bool):
-                assert state_dict is checkpoint_state
-                assert strict is True
-                return None
 
             def __call__(self, _example):
                 return FakeTensor()
 
-        class FakeTraced:
-            def save(self, path: str) -> None:
-                Path(path).write_bytes(model_bytes)
-
         class FakeJit:
-            @staticmethod
-            def trace(_model, _example, *, strict: bool):
-                assert strict is False
-                return FakeTraced()
-
             @staticmethod
             def load(path: str, *, map_location):
                 assert Path(path).read_bytes() == model_bytes
                 assert map_location in {"cpu", "test-device"}
                 return FakeModel()
-
-        class FakeHub:
-            @staticmethod
-            def load(
-                repo_or_dir: str,
-                requested_model_name: str,
-                *,
-                source: str,
-                trust_repo: bool,
-                skip_validation: bool,
-                pretrained: bool,
-            ):
-                assert repo_or_dir == (
-                    f"{pet_pipeline._EMBEDDER_MANIFEST['source_repository']}:"
-                    f"{pet_pipeline._DINO_SOURCE_REVISION}"
-                )
-                assert requested_model_name == model_name
-                assert source == "github"
-                assert trust_repo is True
-                assert skip_validation is True
-                assert pretrained is False
-                return FakeModel()
-
-        class FakeTesting:
-            @staticmethod
-            def assert_close(_actual, _expected, **_kwargs) -> None:
-                return None
 
         class FakeNoGrad:
             def __enter__(self):
@@ -433,21 +429,8 @@ class TestDownloadsAndMetadata:
             def __exit__(self, *_args):
                 return False
 
-        loaded_checkpoints: list[Path] = []
-
-        def fake_torch_load(path, *, map_location, weights_only: bool):
-            checkpoint_path = Path(path)
-            loaded_checkpoints.append(checkpoint_path)
-            assert checkpoint_path.read_bytes() == checkpoint_bytes
-            assert map_location == "cpu"
-            assert weights_only is True
-            return checkpoint_state
-
         fake_torch = SimpleNamespace(
-            hub=FakeHub(),
             jit=FakeJit(),
-            testing=FakeTesting(),
-            load=fake_torch_load,
             float32=object(),
             randn=lambda *_args, **_kwargs: object(),
             no_grad=lambda: FakeNoGrad(),
@@ -457,11 +440,22 @@ class TestDownloadsAndMetadata:
         embedder._device = "test-device"
         embedder._model_name = model_name
 
-        def fake_download(_url: str, destination: Path, **kwargs) -> Path:
-            assert kwargs["expected_sha256"] == pet_pipeline._DINO_WEIGHTS_SHA256
-            assert kwargs["max_bytes"] == pet_pipeline._DINO_WEIGHTS_SIZE
-            assert kwargs["exact_size"] == pet_pipeline._DINO_WEIGHTS_SIZE
-            Path(destination).write_bytes(checkpoint_bytes)
+        digest = hashlib.sha256(model_bytes).hexdigest()
+        monkeypatch.setattr(pet_impl, "_DINO_TORCHSCRIPT_SHA256", digest)
+        monkeypatch.setattr(pet_impl, "_DINO_TORCHSCRIPT_SIZE", len(model_bytes))
+        monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "torchscript_sha256", digest)
+        monkeypatch.setitem(
+            pet_pipeline._EMBEDDER_MANIFEST,
+            "torchscript_size",
+            len(model_bytes),
+        )
+
+        def fake_download(url: str, destination: Path, **kwargs) -> Path:
+            assert url == pet_pipeline._DINO_TORCHSCRIPT_URL
+            assert kwargs["expected_sha256"] == digest
+            assert kwargs["max_bytes"] == len(model_bytes)
+            assert kwargs["exact_size"] == len(model_bytes)
+            Path(destination).write_bytes(model_bytes)
             return Path(destination)
 
         monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
@@ -470,14 +464,14 @@ class TestDownloadsAndMetadata:
         loaded = embedder._build_dinov2_cache(model_path)
         metadata_path = pet_pipeline._dinov2_metadata_path(model_path)
         assert isinstance(loaded, FakeModel)
-        assert len(loaded_checkpoints) == 1
-        assert loaded_checkpoints[0].name == "dinov2_vits14_pretrain.pth"
         assert model_path.read_bytes() == model_bytes
         assert metadata_path.is_file()
         pet_pipeline._validate_dinov2_cache_metadata(model_path, model_name=model_name)
         metadata = hashlib_json_load(metadata_path)
-        assert metadata["derived_torchscript_sha256"] == hashlib.sha256(model_bytes).hexdigest()
-        assert metadata["derived_torchscript_size"] == len(model_bytes)
+        assert metadata["artifact_kind"] == "release_torchscript"
+        assert metadata["cache_schema_version"] == 2
+        assert metadata["torchscript_sha256"] == digest
+        assert metadata["torchscript_size"] == len(model_bytes)
 
     def test_dino_publish_rolls_back_model_when_metadata_publish_is_denied(
         self,

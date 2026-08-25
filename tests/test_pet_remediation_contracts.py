@@ -1500,17 +1500,19 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
         hashlib.sha256(model_path.read_bytes()).hexdigest(),
     )
     monkeypatch.setitem(manifest, "torchscript_size", model_path.stat().st_size)
+    monkeypatch.setattr(
+        pet_impl,
+        "_DINO_TORCHSCRIPT_SHA256",
+        hashlib.sha256(model_path.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        pet_impl,
+        "_DINO_TORCHSCRIPT_SIZE",
+        model_path.stat().st_size,
+    )
     model_path.with_suffix(".pt.metadata.json").write_text(
         json.dumps(
-            {
-                "model_name": "dinov2_vits14",
-                "source_repository": manifest["source_repository"],
-                "source_revision": manifest["source_revision"],
-                "torchscript_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
-                "torchscript_size": model_path.stat().st_size,
-                "input_shape": manifest["input_shape"],
-                "output_shape": manifest["output_shape"],
-            }
+            pet_pipeline._dinov2_release_metadata(model_name="dinov2_vits14")
         ),
         encoding="utf-8",
     )

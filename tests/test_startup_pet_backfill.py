@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -32,7 +33,7 @@ def _startup_worker() -> Mock:
     return worker
 
 
-def test_successful_startup_scan_starts_pet_backfill(
+def test_successful_startup_scan_arms_people_and_pets_idle_gate(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -43,20 +44,21 @@ def test_successful_startup_scan_starts_pet_backfill(
     worker = _startup_worker()
     manager._current_scanner_worker = worker
     manager._live_scan_root = root
+    manager.request_startup_recognition_after_idle()
 
     with (
-        patch.object(manager, "_start_pet_backfill_worker") as start_pet_backfill,
+        patch.object(manager, "_arm_startup_recognition_idle_timer") as arm_idle,
         patch.object(manager._scan_thread_pool, "start") as start_pool,
     ):
         manager._on_scan_finished(worker, root, [{"rel": "pet.jpg"}])
         qapp.processEvents()
 
     worker.scan_service.finalize_scan_result.assert_called_once()
-    start_pet_backfill.assert_called_once_with(root)
+    arm_idle.assert_called_once_with(root, manager._recognition_generation)
     start_pool.assert_called_once()
 
 
-def test_startup_pet_backfill_is_invalidated_by_shutdown_generation(
+def test_startup_recognition_idle_gate_is_invalidated_by_shutdown_generation(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -67,6 +69,7 @@ def test_startup_pet_backfill_is_invalidated_by_shutdown_generation(
     worker = _startup_worker()
     manager._current_scanner_worker = worker
     manager._live_scan_root = root
+    manager.request_startup_recognition_after_idle()
 
     def invalidate_recognition_generation(*_args) -> None:
         manager._recognition_generation += 1
@@ -74,11 +77,63 @@ def test_startup_pet_backfill_is_invalidated_by_shutdown_generation(
     manager.scanFinished.connect(invalidate_recognition_generation)
 
     with (
-        patch.object(manager, "_start_pet_backfill_worker") as start_pet_backfill,
+        patch.object(manager, "_arm_startup_recognition_idle_timer") as arm_idle,
         patch.object(manager._scan_thread_pool, "start") as start_pool,
     ):
         manager._on_scan_finished(worker, root, [{"rel": "pet.jpg"}])
         qapp.processEvents()
 
-    start_pet_backfill.assert_not_called()
+    arm_idle.assert_not_called()
     start_pool.assert_called_once()
+
+
+def test_idle_timeout_lazily_binds_and_starts_both_recognition_services(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    people_service = object()
+    pet_service = object()
+    manager._library_session = SimpleNamespace(
+        library_root=root,
+        people=people_service,
+        pets=pet_service,
+    )
+
+    with (
+        patch.object(manager, "bind_recognition_services") as bind_services,
+        patch.object(manager, "activate_recognition_scans") as activate,
+    ):
+        manager.request_startup_recognition_after_idle()
+        assert manager._startup_recognition_timer.isActive()
+        assert manager._startup_recognition_timer.interval() == 1500
+        manager.notify_user_activity()
+        assert manager._startup_recognition_timer.isActive()
+        manager._startup_recognition_timer.stop()
+        manager._activate_startup_recognition_after_idle()
+
+    bind_services.assert_called_once_with(people_service, pet_service)
+    activate.assert_called_once_with()
+
+
+def test_failed_startup_scan_cancels_pending_idle_activation(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    worker = _startup_worker()
+    worker.failed = True
+    manager._current_scanner_worker = worker
+    manager._live_scan_root = root
+    manager.request_startup_recognition_after_idle()
+
+    manager._on_scan_finished(worker, root, [])
+
+    assert manager._startup_recognition_request is None
+    assert not manager._startup_recognition_timer.isActive()

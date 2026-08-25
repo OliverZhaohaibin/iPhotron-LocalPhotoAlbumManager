@@ -7,16 +7,27 @@ import pytest
 from iPhoto.pets import pipeline as pet_pipeline
 
 
-def test_dinov2_source_pin_is_immutable() -> None:
+def test_dinov2_release_and_provenance_are_immutable() -> None:
     manifest = pet_pipeline._EMBEDDER_MANIFEST
     assert manifest["source_repository"] == "facebookresearch/dinov2"
     assert manifest["source_revision"] == "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
     assert manifest["source_tree_sha1"] == "2a27257b79b0633b027a21014bc9360e3c1b3f43"
-    assert manifest["source_archive_url"] == (
-        "https://github.com/facebookresearch/dinov2/archive/"
-        "7764ea0f912e53c92e82eb78a2a1631e92725fc8.zip"
+    assert manifest["torchscript_url"] == (
+        "https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/"
+        "releases/download/pet-models-v1/dinov2_vits14.pt"
     )
-    pet_pipeline._validate_dinov2_source_pin()
+    assert manifest["cache_schema_version"] == 2
+    assert manifest["producer_torch_version"] == "2.12.1"
+
+
+def test_production_pets_source_has_no_torch_hub_or_xformers_branch() -> None:
+    source_root = Path(pet_pipeline.__file__).parent
+    production_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in source_root.glob("*.py")
+    )
+    assert "torch.hub" not in production_source
+    assert "source=\"github\"" not in production_source
+    assert "XFORMERS" not in production_source
 
 
 def test_embedder_construction_stays_lazy_until_first_crop(

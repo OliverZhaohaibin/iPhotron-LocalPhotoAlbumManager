@@ -15,6 +15,7 @@ from iPhoto.gui.main import (
     _prepare_top_level_rhi_surface,
     _startup_feature_plan,
     _startup_timing_plan,
+    _RecognitionIdleActivityFilter,
     _StartupInputGuard,
 )
 from iPhoto.gui.ui import main_window as main_window_module
@@ -397,6 +398,61 @@ def test_startup_input_guard_filters_only_window_startup_input() -> None:
 
     assert removed_filters == [guard]
     assert guard.eventFilter(child, _FakeEvent(QEvent.Type.MouseButtonPress)) is False
+
+
+def test_recognition_idle_filter_resets_only_for_active_window_input() -> None:
+    installed_filters: list[object] = []
+    removed_filters: list[object] = []
+    activity: list[str] = []
+
+    class _FakeApp:
+        def installEventFilter(self, event_filter) -> None:  # noqa: N802
+            installed_filters.append(event_filter)
+
+        def removeEventFilter(self, event_filter) -> None:  # noqa: N802
+            removed_filters.append(event_filter)
+
+    class _FakeWindow:
+        def isAncestorOf(self, watched) -> bool:  # noqa: N802
+            return watched == "child"
+
+    class _FakeEvent:
+        def __init__(self, event_type, buttons=Qt.MouseButton.NoButton) -> None:
+            self._event_type = event_type
+            self._buttons = buttons
+
+        def type(self):
+            return self._event_type
+
+        def buttons(self):
+            return self._buttons
+
+    window = _FakeWindow()
+    activity_filter = _RecognitionIdleActivityFilter(
+        window,
+        _FakeApp(),
+        lambda: activity.append("active"),
+    )
+    activity_filter.install()
+
+    assert activity_filter.eventFilter("child", _FakeEvent(QEvent.Type.Wheel)) is False
+    assert activity == ["active"]
+    assert (
+        activity_filter.eventFilter("child", _FakeEvent(QEvent.Type.MouseMove))
+        is False
+    )
+    assert activity == ["active"]
+    activity_filter.eventFilter(
+        "child",
+        _FakeEvent(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton),
+    )
+    assert activity == ["active", "active"]
+    activity_filter.eventFilter("external", _FakeEvent(QEvent.Type.KeyPress))
+    assert activity == ["active", "active"]
+
+    activity_filter.release()
+    assert installed_filters == [activity_filter]
+    assert removed_filters == [activity_filter]
 
 
 def test_settings_initialization_failure_emits_one_failed_terminal(

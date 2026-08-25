@@ -755,7 +755,7 @@ def test_pet_backfill_event_does_not_block_face_activation(
         def finish_input(self) -> None:
             self.input_closed = True
 
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             self.started = True
 
         def cancel(self) -> None:
@@ -829,7 +829,7 @@ def test_recognition_activation_retries_only_failed_worker(
             return False
 
     class _FaceWorker(_WorkerBase):
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             face_starts.append(1)
 
     class _PetWorker(_WorkerBase):
@@ -837,7 +837,7 @@ def test_recognition_activation_retries_only_failed_worker(
             super().__init__(*_args, **_kwargs)
             pet_instances.append(self)
 
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             if len(pet_instances) == 1:
                 raise RuntimeError("injected Pet start failure")
 
@@ -956,7 +956,7 @@ def test_startup_ai_workers_close_input_after_metadata_scan(
         def isRunning(self) -> bool:
             return False
 
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             self.started = True
 
     monkeypatch.setitem(

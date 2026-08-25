@@ -1,35 +1,142 @@
-name: Pets DINO source contract
+name: Pets DINO Release contract
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the immutable pet-models-v1 Release after validation
+        required: true
+        type: boolean
+        default: false
   pull_request:
     branches: [main, edit-base]
 
 permissions:
   contents: read
 
-jobs:
-  dino-source-contract:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+env:
+  PYTHON_VERSION: "3.12"
+  TORCH_VERSION: "2.12.1"
+  TORCHVISION_VERSION: "0.27.1"
+  DINO_REVISION: "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
+  DINO_WEIGHTS_URL: "https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2_vits14_pretrain.pth"
 
+jobs:
+  build-release-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
+        with:
+          repository: facebookresearch/dinov2
+          ref: ${{ env.DINO_REVISION }}
+          path: .model-build/dinov2
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
           cache-dependency-path: pyproject.toml
-
-      - name: Install focused dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest numpy pillow certifi torch torchvision
-
-      - name: Run real pinned DINOv2 source contract
+      - name: Install pinned CPU build runtime
+        run: >-
+          python -m pip install torch==${TORCH_VERSION}
+          torchvision==${TORCHVISION_VERSION}
+          --index-url https://download.pytorch.org/whl/cpu
+      - name: Download pinned official checkpoint
+        run: >-
+          curl --fail --location --retry 3 "${DINO_WEIGHTS_URL}"
+          --output .model-build/dinov2_vits14_pretrain.pth
+      - name: Build one verified TorchScript candidate
         env:
-          PYTHONPATH: src
-          IPHOTO_RUN_PETS_DINO_SOURCE_CONTRACT: "1"
           XFORMERS_DISABLED: "1"
-        run: python -m pytest -q -s tests/contracts/test_pets_dino_source_contract.py
+        run: >-
+          python tools/convert_dinov2_torchscript.py
+          model-dist/dinov2_vits14.pt
+          --source-dir .model-build/dinov2
+          --checkpoint .model-build/dinov2_vits14_pretrain.pth
+          --runtime-metadata model-dist/dinov2_vits14.pt.metadata.json
+          --build-manifest model-dist/dinov2_vits14.build.json
+      - name: Record artifact checksum
+        run: sha256sum model-dist/dinov2_vits14.pt > model-dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pet-models-v1-candidate
+          path: model-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  validate-release-candidate:
+    needs: build-release-candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install pinned CPU runtime on Linux and Windows
+        if: runner.os != 'macOS'
+        run: >-
+          python -m pip install torch==${{ env.TORCH_VERSION }}
+          --index-url https://download.pytorch.org/whl/cpu
+      - name: Install pinned runtime on macOS
+        if: runner.os == 'macOS'
+        run: python -m pip install torch==${{ env.TORCH_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: pet-models-v1-candidate
+          path: model-dist
+      - name: Validate identical release bytes and inference
+        shell: bash
+        run: >-
+          python tools/validate_dinov2_torchscript.py
+          model-dist/dinov2_vits14.pt
+          model-dist/dinov2_vits14.pt.metadata.json
+          | tee "model-dist/validation-${RUNNER_OS}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pet-models-v1-validation-${{ runner.os }}
+          path: model-dist/validation-*.json
+          if-no-files-found: error
+
+  publish-release:
+    needs: validate-release-candidate
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    environment: pets-model-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pet-models-v1-candidate
+          path: model-dist
+      - name: Refuse to overwrite an existing immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view pet-models-v1 --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "pet-models-v1 already exists; publish a new versioned tag instead" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" refs/tags/pet-models-v1 >/dev/null 2>&1; then
+            echo "pet-models-v1 tag already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+      - name: Publish pet-models-v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create pet-models-v1
+          model-dist/dinov2_vits14.pt
+          model-dist/dinov2_vits14.pt.metadata.json
+          model-dist/dinov2_vits14.build.json
+          model-dist/SHA256SUMS
+          --repo "${GITHUB_REPOSITORY}"
+          --target "${GITHUB_SHA}"
+          --title "iPhotron Pets models v1"
+          --notes "Pinned DINOv2 ViT-S/14 TorchScript artifact validated on Ubuntu, macOS, and Windows."

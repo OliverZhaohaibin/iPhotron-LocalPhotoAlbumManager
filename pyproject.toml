@@ -57,8 +57,7 @@ ai-demo = [
 pets-ai = [
     "certifi>=2024",
     "onnxruntime>=1.18,<2",
-    "torch",
-    "torchvision",
+    "torch==2.12.1",
     "usearch>=2.26,<3",
 ]
 

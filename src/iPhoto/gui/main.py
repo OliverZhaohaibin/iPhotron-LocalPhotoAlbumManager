@@ -274,6 +274,68 @@ class _StartupInputGuard(QObject):
         return False
 
 
+class _RecognitionIdleActivityFilter(QObject):
+    """Reset the startup recognition idle gate without consuming user input."""
+
+    def __init__(
+        self,
+        window: QObject,
+        app: QApplication,
+        callback: Callable[[], None],
+    ) -> None:
+        try:
+            super().__init__(window)
+        except TypeError:
+            super().__init__()
+        self._window = window
+        self._app = app
+        self._callback = callback
+        self._installed = False
+
+    def install(self) -> None:
+        if self._installed:
+            return
+        install_filter = getattr(self._app, "installEventFilter", None)
+        if not callable(install_filter):
+            return
+        install_filter(self)
+        self._installed = True
+
+    def release(self) -> None:
+        if not self._installed:
+            return
+        remove_filter = getattr(self._app, "removeEventFilter", None)
+        if callable(remove_filter):
+            try:
+                remove_filter(self)
+            except RuntimeError:
+                pass
+        self._installed = False
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if not self._installed or event.type() not in _STARTUP_INPUT_EVENT_TYPES:
+            return False
+        if not self._belongs_to_window(watched):
+            return False
+        if event.type() == QEvent.Type.MouseMove:
+            buttons = getattr(event, "buttons", None)
+            if not callable(buttons) or buttons() == Qt.MouseButton.NoButton:
+                return False
+        self._callback()
+        return False
+
+    def _belongs_to_window(self, watched: QObject) -> bool:
+        if watched is self._window:
+            return True
+        is_ancestor = getattr(self._window, "isAncestorOf", None)
+        if callable(is_ancestor):
+            try:
+                return bool(is_ancestor(watched))
+            except (RuntimeError, TypeError):
+                return False
+        return False
+
+
 def _bootstrap_macos_external_tool_path() -> None:
     """Expose common Homebrew/MacPorts tool paths to GUI-launched app bundles."""
 
@@ -687,6 +749,13 @@ def main(argv: list[str] | None = None) -> int:
             set_startup_orchestrator(startup)
         startup_input_guard = _StartupInputGuard(window, app)
         startup_input_guard.install()
+        recognition_activity_filter = _RecognitionIdleActivityFilter(
+            window,
+            app,
+            lambda: context.library.notify_user_activity(),
+        )
+        recognition_activity_filter.install()
+        setattr(window, "_recognition_idle_activity_filter", recognition_activity_filter)
 
         from iPhoto.bootstrap.library_probe import LibraryProbeController
 

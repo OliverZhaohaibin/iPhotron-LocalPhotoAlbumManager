@@ -176,8 +176,9 @@ not enable it. Build environments that promise Pets support must install:
 python -m pip install -e ".[pets-ai]"
 ```
 
-The standalone bundle must retain `onnxruntime`, `torch`, `torchvision`,
-`usearch`, and `certifi`. An offline-ready build must also include:
+The standalone bundle must retain `onnxruntime`, `torch==2.12.1`, `usearch`, and
+`certifi`. `torchvision` is a model-build dependency, not a production runtime
+dependency. An offline-ready build must also include:
 
 ```text
 extension/models/pets/
@@ -192,14 +193,13 @@ that enable Pets should also include the optional runtime explicitly:
 ```bash
 --include-package=onnxruntime
 --include-package=torch
---include-package=torchvision
 --include-package=usearch
 --include-package=certifi
 --include-data-dir=src/extension/models=extension/models
 ```
 
 The current platform build scripts explicitly include the People runtime but do
-not yet add `torch`, `torchvision`, or `usearch` flags. Therefore a stock script
+not yet add `torch` or `usearch` flags. Therefore a stock script
 build must not be advertised as Pets-enabled merely because the model directory
 was copied; add the flags above (or update the script) and perform the Pets smoke
 test before release.

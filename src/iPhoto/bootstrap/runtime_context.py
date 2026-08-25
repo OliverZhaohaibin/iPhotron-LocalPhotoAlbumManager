@@ -277,6 +277,9 @@ class RuntimeContext:
 
     def schedule_idle_startup_jobs(self) -> None:
         self.start_deferred_startup_scan()
+        requester = getattr(self.library, "request_startup_recognition_after_idle", None)
+        if callable(requester):
+            requester()
 
     def start_deferred_startup_scan(self) -> None:
         """Start a scan that was intentionally delayed until after first gallery load."""

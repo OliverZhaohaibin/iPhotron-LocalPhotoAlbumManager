@@ -19,6 +19,18 @@ if TYPE_CHECKING:
 LOGGER = get_logger()
 
 
+def _prepare_face_runtime_imports() -> None:
+    """Serialize cv2 initialization before handing work to a Face QThread."""
+
+    try:
+        from ..people.pipeline import prepare_face_runtime_imports
+
+        prepare_face_runtime_imports()
+    except ImportError:
+        # The worker preserves the existing graceful optional-runtime error.
+        LOGGER.debug("Face runtime import preflight is unavailable", exc_info=True)
+
+
 class _PairingWorker(QRunnable):
     """Run live-photo pairing off the main thread after a scan completes."""
 
@@ -164,6 +176,7 @@ class ScanCoordinatorMixin:
         started: list[object] = []
 
         if self._current_face_scanner is None:
+            _prepare_face_runtime_imports()
             from .workers.face_scan_worker import FaceScanWorker
 
             face_worker = FaceScanWorker(

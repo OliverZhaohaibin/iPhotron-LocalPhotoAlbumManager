@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import sys
+import threading
 import typing
 import uuid
 from collections import Counter, defaultdict, deque
@@ -48,6 +49,24 @@ DEFAULT_FACE_SMALL_TARGET_MIN_CONFIDENCE = 0.75
 DEFAULT_FACE_TINY_AREA_RATIO = 0.0005
 DEFAULT_FACE_SMALL_AREA_RATIO = 0.005
 DEFAULT_FACE_RELATIVE_AREA_RATIO = 0.15
+_FACE_RUNTIME_IMPORT_LOCK = threading.Lock()
+_FACE_RUNTIME_IMPORT_READY = False
+
+
+def prepare_face_runtime_imports() -> None:
+    """Complete cv2's process-global import before a Face QThread starts."""
+
+    global _FACE_RUNTIME_IMPORT_READY
+    if _FACE_RUNTIME_IMPORT_READY:
+        return
+    with _FACE_RUNTIME_IMPORT_LOCK:
+        if _FACE_RUNTIME_IMPORT_READY:
+            return
+        # Importing cv2 concurrently with PySide/Shiboken signature mapping can
+        # terminate the process on macOS (KeyError: cv2.Error). Model creation
+        # and downloads remain lazy; only the native module import is serialized.
+        __import__("cv2")
+        _FACE_RUNTIME_IMPORT_READY = True
 
 
 @dataclass(frozen=True)

@@ -666,6 +666,12 @@ class LibraryRuntimeController(
         """Start model workers after a recognition viewport is usable."""
 
         root = self._root
+        scanner = self._current_scanner_worker
+        if scanner is not None and getattr(
+            scanner, "_defer_ai_workers_until_scan_finished", False
+        ):
+            self.request_startup_recognition_after_idle()
+            return
         if (
             root is None
             or root != self._recognition_services_root

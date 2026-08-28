@@ -50,6 +50,26 @@ powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_d
    collector window to stop it.
 5. Send back the single ZIP path printed in green. By default it is created on the Desktop.
 
+## First-media compositor A/B
+
+For the Windows-only first-open leak, run from a fresh process so no Detail
+QRhi surface has already been submitted. Test both configurations:
+
+```powershell
+$env:IPHOTO_RHI_BACKEND = "opengl"
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1
+
+$env:IPHOTO_RHI_BACKEND = "d3d11"
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1
+```
+
+For each backend, repeat first still, plain video, adjusted video, and Live
+Photo opening from 30 clean launches. Also exercise Edit, fullscreen, paused
+raw/adjusted switching, and opening/closing Maps. `stderr.log` must contain the
+`Main-window graphics contract` entry. OpenGL runs should report an alpha
+buffer greater than zero; a missing/zero value is a failed graphics contract,
+not a successful reproduction run.
+
 The default timeout is 30 minutes. Override it with `-MaxMinutes 60` if the scan takes longer.
 The expanded directory is retained beside the ZIP so its contents can be reviewed before
 sharing.

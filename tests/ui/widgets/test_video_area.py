@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import struct
+import sys
 import time
 import weakref
 from unittest.mock import Mock, call, patch
@@ -15,7 +16,7 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import (
@@ -671,13 +672,33 @@ class TestVideoRendererWidget:
         cover.raise_()
         failures = []
         cover_visible_at_submission = []
+        waiting_for_second_submission = False
 
         def _release_cover() -> None:
+            nonlocal waiting_for_second_submission
+            cover_visible_at_submission.append(cover.isVisible())
+            if sys.platform != "win32":
+                cover.hide()
+                return
+
+            def _arm_second_submission() -> None:
+                nonlocal waiting_for_second_submission
+                waiting_for_second_submission = True
+                renderer.update()
+
+            QTimer.singleShot(0, _arm_second_submission)
+
+        def _on_composed() -> None:
+            nonlocal waiting_for_second_submission
+            if not waiting_for_second_submission:
+                return
+            waiting_for_second_submission = False
             cover_visible_at_submission.append(cover.isVisible())
             cover.hide()
 
         renderer.renderFailed.connect(lambda: failures.append(True))
         renderer.firstFrameReady.connect(_release_cover)
+        renderer.frameSubmitted.connect(_on_composed)
 
         host.resize(320, 180)
         host.show()
@@ -694,8 +715,9 @@ class TestVideoRendererWidget:
         cover_released = not cover.isVisible()
         host.close()
         if failures:
-            pytest.skip("platform could not create a QRhi for the contract test")
-        assert cover_visible_at_submission == [True]
+            pytest.fail("visible platform could not create a QRhi for the contract test")
+        expected_visibility = [True, True] if sys.platform == "win32" else [True]
+        assert cover_visible_at_submission == expected_visibility
         assert cover_released
 
     def test_transparent_rounded_clip_toggles_widget_attributes(self, qapp):
@@ -1250,6 +1272,28 @@ class TestVideoArea:
         va._gpu_video_frame_presented_handler(va._media_generation, 4)
 
         surface_spy.assert_called_once_with(42, 4)
+
+    def test_only_active_inner_surface_forwards_composition_submission(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        va = VideoArea()
+        composed = mocker.Mock()
+        va.surfaceCompositionSubmitted.connect(composed)
+
+        va._edit_viewer.frameSubmitted.emit()
+        composed.assert_not_called()
+
+        va._renderer.frameSubmitted.emit()
+        composed.assert_called_once_with()
+
+        va.set_adjusted_preview_enabled(True)
+        composed.reset_mock()
+        va._renderer.frameSubmitted.emit()
+        composed.assert_not_called()
+        va._edit_viewer.frameSubmitted.emit()
+        composed.assert_called_once_with()
 
     def test_hidden_surface_resource_loss_does_not_invalidate_visible_surface(
         self,

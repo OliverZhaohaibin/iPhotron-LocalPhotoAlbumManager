@@ -80,6 +80,34 @@ def test_playback_header_shadow_stays_hidden_while_suppressed(qapp):
     assert shadow.raise_count == initial_raise_count + 1
 
 
+def test_playback_header_shadow_raises_when_hidden_detail_page_is_shown(qapp):
+    root = QWidget()
+    root.resize(200, 80)
+    chrome = QWidget(root)
+    chrome.setGeometry(0, 0, 200, 22)
+    separator = QFrame(chrome)
+    separator.setGeometry(0, 20, 200, 2)
+
+    shadow = _SpyPlaybackHeaderShadow(separator, chrome, root)
+    root.show()
+    qapp.processEvents()
+
+    shadow.set_suppressed(True)
+    root.hide()
+    shadow.set_suppressed(False)
+    qapp.processEvents()
+
+    assert not shadow.isHidden()
+    assert not shadow.isVisible()
+    raise_count_before_show = shadow.raise_count
+
+    root.show()
+    qapp.processEvents()
+
+    assert shadow.isVisible()
+    assert shadow.raise_count > raise_count_before_show
+
+
 def test_playback_surface_touches_header_separator_but_keeps_filmstrip_gap(
     qapp,
     monkeypatch,

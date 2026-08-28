@@ -193,6 +193,7 @@ class VideoArea(QWidget):
         # --- Video Renderer Setup ---
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
+        self._immersive_active = False
 
         self._surface_stack = QStackedWidget(self)
         self._renderer = VideoRendererWidget(self._surface_stack)
@@ -639,8 +640,8 @@ class VideoArea(QWidget):
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
-        colour = "#000000" if immersive else self._default_surface_color
-        self._apply_surface(colour)
+        self._immersive_active = bool(immersive)
+        self._apply_effective_surface()
 
     def set_surface_color(self, colour: str) -> None:
         """Update the surface colour used for letterbox and background areas.
@@ -650,7 +651,7 @@ class VideoArea(QWidget):
         """
 
         self._default_surface_color = colour
-        self._apply_surface(colour)
+        self._apply_effective_surface()
 
     def set_viewport_fill_enabled(self, enabled: bool) -> None:
         """Control whether preview surfaces cover the viewport instead of fitting inside it."""
@@ -682,7 +683,13 @@ class VideoArea(QWidget):
             self._surface_stack.setStyleSheet("")
         self._renderer.set_transparent_rounded_clip(corner_radius if target else 0.0)
         self._edit_viewer.set_transparent_rounded_clip(corner_radius if target else 0.0)
-        self._apply_surface(self._default_surface_color)
+        self._apply_effective_surface()
+
+    def _apply_effective_surface(self) -> None:
+        """Apply immersive black or the latest persistent theme surface."""
+
+        colour = "#000000" if self._immersive_active else self._default_surface_color
+        self._apply_surface(colour)
 
     def _apply_surface(self, colour: str) -> None:
         """Apply *colour* to the renderer letterbox, widget, and stylesheet."""

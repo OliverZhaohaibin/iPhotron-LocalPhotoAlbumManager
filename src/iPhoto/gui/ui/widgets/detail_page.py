@@ -85,19 +85,26 @@ class _PlaybackHeaderShadow(QWidget):
         was_suppressed = self._suppressed
         self._suppressed = suppressed
         self._sync_to_anchor()
-        if was_suppressed and not suppressed and self.isVisible():
+        if was_suppressed and not suppressed and not self.isHidden():
             # Restoring is an explicit, transition-settled operation. Geometry
             # events must never keep forcing this QWidget over the QRhi surface.
             self.raise_()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        if event.type() in {
+        event_type = event.type()
+        if event_type in {
             QEvent.Type.Move,
             QEvent.Type.Resize,
             QEvent.Type.Show,
             QEvent.Type.Hide,
         }:
             self._sync_to_anchor()
+            if (
+                event_type == QEvent.Type.Show
+                and not self._suppressed
+                and not self.isHidden()
+            ):
+                self.raise_()
         return super().eventFilter(watched, event)
 
     def _sync_to_anchor(self) -> None:

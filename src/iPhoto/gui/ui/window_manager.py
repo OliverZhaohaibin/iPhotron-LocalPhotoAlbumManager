@@ -107,6 +107,7 @@ class FramelessWindowManager(QObject):
         self._player_stack_stylesheet = ""
         self._immersive_background_applied = False
         self._immersive_visibility_targets = self._build_immersive_targets()
+        self._shadow_restore_generation = 0
 
         self._qmenu_stylesheet: str = ""
         self._global_menu_stylesheet: str | None = None
@@ -196,6 +197,11 @@ class FramelessWindowManager(QObject):
         elif event.type() == QEvent.Type.PaletteChange:
             self._rounded_shell.update()
             self._apply_menu_styles()
+        elif event.type() == QEvent.Type.WindowStateChange:
+            # The native window state is settled after changeEvent returns on
+            # macOS. Reconcile on the next event-loop turn and keep the check
+            # one-way so Edit fullscreen is not mistaken for Playback mode.
+            QTimer.singleShot(0, self._reconcile_playback_fullscreen_state)
 
     # ------------------------------------------------------------------
     # Window chrome helpers
@@ -287,6 +293,7 @@ class FramelessWindowManager(QObject):
         if not ready:
             self._detail_coordinator.show_placeholder_in_viewer()
 
+        self._suppress_playback_header_shadow()
         self._previous_geometry = self._window.saveGeometry()
         self._previous_window_state = self._window.windowState()
         self._splitter_sizes = self._ui.splitter.sizes()
@@ -323,16 +330,30 @@ class FramelessWindowManager(QObject):
         if self._detail_coordinator is None:
             return
 
+        self._finish_immersive_exit(request_window_change=True)
+
+    def _finish_immersive_exit(self, *, request_window_change: bool) -> None:
+        """Converge Playback immersive state after app or native fullscreen exit."""
+
+        if not self._immersive_active:
+            return
+        if self._detail_coordinator is None:
+            return
+
         resume_after_transition = self._detail_coordinator.suspend_playback_for_transition()
         self._immersive_active = False
         self._restore_default_backdrop()
-        self._window.showNormal()
+        if request_window_change:
+            self._window.showNormal()
 
         with self._suspend_layout_updates():
-            if self._previous_geometry is not None:
-                self._window.restoreGeometry(self._previous_geometry)
-            if self._previous_window_state is not None:
-                self._window.setWindowState(self._previous_window_state)
+            # Native fullscreen exit has already restored the platform-owned
+            # geometry. Reapplying it here can trigger another state change.
+            if request_window_change:
+                if self._previous_geometry is not None:
+                    self._window.restoreGeometry(self._previous_geometry)
+                if self._previous_window_state is not None:
+                    self._window.setWindowState(self._previous_window_state)
             if self._splitter_sizes:
                 self._ui.splitter.setSizes(self._splitter_sizes)
 
@@ -354,7 +375,14 @@ class FramelessWindowManager(QObject):
                 self._ui.filmstrip_view.setVisible(self._ui.toggle_filmstrip_action.isChecked())
 
         self._update_fullscreen_button_icon()
+        self._schedule_playback_header_shadow_restore()
         self._schedule_playback_resume(expect_immersive=False, resume=resume_after_transition)
+
+    def _reconcile_playback_fullscreen_state(self) -> None:
+        """Restore stale Playback immersive state after a native fullscreen exit."""
+
+        if self._immersive_active and not self._window.isFullScreen():
+            self._finish_immersive_exit(request_window_change=False)
 
     def is_immersive_active(self) -> bool:
         """Return ``True`` when the window is in immersive full screen mode."""
@@ -688,6 +716,29 @@ class FramelessWindowManager(QObject):
         self._rounded_shell.set_override_color(None)
         self._rounded_shell.set_corner_radius(self._window_corner_radius)
         self._immersive_background_applied = False
+
+    def _set_playback_header_shadow_suppressed(self, suppressed: bool) -> None:
+        detail_page = getattr(self._ui, "detail_page", None)
+        setter = getattr(detail_page, "set_playback_header_shadow_suppressed", None)
+        if callable(setter):
+            setter(suppressed)
+
+    def _suppress_playback_header_shadow(self) -> None:
+        self._shadow_restore_generation += 1
+        self._set_playback_header_shadow_suppressed(True)
+
+    def _schedule_playback_header_shadow_restore(self) -> None:
+        self._shadow_restore_generation += 1
+        generation = self._shadow_restore_generation
+
+        def _restore() -> None:
+            if generation != self._shadow_restore_generation:
+                return
+            if self._immersive_active or self._window.isFullScreen():
+                return
+            self._set_playback_header_shadow_suppressed(False)
+
+        QTimer.singleShot(PLAYBACK_RESUME_DELAY_MS, _restore)
 
     def _schedule_playback_resume(self, *, expect_immersive: bool, resume: bool) -> None:
         if not resume:

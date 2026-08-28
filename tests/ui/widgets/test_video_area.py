@@ -1273,8 +1273,6 @@ class TestVideoArea:
         va._detail_request_generation = 44
         va._presentation_committed = True
         va._accept_video_frames = True
-        va._renderer_resource_ready = True
-        va._edit_viewer_resource_ready = True
         renderer_update = mocker.patch.object(va._renderer, "update_frame")
         edit_update = mocker.patch.object(va._edit_viewer, "set_video_frame")
         invalidated = mocker.Mock()
@@ -1310,6 +1308,83 @@ class TestVideoArea:
         invalidated.assert_called_once_with(44, 2)
         renderer_update.assert_called_once()
         assert renderer_update.call_args.kwargs["content_serial"] == 2
+
+    def test_rapid_surface_switch_rearms_barrier_on_already_current_target(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        """Paused raw -> edit -> raw cannot leave the edit barrier orphaned."""
+
+        va = VideoArea()
+        va._detail_request_generation = 45
+        va._presentation_committed = True
+        va._accept_video_frames = True
+        va._retained_video_content_serial = 10
+        va._surface_submitted_content_serial[va._renderer] = 10
+        va._surface_submitted_content_serial[va._edit_viewer] = 9
+        va._last_presented_video_frame = QVideoFrame(
+            QVideoFrameFormat(
+                QSize(64, 48),
+                QVideoFrameFormat.PixelFormat.Format_RGBA8888,
+            )
+        )
+        renderer_update = mocker.patch.object(va._renderer, "update_frame")
+        edit_update = mocker.patch.object(va._edit_viewer, "set_video_frame")
+        invalidated = mocker.Mock()
+        submitted = mocker.Mock()
+        va.surfaceInvalidated.connect(invalidated)
+        va.surfaceFrameSubmitted.connect(submitted)
+        edit_handler = va._gpu_video_frame_presented_handlers[va._edit_viewer]
+        raw_handler = va._gpu_video_frame_presented_handlers[va._renderer]
+
+        va.set_adjusted_preview_enabled(True)
+        va.set_adjusted_preview_enabled(False)
+
+        assert invalidated.call_args_list == [call(45, 10), call(45, 10)]
+        assert edit_update.call_args.kwargs["content_serial"] == 10
+        renderer_update.assert_called_once()
+        assert renderer_update.call_args.kwargs["content_serial"] == 10
+
+        edit_handler(va._media_generation, 10)
+        submitted.assert_not_called()
+
+        raw_handler(va._media_generation, 10)
+        submitted.assert_called_once_with(45, 10)
+
+    def test_resource_loss_replay_cannot_orphan_barrier_after_surface_switch(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        """A deferred edit replay is replaced by a fresh raw submission."""
+
+        va = VideoArea()
+        va._detail_request_generation = 46
+        va._presentation_committed = True
+        va._accept_video_frames = True
+        va._retained_video_content_serial = 10
+        va._surface_submitted_content_serial[va._renderer] = 10
+        va._surface_stack.setCurrentWidget(va._edit_viewer)
+        va._adjusted_preview_enabled = True
+        va._last_presented_video_frame = QVideoFrame(
+            QVideoFrameFormat(
+                QSize(64, 48),
+                QVideoFrameFormat.PixelFormat.Format_RGBA8888,
+            )
+        )
+        submit = mocker.patch.object(va, "_submit_video_frame_to_surface")
+        invalidated = mocker.Mock()
+        va.surfaceInvalidated.connect(invalidated)
+
+        va._on_surface_resources_invalidated(va._edit_viewer)
+        va.set_adjusted_preview_enabled(False)
+        qapp.processEvents()
+
+        assert invalidated.call_args_list == [call(46, 10), call(46, 10)]
+        submit.assert_called_once()
+        assert submit.call_args.args[1] is va._renderer
+        assert submit.call_args.kwargs["content_serial"] == 10
 
     def test_resource_loss_requeues_retained_paused_frame(
         self,

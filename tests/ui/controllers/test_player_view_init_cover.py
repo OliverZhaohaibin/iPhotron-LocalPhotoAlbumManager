@@ -1132,6 +1132,22 @@ class TestInitCoverTracking:
         assert controller._pending_video_content_serial == 9
         mock_show_cover.assert_called_once()
 
+    def test_latest_surface_submission_completes_rearmed_switch_barrier(
+        self,
+        controller,
+        mocker,
+    ):
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller._player_stack.setCurrentWidget(controller._video_area)
+
+        controller._video_area.surfaceInvalidated.emit(32, 10)
+        controller._video_area.surfaceInvalidated.emit(32, 10)
+        controller._video_area.surfaceFrameSubmitted.emit(32, 10)
+
+        assert controller._pending_video_generation is None
+        assert controller._pending_video_content_serial is None
+        mock_hide_cover.assert_called_once()
+
     def test_image_first_render_hides_cover_when_image_visible(self, controller, mocker):
         """_on_image_first_render should hide cover when image is current widget."""
         mock_hide = mocker.patch.object(controller, "_hide_detail_init_cover")

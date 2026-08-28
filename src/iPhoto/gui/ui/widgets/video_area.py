@@ -272,8 +272,6 @@ class VideoArea(QWidget):
         # Per-surface zoom tracking so the slider stays in sync when switching surfaces.
         self._renderer_zoom: float = 1.0
         self._edit_viewer_zoom: float = 1.0
-        self._renderer_resource_ready = False
-        self._edit_viewer_resource_ready = False
 
         # Playback-only objects are created after the first main-window paint
         # on the staged startup path.  The QRhi widgets above already have
@@ -447,16 +445,14 @@ class VideoArea(QWidget):
         self._adjusted_preview_enabled = target
         target_surface = self._edit_viewer if target else self._renderer
         required_serial = self._retained_video_content_serial
-        target_serial = self._surface_submitted_content_serial.get(target_surface, 0)
-        needs_content_submission = required_serial > 0 and target_serial != required_serial
-        if (
-            not self._surface_is_resource_ready(target_surface)
-            or needs_content_submission
-        ):
-            self.surfaceInvalidated.emit(
-                self._detail_request_generation,
-                required_serial,
-            )
+        # A stack switch needs a fresh composition acknowledgement even when
+        # the target texture already contains the retained serial. Otherwise a
+        # rapid A -> B -> A switch can leave B owning the pending cover while
+        # its eventual submission is (correctly) rejected as no longer active.
+        self.surfaceInvalidated.emit(
+            self._detail_request_generation,
+            required_serial,
+        )
         self._surface_stack.setCurrentWidget(target_surface)
         self.setFocusProxy(target_surface)
         self._gpu_video_frame_presented_handler = (
@@ -469,7 +465,7 @@ class VideoArea(QWidget):
                 self._edit_viewer.update()
         else:
             self._edit_mode_active = False
-        if needs_content_submission and self._last_presented_video_frame is not None:
+        if required_serial > 0 and self._last_presented_video_frame is not None:
             self._queue_retained_frame_for_surface(
                 target_surface,
                 content_serial=required_serial,
@@ -1816,28 +1812,15 @@ class VideoArea(QWidget):
             surface.firstFrameReady.connect(_handle_ready)
             surface.renderResourcesInvalidated.connect(_handle_invalidated)
 
-    def _surface_is_resource_ready(self, surface: QWidget) -> bool:
-        if surface is self._edit_viewer:
-            return self._edit_viewer_resource_ready
-        return self._renderer_resource_ready
-
     def _on_surface_first_frame_ready(self, surface: QWidget) -> None:
         """Publish readiness only for the currently visible QRhi child."""
 
-        if surface is self._edit_viewer:
-            self._edit_viewer_resource_ready = True
-        else:
-            self._renderer_resource_ready = True
         if self._surface_stack.currentWidget() is surface:
             self.firstFrameReady.emit()
 
     def _on_surface_resources_invalidated(self, surface: QWidget) -> None:
         """Cover and repopulate an active video surface after QRhi loss."""
 
-        if surface is self._edit_viewer:
-            self._edit_viewer_resource_ready = False
-        else:
-            self._renderer_resource_ready = False
         self._surface_submitted_content_serial[surface] = 0
         if self._surface_stack.currentWidget() is not surface:
             return

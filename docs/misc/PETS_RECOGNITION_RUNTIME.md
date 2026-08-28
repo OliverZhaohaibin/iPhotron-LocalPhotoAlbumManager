@@ -38,29 +38,44 @@ Install the optional runtime with:
 pip install -e ".[pets-ai]"
 ```
 
-The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Bundled models are read-only fallbacks; downloads are written to the
+The extra provides `onnxruntime`, `torch==2.12.1`, `usearch`, and `certifi`.
+`torchvision==0.27.1` is confined to the controlled model build workflow.
+Bundled models are read-only fallbacks; downloads are written to the
 platform user cache:
 
 ```text
 src/extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
-└── embedding/dinov2_vits14/dinov2_vits14.pt
+└── embedding/dinov2_vits14/
+    ├── dinov2_vits14.pt
+    └── dinov2_vits14.pt.metadata.json
 ```
 
-`IPHOTO_PET_MODEL_DIR` overrides that root. Missing models may be populated on
-first use unless `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL defaults
-to the upstream YOLOX release and can be overridden with
-`IPHOTO_PET_DETECTOR_MODEL_URL`. Production does not execute Torch Hub. DINOv2
-must be supplied as the hash- and size-verified TorchScript artifact declared
-in `iPhoto/pets/model_manifest.json`; Torch Hub is restricted to the release
-conversion tool. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker without
-disabling the rest of the application.
+Lookup uses the bundled extension first and then the platform user cache. A
+writable development extension directory is preferred for installation; signed
+macOS app bundles install directly into the user cache without a writability
+probe. `IPHOTO_PET_MODEL_DIR` is authoritative: when set, both lookup and
+installation use only that root.
+
+Missing models may be populated lazily on the first non-empty scan unless
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. The detector URL defaults to the upstream
+YOLOX release and can be overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`.
+DINOv2 acquisition downloads only the fixed `pet-models-v1` TorchScript Release,
+validates its SHA-256, exact size, producer/cache schema, CPU load, and output
+shape, then publishes metadata first and the model as the visibility point.
+Production never invokes Torch Hub, downloads source, imports xFormers, or traces
+TorchScript. Legacy derived caches are replaced under the acquisition lock;
+bundled artifacts are never deleted. Only local `EACCES`, `EPERM`, or `EROFS`
+storage failures fall back to the user cache; network, TLS, disk-full, I/O, hash,
+or compatibility failures do not masquerade as storage fallback.
+`IPHOTO_PET_SCAN_DISABLED=1` disables the worker without disabling the rest of
+the application.
 
 Packaged/offline builds that promise Pets support must include the Python AI
-runtime and the two model files under `extension/models/pets`. A build that
-omits them must preserve graceful degradation: core browsing, People, Maps,
-editing, and library state remain usable.
+runtime, the YOLOX detector, the DINOv2 TorchScript artifact, and its
+`dinov2_vits14.pt.metadata.json` sidecar under `extension/models/pets`. A build
+that omits them must preserve graceful degradation: core browsing, People,
+Maps, editing, and library state remain usable.
 
 ## Detection And Clustering Contract
 
@@ -125,16 +140,14 @@ starts before the previous drain finishes.
 | `done` | Detection completed, including valid images with no pets. |
 | `skipped` | Video, non-primary Live Photo component, or another ineligible asset. |
 
-Interactive scans start Face and Pet workers alongside metadata scanning and
-enqueue rows only after their asset batches commit. When a saved library needs
-a startup metadata scan, startup first warms the gallery, runs that scan, then
-starts both AI workers with closed input so they drain persisted
-`pending`/`retry` rows. This avoids model initialization and competing AI work
-on the first-frame path. If the metadata scan scope is already complete, startup
-still starts the Pet backfill worker whenever persisted `pending` or `retry` rows
-need draining. With no metadata scan and no queued AI work, startup does not
-launch scan workers; an explicit rescan is only needed to reset or rediscover
-otherwise completed/failed assets.
+Interactive rescans start Face and Pet workers alongside metadata scanning and
+enqueue rows only after their asset batches commit. Desktop startup keeps the
+first-frame and metadata-scan paths AI-free. After the startup scan succeeds—or
+immediately when its scope was already complete—a 1500 ms interaction-idle gate
+starts both closed-input workers at `LowestPriority`. Click, wheel, key, drag,
+touch, and gesture input restart the gate. Missing People/Pets models may then
+download automatically; switching libraries, shutdown, cancellation, or a new
+generation cancels pending activation.
 
 The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies/models are runtime-availability failures: pending rows are

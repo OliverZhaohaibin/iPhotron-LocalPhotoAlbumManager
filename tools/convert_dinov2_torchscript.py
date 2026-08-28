@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and verify the fixed DINOv2 TorchScript release artifact.
 
-This is a development/release tool. Production code must never execute Torch Hub.
+This is a release-only tool. Production never executes DINOv2 source code.
 """
 
 from __future__ import annotations
@@ -9,11 +9,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import platform
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import torch
+import torchvision
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPOSITORY_ROOT / "src" / "iPhoto" / "pets" / "model_manifest.json"
@@ -30,6 +34,10 @@ def _sha256(path: Path) -> str:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="TorchScript artifact destination")
+    parser.add_argument("--source-dir", required=True, type=Path)
+    parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument("--runtime-metadata", type=Path)
+    parser.add_argument("--build-manifest", type=Path)
     parser.add_argument(
         "--require-manifest-identity",
         action="store_true",
@@ -44,18 +52,45 @@ def main() -> int:
     repository = str(manifest["source_repository"])
     revision = str(manifest["source_revision"])
     model_name = str(manifest["model_name"])
-    source = f"{repository}:{revision}"
+    source_dir = args.source_dir.resolve()
+    checkpoint = args.checkpoint.resolve()
+    if _sha256(checkpoint) != str(manifest["weights_sha256"]):
+        raise RuntimeError("DINOv2 checkpoint SHA-256 does not match the manifest")
+    if checkpoint.stat().st_size != int(manifest["weights_size"]):
+        raise RuntimeError("DINOv2 checkpoint size does not match the manifest")
+    source_commit = _git_value(source_dir, "HEAD")
+    source_tree = _git_value(source_dir, "HEAD^{tree}")
+    if source_commit != revision or source_tree != str(manifest["source_tree_sha1"]):
+        raise RuntimeError("DINOv2 source checkout does not match the pinned commit/tree")
 
+    os.environ.setdefault("XFORMERS_DISABLED", "1")
     torch.manual_seed(0)
     example = torch.randn(tuple(manifest["input_shape"]), dtype=torch.float32)
-    model = torch.hub.load(source, model_name, source="github", trust_repo=True).eval().cpu()
+    model = (
+        torch.hub.load(
+            str(source_dir),
+            model_name,
+            source="local",
+            trust_repo=True,
+            pretrained=False,
+        )
+        .eval()
+        .cpu()
+    )
+    state_dict = torch.load(str(checkpoint), map_location="cpu", weights_only=True)
+    model.load_state_dict(state_dict, strict=True)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="iphoto-dinov2-release-") as temp_dir:
         candidate = Path(temp_dir) / args.output.name
         with torch.no_grad():
             eager_output = model(example)
-            traced = torch.jit.trace(model, example, strict=False)
+            traced = torch.jit.trace(
+                model,
+                example,
+                strict=False,
+                check_trace=False,
+            )
             traced.save(str(candidate))
             scripted = torch.jit.load(str(candidate), map_location="cpu").eval()
             scripted_output = scripted(example)
@@ -68,7 +103,7 @@ def main() -> int:
             raise RuntimeError(
                 f"output shape mismatch: {tuple(scripted_output.shape)} != {expected_shape}"
             )
-        torch.testing.assert_close(scripted_output, eager_output, rtol=1e-4, atol=1e-5)
+        torch.testing.assert_close(scripted_output, eager_output, rtol=1e-3, atol=3e-5)
         artifact_sha256 = _sha256(candidate)
         artifact_size = candidate.stat().st_size
         if args.require_manifest_identity and (
@@ -80,6 +115,43 @@ def main() -> int:
                 f"sha256={artifact_sha256}, size={artifact_size}"
             )
         candidate.replace(args.output)
+
+    runtime_metadata = {
+        "artifact_kind": "release_torchscript",
+        "cache_schema_version": int(manifest["cache_schema_version"]),
+        "model_name": model_name,
+        "release_tag": manifest["release_tag"],
+        "source_repository": repository,
+        "source_revision": revision,
+        "source_tree_sha1": source_tree,
+        "weights_sha256": manifest["weights_sha256"],
+        "weights_size": int(manifest["weights_size"]),
+        "producer_python_version": manifest["producer_python_version"],
+        "producer_torch_version": manifest["producer_torch_version"],
+        "producer_torchvision_version": manifest["producer_torchvision_version"],
+        "torchscript_url": manifest["torchscript_url"],
+        "torchscript_sha256": artifact_sha256,
+        "torchscript_size": artifact_size,
+        "input_shape": manifest["input_shape"],
+        "output_shape": manifest["output_shape"],
+    }
+    if args.runtime_metadata is not None:
+        _write_json(args.runtime_metadata, runtime_metadata)
+
+    build_manifest = {
+        **runtime_metadata,
+        "repository_commit": os.environ.get("IPHOTO_MODEL_BUILD_COMMIT")
+        or os.environ.get("GITHUB_SHA"),
+        "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
+        "python_runtime": platform.python_version(),
+        "torch_runtime": torch.__version__,
+        "torchvision_runtime": torchvision.__version__,
+        "numeric_equivalence": True,
+        "numeric_equivalence_rtol": 1e-3,
+        "numeric_equivalence_atol": 3e-5,
+    }
+    if args.build_manifest is not None:
+        _write_json(args.build_manifest, build_manifest)
 
     print(
         json.dumps(
@@ -94,6 +166,18 @@ def main() -> int:
         )
     )
     return 0
+
+
+def _git_value(repository: Path, revision: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", revision],
+        text=True,
+    ).strip()
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -56,6 +56,14 @@ METRIC_ORDER = (
     "probe_ms",
     "max_gui_job_ms",
     "max_post_interactive_gui_stall_ms",
+    "max_post_recognition_gui_stall_ms",
+    "interactive_recognition_activation_ms",
+)
+RESOURCE_SNAPSHOT_NAMES = (
+    "interactive",
+    "recognition_activation",
+    "recognition_plus_1500ms",
+    "recognition_plus_5000ms",
 )
 BATCH_CONTEXT_KEYS = (
     "revision",
@@ -68,6 +76,8 @@ BATCH_CONTEXT_KEYS = (
     "cache_controlled",
     "cache_eviction_method",
     "scenario",
+    "scenario_env_names",
+    "library_restored_per_sample",
     "build_environment_fingerprint",
     "artifact_sha256",
     "manifest_source_revision",
@@ -216,6 +226,44 @@ def _duration(start: dict[str, Any] | None, end: dict[str, Any] | None) -> float
     return round(max(0.0, float(end["elapsed_ms"]) - float(start["elapsed_ms"])), 3)
 
 
+def _nearest_resource_sample(
+    samples: Sequence[dict[str, Any]],
+    target_wall_time: float,
+) -> dict[str, Any] | None:
+    if not samples:
+        return None
+    return min(
+        samples,
+        key=lambda item: abs(float(item["wall_time"]) - float(target_wall_time)),
+    )
+
+
+def _resource_snapshots(events: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
+    samples = [event for event in events if event["stage"] == "launcher.resource_sample"]
+    interactive = _event(events, "interactive")
+    activation = next(
+        (event for event in events if event["stage"] == "recognition.startup.activated"),
+        None,
+    )
+    targets = {
+        "interactive": float(interactive["wall_time"]) if interactive is not None else None,
+        "recognition_activation": (
+            float(activation["wall_time"]) if activation is not None else None
+        ),
+        "recognition_plus_1500ms": (
+            float(activation["wall_time"]) + 1.5 if activation is not None else None
+        ),
+        "recognition_plus_5000ms": (
+            float(activation["wall_time"]) + 5.0 if activation is not None else None
+        ),
+    }
+    snapshots: dict[str, dict[str, Any] | None] = {}
+    for name, target in targets.items():
+        sample = _nearest_resource_sample(samples, target) if target is not None else None
+        snapshots[name] = dict(_details(sample)) if sample is not None else None
+    return snapshots
+
+
 def _contains_path(value: Any) -> bool:
     if isinstance(value, str):
         return bool(_ABSOLUTE_PATH.search(value))
@@ -262,6 +310,8 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
 
     previous_elapsed = -1.0
     for event in events:
+        if event["stage"] == "launcher.resource_sample":
+            continue
         elapsed = float(event["elapsed_ms"])
         if elapsed < previous_elapsed:
             errors.append("event elapsed_ms is out of order")
@@ -350,6 +400,10 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
     probe_finished = next(
         (event for event in events if event["stage"] == "startup.probe.finished"), None
     )
+    recognition_activated = next(
+        (event for event in events if event["stage"] == "recognition.startup.activated"),
+        None,
+    )
 
     context = next(
         (event.get("context") for event in events if isinstance(event.get("context"), dict)),
@@ -360,6 +414,35 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
     eligible = not errors and (cache_state != "cold" or cache_controlled)
     if cache_state == "cold" and not cache_controlled:
         errors.append("cold cache was not controlled; excluded from formal statistics")
+    scenario = str(context.get("scenario", ""))
+    if scenario == "recognition-quick-close" and any(
+        event["stage"] == "recognition.worker.started" for event in events
+    ):
+        errors.append("quick-close started a recognition worker")
+    feature_scoped_ab = (
+        "IPHOTO_STARTUP_RECOGNITION_AUTO_START"
+        in str(context.get("scenario_env_names", "")).split(",")
+    )
+    if scenario in {
+        "recognition-auto-models-present",
+        "recognition-auto-missing-models",
+        "recognition-auto-50k-pending",
+    } and not feature_scoped_ab:
+        if recognition_activated is None:
+            errors.append("recognition activation event is missing")
+        snapshots = _resource_snapshots(events)
+        missing_snapshots = [name for name, value in snapshots.items() if value is None]
+        if missing_snapshots:
+            errors.append(
+                "recognition resource snapshots are missing: "
+                + ", ".join(missing_snapshots)
+            )
+    if feature_scoped_ab and any(
+        event["stage"] == "recognition.worker.started"
+        and bool(_details(event).get("startup", False))
+        for event in events
+    ):
+        errors.append("feature-scoped A/B arm started a startup recognition worker")
 
     metrics = {
         "process_start_app_created_ms": process_app_ms,
@@ -393,6 +476,26 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
         "max_post_interactive_gui_stall_ms": (
             round(max(post_interactive_durations), 3) if post_interactive_durations else 0.0
         ),
+        "max_post_recognition_gui_stall_ms": (
+            round(
+                max(
+                    (
+                        float(_details(event).get("duration_ms", 0.0))
+                        for event in events
+                        if event["stage"] == "startup.gui_job.finished"
+                        and recognition_activated is not None
+                        and float(event["elapsed_ms"])
+                        >= float(recognition_activated["elapsed_ms"])
+                    ),
+                    default=0.0,
+                ),
+                3,
+            )
+        ),
+        "interactive_recognition_activation_ms": _duration(
+            interactive,
+            recognition_activated,
+        ),
     }
     terminal_details = _details(terminal) if terminal is not None else {}
     return {
@@ -404,6 +507,7 @@ def analyse_run(path: Path, *, require_gallery: bool = True) -> dict[str, Any]:
         "error_code": terminal_details.get("code"),
         "context": context,
         "metrics": metrics,
+        "resource_snapshots": _resource_snapshots(events),
     }
 
 
@@ -437,6 +541,25 @@ def summarize_profiles(paths: Iterable[Path], *, require_gallery: bool = True) -
     context = (
         eligible[0].get("context", {}) if eligible else (runs[0].get("context", {}) if runs else {})
     )
+    resource_summary: dict[str, dict[str, dict[str, float | int | None]]] = {}
+    for snapshot_name in RESOURCE_SNAPSHOT_NAMES:
+        resource_summary[snapshot_name] = {}
+        for field in ("cpu_ms", "rss_bytes", "read_bytes", "write_bytes"):
+            values = [
+                float(snapshot[field])
+                for run in eligible
+                if isinstance(
+                    snapshot := run.get("resource_snapshots", {}).get(snapshot_name),
+                    dict,
+                )
+                and snapshot.get(field) is not None
+            ]
+            resource_summary[snapshot_name][field] = {
+                "count": len(values),
+                "p50": nearest_rank(values, 50),
+                "p95": nearest_rank(values, 95),
+                "max": round(max(values), 3) if values else None,
+            }
     return {
         "schema_version": 1,
         "context": context,
@@ -456,6 +579,7 @@ def summarize_profiles(paths: Iterable[Path], *, require_gallery: bool = True) -
         "terminal_counts": dict(sorted(terminal_counts.items())),
         "error_codes": dict(sorted(error_codes.items())),
         "metrics": metric_summary,
+        "resources": resource_summary,
         "runs": runs,
     }
 
@@ -475,7 +599,13 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
     matching_context_keys = tuple(
         key
         for key in BATCH_CONTEXT_KEYS
-        if key not in {"revision", "artifact_sha256", "manifest_source_revision"}
+        if key
+        not in {
+            "revision",
+            "artifact_sha256",
+            "manifest_source_revision",
+            "scenario_env_names",
+        }
     )
     mismatched_context = {
         key: (baseline_context.get(key), candidate_context.get(key))
@@ -535,6 +665,19 @@ def compare_summaries(baseline: dict[str, Any], candidate: dict[str, Any]) -> di
         mismatched_context or "matched",
         "same platform/backend/scenario/cache/build context",
     )
+    if str(candidate_context.get("scenario", "")).startswith("recognition-"):
+        add(
+            "recognition_policy_arms_are_distinct",
+            "IPHOTO_STARTUP_RECOGNITION_AUTO_START"
+            in str(baseline_context.get("scenario_env_names", "")).split(",")
+            and "IPHOTO_STARTUP_RECOGNITION_AUTO_START"
+            not in str(candidate_context.get("scenario_env_names", "")).split(","),
+            (
+                baseline_context.get("scenario_env_names"),
+                candidate_context.get("scenario_env_names"),
+            ),
+            "feature-scoped baseline vs automatic candidate",
+        )
     add(
         "baseline_has_30_eligible_samples",
         baseline.get("eligible_count", 0) >= 30,
@@ -657,6 +800,23 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
             f"| `{metric}` | {stats.get('count', 0)} | {stats.get('p50')} | "
             f"{stats.get('p95')} | {stats.get('max')} |"
         )
+    lines.extend(
+        (
+            "",
+            "## Recognition resource snapshots",
+            "",
+            "| Snapshot | Resource | Count | P50 | P95 | Max |",
+            "|---|---|---:|---:|---:|---:|",
+        )
+    )
+    for snapshot_name in RESOURCE_SNAPSHOT_NAMES:
+        snapshot = summary.get("resources", {}).get(snapshot_name, {})
+        for field in ("cpu_ms", "rss_bytes", "read_bytes", "write_bytes"):
+            stats = snapshot.get(field, {})
+            lines.append(
+                f"| `{snapshot_name}` | `{field}` | {stats.get('count', 0)} | "
+                f"{stats.get('p50')} | {stats.get('p95')} | {stats.get('max')} |"
+            )
     pending = []
     platform_name = str(context.get("platform", ""))
     architecture = str(context.get("architecture", ""))
@@ -700,6 +860,67 @@ def _append_event(path: Path, event: dict[str, Any]) -> None:
         stream.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def _wait_with_resource_sampling(
+    process: subprocess.Popen,
+    *,
+    profile_path: Path,
+    launched_wall: float,
+    timeout_seconds: float,
+    interval_ms: int,
+) -> tuple[int, bool]:
+    try:
+        import psutil
+    except ImportError as exc:
+        raise ProfileError("resource sampling requires psutil") from exc
+    observed = psutil.Process(process.pid)
+    deadline = time.monotonic() + float(timeout_seconds)
+    timed_out = False
+    while process.poll() is None:
+        try:
+            memory = observed.memory_info()
+            cpu = observed.cpu_times()
+            io_getter = getattr(observed, "io_counters", None)
+            io = io_getter() if callable(io_getter) else None
+            details = {
+                "cpu_ms": round((float(cpu.user) + float(cpu.system)) * 1000.0, 3),
+                "rss_bytes": int(memory.rss),
+                "read_bytes": (
+                    int(getattr(io, "read_bytes"))
+                    if io is not None and hasattr(io, "read_bytes")
+                    else None
+                ),
+                "write_bytes": (
+                    int(getattr(io, "write_bytes"))
+                    if io is not None and hasattr(io, "write_bytes")
+                    else None
+                ),
+            }
+            _append_event(
+                profile_path,
+                {
+                    "stage": "launcher.resource_sample",
+                    "elapsed_ms": round((time.time() - launched_wall) * 1000.0, 3),
+                    "wall_time": time.time(),
+                    "pid": process.pid,
+                    "details": details,
+                },
+            )
+        except (psutil.Error, OSError):
+            pass
+        if time.monotonic() >= deadline:
+            timed_out = True
+            process.terminate()
+            break
+        time.sleep(max(10, int(interval_ms)) / 1000.0)
+    if timed_out:
+        try:
+            return process.wait(timeout=2.0), True
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return process.wait(timeout=2.0), True
+    return int(process.wait()), False
+
+
 def collect(args: argparse.Namespace) -> int:
     command = list(args.command)
     if command and command[0] == "--":
@@ -710,6 +931,12 @@ def collect(args: argparse.Namespace) -> int:
         raise ProfileError("samples must be positive")
     if not args.confirm_dedicated_library:
         raise ProfileError("refusing to benchmark without --confirm-dedicated-library")
+    environment_overrides: dict[str, str] = {}
+    for declaration in args.set_env:
+        name, separator, value = str(declaration).partition("=")
+        if not separator or not name or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            raise ProfileError(f"invalid --set-env declaration: {declaration}")
+        environment_overrides[name] = value
     build_identity: dict[str, Any] = {}
     if args.runtime == "packaged":
         if args.build_manifest is None:
@@ -721,8 +948,6 @@ def collect(args: argparse.Namespace) -> int:
             cwd=args.cwd,
         )
     benchmark_library = args.library.expanduser().resolve()
-    if not benchmark_library.is_dir():
-        raise ProfileError(f"benchmark library is not a directory: {benchmark_library}")
     controlled = args.cache_state != "cold" or bool(args.confirm_controlled_cold_cache)
     method = args.cache_eviction_method.strip() or "uncontrolled"
     if args.cache_state == "cold" and (not controlled or method == "uncontrolled"):
@@ -730,7 +955,30 @@ def collect(args: argparse.Namespace) -> int:
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    library_template = (
+        args.library_template.expanduser().resolve()
+        if args.library_template is not None
+        else None
+    )
+    if library_template is None:
+        if not benchmark_library.is_dir():
+            raise ProfileError(f"benchmark library is not a directory: {benchmark_library}")
+    else:
+        if not args.confirm_template_restore:
+            raise ProfileError("library template restore requires --confirm-template-restore")
+        if not library_template.is_dir():
+            raise ProfileError(f"library template is not a directory: {library_template}")
+        if benchmark_library != output_dir / "active-library":
+            raise ProfileError(
+                "restored benchmark library must be OUTPUT_DIR/active-library"
+            )
+        if benchmark_library == library_template:
+            raise ProfileError("benchmark library and template must be different directories")
     for index in range(1, args.samples + 1):
+        if library_template is not None:
+            if benchmark_library.exists():
+                shutil.rmtree(benchmark_library)
+            shutil.copytree(library_template, benchmark_library)
         run_id = (
             f"{args.revision}-{args.scenario}-{args.cache_state}-{index:03d}-{uuid.uuid4().hex[:8]}"
         )
@@ -754,6 +1002,8 @@ def collect(args: argparse.Namespace) -> int:
             "cache_controlled": controlled,
             "cache_eviction_method": method,
             "scenario": args.scenario,
+            "scenario_env_names": ",".join(sorted(environment_overrides)),
+            "library_restored_per_sample": library_template is not None,
             **build_identity,
         }
         launched_wall = time.time()
@@ -794,6 +1044,7 @@ def collect(args: argparse.Namespace) -> int:
                 "IPHOTO_SETTINGS_PATH": str(settings_path),
             }
         )
+        environment.update(environment_overrides)
         settings_path.write_text(
             json.dumps({"basic_library_path": str(benchmark_library)}, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -811,16 +1062,25 @@ def collect(args: argparse.Namespace) -> int:
                 stdout=stdout,
                 stderr=stderr,
             )
-            try:
-                return_code = process.wait(timeout=args.timeout_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                process.terminate()
+            if args.sample_resources:
+                return_code, timed_out = _wait_with_resource_sampling(
+                    process,
+                    profile_path=profile_path,
+                    launched_wall=launched_wall,
+                    timeout_seconds=args.timeout_seconds,
+                    interval_ms=args.resource_sample_interval_ms,
+                )
+            else:
                 try:
-                    return_code = process.wait(timeout=2.0)
+                    return_code = process.wait(timeout=args.timeout_seconds)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    return_code = process.wait(timeout=2.0)
+                    timed_out = True
+                    process.terminate()
+                    try:
+                        return_code = process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        return_code = process.wait(timeout=2.0)
         try:
             last_elapsed_ms = max(float(event["elapsed_ms"]) for event in load_events(profile_path))
         except ProfileError:
@@ -854,6 +1114,8 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--revision", required=True)
     collect_parser.add_argument("--scenario", required=True)
     collect_parser.add_argument("--library", type=Path, required=True)
+    collect_parser.add_argument("--library-template", type=Path)
+    collect_parser.add_argument("--confirm-template-restore", action="store_true")
     collect_parser.add_argument("--confirm-dedicated-library", action="store_true")
     collect_parser.add_argument("--runtime", choices=("source", "packaged"), required=True)
     collect_parser.add_argument("--build-manifest", type=Path)
@@ -865,6 +1127,15 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--samples", type=int, default=30)
     collect_parser.add_argument("--timeout-seconds", type=float, default=30.0)
     collect_parser.add_argument("--auto-exit-delay-ms", type=int, default=250)
+    collect_parser.add_argument("--sample-resources", action="store_true")
+    collect_parser.add_argument("--resource-sample-interval-ms", type=int, default=100)
+    collect_parser.add_argument(
+        "--set-env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="set a non-secret scenario environment variable in the child process",
+    )
     collect_parser.add_argument("--allow-degraded", action="store_true")
     collect_parser.add_argument("--cwd", type=Path, default=Path.cwd())
     collect_parser.add_argument("--output-dir", type=Path, required=True)

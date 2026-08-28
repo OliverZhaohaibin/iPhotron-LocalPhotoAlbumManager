@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -606,6 +606,32 @@ def test_recognition_binding_does_not_start_ai_before_viewport_ready(
     start_ai.assert_called_once_with(root, startup=True)
 
 
+def test_recognition_activation_waits_for_startup_metadata_scan(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    manager._recognition_services_root = root
+    manager._people_service = Mock()
+    manager._pet_service = Mock()
+    startup_worker = Mock()
+    startup_worker._defer_ai_workers_until_scan_finished = True
+    manager._current_scanner_worker = startup_worker
+
+    with patch.object(manager, "_start_ai_scan_workers") as start_ai:
+        manager.activate_recognition_scans()
+
+    start_ai.assert_not_called()
+    assert manager._startup_recognition_request == (
+        root,
+        manager._recognition_generation,
+    )
+    assert not manager._startup_recognition_timer.isActive()
+
+
 def test_upgraded_library_schedules_closed_input_pet_backfill_after_bind(
     tmp_path: Path,
     qapp: QApplication,
@@ -755,7 +781,7 @@ def test_pet_backfill_event_does_not_block_face_activation(
         def finish_input(self) -> None:
             self.input_closed = True
 
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             self.started = True
 
         def cancel(self) -> None:
@@ -829,7 +855,7 @@ def test_recognition_activation_retries_only_failed_worker(
             return False
 
     class _FaceWorker(_WorkerBase):
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             face_starts.append(1)
 
     class _PetWorker(_WorkerBase):
@@ -837,7 +863,7 @@ def test_recognition_activation_retries_only_failed_worker(
             super().__init__(*_args, **_kwargs)
             pet_instances.append(self)
 
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             if len(pet_instances) == 1:
                 raise RuntimeError("injected Pet start failure")
 
@@ -931,6 +957,7 @@ def test_startup_ai_workers_close_input_after_metadata_scan(
     manager = LibraryRuntimeController()
     manager.bind_path(root)
     created: list[object] = []
+    runtime_prepared: list[str] = []
 
     class _FakeSignal:
         def connect(self, _callback) -> None:
@@ -938,6 +965,8 @@ def test_startup_ai_workers_close_input_after_metadata_scan(
 
     class _FakeAiWorker:
         def __init__(self, *_args, **_kwargs) -> None:
+            if not created:
+                assert runtime_prepared == ["cv2"]
             self.statusChanged = _FakeSignal()
             self.finished = _FakeSignal()
             self.input_closed = False
@@ -956,7 +985,7 @@ def test_startup_ai_workers_close_input_after_metadata_scan(
         def isRunning(self) -> bool:
             return False
 
-        def start(self) -> None:
+        def start(self, _priority=None) -> None:
             self.started = True
 
     monkeypatch.setitem(
@@ -970,10 +999,33 @@ def test_startup_ai_workers_close_input_after_metadata_scan(
         SimpleNamespace(PetScanWorker=_FakeAiWorker),
     )
 
-    with patch("iPhoto.library.scan_coordinator.mark") as profile_mark:
+    with (
+        patch("iPhoto.library.scan_coordinator.mark") as profile_mark,
+        patch(
+            "iPhoto.library.scan_coordinator._prepare_face_runtime_imports",
+            side_effect=lambda: runtime_prepared.append("cv2"),
+        ) as prepare_runtime,
+    ):
         manager._start_ai_scan_workers(root, startup=True)
 
-    profile_mark.assert_called_once_with("startup_ai_scan.started", root=root)
+    profile_mark.assert_has_calls(
+        [
+            call("startup_ai_scan.started", root=root),
+            call(
+                "recognition.worker.started",
+                generation=manager._recognition_generation,
+                worker="face",
+                startup=True,
+            ),
+            call(
+                "recognition.worker.started",
+                generation=manager._recognition_generation,
+                worker="pet",
+                startup=True,
+            ),
+        ]
+    )
+    prepare_runtime.assert_called_once_with()
     assert len(created) == 2
     assert all(worker.input_closed for worker in created)
     assert all(worker.started for worker in created)

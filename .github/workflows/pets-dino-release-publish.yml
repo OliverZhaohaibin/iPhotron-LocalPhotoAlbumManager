@@ -1,0 +1,98 @@
+name: Pets DINO Release publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: Successful Pets DINO candidate workflow run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_WORKFLOW_ID: "340207631"
+  CANDIDATE_WORKFLOW_PATH: ".github/workflows/pets-dino-source-contract.yml"
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-latest
+    environment: pets-model-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Require an explicit artifact run
+        run: |
+          if [ -z "${{ inputs.artifact_run_id }}" ]; then
+            echo "artifact_run_id is required" >&2
+            exit 1
+          fi
+
+      - name: Resolve candidate run provenance
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${{ inputs.artifact_run_id }}" > candidate-run.json
+          head_sha=$(python -c 'import json; print(json.load(open("candidate-run.json"))["head_sha"])')
+          echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out the exact builder commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.candidate.outputs.head_sha }}
+          path: builder
+
+      - name: Check out the release manifest commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pet-models-v1-candidate
+          path: model-dist
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify artifact, manifest, and builder provenance
+        run: |
+          builder_commit=$(git -C builder rev-parse HEAD)
+          python release/tools/model_release_provenance.py \
+            --run-json candidate-run.json \
+            --build-manifest model-dist/dinov2_vits14.build.json \
+            --builder-commit "${builder_commit}" \
+            --expected-repository "${GITHUB_REPOSITORY}" \
+            --expected-workflow-id "${CANDIDATE_WORKFLOW_ID}" \
+            --expected-workflow-path "${CANDIDATE_WORKFLOW_PATH}"
+          python release/tools/validate_dinov2_torchscript.py \
+            model-dist/dinov2_vits14.pt \
+            model-dist/dinov2_vits14.pt.metadata.json \
+            --manifest release/src/iPhoto/pets/model_manifest.json \
+            --metadata-only
+
+      - name: Refuse overwrite of an immutable v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view pet-models-v1 --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "pet-models-v1 already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+
+      - name: Create v1 when no Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create pet-models-v1
+          model-dist/dinov2_vits14.pt
+          model-dist/dinov2_vits14.pt.metadata.json
+          model-dist/dinov2_vits14.build.json
+          model-dist/SHA256SUMS
+          --repo "${GITHUB_REPOSITORY}"
+          --target "${{ steps.candidate.outputs.head_sha }}"
+          --title "iPhotron Pets models v1"
+          --notes "Pinned DINOv2 ViT-S/14 TorchScript artifact validated on Ubuntu, macOS, and Windows."

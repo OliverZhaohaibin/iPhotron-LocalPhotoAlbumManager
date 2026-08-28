@@ -235,12 +235,14 @@ YOLOX release asset and can be overridden with:
 export IPHOTO_PET_DETECTOR_MODEL_URL="https://example.invalid/yolox_nano.onnx"
 ```
 
-Production never executes Torch Hub. It loads a packaged DINOv2 TorchScript model,
-or downloads the fixed HTTPS artifact declared by SHA-256 and exact byte size in
-`src/iPhoto/pets/model_manifest.json`. Release engineering may regenerate the
-artifact from the pinned source revision with
-`tools/convert_dinov2_torchscript.py`; that tool also checks eager/TorchScript
-numeric equivalence before publishing.
+When DINOv2 is missing, iPhotron downloads the fixed `pet-models-v1` TorchScript
+Release declared by HTTPS URL, SHA-256, exact byte size, cache schema, and
+producer version in `src/iPhoto/pets/model_manifest.json`. It validates CPU
+loading and output shape before publishing the model and metadata atomically.
+Production never downloads or executes DINOv2 source and never traces a model on
+the user's machine. `tools/convert_dinov2_torchscript.py` is release-only: it
+loads a local checkout of the pinned source commit and verified official
+checkpoint, then checks eager/TorchScript numeric equivalence.
 
 For offline or packaged validation, disable first-use downloads with:
 

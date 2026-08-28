@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,6 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .library_session import LibrarySession
 
 _logger = logging.getLogger(__name__)
+STARTUP_RECOGNITION_AUTO_START_ENV = "IPHOTO_STARTUP_RECOGNITION_AUTO_START"
 
 
 def _create_settings_manager() -> "SettingsManager":
@@ -277,6 +279,12 @@ class RuntimeContext:
 
     def schedule_idle_startup_jobs(self) -> None:
         self.start_deferred_startup_scan()
+        raw_policy = str(os.environ.get(STARTUP_RECOGNITION_AUTO_START_ENV, "1")).strip().lower()
+        if raw_policy in {"0", "false", "no", "off"}:
+            return
+        requester = getattr(self.library, "request_startup_recognition_after_idle", None)
+        if callable(requester):
+            requester()
 
     def start_deferred_startup_scan(self) -> None:
         """Start a scan that was intentionally delayed until after first gallery load."""

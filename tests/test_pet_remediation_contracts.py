@@ -32,6 +32,8 @@ from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 from iPhoto.pets.status import is_pet_scan_candidate
 from iPhoto.utils.pathutils import LibraryAssetPathError, resolve_library_asset_path
 
+pet_impl = pet_pipeline._impl
+
 
 class _AssetStore:
     def __init__(self, asset_id: str) -> None:
@@ -396,7 +398,7 @@ def test_second_bbox_failure_rolls_back_thumbnails_and_metric(
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_bytes(b"thumbnail")
 
-    monkeypatch.setattr(pet_pipeline, "save_pet_thumbnail", save_then_fail)
+    monkeypatch.setattr(pet_impl, "save_pet_thumbnail", save_then_fail)
     thumbnail_dir = tmp_path / ".iPhoto" / "pets" / "thumbnails" / ".staging" / "op"
     results = pipeline.detect_pets_for_rows(
         [{"id": "asset-a", "rel": "album/a.jpg"}],
@@ -1101,8 +1103,6 @@ def test_incremental_rescan_preserves_manual_cross_species_identity(
     assert coordinator._journal.unfinished() == ()
     assert f"Preserving mixed-species Pet identity {dog_identity}" in caplog.text
 
-    # The non-dominant species member must also keep the durable identity.
-    # This is the regression case that previously fell through the species gate.
     caplog.clear()
     rescanned_cat = replace(
         _detection("cat-rescan", asset_id="asset-cat"),
@@ -1500,23 +1500,25 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
         hashlib.sha256(model_path.read_bytes()).hexdigest(),
     )
     monkeypatch.setitem(manifest, "torchscript_size", model_path.stat().st_size)
+    monkeypatch.setattr(
+        pet_impl,
+        "_DINO_TORCHSCRIPT_SHA256",
+        hashlib.sha256(model_path.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        pet_impl,
+        "_DINO_TORCHSCRIPT_SIZE",
+        model_path.stat().st_size,
+    )
     model_path.with_suffix(".pt.metadata.json").write_text(
         json.dumps(
-            {
-                "model_name": "dinov2_vits14",
-                "source_repository": manifest["source_repository"],
-                "source_revision": manifest["source_revision"],
-                "torchscript_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
-                "torchscript_size": model_path.stat().st_size,
-                "input_shape": manifest["input_shape"],
-                "output_shape": manifest["output_shape"],
-            }
+            pet_pipeline._dinov2_release_metadata(model_name="dinov2_vits14")
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
     monkeypatch.setattr(
-        pet_pipeline,
+        pet_impl,
         "pet_model_search_roots",
         lambda: (cache, bundled),
     )
@@ -1524,7 +1526,7 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
     assert pet_pipeline.resolve_pet_model_path(relative, directory=True) == bundled_dir
 
 
-def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
+def test_model_resolver_preserves_corrupt_user_cache_and_uses_bundled(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1543,16 +1545,16 @@ def test_model_resolver_removes_corrupt_user_cache_and_uses_bundled(
         if Path(path) == cached_model:
             raise RuntimeError("bad hash")
 
-    monkeypatch.setattr(pet_pipeline, "_validate_downloaded_file", validate)
-    monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
+    monkeypatch.setattr(pet_impl, "_validate_downloaded_file", validate)
+    monkeypatch.setattr(pet_impl, "user_pet_model_cache_dir", lambda: cache)
     monkeypatch.setattr(
-        pet_pipeline,
+        pet_impl,
         "pet_model_search_roots",
         lambda: (cache, bundled),
     )
 
     assert pet_pipeline.resolve_pet_model_path(relative) == bundled_model
-    assert not cached_model.exists()
+    assert cached_model.exists()
 
 
 def test_thumbnail_publish_compensates_when_later_replace_fails(

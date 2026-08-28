@@ -26,6 +26,7 @@ from PySide6.QtCore import (
     Signal,
 )
 
+from ..bootstrap.startup_profile import mark
 from ..errors import LibraryUnavailableError
 from ..utils.logging import get_logger
 
@@ -44,6 +45,7 @@ from .tree import AlbumNode
 from .watch_service import LibraryWatchResult, LibraryWatchService
 
 LOGGER = get_logger()
+_STARTUP_RECOGNITION_IDLE_MS = 1500
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..application.ports import (
@@ -142,6 +144,13 @@ class LibraryRuntimeController(
         self._recognition_services_root: Path | None = None
         self._recognition_scans_root: Path | None = None
         self._recognition_generation = 0
+        self._startup_recognition_request: tuple[Path, int] | None = None
+        self._startup_recognition_timer = QTimer(self)
+        self._startup_recognition_timer.setSingleShot(True)
+        self._startup_recognition_timer.setInterval(_STARTUP_RECOGNITION_IDLE_MS)
+        self._startup_recognition_timer.timeout.connect(
+            self._activate_startup_recognition_after_idle
+        )
         self._delivered_recognition_event_ids: set[str] = set()
         self._retiring_recognition_workers: set[QThread] = set()
         self._library_session: "LibrarySession | None" = None
@@ -331,6 +340,7 @@ class LibraryRuntimeController(
         """Stop background workers and watchers during application shutdown."""
 
         had_scanner_worker = self._current_scanner_worker is not None
+        self._cancel_startup_recognition_request()
         self.stop_scanning(wait=True)
         self._recognition_services_root = None
         self._recognition_scans_root = None
@@ -657,6 +667,12 @@ class LibraryRuntimeController(
         """Start model workers after a recognition viewport is usable."""
 
         root = self._root
+        scanner = self._current_scanner_worker
+        if scanner is not None and getattr(
+            scanner, "_defer_ai_workers_until_scan_finished", False
+        ):
+            self.request_startup_recognition_after_idle()
+            return
         if (
             root is None
             or root != self._recognition_services_root
@@ -669,6 +685,85 @@ class LibraryRuntimeController(
         self.bind_pet_service(self._pet_service)
         if self._start_ai_scan_workers(root, startup=True):
             self._recognition_scans_root = root
+
+    def request_startup_recognition_after_idle(self) -> None:
+        """Start People/Pets after startup metadata is complete and input is idle."""
+
+        root = self._root
+        if root is None:
+            return
+        generation = int(self._recognition_generation)
+        self._startup_recognition_request = (Path(root), generation)
+        scanner = self._current_scanner_worker
+        waits_for_scan = scanner is not None and getattr(
+            scanner, "_defer_ai_workers_until_scan_finished", False
+        )
+        mark(
+            "recognition.startup.requested",
+            generation=generation,
+            waits_for_scan=waits_for_scan,
+        )
+        if waits_for_scan:
+            return
+        self._arm_startup_recognition_idle_timer(Path(root), generation)
+
+    def notify_user_activity(self) -> None:
+        """Postpone a pending startup recognition scan without consuming input."""
+
+        request = self._startup_recognition_request
+        if request is None or not self._startup_recognition_timer.isActive():
+            return
+        self._startup_recognition_timer.start(_STARTUP_RECOGNITION_IDLE_MS)
+        mark(
+            "recognition.startup.idle_reset",
+            generation=request[1],
+            delay_ms=_STARTUP_RECOGNITION_IDLE_MS,
+        )
+
+    def _arm_startup_recognition_idle_timer(self, root: Path, generation: int) -> None:
+        request = self._startup_recognition_request
+        if (
+            request != (Path(root), int(generation))
+            or self._root != Path(root)
+            or int(self._recognition_generation) != int(generation)
+        ):
+            return
+        self._startup_recognition_timer.start(_STARTUP_RECOGNITION_IDLE_MS)
+        mark(
+            "recognition.startup.idle_armed",
+            generation=generation,
+            delay_ms=_STARTUP_RECOGNITION_IDLE_MS,
+        )
+
+    def _cancel_startup_recognition_request(self, *, reason: str = "cancelled") -> None:
+        request = self._startup_recognition_request
+        self._startup_recognition_timer.stop()
+        self._startup_recognition_request = None
+        if request is not None:
+            mark(
+                "recognition.startup.cancelled",
+                generation=request[1],
+                reason=reason,
+            )
+
+    def _activate_startup_recognition_after_idle(self) -> None:
+        request = self._startup_recognition_request
+        if request is None:
+            return
+        root, generation = request
+        self._startup_recognition_request = None
+        if (
+            self._root != root
+            or int(self._recognition_generation) != generation
+            or self._current_scanner_worker is not None
+        ):
+            return
+        session = self._library_session
+        if session is None or Path(session.library_root) != root:
+            return
+        mark("recognition.startup.activated", generation=generation)
+        self.bind_recognition_services(session.people, session.pets)
+        self.activate_recognition_scans()
 
     def activate_recognition_services(
         self,

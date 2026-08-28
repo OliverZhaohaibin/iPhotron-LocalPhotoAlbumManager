@@ -20,7 +20,7 @@
 本轮复审发现并修复了启动 terminal 边界、后台 import 资源所有权、
 Recognition 启动期回退和 packaged A/B 同构校验四类问题。用户确认的产品策略为：
 
-1. People/Pets dashboard 只在首次进入 People 时异步预热。
+1. 主 metadata scan 成功后等待 1500 ms 无交互，再以最低优先级自动启动 People/Pets；用户交互、切库和 shutdown 会延后或取消启动。
 2. Windows/Linux pre-show Detail 创建失败时显示基础窗口和非模态恢复面板，允许新 generation 重试。
 
 ## 已完成的修复
@@ -57,9 +57,9 @@ PR workflow 已完成自动化修复。当前全量 `2756 passed, 14 skipped`，
 
 远端 CI 已在 `e0001ee646e95fadc33659ebe277eb067e79a084` 上 9/9 成功，证据为
 [run 30263442145](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/actions/runs/30263442145)。
-仍有一个不可伪造为完成的交付边界：仓库不可变 `pet-models-v1` TorchScript Release
-尚未发布，因此生产 Torch Hub 转换路径仍保留。该项及全部真实平台项目继续记录
-在人工矩阵中。
+仓库固定 [`pet-models-v1`](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/tag/pet-models-v1)
+TorchScript Release 已发布；生产仅下载 manifest 固定的 URL/SHA/size，不再执行
+Torch Hub、DINO source 或用户侧 trace。其余真实平台项目继续记录在人工矩阵中。
 
 定向验收覆盖 terminal 唯一性、取消后的迟到 import、Recognition 首用预热、构建清单和 A/B 拒绝路径。完整平台性能数字仍按 `STARTUP_BENCHMARK_RUNBOOK.md` 采集。
 

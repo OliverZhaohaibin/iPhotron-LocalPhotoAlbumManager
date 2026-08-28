@@ -53,9 +53,9 @@ class _PetReadContext:
 
 
 def shared_pet_model_dir() -> Path:
-    from .pipeline import default_pet_model_dir
+    from .pipeline import default_pet_model_dir, pet_model_override_dir
 
-    return default_pet_model_dir()
+    return pet_model_override_dir() or default_pet_model_dir()
 
 
 def pet_library_paths(library_root: Path) -> PetLibraryPaths:

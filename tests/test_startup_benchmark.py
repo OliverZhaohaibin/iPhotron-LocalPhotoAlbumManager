@@ -29,6 +29,7 @@ def _write_profile(
     revision: str = "candidate",
     artifact_sha256: str = "a" * 64,
     build_environment_fingerprint: str = "f" * 64,
+    scenario_env_names: str = "",
 ) -> None:
     context = {
         "run_id": path.stem,
@@ -42,6 +43,7 @@ def _write_profile(
         "cache_controlled": controlled,
         "cache_eviction_method": "purge" if controlled else "uncontrolled",
         "scenario": scenario,
+        "scenario_env_names": scenario_env_names,
         "build_environment_fingerprint": build_environment_fingerprint,
         "artifact_sha256": artifact_sha256,
         "manifest_source_revision": revision,
@@ -110,6 +112,59 @@ def test_analyse_and_summarize_valid_profiles(tmp_path) -> None:
     assert summary["metrics"]["first_usable_thumbnail_ms"]["p95"] == 768.0
 
 
+def test_recognition_resource_snapshots_are_correlated_to_activation(tmp_path) -> None:
+    path = tmp_path / "resources.jsonl"
+    _write_profile(path)
+    payloads = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    payloads = [item for item in payloads if item["stage"] != "launcher.process_finished"]
+    payloads.extend(
+        [
+            {
+                "stage": "recognition.startup.activated",
+                "elapsed_ms": 700.0,
+                "wall_time": 1000.7,
+                "pid": 123,
+                "details": {"generation": 1},
+            },
+            *[
+                {
+                    "stage": "launcher.resource_sample",
+                    "elapsed_ms": elapsed,
+                    "wall_time": 1000.0 + elapsed / 1000.0,
+                    "pid": 123,
+                    "details": {
+                        "cpu_ms": elapsed / 10.0,
+                        "rss_bytes": int(elapsed * 1000),
+                        "read_bytes": int(elapsed * 10),
+                        "write_bytes": int(elapsed * 5),
+                    },
+                }
+                for elapsed in (300.0, 700.0, 2200.0, 5700.0)
+            ],
+            {
+                "stage": "launcher.process_finished",
+                "elapsed_ms": 6000.0,
+                "wall_time": 1006.0,
+                "pid": 123,
+                "details": {"return_code": 0, "timed_out": False},
+            },
+        ]
+    )
+    payloads.sort(key=lambda item: float(item["elapsed_ms"]))
+    path.write_text("".join(json.dumps(item) + "\n" for item in payloads), encoding="utf-8")
+
+    run = analyse_run(path)
+    summary = summarize_profiles([path])
+
+    assert run["metrics"]["interactive_recognition_activation_ms"] == 400.0
+    assert run["metrics"]["max_post_recognition_gui_stall_ms"] == 0.0
+    assert run["resource_snapshots"]["interactive"]["rss_bytes"] == 300000
+    assert run["resource_snapshots"]["recognition_activation"]["rss_bytes"] == 700000
+    assert run["resource_snapshots"]["recognition_plus_1500ms"]["rss_bytes"] == 2200000
+    assert run["resource_snapshots"]["recognition_plus_5000ms"]["rss_bytes"] == 5700000
+    assert summary["resources"]["recognition_plus_5000ms"]["cpu_ms"]["p95"] == 570.0
+
+
 def test_missing_terminal_and_path_leak_are_rejected(tmp_path) -> None:
     path = tmp_path / "broken.jsonl"
     _write_profile(path, include_terminal=False)
@@ -157,6 +212,41 @@ def test_nonzero_or_timed_out_process_is_rejected(tmp_path) -> None:
     assert any("exited with code 3" in error for error in crashed_run["errors"])
     assert timed_out_run["eligible"] is False
     assert any("timed out" in error for error in timed_out_run["errors"])
+
+
+def test_quick_close_rejects_recognition_worker_start(tmp_path) -> None:
+    path = tmp_path / "quick-close.jsonl"
+    _write_profile(path, scenario="recognition-quick-close")
+    payloads = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    payloads.append(
+        {
+            "stage": "recognition.worker.started",
+            "elapsed_ms": 610.0,
+            "wall_time": 1000.61,
+            "pid": 123,
+            "details": {"generation": 1, "worker": "face"},
+        }
+    )
+    payloads.sort(key=lambda item: float(item["elapsed_ms"]))
+    path.write_text("".join(json.dumps(item) + "\n" for item in payloads), encoding="utf-8")
+
+    run = analyse_run(path)
+
+    assert run["valid"] is False
+    assert "quick-close started a recognition worker" in run["errors"]
+
+
+def test_feature_scoped_ab_arm_does_not_require_auto_activation(tmp_path) -> None:
+    path = tmp_path / "feature-scoped.jsonl"
+    _write_profile(
+        path,
+        scenario="recognition-auto-models-present",
+        scenario_env_names="IPHOTO_STARTUP_RECOGNITION_AUTO_START",
+    )
+
+    run = analyse_run(path)
+
+    assert run["valid"] is True
 
 
 def test_mixed_batch_contexts_are_rejected(tmp_path) -> None:
@@ -212,6 +302,7 @@ import time
 from pathlib import Path
 
 assert os.environ["IPHOTO_STARTUP_BENCHMARK_AUTO_EXIT_MS"] == "25"
+assert os.environ["IPHOTO_TEST_SCENARIO"] == "enabled"
 path = Path(os.environ["IPHOTO_STARTUP_PROFILE_PATH"])
 context = {
     "run_id": os.environ["IPHOTO_STARTUP_RUN_ID"],
@@ -292,6 +383,8 @@ with path.open("a", encoding="utf-8") as stream:
             "1",
             "--auto-exit-delay-ms",
             "25",
+            "--set-env",
+            "IPHOTO_TEST_SCENARIO=enabled",
             "--output-dir",
             str(output),
             "--",
@@ -334,6 +427,44 @@ def test_packaged_collect_requires_matching_build_manifest(tmp_path) -> None:
     )
 
     assert result == 2
+
+
+def test_template_restore_is_confined_to_output_active_library(tmp_path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    outside = tmp_path / "outside"
+    output = tmp_path / "output"
+
+    result = benchmark_main(
+        [
+            "collect",
+            "--revision",
+            "candidate",
+            "--scenario",
+            "recognition-auto-models-present",
+            "--library",
+            str(outside),
+            "--library-template",
+            str(template),
+            "--confirm-dedicated-library",
+            "--confirm-template-restore",
+            "--runtime",
+            "source",
+            "--cache-state",
+            "hot",
+            "--samples",
+            "1",
+            "--output-dir",
+            str(output),
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        ]
+    )
+
+    assert result == 2
+    assert not outside.exists()
 
 
 def test_comparison_rejects_environment_mismatch(tmp_path) -> None:

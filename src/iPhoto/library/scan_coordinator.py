@@ -19,6 +19,18 @@ if TYPE_CHECKING:
 LOGGER = get_logger()
 
 
+def _prepare_face_runtime_imports() -> None:
+    """Serialize cv2 initialization before handing work to a Face QThread."""
+
+    try:
+        from ..people.pipeline import prepare_face_runtime_imports
+
+        prepare_face_runtime_imports()
+    except ImportError:
+        # The worker preserves the existing graceful optional-runtime error.
+        LOGGER.debug("Face runtime import preflight is unavailable", exc_info=True)
+
+
 class _PairingWorker(QRunnable):
     """Run live-photo pairing off the main thread after a scan completes."""
 
@@ -77,6 +89,12 @@ class ScanCoordinatorMixin:
         
         All scanned assets are written to the global database at the library root.
         """
+        if not startup:
+            cancel_startup_recognition = getattr(
+                self, "_cancel_startup_recognition_request", None
+            )
+            if callable(cancel_startup_recognition):
+                cancel_startup_recognition()
         # Scanner and face-recognition workers bring Pillow/NumPy and optional
         # AI runtimes into the process. Import them only when a scan actually
         # starts, never while constructing the first window frame.
@@ -158,6 +176,7 @@ class ScanCoordinatorMixin:
         started: list[object] = []
 
         if self._current_face_scanner is None:
+            _prepare_face_runtime_imports()
             from .workers.face_scan_worker import FaceScanWorker
 
             face_worker = FaceScanWorker(
@@ -210,7 +229,17 @@ class ScanCoordinatorMixin:
             try:
                 if startup:
                     worker.finish_input()
-                worker.start()
+                    worker.start(QThread.Priority.LowestPriority)
+                else:
+                    worker.start()
+                mark(
+                    "recognition.worker.started",
+                    generation=generation,
+                    worker=(
+                        "face" if worker is self._current_face_scanner else "pet"
+                    ),
+                    startup=bool(startup),
+                )
             except Exception:  # noqa: BLE001
                 all_started = False
                 if self._current_face_scanner is worker:
@@ -263,6 +292,11 @@ class ScanCoordinatorMixin:
 
     def stop_scanning(self, *, wait: bool = False, timeout_ms: int = 2000) -> None:
         """Cancel the currently running scan, if any."""
+        cancel_startup_recognition = getattr(
+            self, "_cancel_startup_recognition_request", None
+        )
+        if callable(cancel_startup_recognition):
+            cancel_startup_recognition()
         _locker = QMutexLocker(self._scan_buffer_lock)
         scanner_worker = self._current_scanner_worker
         face_scanner = self._current_face_scanner
@@ -284,10 +318,20 @@ class ScanCoordinatorMixin:
         if deferred_queue is not None:
             deferred_queue.clear()
         if self._current_face_scanner is not None:
+            mark(
+                "recognition.worker.cancelled",
+                generation=self._recognition_generation,
+                worker="face",
+            )
             self._current_face_scanner.cancel()
             self._retiring_recognition_workers.add(self._current_face_scanner)
             self._current_face_scanner = None
         if self._current_pet_scanner is not None:
+            mark(
+                "recognition.worker.cancelled",
+                generation=self._recognition_generation,
+                worker="pet",
+            )
             self._current_pet_scanner.cancel()
             self._retiring_recognition_workers.add(self._current_pet_scanner)
             self._current_pet_scanner = None
@@ -602,10 +646,14 @@ class ScanCoordinatorMixin:
             pet_scanner.finish_input()
 
         if worker.cancelled:
+            if defer_ai_workers:
+                self._cancel_startup_recognition_request()
             self.scanFinished.emit(root, False)
             self._start_next_deferred_scan()
             return
         if worker.failed:
+            if defer_ai_workers:
+                self._cancel_startup_recognition_request()
             self.scanFinished.emit(root, False)
             self._start_next_deferred_scan()
             return
@@ -623,20 +671,45 @@ class ScanCoordinatorMixin:
             )
         except Exception as exc:
             LOGGER.warning("Failed to persist scan finalization for %s: %s", root, exc)
+            if defer_ai_workers:
+                self._cancel_startup_recognition_request()
             self.scanFinished.emit(root, False)
             self._start_next_deferred_scan()
             return
 
-        # A startup metadata scan only prepares the Gallery index.  People and
-        # Pets are feature-scoped services and their model workers are started
-        # by ``activate_recognition_services`` on first use.  Starting them here
-        # used to add model pressure immediately after startup completion and
-        # made a quick window close race QThread destruction.
+        # Startup metadata enumeration stays AI-free. Once it commits, arm the
+        # interaction-idle gate for both People and Pets.
+        startup_recognition_generation = (
+            int(getattr(self, "_recognition_generation", 0))
+            if defer_ai_workers
+            else None
+        )
+        if startup_recognition_generation is not None:
+            mark(
+                "recognition.startup.scan_ready",
+                generation=startup_recognition_generation,
+            )
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.
         self.scanFinished.emit(root, True)
         self._start_next_deferred_scan()
+
+        # scanFinished listeners may synchronously close/rebind the runtime.  In
+        # that case stop_scanning() advances the recognition generation; do not
+        # create a new QThread during teardown.  A queued metadata scan also gets
+        # priority and will schedule its own recognition work when appropriate.
+        if (
+            startup_recognition_generation is not None
+            and int(getattr(self, "_recognition_generation", 0))
+            == startup_recognition_generation
+            and self._current_scanner_worker is None
+        ):
+            library_root = getattr(self, "_root", None)
+            if library_root is not None:
+                arm_idle = getattr(self, "_arm_startup_recognition_idle_timer", None)
+                if callable(arm_idle):
+                    arm_idle(Path(library_root), startup_recognition_generation)
 
         # Persist live-photo pairings in the background to avoid blocking the
         # main thread while downstream listeners start refreshing.
@@ -651,6 +724,12 @@ class ScanCoordinatorMixin:
         pet_scanner = self._current_pet_scanner
         self._live_scan_root = None
         del locker
+        if getattr(worker, "_defer_ai_workers_until_scan_finished", False):
+            cancel_startup_recognition = getattr(
+                self, "_cancel_startup_recognition_request", None
+            )
+            if callable(cancel_startup_recognition):
+                cancel_startup_recognition()
         if face_scanner is not None:
             face_scanner.finish_input()
         if pet_scanner is not None:

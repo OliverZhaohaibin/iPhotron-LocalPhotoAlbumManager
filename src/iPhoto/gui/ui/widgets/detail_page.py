@@ -59,6 +59,7 @@ class _PlaybackHeaderShadow(QWidget):
         self._anchor = anchor
         self._visibility_source = visibility_source
         self._header_opacity = 1.0
+        self._suppressed = False
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -67,6 +68,7 @@ class _PlaybackHeaderShadow(QWidget):
         visibility_source.installEventFilter(self)
         parent.installEventFilter(self)
         self._sync_to_anchor()
+        self.raise_()
 
     def bind_opacity_effect(self, effect: QGraphicsOpacityEffect) -> None:
         """Keep the overlay in step with the existing header fade animation."""
@@ -74,14 +76,35 @@ class _PlaybackHeaderShadow(QWidget):
         self._set_header_opacity(effect.opacity())
         effect.opacityChanged.connect(self._set_header_opacity)
 
+    def set_suppressed(self, suppressed: bool) -> None:
+        """Hide the overlay while a native surface transition is in progress."""
+
+        suppressed = bool(suppressed)
+        if self._suppressed == suppressed:
+            return
+        was_suppressed = self._suppressed
+        self._suppressed = suppressed
+        self._sync_to_anchor()
+        if was_suppressed and not suppressed and not self.isHidden():
+            # Restoring is an explicit, transition-settled operation. Geometry
+            # events must never keep forcing this QWidget over the QRhi surface.
+            self.raise_()
+
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        if event.type() in {
+        event_type = event.type()
+        if event_type in {
             QEvent.Type.Move,
             QEvent.Type.Resize,
             QEvent.Type.Show,
             QEvent.Type.Hide,
         }:
             self._sync_to_anchor()
+            if (
+                event_type == QEvent.Type.Show
+                and not self._suppressed
+                and not self.isHidden()
+            ):
+                self.raise_()
         return super().eventFilter(watched, event)
 
     def _sync_to_anchor(self) -> None:
@@ -96,8 +119,9 @@ class _PlaybackHeaderShadow(QWidget):
             self._anchor.width(),
             min(self.SHADOW_HEIGHT, available_height),
         )
-        self.setVisible(not self._visibility_source.isHidden())
-        self.raise_()
+        self.setVisible(
+            not self._suppressed and not self._visibility_source.isHidden()
+        )
 
     def _set_header_opacity(self, opacity: float) -> None:
         self._header_opacity = max(0.0, min(1.0, float(opacity)))
@@ -267,6 +291,12 @@ class DetailPageWidget(QWidget):
             self.video_area.renderer,
             self.video_area.edit_viewer,
         )
+
+    def set_playback_header_shadow_suppressed(self, suppressed: bool) -> None:
+        """Control the header overlay around fullscreen surface transitions."""
+
+        if self.detail_header_shadow is not None:
+            self.detail_header_shadow.set_suppressed(suppressed)
 
     @classmethod
     def default_placeholder_text(cls) -> str:

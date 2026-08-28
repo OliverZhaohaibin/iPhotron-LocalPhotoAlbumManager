@@ -744,8 +744,16 @@ class TestVideoArea:
         va.set_immersive_background(True)
         assert va._renderer._letterbox_color == QColor("#000000")
 
+        va.set_surface_color("#d0d1d2")
+        assert va._renderer._letterbox_color == QColor("#000000")
+        assert va._edit_viewer._fullscreen_handler.backdrop_color == QColor("#000000")
+        assert "background-color: #000000" in va.styleSheet()
+        assert va._default_surface_color == "#d0d1d2"
+
         va.set_immersive_background(False)
-        assert va._renderer._letterbox_color == QColor("#f0f0f0")
+        assert va._renderer._letterbox_color == QColor("#d0d1d2")
+        assert va._edit_viewer._fullscreen_handler.backdrop_color == QColor("#d0d1d2")
+        assert "background-color: #d0d1d2" in va.styleSheet()
 
     def test_video_view_returns_renderer(self, qapp):
         """video_view() should return the VideoRendererWidget."""

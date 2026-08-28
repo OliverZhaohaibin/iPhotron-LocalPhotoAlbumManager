@@ -21,6 +21,7 @@ import logging
 import os
 import struct
 import sys
+import weakref
 from pathlib import Path
 from typing import Optional
 
@@ -280,12 +281,13 @@ class VideoRendererWidget(QRhiWidget):
     nativeSizeChanged(QSizeF)
         Emitted when the decoded video resolution changes.
     firstFrameReady()
-        Emitted once after the first opaque frame has been rendered.
+        Emitted after the first opaque frame has been submitted for composition.
     """
 
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
     videoFramePresented = Signal()
+    renderResourcesInvalidated = Signal()
     zoomChanged = Signal(float)
 
     _ZOOM_MIN = 0.1
@@ -316,8 +318,10 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_dirty = False
         self._native_size = QSizeF()
         self._first_render_done = False
+        self._first_render_submission_pending = False
         self._has_frame = False
         self._frame_presentation_pending = False
+        self._frame_submission_pending = False
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
         self._transparent_rounded_clip_enabled = False
@@ -357,6 +361,18 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_w: int = 0
         self._container_raw_h: int = 0
         self._container_linux_180_hint: bool = False
+
+        # ``render()`` only records commands. Delay presentation acknowledgements
+        # until QRhiWidget confirms that the top-level composition was submitted.
+        owner_ref = weakref.ref(self)
+
+        def _handle_frame_submitted() -> None:
+            owner = owner_ref()
+            if owner is not None:
+                owner._on_frame_submitted()
+
+        self._frame_submitted_handler = _handle_frame_submitted
+        self.frameSubmitted.connect(_handle_frame_submitted)
 
     def render_backend_name(self) -> str:
         """Return the active QRhi backend name for diagnostics/tests."""
@@ -495,6 +511,7 @@ class VideoRendererWidget(QRhiWidget):
         self._container_linux_180_hint = False
         self._has_frame = False
         self._frame_presentation_pending = False
+        self._frame_submission_pending = False
         self._user_rotate90_steps = 0
         if self._zoom_factor != 1.0:
             self._zoom_factor = 1.0
@@ -732,7 +749,7 @@ class VideoRendererWidget(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
             return
 
         rhi = self.rhi()
@@ -754,7 +771,7 @@ class VideoRendererWidget(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
             return
 
         ru = rhi.nextResourceUpdateBatch()
@@ -789,16 +806,26 @@ class VideoRendererWidget(QRhiWidget):
         cb.setVertexInput(0, vbuf_binding)
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
-        self._emit_first_frame_ready()
-        if self._frame_presentation_pending:
+        self._queue_first_frame_ready()
+        if self._frame_presentation_pending and not self._frame_dirty:
             self._frame_presentation_pending = False
-            self.videoFramePresented.emit()
+            self._frame_submission_pending = True
 
-    def _emit_first_frame_ready(self) -> None:
-        """Notify listeners that the first opaque frame has been rendered."""
+    def _queue_first_frame_ready(self) -> None:
+        """Record that an opaque frame is waiting for window submission."""
         if not self._first_render_done:
+            self._first_render_submission_pending = True
+
+    def _on_frame_submitted(self) -> None:
+        """Publish draw acknowledgements after top-level composition submits."""
+
+        if self._first_render_submission_pending:
+            self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
+        if self._frame_submission_pending:
+            self._frame_submission_pending = False
+            self.videoFramePresented.emit()
 
     def _pass_clear_color(self, fallback: QColor) -> QColor:
         """Return the render-pass clear colour for the current opacity mode."""
@@ -810,9 +837,36 @@ class VideoRendererWidget(QRhiWidget):
         return color
 
     def releaseResources(self) -> None:  # type: ignore[override]
-        """Clean up GPU resources."""
+        """Destroy resources owned by the current QRhi before it disappears."""
+
+        for name in (
+            "_pipeline",
+            "_srb",
+            "_tex_y",
+            "_tex_uv",
+            "_tex_rgba",
+            "_sampler",
+            "_ubuf",
+            "_vbuf",
+        ):
+            resource = getattr(self, name)
+            if resource is not None:
+                try:
+                    resource.destroy()
+                except RuntimeError:
+                    _log.debug("QRhi resource %s was already unavailable", name)
+                setattr(self, name, None)
         self._initialized = False
-        # Qt will clean up RHI resources when the widget is destroyed
+        self._tex_y_fmt = None
+        self._tex_uv_fmt = None
+        self._first_render_done = False
+        self._first_render_submission_pending = False
+        self._frame_presentation_pending = False
+        self._frame_submission_pending = False
+        self._current_frame = None
+        self._frame_dirty = False
+        self._has_frame = False
+        self.renderResourcesInvalidated.emit()
 
     # ------------------------------------------------------------------
     # Frame upload helpers

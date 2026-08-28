@@ -874,7 +874,7 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     video_area = Mock(begin_load=Mock(), play=Mock(), reset_zoom=Mock())
     coordinator._player_view = Mock(
-        show_video_surface=Mock(),
+        begin_video_transition=Mock(),
         video_area=video_area,
     )
     coordinator._favorite_button = Mock(setEnabled=Mock())
@@ -897,6 +897,10 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
 
     video_area.begin_load.assert_called_once_with(Path("/fake/video.mp4"), 1)
     coordinator._schedule_video_preparation.assert_called_once_with(presentation)
+    coordinator._player_view.begin_video_transition.assert_called_once_with(
+        1,
+        interactive_when_ready=True,
+    )
     assert coordinator._trim_in_ms == 1000
     assert coordinator._trim_out_ms == 3000
 
@@ -1275,7 +1279,7 @@ def test_live_motion_first_frame_completes_current_transaction() -> None:
         7,
         "live_motion_frame",
     )
-    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=False)
+    coordinator._player_view.show_video_surface.assert_not_called()
 
 
 def test_regular_video_first_frame_enables_interactive_controls() -> None:
@@ -1297,7 +1301,7 @@ def test_regular_video_first_frame_enables_interactive_controls() -> None:
         7,
         "video_frame",
     )
-    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=True)
+    coordinator._player_view.show_video_surface.assert_not_called()
 
 
 def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> None:

@@ -469,9 +469,20 @@ class PlayerViewController(QObject):
         # re-show the cover to prevent a one-frame transparency flash.
         self._image_viewer_rendered = False
         self._video_renderer_rendered = False
+        self._pending_video_generation: int | None = None
+        self._video_interactive_when_ready = False
 
         self._image_viewer.firstFrameReady.connect(self._on_image_first_render)
         self._video_area.firstFrameReady.connect(self._on_video_first_render)
+        image_invalidated = getattr(self._image_viewer, "renderResourcesInvalidated", None)
+        if image_invalidated is not None:
+            image_invalidated.connect(self._on_image_resources_invalidated)
+        video_submitted = getattr(self._video_area, "surfaceFrameSubmitted", None)
+        if video_submitted is not None:
+            video_submitted.connect(self._on_video_surface_frame_submitted)
+        video_invalidated = getattr(self._video_area, "surfaceInvalidated", None)
+        if video_invalidated is not None:
+            video_invalidated.connect(self._on_video_surface_invalidated)
         still_presented = getattr(self._image_viewer, "stillFramePresented", None)
         if still_presented is not None:
             still_presented.connect(self._on_still_frame_presented)
@@ -494,13 +505,56 @@ class PlayerViewController(QObject):
     def _on_image_first_render(self) -> None:
         """Mark image viewer as initialised; hide cover if it is visible."""
         self._image_viewer_rendered = True
-        if self._player_stack.currentWidget() is self._image_viewer:
-            self._hide_detail_init_cover()
+        self._sync_detail_surface_cover()
 
     def _on_video_first_render(self) -> None:
         """Mark video renderer as initialised; hide cover if it is visible."""
         self._video_renderer_rendered = True
-        if self._player_stack.currentWidget() is self._video_area:
+        self._sync_detail_surface_cover()
+
+    def _on_image_resources_invalidated(self) -> None:
+        """Re-arm the image RHI barrier after its resource generation changes."""
+
+        self._image_viewer_rendered = False
+        self._sync_detail_surface_cover()
+
+    def _on_video_surface_invalidated(self, generation: int) -> None:
+        """Keep the active video covered until its retained frame is resubmitted."""
+
+        self._video_renderer_rendered = False
+        if self._player_stack.currentWidget() is self._video_area and generation > 0:
+            self._pending_video_generation = int(generation)
+        self._sync_detail_surface_cover()
+
+    def _on_video_surface_frame_submitted(self, generation: int) -> None:
+        """Release the media barrier only for the current request generation."""
+
+        if int(generation) != self._pending_video_generation:
+            return
+        if self._player_stack.currentWidget() is not self._video_area:
+            return
+        self._pending_video_generation = None
+        self._video_renderer_rendered = True
+        self._configure_video_controls(self._video_interactive_when_ready)
+        self._sync_detail_surface_cover()
+
+    def _sync_detail_surface_cover(self) -> None:
+        """Show the cover while the current surface has an unsatisfied barrier."""
+
+        if getattr(self, "_preparation_shutting_down", False):
+            return
+        current = self._player_stack.currentWidget()
+        needs_cover = False
+        if current is self._image_viewer:
+            needs_cover = not self._image_viewer_rendered
+        elif current is self._video_area:
+            needs_cover = (
+                not self._video_renderer_rendered
+                or self._pending_video_generation is not None
+            )
+        if needs_cover:
+            self._show_detail_init_cover()
+        else:
             self._hide_detail_init_cover()
 
     def _hide_detail_init_cover(self) -> None:
@@ -537,6 +591,8 @@ class PlayerViewController(QObject):
             self._player_stack.setCurrentWidget(self._placeholder)
         if not self._player_stack.isVisible():
             self._player_stack.show()
+        self._pending_video_generation = None
+        self._sync_detail_surface_cover()
         # The placeholder is a separate stack page. Keep the bounded still
         # residency window intact so a hot return can activate its texture
         # without another upload.
@@ -548,10 +604,7 @@ class PlayerViewController(QObject):
         # still viewer never inherits a faded overlay background.
         self._video_area.hide_controls(animate=False)
 
-        # If the image viewer has never rendered, its QRhiWidget backing
-        # texture is still uninitialised (transparent).  Re-show the opaque
-        # init cover *before* switching the stack so the user never sees a
-        # transparent frame.
+        self._pending_video_generation = None
         if not self._image_viewer_rendered:
             self._show_detail_init_cover()
 
@@ -565,6 +618,34 @@ class PlayerViewController(QObject):
         # of the legacy QLabel-based viewer.
         self._image_viewer.update()
 
+        if self._image_viewer_rendered:
+            self._sync_detail_surface_cover()
+
+    def _configure_video_controls(self, interactive: bool) -> None:
+        self._video_area.set_controls_enabled(interactive)
+        if interactive:
+            self._video_area.show_controls(animate=False)
+        else:
+            self._video_area.hide_controls(animate=False)
+
+    def begin_video_transition(
+        self,
+        request_generation: int,
+        *,
+        interactive_when_ready: bool,
+    ) -> None:
+        """Expose the loading surface behind a generation-bound opaque cover."""
+
+        self._pending_video_generation = int(request_generation)
+        self._video_interactive_when_ready = bool(interactive_when_ready)
+        self._configure_video_controls(False)
+        self._show_detail_init_cover()
+        if self._player_stack.currentWidget() is not self._video_area:
+            self._player_stack.setCurrentWidget(self._video_area)
+        if not self._player_stack.isVisible():
+            self._player_stack.show()
+        self._video_area.video_view().setFocus()
+
     def show_video_surface(self, *, interactive: bool) -> None:
         """Switch the stacked widget to the video surface.
 
@@ -576,13 +657,9 @@ class PlayerViewController(QObject):
             unobstructed while still allowing the badge to trigger replays.
         """
 
-        self._video_area.set_controls_enabled(interactive)
-        if interactive:
-            # Present the controls immediately so keyboard users see the
-            # transport state without having to move the pointer.
-            self._video_area.show_controls(animate=False)
-        else:
-            self._video_area.hide_controls(animate=False)
+        self._pending_video_generation = None
+        self._video_interactive_when_ready = bool(interactive)
+        self._configure_video_controls(interactive)
 
         # If the video renderer has never rendered, its QRhiWidget backing
         # texture is still uninitialised (transparent).  Re-show the opaque
@@ -600,6 +677,8 @@ class PlayerViewController(QObject):
         # target the media surface, matching the ergonomics of the legacy
         # QWidget-based implementation.
         self._video_area.video_view().setFocus()
+        if self._video_renderer_rendered:
+            self._sync_detail_surface_cover()
 
     # ------------------------------------------------------------------
     # Content helpers

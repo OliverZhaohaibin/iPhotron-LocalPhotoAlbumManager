@@ -1217,8 +1217,12 @@ class PlaybackCoordinator(QObject):
                     presentation.request_generation,
                 )
                 self._schedule_video_preparation(presentation)
-                # Keep transport chrome hidden over the pure loading surface.
-                self._player_view.show_video_surface(interactive=False)
+                # Keep the loading surface covered until this generation's
+                # first video frame is part of a submitted window frame.
+                self._player_view.begin_video_transition(
+                    presentation.request_generation,
+                    interactive_when_ready=True,
+                )
                 log_detail_profile(
                     "playback",
                     "video.transaction_prepare",
@@ -1463,7 +1467,6 @@ class PlaybackCoordinator(QObject):
         )
         if result is DetailSurfacePresentationResult.REJECTED_STALE:
             return
-        self._player_view.show_video_surface(interactive=not is_live_motion)
         # Do not reclaim the user's scroll position when decoding completes.
 
     def _is_location_video_write_inflight(self, path: Path) -> bool:
@@ -1526,7 +1529,10 @@ class PlaybackCoordinator(QObject):
                 video_adjusted_preview=False,
             )
         )
-        self._player_view.show_video_surface(interactive=False)
+        self._player_view.begin_video_transition(
+            presentation.request_generation,
+            interactive_when_ready=False,
+        )
         self._player_bar.setEnabled(False)
         self._is_playing = True
 

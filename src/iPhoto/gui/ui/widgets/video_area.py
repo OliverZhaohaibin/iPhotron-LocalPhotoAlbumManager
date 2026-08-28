@@ -173,6 +173,8 @@ class VideoArea(QWidget):
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
     mediaFirstFrameReady = Signal(int)
+    surfaceFrameSubmitted = Signal(int)
+    surfaceInvalidated = Signal(int)
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
@@ -243,6 +245,7 @@ class VideoArea(QWidget):
         self._position_changed_handler = None
         self._media_status_changed_handler = None
         self._gpu_video_frame_presented_handler = None
+        self._gpu_video_frame_presented_handlers: dict[QWidget, object] = {}
         self._detail_request_generation = 0
         self._presentation_committed = False
         self._awaiting_first_gpu_frame_generation: int | None = None
@@ -263,6 +266,8 @@ class VideoArea(QWidget):
         # Per-surface zoom tracking so the slider stays in sync when switching surfaces.
         self._renderer_zoom: float = 1.0
         self._edit_viewer_zoom: float = 1.0
+        self._renderer_resource_ready = False
+        self._edit_viewer_resource_ready = False
 
         # Playback-only objects are created after the first main-window paint
         # on the staged startup path.  The QRhi widgets above already have
@@ -434,8 +439,14 @@ class VideoArea(QWidget):
             )
             return
         self._adjusted_preview_enabled = target
-        self._surface_stack.setCurrentWidget(self._edit_viewer if target else self._renderer)
-        self.setFocusProxy(self._edit_viewer if target else self._renderer)
+        target_surface = self._edit_viewer if target else self._renderer
+        if not self._surface_is_resource_ready(target_surface):
+            self.surfaceInvalidated.emit(self._detail_request_generation)
+        self._surface_stack.setCurrentWidget(target_surface)
+        self.setFocusProxy(target_surface)
+        self._gpu_video_frame_presented_handler = (
+            self._gpu_video_frame_presented_handlers.get(target_surface)
+        )
         if target:
             self._adjusted_first_frame_pending = True
             self._edit_viewer.set_adjustments(self._current_adjustments)
@@ -1078,27 +1089,40 @@ class VideoArea(QWidget):
     def _bind_gpu_presentation_generation(self, generation: int) -> None:
         """Bind GPU frame completion to the media generation that queued it."""
 
-        previous = self._gpu_video_frame_presented_handler
-        if previous is not None:
-            for signal in (
-                self._renderer.videoFramePresented,
-                self._edit_viewer.videoFramePresented,
-            ):
+        for surface, previous in tuple(self._gpu_video_frame_presented_handlers.items()):
+            signal = surface.videoFramePresented
+            if previous is not None:
                 try:
                     signal.disconnect(previous)
                 except (RuntimeError, TypeError):
                     pass
 
         owner_ref = weakref.ref(self)
+        handlers: dict[QWidget, object] = {}
+        for surface in (self._renderer, self._edit_viewer):
+            surface_ref = weakref.ref(surface)
 
-        def _handle_presented(*, bound_generation: int = generation) -> None:
-            owner = owner_ref()
-            if owner is not None:
+            def _handle_presented(
+                *,
+                bound_generation: int = generation,
+                bound_surface=surface_ref,
+            ) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if (
+                    owner is None
+                    or child is None
+                    or owner._surface_stack.currentWidget() is not child
+                ):
+                    return
                 owner._on_gpu_video_frame_presented(media_generation=bound_generation)
 
-        self._gpu_video_frame_presented_handler = _handle_presented
-        self._renderer.videoFramePresented.connect(_handle_presented)
-        self._edit_viewer.videoFramePresented.connect(_handle_presented)
+            handlers[surface] = _handle_presented
+            surface.videoFramePresented.connect(_handle_presented)
+        self._gpu_video_frame_presented_handlers = handlers
+        self._gpu_video_frame_presented_handler = handlers.get(
+            self._surface_stack.currentWidget()
+        )
 
     def _bind_video_sink_generation(self, generation: int) -> None:
         """Bind sink delivery to one media generation so old queued calls expire."""
@@ -1307,6 +1331,10 @@ class VideoArea(QWidget):
         )
         if event_generation != self._media_generation:
             return
+        request_generation = self._detail_request_generation
+        if request_generation <= 0:
+            return
+        self.surfaceFrameSubmitted.emit(request_generation)
         generation = self._awaiting_first_gpu_frame_generation
         if generation is None or generation != self._detail_request_generation:
             return
@@ -1680,8 +1708,96 @@ class VideoArea(QWidget):
         self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted.emit)
         self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished.emit)
         self._edit_viewer.colorPicked.connect(self.colorPicked.emit)
-        self._edit_viewer.firstFrameReady.connect(self.firstFrameReady.emit)
-        self._renderer.firstFrameReady.connect(self.firstFrameReady.emit)
+        owner_ref = weakref.ref(self)
+        self._surface_lifecycle_handlers = []
+        for surface in (self._edit_viewer, self._renderer):
+            surface_ref = weakref.ref(surface)
+
+            def _handle_ready(*, bound_surface=surface_ref) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if owner is not None and child is not None:
+                    owner._on_surface_first_frame_ready(child)
+
+            def _handle_invalidated(*, bound_surface=surface_ref) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if owner is not None and child is not None:
+                    owner._on_surface_resources_invalidated(child)
+
+            self._surface_lifecycle_handlers.extend(
+                (_handle_ready, _handle_invalidated)
+            )
+            surface.firstFrameReady.connect(_handle_ready)
+            surface.renderResourcesInvalidated.connect(_handle_invalidated)
+
+    def _surface_is_resource_ready(self, surface: QWidget) -> bool:
+        if surface is self._edit_viewer:
+            return self._edit_viewer_resource_ready
+        return self._renderer_resource_ready
+
+    def _on_surface_first_frame_ready(self, surface: QWidget) -> None:
+        """Publish readiness only for the currently visible QRhi child."""
+
+        if surface is self._edit_viewer:
+            self._edit_viewer_resource_ready = True
+        else:
+            self._renderer_resource_ready = True
+        if self._surface_stack.currentWidget() is surface:
+            self.firstFrameReady.emit()
+
+    def _on_surface_resources_invalidated(self, surface: QWidget) -> None:
+        """Cover and repopulate an active video surface after QRhi loss."""
+
+        if surface is self._edit_viewer:
+            self._edit_viewer_resource_ready = False
+        else:
+            self._renderer_resource_ready = False
+        if self._surface_stack.currentWidget() is not surface:
+            return
+
+        request_generation = self._detail_request_generation
+        self.surfaceInvalidated.emit(request_generation)
+        frame = self._last_presented_video_frame
+        if (
+            frame is None
+            or not self._presentation_committed
+            or not self._accept_video_frames
+        ):
+            return
+        try:
+            retained_frame = QVideoFrame(frame) if QVideoFrame is not None else frame
+        except Exception:
+            retained_frame = frame
+        media_generation = self._media_generation
+        QTimer.singleShot(
+            0,
+            lambda: self._restore_frame_after_resource_loss(
+                retained_frame,
+                media_generation=media_generation,
+                surface=surface,
+            ),
+        )
+
+    def _restore_frame_after_resource_loss(
+        self,
+        frame: "QVideoFrame",
+        *,
+        media_generation: int,
+        surface: QWidget,
+    ) -> None:
+        """Re-upload the retained paused frame if its generation still owns the surface."""
+
+        if (
+            media_generation != self._media_generation
+            or self._surface_stack.currentWidget() is not surface
+            or not self._presentation_committed
+            or not self._accept_video_frames
+            or frame is None
+            or not frame.isValid()
+        ):
+            return
+        self._present_video_frame(frame)
 
     def _on_edit_viewer_zoom_changed(self, factor: float) -> None:
         """Forward zoom changes from _edit_viewer only when it is the active surface."""

@@ -120,6 +120,7 @@ class _FakeImageViewer(QWidget):
     """
 
     firstFrameReady = Signal()
+    renderResourcesInvalidated = Signal()
     replayRequested = Signal()
     viewTransformChanged = Signal()
 
@@ -181,6 +182,8 @@ class _FakeVideoArea(QWidget):
     """
 
     firstFrameReady = Signal()
+    surfaceFrameSubmitted = Signal(int)
+    surfaceInvalidated = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1020,6 +1023,54 @@ class TestInitCoverTracking:
         controller._video_renderer_rendered = True
         controller.show_video_surface(interactive=True)
         mock_show_cover.assert_not_called()
+
+    def test_video_transition_waits_for_matching_submitted_generation(
+        self,
+        controller,
+        mocker,
+    ):
+        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controls_enabled = mocker.patch.object(
+            controller._video_area,
+            "set_controls_enabled",
+        )
+
+        controller.begin_video_transition(17, interactive_when_ready=True)
+        controller._video_area.firstFrameReady.emit()
+
+        assert controller._pending_video_generation == 17
+        mock_hide_cover.assert_not_called()
+
+        controller._video_area.surfaceFrameSubmitted.emit(16)
+        assert controller._pending_video_generation == 17
+        mock_hide_cover.assert_not_called()
+
+        controller._video_area.surfaceFrameSubmitted.emit(17)
+        assert controller._pending_video_generation is None
+        controls_enabled.assert_called_with(True)
+        mock_show_cover.assert_called()
+        mock_hide_cover.assert_called_once()
+
+    def test_placeholder_cancels_pending_video_transition(self, controller, mocker):
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller.begin_video_transition(23, interactive_when_ready=True)
+
+        controller.show_placeholder("Unable to load")
+
+        assert controller._pending_video_generation is None
+        mock_hide_cover.assert_called_once()
+
+    def test_active_video_resource_loss_rearms_media_barrier(self, controller, mocker):
+        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
+        controller._player_stack.setCurrentWidget(controller._video_area)
+        controller._video_renderer_rendered = True
+
+        controller._video_area.surfaceInvalidated.emit(31)
+
+        assert controller._video_renderer_rendered is False
+        assert controller._pending_video_generation == 31
+        mock_show_cover.assert_called_once()
 
     def test_image_first_render_hides_cover_when_image_visible(self, controller, mocker):
         """_on_image_first_render should hide cover when image is current widget."""

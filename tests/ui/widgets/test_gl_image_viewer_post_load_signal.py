@@ -184,7 +184,7 @@ def test_crop_preview_disables_persisted_crop_mask() -> None:
 
 
 def test_rhi_render_presents_video_uploaded_before_render() -> None:
-    """A Linux-style immediate upload is acknowledged by the next GPU draw."""
+    """A video draw is acknowledged only after window-frame submission."""
 
     viewer = Mock()
     viewer._gl_initialized = True
@@ -192,6 +192,8 @@ def test_rhi_render_presents_video_uploaded_before_render() -> None:
     viewer._using_video_frame_source = True
     viewer._video_frame_dirty = False
     viewer._video_frame_presentation_pending = True
+    viewer._video_frame_submission_pending = False
+    viewer._first_render_submission_pending = False
     viewer._video_frame = None
     viewer._pending_video_image = None
     viewer._image = None
@@ -211,8 +213,14 @@ def test_rhi_render_presents_video_uploaded_before_render() -> None:
     GLImageViewer._render_rhi(viewer, Mock())
 
     viewer._renderer.render.assert_called_once()
-    viewer.videoFramePresented.emit.assert_called_once()
+    viewer.videoFramePresented.emit.assert_not_called()
     assert viewer._video_frame_presentation_pending is False
+    assert viewer._video_frame_submission_pending is True
+
+    GLImageViewer._on_frame_submitted(viewer)
+
+    viewer.videoFramePresented.emit.assert_called_once()
+    assert viewer._video_frame_submission_pending is False
 
 
 def test_rhi_first_texture_failure_is_reported_before_no_texture_return() -> None:

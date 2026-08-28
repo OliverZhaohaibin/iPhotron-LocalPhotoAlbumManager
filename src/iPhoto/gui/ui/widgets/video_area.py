@@ -173,8 +173,8 @@ class VideoArea(QWidget):
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
     mediaFirstFrameReady = Signal(int)
-    surfaceFrameSubmitted = Signal(int)
-    surfaceInvalidated = Signal(int)
+    surfaceFrameSubmitted = Signal(int, int)
+    surfaceInvalidated = Signal(int, int)
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
@@ -238,6 +238,12 @@ class VideoArea(QWidget):
         self._pending_video_frame: QVideoFrame | None = None
         self._pending_video_frame_generation: int | None = None
         self._last_presented_video_frame: QVideoFrame | None = None
+        self._next_video_content_serial = 0
+        self._retained_video_content_serial = 0
+        self._surface_submitted_content_serial: dict[QWidget, int] = {
+            self._renderer: 0,
+            self._edit_viewer: 0,
+        }
         self._video_frame_dispatch_pending = False
         self._video_frame_dispatch_generation: int | None = None
         self._media_generation = 0
@@ -440,8 +446,17 @@ class VideoArea(QWidget):
             return
         self._adjusted_preview_enabled = target
         target_surface = self._edit_viewer if target else self._renderer
-        if not self._surface_is_resource_ready(target_surface):
-            self.surfaceInvalidated.emit(self._detail_request_generation)
+        required_serial = self._retained_video_content_serial
+        target_serial = self._surface_submitted_content_serial.get(target_surface, 0)
+        needs_content_submission = required_serial > 0 and target_serial != required_serial
+        if (
+            not self._surface_is_resource_ready(target_surface)
+            or needs_content_submission
+        ):
+            self.surfaceInvalidated.emit(
+                self._detail_request_generation,
+                required_serial,
+            )
         self._surface_stack.setCurrentWidget(target_surface)
         self.setFocusProxy(target_surface)
         self._gpu_video_frame_presented_handler = (
@@ -454,6 +469,11 @@ class VideoArea(QWidget):
                 self._edit_viewer.update()
         else:
             self._edit_mode_active = False
+        if needs_content_submission and self._last_presented_video_frame is not None:
+            self._queue_retained_frame_for_surface(
+                target_surface,
+                content_serial=required_serial,
+            )
         _log.debug(
             "[trace][video_area] set_adjusted_preview_enabled:applied %s",
             {
@@ -1040,6 +1060,12 @@ class VideoArea(QWidget):
         self._pending_video_frame = None
         self._pending_video_frame_generation = None
         self._last_presented_video_frame = None
+        self._next_video_content_serial = 0
+        self._retained_video_content_serial = 0
+        self._surface_submitted_content_serial = {
+            self._renderer: 0,
+            self._edit_viewer: 0,
+        }
         self._video_frame_dispatch_pending = False
         self._video_frame_dispatch_generation = None
         self._renderer.clear_frame()
@@ -1086,7 +1112,7 @@ class VideoArea(QWidget):
             and self._end_detection_armed_media_generation == self._media_generation
         )
 
-    def _bind_gpu_presentation_generation(self, generation: int) -> None:
+    def _bind_gpu_presentation_generation(self, _generation: int) -> None:
         """Bind GPU frame completion to the media generation that queued it."""
 
         for surface, previous in tuple(self._gpu_video_frame_presented_handlers.items()):
@@ -1103,8 +1129,9 @@ class VideoArea(QWidget):
             surface_ref = weakref.ref(surface)
 
             def _handle_presented(
+                content_generation: int,
+                content_serial: int,
                 *,
-                bound_generation: int = generation,
                 bound_surface=surface_ref,
             ) -> None:
                 owner = owner_ref()
@@ -1115,7 +1142,11 @@ class VideoArea(QWidget):
                     or owner._surface_stack.currentWidget() is not child
                 ):
                     return
-                owner._on_gpu_video_frame_presented(media_generation=bound_generation)
+                owner._on_gpu_video_frame_presented(
+                    content_serial,
+                    media_generation=content_generation,
+                    surface=child,
+                )
 
             handlers[surface] = _handle_presented
             surface.videoFramePresented.connect(_handle_presented)
@@ -1273,6 +1304,8 @@ class VideoArea(QWidget):
                 self._last_presented_video_frame = frame
         else:
             self._last_presented_video_frame = frame
+        self._next_video_content_serial += 1
+        self._retained_video_content_serial = self._next_video_content_serial
         self._diag_presented_frame_count += 1
         if self._diag_presented_frame_count <= 12 or self._diag_presented_frame_count % 30 == 0:
             _log.debug(
@@ -1289,7 +1322,23 @@ class VideoArea(QWidget):
                     "frame": self._frame_summary(frame),
                 },
             )
-        if self._adjusted_preview_enabled:
+        active_surface = self._surface_stack.currentWidget()
+        self._submit_video_frame_to_surface(
+            frame,
+            active_surface,
+            content_serial=self._retained_video_content_serial,
+        )
+
+    def _submit_video_frame_to_surface(
+        self,
+        frame: "QVideoFrame",
+        surface: QWidget,
+        *,
+        content_serial: int,
+    ) -> None:
+        """Queue one identified frame on exactly one QRhi child surface."""
+
+        if surface is self._edit_viewer:
             resolved_rotation_cw = _resolve_frame_rotation_cw(
                 frame.surfaceFormat(),
                 container_rotation_cw=self._container_rotation_cw,
@@ -1313,28 +1362,64 @@ class VideoArea(QWidget):
                 frame,
                 self._current_adjustments,
                 reset_view=reset_view,
+                content_generation=self._media_generation,
+                content_serial=content_serial,
             )
             self._surface_stack.update()
             self.update()
         else:
-            self._renderer.update_frame(frame)
+            self._renderer.update_frame(
+                frame,
+                content_generation=self._media_generation,
+                content_serial=content_serial,
+            )
+
+    def _queue_retained_frame_for_surface(
+        self,
+        surface: QWidget,
+        *,
+        content_serial: int,
+    ) -> None:
+        """Replay retained content without assigning it a new serial."""
+
+        frame = self._last_presented_video_frame
+        if frame is None or content_serial <= 0:
+            return
+        try:
+            retained_frame = QVideoFrame(frame) if QVideoFrame is not None else frame
+        except Exception:
+            retained_frame = frame
+        if retained_frame is None or not retained_frame.isValid():
+            return
+        self._submit_video_frame_to_surface(
+            retained_frame,
+            surface,
+            content_serial=content_serial,
+        )
 
     def _on_gpu_video_frame_presented(
         self,
+        content_serial: int = 0,
         *,
         media_generation: int | None = None,
+        surface: QWidget | None = None,
     ) -> None:
-        """Release loading UI only after the current frame completed QRhi draw."""
+        """Acknowledge identified content after its active surface was submitted."""
 
         event_generation = (
             self._media_generation if media_generation is None else int(media_generation)
         )
         if event_generation != self._media_generation:
             return
+        active_surface = self._surface_stack.currentWidget()
+        submitted_surface = active_surface if surface is None else surface
+        if submitted_surface is not active_surface or content_serial <= 0:
+            return
+        self._surface_submitted_content_serial[submitted_surface] = int(content_serial)
         request_generation = self._detail_request_generation
         if request_generation <= 0:
             return
-        self.surfaceFrameSubmitted.emit(request_generation)
+        self.surfaceFrameSubmitted.emit(request_generation, int(content_serial))
         generation = self._awaiting_first_gpu_frame_generation
         if generation is None or generation != self._detail_request_generation:
             return
@@ -1753,11 +1838,13 @@ class VideoArea(QWidget):
             self._edit_viewer_resource_ready = False
         else:
             self._renderer_resource_ready = False
+        self._surface_submitted_content_serial[surface] = 0
         if self._surface_stack.currentWidget() is not surface:
             return
 
         request_generation = self._detail_request_generation
-        self.surfaceInvalidated.emit(request_generation)
+        content_serial = self._retained_video_content_serial
+        self.surfaceInvalidated.emit(request_generation, content_serial)
         frame = self._last_presented_video_frame
         if (
             frame is None
@@ -1776,6 +1863,7 @@ class VideoArea(QWidget):
                 retained_frame,
                 media_generation=media_generation,
                 surface=surface,
+                content_serial=content_serial,
             ),
         )
 
@@ -1785,6 +1873,7 @@ class VideoArea(QWidget):
         *,
         media_generation: int,
         surface: QWidget,
+        content_serial: int,
     ) -> None:
         """Re-upload the retained paused frame if its generation still owns the surface."""
 
@@ -1797,7 +1886,11 @@ class VideoArea(QWidget):
             or not frame.isValid()
         ):
             return
-        self._present_video_frame(frame)
+        self._submit_video_frame_to_surface(
+            frame,
+            surface,
+            content_serial=content_serial,
+        )
 
     def _on_edit_viewer_zoom_changed(self, factor: float) -> None:
         """Forward zoom changes from _edit_viewer only when it is the active surface."""

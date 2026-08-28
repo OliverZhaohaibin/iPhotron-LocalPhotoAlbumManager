@@ -12,6 +12,7 @@ import os
 import time
 from pathlib import Path
 from threading import Event
+from unittest.mock import call
 
 import pytest
 
@@ -121,6 +122,7 @@ class _FakeImageViewer(QWidget):
 
     firstFrameReady = Signal()
     renderResourcesInvalidated = Signal()
+    stillFrameSubmitted = Signal(object, int)
     replayRequested = Signal()
     viewTransformChanged = Signal()
 
@@ -182,8 +184,8 @@ class _FakeVideoArea(QWidget):
     """
 
     firstFrameReady = Signal()
-    surfaceFrameSubmitted = Signal(int)
-    surfaceInvalidated = Signal(int)
+    surfaceFrameSubmitted = Signal(int, int)
+    surfaceInvalidated = Signal(int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1010,6 +1012,63 @@ class TestInitCoverTracking:
         controller.show_image_surface()
         mock_show_cover.assert_not_called()
 
+    def test_image_transition_waits_for_matching_content_submission(
+        self,
+        controller,
+        mocker,
+    ):
+        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller._image_viewer_rendered = True
+        controller._arm_image_transition(22, "image-b")
+        controller.show_image_surface()
+
+        controller._image_viewer.firstFrameReady.emit()
+        controller._image_viewer.stillFrameSubmitted.emit("image-a", 21)
+
+        assert controller._pending_image_generation == 22
+        mock_hide_cover.assert_not_called()
+
+        controller._image_viewer.stillFrameSubmitted.emit("image-b", 22)
+
+        assert controller._pending_image_generation is None
+        assert controller._pending_image_key is None
+        mock_show_cover.assert_called()
+        mock_hide_cover.assert_called_once()
+
+    def test_still_content_barrier_is_armed_before_surface_switch_and_upload(
+        self,
+        controller,
+        mocker,
+    ):
+        surface = _surface(
+            Path("/tmp/content-b.jpg"),
+            QImage(64, 48, QImage.Format.Format_RGBA8888),
+        )
+        controller._present_generation = 24
+        controller._request_reason_by_generation[24] = "initial"
+        arm = mocker.patch.object(controller, "_arm_image_transition")
+        show = mocker.patch.object(controller, "show_image_surface")
+        upload = mocker.patch.object(controller._image_viewer, "set_image")
+        calls = mocker.Mock()
+        calls.attach_mock(arm, "arm")
+        calls.attach_mock(show, "show")
+        calls.attach_mock(upload, "upload")
+
+        controller._apply_still_frame(surface, {})
+
+        assert calls.mock_calls[:3] == [
+            call.arm(24, surface.decode_key),
+            call.show(),
+            call.upload(
+                surface.image,
+                {},
+                image_source=surface.decode_key,
+                source_size=surface.source_size,
+                reset_view=True,
+            ),
+        ]
+
     def test_show_video_surface_shows_cover_if_not_rendered(self, controller, mocker):
         """show_video_surface should re-show the init cover when video hasn't rendered."""
         mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
@@ -1042,11 +1101,11 @@ class TestInitCoverTracking:
         assert controller._pending_video_generation == 17
         mock_hide_cover.assert_not_called()
 
-        controller._video_area.surfaceFrameSubmitted.emit(16)
+        controller._video_area.surfaceFrameSubmitted.emit(16, 1)
         assert controller._pending_video_generation == 17
         mock_hide_cover.assert_not_called()
 
-        controller._video_area.surfaceFrameSubmitted.emit(17)
+        controller._video_area.surfaceFrameSubmitted.emit(17, 1)
         assert controller._pending_video_generation is None
         controls_enabled.assert_called_with(True)
         mock_show_cover.assert_called()
@@ -1066,10 +1125,11 @@ class TestInitCoverTracking:
         controller._player_stack.setCurrentWidget(controller._video_area)
         controller._video_renderer_rendered = True
 
-        controller._video_area.surfaceInvalidated.emit(31)
+        controller._video_area.surfaceInvalidated.emit(31, 9)
 
         assert controller._video_renderer_rendered is False
         assert controller._pending_video_generation == 31
+        assert controller._pending_video_content_serial == 9
         mock_show_cover.assert_called_once()
 
     def test_image_first_render_hides_cover_when_image_visible(self, controller, mocker):

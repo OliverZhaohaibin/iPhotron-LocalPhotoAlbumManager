@@ -22,6 +22,7 @@ import os
 import struct
 import sys
 import weakref
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -286,7 +287,7 @@ class VideoRendererWidget(QRhiWidget):
 
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
-    videoFramePresented = Signal()
+    videoFramePresented = Signal(int, int)
     renderResourcesInvalidated = Signal()
     zoomChanged = Signal(float)
 
@@ -321,7 +322,9 @@ class VideoRendererWidget(QRhiWidget):
         self._first_render_submission_pending = False
         self._has_frame = False
         self._frame_presentation_pending = False
-        self._frame_submission_pending = False
+        self._frame_content_generation = 0
+        self._frame_content_serial = 0
+        self._frame_submission_queue: deque[tuple[int, int] | None] = deque()
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
         self._transparent_rounded_clip_enabled = False
@@ -454,7 +457,13 @@ class VideoRendererWidget(QRhiWidget):
         self._refresh_display_rotation()
         self.update()
 
-    def update_frame(self, frame: "QVideoFrame") -> None:
+    def update_frame(
+        self,
+        frame: "QVideoFrame",
+        *,
+        content_generation: int = 0,
+        content_serial: int = 0,
+    ) -> None:
         """Accept a new video frame and schedule a repaint."""
         _load_video_frame_types()
         if frame is None or not frame.isValid():
@@ -463,6 +472,8 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_dirty = True
         self._has_frame = True
         self._frame_presentation_pending = True
+        self._frame_content_generation = max(0, int(content_generation))
+        self._frame_content_serial = max(0, int(content_serial))
 
         # Check for resolution change
         fmt = frame.surfaceFormat()
@@ -511,7 +522,8 @@ class VideoRendererWidget(QRhiWidget):
         self._container_linux_180_hint = False
         self._has_frame = False
         self._frame_presentation_pending = False
-        self._frame_submission_pending = False
+        self._frame_content_generation = 0
+        self._frame_content_serial = 0
         self._user_rotate90_steps = 0
         if self._zoom_factor != 1.0:
             self._zoom_factor = 1.0
@@ -750,6 +762,7 @@ class VideoRendererWidget(QRhiWidget):
             )
             cb.endPass()
             self._queue_first_frame_ready()
+            self._frame_submission_queue.append(None)
             return
 
         rhi = self.rhi()
@@ -772,6 +785,7 @@ class VideoRendererWidget(QRhiWidget):
             )
             cb.endPass()
             self._queue_first_frame_ready()
+            self._frame_submission_queue.append(None)
             return
 
         ru = rhi.nextResourceUpdateBatch()
@@ -807,9 +821,14 @@ class VideoRendererWidget(QRhiWidget):
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
         self._queue_first_frame_ready()
+        submission: tuple[int, int] | None = None
         if self._frame_presentation_pending and not self._frame_dirty:
             self._frame_presentation_pending = False
-            self._frame_submission_pending = True
+            submission = (
+                self._frame_content_generation,
+                self._frame_content_serial,
+            )
+        self._frame_submission_queue.append(submission)
 
     def _queue_first_frame_ready(self) -> None:
         """Record that an opaque frame is waiting for window submission."""
@@ -823,9 +842,11 @@ class VideoRendererWidget(QRhiWidget):
             self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
-        if self._frame_submission_pending:
-            self._frame_submission_pending = False
-            self.videoFramePresented.emit()
+        if self._frame_submission_queue:
+            submission = self._frame_submission_queue.popleft()
+            if submission is not None:
+                generation, serial = submission
+                self.videoFramePresented.emit(generation, serial)
 
     def _pass_clear_color(self, fallback: QColor) -> QColor:
         """Return the render-pass clear colour for the current opacity mode."""
@@ -862,7 +883,9 @@ class VideoRendererWidget(QRhiWidget):
         self._first_render_done = False
         self._first_render_submission_pending = False
         self._frame_presentation_pending = False
-        self._frame_submission_pending = False
+        self._frame_content_generation = 0
+        self._frame_content_serial = 0
+        self._frame_submission_queue.clear()
         self._current_frame = None
         self._frame_dirty = False
         self._has_frame = False

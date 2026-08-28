@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import struct
+import time
 import weakref
 from unittest.mock import Mock, call, patch
 
@@ -17,7 +18,13 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGridLayout,
+    QMainWindow,
+    QStackedWidget,
+    QWidget,
+)
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 import iPhoto.gui.ui.widgets.video_area as video_area_module
@@ -588,7 +595,7 @@ class TestVideoRendererWidget:
         w.videoFramePresented.connect(video_presented)
 
         w._queue_first_frame_ready()
-        w._frame_submission_pending = True
+        w._frame_submission_queue.append((5, 7))
 
         first_ready.assert_not_called()
         video_presented.assert_not_called()
@@ -596,7 +603,23 @@ class TestVideoRendererWidget:
         w._on_frame_submitted()
 
         first_ready.assert_called_once_with()
-        video_presented.assert_called_once_with()
+        video_presented.assert_called_once_with(5, 7)
+
+    def test_clear_submission_cannot_acknowledge_a_later_video_draw(
+        self,
+        qapp,
+        mocker,
+    ):
+        w = VideoRendererWidget()
+        video_presented = mocker.Mock()
+        w.videoFramePresented.connect(video_presented)
+        w._frame_submission_queue.extend([None, (8, 13)])
+
+        w._on_frame_submitted()
+        video_presented.assert_not_called()
+
+        w._on_frame_submitted()
+        video_presented.assert_called_once_with(8, 13)
 
     def test_release_resources_destroys_owned_qrhi_objects(self, qapp, mocker):
         """Every object created from the old QRhi is destroyed and invalidated."""
@@ -619,7 +642,7 @@ class TestVideoRendererWidget:
         w.renderResourcesInvalidated.connect(invalidated)
         w._initialized = True
         w._first_render_done = True
-        w._frame_submission_pending = True
+        w._frame_submission_queue.append((1, 11))
 
         w.releaseResources()
 
@@ -628,8 +651,52 @@ class TestVideoRendererWidget:
             assert getattr(w, name) is None
         assert w._initialized is False
         assert w._first_render_done is False
-        assert w._frame_submission_pending is False
+        assert not w._frame_submission_queue
         invalidated.assert_called_once_with()
+
+    def test_visible_qrhi_submission_releases_cover_contract(self, qapp):
+        """Exercise the real QRhiWidget render -> composition submission order."""
+
+        if QApplication.platformName().lower() in {"offscreen", "minimal"}:
+            pytest.skip("requires a visible platform QRhi compositor")
+
+        host = QWidget()
+        layout = QGridLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        renderer = VideoRendererWidget(host)
+        cover = QWidget(host)
+        cover.setAutoFillBackground(True)
+        layout.addWidget(renderer, 0, 0)
+        layout.addWidget(cover, 0, 0)
+        cover.raise_()
+        failures = []
+        cover_visible_at_submission = []
+
+        def _release_cover() -> None:
+            cover_visible_at_submission.append(cover.isVisible())
+            cover.hide()
+
+        renderer.renderFailed.connect(lambda: failures.append(True))
+        renderer.firstFrameReady.connect(_release_cover)
+
+        host.resize(320, 180)
+        host.show()
+        cover.raise_()
+        assert cover.isVisible()
+        renderer.update()
+        qapp.processEvents()
+
+        deadline = time.monotonic() + 5.0
+        while cover.isVisible() and not failures and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+
+        cover_released = not cover.isVisible()
+        host.close()
+        if failures:
+            pytest.skip("platform could not create a QRhi for the contract test")
+        assert cover_visible_at_submission == [True]
+        assert cover_released
 
     def test_transparent_rounded_clip_toggles_widget_attributes(self, qapp):
         """Preview clipping should switch the renderer into transparent output mode."""
@@ -1057,7 +1124,7 @@ class TestVideoArea:
         va._player._position = 0
         va._player._media_status = QMediaPlayer.MediaStatus.LoadedMedia
         va._awaiting_first_gpu_frame_generation = 23
-        va._on_gpu_video_frame_presented()
+        va._on_gpu_video_frame_presented(1)
 
         pause = mocker.patch.object(va._player, "pause")
         set_position = mocker.patch.object(va._player, "setPosition")
@@ -1108,7 +1175,7 @@ class TestVideoArea:
         finished_spy.assert_not_called()
 
         va._awaiting_first_gpu_frame_generation = 31
-        va._on_gpu_video_frame_presented()
+        va._on_gpu_video_frame_presented(1)
 
         pause.assert_called_once_with()
         set_position.assert_called_once_with(100 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
@@ -1127,7 +1194,7 @@ class TestVideoArea:
 
         va = VideoArea()
         source = Path("/fake/live.mov")
-        va.begin_load(source, 7)
+        media_generation_a = va.begin_load(source, 7)
         stale_gpu_handler = va._gpu_video_frame_presented_handler
 
         media_generation_b = va.begin_load(source, 7)
@@ -1136,13 +1203,13 @@ class TestVideoArea:
         first_frame_spy = mocker.Mock()
         va.mediaFirstFrameReady.connect(first_frame_spy)
 
-        stale_gpu_handler()
+        stale_gpu_handler(media_generation_a, 1)
 
         assert va._awaiting_first_gpu_frame_generation == 7
         assert va._end_detection_armed_media_generation is None
         first_frame_spy.assert_not_called()
 
-        current_gpu_handler()
+        current_gpu_handler(media_generation_b, 1)
 
         assert va._awaiting_first_gpu_frame_generation is None
         assert va._end_detection_armed_media_generation == media_generation_b
@@ -1161,9 +1228,12 @@ class TestVideoArea:
         va.surfaceFrameSubmitted.connect(surface_spy)
         va.mediaFirstFrameReady.connect(media_spy)
 
-        va._on_gpu_video_frame_presented(media_generation=va._media_generation)
+        va._on_gpu_video_frame_presented(
+            3,
+            media_generation=va._media_generation,
+        )
 
-        surface_spy.assert_called_once_with(41)
+        surface_spy.assert_called_once_with(41, 3)
         media_spy.assert_not_called()
 
     def test_adjusted_surface_submission_uses_the_same_generation_barrier(
@@ -1177,9 +1247,9 @@ class TestVideoArea:
         surface_spy = mocker.Mock()
         va.surfaceFrameSubmitted.connect(surface_spy)
 
-        va._gpu_video_frame_presented_handler()
+        va._gpu_video_frame_presented_handler(va._media_generation, 4)
 
-        surface_spy.assert_called_once_with(42)
+        surface_spy.assert_called_once_with(42, 4)
 
     def test_hidden_surface_resource_loss_does_not_invalidate_visible_surface(
         self,
@@ -1194,6 +1264,53 @@ class TestVideoArea:
 
         invalidated.assert_not_called()
 
+    def test_surface_switch_replays_current_content_serial_before_reveal(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        va = VideoArea()
+        va._detail_request_generation = 44
+        va._presentation_committed = True
+        va._accept_video_frames = True
+        va._renderer_resource_ready = True
+        va._edit_viewer_resource_ready = True
+        renderer_update = mocker.patch.object(va._renderer, "update_frame")
+        edit_update = mocker.patch.object(va._edit_viewer, "set_video_frame")
+        invalidated = mocker.Mock()
+        va.surfaceInvalidated.connect(invalidated)
+        frame = QVideoFrame(
+            QVideoFrameFormat(
+                QSize(64, 48),
+                QVideoFrameFormat.PixelFormat.Format_RGBA8888,
+            )
+        )
+
+        va._present_video_frame(frame)
+        renderer_update.assert_called_with(
+            frame,
+            content_generation=va._media_generation,
+            content_serial=1,
+        )
+        va._on_gpu_video_frame_presented(1, surface=va._renderer)
+
+        va.set_adjusted_preview_enabled(True)
+
+        invalidated.assert_called_with(44, 1)
+        assert edit_update.call_args.kwargs["content_serial"] == 1
+        va._on_gpu_video_frame_presented(1, surface=va._edit_viewer)
+
+        va._present_video_frame(frame)
+        va._on_gpu_video_frame_presented(2, surface=va._edit_viewer)
+        renderer_update.reset_mock()
+        invalidated.reset_mock()
+
+        va.set_adjusted_preview_enabled(False)
+
+        invalidated.assert_called_once_with(44, 2)
+        renderer_update.assert_called_once()
+        assert renderer_update.call_args.kwargs["content_serial"] == 2
+
     def test_resource_loss_requeues_retained_paused_frame(
         self,
         qapp,
@@ -1205,18 +1322,19 @@ class TestVideoArea:
             QVideoFrameFormat.PixelFormat.Format_RGBA8888,
         )
         va._last_presented_video_frame = QVideoFrame(fmt)
+        va._retained_video_content_serial = 5
         va._presentation_committed = True
         va._accept_video_frames = True
         va._detail_request_generation = 43
-        present = mocker.patch.object(va, "_present_video_frame")
+        submit = mocker.patch.object(va, "_submit_video_frame_to_surface")
         invalidated = mocker.Mock()
         va.surfaceInvalidated.connect(invalidated)
 
         va._on_surface_resources_invalidated(va._renderer)
         qapp.processEvents()
 
-        invalidated.assert_called_once_with(43)
-        present.assert_called_once()
+        invalidated.assert_called_once_with(43, 5)
+        submit.assert_called_once()
 
     def test_resource_loss_replay_is_rejected_after_generation_changes(
         self,
@@ -1229,15 +1347,16 @@ class TestVideoArea:
             QVideoFrameFormat.PixelFormat.Format_RGBA8888,
         )
         va._last_presented_video_frame = QVideoFrame(fmt)
+        va._retained_video_content_serial = 6
         va._presentation_committed = True
         va._accept_video_frames = True
-        present = mocker.patch.object(va, "_present_video_frame")
+        submit = mocker.patch.object(va, "_submit_video_frame_to_surface")
 
         va._on_surface_resources_invalidated(va._renderer)
         va._media_generation += 1
         qapp.processEvents()
 
-        present.assert_not_called()
+        submit.assert_not_called()
 
     def test_load_video_clears_frame(self, qapp, mocker):
         """load_video should clear the renderer frame."""

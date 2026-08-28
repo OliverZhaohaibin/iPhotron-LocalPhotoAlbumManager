@@ -469,7 +469,10 @@ class PlayerViewController(QObject):
         # re-show the cover to prevent a one-frame transparency flash.
         self._image_viewer_rendered = False
         self._video_renderer_rendered = False
+        self._pending_image_generation: int | None = None
+        self._pending_image_key: object | None = None
         self._pending_video_generation: int | None = None
+        self._pending_video_content_serial: int | None = None
         self._video_interactive_when_ready = False
 
         self._image_viewer.firstFrameReady.connect(self._on_image_first_render)
@@ -483,9 +486,13 @@ class PlayerViewController(QObject):
         video_invalidated = getattr(self._video_area, "surfaceInvalidated", None)
         if video_invalidated is not None:
             video_invalidated.connect(self._on_video_surface_invalidated)
-        still_presented = getattr(self._image_viewer, "stillFramePresented", None)
-        if still_presented is not None:
-            still_presented.connect(self._on_still_frame_presented)
+        still_submitted = getattr(self._image_viewer, "stillFrameSubmitted", None)
+        if still_submitted is not None:
+            still_submitted.connect(self._on_still_frame_submitted)
+        else:
+            still_presented = getattr(self._image_viewer, "stillFramePresented", None)
+            if still_presented is not None:
+                still_presented.connect(self._on_still_frame_presented)
         texture_failed = getattr(
             self._image_viewer,
             "stillTextureAllocationFailed",
@@ -516,24 +523,58 @@ class PlayerViewController(QObject):
         """Re-arm the image RHI barrier after its resource generation changes."""
 
         self._image_viewer_rendered = False
+        if (
+            self._player_stack.currentWidget() is self._image_viewer
+            and self._pending_image_generation is None
+        ):
+            current_source = self._image_viewer.current_image_source()
+            if current_source is not None and self._present_generation > 0:
+                self._pending_image_generation = self._present_generation
+                self._pending_image_key = current_source
         self._sync_detail_surface_cover()
 
-    def _on_video_surface_invalidated(self, generation: int) -> None:
+    def _arm_image_transition(self, generation: int, content_key: object) -> None:
+        """Cover the still surface until the identified content is submitted."""
+
+        self._pending_image_generation = int(generation)
+        self._pending_image_key = content_key
+        self._show_detail_init_cover()
+
+    def _cancel_image_transition(self) -> None:
+        self._pending_image_generation = None
+        self._pending_image_key = None
+
+    def _on_video_surface_invalidated(
+        self,
+        generation: int,
+        content_serial: int,
+    ) -> None:
         """Keep the active video covered until its retained frame is resubmitted."""
 
         self._video_renderer_rendered = False
         if self._player_stack.currentWidget() is self._video_area and generation > 0:
             self._pending_video_generation = int(generation)
+            self._pending_video_content_serial = (
+                int(content_serial) if content_serial > 0 else None
+            )
         self._sync_detail_surface_cover()
 
-    def _on_video_surface_frame_submitted(self, generation: int) -> None:
+    def _on_video_surface_frame_submitted(
+        self,
+        generation: int,
+        content_serial: int,
+    ) -> None:
         """Release the media barrier only for the current request generation."""
 
         if int(generation) != self._pending_video_generation:
             return
+        required_serial = self._pending_video_content_serial
+        if required_serial is not None and int(content_serial) < required_serial:
+            return
         if self._player_stack.currentWidget() is not self._video_area:
             return
         self._pending_video_generation = None
+        self._pending_video_content_serial = None
         self._video_renderer_rendered = True
         self._configure_video_controls(self._video_interactive_when_ready)
         self._sync_detail_surface_cover()
@@ -546,7 +587,10 @@ class PlayerViewController(QObject):
         current = self._player_stack.currentWidget()
         needs_cover = False
         if current is self._image_viewer:
-            needs_cover = not self._image_viewer_rendered
+            needs_cover = (
+                not self._image_viewer_rendered
+                or self._pending_image_generation is not None
+            )
         elif current is self._video_area:
             needs_cover = (
                 not self._video_renderer_rendered
@@ -592,6 +636,8 @@ class PlayerViewController(QObject):
         if not self._player_stack.isVisible():
             self._player_stack.show()
         self._pending_video_generation = None
+        self._pending_video_content_serial = None
+        self._cancel_image_transition()
         self._sync_detail_surface_cover()
         # The placeholder is a separate stack page. Keep the bounded still
         # residency window intact so a hot return can activate its texture
@@ -605,6 +651,7 @@ class PlayerViewController(QObject):
         self._video_area.hide_controls(animate=False)
 
         self._pending_video_generation = None
+        self._pending_video_content_serial = None
         if not self._image_viewer_rendered:
             self._show_detail_init_cover()
 
@@ -637,6 +684,8 @@ class PlayerViewController(QObject):
         """Expose the loading surface behind a generation-bound opaque cover."""
 
         self._pending_video_generation = int(request_generation)
+        self._pending_video_content_serial = None
+        self._cancel_image_transition()
         self._video_interactive_when_ready = bool(interactive_when_ready)
         self._configure_video_controls(False)
         self._show_detail_init_cover()
@@ -658,6 +707,8 @@ class PlayerViewController(QObject):
         """
 
         self._pending_video_generation = None
+        self._pending_video_content_serial = None
+        self._cancel_image_transition()
         self._video_interactive_when_ready = bool(interactive)
         self._configure_video_controls(interactive)
 
@@ -1040,13 +1091,24 @@ class PlayerViewController(QObject):
             return True
 
         activate_resident = getattr(self._image_viewer, "activate_resident_surface", None)
-        if not defer_presentation and callable(activate_resident) and activate_resident(
-            decode_key,
-            render_adjustments,
-            source_size=(request.source_identity.width, request.source_identity.height),
-            reset_view=request.reason == "initial",
-            generation=request.generation,
-        ):
+        resident_activated = False
+        if not defer_presentation and callable(activate_resident):
+            if request.reason == "initial":
+                self._arm_image_transition(request.generation, decode_key)
+            resident_activated = activate_resident(
+                decode_key,
+                render_adjustments,
+                source_size=(
+                    request.source_identity.width,
+                    request.source_identity.height,
+                ),
+                reset_view=request.reason == "initial",
+                generation=request.generation,
+            )
+            if not resident_activated and request.reason == "initial":
+                self._cancel_image_transition()
+                self._sync_detail_surface_cover()
+        if resident_activated:
             self._present_generation = request.generation
             self._present_started_at = self._loading_started_at
             self._present_source = request.source_identity.path
@@ -1334,7 +1396,31 @@ class PlayerViewController(QObject):
             return
         self._on_adjusted_image_failed(source, message)
 
+    def _on_still_frame_submitted(self, source: object, generation: int) -> None:
+        """Reveal only the still content identity armed by the current request."""
+
+        if self._pending_image_generation is not None:
+            if int(generation) != self._pending_image_generation:
+                return
+            if source != self._pending_image_key:
+                return
+            self._cancel_image_transition()
+            self._image_viewer_rendered = True
+            self._sync_detail_surface_cover()
+        elif int(generation) != self._present_generation:
+            return
+        self._accept_still_frame_presented(source, int(generation))
+
     def _on_still_frame_presented(self, source: object) -> None:
+        """Compatibility path for viewers without content-aware submission."""
+
+        if source == self._pending_image_key:
+            self._cancel_image_transition()
+            self._image_viewer_rendered = True
+            self._sync_detail_surface_cover()
+        self._accept_still_frame_presented(source, self._present_generation)
+
+    def _accept_still_frame_presented(self, source: object, generation: int) -> None:
         if isinstance(source, DetailDecodeKey):
             pending_session = self._pending_present_session
             if pending_session is not None and pending_session[2] == source:
@@ -1348,7 +1434,6 @@ class PlayerViewController(QObject):
         presented_path = getattr(source, "source", source)
         if presented_path != self._present_source:
             return
-        generation = self._present_generation
         started_at = self._present_started_at
         if generation <= 0 or started_at is None:
             return
@@ -1380,6 +1465,13 @@ class PlayerViewController(QObject):
 
         if generation != self._request_generation or not isinstance(key, DetailDecodeKey):
             return
+        if (
+            generation == getattr(self, "_pending_image_generation", None)
+            and key == getattr(self, "_pending_image_key", None)
+        ):
+            cancel_transition = getattr(self, "_cancel_image_transition", None)
+            if callable(cancel_transition):
+                cancel_transition()
         pending_session = getattr(self, "_pending_present_session", None)
         if pending_session is not None and pending_session[2] == key:
             self._pending_present_session = None
@@ -1892,6 +1984,7 @@ class PlayerViewController(QObject):
         self._render_session_lod_pending.clear()
         self._render_session_pending_surfaces.clear()
         self._pending_present_session = None
+        self._cancel_image_transition()
         for entry in tuple(self._preparation_entries.values()):
             entry.intents.clear()
             entry.worker.cancel()
@@ -1917,6 +2010,7 @@ class PlayerViewController(QObject):
         """Remove any pixmap currently shown in the image viewer."""
         # 清空而非传空图像，避免一帧“空绘制/空上传”
         self._current_full_image = None
+        self._cancel_image_transition()
         self._image_viewer.set_image(None, {})
 
     # ------------------------------------------------------------------
@@ -2043,6 +2137,12 @@ class PlayerViewController(QObject):
         apply_started = time.perf_counter()
         source = surface.decode_key.source
         image = surface.image
+        reason = self._request_reason_by_generation.get(self._present_generation)
+        if reason not in {"zoom", "resize"}:
+            self._arm_image_transition(
+                self._present_generation,
+                surface.decode_key,
+            )
         self.show_image_surface()
         self._current_full_image = QImage(image)
         session_key = self._render_session_key_for_surface(surface)

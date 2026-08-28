@@ -12,7 +12,7 @@ import logging
 import sys
 import time
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from typing import Any
 
@@ -209,10 +209,13 @@ class GLImageViewer(QRhiWidget):
     stillFramePresented = Signal(object)
     """Emitted after a newly uploaded full-resolution still has been drawn."""
 
+    stillFrameSubmitted = Signal(object, int)
+    """Emitted with content identity after a still reaches window submission."""
+
     stillTextureAllocationFailed = Signal(object, int, str)
     """Emitted when a queued foreground still cannot become resident."""
 
-    videoFramePresented = Signal()
+    videoFramePresented = Signal(int, int)
     """Emitted after a newly uploaded video frame is submitted for composition."""
 
     def __init__(
@@ -258,13 +261,17 @@ class GLImageViewer(QRhiWidget):
         self._still_generation_by_key: dict[object, int] = {}
         self._pending_resident_activation: object | None = None
         self._still_presentation_pending = False
+        self._frame_submission_queue: deque[
+            tuple[str, object, int] | None
+        ] = deque()
         self._source_image_dimensions: tuple[int, int] | None = None
         self._video_frame = None
         self._pending_video_image: QImage | None = None
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
         self._video_frame_presentation_pending = False
-        self._video_frame_submission_pending = False
+        self._video_frame_content_generation = 0
+        self._video_frame_content_serial = 0
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._reset_zoom_frames_crop = True
@@ -531,17 +538,22 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
         self._video_frame_presentation_pending = False
-        self._video_frame_submission_pending = False
+        self._video_frame_content_generation = 0
+        self._video_frame_content_serial = 0
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._pending_source_rotate90_steps = None
         self._pending_post_load_view_transform = False
         if image is None or image.isNull():
             self._source_image_dimensions = None
+            self._still_presentation_pending = False
         elif source_size is not None and min(source_size) > 0:
             self._source_image_dimensions = (int(source_size[0]), int(source_size[1]))
         elif not self._texture_manager.should_reuse_texture(image_source):
             self._source_image_dimensions = (int(image.width()), int(image.height()))
+
+        if image is not None and not image.isNull() and image_source is not None:
+            self._still_presentation_pending = True
 
         # Check if we can reuse the existing texture
         if (
@@ -562,8 +574,6 @@ class GLImageViewer(QRhiWidget):
             force_upload=force_texture_refresh,
         )
         self._image = image
-        if image is not None and not image.isNull() and image_source is not None:
-            self._still_presentation_pending = True
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
         self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
@@ -742,6 +752,8 @@ class GLImageViewer(QRhiWidget):
         adjustments: Mapping[str, float] | None = None,
         *,
         reset_view: bool = True,
+        content_generation: int = 0,
+        content_serial: int = 0,
     ) -> None:
         """Display *frame* directly through the OpenGL shader pipeline."""
 
@@ -753,7 +765,10 @@ class GLImageViewer(QRhiWidget):
         if starting_video_source:
             self._texture_manager.clear_image()
             self._source_image_dimensions = None
+            self._still_presentation_pending = False
         self._using_video_frame_source = True
+        self._video_frame_content_generation = max(0, int(content_generation))
+        self._video_frame_content_serial = max(0, int(content_serial))
         self._image = None
         self._video_frame = frame
         self._pending_video_image = None
@@ -1495,7 +1510,11 @@ class GLImageViewer(QRhiWidget):
         self._first_render_done = False
         self._first_render_submission_pending = False
         self._video_frame_presentation_pending = False
-        self._video_frame_submission_pending = False
+        self._frame_submission_queue.clear()
+        if self._runtime_ready:
+            source = self._texture_manager.get_current_image_source()
+            if source is not None and not self._using_video_frame_source:
+                self._still_presentation_pending = True
         self.renderResourcesInvalidated.emit()
         emit_detail_event("context_rebuild", generation=0, state="released")
 
@@ -1519,6 +1538,7 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._queue_first_frame_ready()
+            self._frame_submission_queue.append(None)
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
@@ -1529,6 +1549,7 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._queue_first_frame_ready()
+            self._frame_submission_queue.append(None)
             return
 
         output_size = self.renderTarget().pixelSize()
@@ -1660,6 +1681,7 @@ class GLImageViewer(QRhiWidget):
             cb.endExternal()
             cb.endPass()
             self._queue_first_frame_ready()
+            self._frame_submission_queue.append(None)
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -1738,14 +1760,11 @@ class GLImageViewer(QRhiWidget):
         cb.endExternal()
         cb.endPass()
         self._queue_first_frame_ready()
-        if self._still_presentation_pending:
-            self._still_presentation_pending = False
-            self._emit_still_frame_presented()
+        self._frame_submission_queue.append(
+            self._take_pending_content_submission()
+        )
         if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
-        if self._video_frame_presentation_pending:
-            self._video_frame_presentation_pending = False
-            self._video_frame_submission_pending = True
 
     def _render_rhi(self, cb) -> None:
         """Render the current image through QRhi without raw OpenGL."""
@@ -1758,6 +1777,7 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._queue_first_frame_ready()
+            self._frame_submission_queue.append(None)
             return
 
         output_size = self.renderTarget().pixelSize()
@@ -1828,6 +1848,7 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._queue_first_frame_ready()
+            self._frame_submission_queue.append(None)
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -1873,23 +1894,35 @@ class GLImageViewer(QRhiWidget):
         )
 
         self._queue_first_frame_ready()
-        if self._still_presentation_pending:
-            self._still_presentation_pending = False
-            self._emit_still_frame_presented()
+        self._frame_submission_queue.append(
+            self._take_pending_content_submission()
+        )
         if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
-        if self._video_frame_presentation_pending:
-            self._video_frame_presentation_pending = False
-            self._video_frame_submission_pending = True
 
     def _still_source_name(self) -> str:
         source = self._texture_manager.get_current_image_source()
         return getattr(source, "name", str(source or ""))
 
-    def _emit_still_frame_presented(self) -> None:
-        source = self._texture_manager.get_current_image_source()
-        if source is not None:
-            self.stillFramePresented.emit(source)
+    def _take_pending_content_submission(
+        self,
+    ) -> tuple[str, object, int] | None:
+        """Bind the content drawn by this render call to its submission event."""
+
+        if self._still_presentation_pending:
+            source = self._texture_manager.get_current_image_source()
+            if source is not None:
+                self._still_presentation_pending = False
+                generation = self._still_generation_by_key.get(source, 0)
+                return ("still", source, generation)
+        if self._video_frame_presentation_pending:
+            self._video_frame_presentation_pending = False
+            return (
+                "video",
+                self._video_frame_content_generation,
+                self._video_frame_content_serial,
+            )
+        return None
 
     def _consume_still_upload_result(self) -> bool:
         """Publish a foreground allocation failure and suppress false presentation."""
@@ -2007,9 +2040,16 @@ class GLImageViewer(QRhiWidget):
             self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
-        if self._video_frame_submission_pending:
-            self._video_frame_submission_pending = False
-            self.videoFramePresented.emit()
+        if self._frame_submission_queue:
+            submission = self._frame_submission_queue.popleft()
+            if submission is None:
+                return
+            kind, identity, serial = submission
+            if kind == "still":
+                self.stillFrameSubmitted.emit(identity, serial)
+                self.stillFramePresented.emit(identity)
+            else:
+                self.videoFramePresented.emit(int(identity), serial)
 
     # --------------------------- Crop helpers ---------------------------
 

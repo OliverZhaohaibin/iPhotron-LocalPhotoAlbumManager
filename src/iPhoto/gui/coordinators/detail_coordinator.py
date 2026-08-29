@@ -105,6 +105,9 @@ class DetailCoordinator(QObject):
     def toggle_info_panel(self) -> None:
         self._playback.toggle_info_panel()
 
+    def refresh_info_panel_faces(self) -> None:
+        self._playback.refresh_info_panel_faces()
+
     def configure_location_domain(self, **dependencies) -> None:
         self._playback.configure_location_domain(**dependencies)
 

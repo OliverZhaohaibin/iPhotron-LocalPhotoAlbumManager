@@ -2491,6 +2491,10 @@ class PlaybackCoordinator(QObject):
         capabilities = self._map_runtime_capabilities()
         location_enabled = self._refresh_location_extension_state()
         local_info = dict(info)
+        next_rel = str(local_info.get("rel") or local_info.get("name") or "") or None
+        current_rel_getter = getattr(self._info_panel, "current_rel", None)
+        current_rel = current_rel_getter() if callable(current_rel_getter) else None
+        asset_changed = current_rel is not None and current_rel != next_rel
         abs_path = local_info.get("abs")
         path_key = self._info_panel_path_key(abs_path)
         if path_key is not None:
@@ -2518,6 +2522,10 @@ class PlaybackCoordinator(QObject):
         else:
             local_info.pop("_metadata_loading", None)
         with self._info_panel_content_update():
+            if asset_changed:
+                self._info_panel.set_face_actions_enabled(False)
+                self._info_panel.set_face_action_candidates([])
+                self._info_panel.set_asset_faces([])
             self._info_panel.set_location_capability(
                 enabled=location_enabled,
                 preview_enabled=self._info_panel_preview_enabled(
@@ -2533,13 +2541,13 @@ class PlaybackCoordinator(QObject):
                 and location_assign_path is not None
                 and current_path == location_assign_path
             )
-            presentation = getattr(self, "_current_presentation", None)
-            self._refresh_info_panel_faces(presentation.asset_id if presentation is not None else None)
         if should_queue_enrichment:
             self._queue_info_panel_metadata_enrichment(
                 Path(path_key),
                 is_video=bool(local_info.get("is_video")),
             )
+        if asset_changed and self._info_panel.isVisible():
+            QTimer.singleShot(0, self.refresh_info_panel_faces)
 
     def _refresh_location_extension_state(self) -> bool:
         enabled = False
@@ -2549,8 +2557,6 @@ class PlaybackCoordinator(QObject):
         if not enabled:
             self._reset_location_search_service()
             return False
-        self._ensure_location_search_controller()
-        self._warm_location_search_controller()
         return True
 
     @staticmethod
@@ -2615,22 +2621,15 @@ class PlaybackCoordinator(QObject):
             if clear_cache:
                 controller.clear_cache()
 
-    def _warm_location_search_controller(self) -> None:
-        controller = getattr(self, "_location_search_controller", None)
-        if controller is None:
-            return
-        try:
-            controller.warm_up(
-                package_root=self._map_runtime_package_root(),
-                locale=QLocale.system().bcp47Name(),
-            )
-        except Exception:
-            LOGGER.debug("Failed to warm location search controller", exc_info=True)
-
     @Slot(str)
     def _handle_location_query_changed(self, query: str) -> None:
         info_panel = getattr(self, "_info_panel", None)
         if info_panel is None:
+            return
+
+        if not query.strip():
+            self._reset_location_search_service()
+            info_panel.set_location_suggestions([])
             return
 
         if not self._refresh_location_extension_state():
@@ -3167,6 +3166,20 @@ class PlaybackCoordinator(QObject):
     def toggle_info_panel(self) -> None:
         self._detail_vm.toggle_info()
 
+    def refresh_info_panel_faces(self) -> None:
+        """Populate recognition content after the reusable panel is presented."""
+
+        info_panel = getattr(self, "_info_panel", None)
+        presentation = getattr(self, "_current_presentation", None)
+        if info_panel is None or not info_panel.isVisible() or presentation is None:
+            return
+        self._refresh_info_panel_faces(presentation.asset_id)
+        recognition_ready = bool(
+            getattr(self, "_manual_face_worker_factory", None) is not None
+            and getattr(self, "_people_service", None) is not None
+        )
+        info_panel.set_face_actions_enabled(recognition_ready)
+
     @Slot()
     def _handle_info_panel_dismissed(self) -> None:
         self._detail_vm.hide_info_panel(refresh_presentation=False)
@@ -3252,7 +3265,6 @@ class PlaybackCoordinator(QObject):
         local_info = self._merge_info_panel_metadata(presentation.info, result.metadata)
         with self._info_panel_content_update():
             self._info_panel.set_asset_metadata(local_info)
-            self._refresh_info_panel_faces(presentation.asset_id)
 
     def _info_panel_content_update(self):
         info_panel = getattr(self, "_info_panel", None)

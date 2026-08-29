@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from iPhoto.gui.coordinators.contracts import LocationInfoDetailPort
@@ -46,6 +49,7 @@ class LocationInfoCoordinator(QObject):
         self._map_extension_download = map_extension_download
         self._library_root_getter = library_root_getter
         self._recognition_provider = recognition_provider
+        self._recognition_initialized = False
         self._panel = None
         self._write_queue = LocationFileWriteQueue(event_bus=event_bus, parent=self)
         detail.configure_location_domain(
@@ -64,8 +68,9 @@ class LocationInfoCoordinator(QObject):
     def toggle(self) -> None:
         ui = self._window.ui
         panel = getattr(ui, "info_panel", None)
-        if self._recognition_provider is not None:
-            self._recognition_provider()
+        if panel is not None and panel.isVisible():
+            self._detail.toggle_info_panel()
+            return
         if panel is None:
             panel = ui.ensure_info_panel()
         panel.set_map_runtime(self._map_runtime_getter())
@@ -74,8 +79,23 @@ class LocationInfoCoordinator(QObject):
             panel.downloadMapExtensionRequested.connect(
                 lambda: self._map_extension_download.start_download(source="info_panel")
             )
+            panel.presented.connect(self._handle_panel_presented)
             self._panel = panel
         self._detail.toggle_info_panel()
+
+    def _handle_panel_presented(self) -> None:
+        panel = self._panel
+        if panel is None or not panel.isVisible():
+            return
+        if not self._recognition_initialized and self._recognition_provider is not None:
+            try:
+                recognition = self._recognition_provider()
+            except Exception:  # noqa: BLE001 - optional runtime boundary
+                LOGGER.warning("Failed to initialise Info Panel recognition", exc_info=True)
+                panel.set_face_actions_enabled(False)
+                return
+            self._recognition_initialized = recognition is not None
+        self._detail.refresh_info_panel_faces()
 
     def rebind_library(self) -> None:
         map_runtime = self._map_runtime_getter()

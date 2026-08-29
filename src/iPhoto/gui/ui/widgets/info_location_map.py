@@ -60,6 +60,14 @@ _PIN_ANCHOR_X_RATIO = 256.0 / 512.0
 _PIN_ANCHOR_Y_RATIO = 418.0 / 512.0
 
 
+class _MapCreateEvent(QEvent):
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+
+    def __init__(self, generation: int) -> None:
+        super().__init__(self.EVENT_TYPE)
+        self.generation = int(generation)
+
+
 def create_map_widget(
     parent: QWidget,
     *,
@@ -277,6 +285,10 @@ class InfoLocationMapView(QWidget):
         self._pending_viewport_sync = False
         self._pending_pin_sync_queue = False
         self._pending_viewport_sync_queue = False
+        self._map_creation_generation = 0
+        self._map_creation_queued_generation: int | None = None
+        self._deferred_content_active = False
+        self._map_creation_failed = False
         self._pin_paint_callback: Callable[[QPainter], None] | None = None
         self._uses_post_render_pin = False
         self._pin_sync_timer = QTimer(self)
@@ -320,11 +332,11 @@ class InfoLocationMapView(QWidget):
         self._map_host_layout.setSpacing(0)
         self._map_clip_layout.addWidget(self._map_host, 1)
 
-        self._message_label = QLabel("", self)
+        self._message_label = QLabel("", self._map_clip_frame)
         self._message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._message_label.setWordWrap(True)
+        self._message_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._message_label.hide()
-        self._layout.addWidget(self._message_label, 1)
 
         self._overlay = _PinOverlay(self, self._map_host)
         self._overlay.hide()
@@ -337,19 +349,35 @@ class InfoLocationMapView(QWidget):
         """Bind the session-owned runtime snapshot used for mini-map creation."""
 
         previous_package_root = self._map_package_root
+        previous_capabilities = self._map_runtime_capabilities
         self._map_runtime = map_runtime
         self._map_runtime_capabilities = (
             map_runtime.capabilities() if map_runtime is not None else None
         )
         self._map_package_root = resolve_map_package_root(map_runtime)
+        runtime_changed = (
+            self._map_package_root != previous_package_root
+            or self._map_runtime_capabilities != previous_capabilities
+        )
+        if runtime_changed:
+            self._map_creation_failed = False
+            self._invalidate_queued_map_creation()
         if self._map_widget is not None and self._map_package_root != previous_package_root:
             self.shutdown()
+        if runtime_changed:
+            self._queue_map_creation()
 
     def map_widget(self) -> MapWidgetBase | None:
         return self._map_widget
 
     def current_location(self) -> tuple[float | None, float | None]:
         return self._latitude, self._longitude
+
+    def activate_deferred_content(self) -> None:
+        """Allow expensive map creation after the containing panel is painted."""
+
+        self._deferred_content_active = True
+        self._queue_map_creation()
 
     def prepare_for_panel_width(self, width: int) -> None:
         """Pre-size the square map before a hidden preview enters layout."""
@@ -385,14 +413,9 @@ class InfoLocationMapView(QWidget):
         self._pending_viewport_sync = True
         self._screen_point = None
         if self._map_widget is None:
-            self._create_map_widget()
-        if self._map_widget is None:
-            self._message_label.setText(self._unavailable_text())
-            self._message_label.show()
-            self._map_clip_frame.hide()
-            self._map_host.hide()
+            self._show_map_placeholder()
             self._overlay.hide()
-            self._pending_viewport_sync = False
+            self._queue_map_creation()
             return
 
         self._message_label.hide()
@@ -421,6 +444,8 @@ class InfoLocationMapView(QWidget):
         self._screen_point = None
         self._last_set_location = None
         self._pending_viewport_sync = False
+        self._map_creation_failed = False
+        self._invalidate_queued_map_creation()
         self._pin_sync_timer.stop()
         self._pin_settle_timer.stop()
         self._viewport_sync_timer.stop()
@@ -435,6 +460,7 @@ class InfoLocationMapView(QWidget):
         self._pin_settle_timer.stop()
         self._viewport_sync_timer.stop()
         self._viewport_settle_timer.stop()
+        self._invalidate_queued_map_creation()
         self._reset_drag_cursor()
         self._remove_map_event_filters()
         if self._map_widget is not None:
@@ -474,17 +500,48 @@ class InfoLocationMapView(QWidget):
         self._sync_square_height()
         self._sync_corner_masks()
         self._sync_overlay_geometry()
+        self._sync_message_geometry()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._sync_overlay_geometry()
-        self._queue_viewport_sync()
+        self._sync_message_geometry()
+        if self._map_widget is not None:
+            self._queue_viewport_sync()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._deferred_content_active = False
+        self._invalidate_queued_map_creation()
         self._reset_drag_cursor()
         super().hideEvent(event)
 
     def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == _MapCreateEvent.EVENT_TYPE:
+            generation = getattr(event, "generation", None)
+            if self._map_creation_queued_generation == generation:
+                self._map_creation_queued_generation = None
+            if (
+                generation != self._map_creation_generation
+                or not self._deferred_content_active
+                or not self.isVisible()
+                or self._map_widget is not None
+                or self._map_creation_failed
+                or self._latitude is None
+                or self._longitude is None
+            ):
+                return True
+            self._create_map_widget()
+            if self._map_widget is None:
+                self._map_creation_failed = True
+                self._pending_viewport_sync = False
+                self._show_map_failure()
+                return True
+            self._message_label.hide()
+            self._map_host.show()
+            self._sync_overlay_geometry()
+            self._apply_pending_viewport_now()
+            self._queue_viewport_sync()
+            return True
         if event.type() == self._PIN_SYNC_EVENT:
             self._pending_pin_sync_queue = False
             if self._map_widget_ready_for_sync():
@@ -655,6 +712,47 @@ class InfoLocationMapView(QWidget):
                 self._sync_pin_position_now()
             self._schedule_pin_sync()
 
+    def _sync_message_geometry(self) -> None:
+        self._message_label.setGeometry(self._map_clip_frame.rect().adjusted(16, 16, -16, -16))
+
+    def _show_map_placeholder(self) -> None:
+        self._message_label.hide()
+        self._map_clip_frame.show()
+        self._map_host.show()
+        self._sync_message_geometry()
+
+    def _show_map_failure(self) -> None:
+        self._map_clip_frame.show()
+        self._map_host.hide()
+        self._message_label.setText(self._unavailable_text())
+        self._sync_message_geometry()
+        self._message_label.show()
+        self._message_label.raise_()
+
+    def _invalidate_queued_map_creation(self) -> None:
+        self._map_creation_generation += 1
+        self._map_creation_queued_generation = None
+
+    def _queue_map_creation(self) -> None:
+        if (
+            not self._deferred_content_active
+            or not self.isVisible()
+            or self._map_widget is not None
+            or self._map_creation_failed
+            or self._latitude is None
+            or self._longitude is None
+        ):
+            return
+        generation = self._map_creation_generation
+        if self._map_creation_queued_generation == generation:
+            return
+        self._map_creation_queued_generation = generation
+        QCoreApplication.postEvent(
+            self,
+            _MapCreateEvent(generation),
+            Qt.EventPriority.LowEventPriority.value,
+        )
+
     def _visible_map_rect(self) -> QRect | None:
         if self._map_widget is None:
             return None
@@ -729,7 +827,6 @@ class InfoLocationMapView(QWidget):
         if not self._pending_viewport_sync:
             return
         if self._map_widget is None or self._latitude is None or self._longitude is None:
-            self._pending_viewport_sync = False
             return
         if not self._map_widget_ready_for_sync():
             return
@@ -855,8 +952,7 @@ class InfoLocationMapView(QWidget):
 
         if self._map_widget is None:
             self._map_host.hide()
-            self._message_label.setText(self._unavailable_text())
-            self._message_label.show()
+            self._show_map_failure()
             return
 
         if isinstance(self._map_widget, QWidget):
@@ -869,6 +965,7 @@ class InfoLocationMapView(QWidget):
         self._sync_square_height()
         self._sync_corner_masks()
         self._sync_overlay_geometry()
+        QTimer.singleShot(0, self._sync_corner_masks)
         QTimer.singleShot(0, self._sync_overlay_geometry)
 
     def _install_map_event_filters(self) -> None:

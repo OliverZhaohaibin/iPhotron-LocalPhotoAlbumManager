@@ -2020,10 +2020,7 @@ def test_refresh_location_extension_state_uses_bound_map_runtime_capabilities() 
     enabled = PlaybackCoordinator._refresh_location_extension_state(coordinator)
 
     assert enabled is True
-    coordinator._location_search_controller.warm_up.assert_called_once()
-    assert coordinator._location_search_controller.warm_up.call_args.kwargs["package_root"] == Path(
-        "/fake/maps"
-    )
+    coordinator._location_search_controller.warm_up.assert_not_called()
 
 
 def test_refresh_location_extension_state_uses_runtime_package_root() -> None:
@@ -2736,6 +2733,52 @@ def test_handle_info_panel_dismissed_clears_viewmodel_state() -> None:
     coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=False)
 
 
+def test_refresh_info_panel_faces_runs_only_after_visible_recognition_binding() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock(isVisible=Mock(return_value=True))
+    coordinator._current_presentation = _make_presentation(asset_id="asset-photo")
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._manual_face_worker_factory = object()
+    coordinator._people_service = object()
+
+    PlaybackCoordinator.refresh_info_panel_faces(coordinator)
+
+    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
+    coordinator._info_panel.set_face_actions_enabled.assert_called_once_with(True)
+
+
+def test_empty_location_query_does_not_create_search_controller() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock(set_location_suggestions=Mock())
+    coordinator._ensure_location_search_controller = Mock()
+    coordinator._reset_location_search_service = Mock()
+
+    PlaybackCoordinator._handle_location_query_changed(coordinator, "   ")
+
+    coordinator._ensure_location_search_controller.assert_not_called()
+    coordinator._reset_location_search_service.assert_called_once_with()
+    coordinator._info_panel.set_location_suggestions.assert_called_once_with([])
+
+
+def test_nonempty_location_query_creates_search_controller_on_demand() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock(set_location_suggestions=Mock())
+    coordinator._refresh_location_extension_state = Mock(return_value=True)
+    coordinator._location_assign_inflight = False
+    coordinator._current_presentation = _make_presentation(path="/fake/photo.jpg")
+    controller = Mock(search=Mock())
+    coordinator._ensure_location_search_controller = Mock(return_value=controller)
+    coordinator._map_runtime_package_root = Mock(return_value=Path("/fake/maps"))
+
+    PlaybackCoordinator._handle_location_query_changed(coordinator, "Munich")
+
+    coordinator._ensure_location_search_controller.assert_called_once_with()
+    controller.search.assert_called_once()
+    assert controller.search.call_args.args == ("Munich",)
+    assert controller.search.call_args.kwargs["target_path"] == Path("/fake/photo.jpg")
+    assert controller.search.call_args.kwargs["package_root"] == Path("/fake/maps")
+
+
 def test_refresh_info_panel_sets_loading_state_and_queues_background_enrichment() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._info_panel = Mock()
@@ -2789,6 +2832,12 @@ def test_refresh_info_panel_batches_visible_panel_updates() -> None:
         def set_location_busy(self, _busy: bool) -> None:
             self.calls.append("busy")
 
+        def current_rel(self):
+            return None
+
+        def isVisible(self) -> bool:
+            return False
+
         def set_asset_faces(self, _faces) -> None:
             self.calls.append("faces")
 
@@ -2807,7 +2856,7 @@ def test_refresh_info_panel_batches_visible_panel_updates() -> None:
         },
     )
 
-    assert panel.calls == ["enter", "location", "metadata", "busy", "faces", "exit"]
+    assert panel.calls == ["enter", "location", "metadata", "busy", "exit"]
 
 
 def test_refresh_info_panel_uses_cached_metadata_without_queueing_worker() -> None:

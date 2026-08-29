@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -414,8 +415,11 @@ class InfoPanel(QWidget):
     _SHADOW_SIZE = 16
     _SHADOW_MAX_ALPHA = 18
     _SHADOW_RADIUS_GROWTH = 0.5
+    _METADATA_VISIBLE_LINES = 4
     _DEFAULT_LOCATION_FALLBACK_TEXT = "Install the map extension to use Assign a Location."
+    _PRESENTED_EVENT = QEvent.Type(QEvent.registerEventType())
     dismissed = Signal()
+    presented = Signal()
     manualFaceAddRequested = Signal()
     faceDeleteRequested = Signal(object)
     faceMoveRequested = Signal(object, str)
@@ -457,6 +461,10 @@ class InfoPanel(QWidget):
         self._content_update_previous_updates_enabled: bool | None = None
         self._pending_geometry_refresh = False
         self._pending_geometry_recenter = False
+        self._visibility_generation = 0
+        self._presented_generation: int | None = None
+        self._presented_event_generation: int | None = None
+        self._shutdown_requested = False
         self._location_capability_enabled = False
         self._location_preview_enabled = False
         self._location_fallback_text = self._DEFAULT_LOCATION_FALLBACK_TEXT
@@ -497,7 +505,7 @@ class InfoPanel(QWidget):
         self._close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._close_button.setToolTip(self._tr("Close"))
         self._apply_close_button_style()
-        self._close_button.clicked.connect(self.close)
+        self._close_button.clicked.connect(self.dismiss)
         title_layout.addWidget(
             self._close_button, 0, Qt.AlignmentFlag.AlignRight,
         )
@@ -525,14 +533,31 @@ class InfoPanel(QWidget):
         content_layout.addWidget(self._filename_label)
         content_layout.addWidget(self._timestamp_label)
 
-        metadata_frame = QWidget(self)
-        metadata_layout = QVBoxLayout(metadata_frame)
-        metadata_layout.setContentsMargins(0, 0, 0, 0)
-        metadata_layout.setSpacing(6)
-        metadata_layout.addWidget(self._camera_label)
-        metadata_layout.addWidget(self._lens_label)
-        metadata_layout.addWidget(self._summary_label)
-        content_layout.addWidget(metadata_frame)
+        self._metadata_frame = QWidget(self)
+        self._metadata_layout = QVBoxLayout(self._metadata_frame)
+        self._metadata_layout.setContentsMargins(0, 0, 0, 0)
+        self._metadata_layout.setSpacing(6)
+        self._metadata_layout.addWidget(self._camera_label)
+        self._metadata_layout.addWidget(self._lens_label)
+        self._metadata_layout.addWidget(self._summary_label)
+        self._metadata_scroll = QScrollArea(self)
+        self._metadata_scroll.setObjectName("infoPanelMetadataScroll")
+        self._metadata_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._metadata_scroll.setWidgetResizable(True)
+        self._metadata_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._metadata_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._metadata_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._metadata_scroll.setStyleSheet(
+            "QScrollArea#infoPanelMetadataScroll { background: transparent; border: none; }"
+            "QScrollArea#infoPanelMetadataScroll > QWidget > QWidget { background: transparent; }"
+        )
+        self._metadata_scroll.setWidget(self._metadata_frame)
+        self._sync_metadata_viewport_height()
+        content_layout.addWidget(self._metadata_scroll)
 
         separator = QFrame(self)
         separator.setFrameShape(QFrame.HLine)
@@ -560,6 +585,7 @@ class InfoPanel(QWidget):
         self._face_add_button.setFixedSize(_FACE_ADD_BUTTON_SIZE)
         self._face_add_button.setAutoRaise(True)
         self._face_add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._face_add_button.setEnabled(False)
         self._face_add_button.setStyleSheet(
             "QToolButton { padding: 0px; margin: 0px; border: none; background: transparent; }"
         )
@@ -671,6 +697,7 @@ class InfoPanel(QWidget):
         self._set_label_state(self._camera_label, formatted.camera, visible=bool(formatted.camera))
         self._set_label_state(self._lens_label, formatted.lens, visible=bool(formatted.lens))
         self._set_label_state(self._summary_label, formatted.summary, visible=bool(formatted.summary))
+        self._sync_metadata_scroll_content(reset_to_top=previous_rel != self._current_rel)
         if formatted.exposure_line:
             self._set_label_text(self._exposure_label, formatted.exposure_line)
         else:
@@ -702,6 +729,20 @@ class InfoPanel(QWidget):
         self._face_action_candidates = list(candidates)
         for avatar in self._face_avatar_widgets():
             avatar.set_candidates(self._face_action_candidates)
+
+    def set_face_actions_enabled(self, enabled: bool) -> None:
+        """Enable recognition-backed actions after deferred binding completes."""
+
+        self._face_add_button.setEnabled(bool(enabled))
+
+    def dismiss(self) -> None:
+        """Hide the reusable panel without closing its native window surface."""
+
+        if not self.isVisible():
+            return
+        self._clear_location_results()
+        self.hide()
+        self.dismissed.emit()
 
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
@@ -857,6 +898,9 @@ class InfoPanel(QWidget):
         the application shutdown path instead.
         """
 
+        self._visibility_generation += 1
+        self._shutdown_requested = True
+        self._presented_event_generation = None
         self._clear_location_results()
         self._location_map.shutdown()
 
@@ -924,6 +968,35 @@ class InfoPanel(QWidget):
             QSizePolicy.Policy.Minimum,
         )
         return label
+
+    def _sync_metadata_viewport_height(self) -> None:
+        line_height = max(1, self._camera_label.fontMetrics().lineSpacing())
+        inter_label_spacing = max(0, self._metadata_layout.spacing()) * 2
+        self._metadata_scroll.setFixedHeight(
+            line_height * self._METADATA_VISIBLE_LINES + inter_label_spacing
+        )
+
+    def _sync_metadata_scroll_content(self, *, reset_to_top: bool = False) -> None:
+        self._metadata_layout.invalidate()
+        self._metadata_layout.activate()
+        viewport_width = self._metadata_scroll.viewport().width()
+        if viewport_width <= 1:
+            viewport_width = max(self.minimumWidth() - 48, 1)
+        visible_labels = [
+            label
+            for label in (self._camera_label, self._lens_label, self._summary_label)
+            if not label.isHidden()
+        ]
+        content_height = sum(
+            max(label.fontMetrics().lineSpacing(), label.heightForWidth(viewport_width))
+            for label in visible_labels
+        )
+        if visible_labels:
+            content_height += self._metadata_layout.spacing() * (len(visible_labels) - 1)
+        self._metadata_frame.setMinimumHeight(max(0, content_height))
+        self._metadata_frame.updateGeometry()
+        if reset_to_top:
+            self._metadata_scroll.verticalScrollBar().setValue(0)
 
     @staticmethod
     def _set_label_text(label: QLabel, text: str) -> None:
@@ -1182,8 +1255,7 @@ class InfoPanel(QWidget):
         self._set_widget_explicitly_visible(self._location_map, True)
         current_lat, current_lon = self._location_map.current_location()
         should_update_location = (
-            self._location_map.map_widget() is None
-            or self._last_location_map_target is None
+            self._last_location_map_target is None
             or current_lat is None
             or current_lon is None
             or abs(self._last_location_map_target[0] - target[0]) > 1e-6
@@ -1451,6 +1523,24 @@ class InfoPanel(QWidget):
     # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
+    def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == self._PRESENTED_EVENT:
+            generation = getattr(event, "visibility_generation", None)
+            if self._presented_event_generation == generation:
+                self._presented_event_generation = None
+            if (
+                self._shutdown_requested
+                or generation != self._visibility_generation
+                or not self.isVisible()
+                or self._presented_generation == generation
+            ):
+                return True
+            self._presented_generation = generation
+            self._location_map.activate_deferred_content()
+            self.presented.emit()
+            return True
+        return super().event(event)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         is_title_target = watched in (self._title_bar, self._title_label)
         is_drag_event = event.type() in self._DRAG_EVENT_TYPES
@@ -1504,12 +1594,18 @@ class InfoPanel(QWidget):
         if event.type() == QEvent.Type.PaletteChange:
             self._apply_close_button_style()
             self._update_face_add_button_icon()
+        if event.type() == QEvent.Type.FontChange:
+            self._sync_metadata_viewport_height()
+            self._sync_metadata_scroll_content()
         super().changeEvent(event)
 
     def showEvent(self, event: QShowEvent) -> None:
         """Centre the panel over its parent window the first time it appears."""
 
         super().showEvent(event)
+        self._visibility_generation += 1
+        self._presented_generation = None
+        self._presented_event_generation = None
         first_show = not self._centered
         if first_show:
             self._centered = True
@@ -1517,6 +1613,8 @@ class InfoPanel(QWidget):
         self._schedule_post_show_reflow(recenter=first_show)
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._visibility_generation += 1
+        self._presented_event_generation = None
         self._set_widget_explicitly_visible(self._location_results, False)
         super().hideEvent(event)
 
@@ -1527,14 +1625,15 @@ class InfoPanel(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._sync_metadata_scroll_content()
         if not self._location_results.isHidden():
             self._position_location_results_popup()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        """Emit a dismissal signal so the detail state stays in sync."""
+        """Convert native close requests into reusable-panel dismissal."""
 
-        self.dismissed.emit()
-        super().closeEvent(event)
+        event.ignore()
+        self.dismiss()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """Draw drop shadow and an anti-aliased rounded rectangle."""
@@ -1581,6 +1680,23 @@ class InfoPanel(QWidget):
         painter.setPen(border_color)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
+        painter.end()
+
+        generation = self._visibility_generation
+        if (
+            not self._shutdown_requested
+            and self.isVisible()
+            and self._presented_generation != generation
+            and self._presented_event_generation != generation
+        ):
+            presented_event = QEvent(self._PRESENTED_EVENT)
+            presented_event.visibility_generation = generation
+            self._presented_event_generation = generation
+            QCoreApplication.postEvent(
+                self,
+                presented_event,
+                Qt.EventPriority.LowEventPriority.value,
+            )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """Begin a drag when clicking on the title bar area."""

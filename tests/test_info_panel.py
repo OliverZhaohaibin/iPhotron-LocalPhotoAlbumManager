@@ -102,6 +102,11 @@ def _shutdown_info_panels_after_test(qapp: QApplication):
     qapp.processEvents()
 
 
+def _process_deferred_panel_content(qapp: QApplication) -> None:
+    for _ in range(4):
+        qapp.processEvents()
+
+
 class _DelayedProjectionMiniMapWidget(_FakeMiniMapWidget):
     def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
         super().__init__(parent, map_source=map_source)
@@ -372,6 +377,52 @@ def test_info_panel_video_shows_lens_when_available(qapp: QApplication) -> None:
     panel.close()
 
 
+def test_info_panel_metadata_region_reserves_four_lines_and_scrolls_without_resizing(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    sparse = {
+        "rel": "photo.jpg",
+        "name": "photo.jpg",
+        "make": "Apple",
+        "model": "iPhone 16 Pro",
+    }
+    panel.set_asset_metadata(sparse)
+    panel.show()
+    qapp.processEvents()
+
+    line_height = panel._camera_label.fontMetrics().lineSpacing()
+    expected_height = line_height * 4 + panel._metadata_layout.spacing() * 2
+    panel_size = panel.size()
+    assert panel._metadata_scroll.height() == expected_height
+    assert panel._metadata_scroll.verticalScrollBar().maximum() == 0
+    assert panel._metadata_scroll.viewport().height() > panel._camera_label.height()
+
+    rich = dict(sparse)
+    rich.update(
+        {
+            "lens": "iPhone 16 Pro back triple camera " * 20,
+            "w": 4032,
+            "h": 3024,
+            "bytes": 901_600,
+            "codec": "heif",
+        }
+    )
+    panel.set_asset_metadata(rich)
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert panel.size() == panel_size
+    assert panel._metadata_scroll.height() == expected_height
+    assert panel._metadata_scroll.verticalScrollBar().maximum() > 0
+
+    panel.set_asset_metadata({**sparse, "rel": "other.jpg", "name": "other.jpg"})
+    qapp.processEvents()
+    assert panel.size() == panel_size
+    assert panel._metadata_scroll.verticalScrollBar().value() == 0
+    assert panel._metadata_scroll.verticalScrollBar().maximum() == 0
+
+
 def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> None:
     """When metadata is sparse the video fallback string should be displayed."""
 
@@ -460,7 +511,7 @@ def test_info_panel_location_map_is_reused_until_explicit_shutdown(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
     map_widget = panel._location_map._map_widget
     assert isinstance(map_widget, _FakeMiniMapWidget)
 
@@ -478,6 +529,133 @@ def test_info_panel_location_map_is_reused_until_explicit_shutdown(
 
     assert panel._location_map._map_widget is None
     assert map_widget.shutdown_calls == 1
+
+
+def test_info_panel_map_placeholder_precedes_lazy_backend_without_resizing(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+            "location": "Munich",
+        }
+    )
+
+    panel.show()
+
+    map_view = panel._location_map
+    panel_size = panel.size()
+    assert map_view._map_widget is None
+    assert map_view.width() == map_view.height()
+    placeholder = QPixmap(map_view._map_clip_frame.size())
+    map_view._map_clip_frame.render(placeholder)
+    center = placeholder.toImage().pixelColor(
+        placeholder.width() // 2,
+        placeholder.height() // 2,
+    )
+    assert center.name().lower() == "#88a8c2"
+
+    _process_deferred_panel_content(qapp)
+
+    assert isinstance(map_view._map_widget, _FakeMiniMapWidget)
+    assert panel.size() == panel_size
+
+
+def test_info_panel_presented_emits_once_per_visible_cycle(qapp: QApplication) -> None:
+    panel = InfoPanel()
+    presented: list[bool] = []
+    panel.presented.connect(lambda: presented.append(True))
+
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    _process_deferred_panel_content(qapp)
+    assert presented == [True]
+
+    panel.dismiss()
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    assert presented == [True, True]
+
+
+def test_info_panel_dismiss_before_presented_cancels_lazy_map_creation(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+        }
+    )
+
+    panel.show()
+    panel.dismiss()
+    _process_deferred_panel_content(qapp)
+
+    assert panel._location_map._map_widget is None
+
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
+
+
+def test_info_panel_lazy_map_uses_latest_location_and_does_not_recreate_after_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+        }
+    )
+    panel.show()
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 35.6764, "lon": 139.6500},
+        }
+    )
+
+    _process_deferred_panel_content(qapp)
+
+    map_widget = panel._location_map._map_widget
+    assert isinstance(map_widget, _FakeMiniMapWidget)
+    assert map_widget.center_lonlat() == (139.6500, 35.6764)
+
+    panel.shutdown()
+    _process_deferred_panel_content(qapp)
+    assert panel._location_map._map_widget is None
 
 
 def test_info_panel_close_button_matches_main_window(qapp: QApplication) -> None:
@@ -1278,7 +1456,7 @@ def test_info_panel_location_map_stays_square(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     assert map_view.width() == map_view.height()
@@ -1308,7 +1486,7 @@ def test_info_panel_location_map_restores_outer_rounded_corners(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     assert not map_view.mask().contains(QPoint(0, 0))
@@ -1345,7 +1523,7 @@ def test_info_panel_location_map_clips_embedded_event_target_corners(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -1381,7 +1559,7 @@ def test_info_panel_location_map_clips_qwindow_event_target_corners(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -1416,7 +1594,7 @@ def test_info_panel_repeated_same_gps_metadata_does_not_reset_location_map(
     panel.set_location_capability(enabled=True)
     panel.set_asset_metadata(metadata)
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     set_location = Mock(wraps=panel._location_map.set_location)
     monkeypatch.setattr(panel._location_map, "set_location", set_location)
@@ -1450,7 +1628,7 @@ def test_info_panel_missing_location_hides_map_without_repaint(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -1555,7 +1733,7 @@ def test_info_panel_location_map_reflow_stabilizes_on_first_event_pass(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     first_height = panel.height()
     layout = panel.layout()
@@ -1861,10 +2039,12 @@ def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
         }
     )
     panel.show()
-    qapp.processEvents()
+    panel_size = panel.size()
+    _process_deferred_panel_content(qapp)
 
     assert panel._location_map._map_widget is None
     assert not panel._location_map._message_label.isHidden()
+    assert panel.size() == panel_size
 
     panel.set_map_runtime(
         SimpleNamespace(
@@ -1875,11 +2055,12 @@ def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
             )
         )
     )
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
     assert panel._location_map._message_label.isHidden()
     assert not panel._location_map.isHidden()
+    assert panel.size() == panel_size
     panel.close()
 
 
@@ -1919,7 +2100,9 @@ def test_info_location_map_unavailable_message_retranslates(
     view = info_location_map_module.InfoLocationMapView()
     try:
         view.set_location(37.7749, -122.4194)
-        qapp.processEvents()
+        view.show()
+        view.activate_deferred_content()
+        _process_deferred_panel_content(qapp)
 
         assert not view._message_label.isHidden()
         assert view._message_label.text() == "Map preview unavailable"
@@ -1983,7 +2166,7 @@ def test_info_panel_map_runtime_package_root_controls_embedded_map_source(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     assert captured_map_source
     assert Path(captured_map_source[-1].data_path) == (
@@ -2014,7 +2197,7 @@ def test_info_panel_location_map_overlay_tracks_actual_embedded_map_size(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -2063,7 +2246,7 @@ def test_info_panel_location_map_drag_cursor_tracks_event_target(
             }
         )
         panel.show()
-        qapp.processEvents()
+        _process_deferred_panel_content(qapp)
 
         map_view = panel._location_map
         map_widget = map_view._map_widget
@@ -2136,7 +2319,7 @@ def test_info_panel_location_map_drag_cursor_resets_on_hide_and_shutdown(
             }
         )
         panel.show()
-        qapp.processEvents()
+        _process_deferred_panel_content(qapp)
 
         map_view = panel._location_map
         map_widget = map_view._map_widget
@@ -2198,7 +2381,7 @@ def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
             }
         )
         panel.show()
-        qapp.processEvents()
+        _process_deferred_panel_content(qapp)
 
         map_view = panel._location_map
         fallback_receiver = QWidget(map_view._map_host)
@@ -2321,7 +2504,7 @@ def test_info_panel_location_map_uses_post_render_pin_when_available(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -2374,7 +2557,7 @@ def test_info_panel_location_map_resyncs_pin_after_delayed_zoom_projection(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -2412,7 +2595,7 @@ def test_info_panel_location_map_recenters_view_after_widget_becomes_visible(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget

@@ -1195,6 +1195,11 @@ class TestInitCoverTracking:
         request_update.assert_called_once_with()
         hide_cover.assert_not_called()
 
+        # Real QRhi ordering: the next decoded-frame acknowledgement arrives
+        # before that frame's generic composition acknowledgement.
+        controller._video_area.surfaceFrameSubmitted.emit(41, 8)
+        assert controller._peek_post_submit_payload("video") == (41, 7)
+        assert controller._post_submit_armed is True
         controller._video_area.surfaceCompositionSubmitted.emit()
 
         assert controller._pending_video_generation is None

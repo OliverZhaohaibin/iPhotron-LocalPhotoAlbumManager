@@ -5,7 +5,6 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GL image viewer tests")
 
 import os
-from collections import deque
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -195,7 +194,9 @@ def test_rhi_render_presents_video_uploaded_before_render() -> None:
     viewer._video_frame_presentation_pending = True
     viewer._video_frame_content_generation = 6
     viewer._video_frame_content_serial = 12
-    viewer._frame_submission_queue = deque()
+    viewer._content_revision = 0
+    viewer._rendered_content_identity = None
+    viewer._last_composed_content_identity = None
     viewer._take_pending_content_submission = lambda: (
         GLImageViewer._take_pending_content_submission(viewer)
     )
@@ -225,25 +226,27 @@ def test_rhi_render_presents_video_uploaded_before_render() -> None:
     viewer._renderer.render.assert_called_once()
     viewer.videoFramePresented.emit.assert_not_called()
     assert viewer._video_frame_presentation_pending is False
-    assert list(viewer._frame_submission_queue) == [("video", 6, 12)]
+    assert viewer._rendered_content_identity == ("video", 6, 12, 1)
 
     GLImageViewer._on_frame_submitted(viewer)
 
     viewer.videoFramePresented.emit.assert_called_once_with(6, 12)
-    assert not viewer._frame_submission_queue
+    assert viewer._last_composed_content_identity == ("video", 6, 12, 1)
 
 
 def test_still_submission_carries_content_identity_and_generation() -> None:
     viewer = Mock()
     viewer._first_render_submission_pending = False
-    viewer._frame_submission_queue = deque()
+    viewer._content_revision = 0
+    viewer._rendered_content_identity = None
+    viewer._last_composed_content_identity = None
     viewer._still_presentation_pending = True
     viewer._video_frame_presentation_pending = False
     viewer._texture_manager.get_current_image_source.return_value = "image-b-key"
     viewer._still_generation_by_key = {"image-b-key": 22}
 
     submission = GLImageViewer._take_pending_content_submission(viewer)
-    viewer._frame_submission_queue.append(submission)
+    viewer._rendered_content_identity = submission
 
     viewer.stillFrameSubmitted.emit.assert_not_called()
     viewer.stillFramePresented.emit.assert_not_called()
@@ -254,15 +257,29 @@ def test_still_submission_carries_content_identity_and_generation() -> None:
     viewer.stillFramePresented.emit.assert_called_once_with("image-b-key")
 
 
-def test_empty_submission_cannot_acknowledge_later_video_content() -> None:
+def test_empty_compositions_cannot_delay_later_video_content() -> None:
     viewer = Mock()
     viewer._first_render_submission_pending = False
-    viewer._frame_submission_queue = deque([None, ("video", 9, 14)])
+    viewer._rendered_content_identity = None
+    viewer._last_composed_content_identity = None
 
-    GLImageViewer._on_frame_submitted(viewer)
+    for _ in range(20):
+        GLImageViewer._on_frame_submitted(viewer)
     viewer.videoFramePresented.emit.assert_not_called()
 
+    viewer._rendered_content_identity = ("video", 9, 14, 21)
     GLImageViewer._on_frame_submitted(viewer)
+    viewer.videoFramePresented.emit.assert_called_once_with(9, 14)
+
+
+def test_replayed_gl_video_serial_gets_new_composition_acknowledgement() -> None:
+    viewer = Mock()
+    viewer._first_render_submission_pending = False
+    viewer._last_composed_content_identity = ("video", 9, 14, 1)
+    viewer._rendered_content_identity = ("video", 9, 14, 2)
+
+    GLImageViewer._on_frame_submitted(viewer)
+
     viewer.videoFramePresented.emit.assert_called_once_with(9, 14)
 
 

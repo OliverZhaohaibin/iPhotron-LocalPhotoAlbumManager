@@ -596,7 +596,7 @@ class TestVideoRendererWidget:
         w.videoFramePresented.connect(video_presented)
 
         w._queue_first_frame_ready()
-        w._frame_submission_queue.append((5, 7))
+        w._rendered_content_identity = (5, 7, 1)
 
         first_ready.assert_not_called()
         video_presented.assert_not_called()
@@ -606,7 +606,7 @@ class TestVideoRendererWidget:
         first_ready.assert_called_once_with()
         video_presented.assert_called_once_with(5, 7)
 
-    def test_clear_submission_cannot_acknowledge_a_later_video_draw(
+    def test_clear_compositions_cannot_delay_a_later_video_acknowledgement(
         self,
         qapp,
         mocker,
@@ -614,12 +614,25 @@ class TestVideoRendererWidget:
         w = VideoRendererWidget()
         video_presented = mocker.Mock()
         w.videoFramePresented.connect(video_presented)
-        w._frame_submission_queue.extend([None, (8, 13)])
 
-        w._on_frame_submitted()
+        for _ in range(20):
+            w._rendered_content_identity = None
+            w._on_frame_submitted()
         video_presented.assert_not_called()
 
+        w._rendered_content_identity = (8, 13, 21)
         w._on_frame_submitted()
+        video_presented.assert_called_once_with(8, 13)
+
+    def test_replayed_serial_gets_a_new_composition_acknowledgement(self, qapp, mocker):
+        w = VideoRendererWidget()
+        video_presented = mocker.Mock()
+        w.videoFramePresented.connect(video_presented)
+        w._last_composed_content_identity = (8, 13, 1)
+        w._rendered_content_identity = (8, 13, 2)
+
+        w._on_frame_submitted()
+
         video_presented.assert_called_once_with(8, 13)
 
     def test_release_resources_destroys_owned_qrhi_objects(self, qapp, mocker):
@@ -643,16 +656,18 @@ class TestVideoRendererWidget:
         w.renderResourcesInvalidated.connect(invalidated)
         w._initialized = True
         w._first_render_done = True
-        w._frame_submission_queue.append((1, 11))
+        w._rendered_content_identity = (1, 11, 1)
+        w._last_composed_content_identity = (1, 10, 0)
 
         w.releaseResources()
 
         for name, resource in resources.items():
             resource.destroy.assert_called_once_with()
-            assert getattr(w, name) is None
+        assert getattr(w, name) is None
         assert w._initialized is False
         assert w._first_render_done is False
-        assert not w._frame_submission_queue
+        assert w._rendered_content_identity is None
+        assert w._last_composed_content_identity is None
         invalidated.assert_called_once_with()
 
     @pytest.mark.gpu

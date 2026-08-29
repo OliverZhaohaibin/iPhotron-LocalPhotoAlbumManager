@@ -544,8 +544,10 @@ class PlayerViewController(QObject):
         if (
             self._post_submit_epoch == epoch
             and self._post_submit_kind == kind
-            and self._post_submit_payload == candidate_payload
         ):
+            # The first valid content submission anchors this transition.
+            # Continuous video frames must not move the target forward and
+            # repeatedly disarm the one-extra-submission barrier.
             return
         self._post_submit_epoch = epoch
         self._post_submit_kind = kind

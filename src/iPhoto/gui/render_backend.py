@@ -35,17 +35,20 @@ def select_qrhi_widget_api() -> "QRhiWidget.Api":
     opengl_api = _qt_api("OpenGL")
     metal_api = _qt_api("Metal")
     d3d11_api = _qt_api("Direct3D11")
-    if opengl_api is None:
-        raise RuntimeError("This Qt build does not expose the QRhi OpenGL backend")
+
+    def require_opengl() -> "QRhiWidget.Api":
+        if opengl_api is None:
+            raise RuntimeError("This Qt build does not expose the QRhi OpenGL backend")
+        return opengl_api
 
     if override == "opengl":
-        return opengl_api
+        return require_opengl()
 
     if override == "metal":
         if metal_api is not None:
             return metal_api
         _LOGGER.warning("IPHOTO_RHI_BACKEND=metal requested but this Qt build has no Metal QRhi backend")
-        return opengl_api
+        return require_opengl()
 
     if override == "d3d11":
         if sys.platform == "win32" and d3d11_api is not None:
@@ -54,11 +57,11 @@ def select_qrhi_widget_api() -> "QRhiWidget.Api":
             "IPHOTO_RHI_BACKEND=d3d11 requested outside a compatible Windows Qt build; "
             "falling back to OpenGL"
         )
-        return opengl_api
+        return require_opengl()
 
     if sys.platform == "darwin" and metal_api is not None:
         return metal_api
-    return opengl_api
+    return require_opengl()
 
 
 def selected_rhi_backend_name() -> str:

@@ -655,9 +655,13 @@ class TestVideoRendererWidget:
         assert not w._frame_submission_queue
         invalidated.assert_called_once_with()
 
+    @pytest.mark.gpu
+    @pytest.mark.windows_compositor
     def test_visible_qrhi_submission_releases_cover_contract(self, qapp):
         """Exercise the real QRhiWidget render -> composition submission order."""
 
+        if sys.platform != "win32":
+            pytest.skip("requires a visible Windows compositor integration runner")
         if QApplication.platformName().lower() in {"offscreen", "minimal"}:
             pytest.skip("requires a visible platform QRhi compositor")
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PySide6.QtGui import QShader
 from PySide6.QtWidgets import QRhiWidget
 
@@ -15,6 +16,19 @@ def test_auto_selects_metal_on_macos_when_available(monkeypatch) -> None:
     expected = getattr(QRhiWidget.Api, "Metal", QRhiWidget.Api.OpenGL)
 
     assert render_backend.select_qrhi_widget_api() == expected
+
+
+def test_metal_override_does_not_require_opengl(monkeypatch) -> None:
+    monkeypatch.setattr(render_backend.sys, "platform", "darwin")
+    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "metal")
+    metal_api = QRhiWidget.Api.Metal
+    monkeypatch.setattr(
+        render_backend,
+        "_qt_api",
+        lambda name: None if name == "OpenGL" else metal_api if name == "Metal" else None,
+    )
+
+    assert render_backend.select_qrhi_widget_api() == metal_api
 
 
 def test_auto_keeps_opengl_on_linux(monkeypatch) -> None:
@@ -37,6 +51,44 @@ def test_windows_override_can_select_d3d11(monkeypatch) -> None:
 
     expected = getattr(QRhiWidget.Api, "Direct3D11", QRhiWidget.Api.OpenGL)
     assert render_backend.select_qrhi_widget_api() == expected
+
+
+def test_d3d11_override_does_not_require_opengl(monkeypatch) -> None:
+    monkeypatch.setattr(render_backend.sys, "platform", "win32")
+    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "d3d11")
+    d3d11_api = QRhiWidget.Api.Direct3D11
+    monkeypatch.setattr(
+        render_backend,
+        "_qt_api",
+        lambda name: None if name == "OpenGL" else d3d11_api if name == "Direct3D11" else None,
+    )
+
+    assert render_backend.select_qrhi_widget_api() == d3d11_api
+
+
+def test_explicit_opengl_requires_available_opengl_backend(monkeypatch) -> None:
+    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "opengl")
+    monkeypatch.setattr(
+        render_backend,
+        "_qt_api",
+        lambda name: None if name == "OpenGL" else getattr(QRhiWidget.Api, name, None),
+    )
+
+    with pytest.raises(RuntimeError, match="does not expose the QRhi OpenGL backend"):
+        render_backend.select_qrhi_widget_api()
+
+
+def test_auto_opengl_platform_requires_available_opengl_backend(monkeypatch) -> None:
+    monkeypatch.setattr(render_backend.sys, "platform", "linux")
+    monkeypatch.delenv("IPHOTO_RHI_BACKEND", raising=False)
+    monkeypatch.setattr(
+        render_backend,
+        "_qt_api",
+        lambda name: None if name == "OpenGL" else getattr(QRhiWidget.Api, name, None),
+    )
+
+    with pytest.raises(RuntimeError, match="does not expose the QRhi OpenGL backend"):
+        render_backend.select_qrhi_widget_api()
 
 
 def test_d3d11_override_falls_back_to_opengl_off_windows(monkeypatch) -> None:

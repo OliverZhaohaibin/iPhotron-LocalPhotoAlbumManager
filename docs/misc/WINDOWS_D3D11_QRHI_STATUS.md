@@ -45,8 +45,8 @@ The following pieces exist and are covered by code-level contracts:
 - Detail still, adjusted-video, and native-video QRhi paths have non-OpenGL
   renderer implementations.
 - Image, overlay, and video QSB assets contain HLSL Shader Model 5.0 variants.
-- First-media reveal is content-identity based and remains covered through the
-  Windows post-submit composition frame.
+- First-media reveal is content-identity based and waits for an additional
+  active-surface QRhi `frameSubmitted` before removing the cover on Windows.
 - Transition epochs reject delayed submissions from an older media request,
   resource generation, or raw/adjusted surface transition.
 - The Detail cover is persistent for the page lifetime and does not require
@@ -54,6 +54,14 @@ The following pieces exist and are covered by code-level contracts:
 
 This is sufficient for focused Detail compositor A/B experiments. It is not a
 complete application graphics contract.
+
+### Guarantee boundary of the extra submission
+
+The Windows reveal workaround proves that Qt/QRhi submitted an additional
+active-surface composition after the matching media content submission. It is
+a deterministic state-machine barrier, but it is **not** a DXGI presentation
+fence and does not prove that Windows DWM scanned either submission to the
+display. Real Windows repetition remains required to validate the visible bug.
 
 ## Unsupported and unsafe scenarios
 

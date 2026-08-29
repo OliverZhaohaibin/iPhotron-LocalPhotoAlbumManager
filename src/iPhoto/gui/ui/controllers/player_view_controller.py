@@ -558,7 +558,7 @@ class PlayerViewController(QObject):
         epoch: int,
         kind: Literal["image", "video"],
     ) -> None:
-        """Request the additional composed frame used by Windows reveal."""
+        """Request the additional active-surface QRhi submission heuristic."""
 
         if (
             epoch != self._surface_transition_epoch
@@ -827,48 +827,6 @@ class PlayerViewController(QObject):
         if not self._player_stack.isVisible():
             self._player_stack.show()
         self._video_area.video_view().setFocus()
-
-    def show_video_surface(self, *, interactive: bool) -> None:
-        """Switch the stacked widget to the video surface.
-
-        Parameters
-        ----------
-        interactive:
-            ``True`` enables the floating playback controls (used for regular
-            videos). ``False`` keeps the controls hidden so Live Photos can play
-            unobstructed while still allowing the badge to trigger replays.
-        """
-
-        if self._pending_video_generation is not None:
-            raise RuntimeError(
-                "show_video_surface() cannot cancel an active video transition; "
-                "wait for the matching surface submission"
-            )
-        self._advance_surface_transition_epoch()
-        self._pending_video_generation = None
-        self._pending_video_content_serial = None
-        self._cancel_image_transition()
-        self._video_interactive_when_ready = bool(interactive)
-        self._configure_video_controls(interactive)
-
-        # If the video renderer has never rendered, its QRhiWidget backing
-        # texture is still uninitialised (transparent).  Re-show the opaque
-        # init cover *before* switching the stack so the user never sees a
-        # transparent frame.
-        if not self._video_renderer_rendered:
-            self._show_detail_init_cover()
-
-        if self._player_stack.currentWidget() is not self._video_area:
-            self._player_stack.setCurrentWidget(self._video_area)
-        if not self._player_stack.isVisible():
-            self._player_stack.show()
-
-        # Hand focus to the graphics view so space/arrow shortcuts continue to
-        # target the media surface, matching the ergonomics of the legacy
-        # QWidget-based implementation.
-        self._video_area.video_view().setFocus()
-        if self._video_renderer_rendered:
-            self._sync_detail_surface_cover()
 
     # ------------------------------------------------------------------
     # Content helpers

@@ -1074,30 +1074,6 @@ class TestInitCoverTracking:
             ),
         ]
 
-    def test_show_video_surface_shows_cover_if_not_rendered(self, controller, mocker):
-        """show_video_surface should re-show the init cover when video hasn't rendered."""
-        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
-        controller._video_renderer_rendered = False
-        controller.show_video_surface(interactive=True)
-        mock_show_cover.assert_called_once()
-
-    def test_show_video_surface_skips_cover_if_rendered(self, controller, mocker):
-        """show_video_surface should NOT re-show cover when video has already rendered."""
-        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
-        controller._video_renderer_rendered = True
-        controller.show_video_surface(interactive=True)
-        mock_show_cover.assert_not_called()
-
-    def test_show_video_surface_rejects_active_video_transition(self, controller):
-        controller.begin_video_transition(16, interactive_when_ready=True)
-        epoch = controller._surface_transition_epoch
-
-        with pytest.raises(RuntimeError, match="cannot cancel an active video transition"):
-            controller.show_video_surface(interactive=True)
-
-        assert controller._pending_video_generation == 16
-        assert controller._surface_transition_epoch == epoch
-
     def test_video_transition_waits_for_matching_submitted_generation(
         self,
         controller,

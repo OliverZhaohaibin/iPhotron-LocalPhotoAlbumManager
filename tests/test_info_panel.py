@@ -53,6 +53,7 @@ class _FakeMiniMapWidget(QWidget):
         self._map_source = map_source
         self._zoom = 2.0
         self._center: tuple[float, float] = (0.0, 0.0)
+        self.shutdown_calls = 0
         self.setMinimumSize(640, 480)
 
     @property
@@ -83,10 +84,22 @@ class _FakeMiniMapWidget(QWidget):
         return QPointF(self.width() / 2.0, self.height() / 2.0)
 
     def shutdown(self) -> None:
-        return None
+        self.shutdown_calls += 1
 
     def map_backend_metadata(self) -> MapBackendMetadata:
         return MapBackendMetadata(2.0, 19.0, True, "raster", "xyz")
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_info_panels_after_test(qapp: QApplication):
+    """Keep reusable map runtimes from leaking between widget tests."""
+
+    yield
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, InfoPanel):
+            widget.shutdown()
+            widget.close()
+    qapp.processEvents()
 
 
 class _DelayedProjectionMiniMapWidget(_FakeMiniMapWidget):
@@ -404,19 +417,28 @@ def test_info_panel_frameless_window_flags(qapp: QApplication) -> None:
     panel.close()
 
 
-def test_info_panel_close_event_shuts_down_location_map(qapp: QApplication, monkeypatch) -> None:
+def test_info_panel_close_event_dismisses_without_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     panel = InfoPanel()
     shutdown_calls: list[bool] = []
+    dismissed_calls: list[bool] = []
 
     monkeypatch.setattr(panel, "shutdown", lambda: shutdown_calls.append(True))
+    panel.dismissed.connect(lambda: dismissed_calls.append(True))
 
+    panel.show()
+    qapp.processEvents()
     panel.close()
     qapp.processEvents()
 
-    assert shutdown_calls == [True]
+    assert not panel.isVisible()
+    assert dismissed_calls == [True]
+    assert shutdown_calls == []
 
 
-def test_info_panel_location_map_recreates_after_close_shutdown(
+def test_info_panel_location_map_is_reused_until_explicit_shutdown(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -437,23 +459,25 @@ def test_info_panel_location_map_recreates_after_close_shutdown(
             "location": "San Francisco",
         }
     )
-    assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
-
-    panel.close()
+    panel.show()
     qapp.processEvents()
-    assert panel._location_map._map_widget is None
+    map_widget = panel._location_map._map_widget
+    assert isinstance(map_widget, _FakeMiniMapWidget)
 
-    panel.set_asset_metadata(
-        {
-            "rel": "map.jpg",
-            "name": "map.jpg",
-            "gps": {"lat": 37.7749, "lon": -122.4194},
-            "location": "San Francisco",
-        }
-    )
+    for _ in range(20):
+        panel.close()
+        qapp.processEvents()
+        assert panel._location_map._map_widget is map_widget
+        assert map_widget.shutdown_calls == 0
+        panel.show()
+        qapp.processEvents()
+        assert panel._location_map._map_widget is map_widget
 
-    assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
     panel.shutdown()
+    panel.shutdown()
+
+    assert panel._location_map._map_widget is None
+    assert map_widget.shutdown_calls == 1
 
 
 def test_info_panel_close_button_matches_main_window(qapp: QApplication) -> None:

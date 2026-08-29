@@ -850,6 +850,13 @@ class InfoPanel(QWidget):
         )
 
     def shutdown(self) -> None:
+        """Release terminal resources owned by the reusable panel.
+
+        Normal user dismissal only hides the panel.  The embedded map runtime
+        must stay alive across close/show cycles and is released explicitly by
+        the application shutdown path instead.
+        """
+
         self._clear_location_results()
         self._location_map.shutdown()
 
@@ -1526,7 +1533,6 @@ class InfoPanel(QWidget):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Emit a dismissal signal so the detail state stays in sync."""
 
-        self.shutdown()
         self.dismissed.emit()
         super().closeEvent(event)
 

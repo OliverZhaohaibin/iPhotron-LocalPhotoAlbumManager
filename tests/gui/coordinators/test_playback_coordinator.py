@@ -381,6 +381,29 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
     coordinator._update_favorite_icon.assert_called_once_with(True)
 
 
+def test_handle_presentation_changed_hides_info_panel_without_closing_it() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    visible = _make_presentation(info_panel_visible=True)
+    hidden = replace(visible, info_panel_visible=False)
+    coordinator._current_presentation = visible
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock()
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._select_filmstrip_row = Mock()
+    coordinator._player_view = Mock(show_placeholder=Mock())
+    coordinator._render_presentation = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = Mock(isVisible=Mock(return_value=True))
+
+    PlaybackCoordinator._handle_presentation_changed(coordinator, hidden)
+
+    coordinator._info_panel.hide.assert_called_once_with()
+    coordinator._info_panel.close.assert_not_called()
+    coordinator._render_presentation.assert_not_called()
+
+
 def test_same_render_pending_keeps_visual_row_and_reconciles_all_capabilities() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     resolved = _make_presentation(path="/fake/photo.jpg", is_video=False)
@@ -1825,7 +1848,7 @@ def test_neighbor_prefetch_preserves_asset_descriptors() -> None:
     )
 
 
-def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:
+def test_reset_for_gallery_hides_info_panel_and_clears_viewmodel_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._player_view = Mock(
         video_area=Mock(stop=Mock(), has_video=Mock(return_value=True)),
@@ -1836,7 +1859,7 @@ def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> Non
     coordinator._current_presentation = _make_presentation()
     coordinator._detail_vm = Mock(hide_info_panel=Mock())
     coordinator._update_header = Mock()
-    coordinator._info_panel = Mock(close=Mock())
+    coordinator._info_panel = Mock(hide=Mock())
     coordinator._hide_face_name_overlay = Mock()
     coordinator._confirmed_location_metadata = {
         Path("/fake/video.mp4"): {"location": "Munich"}
@@ -1849,9 +1872,33 @@ def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> Non
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
     coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=False)
     coordinator._update_header.assert_called_once_with(None)
-    coordinator._info_panel.close.assert_called_once_with()
+    coordinator._info_panel.hide.assert_called_once_with()
     coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
     assert coordinator._confirmed_location_metadata == {}
+
+
+def test_shutdown_releases_info_panel_once_and_hides_it() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._invalidate_overlay_requests = Mock()
+    coordinator._overlay_pool = Mock(waitForDone=Mock())
+    coordinator._clear_play_request_state = Mock()
+    coordinator._location_search_controller = None
+    coordinator._player_view = Mock(video_area=Mock(stop=Mock()), shutdown=Mock())
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._detail_vm = Mock(hide_info_panel=Mock())
+    coordinator._update_header = Mock()
+    coordinator._info_panel = Mock(shutdown=Mock(), hide=Mock())
+    coordinator._clear_info_panel_metadata_state = Mock()
+    coordinator._clear_confirmed_location_metadata = Mock()
+
+    PlaybackCoordinator.shutdown(coordinator)
+
+    coordinator._info_panel.shutdown.assert_called_once_with()
+    coordinator._info_panel.hide.assert_called_once_with()
+    coordinator._info_panel.close.assert_not_called()
+    coordinator._detail_vm.hide_info_panel.assert_called_once_with(
+        refresh_presentation=False,
+    )
 
 
 def test_reset_for_gallery_skips_media_cleanup_when_idle() -> None:
@@ -2896,6 +2943,23 @@ def test_ready_enrichment_updates_visible_panel_for_current_asset() -> None:
     displayed = coordinator._info_panel.set_asset_metadata.call_args.args[0]
     assert displayed["frame_rate"] == 59.94
     assert displayed["lens"] == "Wide Camera"
+    assert coordinator._info_panel_metadata_cache[str(Path("/fake/video.mp4"))]["lens"] == "Wide Camera"
+
+
+def test_ready_enrichment_is_cached_without_updating_hidden_panel() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock(isVisible=Mock(return_value=False))
+    coordinator._current_presentation = _make_presentation(path="/fake/video.mp4")
+
+    PlaybackCoordinator._handle_info_panel_metadata_ready(
+        coordinator,
+        InfoPanelMetadataResult(
+            path=Path("/fake/video.mp4"),
+            metadata={"frame_rate": 59.94, "lens": "Wide Camera"},
+        ),
+    )
+
+    coordinator._info_panel.set_asset_metadata.assert_not_called()
     assert coordinator._info_panel_metadata_cache[str(Path("/fake/video.mp4"))]["lens"] == "Wide Camera"
 
 

@@ -1058,7 +1058,7 @@ class PlaybackCoordinator(QObject):
                 and self._info_panel.isVisible()
                 and not presentation.info_panel_visible
             ):
-                self._info_panel.close()
+                self._info_panel.hide()
             self._clear_play_profile(presentation.row)
             return
         transaction = self._transaction_for_presentation(presentation)
@@ -1283,7 +1283,7 @@ class PlaybackCoordinator(QObject):
             and self._info_panel.isVisible()
             and not presentation.info_panel_visible
         ):
-            self._info_panel.close()
+            self._info_panel.hide()
         log_detail_profile(
             "playback",
             "render_presentation.total",
@@ -2340,7 +2340,7 @@ class PlaybackCoordinator(QObject):
         self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
         if self._info_panel:
-            self._info_panel.close()
+            self._info_panel.hide()
         self._clear_info_panel_metadata_state()
         self._clear_confirmed_location_metadata()
 
@@ -2367,7 +2367,7 @@ class PlaybackCoordinator(QObject):
         self._update_header(None)
         if self._info_panel:
             self._info_panel.shutdown()
-            self._info_panel.close()
+            self._info_panel.hide()
         self._clear_info_panel_metadata_state()
         self._clear_confirmed_location_metadata()
 

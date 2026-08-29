@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
@@ -200,16 +201,22 @@ class GLImageViewer(QRhiWidget):
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
-    """Emitted once after the first opaque frame has been rendered."""
+    """Emitted after the first opaque frame has been submitted for composition."""
+
+    renderResourcesInvalidated = Signal()
+    """Emitted when the active QRhi resource generation is released."""
 
     stillFramePresented = Signal(object)
     """Emitted after a newly uploaded full-resolution still has been drawn."""
 
+    stillFrameSubmitted = Signal(object, int)
+    """Emitted with content identity after a still reaches window submission."""
+
     stillTextureAllocationFailed = Signal(object, int, str)
     """Emitted when a queued foreground still cannot become resident."""
 
-    videoFramePresented = Signal()
-    """Emitted after a newly uploaded video frame has been drawn."""
+    videoFramePresented = Signal(int, int)
+    """Emitted after a newly uploaded video frame is submitted for composition."""
 
     def __init__(
         self,
@@ -239,6 +246,7 @@ class GLImageViewer(QRhiWidget):
         self._renderer: Any | RhiImageRenderer | None = None
         self._gl_initialized = False
         self._first_render_done = False
+        self._first_render_submission_pending = False
         self._pending_post_load_view_transform = False
         self._post_load_view_transform_scheduled = False
 
@@ -253,12 +261,17 @@ class GLImageViewer(QRhiWidget):
         self._still_generation_by_key: dict[object, int] = {}
         self._pending_resident_activation: object | None = None
         self._still_presentation_pending = False
+        self._content_revision = 0
+        self._rendered_content_identity: tuple[str, object, int, int] | None = None
+        self._last_composed_content_identity: tuple[str, object, int, int] | None = None
         self._source_image_dimensions: tuple[int, int] | None = None
         self._video_frame = None
         self._pending_video_image: QImage | None = None
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
         self._video_frame_presentation_pending = False
+        self._video_frame_content_generation = 0
+        self._video_frame_content_serial = 0
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._reset_zoom_frames_crop = True
@@ -286,6 +299,18 @@ class GLImageViewer(QRhiWidget):
         self._crop_controller = None
         self._input_handler = None
         self._pending_surface_color_override: str | None = None
+
+        # Presentation signals must describe a composed window frame, not merely
+        # a draw command recorded by ``render()``.
+        owner_ref = weakref.ref(self)
+
+        def _handle_frame_submitted() -> None:
+            owner = owner_ref()
+            if owner is not None:
+                owner._on_frame_submitted()
+
+        self._frame_submitted_handler = _handle_frame_submitted
+        self.frameSubmitted.connect(_handle_frame_submitted)
 
         if not staged:
             self.complete_runtime()
@@ -513,16 +538,23 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
         self._video_frame_presentation_pending = False
+        self._video_frame_content_generation = 0
+        self._video_frame_content_serial = 0
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._pending_source_rotate90_steps = None
         self._pending_post_load_view_transform = False
         if image is None or image.isNull():
             self._source_image_dimensions = None
+            self._still_presentation_pending = False
+            self._rendered_content_identity = None
         elif source_size is not None and min(source_size) > 0:
             self._source_image_dimensions = (int(source_size[0]), int(source_size[1]))
         elif not self._texture_manager.should_reuse_texture(image_source):
             self._source_image_dimensions = (int(image.width()), int(image.height()))
+
+        if image is not None and not image.isNull() and image_source is not None:
+            self._still_presentation_pending = True
 
         # Check if we can reuse the existing texture
         if (
@@ -543,8 +575,6 @@ class GLImageViewer(QRhiWidget):
             force_upload=force_texture_refresh,
         )
         self._image = image
-        if image is not None and not image.isNull() and image_source is not None:
-            self._still_presentation_pending = True
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
         self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
@@ -723,6 +753,8 @@ class GLImageViewer(QRhiWidget):
         adjustments: Mapping[str, float] | None = None,
         *,
         reset_view: bool = True,
+        content_generation: int = 0,
+        content_serial: int = 0,
     ) -> None:
         """Display *frame* directly through the OpenGL shader pipeline."""
 
@@ -734,7 +766,11 @@ class GLImageViewer(QRhiWidget):
         if starting_video_source:
             self._texture_manager.clear_image()
             self._source_image_dimensions = None
+            self._still_presentation_pending = False
+            self._rendered_content_identity = None
         self._using_video_frame_source = True
+        self._video_frame_content_generation = max(0, int(content_generation))
+        self._video_frame_content_serial = max(0, int(content_serial))
         self._image = None
         self._video_frame = frame
         self._pending_video_image = None
@@ -1459,21 +1495,31 @@ class GLImageViewer(QRhiWidget):
     def releaseResources(self) -> None:  # type: ignore[override]
         """QRhiWidget override: release renderer resources."""
         self._gl_initialized = False
-        if not self._runtime_ready:
-            return
-        if self._renderer is not None:
-            rhi = self.rhi()
-            if self._uses_raw_gl and rhi is not None:
-                # Ensure the underlying OpenGL context is current before
-                # issuing raw GL deletes in GLRenderer.destroy_resources().
-                rhi.makeThreadLocalNativeContextCurrent()
-            self._renderer.destroy_resources()
-        self._texture_manager.mark_texture_lost()
-        self._sync_gpu_residency()
-        tracker = self._surface_residency_tracker
-        if tracker is not None:
-            tracker.release("detail-upload-staging")
-        self._tracked_staging_resources.clear()
+        if self._runtime_ready:
+            if self._renderer is not None:
+                rhi = self.rhi()
+                if self._uses_raw_gl and rhi is not None:
+                    # Ensure the underlying OpenGL context is current before
+                    # issuing raw GL deletes in GLRenderer.destroy_resources().
+                    rhi.makeThreadLocalNativeContextCurrent()
+                self._renderer.destroy_resources()
+            self._texture_manager.mark_texture_lost()
+            self._sync_gpu_residency()
+            tracker = self._surface_residency_tracker
+            if tracker is not None:
+                tracker.release("detail-upload-staging")
+            self._tracked_staging_resources.clear()
+        self._first_render_done = False
+        self._first_render_submission_pending = False
+        self._video_frame_presentation_pending = False
+        self._content_revision = 0
+        self._rendered_content_identity = None
+        self._last_composed_content_identity = None
+        if self._runtime_ready:
+            source = self._texture_manager.get_current_image_source()
+            if source is not None and not self._using_video_frame_source:
+                self._still_presentation_pending = True
+        self.renderResourcesInvalidated.emit()
         emit_detail_event("context_rebuild", generation=0, state="released")
 
     def render(self, cb) -> None:  # type: ignore[override]
@@ -1495,7 +1541,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
@@ -1505,7 +1552,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         output_size = self.renderTarget().pixelSize()
@@ -1636,7 +1684,8 @@ class GLImageViewer(QRhiWidget):
                 )
             cb.endExternal()
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -1714,15 +1763,12 @@ class GLImageViewer(QRhiWidget):
         # --- End raw OpenGL block ---
         cb.endExternal()
         cb.endPass()
-        self._emit_first_frame_ready()
-        if self._still_presentation_pending:
-            self._still_presentation_pending = False
-            self._emit_still_frame_presented()
+        self._queue_first_frame_ready()
+        rendered_identity = self._take_pending_content_submission()
+        if rendered_identity is not None:
+            self._rendered_content_identity = rendered_identity
         if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
-        if self._video_frame_presentation_pending:
-            self._video_frame_presentation_pending = False
-            self.videoFramePresented.emit()
 
     def _render_rhi(self, cb) -> None:
         """Render the current image through QRhi without raw OpenGL."""
@@ -1734,7 +1780,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         output_size = self.renderTarget().pixelSize()
@@ -1804,7 +1851,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -1849,24 +1897,39 @@ class GLImageViewer(QRhiWidget):
             crop_faded=crop_faded,
         )
 
-        self._emit_first_frame_ready()
-        if self._still_presentation_pending:
-            self._still_presentation_pending = False
-            self._emit_still_frame_presented()
+        self._queue_first_frame_ready()
+        rendered_identity = self._take_pending_content_submission()
+        if rendered_identity is not None:
+            self._rendered_content_identity = rendered_identity
         if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
-        if self._video_frame_presentation_pending:
-            self._video_frame_presentation_pending = False
-            self.videoFramePresented.emit()
 
     def _still_source_name(self) -> str:
         source = self._texture_manager.get_current_image_source()
         return getattr(source, "name", str(source or ""))
 
-    def _emit_still_frame_presented(self) -> None:
-        source = self._texture_manager.get_current_image_source()
-        if source is not None:
-            self.stillFramePresented.emit(source)
+    def _take_pending_content_submission(
+        self,
+    ) -> tuple[str, object, int, int] | None:
+        """Bind the content drawn by this render call to its submission event."""
+
+        if self._still_presentation_pending:
+            source = self._texture_manager.get_current_image_source()
+            if source is not None:
+                self._still_presentation_pending = False
+                generation = self._still_generation_by_key.get(source, 0)
+                self._content_revision += 1
+                return ("still", source, generation, self._content_revision)
+        if self._video_frame_presentation_pending:
+            self._video_frame_presentation_pending = False
+            self._content_revision += 1
+            return (
+                "video",
+                self._video_frame_content_generation,
+                self._video_frame_content_serial,
+                self._content_revision,
+            )
+        return None
 
     def _consume_still_upload_result(self) -> bool:
         """Publish a foreground allocation failure and suppress false presentation."""
@@ -1972,11 +2035,27 @@ class GLImageViewer(QRhiWidget):
                 generation=self._still_generation_by_key.get(key, 0),
             )
 
-    def _emit_first_frame_ready(self) -> None:
-        """Notify listeners that the first opaque frame has been rendered."""
+    def _queue_first_frame_ready(self) -> None:
+        """Record that an opaque draw is waiting for window submission."""
         if not self._first_render_done:
+            self._first_render_submission_pending = True
+
+    def _on_frame_submitted(self) -> None:
+        """Publish pending draw acknowledgements after window composition."""
+
+        if self._first_render_submission_pending:
+            self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
+        submission = self._rendered_content_identity
+        if submission is not None and submission != self._last_composed_content_identity:
+            self._last_composed_content_identity = submission
+            kind, identity, serial, _revision = submission
+            if kind == "still":
+                self.stillFrameSubmitted.emit(identity, serial)
+                self.stillFramePresented.emit(identity)
+            else:
+                self.videoFramePresented.emit(int(identity), serial)
 
     # --------------------------- Crop helpers ---------------------------
 

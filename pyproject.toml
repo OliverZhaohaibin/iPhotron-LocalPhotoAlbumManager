@@ -90,6 +90,8 @@ line-length = 100
 testpaths = ["tests"]
 addopts = "-ra -p no:pytestqt"
 markers = [
+    "gpu: requires a render-capable GPU/window-system integration environment",
+    "windows_compositor: requires a visible Windows compositor integration runner",
     "maps_scale_contract: large synthetic map marker clustering contract",
     "pets_model_contract: real official YOLOX model and image contract",
     "pets_scale_contract: large synthetic Pets incremental-index contract",

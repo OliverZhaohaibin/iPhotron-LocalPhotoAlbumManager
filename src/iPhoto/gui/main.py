@@ -366,7 +366,10 @@ def _map_gl_surface_format(platform: str | None = None) -> QSurfaceFormat:
     surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
     surface_format.setDepthBufferSize(24)
     surface_format.setStencilBufferSize(8)
-    surface_format.setAlphaBufferSize(8 if platform == "darwin" else 0)
+    # The frameless top-level uses WA_TranslucentBackground on macOS and
+    # Windows. OpenGL composition must not proactively request a zero-bit alpha
+    # surface on either platform.
+    surface_format.setAlphaBufferSize(8 if platform in {"darwin", "win32"} else 0)
     surface_format.setSamples(0)
     return surface_format
 
@@ -483,6 +486,8 @@ def _prepare_top_level_rhi_surface(window: object, backend_name: str) -> str:
 
     targets_by_backend = {
         "metal": (QSurface.SurfaceType.MetalSurface,),
+        "direct3d11": (QSurface.SurfaceType.Direct3DSurface,),
+        "d3d11": (QSurface.SurfaceType.Direct3DSurface,),
         "opengl": (
             QSurface.SurfaceType.OpenGLSurface,
             QSurface.SurfaceType.RasterGLSurface,
@@ -514,6 +519,62 @@ def _prepare_top_level_rhi_surface(window: object, backend_name: str) -> str:
             f"{', '.join(target.name for target in targets)}"
         )
     return actual_surface_type.name
+
+
+def _top_level_graphics_contract(
+    window: object,
+    backend_name: str,
+    *,
+    platform: str | None = None,
+) -> dict[str, object]:
+    """Inspect the created top-level graphics contract after its first paint."""
+
+    platform = sys.platform if platform is None else platform
+    handle_accessor = getattr(window, "windowHandle", None)
+    handle = handle_accessor() if callable(handle_accessor) else None
+    surface_type = "missing"
+    actual_alpha_bits = -1
+    if handle is not None:
+        surface_type_getter = getattr(handle, "surfaceType", None)
+        if callable(surface_type_getter):
+            surface_type_value = surface_type_getter()
+            surface_type = getattr(surface_type_value, "name", str(surface_type_value))
+        format_getter = getattr(handle, "format", None)
+        if callable(format_getter):
+            actual_format = format_getter()
+            alpha_getter = getattr(actual_format, "alphaBufferSize", None)
+            if callable(alpha_getter):
+                actual_alpha_bits = int(alpha_getter())
+
+    test_attribute = getattr(window, "testAttribute", None)
+    translucent = bool(
+        callable(test_attribute)
+        and test_attribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    )
+    flags_getter = getattr(window, "windowFlags", None)
+    flags = flags_getter() if callable(flags_getter) else Qt.WindowType.Widget
+    frameless = bool(flags & Qt.WindowType.FramelessWindowHint)
+    payload = {
+        "backend": str(backend_name),
+        "surface_type": surface_type,
+        "actual_alpha_bits": actual_alpha_bits,
+        "translucent": translucent,
+        "frameless": frameless,
+    }
+    mark("main_window.graphics_contract", **payload)
+    _logger.info("Main-window graphics contract: %s", payload)
+    if (
+        platform == "win32"
+        and str(backend_name).strip().lower() == "opengl"
+        and translucent
+        and actual_alpha_bits <= 0
+    ):
+        _logger.warning(
+            "Windows translucent OpenGL top-level has no confirmed alpha buffer: %s. "
+            "Re-run with QT_LOGGING_RULES=qt.qpa.gl=true;qt.rhi.*=true",
+            payload,
+        )
+    return payload
 
 
 def _startup_timing_plan(platform: str | None = None) -> _StartupTimingPlan:
@@ -1171,6 +1232,16 @@ def main(argv: list[str] | None = None) -> int:
 
     def _continue_after_shell() -> None:
         startup_input_guard.release()
+        try:
+            _top_level_graphics_contract(
+                window,
+                selected_rhi_backend_name(),
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "Failed to inspect the post-paint graphics contract",
+                exc_info=True,
+            )
         generation = startup.generation
         if startup_timing.first_post_paint_delay_ms > 0:
             QTimer.singleShot(

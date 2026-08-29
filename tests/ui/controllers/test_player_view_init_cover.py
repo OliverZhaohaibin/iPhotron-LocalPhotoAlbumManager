@@ -12,6 +12,7 @@ import os
 import time
 from pathlib import Path
 from threading import Event
+from unittest.mock import call
 
 import pytest
 
@@ -120,6 +121,9 @@ class _FakeImageViewer(QWidget):
     """
 
     firstFrameReady = Signal()
+    renderResourcesInvalidated = Signal()
+    stillFrameSubmitted = Signal(object, int)
+    frameSubmitted = Signal()
     replayRequested = Signal()
     viewTransformChanged = Signal()
 
@@ -181,6 +185,9 @@ class _FakeVideoArea(QWidget):
     """
 
     firstFrameReady = Signal()
+    surfaceFrameSubmitted = Signal(int, int)
+    surfaceInvalidated = Signal(int, int)
+    surfaceCompositionSubmitted = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -197,6 +204,9 @@ class _FakeVideoArea(QWidget):
 
     def video_view(self) -> QWidget:
         return self
+
+    def request_active_surface_update(self) -> None:
+        pass
 
 
 @pytest.fixture(scope="module")
@@ -1007,19 +1017,440 @@ class TestInitCoverTracking:
         controller.show_image_surface()
         mock_show_cover.assert_not_called()
 
-    def test_show_video_surface_shows_cover_if_not_rendered(self, controller, mocker):
-        """show_video_surface should re-show the init cover when video hasn't rendered."""
+    def test_image_transition_waits_for_matching_content_submission(
+        self,
+        controller,
+        mocker,
+    ):
         mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
-        controller._video_renderer_rendered = False
-        controller.show_video_surface(interactive=True)
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller._image_viewer_rendered = True
+        controller._arm_image_transition(22, "image-b")
+        controller.show_image_surface()
+
+        controller._image_viewer.firstFrameReady.emit()
+        controller._image_viewer.stillFrameSubmitted.emit("image-a", 21)
+
+        assert controller._pending_image_generation == 22
+        mock_hide_cover.assert_not_called()
+
+        controller._image_viewer.stillFrameSubmitted.emit("image-b", 22)
+
+        assert controller._pending_image_generation is None
+        assert controller._pending_image_key is None
+        mock_show_cover.assert_called()
+        mock_hide_cover.assert_called_once()
+
+    def test_still_content_barrier_is_armed_before_surface_switch_and_upload(
+        self,
+        controller,
+        mocker,
+    ):
+        surface = _surface(
+            Path("/tmp/content-b.jpg"),
+            QImage(64, 48, QImage.Format.Format_RGBA8888),
+        )
+        controller._present_generation = 24
+        controller._request_reason_by_generation[24] = "initial"
+        arm = mocker.patch.object(controller, "_arm_image_transition")
+        show = mocker.patch.object(controller, "show_image_surface")
+        upload = mocker.patch.object(controller._image_viewer, "set_image")
+        calls = mocker.Mock()
+        calls.attach_mock(arm, "arm")
+        calls.attach_mock(show, "show")
+        calls.attach_mock(upload, "upload")
+
+        controller._apply_still_frame(surface, {})
+
+        assert calls.mock_calls[:3] == [
+            call.arm(24, surface.decode_key),
+            call.show(),
+            call.upload(
+                surface.image,
+                {},
+                image_source=surface.decode_key,
+                source_size=surface.source_size,
+                reset_view=True,
+            ),
+        ]
+
+    def test_stale_still_generation_cannot_consume_current_presentation(
+        self,
+        controller,
+        mocker,
+        tmp_path,
+    ):
+        path = tmp_path / "same-path-generation-race.jpg"
+        current_key = _surface(
+            path,
+            QImage(128, 96, QImage.Format.Format_RGBA8888),
+            level=2048,
+        ).decode_key
+        previous_key = _surface(
+            path,
+            QImage(64, 48, QImage.Format.Format_RGBA8888),
+            level=1024,
+        ).decode_key
+        pending_session = mocker.Mock()
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
+        controller._present_generation = 41
+        controller._present_source = path
+        controller._present_started_at = time.perf_counter()
+        controller._pending_present_session = (41, pending_session, current_key)
+        controller._last_presented_decode_key = previous_key
+
+        controller._accept_still_frame_presented(current_key, 40)
+
+        assert controller._present_source == path
+        assert controller._present_started_at is not None
+        assert controller._pending_present_session == (41, pending_session, current_key)
+        assert controller._last_presented_decode_key == previous_key
+        pending_session.activate_surface.assert_not_called()
+        presented.assert_not_called()
+
+    def test_pending_present_session_requires_matching_generation(
+        self,
+        controller,
+        mocker,
+        tmp_path,
+    ):
+        path = tmp_path / "session-generation-race.jpg"
+        current_key = _surface(
+            path,
+            QImage(128, 96, QImage.Format.Format_RGBA8888),
+            level=2048,
+        ).decode_key
+        stale_session = mocker.Mock()
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
+        controller._present_generation = 41
+        controller._present_source = path
+        controller._present_started_at = time.perf_counter()
+        controller._pending_present_session = (40, stale_session, current_key)
+
+        controller._accept_still_frame_presented(current_key, 41)
+
+        stale_session.activate_surface.assert_not_called()
+        assert controller._pending_present_session == (40, stale_session, current_key)
+        assert controller._last_presented_decode_key == current_key
+        assert controller._present_source is None
+        assert controller._present_started_at is None
+        presented.assert_called_once_with(path, 41)
+
+    def test_video_transition_waits_for_matching_submitted_generation(
+        self,
+        controller,
+        mocker,
+    ):
+        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controls_enabled = mocker.patch.object(
+            controller._video_area,
+            "set_controls_enabled",
+        )
+
+        controller.begin_video_transition(17, interactive_when_ready=True)
+        controller._video_area.firstFrameReady.emit()
+
+        assert controller._pending_video_generation == 17
+        mock_hide_cover.assert_not_called()
+
+        controller._video_area.surfaceFrameSubmitted.emit(16, 1)
+        assert controller._pending_video_generation == 17
+        mock_hide_cover.assert_not_called()
+
+        controller._video_area.surfaceFrameSubmitted.emit(17, 1)
+        assert controller._pending_video_generation is None
+        controls_enabled.assert_called_with(True)
+        mock_show_cover.assert_called()
+        mock_hide_cover.assert_called_once()
+
+    def test_placeholder_cancels_pending_video_transition(self, controller, mocker):
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller.begin_video_transition(23, interactive_when_ready=True)
+
+        controller.show_placeholder("Unable to load")
+
+        assert controller._pending_video_generation is None
+        mock_hide_cover.assert_called_once()
+
+    def test_active_video_resource_loss_rearms_media_barrier(self, controller, mocker):
+        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
+        controller._player_stack.setCurrentWidget(controller._video_area)
+        controller._video_renderer_rendered = True
+
+        controller._video_area.surfaceInvalidated.emit(31, 9)
+
+        assert controller._video_renderer_rendered is False
+        assert controller._pending_video_generation == 31
+        assert controller._pending_video_content_serial == 9
         mock_show_cover.assert_called_once()
 
-    def test_show_video_surface_skips_cover_if_rendered(self, controller, mocker):
-        """show_video_surface should NOT re-show cover when video has already rendered."""
-        mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
-        controller._video_renderer_rendered = True
-        controller.show_video_surface(interactive=True)
-        mock_show_cover.assert_not_called()
+    def test_latest_surface_submission_completes_rearmed_switch_barrier(
+        self,
+        controller,
+        mocker,
+    ):
+        mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller._player_stack.setCurrentWidget(controller._video_area)
+
+        controller._video_area.surfaceInvalidated.emit(32, 10)
+        controller._video_area.surfaceInvalidated.emit(32, 10)
+        controller._video_area.surfaceFrameSubmitted.emit(32, 10)
+
+        assert controller._pending_video_generation is None
+        assert controller._pending_video_content_serial is None
+        mock_hide_cover.assert_called_once()
+
+    def test_windows_image_reveal_waits_for_next_composition(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        update = mocker.patch.object(controller._image_viewer, "update")
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller._arm_image_transition(40, "image-40")
+        controller.show_image_surface()
+        update.reset_mock()
+
+        controller._image_viewer.stillFrameSubmitted.emit("image-40", 40)
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._pending_image_generation == 40
+        hide_cover.assert_not_called()
+
+        qapp.processEvents()
+        update.assert_called()
+        hide_cover.assert_not_called()
+
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._pending_image_generation is None
+        hide_cover.assert_called_once()
+
+    def test_delayed_old_composition_does_not_consume_new_still_generation(
+        self,
+        controller,
+        qapp,
+        mocker,
+        tmp_path,
+    ):
+        path = tmp_path / "composition-before-current-submission.jpg"
+        old_key = _surface(
+            path,
+            QImage(64, 48, QImage.Format.Format_RGBA8888),
+            level=1024,
+        ).decode_key
+        current_key = _surface(
+            path,
+            QImage(128, 96, QImage.Format.Format_RGBA8888),
+            level=2048,
+        ).decode_key
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
+        controller._player_stack.setCurrentWidget(controller._image_viewer)
+        controller._present_generation = 40
+        controller._present_source = path
+        controller._present_started_at = time.perf_counter()
+        controller._arm_image_transition(40, old_key)
+        controller._image_viewer.stillFrameSubmitted.emit(old_key, 40)
+        qapp.processEvents()
+
+        current_started_at = time.perf_counter()
+        controller._present_generation = 41
+        controller._present_source = path
+        controller._present_started_at = current_started_at
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._pending_image_generation is None
+        assert controller._present_source == path
+        assert controller._present_started_at == current_started_at
+        presented.assert_not_called()
+        hide_cover.assert_called_once()
+
+        controller._image_viewer.stillFrameSubmitted.emit(current_key, 41)
+
+        assert controller._present_source is None
+        assert controller._present_started_at is None
+        assert controller._last_presented_decode_key == current_key
+        presented.assert_called_once_with(path, 41)
+
+    def test_current_still_submission_is_accepted_before_old_composition(
+        self,
+        controller,
+        qapp,
+        mocker,
+        tmp_path,
+    ):
+        path = tmp_path / "current-submission-before-composition.jpg"
+        old_key = _surface(
+            path,
+            QImage(64, 48, QImage.Format.Format_RGBA8888),
+            level=1024,
+        ).decode_key
+        current_key = _surface(
+            path,
+            QImage(128, 96, QImage.Format.Format_RGBA8888),
+            level=2048,
+        ).decode_key
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
+        controller._player_stack.setCurrentWidget(controller._image_viewer)
+        controller._present_generation = 40
+        controller._present_source = path
+        controller._present_started_at = time.perf_counter()
+        controller._arm_image_transition(40, old_key)
+        controller._image_viewer.stillFrameSubmitted.emit(old_key, 40)
+        qapp.processEvents()
+
+        controller._present_generation = 41
+        controller._present_source = path
+        controller._present_started_at = time.perf_counter()
+        controller._image_viewer.stillFrameSubmitted.emit(current_key, 41)
+
+        assert controller._pending_image_generation == 40
+        assert controller._last_presented_decode_key == current_key
+        assert controller._present_source is None
+        assert controller._present_started_at is None
+        hide_cover.assert_not_called()
+        presented.assert_called_once_with(path, 41)
+
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._pending_image_generation is None
+        assert controller._last_presented_decode_key == current_key
+        hide_cover.assert_called_once()
+        presented.assert_called_once_with(path, 41)
+
+    def test_windows_video_reveal_waits_for_next_active_surface_composition(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        request_update = mocker.patch.object(
+            controller._video_area,
+            "request_active_surface_update",
+        )
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controls_enabled = mocker.patch.object(
+            controller._video_area,
+            "set_controls_enabled",
+        )
+        controller.begin_video_transition(41, interactive_when_ready=True)
+
+        controller._video_area.surfaceFrameSubmitted.emit(41, 7)
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        assert controller._pending_video_generation == 41
+        hide_cover.assert_not_called()
+
+        qapp.processEvents()
+        request_update.assert_called_once_with()
+        hide_cover.assert_not_called()
+
+        # Real QRhi ordering: the next decoded-frame acknowledgement arrives
+        # before that frame's generic composition acknowledgement.
+        controller._video_area.surfaceFrameSubmitted.emit(41, 8)
+        assert controller._peek_post_submit_payload("video") == (41, 7)
+        assert controller._post_submit_armed is True
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        assert controller._pending_video_generation is None
+        assert controller._pending_video_content_serial is None
+        controls_enabled.assert_called_with(True)
+        hide_cover.assert_called_once()
+
+    def test_invalid_composition_does_not_consume_post_submit_payload(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(
+            controller._video_area,
+            "request_active_surface_update",
+        )
+        controller.begin_video_transition(44, interactive_when_ready=False)
+        controller._video_area.surfaceFrameSubmitted.emit(44, 9)
+        qapp.processEvents()
+        payload = (44, 9)
+        assert controller._peek_post_submit_payload("video") == payload
+
+        # Simulate a future caller changing ownership without advancing epoch.
+        controller._pending_video_generation = 45
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        assert controller._peek_post_submit_payload("video") == payload
+        assert controller._post_submit_armed is True
+
+        controller._pending_video_generation = 44
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        assert controller._peek_post_submit_payload("video") is None
+        assert controller._pending_video_generation is None
+
+    def test_new_transition_cancels_deferred_windows_cover_release(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        update = mocker.patch.object(controller._image_viewer, "update")
+        controller._arm_image_transition(42, "image-42")
+        controller.show_image_surface()
+        update.reset_mock()
+        controller._image_viewer.stillFrameSubmitted.emit("image-42", 42)
+
+        controller.show_placeholder("cancelled")
+        qapp.processEvents()
+        controller._image_viewer.frameSubmitted.emit()
+
+        update.assert_not_called()
+        assert controller._pending_image_generation is None
+
+    def test_video_invalidation_replaces_deferred_windows_release_epoch(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        request_update = mocker.patch.object(
+            controller._video_area,
+            "request_active_surface_update",
+        )
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller.begin_video_transition(43, interactive_when_ready=False)
+        controller._video_area.surfaceFrameSubmitted.emit(43, 8)
+
+        controller._video_area.surfaceInvalidated.emit(43, 8)
+        qapp.processEvents()
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        request_update.assert_not_called()
+        hide_cover.assert_not_called()
+        assert controller._pending_video_generation == 43
+
+        controller._video_area.surfaceFrameSubmitted.emit(43, 8)
+        qapp.processEvents()
+        request_update.assert_called_once_with()
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        assert controller._pending_video_generation is None
+        hide_cover.assert_called_once()
 
     def test_image_first_render_hides_cover_when_image_visible(self, controller, mocker):
         """_on_image_first_render should hide cover when image is current widget."""
@@ -1096,6 +1527,9 @@ def test_init_cover_stays_below_face_name_overlay_and_does_not_take_mouse(
     assert detail._rhi_init_cover is not None
     assert detail._rhi_init_cover.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
     assert detail.face_name_overlay.isVisible() is True
+    persistent_cover = detail._rhi_init_cover
+    player_layout = detail.player_container.layout()
+    layout_count = player_layout.count()
 
     margin_point = _chip_margin_point(detail.face_name_overlay)
     _send_mouse_move_to_overlay_point(detail._rhi_init_cover, detail.face_name_overlay, margin_point)
@@ -1108,7 +1542,8 @@ def test_init_cover_stays_below_face_name_overlay_and_does_not_take_mouse(
     detail.show_rhi_init_cover()
     qapp.processEvents()
 
-    assert detail._rhi_init_cover is not None
+    assert detail._rhi_init_cover is persistent_cover
+    assert player_layout.count() == layout_count
     assert detail._rhi_init_cover.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
     _send_mouse_move_to_overlay_point(image_viewer, detail.face_name_overlay, margin_point)
     qapp.processEvents()

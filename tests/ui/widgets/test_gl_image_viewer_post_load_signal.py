@@ -6,7 +6,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for GL image viewer t
 
 import os
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QPointF, QSize
 from PySide6.QtGui import QImage
@@ -155,7 +155,6 @@ def test_rhi_render_without_pending_upload_has_defined_presentation_flags() -> N
     viewer._rounded_clip_radius = 0.0
     viewer._time_base = 0.0
     viewer.devicePixelRatioF.return_value = 1.0
-
     GLImageViewer._render_rhi(viewer, Mock())
 
     viewer._renderer.render.assert_called_once()
@@ -184,14 +183,24 @@ def test_crop_preview_disables_persisted_crop_mask() -> None:
 
 
 def test_rhi_render_presents_video_uploaded_before_render() -> None:
-    """A Linux-style immediate upload is acknowledged by the next GPU draw."""
+    """A video draw is acknowledged only after window-frame submission."""
 
     viewer = Mock()
     viewer._gl_initialized = True
     viewer._renderer.has_texture.return_value = True
     viewer._using_video_frame_source = True
     viewer._video_frame_dirty = False
+    viewer._still_presentation_pending = False
     viewer._video_frame_presentation_pending = True
+    viewer._video_frame_content_generation = 6
+    viewer._video_frame_content_serial = 12
+    viewer._content_revision = 0
+    viewer._rendered_content_identity = None
+    viewer._last_composed_content_identity = None
+    viewer._take_pending_content_submission = lambda: (
+        GLImageViewer._take_pending_content_submission(viewer)
+    )
+    viewer._first_render_submission_pending = False
     viewer._video_frame = None
     viewer._pending_video_image = None
     viewer._image = None
@@ -208,11 +217,70 @@ def test_rhi_render_presents_video_uploaded_before_render() -> None:
     viewer._time_base = 0.0
     viewer.devicePixelRatioF.return_value = 1.0
 
-    GLImageViewer._render_rhi(viewer, Mock())
+    with patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget.geometry",
+        SimpleNamespace(logical_crop_mapping_from_texture=lambda values: values),
+    ):
+        GLImageViewer._render_rhi(viewer, Mock())
 
     viewer._renderer.render.assert_called_once()
-    viewer.videoFramePresented.emit.assert_called_once()
+    viewer.videoFramePresented.emit.assert_not_called()
     assert viewer._video_frame_presentation_pending is False
+    assert viewer._rendered_content_identity == ("video", 6, 12, 1)
+
+    GLImageViewer._on_frame_submitted(viewer)
+
+    viewer.videoFramePresented.emit.assert_called_once_with(6, 12)
+    assert viewer._last_composed_content_identity == ("video", 6, 12, 1)
+
+
+def test_still_submission_carries_content_identity_and_generation() -> None:
+    viewer = Mock()
+    viewer._first_render_submission_pending = False
+    viewer._content_revision = 0
+    viewer._rendered_content_identity = None
+    viewer._last_composed_content_identity = None
+    viewer._still_presentation_pending = True
+    viewer._video_frame_presentation_pending = False
+    viewer._texture_manager.get_current_image_source.return_value = "image-b-key"
+    viewer._still_generation_by_key = {"image-b-key": 22}
+
+    submission = GLImageViewer._take_pending_content_submission(viewer)
+    viewer._rendered_content_identity = submission
+
+    viewer.stillFrameSubmitted.emit.assert_not_called()
+    viewer.stillFramePresented.emit.assert_not_called()
+
+    GLImageViewer._on_frame_submitted(viewer)
+
+    viewer.stillFrameSubmitted.emit.assert_called_once_with("image-b-key", 22)
+    viewer.stillFramePresented.emit.assert_called_once_with("image-b-key")
+
+
+def test_empty_compositions_cannot_delay_later_video_content() -> None:
+    viewer = Mock()
+    viewer._first_render_submission_pending = False
+    viewer._rendered_content_identity = None
+    viewer._last_composed_content_identity = None
+
+    for _ in range(20):
+        GLImageViewer._on_frame_submitted(viewer)
+    viewer.videoFramePresented.emit.assert_not_called()
+
+    viewer._rendered_content_identity = ("video", 9, 14, 21)
+    GLImageViewer._on_frame_submitted(viewer)
+    viewer.videoFramePresented.emit.assert_called_once_with(9, 14)
+
+
+def test_replayed_gl_video_serial_gets_new_composition_acknowledgement() -> None:
+    viewer = Mock()
+    viewer._first_render_submission_pending = False
+    viewer._last_composed_content_identity = ("video", 9, 14, 1)
+    viewer._rendered_content_identity = ("video", 9, 14, 2)
+
+    GLImageViewer._on_frame_submitted(viewer)
+
+    viewer.videoFramePresented.emit.assert_called_once_with(9, 14)
 
 
 def test_rhi_first_texture_failure_is_reported_before_no_texture_return() -> None:

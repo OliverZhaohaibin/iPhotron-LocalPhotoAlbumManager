@@ -41,3 +41,12 @@ def test_windows_collector_documentation_describes_reproduction_marker() -> None
     assert "press `R` once" in documentation
     assert "single ZIP" in documentation
     assert "does not copy photos" in documentation
+
+
+def test_d3d11_ab_protocol_excludes_unsupported_gpu_maps() -> None:
+    documentation = DOCUMENTATION.read_text(encoding="utf-8")
+
+    assert "Only the supported OpenGL baseline should" in documentation
+    assert "exercise opening/closing Maps" in documentation
+    assert "D3D11 run is Detail-only" in documentation
+    assert "must not enter Location or create a GPU map widget" in documentation

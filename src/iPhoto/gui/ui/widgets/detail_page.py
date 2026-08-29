@@ -579,14 +579,15 @@ class DetailPageWidget(QWidget):
         player_layout.addWidget(self.player_stack, 0, 0)
         self.player_container = player_container
 
-        # Opaque cover that hides the QRhiWidget area until its first frame
-        # has been rendered.  QRhiWidget replaces its backing-store region
+        # Persistent opaque cover that hides the QRhiWidget area until its
+        # current content has passed the platform submission barriers.
+        # QRhiWidget replaces its backing-store region
         # with its own texture; before the first render() call that texture
         # is uninitialised / transparent.  This cover occupies the same
         # grid cell as the player_stack and is raised above it so it
-        # visually hides any transparent texture.  It is removed by
-        # ``hide_rhi_init_cover()`` once any QRhiWidget child signals
-        # ``firstFrameReady``.
+        # visually hides any transparent texture. It remains in the layout for
+        # the page lifetime and is only hidden/shown, avoiding layout and
+        # stacking churn during later media transitions.
         self._rhi_init_cover = QWidget(player_container)
         self._configure_rhi_init_cover(self._rhi_init_cover)
         player_layout.addWidget(self._rhi_init_cover, 0, 0)
@@ -786,15 +787,13 @@ class DetailPageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def hide_rhi_init_cover(self) -> None:
-        """Remove the opaque cover once the first QRhiWidget frame is ready."""
+        """Hide the persistent opaque cover once presentation is safe."""
         if self._rhi_init_cover is not None:
             self._rhi_init_cover.hide()
-            self._rhi_init_cover.deleteLater()
-            self._rhi_init_cover = None
         self._raise_player_overlays()
 
     def show_rhi_init_cover(self) -> None:
-        """Re-create and show the opaque init cover.
+        """Show the persistent opaque init cover.
 
         Called when the player stack is about to switch to a QRhiWidget
         that has never rendered.  The backing texture of an uninitialised
@@ -803,7 +802,6 @@ class DetailPageWidget(QWidget):
         renders its first opaque frame.
         """
         if self._rhi_init_cover is not None:
-            # Cover still exists – just make sure it is visible and on top.
             self._rhi_init_cover.show()
             self._rhi_init_cover.raise_()
             self._raise_player_overlays()

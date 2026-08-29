@@ -874,7 +874,7 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     video_area = Mock(begin_load=Mock(), play=Mock(), reset_zoom=Mock())
     coordinator._player_view = Mock(
-        show_video_surface=Mock(),
+        begin_video_transition=Mock(),
         video_area=video_area,
     )
     coordinator._favorite_button = Mock(setEnabled=Mock())
@@ -897,6 +897,10 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
 
     video_area.begin_load.assert_called_once_with(Path("/fake/video.mp4"), 1)
     coordinator._schedule_video_preparation.assert_called_once_with(presentation)
+    coordinator._player_view.begin_video_transition.assert_called_once_with(
+        1,
+        interactive_when_ready=True,
+    )
     assert coordinator._trim_in_ms == 1000
     assert coordinator._trim_out_ms == 3000
 
@@ -911,7 +915,6 @@ def test_render_presentation_defers_video_load_during_location_file_write() -> N
     )
     coordinator._player_view = Mock(
         show_placeholder=Mock(),
-        show_video_surface=Mock(),
         video_area=video_area,
     )
     parent = Mock()
@@ -943,7 +946,6 @@ def test_render_presentation_defers_video_load_during_location_file_write() -> N
         call.show_placeholder(playback_coordinator_module._LOCATION_VIDEO_WRITE_PLACEHOLDER),
         call.stop(),
     ]
-    coordinator._player_view.show_video_surface.assert_not_called()
     video_area.present_video.assert_not_called()
     video_area.play.assert_not_called()
     coordinator._player_bar.setEnabled.assert_called_once_with(False)
@@ -1267,7 +1269,7 @@ def test_live_motion_first_frame_completes_current_transaction() -> None:
         ),
         live_motion_abs=Path("/fake/photo.mov"),
     )
-    coordinator._player_view = Mock(show_video_surface=Mock())
+    coordinator._player_view = Mock()
 
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
 
@@ -1275,7 +1277,6 @@ def test_live_motion_first_frame_completes_current_transaction() -> None:
         7,
         "live_motion_frame",
     )
-    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=False)
 
 
 def test_regular_video_first_frame_enables_interactive_controls() -> None:
@@ -1289,7 +1290,7 @@ def test_regular_video_first_frame_enables_interactive_controls() -> None:
     coordinator._detail_request_generation = 7
     coordinator._active_live_motion = None
     coordinator._current_presentation = _make_presentation(request_generation=7)
-    coordinator._player_view = Mock(show_video_surface=Mock())
+    coordinator._player_view = Mock()
 
     PlaybackCoordinator._on_video_first_frame_presented(coordinator, 7)
 
@@ -1297,7 +1298,6 @@ def test_regular_video_first_frame_enables_interactive_controls() -> None:
         7,
         "video_frame",
     )
-    coordinator._player_view.show_video_surface.assert_called_once_with(interactive=True)
 
 
 def test_live_motion_deferred_still_frame_does_not_complete_transaction() -> None:
@@ -1395,7 +1395,6 @@ def test_live_photo_motion_to_still_runs_overlay_and_prefetch(
         defer_still_updates=Mock(),
         apply_pending_still=Mock(return_value=has_pending_still),
         display_image=Mock(),
-        show_video_surface=Mock(),
         show_live_badge=Mock(),
         set_live_replay_enabled=Mock(),
     )
@@ -1467,7 +1466,6 @@ def test_live_photo_second_replay_restores_overlay_without_reopening_transaction
         defer_still_updates=Mock(),
         apply_pending_still=Mock(return_value=False),
         display_image=Mock(),
-        show_video_surface=Mock(),
         show_live_badge=Mock(),
         set_live_replay_enabled=Mock(),
     )
@@ -1549,7 +1547,6 @@ def test_live_photo_replay_preparation_failure_restores_overlay() -> None:
         defer_still_updates=Mock(),
         apply_pending_still=Mock(return_value=False),
         display_image=Mock(),
-        show_video_surface=Mock(),
         show_live_badge=Mock(),
         set_live_replay_enabled=Mock(),
         show_placeholder=Mock(),

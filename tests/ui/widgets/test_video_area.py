@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import struct
+import sys
 import time
 import weakref
 from unittest.mock import Mock, call, patch
@@ -15,7 +16,7 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import (
@@ -595,7 +596,7 @@ class TestVideoRendererWidget:
         w.videoFramePresented.connect(video_presented)
 
         w._queue_first_frame_ready()
-        w._frame_submission_queue.append((5, 7))
+        w._rendered_content_identity = (5, 7, 1)
 
         first_ready.assert_not_called()
         video_presented.assert_not_called()
@@ -605,7 +606,7 @@ class TestVideoRendererWidget:
         first_ready.assert_called_once_with()
         video_presented.assert_called_once_with(5, 7)
 
-    def test_clear_submission_cannot_acknowledge_a_later_video_draw(
+    def test_clear_compositions_cannot_delay_a_later_video_acknowledgement(
         self,
         qapp,
         mocker,
@@ -613,12 +614,25 @@ class TestVideoRendererWidget:
         w = VideoRendererWidget()
         video_presented = mocker.Mock()
         w.videoFramePresented.connect(video_presented)
-        w._frame_submission_queue.extend([None, (8, 13)])
 
-        w._on_frame_submitted()
+        for _ in range(20):
+            w._rendered_content_identity = None
+            w._on_frame_submitted()
         video_presented.assert_not_called()
 
+        w._rendered_content_identity = (8, 13, 21)
         w._on_frame_submitted()
+        video_presented.assert_called_once_with(8, 13)
+
+    def test_replayed_serial_gets_a_new_composition_acknowledgement(self, qapp, mocker):
+        w = VideoRendererWidget()
+        video_presented = mocker.Mock()
+        w.videoFramePresented.connect(video_presented)
+        w._last_composed_content_identity = (8, 13, 1)
+        w._rendered_content_identity = (8, 13, 2)
+
+        w._on_frame_submitted()
+
         video_presented.assert_called_once_with(8, 13)
 
     def test_release_resources_destroys_owned_qrhi_objects(self, qapp, mocker):
@@ -642,21 +656,27 @@ class TestVideoRendererWidget:
         w.renderResourcesInvalidated.connect(invalidated)
         w._initialized = True
         w._first_render_done = True
-        w._frame_submission_queue.append((1, 11))
+        w._rendered_content_identity = (1, 11, 1)
+        w._last_composed_content_identity = (1, 10, 0)
 
         w.releaseResources()
 
         for name, resource in resources.items():
             resource.destroy.assert_called_once_with()
-            assert getattr(w, name) is None
+        assert getattr(w, name) is None
         assert w._initialized is False
         assert w._first_render_done is False
-        assert not w._frame_submission_queue
+        assert w._rendered_content_identity is None
+        assert w._last_composed_content_identity is None
         invalidated.assert_called_once_with()
 
+    @pytest.mark.gpu
+    @pytest.mark.windows_compositor
     def test_visible_qrhi_submission_releases_cover_contract(self, qapp):
         """Exercise the real QRhiWidget render -> composition submission order."""
 
+        if sys.platform != "win32":
+            pytest.skip("requires a visible Windows compositor integration runner")
         if QApplication.platformName().lower() in {"offscreen", "minimal"}:
             pytest.skip("requires a visible platform QRhi compositor")
 
@@ -671,13 +691,33 @@ class TestVideoRendererWidget:
         cover.raise_()
         failures = []
         cover_visible_at_submission = []
+        waiting_for_second_submission = False
 
         def _release_cover() -> None:
+            nonlocal waiting_for_second_submission
+            cover_visible_at_submission.append(cover.isVisible())
+            if sys.platform != "win32":
+                cover.hide()
+                return
+
+            def _arm_second_submission() -> None:
+                nonlocal waiting_for_second_submission
+                waiting_for_second_submission = True
+                renderer.update()
+
+            QTimer.singleShot(0, _arm_second_submission)
+
+        def _on_composed() -> None:
+            nonlocal waiting_for_second_submission
+            if not waiting_for_second_submission:
+                return
+            waiting_for_second_submission = False
             cover_visible_at_submission.append(cover.isVisible())
             cover.hide()
 
         renderer.renderFailed.connect(lambda: failures.append(True))
         renderer.firstFrameReady.connect(_release_cover)
+        renderer.frameSubmitted.connect(_on_composed)
 
         host.resize(320, 180)
         host.show()
@@ -694,8 +734,9 @@ class TestVideoRendererWidget:
         cover_released = not cover.isVisible()
         host.close()
         if failures:
-            pytest.skip("platform could not create a QRhi for the contract test")
-        assert cover_visible_at_submission == [True]
+            pytest.fail("visible platform could not create a QRhi for the contract test")
+        expected_visibility = [True, True] if sys.platform == "win32" else [True]
+        assert cover_visible_at_submission == expected_visibility
         assert cover_released
 
     def test_transparent_rounded_clip_toggles_widget_attributes(self, qapp):
@@ -1250,6 +1291,28 @@ class TestVideoArea:
         va._gpu_video_frame_presented_handler(va._media_generation, 4)
 
         surface_spy.assert_called_once_with(42, 4)
+
+    def test_only_active_inner_surface_forwards_composition_submission(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        va = VideoArea()
+        composed = mocker.Mock()
+        va.surfaceCompositionSubmitted.connect(composed)
+
+        va._edit_viewer.frameSubmitted.emit()
+        composed.assert_not_called()
+
+        va._renderer.frameSubmitted.emit()
+        composed.assert_called_once_with()
+
+        va.set_adjusted_preview_enabled(True)
+        composed.reset_mock()
+        va._renderer.frameSubmitted.emit()
+        composed.assert_not_called()
+        va._edit_viewer.frameSubmitted.emit()
+        composed.assert_called_once_with()
 
     def test_hidden_surface_resource_loss_does_not_invalidate_visible_surface(
         self,

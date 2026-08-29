@@ -382,7 +382,8 @@ available.
 Media preview widgets use QRhi backend selection rather than a fixed raw-GL
 path. `IPHOTO_RHI_BACKEND=auto` selects Metal on macOS when Qt exposes it, and
 OpenGL elsewhere. Use `IPHOTO_RHI_BACKEND=opengl` to force the legacy OpenGL
-path for diagnostics.
+path for diagnostics. On Windows, `IPHOTO_RHI_BACKEND=d3d11` enables the
+pure-QRhi/HLSL path for A/B validation; it is not yet the `auto` default.
 
 ### Upstream sub-project: `PySide6-OsmAnd-SDK`
 
@@ -608,7 +609,7 @@ runtime binaries:
 | `IPHOTO_DISABLE_OPENGL` | Set to `1` to force CPU/fallback rendering where supported |
 | `IPHOTO_MAP_GL_DEBUG` | Set to `1` to print one-shot map GL surface diagnostics |
 | `IPHOTO_OSMAND_GL_PARTIAL_UPDATE` | Set to `1` to allow partial updates on platforms that default to full GL repaint |
-| `IPHOTO_RHI_BACKEND` | `auto`, `metal`, or `opengl` for media preview QRhi backend selection |
+| `IPHOTO_RHI_BACKEND` | `auto`, `metal`, `opengl`, or Windows-only `d3d11` for media preview QRhi backend selection |
 | `IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND` | Set to `1` only when deliberately testing packaged Linux maps outside the default XCB/GLX path |
 
 Example:

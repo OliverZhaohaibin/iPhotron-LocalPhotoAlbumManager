@@ -175,6 +175,7 @@ class VideoArea(QWidget):
     mediaFirstFrameReady = Signal(int)
     surfaceFrameSubmitted = Signal(int, int)
     surfaceInvalidated = Signal(int, int)
+    surfaceCompositionSubmitted = Signal()
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
@@ -1806,11 +1807,22 @@ class VideoArea(QWidget):
                 if owner is not None and child is not None:
                     owner._on_surface_resources_invalidated(child)
 
+            def _handle_composed(*, bound_surface=surface_ref) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if (
+                    owner is not None
+                    and child is not None
+                    and owner._surface_stack.currentWidget() is child
+                ):
+                    owner.surfaceCompositionSubmitted.emit()
+
             self._surface_lifecycle_handlers.extend(
-                (_handle_ready, _handle_invalidated)
+                (_handle_ready, _handle_invalidated, _handle_composed)
             )
             surface.firstFrameReady.connect(_handle_ready)
             surface.renderResourcesInvalidated.connect(_handle_invalidated)
+            surface.frameSubmitted.connect(_handle_composed)
 
     def _on_surface_first_frame_ready(self, surface: QWidget) -> None:
         """Publish readiness only for the currently visible QRhi child."""
@@ -1906,6 +1918,13 @@ class VideoArea(QWidget):
         """Return the currently active video surface for focus/event handling."""
 
         return self._edit_viewer if self._adjusted_preview_enabled else self._renderer
+
+    def request_active_surface_update(self) -> None:
+        """Request another composition from the currently visible QRhi child."""
+
+        surface = self._surface_stack.currentWidget()
+        if surface is not None:
+            surface.update()
 
     def video_viewport(self) -> QWidget:
         """Return the widget that accepts keyboard focus."""

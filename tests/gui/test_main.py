@@ -6,15 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtGui import QCloseEvent, QSurface
+from PySide6.QtGui import QCloseEvent, QSurface, QSurfaceFormat
 
 from iPhoto.gui.main import (
     _bootstrap_macos_external_tool_path,
     _configure_qt_opengl_defaults,
+    _map_gl_surface_format,
     _prepare_qt_runtime_for_maps,
     _prepare_top_level_rhi_surface,
     _startup_feature_plan,
     _startup_timing_plan,
+    _top_level_graphics_contract,
     _StartupInputGuard,
 )
 from iPhoto.gui.ui import main_window as main_window_module
@@ -185,6 +187,17 @@ def test_configure_qt_opengl_defaults_keeps_map_gl_contexts_on_macos_auto(monkey
     assert default_formats[0].samples() == 0
 
 
+@pytest.mark.parametrize(
+    ("platform", "alpha_bits"),
+    (("darwin", 8), ("win32", 8), ("linux", 0)),
+)
+def test_global_opengl_format_matches_top_level_translucency(
+    platform: str,
+    alpha_bits: int,
+) -> None:
+    assert _map_gl_surface_format(platform).alphaBufferSize() == alpha_bits
+
+
 def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_disabled(monkeypatch) -> None:
     helper_calls: list[bool] = []
     attributes: list[tuple[object, bool]] = []
@@ -307,6 +320,8 @@ def test_startup_timing_plan_has_no_fixed_platform_delay(
     ("backend", "surface_type"),
     (
         ("metal", QSurface.SurfaceType.MetalSurface),
+        ("direct3d11", QSurface.SurfaceType.Direct3DSurface),
+        ("d3d11", QSurface.SurfaceType.Direct3DSurface),
         ("opengl", QSurface.SurfaceType.OpenGLSurface),
     ),
 )
@@ -353,6 +368,43 @@ def test_prepare_top_level_rhi_surface_allows_platform_deferred_handle() -> None
         _prepare_top_level_rhi_surface(_FakeWindow(), "opengl")
         == "deferred:OpenGLSurface"
     )
+
+
+def test_windows_graphics_contract_reports_actual_surface_alpha(caplog) -> None:
+    actual_format = QSurfaceFormat()
+    actual_format.setAlphaBufferSize(0)
+
+    class _Handle:
+        def surfaceType(self):  # noqa: N802
+            return QSurface.SurfaceType.OpenGLSurface
+
+        def format(self):
+            return actual_format
+
+    class _Window:
+        def windowHandle(self):  # noqa: N802
+            return _Handle()
+
+        def testAttribute(self, attribute):  # noqa: N802
+            return attribute == Qt.WidgetAttribute.WA_TranslucentBackground
+
+        def windowFlags(self):  # noqa: N802
+            return Qt.WindowType.FramelessWindowHint
+
+    payload = _top_level_graphics_contract(
+        _Window(),
+        "opengl",
+        platform="win32",
+    )
+
+    assert payload == {
+        "backend": "opengl",
+        "surface_type": "OpenGLSurface",
+        "actual_alpha_bits": 0,
+        "translucent": True,
+        "frameless": True,
+    }
+    assert "has no confirmed alpha buffer" in caplog.text
 
 
 def test_startup_input_guard_filters_only_window_startup_input() -> None:

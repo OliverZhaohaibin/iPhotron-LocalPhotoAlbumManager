@@ -1088,6 +1088,16 @@ class TestInitCoverTracking:
         controller.show_video_surface(interactive=True)
         mock_show_cover.assert_not_called()
 
+    def test_show_video_surface_rejects_active_video_transition(self, controller):
+        controller.begin_video_transition(16, interactive_when_ready=True)
+        epoch = controller._surface_transition_epoch
+
+        with pytest.raises(RuntimeError, match="cannot cancel an active video transition"):
+            controller.show_video_surface(interactive=True)
+
+        assert controller._pending_video_generation == 16
+        assert controller._surface_transition_epoch == epoch
+
     def test_video_transition_waits_for_matching_submitted_generation(
         self,
         controller,
@@ -1215,6 +1225,36 @@ class TestInitCoverTracking:
         assert controller._pending_video_content_serial is None
         controls_enabled.assert_called_with(True)
         hide_cover.assert_called_once()
+
+    def test_invalid_composition_does_not_consume_post_submit_payload(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(
+            controller._video_area,
+            "request_active_surface_update",
+        )
+        controller.begin_video_transition(44, interactive_when_ready=False)
+        controller._video_area.surfaceFrameSubmitted.emit(44, 9)
+        qapp.processEvents()
+        payload = (44, 9)
+        assert controller._peek_post_submit_payload("video") == payload
+
+        # Simulate a future caller changing ownership without advancing epoch.
+        controller._pending_video_generation = 45
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        assert controller._peek_post_submit_payload("video") == payload
+        assert controller._post_submit_armed is True
+
+        controller._pending_video_generation = 44
+        controller._video_area.surfaceCompositionSubmitted.emit()
+
+        assert controller._peek_post_submit_payload("video") is None
+        assert controller._pending_video_generation is None
 
     def test_new_transition_cancels_deferred_windows_cover_release(
         self,

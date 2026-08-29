@@ -579,22 +579,34 @@ class PlayerViewController(QObject):
             self._post_submit_armed = True
             request_update()
 
-    def _take_post_submit_payload(
+    def _peek_post_submit_payload(
         self,
         kind: Literal["image", "video"],
     ) -> tuple[object, ...] | None:
+        """Return an armed payload without consuming the reveal barrier."""
+
         if (
             not self._post_submit_armed
             or self._post_submit_epoch != self._surface_transition_epoch
             or self._post_submit_kind != kind
         ):
             return None
-        payload = self._post_submit_payload
+        return self._post_submit_payload
+
+    def _consume_post_submit_payload(
+        self,
+        kind: Literal["image", "video"],
+        expected_payload: tuple[object, ...],
+    ) -> bool:
+        """Consume the barrier only if it still owns the validated payload."""
+
+        if self._peek_post_submit_payload(kind) != expected_payload:
+            return False
         self._post_submit_epoch = None
         self._post_submit_kind = None
         self._post_submit_payload = ()
         self._post_submit_armed = False
-        return payload
+        return True
 
     def _on_image_first_render(self) -> None:
         """Mark image viewer as initialised; hide cover if it is visible."""
@@ -683,7 +695,7 @@ class PlayerViewController(QObject):
         self._sync_detail_surface_cover()
 
     def _on_video_composition_submitted(self) -> None:
-        payload = self._take_post_submit_payload("video")
+        payload = self._peek_post_submit_payload("video")
         if payload is None or len(payload) != 2:
             return
         generation, content_serial = (int(payload[0]), int(payload[1]))
@@ -693,6 +705,8 @@ class PlayerViewController(QObject):
         if required_serial is not None and content_serial < required_serial:
             return
         if self._player_stack.currentWidget() is not self._video_area:
+            return
+        if not self._consume_post_submit_payload("video", payload):
             return
         self._finalize_video_surface_submission()
 
@@ -825,6 +839,11 @@ class PlayerViewController(QObject):
             unobstructed while still allowing the badge to trigger replays.
         """
 
+        if self._pending_video_generation is not None:
+            raise RuntimeError(
+                "show_video_surface() cannot cancel an active video transition; "
+                "wait for the matching surface submission"
+            )
         self._advance_surface_transition_epoch()
         self._pending_video_generation = None
         self._pending_video_content_serial = None
@@ -1565,7 +1584,7 @@ class PlayerViewController(QObject):
         self._accept_still_frame_presented(source, generation)
 
     def _on_image_composition_submitted(self) -> None:
-        payload = self._take_post_submit_payload("image")
+        payload = self._peek_post_submit_payload("image")
         if payload is None or len(payload) != 2:
             return
         source, generation = payload[0], int(payload[1])
@@ -1574,6 +1593,8 @@ class PlayerViewController(QObject):
         if source != self._pending_image_key:
             return
         if self._player_stack.currentWidget() is not self._image_viewer:
+            return
+        if not self._consume_post_submit_payload("image", payload):
             return
         self._finalize_image_surface_submission(source, generation)
 

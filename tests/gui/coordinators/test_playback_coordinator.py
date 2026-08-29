@@ -2730,7 +2730,7 @@ def test_handle_info_panel_dismissed_clears_viewmodel_state() -> None:
 
     PlaybackCoordinator._handle_info_panel_dismissed(coordinator)
 
-    coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=False)
+    coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=True)
 
 
 def test_refresh_info_panel_faces_runs_only_after_visible_recognition_binding() -> None:

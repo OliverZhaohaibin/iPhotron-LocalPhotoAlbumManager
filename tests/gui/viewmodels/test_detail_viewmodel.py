@@ -505,6 +505,26 @@ def test_toggle_info_flips_presentation_flag():
     assert vm.presentation.value.info_panel_visible is False
 
 
+def test_user_dismissal_publishes_hidden_state_and_one_toggle_reopens_panel():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+    vm.show_row(0)
+    vm.toggle_info()
+    assert vm.presentation.value.info_panel_visible is True
+
+    vm.hide_info_panel(refresh_presentation=True)
+
+    assert vm._info_panel_visible is False
+    assert vm.presentation.value.info_panel_visible is False
+
+    vm.toggle_info()
+
+    assert vm._info_panel_visible is True
+    assert vm.presentation.value.info_panel_visible is True
+
+
 def test_request_edit_emits_current_path():
     vm, store, session, _ = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")

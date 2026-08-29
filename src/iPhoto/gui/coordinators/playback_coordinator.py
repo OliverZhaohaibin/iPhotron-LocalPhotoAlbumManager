@@ -3182,7 +3182,7 @@ class PlaybackCoordinator(QObject):
 
     @Slot()
     def _handle_info_panel_dismissed(self) -> None:
-        self._detail_vm.hide_info_panel(refresh_presentation=False)
+        self._detail_vm.hide_info_panel(refresh_presentation=True)
 
     def _ensure_info_panel_metadata_state(self) -> None:
         if not hasattr(self, "_info_panel_metadata_cache"):

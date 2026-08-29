@@ -1498,23 +1498,27 @@ class PlayerViewController(QObject):
     def _on_still_frame_submitted(self, source: object, generation: int) -> None:
         """Reveal only the still content identity armed by the current request."""
 
+        submitted_generation = int(generation)
         if self._pending_image_generation is not None:
-            if int(generation) != self._pending_image_generation:
+            if submitted_generation == self._pending_image_generation:
+                if source != self._pending_image_key:
+                    return
+                if self._requires_post_submit_frame:
+                    self._schedule_post_submit_release(
+                        "image",
+                        source,
+                        submitted_generation,
+                    )
+                    return
+                self._finalize_image_surface_submission(source, submitted_generation)
                 return
-            if source != self._pending_image_key:
-                return
-            if self._requires_post_submit_frame:
-                self._schedule_post_submit_release(
-                    "image",
-                    source,
-                    int(generation),
-                )
-                return
-            self._finalize_image_surface_submission(source, int(generation))
+
+        # A newer LOD can be submitted while an older initial reveal still owns
+        # the Windows cover barrier.  Its presentation bookkeeping is current
+        # even though it must not release that older barrier.
+        if submitted_generation != self._present_generation:
             return
-        elif int(generation) != self._present_generation:
-            return
-        self._accept_still_frame_presented(source, int(generation))
+        self._accept_still_frame_presented(source, submitted_generation)
 
     def _on_still_frame_presented(self, source: object) -> None:
         """Compatibility path for viewers without content-aware submission."""
@@ -1559,22 +1563,31 @@ class PlayerViewController(QObject):
         self._finalize_image_surface_submission(source, generation)
 
     def _accept_still_frame_presented(self, source: object, generation: int) -> None:
-        if isinstance(source, DetailDecodeKey):
-            pending_session = self._pending_present_session
-            if pending_session is not None and pending_session[2] == source:
-                _generation, session, _key = pending_session
-                session.activate_surface(source)
-                self._current_render_session = session
-                self._current_decode_level = source.decode_level
-                self._touch_render_session(session)
-                self._pending_present_session = None
-            self._last_presented_decode_key = source
+        generation = int(generation)
+        if generation != self._present_generation:
+            return
+
         presented_path = getattr(source, "source", source)
         if presented_path != self._present_source:
             return
         started_at = self._present_started_at
         if generation <= 0 or started_at is None:
             return
+
+        if isinstance(source, DetailDecodeKey):
+            pending_session = self._pending_present_session
+            if (
+                pending_session is not None
+                and pending_session[0] == generation
+                and pending_session[2] == source
+            ):
+                _pending_generation, session, _key = pending_session
+                session.activate_surface(source)
+                self._current_render_session = session
+                self._current_decode_level = source.decode_level
+                self._touch_render_session(session)
+                self._pending_present_session = None
+            self._last_presented_decode_key = source
         log_detail_profile(
             "player_view",
             "still.presented",

@@ -518,6 +518,7 @@ class InfoPanel(QWidget):
         self._lens_label = self._make_content_label()
         self._summary_label = self._make_content_label()
         self._exposure_label = self._make_content_label()
+        self._sync_stable_metadata_row_heights()
 
         # -- root layout ---------------------------------------------------
         s = self._SHADOW_SIZE
@@ -976,6 +977,11 @@ class InfoPanel(QWidget):
             line_height * self._METADATA_VISIBLE_LINES + inter_label_spacing
         )
 
+    def _sync_stable_metadata_row_heights(self) -> None:
+        for label in (self._timestamp_label, self._exposure_label):
+            label.setWordWrap(False)
+            label.setFixedHeight(max(1, label.fontMetrics().lineSpacing()))
+
     def _sync_metadata_scroll_content(self, *, reset_to_top: bool = False) -> None:
         self._metadata_layout.invalidate()
         self._metadata_layout.activate()
@@ -1002,6 +1008,7 @@ class InfoPanel(QWidget):
     def _set_label_text(label: QLabel, text: str) -> None:
         if label.text() != text:
             label.setText(text)
+            label.setToolTip(text)
 
     def _set_label_state(self, label: QLabel, text: str, *, visible: bool) -> None:
         self._set_label_text(label, text)
@@ -1595,6 +1602,7 @@ class InfoPanel(QWidget):
             self._apply_close_button_style()
             self._update_face_add_button_icon()
         if event.type() == QEvent.Type.FontChange:
+            self._sync_stable_metadata_row_heights()
             self._sync_metadata_viewport_height()
             self._sync_metadata_scroll_content()
         super().changeEvent(event)

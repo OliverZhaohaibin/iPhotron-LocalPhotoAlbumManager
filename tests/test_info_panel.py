@@ -1192,16 +1192,17 @@ def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
     parent.close()
 
 
-def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication) -> None:
-    """Updating metadata while hidden should expand the panel on the next show."""
+def test_info_panel_metadata_enrichment_keeps_panel_height_stable(qapp: QApplication) -> None:
+    """Async metadata enrichment must not resize the visible Info Panel."""
 
     sparse = {
-        "rel": "clip.MOV",
-        "name": "clip.MOV",
-        "is_video": True,
+        "rel": "IMG_3686.HEIC",
+        "name": "IMG_3686.HEIC",
+        "is_video": False,
+        "_metadata_loading": True,
     }
     rich = {
-        "rel": "IMG_3686.HEIC",
+        **sparse,
         "name": "IMG_3686.HEIC",
         "dt": "2025-09-16T12:08:36Z",
         "make": "Apple",
@@ -1222,16 +1223,11 @@ def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication)
     qapp.processEvents()
     sparse_height = panel.height()
 
-    panel.hide()
-    qapp.processEvents()
     panel.set_asset_metadata(rich)
+    for _ in range(3):
+        qapp.processEvents()
 
-    panel.show()
-    qapp.processEvents()
-    layout = panel.layout()
-    expected_height = layout.totalHeightForWidth(max(panel.width(), panel.minimumWidth()))
-    assert panel.height() > sparse_height
-    assert panel.height() >= expected_height
+    assert panel.height() == sparse_height
     panel.close()
 
 

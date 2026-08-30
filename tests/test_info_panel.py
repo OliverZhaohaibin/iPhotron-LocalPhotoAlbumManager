@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPainter, QPixmap, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -105,6 +105,17 @@ def _shutdown_info_panels_after_test(qapp: QApplication):
 def _process_deferred_panel_content(qapp: QApplication) -> None:
     for _ in range(4):
         qapp.processEvents()
+
+
+def _expected_panel_size(panel: InfoPanel) -> QSize:
+    screen = panel._panel_screen()
+    if screen is None:
+        return QSize(panel._PANEL_WIDTH, panel._PANEL_HEIGHT)
+    available = screen.availableGeometry()
+    return QSize(
+        min(panel._PANEL_WIDTH, available.width() - panel._SCREEN_HORIZONTAL_MARGIN),
+        min(panel._PANEL_HEIGHT, available.height() - panel._SCREEN_VERTICAL_MARGIN),
+    )
 
 
 class _DelayedProjectionMiniMapWidget(_FakeMiniMapWidget):
@@ -377,7 +388,7 @@ def test_info_panel_video_shows_lens_when_available(qapp: QApplication) -> None:
     panel.close()
 
 
-def test_info_panel_metadata_region_reserves_four_lines_and_scrolls_without_resizing(
+def test_info_panel_body_scrolls_long_content_without_resizing_or_changing_width(
     qapp: QApplication,
 ) -> None:
     panel = InfoPanel()
@@ -391,17 +402,20 @@ def test_info_panel_metadata_region_reserves_four_lines_and_scrolls_without_resi
     panel.show()
     qapp.processEvents()
 
-    line_height = panel._camera_label.fontMetrics().lineSpacing()
-    expected_height = line_height * 4 + panel._metadata_layout.spacing() * 2
     panel_size = panel.size()
-    assert panel._metadata_scroll.height() == expected_height
-    assert panel._metadata_scroll.verticalScrollBar().maximum() == 0
-    assert panel._metadata_scroll.viewport().height() > panel._camera_label.height()
+    viewport_width = panel._body_scroll.viewport().width()
+    body_scrollbar = panel._body_scroll.verticalScrollBar()
+    assert panel_size == _expected_panel_size(panel)
+    assert not hasattr(panel, "_metadata_scroll")
+    assert body_scrollbar.maximum() == 0
+    assert not body_scrollbar.isEnabled()
+    assert "transparent" in body_scrollbar.styleSheet()
+    assert panel._body_scroll.horizontalScrollBar().maximum() == 0
 
     rich = dict(sparse)
     rich.update(
         {
-            "lens": "iPhone 16 Pro back triple camera " * 20,
+            "lens": "iPhone 16 Pro back triple camera " * 100,
             "w": 4032,
             "h": 3024,
             "bytes": 901_600,
@@ -413,14 +427,23 @@ def test_info_panel_metadata_region_reserves_four_lines_and_scrolls_without_resi
         qapp.processEvents()
 
     assert panel.size() == panel_size
-    assert panel._metadata_scroll.height() == expected_height
-    assert panel._metadata_scroll.verticalScrollBar().maximum() > 0
+    assert panel._body_scroll.viewport().width() == viewport_width
+    assert body_scrollbar.maximum() > 0
+    assert body_scrollbar.isEnabled()
+    assert body_scrollbar.styleSheet() == ""
+    assert panel._body_scroll.horizontalScrollBar().maximum() == 0
+
+    body_scrollbar.setValue(min(40, body_scrollbar.maximum()))
+    retained_scroll = body_scrollbar.value()
+    panel.set_asset_metadata({**rich, "iso": 640})
+    qapp.processEvents()
+    assert body_scrollbar.value() == retained_scroll
 
     panel.set_asset_metadata({**sparse, "rel": "other.jpg", "name": "other.jpg"})
     qapp.processEvents()
     assert panel.size() == panel_size
-    assert panel._metadata_scroll.verticalScrollBar().value() == 0
-    assert panel._metadata_scroll.verticalScrollBar().maximum() == 0
+    assert body_scrollbar.value() == 0
+    assert body_scrollbar.maximum() == 0
 
 
 def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> None:
@@ -1231,32 +1254,89 @@ def test_info_panel_metadata_enrichment_keeps_panel_height_stable(qapp: QApplica
     panel.close()
 
 
-def test_info_panel_first_show_schedules_post_show_reflow(
+def test_info_panel_first_show_uses_fixed_shell_without_deferred_resize(
     qapp: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The panel should queue a deferred geometry reflow on the first show."""
+    """The first presentation should use the screen-bounded design shell."""
 
     panel = InfoPanel()
-    schedule = Mock()
-
-    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
-
     panel.show()
+    first_size = panel.size()
     qapp.processEvents()
 
-    schedule.assert_called_once_with(recenter=True)
+    assert first_size == _expected_panel_size(panel)
+    assert panel.size() == first_size
     panel.close()
 
 
-def test_info_panel_visible_metadata_update_schedules_post_show_reflow(
+def test_info_panel_shell_is_capped_once_for_small_screen(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Visible metadata refreshes should queue a deferred reflow."""
+    del qapp
+
+    class _SmallScreen:
+        @staticmethod
+        def name() -> str:
+            return "small-screen"
+
+        @staticmethod
+        def availableGeometry() -> QRect:
+            return QRect(0, 0, 500, 600)
 
     panel = InfoPanel()
-    schedule = Mock()
+    monkeypatch.setattr(panel, "_panel_screen", lambda: _SmallScreen())
+
+    assert panel._apply_shell_size(force=True) is True
+    assert panel.size() == QSize(320, 520)
+
+    panel.set_asset_metadata(
+        {
+            "rel": "long.jpg",
+            "name": "long.jpg",
+            "lens": "Long translated metadata " * 100,
+        }
+    )
+    assert panel.size() == QSize(320, 520)
+
+
+def test_info_panel_faces_wrap_without_horizontal_overflow(qapp: QApplication) -> None:
+    from iPhoto.people.repository import AssetFaceAnnotation
+
+    panel = InfoPanel()
+    panel.set_asset_faces(
+        [
+            AssetFaceAnnotation(
+                face_id=f"face-{index}",
+                person_id=f"person-{index}",
+                display_name=f"Person {index}",
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            )
+            for index in range(14)
+        ]
+    )
+    panel.show()
+    qapp.processEvents()
+
+    assert panel._face_container.height() > _FACE_AVATAR_DIAMETER
+    assert panel._body_scroll.horizontalScrollBar().maximum() == 0
+    assert panel._body_content.width() == panel._body_scroll.viewport().width()
+    assert panel.size() == _expected_panel_size(panel)
+    panel.close()
+
+
+def test_info_panel_visible_metadata_update_refreshes_body_without_resizing_shell(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Visible metadata updates should affect only scrollable body geometry."""
+
+    panel = InfoPanel()
     metadata = {
         "rel": "clip.MOV",
         "name": "clip.MOV",
@@ -1266,11 +1346,14 @@ def test_info_panel_visible_metadata_update_schedules_post_show_reflow(
 
     panel.show()
     qapp.processEvents()
-    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
+    panel_size = panel.size()
+    refresh = Mock(wraps=panel._refresh_panel_geometry)
+    monkeypatch.setattr(panel, "_refresh_panel_geometry", refresh)
 
     panel.set_asset_metadata(metadata)
 
-    schedule.assert_called_once_with(recenter=False)
+    assert refresh.call_count >= 1
+    assert panel.size() == panel_size
     panel.close()
 
 
@@ -1731,16 +1814,14 @@ def test_info_panel_location_map_reflow_stabilizes_on_first_event_pass(
     panel.show()
     _process_deferred_panel_content(qapp)
 
-    first_height = panel.height()
-    layout = panel.layout()
-    expected_height = layout.totalHeightForWidth(max(panel.width(), panel.minimumWidth()))
-    assert first_height >= expected_height
+    first_size = panel.size()
+    assert first_size == _expected_panel_size(panel)
     assert panel._location_map.width() == panel._location_map.height()
 
     for _ in range(3):
         qapp.processEvents()
 
-    assert panel.height() == first_height
+    assert panel.size() == first_size
     panel.close()
 
 
@@ -1769,6 +1850,32 @@ def test_info_panel_location_suggestions_use_non_focus_floating_tool(
     assert panel._location_results.focusPolicy() == Qt.FocusPolicy.NoFocus
     assert panel._location_layout.indexOf(panel._location_results) == -1
     assert panel.height() == height_before
+    panel.close()
+
+
+def test_info_panel_body_scroll_hides_location_suggestions(qapp: QApplication) -> None:
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "long.jpg",
+            "name": "long.jpg",
+            "lens": "Long metadata content " * 100,
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+    panel.set_location_suggestions(
+        [SimpleNamespace(display_name="Munich", secondary_text="Germany")]
+    )
+    assert not panel._location_results.isHidden()
+
+    scrollbar = panel._body_scroll.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    scrollbar.setValue(min(40, scrollbar.maximum()))
+    qapp.processEvents()
+
+    assert panel._location_results.isHidden()
     panel.close()
 
 
@@ -1864,7 +1971,7 @@ def test_info_panel_location_keyboard_escape_closes_suggestions_without_confirm(
     panel.close()
 
 
-def test_info_panel_common_location_show_path_queues_one_post_show_reflow(
+def test_info_panel_common_location_show_path_keeps_fixed_shell(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1875,8 +1982,6 @@ def test_info_panel_common_location_show_path_queues_one_post_show_reflow(
         _fake_choose_map_widget_backend,
     )
     panel = InfoPanel()
-    schedule = Mock()
-    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
 
     panel.set_location_capability(enabled=True)
     panel.set_asset_metadata(
@@ -1890,7 +1995,8 @@ def test_info_panel_common_location_show_path_queues_one_post_show_reflow(
     panel.show()
     qapp.processEvents()
 
-    schedule.assert_called_once_with(recenter=True)
+    assert panel.size() == _expected_panel_size(panel)
+    assert panel._location_map.width() == panel._location_map.height()
     panel.close()
 
 

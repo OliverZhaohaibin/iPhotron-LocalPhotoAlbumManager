@@ -379,6 +379,14 @@ class InfoLocationMapView(QWidget):
         self._deferred_content_active = True
         self._queue_map_creation()
 
+    def refresh_after_ancestor_scroll(self) -> None:
+        """Resynchronise native/overlay geometry after a parent viewport moves."""
+
+        self._sync_corner_masks()
+        self._sync_overlay_geometry()
+        if self._map_widget is not None:
+            self._queue_viewport_sync()
+
     def prepare_for_panel_width(self, width: int) -> None:
         """Pre-size the square map before a hidden preview enters layout."""
 

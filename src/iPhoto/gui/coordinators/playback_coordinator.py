@@ -1052,6 +1052,7 @@ class PlaybackCoordinator(QObject):
             self._update_favorite_icon(presentation.is_favorite)
             if self._info_panel and presentation.info_panel_visible:
                 self._refresh_info_panel(presentation.info)
+                self._prepare_info_panel_presentation()
                 self._info_panel.show()
             elif (
                 self._info_panel
@@ -1277,6 +1278,7 @@ class PlaybackCoordinator(QObject):
 
         if self._info_panel and presentation.info_panel_visible:
             self._refresh_info_panel(presentation.info)
+            self._prepare_info_panel_presentation()
             self._info_panel.show()
         elif (
             self._info_panel
@@ -2541,14 +2543,20 @@ class PlaybackCoordinator(QObject):
                 and location_assign_path is not None
                 and current_path == location_assign_path
             )
+            presentation = getattr(self, "_current_presentation", None)
+            self._refresh_info_panel_faces(
+                presentation.asset_id if presentation is not None else None
+            )
+            recognition_ready = bool(
+                getattr(self, "_manual_face_worker_factory", None) is not None
+                and getattr(self, "_people_service", None) is not None
+            )
+            self._info_panel.set_face_actions_enabled(recognition_ready)
         if should_queue_enrichment:
             self._queue_info_panel_metadata_enrichment(
                 Path(path_key),
                 is_video=bool(local_info.get("is_video")),
             )
-        if asset_changed and self._info_panel.isVisible():
-            QTimer.singleShot(0, self.refresh_info_panel_faces)
-
     def _refresh_location_extension_state(self) -> bool:
         enabled = False
         capabilities = self._map_runtime_capabilities()
@@ -3166,19 +3174,11 @@ class PlaybackCoordinator(QObject):
     def toggle_info_panel(self) -> None:
         self._detail_vm.toggle_info()
 
-    def refresh_info_panel_faces(self) -> None:
-        """Populate recognition content after the reusable panel is presented."""
-
+    def _prepare_info_panel_presentation(self) -> None:
         info_panel = getattr(self, "_info_panel", None)
-        presentation = getattr(self, "_current_presentation", None)
-        if info_panel is None or not info_panel.isVisible() or presentation is None:
-            return
-        self._refresh_info_panel_faces(presentation.asset_id)
-        recognition_ready = bool(
-            getattr(self, "_manual_face_worker_factory", None) is not None
-            and getattr(self, "_people_service", None) is not None
-        )
-        info_panel.set_face_actions_enabled(recognition_ready)
+        prepare = getattr(info_panel, "prepare_for_presentation", None)
+        if callable(prepare):
+            prepare()
 
     @Slot()
     def _handle_info_panel_dismissed(self) -> None:

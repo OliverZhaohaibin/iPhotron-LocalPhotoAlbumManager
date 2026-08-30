@@ -50,6 +50,7 @@ class LocationInfoCoordinator(QObject):
         self._library_root_getter = library_root_getter
         self._recognition_provider = recognition_provider
         self._recognition_initialized = False
+        self._recognition_initialization_attempted = False
         self._panel = None
         self._write_queue = LocationFileWriteQueue(event_bus=event_bus, parent=self)
         detail.configure_location_domain(
@@ -79,15 +80,15 @@ class LocationInfoCoordinator(QObject):
             panel.downloadMapExtensionRequested.connect(
                 lambda: self._map_extension_download.start_download(source="info_panel")
             )
-            panel.presented.connect(self._handle_panel_presented)
             self._panel = panel
+        self._initialize_recognition_once(panel)
         self._detail.toggle_info_panel()
 
-    def _handle_panel_presented(self) -> None:
-        panel = self._panel
-        if panel is None or not panel.isVisible():
+    def _initialize_recognition_once(self, panel) -> None:
+        if self._recognition_initialization_attempted:
             return
-        if not self._recognition_initialized and self._recognition_provider is not None:
+        self._recognition_initialization_attempted = True
+        if self._recognition_provider is not None:
             try:
                 recognition = self._recognition_provider()
             except Exception:  # noqa: BLE001 - optional runtime boundary
@@ -95,9 +96,12 @@ class LocationInfoCoordinator(QObject):
                 panel.set_face_actions_enabled(False)
                 return
             self._recognition_initialized = recognition is not None
-        self._detail.refresh_info_panel_faces()
+        if not self._recognition_initialized:
+            panel.set_face_actions_enabled(False)
 
     def rebind_library(self) -> None:
+        self._recognition_initialized = False
+        self._recognition_initialization_attempted = False
         map_runtime = self._map_runtime_getter()
         self._write_queue.bind_library_root(self._library_root_getter())
         self._detail.set_map_runtime(map_runtime)

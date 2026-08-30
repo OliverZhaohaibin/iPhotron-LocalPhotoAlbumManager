@@ -80,8 +80,6 @@ class LocationInfoDetailPort(Protocol):
 
     def toggle_info_panel(self) -> None: ...
 
-    def refresh_info_panel_faces(self) -> None: ...
-
 
 __all__ = [
     "CoordinatorLifecyclePort",

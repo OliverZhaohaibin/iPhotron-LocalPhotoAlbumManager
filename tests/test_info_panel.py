@@ -47,6 +47,7 @@ class _FakeMiniMapWidget(QWidget):
     viewChanged = Signal(float, float, float)
     panned = Signal(QPointF)
     panFinished = Signal()
+    firstFramePresented = Signal()
 
     def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
         super().__init__(parent)
@@ -54,6 +55,7 @@ class _FakeMiniMapWidget(QWidget):
         self._zoom = 2.0
         self._center: tuple[float, float] = (0.0, 0.0)
         self.shutdown_calls = 0
+        self.auto_present_first_frame = True
         self.setMinimumSize(640, 480)
 
     @property
@@ -89,6 +91,9 @@ class _FakeMiniMapWidget(QWidget):
     def map_backend_metadata(self) -> MapBackendMetadata:
         return MapBackendMetadata(2.0, 19.0, True, "raster", "xyz")
 
+    def present_first_frame(self) -> None:
+        self.firstFramePresented.emit()
+
 
 @pytest.fixture(autouse=True)
 def _shutdown_info_panels_after_test(qapp: QApplication):
@@ -105,6 +110,12 @@ def _shutdown_info_panels_after_test(qapp: QApplication):
 def _process_deferred_panel_content(qapp: QApplication) -> None:
     for _ in range(4):
         qapp.processEvents()
+        for widget in QApplication.topLevelWidgets():
+            if not isinstance(widget, InfoPanel):
+                continue
+            map_widget = widget._location_map._map_widget
+            if isinstance(map_widget, _FakeMiniMapWidget) and map_widget.auto_present_first_frame:
+                map_widget.present_first_frame()
 
 
 def _expected_panel_size(panel: InfoPanel) -> QSize:
@@ -657,11 +668,13 @@ def test_info_panel_map_placeholder_precedes_lazy_backend_without_resizing(
         }
     )
 
-    panel.show()
+    panel.prepare_for_presentation()
 
     map_view = panel._location_map
     panel_size = panel.size()
-    assert map_view._map_widget is None
+    assert isinstance(map_view._map_widget, _FakeMiniMapWidget)
+    map_view._map_widget.auto_present_first_frame = False
+    assert not map_view._placeholder.isHidden()
     assert map_view.width() == map_view.height()
     placeholder = QPixmap(map_view._map_clip_frame.size())
     map_view._map_clip_frame.render(placeholder)
@@ -671,29 +684,18 @@ def test_info_panel_map_placeholder_precedes_lazy_backend_without_resizing(
     )
     assert center.name().lower() == "#88a8c2"
 
+    panel.show()
     _process_deferred_panel_content(qapp)
+    assert not map_view._placeholder.isHidden()
 
-    assert isinstance(map_view._map_widget, _FakeMiniMapWidget)
+    map_view._map_widget.present_first_frame()
+    qapp.processEvents()
+
+    assert map_view._placeholder.isHidden()
     assert panel.size() == panel_size
 
 
-def test_info_panel_presented_emits_once_per_visible_cycle(qapp: QApplication) -> None:
-    panel = InfoPanel()
-    presented: list[bool] = []
-    panel.presented.connect(lambda: presented.append(True))
-
-    panel.show()
-    _process_deferred_panel_content(qapp)
-    _process_deferred_panel_content(qapp)
-    assert presented == [True]
-
-    panel.dismiss()
-    panel.show()
-    _process_deferred_panel_content(qapp)
-    assert presented == [True, True]
-
-
-def test_info_panel_dismiss_before_presented_cancels_lazy_map_creation(
+def test_info_panel_dismiss_before_first_frame_reuses_stable_map_surface(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -714,14 +716,55 @@ def test_info_panel_dismiss_before_presented_cancels_lazy_map_creation(
     )
 
     panel.show()
+    map_widget = panel._location_map._map_widget
     panel.dismiss()
     _process_deferred_panel_content(qapp)
 
-    assert panel._location_map._map_widget is None
+    assert isinstance(map_widget, _FakeMiniMapWidget)
+    assert panel._location_map._map_widget is map_widget
+    assert map_widget.shutdown_calls == 0
 
     panel.show()
     _process_deferred_panel_content(qapp)
+    assert panel._location_map._map_widget is map_widget
+
+
+def test_info_panel_deferred_native_failure_falls_back_behind_placeholder(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingDeferredNativeMap(_FakeMiniMapWidget):
+        def start_deferred_content(self) -> None:
+            raise RuntimeError("native resources unavailable")
+
+    source = MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd())
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        lambda *_args, **_kwargs: (_FailingDeferredNativeMap, source, "osmand_native"),
+    )
+    monkeypatch.setattr(
+        info_location_map_module,
+        "_preferred_python_widget_class",
+        lambda **_kwargs: _FakeMiniMapWidget,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+        }
+    )
+
+    panel.show()
+    _process_deferred_panel_content(qapp)
+
     assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
+    assert not isinstance(panel._location_map._map_widget, _FailingDeferredNativeMap)
+    assert panel._location_map._backend_kind == "osmand_python"
 
 
 def test_info_panel_lazy_map_uses_latest_location_and_does_not_recreate_after_shutdown(
@@ -2284,8 +2327,9 @@ def test_info_location_map_unavailable_message_retranslates(
     view = info_location_map_module.InfoLocationMapView()
     try:
         view.set_location(37.7749, -122.4194)
+        view.prepare_surface()
         view.show()
-        view.activate_deferred_content()
+        view.start_deferred_content()
         _process_deferred_panel_content(qapp)
 
         assert not view._message_label.isHidden()

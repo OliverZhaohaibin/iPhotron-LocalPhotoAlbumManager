@@ -25,29 +25,53 @@ def test_visible_panel_toggle_uses_close_fast_path() -> None:
     coordinator._map_runtime_getter.assert_not_called()
 
 
-def test_presented_panel_initialises_recognition_once_and_refreshes_faces() -> None:
+def test_open_toggle_initialises_recognition_before_publishing_presentation() -> None:
+    calls: list[str] = []
+    panel = Mock(isVisible=Mock(return_value=False))
     coordinator = LocationInfoCoordinator.__new__(LocationInfoCoordinator)
-    panel = Mock(isVisible=Mock(return_value=True))
+    coordinator._window = SimpleNamespace(ui=SimpleNamespace(info_panel=panel))
     coordinator._panel = panel
-    coordinator._detail = Mock(refresh_info_panel_faces=Mock())
+    coordinator._detail = Mock(
+        toggle_info_panel=Mock(side_effect=lambda: calls.append("toggle")),
+    )
+    coordinator._recognition_provider = Mock(
+        side_effect=lambda: calls.append("recognition") or object()
+    )
+    coordinator._recognition_initialized = False
+    coordinator._recognition_initialization_attempted = False
+    coordinator._map_runtime_getter = Mock(return_value=None)
+
+    LocationInfoCoordinator.toggle(coordinator)
+
+    assert calls == ["recognition", "toggle"]
+    coordinator._recognition_provider.assert_called_once_with()
+
+
+def test_opening_panel_initialises_recognition_once_before_toggle() -> None:
+    coordinator = LocationInfoCoordinator.__new__(LocationInfoCoordinator)
+    panel = Mock()
+    coordinator._panel = panel
     coordinator._recognition_provider = Mock(return_value=object())
     coordinator._recognition_initialized = False
+    coordinator._recognition_initialization_attempted = False
 
-    LocationInfoCoordinator._handle_panel_presented(coordinator)
-    LocationInfoCoordinator._handle_panel_presented(coordinator)
+    LocationInfoCoordinator._initialize_recognition_once(coordinator, panel)
+    LocationInfoCoordinator._initialize_recognition_once(coordinator, panel)
 
     coordinator._recognition_provider.assert_called_once_with()
-    assert coordinator._detail.refresh_info_panel_faces.call_count == 2
+    assert coordinator._recognition_initialized
 
 
-def test_hidden_panel_does_not_initialise_recognition() -> None:
+def test_failed_recognition_initialisation_is_not_retried_on_reopen() -> None:
     coordinator = LocationInfoCoordinator.__new__(LocationInfoCoordinator)
-    coordinator._panel = Mock(isVisible=Mock(return_value=False))
-    coordinator._detail = Mock(refresh_info_panel_faces=Mock())
-    coordinator._recognition_provider = Mock(return_value=object())
+    panel = Mock()
+    coordinator._panel = panel
+    coordinator._recognition_provider = Mock(side_effect=RuntimeError("unavailable"))
     coordinator._recognition_initialized = False
+    coordinator._recognition_initialization_attempted = False
 
-    LocationInfoCoordinator._handle_panel_presented(coordinator)
+    LocationInfoCoordinator._initialize_recognition_once(coordinator, panel)
+    LocationInfoCoordinator._initialize_recognition_once(coordinator, panel)
 
-    coordinator._recognition_provider.assert_not_called()
-    coordinator._detail.refresh_info_panel_faces.assert_not_called()
+    coordinator._recognition_provider.assert_called_once_with()
+    panel.set_face_actions_enabled.assert_called_once_with(False)

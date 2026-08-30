@@ -2733,18 +2733,13 @@ def test_handle_info_panel_dismissed_clears_viewmodel_state() -> None:
     coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=True)
 
 
-def test_refresh_info_panel_faces_runs_only_after_visible_recognition_binding() -> None:
+def test_prepare_info_panel_presentation_delegates_before_show() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._info_panel = Mock(isVisible=Mock(return_value=True))
-    coordinator._current_presentation = _make_presentation(asset_id="asset-photo")
-    coordinator._refresh_info_panel_faces = Mock()
-    coordinator._manual_face_worker_factory = object()
-    coordinator._people_service = object()
+    coordinator._info_panel = Mock(prepare_for_presentation=Mock())
 
-    PlaybackCoordinator.refresh_info_panel_faces(coordinator)
+    PlaybackCoordinator._prepare_info_panel_presentation(coordinator)
 
-    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
-    coordinator._info_panel.set_face_actions_enabled.assert_called_once_with(True)
+    coordinator._info_panel.prepare_for_presentation.assert_called_once_with()
 
 
 def test_empty_location_query_does_not_create_search_controller() -> None:
@@ -2841,6 +2836,9 @@ def test_refresh_info_panel_batches_visible_panel_updates() -> None:
         def set_asset_faces(self, _faces) -> None:
             self.calls.append("faces")
 
+        def set_face_actions_enabled(self, _enabled: bool) -> None:
+            self.calls.append("face-actions")
+
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     panel = _FakeInfoPanel()
     coordinator._info_panel = panel
@@ -2856,7 +2854,15 @@ def test_refresh_info_panel_batches_visible_panel_updates() -> None:
         },
     )
 
-    assert panel.calls == ["enter", "location", "metadata", "busy", "exit"]
+    assert panel.calls == [
+        "enter",
+        "location",
+        "metadata",
+        "busy",
+        "faces",
+        "face-actions",
+        "exit",
+    ]
 
 
 def test_refresh_info_panel_uses_cached_metadata_without_queueing_worker() -> None:

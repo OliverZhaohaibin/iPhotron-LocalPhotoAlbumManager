@@ -422,9 +422,7 @@ class InfoPanel(QWidget):
     _SCREEN_HORIZONTAL_MARGIN = 40
     _SCREEN_VERTICAL_MARGIN = 80
     _DEFAULT_LOCATION_FALLBACK_TEXT = "Install the map extension to use Assign a Location."
-    _PRESENTED_EVENT = QEvent.Type(QEvent.registerEventType())
     dismissed = Signal()
-    presented = Signal()
     manualFaceAddRequested = Signal()
     faceDeleteRequested = Signal(object)
     faceMoveRequested = Signal(object, str)
@@ -463,9 +461,6 @@ class InfoPanel(QWidget):
         self._content_update_previous_updates_enabled: bool | None = None
         self._pending_geometry_refresh = False
         self._pending_geometry_recenter = False
-        self._visibility_generation = 0
-        self._presented_generation: int | None = None
-        self._presented_event_generation: int | None = None
         self._shutdown_requested = False
         self._location_capability_enabled = False
         self._location_preview_enabled = False
@@ -771,6 +766,16 @@ class InfoPanel(QWidget):
         self.hide()
         self.dismissed.emit()
 
+    def prepare_for_presentation(self) -> None:
+        """Attach stable native child surfaces before the top-level first paint."""
+
+        if self._shutdown_requested:
+            return
+        self._apply_shell_size()
+        self._refresh_panel_geometry()
+        if self._location_preview_enabled and not self._location_map.isHidden():
+            self._location_map.prepare_surface()
+
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
 
@@ -925,9 +930,7 @@ class InfoPanel(QWidget):
         the application shutdown path instead.
         """
 
-        self._visibility_generation += 1
         self._shutdown_requested = True
-        self._presented_event_generation = None
         self._clear_location_results()
         self._location_map.shutdown()
 
@@ -1265,6 +1268,9 @@ class InfoPanel(QWidget):
         if should_update_location:
             self._location_map.set_location(target[0], target[1])
             self._last_location_map_target = target
+        if self.isVisible():
+            self._location_map.prepare_surface()
+            self._location_map.schedule_deferred_content()
         self._location_container.updateGeometry()
         location_layout = self._location_container.layout()
         if location_layout is not None:
@@ -1556,24 +1562,6 @@ class InfoPanel(QWidget):
     # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
-    def event(self, event: QEvent) -> bool:  # type: ignore[override]
-        if event.type() == self._PRESENTED_EVENT:
-            generation = getattr(event, "visibility_generation", None)
-            if self._presented_event_generation == generation:
-                self._presented_event_generation = None
-            if (
-                self._shutdown_requested
-                or generation != self._visibility_generation
-                or not self.isVisible()
-                or self._presented_generation == generation
-            ):
-                return True
-            self._presented_generation = generation
-            self._location_map.activate_deferred_content()
-            self.presented.emit()
-            return True
-        return super().event(event)
-
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         is_title_target = watched in (self._title_bar, self._title_label)
         is_drag_event = event.type() in self._DRAG_EVENT_TYPES
@@ -1634,19 +1622,17 @@ class InfoPanel(QWidget):
     def showEvent(self, event: QShowEvent) -> None:
         """Centre the panel over its parent window the first time it appears."""
 
+        self.prepare_for_presentation()
         super().showEvent(event)
-        self._visibility_generation += 1
-        self._presented_generation = None
-        self._presented_event_generation = None
         shell_changed = self._apply_shell_size()
         first_show = not self._centered
         if first_show:
             self._centered = True
         self._refresh_panel_geometry(recenter=first_show or shell_changed)
+        if self._location_preview_enabled:
+            self._location_map.schedule_deferred_content()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
-        self._visibility_generation += 1
-        self._presented_event_generation = None
         self._set_widget_explicitly_visible(self._location_results, False)
         super().hideEvent(event)
 
@@ -1713,22 +1699,6 @@ class InfoPanel(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
         painter.end()
-
-        generation = self._visibility_generation
-        if (
-            not self._shutdown_requested
-            and self.isVisible()
-            and self._presented_generation != generation
-            and self._presented_event_generation != generation
-        ):
-            presented_event = QEvent(self._PRESENTED_EVENT)
-            presented_event.visibility_generation = generation
-            self._presented_event_generation = generation
-            QCoreApplication.postEvent(
-                self,
-                presented_event,
-                Qt.EventPriority.LowEventPriority.value,
-            )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """Begin a drag when clicking on the title bar area."""

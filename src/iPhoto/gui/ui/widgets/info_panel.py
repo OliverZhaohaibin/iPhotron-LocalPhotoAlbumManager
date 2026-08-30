@@ -418,7 +418,7 @@ class InfoPanel(QWidget):
     _SHADOW_MAX_ALPHA = 18
     _SHADOW_RADIUS_GROWTH = 0.5
     _PANEL_WIDTH = 320
-    _PANEL_HEIGHT = 798
+    _PANEL_HEIGHT = 550
     _SCREEN_HORIZONTAL_MARGIN = 40
     _SCREEN_VERTICAL_MARGIN = 80
     _DEFAULT_LOCATION_FALLBACK_TEXT = "Install the map extension to use Assign a Location."
@@ -568,16 +568,16 @@ class InfoPanel(QWidget):
         self._metadata_layout.addWidget(self._summary_label)
         self._content_layout.addWidget(self._metadata_frame)
 
-        separator = QFrame(self)
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        self._content_layout.addWidget(separator)
+        self._metadata_separator = QFrame(self)
+        self._metadata_separator.setFrameShape(QFrame.HLine)
+        self._metadata_separator.setFrameShadow(QFrame.Sunken)
+        self._content_layout.addWidget(self._metadata_separator)
 
-        exposure_container = QWidget(self)
-        exposure_layout = QHBoxLayout(exposure_container)
+        self._exposure_container = QWidget(self)
+        exposure_layout = QHBoxLayout(self._exposure_container)
         exposure_layout.setContentsMargins(0, 0, 0, 0)
         exposure_layout.addWidget(self._exposure_label)
-        self._content_layout.addWidget(exposure_container)
+        self._content_layout.addWidget(self._exposure_container)
 
         self._face_separator = QFrame(self)
         self._face_separator.setFrameShape(QFrame.HLine)
@@ -678,6 +678,7 @@ class InfoPanel(QWidget):
         self._location_map.hide()
         self._location_layout.addWidget(self._location_map)
         self._content_layout.addWidget(self._location_container)
+        self._content_layout.addStretch(1)
 
         self._body_scroll.setWidget(self._body_content)
         body_scrollbar = self._body_scroll.verticalScrollBar()

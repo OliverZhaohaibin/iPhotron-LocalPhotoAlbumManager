@@ -446,6 +446,88 @@ def test_info_panel_body_scrolls_long_content_without_resizing_or_changing_width
     assert body_scrollbar.maximum() == 0
 
 
+def test_info_panel_short_content_keeps_natural_section_gaps_and_bottom_slack(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.set_asset_metadata(
+        {
+            "rel": "IMG_1424.HEIC",
+            "name": "IMG_1424.HEIC",
+            "dt": "2026-01-27T18:43:16Z",
+            "make": "Apple",
+            "model": "Apple iPhone 16 Pro",
+            "lens": "iPhone 16 Pro back triple camera 6.765mm f/1.78",
+            "w": 3024,
+            "h": 4032,
+            "bytes": 901_600,
+            "codec": "heif",
+            "iso": 640,
+            "focal_length": 6.8,
+            "exposure_compensation": 0,
+            "f_number": 1.78,
+            "exposure_time": "1/25",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    spacing = panel._content_layout.spacing()
+    adjacent_sections = (
+        (panel._filename_label, panel._timestamp_label),
+        (panel._timestamp_label, panel._metadata_frame),
+        (panel._exposure_container, panel._face_separator),
+    )
+    for previous, following in adjacent_sections:
+        assert following.y() - (previous.y() + previous.height()) == spacing
+
+    tail_item = panel._content_layout.itemAt(panel._content_layout.count() - 1)
+    tail_spacer = tail_item.spacerItem()
+    assert tail_spacer is not None
+    assert tail_spacer.geometry().height() > 0
+    assert tail_spacer.geometry().top() >= (
+        panel._location_container.y() + panel._location_container.height()
+    )
+    assert panel.size() == _expected_panel_size(panel)
+    panel.close()
+
+
+def test_info_panel_long_text_wraps_fully_before_body_scrolls(qapp: QApplication) -> None:
+    panel = InfoPanel()
+    panel.set_asset_metadata(
+        {
+            "rel": "long.jpg",
+            "name": "very-long-file-name-" * 30,
+            "lens": "Long translated lens metadata " * 50,
+        }
+    )
+    panel._set_label_text(
+        panel._timestamp_label,
+        "Long localized timestamp value " * 20,
+    )
+    panel._set_label_text(
+        panel._exposure_label,
+        "Long localized exposure value " * 20,
+    )
+    panel._refresh_panel_geometry()
+    panel.show()
+    for _ in range(3):
+        qapp.processEvents()
+
+    for label in (
+        panel._filename_label,
+        panel._timestamp_label,
+        panel._lens_label,
+        panel._exposure_label,
+    ):
+        assert label.wordWrap() is True
+        assert label.height() >= label.heightForWidth(label.width())
+
+    assert panel._body_scroll.verticalScrollBar().maximum() > 0
+    assert panel.size() == _expected_panel_size(panel)
+    panel.close()
+
+
 def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> None:
     """When metadata is sparse the video fallback string should be displayed."""
 

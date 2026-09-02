@@ -93,3 +93,25 @@ def test_map_runtime_service_checks_search_extension_against_bound_package_root(
 
     assert probed_roots == [tmp_path]
     assert capabilities.location_search_available is True
+
+
+def test_native_failure_selects_legacy_without_disabling_search(monkeypatch, tmp_path):
+    monkeypatch.setattr(map_runtime_service_module, "_has_qt_application", lambda: True)
+    monkeypatch.setattr(map_runtime_service_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(map_runtime_service_module, "prefer_osmand_native_widget", lambda: True)
+    monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_native_widget", lambda root: True)
+    monkeypatch.setattr(map_runtime_service_module, "probe_native_widget_runtime", lambda root: (False, "incompatible surface"))
+    monkeypatch.setattr(map_runtime_service_module, "choose_default_map_source",
+                        lambda root, **kw: MapSourceSpec.osmand_default(root))
+    monkeypatch.setattr(map_runtime_service_module, "has_usable_osmand_search_extension", lambda root: True)
+    capabilities = SessionMapRuntimeService(tmp_path).capabilities()
+    assert capabilities.preferred_backend == "legacy_python"
+    assert capabilities.native_failure_reason == "incompatible surface"
+    assert capabilities.location_search_available
+    from iPhoto.gui.ui.widgets.map_widget_factory import choose_map_widget_backend
+    _, source, backend = choose_map_widget_backend(
+        MapSourceSpec.osmand_default(tmp_path), use_opengl=True,
+        runtime_capabilities=capabilities, package_root=tmp_path,
+    )
+    assert backend == "legacy_python"
+    assert source.kind == "legacy_pbf"

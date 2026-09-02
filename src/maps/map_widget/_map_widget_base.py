@@ -18,6 +18,7 @@ from .input_handler import InputHandler
 from .layer import LayerPlan
 from .map_renderer import CityAnnotation, MapRenderer
 from .tile_manager import TileManager
+from .viewport import effective_pan_delta
 
 
 class SupportsMapViewport(Protocol):
@@ -194,7 +195,6 @@ class MapWidgetController:
         self._tile_manager.tiles_changed.connect(self._schedule_update)
 
         self._input_handler.pan_requested.connect(self._on_pan_requested)
-        self._input_handler.pan_requested.connect(self._notify_pan_delta)
         self._input_handler.pan_finished.connect(self._notify_pan_finished)
         self._input_handler.zoom_requested.connect(self._on_zoom_requested)
         self._input_handler.cursor_changed.connect(self._set_drag_cursor)
@@ -253,12 +253,20 @@ class MapWidgetController:
     def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
         """Translate the camera by a fixed on-screen pixel delta."""
 
+        self._apply_pan(delta_x, delta_y, finished=True)
+
+    def _apply_pan(self, delta_x: float, delta_y: float, *, finished: bool) -> None:
         world_size = self._world_size()
+        before = self._center_x, self._center_y
         self._center_x -= float(delta_x) / world_size
         self._center_y -= float(delta_y) / world_size
         self._wrap_center()
+        applied = effective_pan_delta(before, (self._center_x, self._center_y), world_size)
+        self._notify_pan_delta(QPointF(*applied))
         self._widget.update()
         self._notify_view_changed()
+        if finished:
+            self._notify_pan_finished()
 
     # ------------------------------------------------------------------
     def center_lonlat(self) -> tuple[float, float]:
@@ -433,11 +441,11 @@ class MapWidgetController:
     def _on_pan_requested(self, delta: QPointF) -> None:
         """Translate drag gestures from screen space to world space."""
 
-        self.pan_by_pixels(delta.x(), delta.y())
+        self._apply_pan(delta.x(), delta.y(), finished=False)
 
     # ------------------------------------------------------------------
     def _notify_pan_delta(self, delta: QPointF) -> None:
-        """Forward the on-screen drag delta to registered observers."""
+        """Forward applied map movement in logical pixels, including zero."""
 
         for callback in list(self._pan_listeners):
             try:

@@ -31,6 +31,9 @@ class _MarkerCluster:
     screen_x_sum: float = 0.0
     screen_y_sum: float = 0.0
     bounding_rect: QRectF = field(default_factory=QRectF)
+    representative_screen_pos_exact: Optional[QPointF] = None
+    projection_offset: Optional[QPointF] = None
+    projection_visible: bool = True
 
     def __post_init__(self) -> None:
         """Prime the cached aggregates once the dataclass is initialised."""
@@ -332,6 +335,7 @@ class MarkerController(QObject):
         self._view_center_y = 0.5
         self._view_zoom = float(self._map_widget.zoom)
         self._is_panning = False
+        self._projection_snapshot_zoom: float | None = None
         self._pending_click_assets: list[GeotaggedAsset] = []
         self._pending_click_position = QPointF()
         self._pending_click_rect = QRectF()
@@ -434,15 +438,27 @@ class MarkerController(QObject):
         self._view_center_x = float(center_x)
         self._view_center_y = float(center_y)
         self._view_zoom = float(zoom)
+        if self._prefer_exact_screen_projection and self._projection_snapshot_zoom != zoom:
+            # Translation offsets belong to one zoom. Rebuild after a zoom even
+            # if a mouse button is still down, rather than displaying old geometry.
+            self._is_panning = False
+            for cluster in self._clusters:
+                cluster.projection_visible = False
+                cluster.bounding_rect = QRectF()
+            if self._clusters:
+                self.clustersUpdated.emit(self._clusters)
         self._schedule_cluster_update()
 
     def handle_pan(self, delta: QPointF) -> None:
-        """Shift visible markers while the user drags the map."""
+        """Suspend clustering; exact backends move markers on rendered frames."""
 
         self._invalidate_cluster_request()
         self._is_panning = True
         if self._cluster_timer.isActive():
             self._cluster_timer.stop()
+
+        if self._prefer_exact_screen_projection:
+            return
 
         if not self._clusters:
             self.clustersUpdated.emit([])
@@ -456,6 +472,31 @@ class MarkerController(QObject):
             if marker.bounding_rect:
                 marker.bounding_rect.translate(delta.x(), delta.y())
 
+        self.clustersUpdated.emit(self._clusters)
+
+    def _project_exact(self, longitude: float, latitude: float) -> Optional[QPointF]:
+        projector = getattr(
+            self._map_widget, "project_lonlat_exact", self._map_widget.project_lonlat,
+        )
+        return projector(longitude, latitude)
+
+    def handle_projection_changed(self) -> None:
+        """Refresh only existing anchors, without walking assets or reclustering."""
+
+        if not self._prefer_exact_screen_projection:
+            return
+        if self._projection_snapshot_zoom != float(self._map_widget.zoom):
+            return
+        for cluster in self._clusters:
+            anchor = cluster.representative
+            point = self._project_exact(anchor.longitude, anchor.latitude)
+            if point is not None and cluster.projection_offset is not None:
+                cluster.projection_visible = True
+                cluster.screen_pos = point + cluster.projection_offset
+                cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
+            else:
+                cluster.projection_visible = False
+                cluster.bounding_rect = QRectF()
         self.clustersUpdated.emit(self._clusters)
 
     def handle_pan_finished(self) -> None:
@@ -524,7 +565,7 @@ class MarkerController(QObject):
         """Return the foremost cluster that intersects *position*."""
 
         for cluster in reversed(self._clusters):
-            if cluster.bounding_rect.contains(position):
+            if cluster.projection_visible and cluster.bounding_rect.contains(position):
                 return cluster
         return None
 
@@ -806,8 +847,18 @@ class MarkerController(QObject):
             for cluster in clusters
         }
         for cluster in clusters:
+            if self._prefer_exact_screen_projection:
+                anchor = cluster.representative_screen_pos_exact
+                if anchor is None:
+                    asset = cluster.representative
+                    anchor = self._project_exact(asset.longitude, asset.latitude)
+                cluster.projection_offset = cluster.screen_pos - anchor if anchor is not None else None
+                cluster.projection_visible = anchor is not None
             cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
+            if not cluster.projection_visible:
+                cluster.bounding_rect = QRectF()
 
+        self._projection_snapshot_zoom = float(self._map_widget.zoom)
         self._clusters = clusters
         self._update_city_annotations_for_clusters(self._clusters)
         self.clustersUpdated.emit(self._clusters)
@@ -831,7 +882,7 @@ class MarkerController(QObject):
         clusters: list[_MarkerCluster] = []
 
         for asset in self._assets:
-            point = self._map_widget.project_lonlat(asset.longitude, asset.latitude)
+            point = self._project_exact(asset.longitude, asset.latitude)
             if point is None:
                 continue
 
@@ -872,6 +923,7 @@ class MarkerController(QObject):
                     representative=asset,
                     assets=[asset],
                     screen_pos=point,
+                    representative_screen_pos_exact=QPointF(point),
                 )
                 cluster.cell = (cell_x, cell_y)  # type: ignore[attr-defined]
                 cluster.screen_x_sum = point.x()
@@ -898,7 +950,7 @@ class MarkerController(QObject):
 
         for coarse_cluster in coarse_clusters:
             representative = coarse_cluster.representative
-            exact_representative = self._map_widget.project_lonlat(
+            exact_representative = self._project_exact(
                 representative.longitude,
                 representative.latitude,
             )
@@ -965,6 +1017,7 @@ class MarkerController(QObject):
 
             asset_count = float(len(coarse_cluster.assets))
             coarse_cluster.screen_pos = QPointF(corrected_centroid)
+            coarse_cluster.representative_screen_pos_exact = QPointF(exact_representative)
             coarse_cluster.screen_x_sum = corrected_centroid.x() * asset_count
             coarse_cluster.screen_y_sum = corrected_centroid.y() * asset_count
             coarse_cluster.cell = (cell_x, cell_y)  # type: ignore[attr-defined]

@@ -91,6 +91,7 @@ class SessionMapRuntimeService(MapRuntimePort):
         )
 
         native_widget_available = False
+        native_failure_reason = None
         if (
             has_qt_app
             and
@@ -98,7 +99,9 @@ class SessionMapRuntimeService(MapRuntimePort):
             and prefer_osmand_native_widget()
             and has_usable_osmand_native_widget(self._package_root)
         ):
-            native_widget_available, _ = probe_native_widget_runtime(self._package_root)
+            native_widget_available, reason = probe_native_widget_runtime(self._package_root)
+            if not native_widget_available:
+                native_failure_reason = reason or "Native map runtime unavailable"
 
         default_source = choose_default_map_source(
             self._package_root,
@@ -108,7 +111,9 @@ class SessionMapRuntimeService(MapRuntimePort):
         osmand_extension_available = default_source.kind == "osmand_obf"
         location_search_available = has_usable_osmand_search_extension(self._package_root)
 
-        if osmand_extension_available and native_widget_available:
+        if native_failure_reason:
+            preferred_backend = "legacy_python"
+        elif osmand_extension_available and native_widget_available:
             preferred_backend = "osmand_native"
         elif osmand_extension_available:
             preferred_backend = "osmand_python"
@@ -124,6 +129,7 @@ class SessionMapRuntimeService(MapRuntimePort):
             native_widget_available=native_widget_available,
             osmand_extension_available=osmand_extension_available,
             location_search_available=location_search_available,
+            native_failure_reason=native_failure_reason,
             status_message=self._status_message(
                 preferred_backend=preferred_backend,
                 python_gl_available=python_gl_available,

@@ -560,12 +560,29 @@ return the QWidget host; `osmand_widget_get_event_target` returns the actual
 rendering window. The container owns that window and cleanup must finish before
 its OpenGL context is destroyed.
 
-The bridge exports the instance-free `int osmand_widget_surface_kind()` query:
-`1` means a composited QOpenGLWidget and `2` means an independent QOpenGLWindow
-(`0` or a missing symbol is unknown). On macOS with the default Metal backend,
-the application rejects unknown/widget surfaces before creating any native
-child and falls back to the Python window renderer, then CPU rendering if
-necessary. An explicit `IPHOTO_RHI_BACKEND=opengl` retains legacy compatibility.
+Newer bridges export the instance-free `int osmand_widget_surface_kind()` query:
+`1` means a composited QOpenGLWidget and `2` means an independent QOpenGLWindow.
+A missing query is not a binary incompatibility: historical touch-interaction
+builds already use independent windows. On macOS/Metal, unknown surfaces are
+inspected in an isolated `--native-map-surface-probe` process using the existing
+creation and event-target exports. Results are cached by binary identity and
+Qt version. A confirmed independent window remains native; failed or incompatible
+runtimes use the legacy tile source with Python GL, then CPU if needed.
+An explicit `IPHOTO_RHI_BACKEND=opengl` retains widget-surface support.
+
+Native marker overlays use the existing exact projection export and Qt's
+`frameSwapped` signal. Mouse displacement only marks a drag as active; each changed
+map frame reprojects existing cluster representatives and preserves their centroid
+offsets. Cluster membership is rebuilt after release, once native queued input has
+been flushed. No new C ABI or binary rebuild is required for pan synchronization.
+Python map backends instead publish the screen displacement remaining after
+camera wrapping/clamping, in logical pixels.
+
+An actual native fallback displays one non-modal update notice per application
+session. Reserve future downloads in `MAP_EXTENSION_UPDATE_URLS` in
+`src/maps/map_sources.py` (Windows, macOS, Linux). All entries default to `None`;
+the update action appears only once the platform's URL is configured. It opens
+that URL in the system browser and does not reuse the historical installer URLs.
 
 Keep the surface implementation in this repository and the SDK source in sync;
 copying an older working dylib alone does not survive a rebuild. After building
@@ -583,6 +600,18 @@ map first-frame completion, still/video/Live Photo surface transitions, Info
 mini-maps and normal window teardown. It verifies actual Metal frame submission
 and framebuffer pixels, not only the window surface type. Native lifecycle and
 fallback unit tests remain in `test_photo_map_view.py` and `test_info_panel.py`.
+
+Test pan projection and hitboxes with actual native frames on a Retina desktop:
+
+```bash
+IPHOTO_RUN_MACOS_GPU_TESTS=1 QT_QPA_PLATFORM=offscreen \
+  .venv/bin/python tools/run_pytest_ci.py tests/gui/test_native_map_pan_gpu.py -q -s
+```
+
+The test runs at scale factors 0.5 and 1 (DPR 1 and 2 on Retina), includes north/
+south bounds, fractional zoom, longitude wrap, projection disappearance/recovery,
+and release without a positional correction. Set `IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY`
+to an existing older library to repeat the same test without replacing it.
 
 If you are intentionally using the MinGW path instead of MSVC, replace
 `dist-msvc` with `dist`. The helper-backed Python renderer only requires the

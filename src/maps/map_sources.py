@@ -19,6 +19,20 @@ DEFAULT_OSMAND_RESOURCES_ROOT = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT
 DEFAULT_OSMAND_STYLE_PATH = DEFAULT_OSMAND_RESOURCES_ROOT / "rendering_styles" / DEFAULT_OSMAND_STYLE_FILENAME
 DEFAULT_OSMAND_SEARCH_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "search" / "geonames.sqlite3"
 DEFAULT_OSMAND_PENDING_EXTENSION_SUFFIX = ".pending"
+# Fill these with the new native-runtime downloads when they are published.
+# Update notices deliberately do not use the historical install URLs below.
+MAP_EXTENSION_UPDATE_URLS: dict[str, str | None] = {
+    "win32": None,
+    "darwin": None,
+    "linux": None,
+}
+
+
+def map_extension_update_url(platform: str | None = None) -> str | None:
+    platform = platform or sys.platform
+    return MAP_EXTENSION_UPDATE_URLS.get("linux" if platform.startswith("linux") else platform)
+
+
 LINUX_MAP_EXTENSION_DOWNLOAD_URL = (
     "https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/"
     "releases/download/v5.0.0/extension.tar.xz"

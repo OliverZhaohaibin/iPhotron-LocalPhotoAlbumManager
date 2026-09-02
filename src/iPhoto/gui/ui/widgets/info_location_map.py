@@ -36,6 +36,7 @@ from maps.map_widget.drag_cursor import DragCursorManager
 from ....application.ports import MapRuntimePort
 from ....gui.i18n import tr
 from .map_widget_factory import (
+    map_native_failure,
     MapGLWidget,
     MapGLWindowWidget,
     MapWidget,
@@ -49,6 +50,7 @@ from .map_widget_factory import (
     resolve_map_package_root,
 )
 from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
+from .map_extension_notice import show_map_extension_update_notice
 from .photo_map_view import (
     _configure_opaque_map_container,
 )
@@ -125,13 +127,18 @@ def create_map_widget(
     assert resolved_map_source is not None
     if backend_kind == "osmand_native" and not allow_native:
         widget_cls = _preferred_python_widget_class(use_opengl=use_opengl)
-        backend_kind = "osmand_python"
+        resolved_map_source = MapSourceSpec.legacy_default(package_root).resolved(package_root)
+        backend_kind = "legacy_python"
+    failure = (
+        "Native map initialization failed" if not allow_native
+        else map_native_failure(map_runtime_capabilities, package_root)
+    )
     try:
         if issubclass(widget_cls, NativeOsmAndWidget):
             widget = widget_cls(parent, map_source=resolved_map_source, defer_initialization=True)
         else:
             widget = widget_cls(parent, map_source=resolved_map_source)
-        return MapWidgetFactoryResult(widget, resolved_map_source, backend_kind, use_opengl)
+        return MapWidgetFactoryResult(widget, resolved_map_source, backend_kind, use_opengl, failure)
     except Exception as exc:
         if backend_kind == "osmand_native":
             active_logger.warning(
@@ -140,6 +147,7 @@ def create_map_widget(
                 exc,
             )
             fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
+            resolved_map_source = MapSourceSpec.legacy_default(package_root).resolved(package_root)
             try:
                 widget = fallback_cls(parent, map_source=resolved_map_source)
             except Exception:
@@ -154,8 +162,9 @@ def create_map_widget(
             return MapWidgetFactoryResult(
                 widget,
                 resolved_map_source,
-                "osmand_python",
+                "legacy_python",
                 use_opengl,
+                str(exc),
             )
         if widget_cls in {MapGLWidget, MapGLWindowWidget}:
             active_logger.warning(
@@ -172,7 +181,8 @@ def create_map_widget(
                 widget,
                 resolved_map_source,
                 fallback_backend_kind,
-                use_opengl,
+                False,
+                failure,
             )
         active_logger.warning("Mini-map backend unavailable", exc_info=True)
         return MapWidgetFactoryResult(None, resolved_map_source, "unavailable", use_opengl)
@@ -640,6 +650,7 @@ class InfoLocationMapView(QWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        show_map_extension_update_notice(self, getattr(self, "_native_failure_reason", None))
         self._sync_overlay_geometry()
         self._sync_message_geometry()
         if self._map_widget is not None:
@@ -954,6 +965,13 @@ class InfoLocationMapView(QWidget):
         pan_finished = getattr(self._map_widget, "panFinished", None)
         if pan_finished is not None:
             pan_finished.connect(self._handle_map_pan_finished)
+        projection_changed = getattr(self._map_widget, "projectionChanged", None)
+        if projection_changed is not None:
+            widget = self._map_widget
+            projection_changed.connect(
+                lambda: self._sync_pin_position(center_fallback=False)
+                if self._map_widget is widget else None
+            )
 
     def _project_current_location(self, *, center_fallback: bool) -> QPointF | None:
         if self._map_widget is None or self._latitude is None or self._longitude is None:
@@ -963,8 +981,15 @@ class InfoLocationMapView(QWidget):
         if visible_rect is None:
             return None
 
-        point = self._map_widget.project_lonlat(self._longitude, self._latitude)
-        if point is None and center_fallback:
+        projector = getattr(
+            self._map_widget, "project_lonlat_exact", self._map_widget.project_lonlat,
+        )
+        point = projector(self._longitude, self._latitude)
+        if (
+            point is None
+            and center_fallback
+            and not callable(getattr(self._map_widget, "project_lonlat_exact", None))
+        ):
             return QPointF(visible_rect.width() / 2.0, visible_rect.height() / 2.0)
         return point
 
@@ -1010,6 +1035,10 @@ class InfoLocationMapView(QWidget):
 
     def _handle_map_panned(self, delta: QPointF) -> None:
         self._pending_viewport_sync = False
+        if getattr(self._map_widget, "prefers_exact_screen_projection", lambda: False)():
+            # Native input may be queued and clamped. Its next rendered frame
+            # supplies the authoritative pin position through projectionChanged.
+            return
         if self._screen_point is None:
             self._schedule_pin_sync()
             return
@@ -1044,6 +1073,8 @@ class InfoLocationMapView(QWidget):
         )
         self._map_widget = result.widget
         self._backend_kind = result.backend_kind
+        self._native_failure_reason = result.native_failure_reason
+        show_map_extension_update_notice(self, self._native_failure_reason)
 
         if self._map_widget is None:
             self._map_host.hide()

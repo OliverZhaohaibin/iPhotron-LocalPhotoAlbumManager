@@ -806,9 +806,45 @@ def test_info_panel_deferred_native_failure_falls_back_behind_placeholder(
 
     assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
     assert not isinstance(panel._location_map._map_widget, _FailingDeferredNativeMap)
-    assert panel._location_map._backend_kind == "osmand_python"
+    assert panel._location_map._backend_kind == "legacy_python"
     assert panel._location_map._map_widget.center_lonlat() == (11.576124, 48.137154)
     assert panel._location_map._map_widget.zoom == 8.0
+
+
+def test_native_info_pin_uses_frames_and_never_falls_back_to_center(qapp, monkeypatch):
+    class ExactMap(_FakeMiniMapWidget):
+        projectionChanged = Signal()
+        point = QPointF(70, 80)
+
+        def prefers_exact_screen_projection(self):
+            return True
+
+        def project_lonlat_exact(self, lon, lat):
+            return self.point
+
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module, "choose_map_widget_backend",
+        lambda source, **kwargs: (ExactMap, source, "osmand_native"),
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata({"rel": "map.jpg", "gps": {"lat": 48, "lon": 11}})
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    mini = panel._location_map
+    widget = mini.map_widget()
+    widget.projectionChanged.emit()
+    assert mini._screen_point == QPointF(70, 80)
+    widget.panned.emit(QPointF(0, 100))
+    assert mini._screen_point == QPointF(70, 80)
+    widget.point = QPointF(70, 110)
+    widget.projectionChanged.emit()
+    assert mini._screen_point == QPointF(70, 110)
+    widget.point = None
+    widget.projectionChanged.emit()
+    mini._sync_pin_position_now()
+    assert mini._screen_point is None
 
 
 @pytest.mark.parametrize("first_frame_presented", [False, True])

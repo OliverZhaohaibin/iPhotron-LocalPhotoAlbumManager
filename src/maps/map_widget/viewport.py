@@ -12,6 +12,15 @@ DEFAULT_MAX_TILE_ZOOM_LEVEL = 6
 MERCATOR_LAT_BOUND = 85.05112878
 
 
+def effective_pan_delta(
+    before: tuple[float, float], after: tuple[float, float], world_size: float,
+) -> tuple[float, float]:
+    """Return applied map movement in logical pixels after camera wrap/clamp."""
+
+    dx = (before[0] - after[0] + 0.5) % 1.0 - 0.5
+    return dx * world_size, (before[1] - after[1]) * world_size
+
+
 @dataclass(frozen=True)
 class ViewState:
     """Describe the camera parameters used for the current paint pass."""

@@ -25,6 +25,7 @@ from maps.map_widget.map_widget import MapWidget
 from maps.map_widget.native_osmand_widget import (
     NativeOsmAndWidget,
     probe_native_widget_runtime,
+    native_widget_runtime_failure,
 )
 from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
 
@@ -39,6 +40,7 @@ class MapWidgetFactoryResult:
     resolved_map_source: MapSourceSpec | None
     backend_kind: str
     use_opengl: bool
+    native_failure_reason: str | None = None
 
 
 def _opengl_explicitly_disabled() -> bool:
@@ -146,6 +148,9 @@ def choose_map_widget_backend(
             and _native_widget_runtime_is_usable_for_root(package_root)
         )
     )
+    failure = map_native_failure(runtime_capabilities, package_root)
+    if not native_widget_usable and failure and (map_source is None or map_source.kind == "osmand_obf"):
+        return python_widget_cls, MapSourceSpec.legacy_default(package_root).resolved(package_root), "legacy_python"
 
     if map_source is not None:
         resolved_map_source = _resolve_map_source(map_source, package_root)
@@ -170,6 +175,14 @@ def choose_map_widget_backend(
 
     legacy_source = MapSourceSpec.legacy_default(package_root).resolved(package_root)
     return python_widget_cls, legacy_source, "legacy_python"
+
+
+def map_native_failure(capabilities: MapRuntimeCapabilities | None, package_root: Path) -> str | None:
+    if capabilities is not None:
+        return getattr(capabilities, "native_failure_reason", None)
+    if _opengl_explicitly_disabled() or not prefer_osmand_native_widget():
+        return None
+    return native_widget_runtime_failure(package_root)
 
 
 def _choose_map_widget_backend_with_runtime(
@@ -317,7 +330,10 @@ def create_map_widget(
     assert resolved_map_source is not None
     try:
         widget = widget_cls(parent, map_source=resolved_map_source)
-        return MapWidgetFactoryResult(widget, resolved_map_source, backend_kind, use_opengl)
+        return MapWidgetFactoryResult(
+            widget, resolved_map_source, backend_kind, use_opengl,
+            map_native_failure(map_runtime_capabilities, package_root) if backend_kind == "legacy_python" else None,
+        )
     except Exception as exc:
         if backend_kind == "osmand_native":
             active_logger.warning(
@@ -326,19 +342,21 @@ def create_map_widget(
                 exc,
             )
             fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
+            resolved_map_source = MapSourceSpec.legacy_default(package_root).resolved(package_root)
             try:
                 widget = fallback_cls(parent, map_source=resolved_map_source)
                 return MapWidgetFactoryResult(
                     widget,
                     resolved_map_source,
-                    "osmand_python",
+                    "legacy_python",
                     use_opengl,
+                    str(exc),
                 )
             except Exception as fallback_exc:
                 if not use_opengl:
                     raise
                 active_logger.warning(
-                    "OpenGL OBF fallback unavailable for %s, falling back to CPU: %s",
+                    "OpenGL legacy fallback unavailable for %s, falling back to CPU: %s",
                     context,
                     fallback_exc,
                 )
@@ -346,8 +364,9 @@ def create_map_widget(
                 return MapWidgetFactoryResult(
                     widget,
                     resolved_map_source,
-                    "osmand_python",
+                    "legacy_python",
                     False,
+                    str(exc),
                 )
         if widget_cls in {MapGLWidget, MapGLWindowWidget}:
             active_logger.warning(
@@ -365,7 +384,8 @@ def create_map_widget(
                 widget,
                 resolved_map_source,
                 fallback_backend_kind,
-                use_opengl,
+                False,
+                map_native_failure(map_runtime_capabilities, package_root) if fallback_backend_kind == "legacy_python" else None,
             )
         active_logger.warning("%s backend unavailable", context, exc_info=True)
         return MapWidgetFactoryResult(None, resolved_map_source, "unavailable", use_opengl)

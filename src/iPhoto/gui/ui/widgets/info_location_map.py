@@ -41,6 +41,7 @@ from .map_widget_factory import (
     MapWidget,
     MapWidgetBase,
     MapWidgetFactoryResult,
+    NativeOsmAndWidget,
     _choose_map_widget_backend_with_runtime,
     _preferred_python_widget_class,
     check_opengl_support,
@@ -126,7 +127,10 @@ def create_map_widget(
         widget_cls = _preferred_python_widget_class(use_opengl=use_opengl)
         backend_kind = "osmand_python"
     try:
-        widget = widget_cls(parent, map_source=resolved_map_source)
+        if issubclass(widget_cls, NativeOsmAndWidget):
+            widget = widget_cls(parent, map_source=resolved_map_source, defer_initialization=True)
+        else:
+            widget = widget_cls(parent, map_source=resolved_map_source)
         return MapWidgetFactoryResult(widget, resolved_map_source, backend_kind, use_opengl)
     except Exception as exc:
         if backend_kind == "osmand_native":
@@ -317,6 +321,10 @@ class InfoLocationMapView(QWidget):
         self._deferred_start_timer.setSingleShot(True)
         self._deferred_start_timer.setInterval(0)
         self._deferred_start_timer.timeout.connect(self.start_deferred_content)
+        self._runtime_rebuild_timer = QTimer(self)
+        self._runtime_rebuild_timer.setSingleShot(True)
+        self._runtime_rebuild_timer.setInterval(0)
+        self._runtime_rebuild_timer.timeout.connect(self._rebuild_map_widget_for_runtime)
 
         self.setMinimumSize(self._MINIMUM_SIDE, self._MINIMUM_SIDE)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -366,6 +374,8 @@ class InfoLocationMapView(QWidget):
     def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
         """Bind the session-owned runtime snapshot used for mini-map creation."""
 
+        if self._map_lifecycle == _MapLifecycle.SHUTDOWN:
+            return
         previous_package_root = self._map_package_root
         previous_capabilities = self._map_runtime_capabilities
         self._map_runtime = map_runtime
@@ -378,16 +388,26 @@ class InfoLocationMapView(QWidget):
             or self._map_runtime_capabilities != previous_capabilities
         )
         if runtime_changed:
-            self._map_creation_generation += 1
             self._native_fallback_attempted = False
-            if self._map_widget is not None and self._map_package_root != previous_package_root:
+            if (
+                self._map_widget is not None
+                and self._map_package_root != previous_package_root
+            ) or self._map_lifecycle == _MapLifecycle.FAILED:
+                self._runtime_rebuild_pending = True
+                self._deferred_start_timer.stop()
                 self._show_map_placeholder()
                 if self.isVisible():
-                    self._runtime_rebuild_pending = True
+                    self._runtime_rebuild_timer.start()
                 else:
                     self._release_map_widget()
-            elif self._map_lifecycle == _MapLifecycle.FAILED:
-                self._map_lifecycle = _MapLifecycle.UNINITIALIZED
+
+    def _rebuild_map_widget_for_runtime(self) -> None:
+        if not self._runtime_rebuild_pending or self._map_lifecycle == _MapLifecycle.SHUTDOWN:
+            return
+        self._release_map_widget()
+        if self.isVisible():
+            self.prepare_surface()
+            self.schedule_deferred_content()
 
     def map_widget(self) -> MapWidgetBase | None:
         return self._map_widget
@@ -398,7 +418,7 @@ class InfoLocationMapView(QWidget):
     def prepare_surface(self) -> None:
         """Attach the final map surface before the containing panel is painted."""
 
-        if self._map_lifecycle in {
+        if self._runtime_rebuild_pending or self._map_lifecycle in {
             _MapLifecycle.SURFACE_READY,
             _MapLifecycle.LOADING,
             _MapLifecycle.READY,
@@ -417,7 +437,7 @@ class InfoLocationMapView(QWidget):
     def start_deferred_content(self) -> None:
         """Start expensive rendering without changing the visible widget tree."""
 
-        if not self.isVisible():
+        if not self.isVisible() or self._runtime_rebuild_pending:
             return
         if self._map_lifecycle not in {
             _MapLifecycle.SURFACE_READY,
@@ -474,6 +494,8 @@ class InfoLocationMapView(QWidget):
         self._sync_square_height(target_width)
 
     def set_location(self, latitude: float, longitude: float, *, zoom: float | None = None) -> None:
+        if self._map_lifecycle == _MapLifecycle.SHUTDOWN:
+            return
         next_latitude = float(latitude)
         next_longitude = float(longitude)
         next_zoom = float(zoom if zoom is not None else self.DEFAULT_ZOOM)
@@ -486,11 +508,14 @@ class InfoLocationMapView(QWidget):
         self._longitude = next_longitude
         self._requested_zoom = next_zoom
         self._last_set_location = (next_latitude, next_longitude, next_zoom)
+        if self._map_lifecycle == _MapLifecycle.FAILED:
+            self._show_map_failure()
+            return
         if same_location and self._map_widget is not None:
             self._message_label.hide()
             self._map_clip_frame.show()
             self._map_host.show()
-            if self._map_lifecycle == _MapLifecycle.READY:
+            if self._map_lifecycle == _MapLifecycle.READY and not self._runtime_rebuild_pending:
                 self._placeholder.hide()
             else:
                 self._show_map_placeholder()
@@ -510,7 +535,7 @@ class InfoLocationMapView(QWidget):
         self._message_label.hide()
         self._map_clip_frame.show()
         self._map_host.show()
-        if self._map_lifecycle == _MapLifecycle.READY:
+        if self._map_lifecycle == _MapLifecycle.READY and not self._runtime_rebuild_pending:
             self._placeholder.hide()
         else:
             self._show_map_placeholder()
@@ -552,6 +577,7 @@ class InfoLocationMapView(QWidget):
         self._map_clip_frame.hide()
 
     def _release_map_widget(self) -> None:
+        self._runtime_rebuild_timer.stop()
         self._deferred_start_timer.stop()
         self._pin_sync_timer.stop()
         self._pin_settle_timer.stop()
@@ -825,7 +851,7 @@ class InfoLocationMapView(QWidget):
         self.updateGeometry()
 
     def _map_widget_ready_for_sync(self) -> bool:
-        if self._map_widget is None:
+        if self._map_widget is None or self._runtime_rebuild_pending:
             return False
         visible_rect = self._visible_map_rect()
         if visible_rect is None or visible_rect.isEmpty():
@@ -1014,6 +1040,8 @@ class InfoLocationMapView(QWidget):
             self._show_map_failure()
             return
 
+        # Every replacement has its own camera, even when metadata is unchanged.
+        self._pending_viewport_sync = self._latitude is not None and self._longitude is not None
         if isinstance(self._map_widget, QWidget):
             self._map_widget.setMinimumSize(0, 0)
             self._map_widget.setSizePolicy(
@@ -1046,7 +1074,8 @@ class InfoLocationMapView(QWidget):
 
     def _handle_first_frame_presented(self, generation: int, widget: object) -> None:
         if (
-            generation != self._map_creation_generation
+            self._runtime_rebuild_pending
+            or generation != self._map_creation_generation
             or widget is not self._map_widget
             or self._map_lifecycle not in {
                 _MapLifecycle.SURFACE_READY,

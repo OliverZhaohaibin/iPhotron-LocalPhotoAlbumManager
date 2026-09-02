@@ -502,7 +502,7 @@ void OsmAndNativeMapWidget::initializeGL()
     if (_startupProfileEnabled)
         stageTimer.start();
     connect(context(), &QOpenGLContext::aboutToBeDestroyed, this, &OsmAndNativeMapWidget::cleanupRenderer, Qt::DirectConnection);
-    if (!ensureRenderer() && _initError.isEmpty())
+    if (_resourcesReady && !ensureRenderer() && _initError.isEmpty())
         _initError = QStringLiteral("Failed to initialize the native OsmAnd renderer");
     if (_startupProfileEnabled)
     {
@@ -817,6 +817,7 @@ bool OsmAndNativeMapWidget::ensureRenderer()
 
     _minZoomLevel = std::max(kDefaultMinZoom, static_cast<double>(_mapRenderer->getMinZoomLevel()));
     _maxZoomLevel = std::max(_minZoomLevel, static_cast<double>(_mapRenderer->getMaxZoomLevel()));
+    _initError.clear();
     _defaultZoomLevel = std::clamp(kDefaultZoom, _minZoomLevel, _maxZoomLevel);
     _zoomLevel = std::clamp(_zoomLevel, _minZoomLevel, _maxZoomLevel);
     // Bootstrap the first visible frame in the lighter interaction profile so

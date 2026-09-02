@@ -16,6 +16,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSi
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPainter, QPixmap, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 
+from iPhoto.application.ports import MapRuntimeCapabilities
 from iPhoto.gui.i18n import formatters
 from iPhoto.gui.ui.widgets import info_location_map as info_location_map_module
 from iPhoto.gui.ui.widgets import info_panel as info_panel_module
@@ -116,6 +117,47 @@ def _process_deferred_panel_content(qapp: QApplication) -> None:
             map_widget = widget._location_map._map_widget
             if isinstance(map_widget, _FakeMiniMapWidget) and map_widget.auto_present_first_frame:
                 map_widget.present_first_frame()
+
+
+def _mini_map_runtime(root: Path, *, search_available: bool = True):
+    capabilities = MapRuntimeCapabilities(
+        display_available=True,
+        preferred_backend="osmand_python",
+        python_gl_available=False,
+        native_widget_available=False,
+        osmand_extension_available=True,
+        location_search_available=search_available,
+        status_message="test runtime",
+    )
+    return SimpleNamespace(package_root=lambda: root, capabilities=lambda: capabilities)
+
+
+@pytest.fixture
+def runtime_map_panel(qapp, monkeypatch, tmp_path):
+    created = []
+
+    class _RuntimeMiniMap(_FakeMiniMapWidget):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.auto_present_first_frame = False
+            created.append(self)
+
+    monkeypatch.setattr(
+        info_location_map_module,
+        "_choose_map_widget_backend_with_runtime",
+        lambda source, **_kwargs: (_RuntimeMiniMap, source, "osmand_python"),
+    )
+    panel = InfoPanel()
+    panel.set_map_runtime(_mini_map_runtime(tmp_path / "a"))
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata({
+        "rel": "map.jpg", "name": "map.jpg",
+        "gps": {"lat": 48.137154, "lon": 11.576124},
+    })
+    panel.prepare_for_presentation()
+    panel.show()
+    qapp.processEvents()
+    return panel, created
 
 
 def _expected_panel_size(panel: InfoPanel) -> QSize:
@@ -765,6 +807,107 @@ def test_info_panel_deferred_native_failure_falls_back_behind_placeholder(
     assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
     assert not isinstance(panel._location_map._map_widget, _FailingDeferredNativeMap)
     assert panel._location_map._backend_kind == "osmand_python"
+    assert panel._location_map._map_widget.center_lonlat() == (11.576124, 48.137154)
+    assert panel._location_map._map_widget.zoom == 8.0
+
+
+@pytest.mark.parametrize("first_frame_presented", [False, True])
+def test_visible_runtime_replacement_coalesces_updates_and_keeps_latest_gps(
+    runtime_map_panel, qapp, tmp_path, first_frame_presented,
+) -> None:
+    panel, created = runtime_map_panel
+    view = panel._location_map
+    old = created[0]
+    old_generation = view._map_creation_generation
+    if first_frame_presented:
+        old.present_first_frame()
+    size = panel.size()
+
+    panel.set_map_runtime(_mini_map_runtime(tmp_path / "b"))
+    panel.set_map_runtime(_mini_map_runtime(tmp_path / "c"))
+    panel.set_asset_metadata({
+        "rel": "next.jpg", "name": "next.jpg",
+        "gps": {"lat": 35.6764, "lon": 139.65},
+    })
+    old.present_first_frame()
+    assert view.map_widget() is old  # No teardown inside the runtime callback.
+    assert old.shutdown_calls == 0
+    assert not view._placeholder.isHidden()
+
+    _process_deferred_panel_content(qapp)
+
+    assert len(created) == 2
+    new = created[-1]
+    assert view.map_widget() is new
+    assert old.shutdown_calls == 1
+    assert Path(new._map_source.data_path).is_relative_to(tmp_path / "c")
+    view._handle_first_frame_presented(old_generation, old)
+    assert not view._placeholder.isHidden()
+    new.present_first_frame()
+    qapp.processEvents()
+    assert view._placeholder.isHidden()
+    assert new.center_lonlat() == (139.65, 35.6764)
+    assert new.zoom == 8.0
+    assert panel.size() == size
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+def test_capabilities_only_update_keeps_first_frame_subscription(
+    runtime_map_panel, qapp, tmp_path, reopen,
+) -> None:
+    panel, created = runtime_map_panel
+    panel.set_map_runtime(_mini_map_runtime(tmp_path / "a", search_available=False))
+    if reopen:
+        panel.hide()
+        panel.show()
+    _process_deferred_panel_content(qapp)
+    assert len(created) == 1
+    created[0].present_first_frame()
+    assert panel._location_map._placeholder.isHidden()
+    assert created[0].shutdown_calls == 0
+
+
+@pytest.mark.parametrize("hide_before_update", [False, True])
+def test_hidden_runtime_replacement_restores_camera_on_reopen(
+    runtime_map_panel, qapp, tmp_path, hide_before_update,
+) -> None:
+    panel, created = runtime_map_panel
+    old = created[0]
+    old.present_first_frame()
+    panel._location_map.set_location(48.137154, 11.576124, zoom=10.0)
+    if hide_before_update:
+        panel.hide()
+    panel.set_map_runtime(_mini_map_runtime(tmp_path / "b"))
+    panel.hide()
+    qapp.processEvents()
+    assert old.shutdown_calls == 1
+    assert len(created) == 1
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    assert len(created) == 2
+    created[-1].present_first_frame()
+    assert panel._location_map._placeholder.isHidden()
+    assert created[-1].center_lonlat() == (11.576124, 48.137154)
+    assert created[-1].zoom == 10.0
+
+
+def test_shutdown_cancels_pending_runtime_replacement(runtime_map_panel, qapp, tmp_path) -> None:
+    panel, created = runtime_map_panel
+    view = panel._location_map
+    old = created[0]
+    generation = view._map_creation_generation
+    panel.set_map_runtime(_mini_map_runtime(tmp_path / "b"))
+    panel.shutdown()
+    panel.set_map_runtime(_mini_map_runtime(tmp_path / "c"))
+    view._handle_first_frame_presented(generation, old)
+    view.set_location(1.0, 2.0)
+    view.prepare_surface()
+    view.start_deferred_content()
+    qapp.processEvents()
+    assert view.map_widget() is None
+    assert view._map_clip_frame.isHidden()
+    assert len(created) == 1
+    assert old.shutdown_calls == 1
 
 
 def test_info_panel_lazy_map_uses_latest_location_and_does_not_recreate_after_shutdown(
@@ -2273,6 +2416,14 @@ def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
     assert not panel._location_map._message_label.isHidden()
     assert panel.size() == panel_size
 
+    panel.set_asset_metadata({
+        "rel": "next.jpg", "name": "next.jpg",
+        "gps": {"lat": 35.6764, "lon": 139.65},
+    })
+    _process_deferred_panel_content(qapp)
+    assert not panel._location_map._message_label.isHidden()
+    assert panel._location_map._placeholder.isHidden()
+
     panel.set_map_runtime(
         SimpleNamespace(
             capabilities=lambda: SimpleNamespace(
@@ -2288,6 +2439,7 @@ def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
     assert panel._location_map._message_label.isHidden()
     assert not panel._location_map.isHidden()
     assert panel.size() == panel_size
+    assert panel._location_map.map_widget().center_lonlat() == (139.65, 35.6764)
     panel.close()
 
 

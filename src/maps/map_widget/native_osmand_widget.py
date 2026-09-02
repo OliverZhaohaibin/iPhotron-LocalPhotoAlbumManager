@@ -14,7 +14,7 @@ from typing import Any, Callable, Sequence
 
 import PySide6
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal, SIGNAL
 from PySide6.QtGui import (
     QColor,
     QCloseEvent,
@@ -28,7 +28,6 @@ from PySide6.QtGui import (
     QWindow,
 )
 from PySide6.QtOpenGL import QOpenGLWindow
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
@@ -389,6 +388,7 @@ class NativeOsmAndWidget(QWidget):
         map_source: MapSourceSpec | None = None,
         tile_root: Path | str = "tiles",
         style_path: Path | str = "style.json",
+        defer_initialization: bool = False,
     ) -> None:
         super().__init__(parent)
         del tile_root, style_path
@@ -420,7 +420,10 @@ class NativeOsmAndWidget(QWidget):
             None,
         )
         self._deferred_resources_pending = bool(
-            deferred_create is not None and initialize_resources is not None
+            # Existing full-map and preview callers expect ready resources.
+            defer_initialization
+            and deferred_create is not None
+            and initialize_resources is not None
         )
         if self._deferred_resources_pending:
             native_pointer = deferred_create(
@@ -451,7 +454,8 @@ class NativeOsmAndWidget(QWidget):
         )
 
         self._native_pointer = ctypes.c_void_p(native_pointer)
-        self._native_widget = shiboken6.wrapInstance(int(native_pointer), QOpenGLWidget)
+        # macOS SDKs can return a QWidget containing a separate QOpenGLWindow.
+        self._native_widget = shiboken6.wrapInstance(int(native_pointer), QWidget)
         self._native_widget.setObjectName("NativeOsmAndMapWidget")
         self._native_event_target = self._native_widget
         get_event_target = getattr(self._bridge.library, "osmand_widget_get_event_target", None)
@@ -486,9 +490,15 @@ class NativeOsmAndWidget(QWidget):
         self._overlay_window: _NativeMarkerOverlayWindow | None = None
         self._overlay_container: QWidget | None = None
         self._first_frame_presented = False
-        frame_swapped = getattr(self._native_widget, "frameSwapped", None)
-        if frame_swapped is not None and not self._deferred_resources_pending:
-            frame_swapped.connect(self._emit_first_frame_presented)
+        if getattr(self._bridge.library, "osmand_widget_has_presented_frame", None) is None:
+            for surface in (self._native_event_target, self._native_widget):
+                if surface.metaObject().indexOfSignal("frameSwapped()") >= 0:
+                    # Connect through the actual meta-object without downcasting
+                    # a foreign QWidget/QWindow to an incompatible GL type.
+                    QObject.connect(
+                        surface, SIGNAL("frameSwapped()"), self._emit_first_frame_presented
+                    )
+                    break
 
         min_zoom = float(self._bridge.library.osmand_widget_get_min_zoom(self._native_pointer)) or 2.0
         max_zoom = float(self._bridge.library.osmand_widget_get_max_zoom(self._native_pointer)) or 19.0
@@ -530,7 +540,7 @@ class NativeOsmAndWidget(QWidget):
         self._native_widget.update()
 
     def prepare_surface(self) -> None:
-        """The native QOpenGLWidget shell is attached during initialisation."""
+        """The native surface is attached during initialisation."""
 
     @property
     def zoom(self) -> float:
@@ -756,7 +766,7 @@ class NativeOsmAndWidget(QWidget):
         self.viewChanged.emit(center_x, center_y, zoom)
 
     def _emit_first_frame_presented(self) -> None:
-        if self._first_frame_presented:
+        if self._is_shutdown() or self._deferred_resources_pending or self._first_frame_presented:
             return
         self._first_frame_presented = True
         self.firstFramePresented.emit()

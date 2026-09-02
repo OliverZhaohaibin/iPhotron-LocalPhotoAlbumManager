@@ -375,7 +375,7 @@ OsmAndNativeMapWidget* OsmAndNativeMapWidget::createDeferred(
 }
 
 OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration, QWidget* parent)
-    : QOpenGLWidget(parent)
+    : OsmAndNativeMapSurface(parent)
     , _configuration(configuration)
     , _interactionTimer(this)
 {
@@ -388,6 +388,7 @@ OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration,
     _interactionTimer.setInterval(kInteractionSettleDelayMs);
     connect(&_interactionTimer, &QTimer::timeout, this, &OsmAndNativeMapWidget::finishInteractiveRendering);
 
+#ifndef Q_OS_MACOS
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     setAttribute(Qt::WA_TranslucentBackground, false);
@@ -396,12 +397,22 @@ OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration,
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     setMinimumSize(640, 480);
+#endif
+    connect(this, &OsmAndNativeMapSurface::frameSwapped, this, [this] {
+        if (!_shutdown && _framePendingPresentation)
+        {
+            _firstFramePresented = true;
+            _framePendingPresentation = false;
+        }
+    });
 }
 
 OsmAndNativeMapWidget::~OsmAndNativeMapWidget()
 {
     resetDragCursor();
     cleanupRenderer();
+    if (context())
+        disconnect(context(), nullptr, this, nullptr);
     if (_resourcesReady)
         CoreRuntime::instance().release();
 }
@@ -542,7 +553,7 @@ void OsmAndNativeMapWidget::paintGL()
     if (prepared)
     {
         _mapRenderer->renderFrame();
-        _firstFramePresented = true;
+        _framePendingPresentation = true;
         if (_coldStartBootstrapPending)
         {
             _coldStartBootstrapPending = false;
@@ -581,12 +592,16 @@ void OsmAndNativeMapWidget::mousePressEvent(QMouseEvent* event)
         _dragging = true;
         _lastMousePosition = event->position();
         setDragCursor();
+#ifdef Q_OS_MACOS
+        requestActivate();
+#else
         setFocus(Qt::MouseFocusReason);
+#endif
         event->accept();
         return;
     }
 
-    QOpenGLWidget::mousePressEvent(event);
+    OsmAndNativeMapSurface::mousePressEvent(event);
 }
 
 void OsmAndNativeMapWidget::mouseMoveEvent(QMouseEvent* event)
@@ -603,7 +618,7 @@ void OsmAndNativeMapWidget::mouseMoveEvent(QMouseEvent* event)
         return;
     }
 
-    QOpenGLWidget::mouseMoveEvent(event);
+    OsmAndNativeMapSurface::mouseMoveEvent(event);
 }
 
 void OsmAndNativeMapWidget::mouseReleaseEvent(QMouseEvent* event)
@@ -617,7 +632,7 @@ void OsmAndNativeMapWidget::mouseReleaseEvent(QMouseEvent* event)
         return;
     }
 
-    QOpenGLWidget::mouseReleaseEvent(event);
+    OsmAndNativeMapSurface::mouseReleaseEvent(event);
 }
 
 void OsmAndNativeMapWidget::wheelEvent(QWheelEvent* event)
@@ -625,7 +640,7 @@ void OsmAndNativeMapWidget::wheelEvent(QWheelEvent* event)
     const auto delta = event->angleDelta().y();
     if (delta == 0)
     {
-        QOpenGLWidget::wheelEvent(event);
+        OsmAndNativeMapSurface::wheelEvent(event);
         return;
     }
 
@@ -699,6 +714,7 @@ bool OsmAndNativeMapWidget::initializeResources(QString& errorMessage)
         _locale = QStringLiteral("en");
 
     _resourcesReady = true;
+    update();
     return true;
 }
 
@@ -712,6 +728,8 @@ bool OsmAndNativeMapWidget::ensureRenderer()
         stageTimer.start();
     }
 
+    if (_shutdown)
+        return false;
     if (_mapRenderer)
         return true;
     if (!_resourcesReady)
@@ -1083,8 +1101,16 @@ void OsmAndNativeMapWidget::finishInteractiveRendering()
     update();
 }
 
+void OsmAndNativeMapWidget::shutdown()
+{
+    _shutdown = true;
+    cleanupRenderer();
+}
+
 void OsmAndNativeMapWidget::cleanupRenderer()
 {
+    _firstFramePresented = false;
+    _framePendingPresentation = false;
     if (_interactionTimer.isActive())
         _interactionTimer.stop();
     resetDragCursor();

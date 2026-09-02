@@ -59,6 +59,9 @@ def _clear_override_cursors() -> None:
 
 
 class _FakeNativeLibrary:
+    def osmand_widget_surface_kind(self) -> int:
+        return 2
+
     def __init__(self) -> None:
         self.zoom = 2.0
         self.center_lon = 0.0
@@ -1277,6 +1280,82 @@ def test_choose_map_widget_backend_keeps_legacy_gl_on_macos(monkeypatch, tmp_pat
     assert resolved_source is not None
     assert resolved_source.kind == "legacy_pbf"
     assert backend_kind == "legacy_python"
+
+
+@pytest.mark.parametrize("kind", [None, 0, 1, 99])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_metal_rejects_incompatible_native_before_creation(
+    deferred_native_runtime, monkeypatch, kind, deferred,
+) -> None:
+    runtime = deferred_native_runtime
+    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", "darwin")
+    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "metal")
+    monkeypatch.setattr(
+        runtime.library, "osmand_widget_surface_kind",
+        None if kind is None else lambda: kind,
+    )
+    with pytest.raises(native_osmand_widget_module.TileLoadingError, match="independent OpenGL window"):
+        NativeOsmAndWidget(map_source=runtime.source, defer_initialization=deferred)
+    assert runtime.library.eager_creations == 0
+    assert runtime.library.deferred_creations == 0
+    assert runtime.wrapped_types == []
+
+
+@pytest.mark.parametrize("platform,backend", [("darwin", "opengl"), ("win32", "auto"), ("linux", "auto")])
+def test_opengl_consumers_keep_legacy_native_support(
+    deferred_native_runtime, monkeypatch, platform, backend,
+) -> None:
+    runtime = deferred_native_runtime
+    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", platform)
+    monkeypatch.setenv("IPHOTO_RHI_BACKEND", backend)
+    monkeypatch.setattr(runtime.library, "osmand_widget_surface_kind", None)
+    widget = NativeOsmAndWidget(map_source=runtime.source)
+    try:
+        assert runtime.library.eager_creations == 1
+        assert widget.native_surface_kind() == "unknown"
+    finally:
+        widget.shutdown()
+        widget.close()
+
+
+@pytest.mark.parametrize("consumer", ["photo_map", "info"])
+@pytest.mark.parametrize("gl_fails", [False, True])
+def test_metal_legacy_native_falls_back_without_creating_native_child(
+    deferred_native_runtime, monkeypatch, consumer, gl_fails,
+) -> None:
+    from iPhoto.gui.ui.widgets import info_location_map
+
+    runtime = deferred_native_runtime
+    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", "darwin")
+    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "metal")
+    monkeypatch.setattr(runtime.library, "osmand_widget_surface_kind", lambda: 1)
+    module = info_location_map if consumer == "info" else map_widget_factory_module
+    fallback_calls = []
+
+    class Fallback(QWidget):
+        def __init__(self, parent, *, map_source):
+            super().__init__(parent)
+            fallback_calls.append(map_source)
+            if gl_fails:
+                raise RuntimeError("No GL context")
+
+    class CpuFallback(QWidget):
+        def __init__(self, parent, *, map_source):
+            super().__init__(parent)
+            assert map_source is runtime.source
+
+    monkeypatch.setattr(module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(module, "choose_map_widget_backend", lambda *a, **kw: (NativeOsmAndWidget, runtime.source, "osmand_native"))
+    monkeypatch.setattr(module, "_preferred_python_widget_class", lambda **kw: Fallback)
+    monkeypatch.setattr(module, "MapWidget", CpuFallback)
+    parent = QWidget()
+    result = module.create_map_widget(parent, map_source=runtime.source, map_runtime_capabilities=None, package_root=Path("."))
+    assert result.backend_kind == "osmand_python"
+    assert isinstance(result.widget, CpuFallback if gl_fails else Fallback)
+    assert result.use_opengl is not gl_fails
+    assert fallback_calls == [runtime.source]
+    assert runtime.library.eager_creations == runtime.library.deferred_creations == 0
+    parent.close()
 
 
 @pytest.mark.parametrize("consumer", ["direct", "photo_map", "preview"])

@@ -553,6 +553,37 @@ the OsmAnd resource directories, `osmand_render_helper`,
 dependencies, then patches `install_name`/rpaths and ad-hoc signs copied
 binaries.
 
+The macOS native map must use a `QOpenGLWindow` inside a QWidget container.
+Playback uses Metal, so attaching a `QOpenGLWidget` to its window can break
+composition (`QRhiWidget: No QRhi`). Both eager and deferred bridge creation
+return the QWidget host; `osmand_widget_get_event_target` returns the actual
+rendering window. The container owns that window and cleanup must finish before
+its OpenGL context is destroyed.
+
+The bridge exports the instance-free `int osmand_widget_surface_kind()` query:
+`1` means a composited QOpenGLWidget and `2` means an independent QOpenGLWindow
+(`0` or a missing symbol is unknown). On macOS with the default Metal backend,
+the application rejects unknown/widget surfaces before creating any native
+child and falls back to the Python window renderer, then CPU rendering if
+necessary. An explicit `IPHOTO_RHI_BACKEND=opengl` retains legacy compatibility.
+
+Keep the surface implementation in this repository and the SDK source in sync;
+copying an older working dylib alone does not survive a rebuild. After building
+the SDK with the application's Python runtime and running the sync above, run
+the real GPU regression from a macOS desktop session:
+
+```bash
+IPHOTO_RUN_MACOS_GPU_TESTS=1 QT_QPA_PLATFORM=offscreen \
+  .venv/bin/python tools/run_pytest_ci.py tests/gui/test_native_map_playback_gpu.py -q
+```
+
+The parent pytest process can be headless. Each test starts a separate Cocoa
+process with real Qt widgets and the staged dylib, checks both navigation orders,
+map first-frame completion, still/video/Live Photo surface transitions, Info
+mini-maps and normal window teardown. It verifies actual Metal frame submission
+and framebuffer pixels, not only the window surface type. Native lifecycle and
+fallback unit tests remain in `test_photo_map_view.py` and `test_info_panel.py`.
+
 If you are intentionally using the MinGW path instead of MSVC, replace
 `dist-msvc` with `dist`. The helper-backed Python renderer only requires the
 helper executable plus its dependent DLLs, but the native widget path also

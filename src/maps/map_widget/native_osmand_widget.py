@@ -55,6 +55,31 @@ class _BridgeAPI:
     library: ctypes.CDLL
 
 
+def _native_surface_kind(library: object) -> str:
+    query = getattr(library, "osmand_widget_surface_kind", None)
+    if query is None:
+        return "unknown"
+    return {1: "opengl_widget", 2: "opengl_window"}.get(int(query()), "unknown")
+
+
+def _validate_native_surface(library: object, library_path: Path) -> str:
+    """Reject an incompatible extension before it can create any child widgets."""
+
+    kind = _native_surface_kind(library)
+    # The media application defaults to Metal on macOS. Standalone map callers
+    # use the same safe default; the explicit OpenGL override remains supported.
+    requires_window = (
+        sys.platform == "darwin"
+        and os.environ.get("IPHOTO_RHI_BACKEND", "auto").strip().lower() != "opengl"
+    )
+    if requires_window and kind != "opengl_window":
+        raise TileLoadingError(
+            f"Native map surface {kind} is incompatible with macOS Metal composition; "
+            f"an independent OpenGL window is required: {library_path}"
+        )
+    return kind
+
+
 def _render_marker_buffer(
     size: QSize,
     device_pixel_ratio: float,
@@ -265,6 +290,11 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
         (time.perf_counter() - load_started) * 1000.0,
         library=library_path,
     )
+    surface_kind = getattr(library, "osmand_widget_surface_kind", None)
+    if surface_kind is not None:
+        surface_kind.argtypes = []
+        surface_kind.restype = ctypes.c_int
+    _validate_native_surface(library, library_path)
     library.osmand_create_map_widget.argtypes = [
         ctypes.c_void_p,
         ctypes.c_wchar_p,
@@ -374,7 +404,7 @@ def _lonlat_to_normalized(longitude: float, latitude: float) -> tuple[float, flo
 
 
 class NativeOsmAndWidget(QWidget):
-    """Host a native C++ OsmAnd `QOpenGLWidget` inside a PySide6 widget tree."""
+    """Host an OsmAnd surface, isolated in a native window on macOS."""
 
     viewChanged = Signal(float, float, float)
     panned = Signal(QPointF)
@@ -407,6 +437,7 @@ class NativeOsmAndWidget(QWidget):
 
         create_started = time.perf_counter()
         self._bridge = _load_bridge(library_path)
+        self._surface_kind = _validate_native_surface(self._bridge.library, library_path)
         error_buffer = ctypes.create_unicode_buffer(4096)
         parent_pointer = int(shiboken6.getCppPointer(self)[0])
         deferred_create = getattr(
@@ -619,6 +650,9 @@ class NativeOsmAndWidget(QWidget):
 
     def loaded_library_path(self) -> Path:
         return self._library_path
+
+    def native_surface_kind(self) -> str:
+        return self._surface_kind
 
     def set_city_annotations(self, cities: Sequence[CityAnnotation]) -> None:
         del cities

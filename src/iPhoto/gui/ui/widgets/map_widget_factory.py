@@ -12,6 +12,7 @@ from PySide6.QtGui import QOffscreenSurface, QOpenGLContext
 from PySide6.QtWidgets import QWidget
 
 from ....application.ports import MapRuntimeCapabilities, MapRuntimePort
+from ...render_backend import selected_rhi_backend_name
 from maps.map_sources import (
     MapSourceSpec,
     has_usable_osmand_default,
@@ -269,6 +270,7 @@ def format_map_runtime_diagnostics(
     native_library_suffix = ""
     if native_library_path:
         native_library_suffix = f" native_dll={native_library_path}"
+    surface_kind = getattr(map_widget, "native_surface_kind", lambda: "unknown")()
 
     return (
         "[PhotoMapView] "
@@ -279,6 +281,7 @@ def format_map_runtime_diagnostics(
         f"source={source_kind} "
         f"tile_kind={metadata.tile_kind} "
         f"tile_scheme={metadata.tile_scheme}"
+        f" surface_kind={surface_kind} media_backend={selected_rhi_backend_name()}"
         f"{native_library_suffix}"
     )
 
@@ -344,7 +347,7 @@ def create_map_widget(
                     widget,
                     resolved_map_source,
                     "osmand_python",
-                    use_opengl,
+                    False,
                 )
         if widget_cls in {MapGLWidget, MapGLWindowWidget}:
             active_logger.warning(

@@ -140,7 +140,17 @@ def create_map_widget(
                 exc,
             )
             fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
-            widget = fallback_cls(parent, map_source=resolved_map_source)
+            try:
+                widget = fallback_cls(parent, map_source=resolved_map_source)
+            except Exception:
+                if not use_opengl:
+                    raise
+                active_logger.warning(
+                    "OpenGL mini-map fallback unavailable; using CPU renderer",
+                    exc_info=True,
+                )
+                widget = MapWidget(parent, map_source=resolved_map_source)
+                use_opengl = False
             return MapWidgetFactoryResult(
                 widget,
                 resolved_map_source,

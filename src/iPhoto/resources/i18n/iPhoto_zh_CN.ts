@@ -301,18 +301,6 @@
     <context>
         <name>MapExtension</name>
         <message>
-            <source>The map extension could not be used. Using the basic map. Please update the map extension.</source>
-            <translation>当前地图扩展无法使用，已切换到基础地图。请更新地图扩展。</translation>
-        </message>
-        <message>
-            <source>Download Update</source>
-            <translation>下载更新</translation>
-        </message>
-        <message>
-            <source>An update download will be available soon.</source>
-            <translation>更新下载即将提供。</translation>
-        </message>
-        <message>
             <source>Map Extension</source>
             <translation>地图扩展</translation>
         </message>

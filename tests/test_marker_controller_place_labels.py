@@ -134,61 +134,6 @@ def _clickable_cluster(asset: GeotaggedAsset) -> _MarkerCluster:
     return cluster
 
 
-def test_exact_pan_preserves_centroid_and_recovers_missing_projection(qapp, tmp_path):
-    assets = _assets_at(tmp_path, 2)
-    widget = _ExactProjectionMapWidget({(10.0, 20.0): QPointF(100.0, 100.0)})
-    controller = MarkerController(widget, _DummyThumbnailLoader(), marker_size=72, thumbnail_size=192,
-                                  provides_place_labels=True)
-    cluster = _MarkerCluster(representative=assets[0], assets=assets, screen_pos=QPointF(125.0, 110.0))
-    try:
-        controller._publish_clusters([cluster])
-        controller.handle_pan(QPointF(0, 100))
-        assert cluster.screen_pos == QPointF(125, 110)
-        # Only 30 pixels survived camera clamping, irrespective of pointer input.
-        widget._projected_points[(10.0, 20.0)] = QPointF(100, 130)
-        controller.handle_projection_changed()
-        assert cluster.screen_pos == QPointF(125, 140)
-        assert controller.cluster_at(cluster.bounding_rect.center()) is cluster
-        controller.handle_pan(QPointF(0, 100))
-        controller.handle_projection_changed()
-        assert cluster.screen_pos == QPointF(125, 140)
-        widget._projected_points.clear()
-        old_hit = QPointF(cluster.bounding_rect.center())
-        controller.handle_projection_changed()
-        assert not cluster.projection_visible
-        assert controller.cluster_at(old_hit) is None
-        widget._projected_points[(10.0, 20.0)] = QPointF(100, 115)
-        controller.handle_projection_changed()
-        assert cluster.projection_visible
-        assert cluster.screen_pos == QPointF(125, 125)
-        assert controller._clusters == [cluster]
-    finally:
-        controller.shutdown()
-
-
-def test_exact_pan_projects_once_per_cluster_without_walking_assets(qapp, tmp_path):
-    class NoIteration(list):
-        def __iter__(self):
-            raise AssertionError("drag frame must not walk photos")
-
-    assets = _assets_at(tmp_path, 50)
-    widget = _ExactProjectionMapWidget({(10.0, 20.0): QPointF(100, 100)})
-    controller = MarkerController(widget, _DummyThumbnailLoader(), marker_size=72, thumbnail_size=192,
-                                  provides_place_labels=True)
-    try:
-        cluster = _MarkerCluster(representative=assets[0], assets=assets, screen_pos=QPointF(100, 100))
-        controller._publish_clusters([cluster])
-        cluster.assets = NoIteration(assets)
-        controller._assets = NoIteration(assets)
-        widget.project_calls.clear()
-        controller.handle_pan(QPointF(0, 100))
-        controller.handle_projection_changed()
-        assert len(widget.project_calls) == 1
-        assert not controller._cluster_timer.isActive()
-    finally:
-        controller.shutdown()
-
-
 def test_marker_controller_suppresses_city_labels_when_backend_provides_them(
     qapp: QApplication,
 ) -> None:

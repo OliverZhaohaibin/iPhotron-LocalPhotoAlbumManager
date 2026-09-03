@@ -28,7 +28,6 @@ from maps.map_widget.map_renderer import CityAnnotation
 from ....library.runtime_controller import GeotaggedAsset
 from ..tasks.thumbnail_loader import ThumbnailLoader
 from .marker_controller import MarkerController, _MarkerCluster
-from .map_extension_notice import show_map_extension_update_notice
 from .custom_tooltip import FloatingToolTip, ToolTipEventFilter
 from .map_widget_support import MapEventSurfaceBridge, MapOverlayAttachment
 from .map_widget_factory import (
@@ -173,8 +172,7 @@ class _MarkerLayer(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         for cluster in self._clusters:
-            if cluster.projection_visible:
-                self._paint_cluster(painter, cluster)
+            self._paint_cluster(painter, cluster)
 
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
         painter = QPainter(self)
@@ -390,10 +388,6 @@ class PhotoMapView(QWidget):
 
         return self._map_widget
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        show_map_extension_update_notice(self, getattr(self, "_native_failure_reason", None))
-
     def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
         """Bind the session-owned map runtime snapshot for later refreshes."""
 
@@ -587,8 +581,6 @@ class PhotoMapView(QWidget):
         self._map_widget = result.widget
         self._map_widget_teardown_complete = False
         self._backend_kind = result.backend_kind
-        self._native_failure_reason = result.native_failure_reason
-        show_map_extension_update_notice(self, self._native_failure_reason)
         self._resolved_map_source = result.resolved_map_source
         assert self._resolved_map_source is not None
         actual_uses_gl = "confirmed_gl=true" in format_map_runtime_diagnostics(
@@ -652,9 +644,6 @@ class PhotoMapView(QWidget):
         self._map_widget.viewChanged.connect(self._marker_controller.handle_view_changed)
         self._map_widget.panned.connect(self._marker_controller.handle_pan)
         self._map_widget.panFinished.connect(self._marker_controller.handle_pan_finished)
-        projection_changed = getattr(self._map_widget, "projectionChanged", None)
-        if projection_changed is not None:
-            projection_changed.connect(self._marker_controller.handle_projection_changed)
         self._thumbnail_loader.ready.connect(self._marker_controller.handle_thumbnail_ready)
         self._marker_controller.clustersUpdated.connect(self._overlay.set_clusters)
         self._marker_controller.citiesUpdated.connect(self._handle_city_annotations)

@@ -16,7 +16,6 @@ from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 from .drag_cursor import DragCursorManager
 from .map_renderer import CityAnnotation
-from .viewport import effective_pan_delta
 
 TILE_SIZE = 256
 MERCATOR_LAT_BOUND = 85.05112878
@@ -133,19 +132,11 @@ class QtLocationMapWidget(QQuickWidget):
     def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
         """Translate the viewport by a fixed on-screen pixel delta."""
 
-        self._apply_pan(delta_x, delta_y)
-        self.panFinished.emit()
-
-    def _apply_pan(self, delta_x: float, delta_y: float) -> None:
         world_size = self._world_size()
-        before = self._center_x, self._center_y
         self._center_x -= float(delta_x) / world_size
         self._center_y -= float(delta_y) / world_size
         self._wrap_center()
         self._sync_map_camera()
-        self.panned.emit(QPointF(*effective_pan_delta(
-            before, (self._center_x, self._center_y), world_size,
-        )))
         self._emit_view_change()
 
     def center_lonlat(self) -> tuple[float, float]:
@@ -232,7 +223,13 @@ class QtLocationMapWidget(QQuickWidget):
             delta = current_pos - self._last_mouse_pos
             self._last_mouse_pos = current_pos
             if not delta.isNull():
-                self._apply_pan(delta.x(), delta.y())
+                world_size = self._world_size()
+                self._center_x -= delta.x() / world_size
+                self._center_y -= delta.y() / world_size
+                self._wrap_center()
+                self._sync_map_camera()
+                self.panned.emit(QPointF(delta))
+                self._emit_view_change()
             event.accept()
             return
         super().mouseMoveEvent(event)

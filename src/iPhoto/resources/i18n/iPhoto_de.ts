@@ -301,18 +301,6 @@
     <context>
         <name>MapExtension</name>
         <message>
-            <source>The map extension could not be used. Using the basic map. Please update the map extension.</source>
-            <translation>Die Kartenerweiterung konnte nicht verwendet werden. Die Basiskarte wird angezeigt. Bitte aktualisieren Sie die Kartenerweiterung.</translation>
-        </message>
-        <message>
-            <source>Download Update</source>
-            <translation>Update herunterladen</translation>
-        </message>
-        <message>
-            <source>An update download will be available soon.</source>
-            <translation>Ein Update wird demnächst zum Download verfügbar sein.</translation>
-        </message>
-        <message>
             <source>Map Extension</source>
             <translation>Kartenerweiterung</translation>
         </message>

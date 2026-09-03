@@ -13,7 +13,7 @@ pytest.importorskip("PySide6.QtCore", reason="QtCore is required for photo map t
 pytest.importorskip("PySide6.QtGui", reason="QtGui is required for photo map tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="QtWidgets is required for photo map tests", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QMetaObject, QObject, QPoint, QPointF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QHideEvent,
     QImage,
@@ -59,9 +59,6 @@ def _clear_override_cursors() -> None:
 
 
 class _FakeNativeLibrary:
-    def osmand_widget_surface_kind(self) -> int:
-        return 2
-
     def __init__(self) -> None:
         self.zoom = 2.0
         self.center_lon = 0.0
@@ -103,55 +100,6 @@ class _FakeNativeLibrary:
         screen_x._obj.value = float(longitude) * 10.0 + 5.0
         screen_y._obj.value = float(latitude) * 10.0 + 7.0
         return 1
-
-
-class _DeferredNativeLibrary(_FakeNativeLibrary):
-    def __init__(self):
-        super().__init__()
-        self.eager_creations = 0
-        self.deferred_creations = 0
-        self.initializations = 0
-        self.presented = False
-
-    def osmand_create_map_widget(self, *_args):
-        self.eager_creations += 1
-        self.initializations += 1
-        return 1
-
-    def osmand_create_map_widget_deferred(self, *_args):
-        self.deferred_creations += 1
-        return 1
-
-    def osmand_widget_initialize_resources(self, *_args):
-        self.initializations += 1
-        return 1
-
-    def osmand_widget_has_presented_frame(self, _pointer):
-        return int(self.presented)
-
-
-@pytest.fixture
-def deferred_native_runtime(qapp, monkeypatch, tmp_path):
-    class _FrameSurface(QWidget):
-        frameSwapped = Signal()
-
-    library = _DeferredNativeLibrary()
-    surface = _FrameSurface()
-    wrapped_types = []
-
-    def wrap(_pointer, cls):
-        wrapped_types.append(cls)
-        return surface
-
-    monkeypatch.setattr(native_osmand_widget_module, "resolve_osmand_native_widget_library", lambda _root: tmp_path / "native.dll")
-    monkeypatch.setattr(native_osmand_widget_module, "_load_bridge", lambda _path: SimpleNamespace(library=library))
-    monkeypatch.setattr(native_osmand_widget_module.shiboken6, "getCppPointer", lambda _widget: (1,))
-    monkeypatch.setattr(native_osmand_widget_module.shiboken6, "wrapInstance", wrap)
-    source = MapSourceSpec(
-        kind="osmand_obf", data_path=tmp_path / "world.obf",
-        resources_root=tmp_path, style_path=tmp_path / "style.xml",
-    )
-    return SimpleNamespace(library=library, surface=surface, source=source, wrapped_types=wrapped_types)
 
 
 class _FakeNativeChild(QWidget):
@@ -219,9 +167,6 @@ class _DummyThumbnailLoader(QObject):
 
 
 class _DummyMarkerController(QObject):
-    def handle_projection_changed(self) -> None:
-        pass
-
     clustersUpdated = Signal(list)
     citiesUpdated = Signal(list)
     assetActivated = Signal(str)
@@ -1220,7 +1165,7 @@ def test_probe_native_widget_runtime_loads_after_qapplication_on_macos(
     monkeypatch.setattr(
         native_osmand_widget_module,
         "_load_bridge",
-        lambda path: load_calls.append(path) or SimpleNamespace(library=_FakeNativeLibrary()),
+        lambda path: load_calls.append(path) or object(),
     )
 
     available, reason = native_osmand_widget_module.probe_native_widget_runtime(tmp_path)
@@ -1283,286 +1228,6 @@ def test_choose_map_widget_backend_keeps_legacy_gl_on_macos(monkeypatch, tmp_pat
     assert resolved_source is not None
     assert resolved_source.kind == "legacy_pbf"
     assert backend_kind == "legacy_python"
-
-
-@pytest.mark.parametrize("kind", [None, 0, 1, 99])
-@pytest.mark.parametrize("deferred", [False, True])
-def test_metal_rejects_incompatible_native_before_creation(
-    deferred_native_runtime, monkeypatch, kind, deferred,
-) -> None:
-    runtime = deferred_native_runtime
-    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", "darwin")
-    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "metal")
-    monkeypatch.setattr(
-        runtime.library, "osmand_widget_surface_kind",
-        None if kind is None else lambda: kind,
-    )
-    with pytest.raises(native_osmand_widget_module.TileLoadingError, match="independent OpenGL window"):
-        NativeOsmAndWidget(map_source=runtime.source, defer_initialization=deferred)
-    assert runtime.library.eager_creations == 0
-    assert runtime.library.deferred_creations == 0
-    assert runtime.wrapped_types == []
-
-
-@pytest.mark.parametrize("platform,backend", [("darwin", "opengl"), ("win32", "auto"), ("linux", "auto")])
-def test_opengl_consumers_keep_legacy_native_support(
-    deferred_native_runtime, monkeypatch, platform, backend,
-) -> None:
-    runtime = deferred_native_runtime
-    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", platform)
-    monkeypatch.setenv("IPHOTO_RHI_BACKEND", backend)
-    monkeypatch.setattr(runtime.library, "osmand_widget_surface_kind", None)
-    widget = NativeOsmAndWidget(map_source=runtime.source)
-    try:
-        assert runtime.library.eager_creations == 1
-        assert widget.native_surface_kind() == "unknown"
-    finally:
-        widget.shutdown()
-        widget.close()
-
-
-def test_metal_accepts_old_window_binary_after_isolated_probe(deferred_native_runtime, monkeypatch):
-    runtime = deferred_native_runtime
-    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "metal")
-    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", "darwin")
-    monkeypatch.setattr(runtime.library, "osmand_widget_surface_kind", None)
-    probes = []
-    monkeypatch.setattr(native_osmand_widget_module, "_probe_legacy_surface",
-                        lambda path, source: probes.append((path, source)) or "opengl_window")
-    widget = NativeOsmAndWidget(map_source=runtime.source)
-    try:
-        assert len(probes) == 1
-        assert runtime.library.eager_creations == 1
-        assert widget.native_surface_kind() == "opengl_window"
-    finally:
-        widget.shutdown()
-        widget.close()
-
-
-def test_native_projection_notifications_follow_changed_frames_and_stop_on_shutdown(
-    deferred_native_runtime, monkeypatch,
-):
-    runtime = deferred_native_runtime
-    widget = NativeOsmAndWidget(map_source=runtime.source)
-    widget.show()
-    runtime.library.presented = True
-    spy = QSignalSpy(widget.projectionChanged)
-    try:
-        runtime.surface.frameSwapped.emit()
-        initial = spy.count()
-        runtime.library.center_lat = 10.0
-        # Pointer activity alone does not publish a premature projection.
-        widget.panned.emit(QPointF(0, 100))
-        assert spy.count() == initial
-        runtime.surface.frameSwapped.emit()
-        assert spy.count() == initial + 1
-        runtime.surface.frameSwapped.emit()
-        assert spy.count() == initial + 1
-        widget.hide()
-        runtime.library.center_lat = 20.0
-        runtime.surface.frameSwapped.emit()
-        assert spy.count() == initial + 1
-        widget.shutdown()
-        runtime.surface.frameSwapped.emit()
-        assert spy.count() == initial + 1
-    finally:
-        widget.shutdown()
-        widget.close()
-
-
-def test_native_release_syncs_after_queued_camera_movement(deferred_native_runtime):
-    runtime = deferred_native_runtime
-    widget = NativeOsmAndWidget(map_source=runtime.source)
-    events = []
-    widget.projectionChanged.connect(lambda: events.append(("projection", widget.center_lonlat())))
-    widget.panFinished.connect(lambda: events.append(("finished", widget.center_lonlat())))
-    try:
-        widget._bridge_dragging = True
-        event = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(50, 50), QPointF(50, 50),
-                            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
-        widget.eventFilter(runtime.surface, event)
-        assert events == []
-        # Mimic the old native release handler flushing its own input queue.
-        runtime.library.center_lat = 59.0
-        widget._sync_deferred_view()
-        assert events == [("projection", (0.0, 59.0)), ("finished", (0.0, 59.0))]
-        events.clear()
-        widget.pan_by_pixels(0, 5)
-        assert events[-1][0] == "finished"
-    finally:
-        widget.shutdown()
-        widget.close()
-
-
-def test_native_strict_projection_does_not_substitute_mercator(deferred_native_runtime, monkeypatch):
-    runtime = deferred_native_runtime
-    widget = NativeOsmAndWidget(map_source=runtime.source)
-    try:
-        monkeypatch.setattr(runtime.library, "osmand_widget_project_lonlat", lambda *args: 0)
-        assert widget.project_lonlat_exact(10, 20) is None
-        assert widget.project_lonlat(10, 20) is not None
-    finally:
-        widget.shutdown()
-        widget.close()
-
-
-@pytest.mark.parametrize("consumer", ["photo_map", "info"])
-@pytest.mark.parametrize("gl_fails", [False, True])
-def test_metal_legacy_native_falls_back_without_creating_native_child(
-    deferred_native_runtime, monkeypatch, consumer, gl_fails,
-) -> None:
-    from iPhoto.gui.ui.widgets import info_location_map
-
-    runtime = deferred_native_runtime
-    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", "darwin")
-    monkeypatch.setenv("IPHOTO_RHI_BACKEND", "metal")
-    monkeypatch.setattr(runtime.library, "osmand_widget_surface_kind", lambda: 1)
-    module = info_location_map if consumer == "info" else map_widget_factory_module
-    fallback_calls = []
-
-    class Fallback(QWidget):
-        def __init__(self, parent, *, map_source):
-            super().__init__(parent)
-            fallback_calls.append(map_source)
-            if gl_fails:
-                raise RuntimeError("No GL context")
-
-    class CpuFallback(QWidget):
-        def __init__(self, parent, *, map_source):
-            super().__init__(parent)
-            assert map_source.kind == "legacy_pbf"
-
-    monkeypatch.setattr(module, "check_opengl_support", lambda: True)
-    monkeypatch.setattr(module, "choose_map_widget_backend", lambda *a, **kw: (NativeOsmAndWidget, runtime.source, "osmand_native"))
-    monkeypatch.setattr(module, "_preferred_python_widget_class", lambda **kw: Fallback)
-    monkeypatch.setattr(module, "MapWidget", CpuFallback)
-    parent = QWidget()
-    result = module.create_map_widget(parent, map_source=runtime.source, map_runtime_capabilities=None, package_root=Path("."))
-    assert result.backend_kind == "legacy_python"
-    assert isinstance(result.widget, CpuFallback if gl_fails else Fallback)
-    assert result.use_opengl is not gl_fails
-    assert len(fallback_calls) == 1
-    assert fallback_calls[0].kind == "legacy_pbf"
-    assert result.native_failure_reason
-    assert runtime.library.eager_creations == runtime.library.deferred_creations == 0
-    parent.close()
-
-
-@pytest.mark.parametrize("consumer", ["direct", "photo_map", "preview"])
-def test_native_existing_consumers_initialize_without_deferred_start(
-    deferred_native_runtime, qapp, monkeypatch, consumer,
-) -> None:
-    runtime = deferred_native_runtime
-    view = None
-    if consumer == "photo_map":
-        monkeypatch.setattr(map_widget_factory_module, "check_opengl_support", lambda: False)
-        monkeypatch.setattr(
-            map_widget_factory_module, "choose_map_widget_backend",
-            lambda *_args, **_kwargs: (NativeOsmAndWidget, runtime.source, "osmand_native"),
-        )
-        monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
-        monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
-        view = photo_map_view_module.PhotoMapView(map_source=runtime.source)
-        widget = view.map_widget()
-    elif consumer == "preview":
-        from maps.main import MainWindow
-
-        widget = MainWindow._create_map_widget(
-            SimpleNamespace(_native_widget_cls=NativeOsmAndWidget), map_source=runtime.source,
-        )
-    else:
-        widget = NativeOsmAndWidget(map_source=runtime.source)
-    try:
-        assert runtime.library.eager_creations == 1
-        assert runtime.library.deferred_creations == 0
-        assert runtime.library.initializations == 1
-        widget.start_deferred_content()
-        assert runtime.library.initializations == 1
-    finally:
-        (view or widget).shutdown()
-        (view or widget).close()
-
-
-@pytest.mark.parametrize("with_frame_query", [False, True])
-def test_info_panel_explicitly_defers_native_resources_until_shown(
-    deferred_native_runtime, qapp, monkeypatch, with_frame_query,
-) -> None:
-    from iPhoto.gui.ui.widgets import info_location_map
-    from iPhoto.gui.ui.widgets.info_panel import InfoPanel
-
-    runtime = deferred_native_runtime
-    if not with_frame_query:
-        monkeypatch.setattr(runtime.library, "osmand_widget_has_presented_frame", None)
-    monkeypatch.setattr(info_location_map, "check_opengl_support", lambda: False)
-    monkeypatch.setattr(
-        info_location_map, "choose_map_widget_backend",
-        lambda *_args, **_kwargs: (NativeOsmAndWidget, runtime.source, "osmand_native"),
-    )
-    panel = InfoPanel()
-    try:
-        panel.set_location_capability(enabled=True)
-        panel.set_asset_metadata({"rel": "map.jpg", "gps": {"lat": 48.137154, "lon": 11.576124}})
-        panel.prepare_for_presentation()
-        widget = panel._location_map.map_widget()
-        assert runtime.library.deferred_creations == 1
-        assert runtime.library.initializations == 0
-        runtime.surface.frameSwapped.emit()
-        assert not panel._location_map._placeholder.isHidden()
-
-        panel.show()
-        for _ in range(4):
-            qapp.processEvents()
-        assert runtime.library.initializations == 1
-        widget.start_deferred_content()
-        assert runtime.library.initializations == 1
-        runtime.surface.frameSwapped.emit()
-        if with_frame_query:
-            assert not panel._location_map._placeholder.isHidden()
-            runtime.library.presented = True
-            widget._poll_view_state()
-        assert panel._location_map._placeholder.isHidden()
-        assert widget.center_lonlat() == (11.576124, 48.137154)
-    finally:
-        panel.shutdown()
-        panel.close()
-
-
-@pytest.mark.parametrize("window_surface", [False, True])
-def test_old_native_runtime_uses_actual_surface_first_frame(
-    deferred_native_runtime, qapp, monkeypatch, window_surface,
-) -> None:
-    runtime = deferred_native_runtime
-    for name in ("osmand_create_map_widget_deferred", "osmand_widget_initialize_resources", "osmand_widget_has_presented_frame"):
-        monkeypatch.setattr(runtime.library, name, None)
-    target = runtime.surface
-    if window_surface:
-        class _FrameWindow(QWindow):
-            frameSwapped = Signal()
-
-        target = _FrameWindow()
-        monkeypatch.setattr(runtime.library, "osmand_widget_get_event_target", lambda _pointer: 2, raising=False)
-
-        def wrap(pointer, cls):
-            runtime.wrapped_types.append(cls)
-            return target if int(pointer) == 2 else runtime.surface
-
-        monkeypatch.setattr(native_osmand_widget_module.shiboken6, "wrapInstance", wrap)
-    widget = NativeOsmAndWidget(map_source=runtime.source, defer_initialization=True)
-    spy = QSignalSpy(widget.firstFramePresented)
-    try:
-        assert runtime.wrapped_types == ([QWidget, QWindow] if window_surface else [QWidget])
-        assert runtime.library.eager_creations == 1
-        assert runtime.library.initializations == 1
-        assert QMetaObject.invokeMethod(target, "frameSwapped", Qt.ConnectionType.DirectConnection)
-        assert spy.count() == 1
-        widget.shutdown()
-        QMetaObject.invokeMethod(target, "frameSwapped", Qt.ConnectionType.DirectConnection)
-        assert spy.count() == 1
-    finally:
-        widget.shutdown()
-        widget.close()
-        if window_surface:
-            target.destroy()
 
 
 def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QApplication, monkeypatch, tmp_path) -> None:

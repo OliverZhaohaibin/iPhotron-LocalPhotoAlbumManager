@@ -5,7 +5,7 @@
 #include <memory>
 
 #include <QElapsedTimer>
-#include "osmand_native_map_surface.h"
+#include <QOpenGLWidget>
 #include <QPointF>
 #include <QString>
 #include <QTimer>
@@ -23,7 +23,7 @@ namespace OsmAnd
     class MapRasterLayerProvider_Software;
 }
 
-class OsmAndNativeMapWidget final : public OsmAndNativeMapSurface
+class OsmAndNativeMapWidget final : public QOpenGLWidget
 {
 public:
     struct Configuration
@@ -51,7 +51,6 @@ public:
     bool hasPresentedFrame() const;
     bool initializeResources(QString& errorMessage);
     void cleanupRenderer();
-    void shutdown();
 
 protected:
     void initializeGL() override;
@@ -100,8 +99,6 @@ private:
     bool _captionDiagnosticsDumped = false;
     bool _coldStartBootstrapPending = false;
     bool _firstFramePresented = false;
-    bool _framePendingPresentation = false;
-    bool _shutdown = false;
     bool _startupProfileEnabled = false;
     bool _firstPreparedFrameLogged = false;
     bool _prepareFramePendingLogged = false;

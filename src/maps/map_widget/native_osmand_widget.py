@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import ctypes
-import json
 import logging
 import math
 import os
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -16,7 +14,7 @@ from typing import Any, Callable, Sequence
 
 import PySide6
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal, SIGNAL
+from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QCloseEvent,
@@ -30,6 +28,7 @@ from PySide6.QtGui import (
     QWindow,
 )
 from PySide6.QtOpenGL import QOpenGLWindow
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
@@ -44,9 +43,7 @@ from maps.tile_parser import TileLoadingError
 MERCATOR_LAT_BOUND = 85.05112878
 _NATIVE_DLL_DIR_HANDLES: list[Any] = []
 _PRELOADED_QT_LIBRARIES: list[ctypes.CDLL] = []
-_NATIVE_WIDGET_RUNTIME_PROBE: dict[tuple, tuple[bool, str | None]] = {}
-_NATIVE_WIDGET_RUNTIME_FAILURES: dict[Path, str] = {}
-_LEGACY_SURFACE_PROBE: dict[tuple, str] = {}
+_NATIVE_WIDGET_RUNTIME_PROBE: dict[Path, tuple[bool, str | None]] = {}
 _LOGGER = logging.getLogger(__name__)
 _MAP_OPAQUE_BACKGROUND = "#88a8c2"
 _GL_COLOR_BUFFER_BIT = 0x00004000
@@ -57,75 +54,6 @@ _GL_SCISSOR_TEST = 0x0C11
 @dataclass(frozen=True)
 class _BridgeAPI:
     library: ctypes.CDLL
-
-
-def _native_surface_kind(library: object) -> str:
-    query = getattr(library, "osmand_widget_surface_kind", None)
-    if query is None:
-        return "unknown"
-    return {1: "opengl_widget", 2: "opengl_window"}.get(int(query()), "unknown")
-
-
-def _probe_legacy_surface(library_path: Path, source: MapSourceSpec | None = None) -> str:
-    """Inspect old Qt objects in a child process before touching the media window."""
-
-    try:
-        stat = library_path.stat()
-    except OSError:
-        return "unknown"
-    root = Path(__file__).resolve().parent.parent
-    source = (source or MapSourceSpec.osmand_default(root)).resolved(root)
-    key = (str(library_path.resolve()), stat.st_mtime_ns, stat.st_size,
-           PySide6.__version__, str(source.data_path), str(source.resources_root))
-    if key in _LEGACY_SURFACE_PROBE:
-        return _LEGACY_SURFACE_PROBE[key]
-    payload = json.dumps({
-        "library": str(library_path.resolve()), "obf": str(source.data_path),
-        "resources": str(source.resources_root or ""), "style": str(source.style_path or ""),
-    })
-    if getattr(sys, "frozen", False) or "__compiled__" in globals():
-        command = [QApplication.applicationFilePath() or sys.executable, "--native-map-surface-probe", payload]
-    else:
-        command = [sys.executable, "-m", "iPhoto.entrypoint", "--native-map-surface-probe", payload]
-    env = os.environ.copy()
-    env["QT_QPA_PLATFORM"] = "offscreen"
-    src_root = str(root.parent)
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, (src_root, env.get("PYTHONPATH"))))
-    kind = "unknown"
-    try:
-        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if line.startswith("NATIVE_SURFACE="):
-                    candidate = line.partition("=")[2]
-                    if candidate in {"opengl_window", "opengl_widget"}:
-                        kind = candidate
-    except (OSError, subprocess.TimeoutExpired):
-        _LOGGER.warning("Could not inspect legacy native map surface", exc_info=True)
-    _LEGACY_SURFACE_PROBE[key] = kind
-    return kind
-
-
-def _validate_native_surface(
-    library: object, library_path: Path, source: MapSourceSpec | None = None,
-) -> str:
-    """Reject an incompatible extension before it can create any child widgets."""
-
-    kind = _native_surface_kind(library)
-    # The media application defaults to Metal on macOS. Standalone map callers
-    # use the same safe default; the explicit OpenGL override remains supported.
-    requires_window = (
-        sys.platform == "darwin"
-        and os.environ.get("IPHOTO_RHI_BACKEND", "auto").strip().lower() != "opengl"
-    )
-    if requires_window and kind == "unknown":
-        kind = _probe_legacy_surface(library_path, source)
-    if requires_window and kind != "opengl_window":
-        raise TileLoadingError(
-            f"Native map surface {kind} is incompatible with macOS Metal composition; "
-            f"an independent OpenGL window is required: {library_path}"
-        )
-    return kind
 
 
 def _render_marker_buffer(
@@ -338,10 +266,6 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
         (time.perf_counter() - load_started) * 1000.0,
         library=library_path,
     )
-    surface_kind = getattr(library, "osmand_widget_surface_kind", None)
-    if surface_kind is not None:
-        surface_kind.argtypes = []
-        surface_kind.restype = ctypes.c_int
     library.osmand_create_map_widget.argtypes = [
         ctypes.c_void_p,
         ctypes.c_wchar_p,
@@ -418,25 +342,11 @@ def _has_qapplication_instance() -> bool:
 
 def probe_native_widget_runtime(package_root: Path | None = None) -> tuple[bool, str | None]:
     root = (package_root or Path(__file__).resolve().parent.parent).resolve()
-    library_path = resolve_osmand_native_widget_library(root)
-    identity = None
-    if library_path is not None:
-        try:
-            stat = library_path.stat()
-            identity = (str(library_path.resolve()), stat.st_mtime_ns, stat.st_size)
-        except OSError as exc:
-            reason = f"Native map library is unavailable: {exc}"
-            _NATIVE_WIDGET_RUNTIME_FAILURES[root] = reason
-            return False, reason
-    key = (root, identity, sys.platform, os.environ.get("IPHOTO_RHI_BACKEND", "auto"), PySide6.__version__)
-    cached = _NATIVE_WIDGET_RUNTIME_PROBE.get(key)
+    cached = _NATIVE_WIDGET_RUNTIME_PROBE.get(root)
     if cached is not None:
-        if not cached[0] and library_path is not None:
-            _NATIVE_WIDGET_RUNTIME_FAILURES[root] = cached[1] or "Native map runtime unavailable"
-        else:
-            _NATIVE_WIDGET_RUNTIME_FAILURES.pop(root, None)
         return cached
 
+    library_path = resolve_osmand_native_widget_library(root)
     if library_path is None:
         result = (False, "The native OsmAnd widget library is not available")
     elif sys.platform == "darwin" and not _has_qapplication_instance():
@@ -446,25 +356,14 @@ def probe_native_widget_runtime(package_root: Path | None = None) -> tuple[bool,
         )
     else:
         try:
-            bridge = _load_bridge(library_path)
-            _validate_native_surface(bridge.library, library_path, MapSourceSpec.osmand_default(root))
+            _load_bridge(library_path)
         except Exception as exc:  # pragma: no cover - exercised only on local runtimes
             result = (False, f"{type(exc).__name__}: {exc}")
         else:
             result = (True, None)
 
-    _NATIVE_WIDGET_RUNTIME_PROBE[key] = result
-    if not result[0] and library_path is not None:
-        _NATIVE_WIDGET_RUNTIME_FAILURES[root] = result[1] or "Native map runtime unavailable"
-    else:
-        _NATIVE_WIDGET_RUNTIME_FAILURES.pop(root, None)
+    _NATIVE_WIDGET_RUNTIME_PROBE[root] = result
     return result
-
-
-def native_widget_runtime_failure(package_root: Path) -> str | None:
-    """Return an actual failed probe, not an intentionally disabled backend."""
-
-    return _NATIVE_WIDGET_RUNTIME_FAILURES.get(package_root.resolve())
 
 
 def _lonlat_to_normalized(longitude: float, latitude: float) -> tuple[float, float]:
@@ -476,14 +375,11 @@ def _lonlat_to_normalized(longitude: float, latitude: float) -> tuple[float, flo
 
 
 class NativeOsmAndWidget(QWidget):
-    """Host an OsmAnd surface, isolated in a native window on macOS."""
+    """Host a native C++ OsmAnd `QOpenGLWidget` inside a PySide6 widget tree."""
 
     viewChanged = Signal(float, float, float)
     panned = Signal(QPointF)
-    """Pointer activity only; native overlays position themselves on projectionChanged."""
     panFinished = Signal()
-    projectionChanged = Signal()
-    """The native camera's projection changed after an event or rendered frame."""
     firstFramePresented = Signal()
 
     def __init__(
@@ -493,7 +389,6 @@ class NativeOsmAndWidget(QWidget):
         map_source: MapSourceSpec | None = None,
         tile_root: Path | str = "tiles",
         style_path: Path | str = "style.json",
-        defer_initialization: bool = False,
     ) -> None:
         super().__init__(parent)
         del tile_root, style_path
@@ -512,7 +407,6 @@ class NativeOsmAndWidget(QWidget):
 
         create_started = time.perf_counter()
         self._bridge = _load_bridge(library_path)
-        self._surface_kind = _validate_native_surface(self._bridge.library, library_path, self._map_source)
         error_buffer = ctypes.create_unicode_buffer(4096)
         parent_pointer = int(shiboken6.getCppPointer(self)[0])
         deferred_create = getattr(
@@ -526,10 +420,7 @@ class NativeOsmAndWidget(QWidget):
             None,
         )
         self._deferred_resources_pending = bool(
-            # Existing full-map and preview callers expect ready resources.
-            defer_initialization
-            and deferred_create is not None
-            and initialize_resources is not None
+            deferred_create is not None and initialize_resources is not None
         )
         if self._deferred_resources_pending:
             native_pointer = deferred_create(
@@ -560,8 +451,7 @@ class NativeOsmAndWidget(QWidget):
         )
 
         self._native_pointer = ctypes.c_void_p(native_pointer)
-        # macOS SDKs can return a QWidget containing a separate QOpenGLWindow.
-        self._native_widget = shiboken6.wrapInstance(int(native_pointer), QWidget)
+        self._native_widget = shiboken6.wrapInstance(int(native_pointer), QOpenGLWidget)
         self._native_widget.setObjectName("NativeOsmAndMapWidget")
         self._native_event_target = self._native_widget
         get_event_target = getattr(self._bridge.library, "osmand_widget_get_event_target", None)
@@ -596,16 +486,9 @@ class NativeOsmAndWidget(QWidget):
         self._overlay_window: _NativeMarkerOverlayWindow | None = None
         self._overlay_container: QWidget | None = None
         self._first_frame_presented = False
-        self._last_projection_state: tuple | None = None
-        self._pan_finish_pending = False
-        self._frame_surface: QObject | None = None
-        for surface in (self._native_event_target, self._native_widget):
-            if surface.metaObject().indexOfSignal("frameSwapped()") >= 0:
-                # Both historical and current binaries expose Qt's signal.
-                # Do not downcast a foreign QWidget/QWindow to a GL wrapper.
-                QObject.connect(surface, SIGNAL("frameSwapped()"), self._handle_frame_swapped)
-                self._frame_surface = surface
-                break
+        frame_swapped = getattr(self._native_widget, "frameSwapped", None)
+        if frame_swapped is not None and not self._deferred_resources_pending:
+            frame_swapped.connect(self._emit_first_frame_presented)
 
         min_zoom = float(self._bridge.library.osmand_widget_get_min_zoom(self._native_pointer)) or 2.0
         max_zoom = float(self._bridge.library.osmand_widget_get_max_zoom(self._native_pointer)) or 19.0
@@ -626,7 +509,7 @@ class NativeOsmAndWidget(QWidget):
         self._deferred_view_sync_timer = QTimer(self)
         self._deferred_view_sync_timer.setSingleShot(True)
         self._deferred_view_sync_timer.setInterval(0)
-        self._deferred_view_sync_timer.timeout.connect(self._sync_deferred_view)
+        self._deferred_view_sync_timer.timeout.connect(self._emit_view_change)
         self._sync_native_widget_geometry()
         self._emit_view_change()
 
@@ -647,7 +530,7 @@ class NativeOsmAndWidget(QWidget):
         self._native_widget.update()
 
     def prepare_surface(self) -> None:
-        """The native surface is attached during initialisation."""
+        """The native QOpenGLWidget shell is attached during initialisation."""
 
     @property
     def zoom(self) -> float:
@@ -670,12 +553,9 @@ class NativeOsmAndWidget(QWidget):
     def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
         if self._is_shutdown():
             return
-        self.panned.emit(QPointF())
         self._bridge.library.osmand_widget_pan_by_pixels(self._native_pointer, float(delta_x), float(delta_y))
+        self.panned.emit(QPointF(float(delta_x), float(delta_y)))
         self._emit_view_change()
-        self._notify_projection_changed()
-        if not self._bridge_dragging:
-            self.panFinished.emit()
 
     def center_lonlat(self) -> tuple[float, float]:
         if self._is_shutdown():
@@ -710,13 +590,6 @@ class NativeOsmAndWidget(QWidget):
             self._deferred_view_sync_timer.stop()
         self._reset_drag_cursor()
         self._bridge_dragging = False
-        self._pan_finish_pending = False
-        if self._frame_surface is not None:
-            try:
-                QObject.disconnect(self._frame_surface, SIGNAL("frameSwapped()"), self._handle_frame_swapped)
-            except RuntimeError:
-                pass  # The container may already have destroyed its native window.
-            self._frame_surface = None
         if hasattr(self, "_native_widget") and self._native_widget is not None:
             try:
                 self._native_event_target.removeEventFilter(self)
@@ -736,9 +609,6 @@ class NativeOsmAndWidget(QWidget):
 
     def loaded_library_path(self) -> Path:
         return self._library_path
-
-    def native_surface_kind(self) -> str:
-        return self._surface_kind
 
     def set_city_annotations(self, cities: Sequence[CityAnnotation]) -> None:
         del cities
@@ -774,9 +644,7 @@ class NativeOsmAndWidget(QWidget):
     def prefers_exact_screen_projection(self) -> bool:
         return True
 
-    def project_lonlat_exact(self, lon: float, lat: float) -> QPointF | None:
-        """Use only OsmAnd geometry; never substitute a different projection."""
-
+    def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
         if self._is_shutdown():
             return None
         screen_x = ctypes.c_double(0.0)
@@ -790,14 +658,6 @@ class NativeOsmAndWidget(QWidget):
         )
         if projected:
             return QPointF(float(screen_x.value), float(screen_y.value))
-        return None
-
-    def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
-        if self._is_shutdown():
-            return None
-        point = self.project_lonlat_exact(lon, lat)
-        if point is not None:
-            return point
 
         try:
             world_position = _lonlat_to_normalized(lon, lat)
@@ -830,8 +690,6 @@ class NativeOsmAndWidget(QWidget):
             if event_type == QEvent.Type.MouseButtonPress:
                 mouse_event = event
                 if mouse_event.button() == Qt.MouseButton.LeftButton:
-                    if self._pan_finish_pending:
-                        self._sync_deferred_view()
                     self._bridge_dragging = True
                     self._bridge_last_mouse_pos = mouse_event.position()
                     self._set_drag_cursor()
@@ -851,9 +709,7 @@ class NativeOsmAndWidget(QWidget):
                 if self._bridge_dragging and mouse_event.button() == Qt.MouseButton.LeftButton:
                     self._bridge_dragging = False
                     self._reset_drag_cursor()
-                    # The old touch binary flushes its coalesced movement in
-                    # its release handler, which runs after this event filter.
-                    self._pan_finish_pending = True
+                    self.panFinished.emit()
                     self._schedule_deferred_view_sync()
             elif event_type in {QEvent.Type.Wheel, QEvent.Type.Resize}:
                 self._schedule_deferred_view_sync()
@@ -885,11 +741,7 @@ class NativeOsmAndWidget(QWidget):
             if self._deferred_view_sync_timer.isActive():
                 self._deferred_view_sync_timer.stop()
             self._reset_drag_cursor()
-            was_panning = self._bridge_dragging or self._pan_finish_pending
             self._bridge_dragging = False
-            self._pan_finish_pending = False
-            if was_panning:
-                self.panFinished.emit()
         super().hideEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
@@ -904,41 +756,10 @@ class NativeOsmAndWidget(QWidget):
         self.viewChanged.emit(center_x, center_y, zoom)
 
     def _emit_first_frame_presented(self) -> None:
-        if self._is_shutdown() or self._deferred_resources_pending or self._first_frame_presented:
+        if self._first_frame_presented:
             return
         self._first_frame_presented = True
         self.firstFramePresented.emit()
-
-    def _handle_frame_swapped(self) -> None:
-        if self._is_shutdown() or self._deferred_resources_pending:
-            return
-        has_frame = getattr(self._bridge.library, "osmand_widget_has_presented_frame", None)
-        if has_frame is None or has_frame(self._native_pointer):
-            self._emit_first_frame_presented()
-            if not self.isHidden():
-                self._notify_projection_changed()
-
-    def _notify_projection_changed(self) -> None:
-        if self._is_shutdown():
-            return
-        state = self._read_view_state()
-        key = (*state, self.width(), self.height(), self.devicePixelRatioF())
-        if key == self._last_projection_state:
-            return
-        self._last_projection_state = key
-        if state != self._last_view_state:
-            self._last_view_state = state
-            self.viewChanged.emit(*state)
-        self.projectionChanged.emit()
-
-    def _sync_deferred_view(self) -> None:
-        if self._is_shutdown():
-            return
-        self._emit_view_change()
-        if self._pan_finish_pending:
-            self._pan_finish_pending = False
-            self._notify_projection_changed()
-            self.panFinished.emit()
 
     def _poll_view_state(self) -> None:
         if self._is_shutdown():

@@ -29,7 +29,6 @@ class MapRuntimeCapabilities:
     osmand_extension_available: bool
     location_search_available: bool
     status_message: str
-    native_failure_reason: str | None = None
 
 
 class MapRuntimePort(Protocol):

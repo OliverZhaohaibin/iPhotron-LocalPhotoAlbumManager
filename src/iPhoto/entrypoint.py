@@ -7,10 +7,6 @@ import sys
 
 def main() -> int:
     arguments = sys.argv
-    if len(arguments) > 1 and arguments[1] == "--native-map-surface-probe":
-        from maps.native_surface_probe import main as run_surface_probe
-
-        return run_surface_probe(arguments[2:])
     if len(arguments) > 1 and arguments[1] == "--startup-library-probe":
         from iPhoto.bootstrap.library_probe import _main as run_library_probe
 

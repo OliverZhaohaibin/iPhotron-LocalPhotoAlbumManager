@@ -35,6 +35,7 @@ public:
     };
 
     static OsmAndNativeMapWidget* create(const Configuration& configuration, QWidget* parent, QString& errorMessage);
+    static OsmAndNativeMapWidget* createDeferred(const Configuration& configuration, QWidget* parent);
 
     ~OsmAndNativeMapWidget() override;
 
@@ -47,6 +48,8 @@ public:
     void setCenterLonLat(double longitude, double latitude);
     QPointF centerLonLat() const;
     bool projectLonLat(double longitude, double latitude, QPointF& outScreenPoint) const;
+    bool hasPresentedFrame() const;
+    bool initializeResources(QString& errorMessage);
     void cleanupRenderer();
 
 protected:
@@ -61,7 +64,6 @@ protected:
 private:
     explicit OsmAndNativeMapWidget(const Configuration& configuration, QWidget* parent = nullptr);
 
-    bool initializeResources(QString& errorMessage);
     bool ensureRenderer();
     void maybeDumpCaptionDiagnostics();
     void syncRendererViewport(bool forcedUpdate = false);
@@ -96,6 +98,7 @@ private:
     bool _symbolsSuspendedByInteraction = false;
     bool _captionDiagnosticsDumped = false;
     bool _coldStartBootstrapPending = false;
+    bool _firstFramePresented = false;
     bool _startupProfileEnabled = false;
     bool _firstPreparedFrameLogged = false;
     bool _prepareFramePendingLogged = false;

@@ -873,6 +873,8 @@ def test_people_runtime_mutation_recovers_forward_after_phase_failure(
             _person_record(person_id="person-b", key_face_id="face-b", face_count=1),
         ],
     )
+    recovery_group = service.create_group(["person-a", "person-b"])
+    assert recovery_group is not None
     coordinator = service.coordinator
     assert coordinator is not None
 
@@ -889,17 +891,17 @@ def test_people_runtime_mutation_recovers_forward_after_phase_failure(
 
         monkeypatch.setattr(FaceStateRepository, "sync_scan_results", fail_once)
     elif failure_point == "group_refresh":
-        original = FaceRepository.refresh_all_group_assets
+        original = FaceRepository.refresh_group_assets
         calls = 0
 
-        def fail_once(self) -> None:
+        def fail_once(self, group_id: str) -> list[str]:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise RuntimeError("injected group refresh failure")
-            original(self)
+            return original(self, group_id)
 
-        monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", fail_once)
+        monkeypatch.setattr(FaceRepository, "refresh_group_assets", fail_once)
     else:
         original = coordinator._journal.commit_and_dispatch
         calls = 0
@@ -919,7 +921,7 @@ def test_people_runtime_mutation_recovers_forward_after_phase_failure(
     if failure_point == "state_sync":
         monkeypatch.setattr(FaceStateRepository, "sync_scan_results", original)
     elif failure_point == "group_refresh":
-        monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", original)
+        monkeypatch.setattr(FaceRepository, "refresh_group_assets", original)
     assert coordinator.delete_face("missing-face") is None
     journal = RecognitionOperationJournal(
         ensure_work_dir(library_root) / "recognition" / "operations.db"
@@ -2730,10 +2732,11 @@ def recognition_edit_library(tmp_path):
         _face_record(face_id="FA", asset_id="photo", asset_rel="photo.jpg", person_id="A"),
         _face_record(face_id="FA2", asset_id="other-a", asset_rel="other-a.jpg", person_id="A"),
         _face_record(face_id="FB0", asset_id="other-b", asset_rel="other-b.jpg", person_id="B"),
+        _face_record(face_id="FB1", asset_id="pet-photo", asset_rel="pet-photo.jpg", person_id="B"),
     ]
     persons = [
         _person_record(person_id="A", key_face_id="FA", face_count=2, name="Alice"),
-        _person_record(person_id="B", key_face_id="FB0", face_count=1, name="Bob"),
+        _person_record(person_id="B", key_face_id="FB0", face_count=2, name="Bob"),
     ]
     repo.replace_all(faces, persons)
     repo.state_repository.sync_scan_results(persons, faces)
@@ -2755,9 +2758,15 @@ def recognition_edit_library(tmp_path):
         [
             _pet_detection_record(
                 detection_id="DP", asset_id="pet-photo", asset_rel="pet-photo.jpg", pet_id="P"
-            )
+            ),
+            _pet_detection_record(
+                detection_id="DQ", asset_id="other-b", asset_rel="other-b.jpg", pet_id="Q"
+            ),
         ],
-        [_pet_record(pet_id="P", key_detection_id="DP", detection_count=1, name="Miso")],
+        [
+            _pet_record(pet_id="P", key_detection_id="DP", detection_count=1, name="Miso"),
+            _pet_record(pet_id="Q", key_detection_id="DQ", detection_count=1, name="Other"),
+        ],
     )
     merges = Mock(wraps=RecognitionMergeService(people, pets))
     edits = RecognitionEditService(
@@ -2920,7 +2929,7 @@ def test_move_recovery_replays_override_cleanup_and_group_refresh(
         if failure_stage == "before_sync":
             patcher.setattr(type(repo), "complete_runtime_state_sync", fail_sync)
         else:
-            patcher.setattr(FaceRepository, "refresh_all_group_assets", fail_sync)
+            patcher.setattr(FaceRepository, "refresh_group_assets_for_identity_refs", fail_sync)
         with pytest.raises(OSError, match="after runtime commit"):
             if source == "pet":
                 repo.move_detection_to_pet(annotation_id, "P", operation_id=operation_id)
@@ -2931,6 +2940,8 @@ def test_move_recovery_replays_override_cleanup_and_group_refresh(
             [(kind, annotation_id)]
         )
     ) == (failure_stage == "before_sync")
+    expected_target = "person:A" if source == "pet" else "pet:P"
+    assert repo.get_runtime_commit(operation_id)["cleared_identity_assignment"] == expected_target
     repo.complete_runtime_state_sync(operation_id)
     repo.complete_runtime_state_sync(operation_id)
     assert (
@@ -3038,3 +3049,190 @@ def test_qt_manual_correction_reaches_persistence_and_refreshes_label(
         surface.close()
         surface.deleteLater()
         qapp.processEvents()
+
+
+
+def test_cross_kind_unnamed_identity_can_take_source_name(recognition_edit_library):
+    from iPhoto.application.services.recognition_edit_service import (
+        annotation_edit_context,
+        current_identity_display_name,
+    )
+    from iPhoto.domain.recognition_edits import IdentityRenameRequest, RecognitionEditStatus
+
+    root, people, pets, edits, merges = recognition_edit_library
+    assert pets.rename_pet("P", None)
+    assert people.reassign_detection_identity(
+        source_kind="person", source_annotation_id="FA", target_identity="pet:P"
+    )
+    raw = next(r for r in people.list_asset_face_annotations("photo") if r.face_id == "FA")
+    presented = face_annotation_adapter(raw, "photo")
+    assert raw.display_name == "Alice"
+    assert raw.canonical_display_name is None
+    assert presented.canonical_display_name is None
+    assert presented.display_name is None
+    request = IdentityRenameRequest(
+        annotation_edit_context("photo", presented), "Alice", None
+    )
+    assert current_identity_display_name(presented) is None
+    assert edits.rename_identity(request).status == RecognitionEditStatus.CHANGED
+    assert {pet.pet_id: pet.name for pet in pets.list_pets(include_candidates=True)}["P"] == "Alice"
+    merges.merge.assert_not_called()
+
+
+def test_confirmed_stale_editor_cannot_overwrite_new_identity_name(recognition_edit_library):
+    from iPhoto.application.services.recognition_edit_service import annotation_edit_context
+    from iPhoto.domain.recognition_edits import IdentityRenameRequest, RecognitionEditStatus
+
+    root, people, pets, edits, merges = recognition_edit_library
+    people.repository().state_repository.confirm_person("A")
+    opened = next(r for r in people.list_asset_face_annotations("photo") if r.face_id == "FA")
+    request = IdentityRenameRequest(
+        annotation_edit_context("photo", opened), "Bob from stale editor", "Alice"
+    )
+    assert people.rename_cluster("A", "Carol")
+    outcome = edits.rename_identity(request)
+    assert outcome.status == RecognitionEditStatus.REJECTED
+    assert outcome.failure == "context_changed"
+    assert {person.person_id: person.name for person in people.list_clusters(include_candidates=True)}[
+        "A"
+    ] == "Carol"
+    merges.merge.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["delete", "move", "move_new"])
+def test_ordinary_pet_detection_mutation_never_refreshes_all_people_groups(
+    recognition_edit_library, monkeypatch, operation
+):
+    root, people, pets, edits, merges = recognition_edit_library
+    relevant = people.create_group(["pet:P", "person:A"])
+    unrelated = people.create_group(["pet:Q", "person:B"])
+    assert relevant is not None and unrelated is not None
+    refreshed = []
+    original = FaceRepository.refresh_group_assets
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        lambda self: pytest.fail("ordinary detection mutation enumerated every People group"),
+    )
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_group_assets",
+        lambda self, group_id: (refreshed.append(group_id), original(self, group_id))[1],
+    )
+    if operation == "delete":
+        assert pets.delete_detection("DP")
+    elif operation == "move":
+        assert pets.move_detection_to_pet_with_outcome("DP", "Q").succeeded
+    else:
+        assert pets.move_detection_to_new_pet("DP", "New pet")
+    assert relevant.group_id in refreshed
+    if operation == "move":
+        assert unrelated.group_id in refreshed
+    else:
+        assert unrelated.group_id not in refreshed
+
+
+def test_override_cleanup_refreshes_only_native_and_previous_target_groups(
+    recognition_edit_library, monkeypatch
+):
+    root, people, pets, edits, merges = recognition_edit_library
+    target_group = people.create_group(["person:A", "person:B"])
+    native_group = people.create_group(["pet:P", "person:A"])
+    unrelated_group = people.create_group(["pet:Q", "person:B"])
+    assert target_group and native_group and unrelated_group
+    assert people.reassign_detection_identity(
+        source_kind="pet", source_annotation_id="DP", target_identity="person:A"
+    )
+    refreshed = []
+    original = FaceRepository.refresh_group_assets
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        lambda self: pytest.fail("override cleanup enumerated every People group"),
+    )
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_group_assets",
+        lambda self, group_id: (refreshed.append(group_id), original(self, group_id))[1],
+    )
+    assert pets.move_detection_to_pet_with_outcome("DP", "P").succeeded
+    assert set(refreshed) == {target_group.group_id, native_group.group_id}
+    assert unrelated_group.group_id not in refreshed
+
+
+def test_pet_override_cleanup_recovers_through_global_journal(
+    recognition_edit_library, monkeypatch
+):
+    root, people, pets, edits, merges = recognition_edit_library
+    target_group = people.create_group(["person:A", "person:B"])
+    native_group = people.create_group(["pet:P", "person:A"])
+    assert target_group and native_group
+    assert people.reassign_detection_identity(
+        source_kind="pet", source_annotation_id="DP", target_identity="person:A"
+    )
+    calls = 0
+    original = FaceRepository.refresh_group_assets_for_identity_refs
+
+    def fail_after_cleanup(self, refs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("injected targeted group refresh failure")
+        return original(self, refs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            FaceRepository,
+            "refresh_group_assets_for_identity_refs",
+            fail_after_cleanup,
+        )
+        with pytest.raises(OSError, match="targeted group refresh"):
+            pets.move_detection_to_pet_with_outcome("DP", "P")
+
+    state = people.repository().state_repository
+    assert state.get_annotation_identity_assignments([("pet", "DP")]) == {}
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(root) / "recognition" / "operations.db"
+    )
+    assert [operation.kind for operation in journal.unfinished()] == ["pet_move_detection"]
+    # Any subsequent mutation first replays the committed runtime operation.
+    assert pets.rename_pet("Q", "Other updated")
+    assert journal.unfinished() == ()
+    assert people.group_asset_ids(target_group.group_id) == []
+    assert people.group_asset_ids(native_group.group_id) == []
+
+
+def test_legacy_pet_runtime_commit_keeps_full_refresh_recovery_fallback(
+    recognition_edit_library, monkeypatch
+):
+    from contextlib import closing
+
+    root, people, pets, edits, merges = recognition_edit_library
+    repository = pets.repository()
+    operation_id = "legacy-pet-move-without-assignment-target"
+    with closing(repository._connect()) as connection:
+        repository._write_runtime_commit(
+            connection,
+            operation_id,
+            {
+                "operation_kind": "pet_move_detection",
+                "affected_pet_ids": ["P"],
+                "changed_pet_ids": ["P"],
+                "changed_asset_ids": ["pet-photo"],
+                "detection_id": "DP",
+                "source_pet_id": "P",
+                "target_pet_id": "P",
+            },
+        )
+        connection.commit()
+    refresh_calls = []
+    original_refresh = FaceRepository.refresh_all_group_assets
+
+    def refresh(instance):
+        refresh_calls.append(1)
+        return original_refresh(instance)
+
+    monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", refresh)
+    result = repository.complete_runtime_state_sync(operation_id)
+    assert result is not None and result["state_synced"]
+    assert refresh_calls == [1]

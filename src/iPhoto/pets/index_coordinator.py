@@ -1162,9 +1162,6 @@ class PetIndexCoordinator(QObject):
             if source_id and target_id:
                 repository.recover_pet_merge_people_groups(source_id, target_id)
         elif operation.kind in {
-            "pet_delete_detection",
-            "pet_move_detection",
-            "pet_move_detection_new",
             "pet_overlap_reconcile",
             "pet_cluster_consolidate",
         }:

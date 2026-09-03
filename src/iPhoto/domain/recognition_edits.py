@@ -75,6 +75,7 @@ class IdentitySelectionRequest:
 class IdentityRenameRequest:
     context: AnnotationEditContext
     name: str | None
+    expected_name: str | None
 
 
 class RecognitionEditStatus(StrEnum):

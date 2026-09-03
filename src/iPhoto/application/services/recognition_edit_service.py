@@ -57,6 +57,18 @@ def annotation_edit_context(asset_id: str, annotation: object) -> AnnotationEdit
     )
 
 
+def current_identity_display_name(annotation: object) -> str | None:
+    """Return the effective identity's name without borrowing another identity's name."""
+
+    context = annotation_edit_context("", annotation)
+    canonical_name = getattr(annotation, "canonical_display_name", None)
+    value = canonical_name
+    if context.source_identity == context.current_identity and canonical_name is None:
+        value = getattr(annotation, "display_name", None)
+    normalized = str(value).strip() if value is not None else ""
+    return normalized or None
+
+
 class RecognitionEditService:
     def __init__(self, *, people_service, pet_service, merge_service, mutation_coordinator):
         self._people = people_service
@@ -154,9 +166,10 @@ class RecognitionEditService:
         if identity is None or not self._exists(identity):
             return self._rejected("not_found")
         name = (request.name or "").strip() or None
-        current_name = getattr(annotation, "canonical_display_name", None) or getattr(
-            annotation, "display_name", None
-        )
+        expected_name = (request.expected_name or "").strip() or None
+        current_name = current_identity_display_name(annotation)
+        if current_name != expected_name:
+            return self._rejected("context_changed")
         if name == current_name:
             return RecognitionEditOutcome(RecognitionEditStatus.UNCHANGED)
         changed = (

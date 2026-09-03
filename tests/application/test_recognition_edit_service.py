@@ -11,6 +11,7 @@ import pytest
 from iPhoto.application.services.recognition_edit_service import (
     RecognitionEditService,
     annotation_edit_context,
+    current_identity_display_name,
 )
 from iPhoto.domain.recognition_edits import (
     AnnotationEditContext,
@@ -197,7 +198,11 @@ def test_current_identity_is_noop_even_for_pending_candidate(operation):
 def test_plain_text_renames_even_when_matching_an_existing_name(kind):
     record = annotation(kind)
     service, people, pets, merges, _ = service_for(record)
-    request = IdentityRenameRequest(annotation_edit_context("photo", record), "  Bob  ")
+    request = IdentityRenameRequest(
+        annotation_edit_context("photo", record),
+        "  Bob  ",
+        current_identity_display_name(record),
+    )
     assert service.rename_identity(request).status == RecognitionEditStatus.CHANGED
     (people.rename_cluster if kind == "person" else pets.rename_pet).assert_called_once_with(
         "a", "Bob"
@@ -230,3 +235,50 @@ def test_move_failure_never_returns_success(failure):
             failure
         ]
     )
+
+
+@pytest.mark.parametrize("source_kind", ["person", "pet"])
+def test_unnamed_cross_kind_identity_does_not_borrow_source_name(source_kind):
+    target_kind = "pet" if source_kind == "person" else "person"
+    record = annotation(
+        source_kind,
+        canonical_identity_kind=target_kind,
+        canonical_identity_id="target",
+        canonical_display_name=None,
+        display_name="Alice",
+    )
+    service, people, pets, merges, _ = service_for(record)
+    request = IdentityRenameRequest(annotation_edit_context("photo", record), "Alice", None)
+    assert current_identity_display_name(record) is None
+    assert service.rename_identity(request).status == RecognitionEditStatus.CHANGED
+    rename = pets.rename_pet if target_kind == "pet" else people.rename_cluster
+    rename.assert_called_once_with("target", "Alice")
+    merges.merge.assert_not_called()
+
+
+def test_stale_confirmed_rename_is_compare_and_set_rejected():
+    record = annotation(
+        promotion_state="confirmed",
+        canonical_display_name="Alice",
+        display_name="Alice",
+    )
+    service, people, pets, merges, _ = service_for(record)
+    request = IdentityRenameRequest(annotation_edit_context("photo", record), "Bob", "Alice")
+    people.list_asset_face_annotations.return_value = [
+        replace(record, canonical_display_name="Carol", display_name="Carol")
+    ]
+    outcome = service.rename_identity(request)
+    assert outcome.status == RecognitionEditStatus.REJECTED
+    assert outcome.failure == "context_changed"
+    people.rename_cluster.assert_not_called()
+    pets.rename_pet.assert_not_called()
+    merges.merge.assert_not_called()
+
+
+def test_rename_with_matching_expected_and_new_name_is_noop():
+    record = annotation(canonical_display_name="Alice", display_name="Alice")
+    service, people, pets, _, _ = service_for(record)
+    request = IdentityRenameRequest(annotation_edit_context("photo", record), "Alice", "Alice")
+    assert service.rename_identity(request).status == RecognitionEditStatus.UNCHANGED
+    people.rename_cluster.assert_not_called()
+    pets.rename_pet.assert_not_called()

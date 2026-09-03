@@ -2560,7 +2560,9 @@ def test_cross_kind_annotation_routes_identity_and_detection_mutations_separatel
     PlaybackCoordinator._handle_face_name_rename_submitted(
         coordinator,
         IdentityRenameRequest(
-            annotation_edit_context("asset-photo", pet_source_person_identity), "Alice Updated"
+            annotation_edit_context("asset-photo", pet_source_person_identity),
+            "Alice Updated",
+            "Alice",
         ),
     )
     PlaybackCoordinator._handle_info_panel_face_delete_requested(
@@ -2575,7 +2577,9 @@ def test_cross_kind_annotation_routes_identity_and_detection_mutations_separatel
 
     coordinator._recognition_edit_service.rename_identity.assert_called_once_with(
         IdentityRenameRequest(
-            annotation_edit_context("asset-photo", pet_source_person_identity), "Alice Updated"
+            annotation_edit_context("asset-photo", pet_source_person_identity),
+            "Alice Updated",
+            "Alice",
         )
     )
     coordinator._pet_service.delete_detection.assert_called_once_with("det-1")

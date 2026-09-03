@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from iPhoto.application.services.recognition_edit_service import current_identity_display_name
 from iPhoto.people.records import AssetFaceAnnotation
 from iPhoto.pets.records import AssetPetAnnotation
 
@@ -90,7 +91,7 @@ def face_annotation_adapter(
         source_identity_id=annotation.source_identity_id or annotation.person_id,
         canonical_identity_kind=annotation.canonical_identity_kind or "person",
         canonical_identity_id=annotation.canonical_identity_id or annotation.person_id,
-        canonical_display_name=(annotation.canonical_display_name or annotation.display_name),
+        canonical_display_name=current_identity_display_name(annotation),
         box_x=annotation.box_x,
         box_y=annotation.box_y,
         box_w=annotation.box_w,
@@ -107,7 +108,6 @@ def face_annotation_adapter(
 def pet_annotation_adapter(
     annotation: AssetPetAnnotation, asset_id: str = ""
 ) -> RecognitionAnnotation:
-    display_name = annotation.canonical_display_name or annotation.display_name
     return RecognitionAnnotation(
         source_detection_kind="pet",
         source_annotation_id=annotation.detection_id,
@@ -115,7 +115,7 @@ def pet_annotation_adapter(
         source_identity_id=annotation.source_identity_id or annotation.pet_id,
         canonical_identity_kind=annotation.canonical_identity_kind or "pet",
         canonical_identity_id=annotation.canonical_identity_id or annotation.pet_id,
-        canonical_display_name=display_name,
+        canonical_display_name=current_identity_display_name(annotation),
         box_x=annotation.box_x,
         box_y=annotation.box_y,
         box_w=annotation.box_w,

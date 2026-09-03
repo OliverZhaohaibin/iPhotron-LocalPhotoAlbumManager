@@ -3,7 +3,10 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 
-from iPhoto.application.services.recognition_edit_service import annotation_edit_context
+from iPhoto.application.services.recognition_edit_service import (
+    annotation_edit_context,
+    current_identity_display_name,
+)
 from iPhoto.domain.recognition_edits import (
     IdentityRef,
     IdentityRenameRequest,
@@ -254,7 +257,11 @@ def test_candidate_face_click_opens_editor_and_confirms_renamed_cluster(qapp) ->
     qapp.processEvents()
 
     assert _spy_records(spy) == [
-        [IdentityRenameRequest(annotation_edit_context("", annotation), "Alice")]
+        [IdentityRenameRequest(
+                annotation_edit_context("", annotation),
+                "Alice",
+                current_identity_display_name(annotation),
+            )]
     ]
     assert overlay._states["face-1"].layout.label_text == "Pending confirmation"
 
@@ -466,7 +473,9 @@ def test_saved_name_editor_only_reassigns_explicit_dropdown_selection(qapp) -> N
     assert _spy_records(rename_spy) == [
         [
             IdentityRenameRequest(
-                annotation_edit_context("", _annotation(display_name="Bob")), "Alice"
+                annotation_edit_context("", _annotation(display_name="Bob")),
+                "Alice",
+                "Bob",
             )
         ]
     ]
@@ -907,7 +916,9 @@ def test_face_name_overlay_commits_entered_name(qapp, entered_text: str, expecte
     assert _spy_records(spy) == [
         [
             IdentityRenameRequest(
-                annotation_edit_context("", _annotation(display_name="Bob")), expected_name
+                annotation_edit_context("", _annotation(display_name="Bob")),
+                expected_name,
+                "Bob",
             )
         ]
     ]
@@ -1222,3 +1233,38 @@ def test_cancel_discards_selection_and_scope_hint(qapp):
     assert _spy_records(spy) == []
     assert overlay._states["face-1"].annotation == record
     assert overlay._edit_hint is None
+
+
+@pytest.mark.parametrize("source_kind", ["person", "pet"])
+def test_cross_kind_unnamed_identity_stays_unnamed_in_label_and_editor(qapp, source_kind):
+    _surface, viewer, overlay = _make_overlay(qapp)
+    target_kind = "pet" if source_kind == "person" else "person"
+    annotation = RecognitionAnnotation(
+        source_detection_kind=source_kind,
+        source_annotation_id="detection-source",
+        source_identity_kind=source_kind,
+        source_identity_id="source",
+        canonical_identity_kind=target_kind,
+        canonical_identity_id="target",
+        canonical_display_name=None,
+        box_x=80,
+        box_y=80,
+        box_w=100,
+        box_h=90,
+        image_width=420,
+        image_height=320,
+        promotion_state="confirmed",
+    )
+    overlay.set_annotations([annotation])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    assert overlay._states[annotation.face_id].layout.label_text == "unnamed"
+    overlay._start_editing(annotation.face_id)
+    assert overlay._editor.text() == ""
+    overlay._editor.setText("Alice")
+    spy = QSignalSpy(overlay.renameSubmitted)
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+    assert _spy_records(spy) == [[IdentityRenameRequest(
+        annotation_edit_context("", annotation), "Alice", None
+    )]]

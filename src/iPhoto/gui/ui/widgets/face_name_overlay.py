@@ -41,7 +41,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iPhoto.application.services.recognition_edit_service import annotation_edit_context
+from iPhoto.application.services.recognition_edit_service import (
+    annotation_edit_context,
+    current_identity_display_name,
+)
 from iPhoto.domain.recognition_edits import (
     AnnotationEditContext,
     IdentityRef,
@@ -322,6 +325,7 @@ class FaceNameOverlayWidget(QWidget):
         self._editing_face_id: str | None = None
         self._editor: _FaceNameEditor | None = None
         self._editing_context: AnnotationEditContext | None = None
+        self._editing_expected_name: str | None = None
         self._edit_hint: QLabel | None = None
         self._name_suggestions: list[_NameSuggestion] = []
         self._manual_draft: _ManualFaceDraft | None = None
@@ -722,7 +726,7 @@ class FaceNameOverlayWidget(QWidget):
         if getattr(annotation, "promotion_state", "legacy_visible") == "candidate":
             display_name = tr("FaceNameOverlay", "Pending confirmation")
         else:
-            name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
+            name = current_identity_display_name(annotation)
             display_name = (
                 name.strip()
                 if isinstance(name, str) and name.strip()
@@ -1321,6 +1325,7 @@ class FaceNameOverlayWidget(QWidget):
         self._editing_context = annotation_edit_context(
             getattr(state.annotation, "asset_id", ""), state.annotation
         )
+        self._editing_expected_name = current_identity_display_name(state.annotation)
         hint = QLabel(self.parentWidget() or self)
         hint.setWordWrap(True)
         hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -1342,11 +1347,7 @@ class FaceNameOverlayWidget(QWidget):
         self._edit_hint = hint
         editor = _FaceNameEditor(self.parentWidget() or self)
         editor.set_name_suggestions(self._name_suggestions)
-        editor.setText(
-            getattr(state.annotation, "canonical_display_name", None)
-            or state.annotation.display_name
-            or ""
-        )
+        editor.setText(self._editing_expected_name or "")
         editor.commitRequested.connect(self._commit_editing)
         editor.cancelRequested.connect(self._cancel_editing)
         self._editor = editor
@@ -1385,9 +1386,10 @@ class FaceNameOverlayWidget(QWidget):
                 self.annotationReassignmentSubmitted.emit(request)
             return
         annotation = state.annotation
+        expected_name = self._editing_expected_name
         self._teardown_editor(show_chip=True)
         if person_id:
-            self.renameSubmitted.emit(IdentityRenameRequest(context, new_name))
+            self.renameSubmitted.emit(IdentityRenameRequest(context, new_name, expected_name))
         elif new_name:
             self.unassignedRenameSubmitted.emit(annotation, new_name)
 
@@ -1402,6 +1404,7 @@ class FaceNameOverlayWidget(QWidget):
         editor = self._editor
         self._editing_face_id = None
         self._editing_context = None
+        self._editing_expected_name = None
         self._editor = None
         if self._edit_hint is not None:
             self._edit_hint.hide()

@@ -3236,3 +3236,177 @@ def test_legacy_pet_runtime_commit_keeps_full_refresh_recovery_fallback(
     result = repository.complete_runtime_state_sync(operation_id)
     assert result is not None and result["state_synced"]
     assert refresh_calls == [1]
+
+
+def _prepare_overridden_people_delete(people, face_id):
+    """Give B a witness on the face asset so the target group's cache is observable."""
+    state = people.repository().state_repository
+    state.add_manual_face(
+        _manual_face_record(
+            face_id="delete-witness-b",
+            asset_id="photo",
+            asset_rel="photo.jpg",
+            person_id="B",
+        )
+    )
+    target_group = people.create_group(["pet:P", "person:B"])
+    unrelated_group = people.create_group(["pet:Q", "person:B"])
+    assert target_group is not None and unrelated_group is not None
+    assert people.reassign_detection_identity(
+        source_kind="person",
+        source_annotation_id=face_id,
+        target_identity="pet:P",
+    )
+    assert "photo" in people.group_asset_ids(target_group.group_id)
+    assert people.group_asset_ids(unrelated_group.group_id) == ["other-b"]
+    return target_group, unrelated_group
+
+
+@pytest.mark.parametrize("face_id", ["FA", "FB"])
+def test_delete_cross_kind_overridden_face_refreshes_target_groups(
+    recognition_edit_library, monkeypatch, face_id
+):
+    root, people, pets, edits, merges = recognition_edit_library
+    target_group, unrelated_group = _prepare_overridden_people_delete(people, face_id)
+    refreshed = []
+    original_refresh = FaceRepository.refresh_group_assets
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        lambda self: pytest.fail("new People delete used the legacy full-refresh fallback"),
+    )
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_group_assets",
+        lambda self, group_id: (
+            refreshed.append(group_id),
+            original_refresh(self, group_id),
+        )[1],
+    )
+
+    event = people.coordinator.delete_face(face_id)
+
+    assert event is not None
+    assert target_group.group_id in event.changed_group_ids
+    assert set(refreshed) == {target_group.group_id}
+    assert unrelated_group.group_id not in refreshed
+    assert "photo" not in people.group_asset_ids(target_group.group_id)
+    assert people.group_asset_ids(unrelated_group.group_id) == ["other-b"]
+    state = people.repository().state_repository
+    assert state.get_annotation_identity_assignments([("person", face_id)]) == {}
+    if face_id == "FB":
+        assert state.get_manual_face(face_id) is None
+    else:
+        assert all(record.face_id != face_id for record in people.list_asset_face_annotations("photo"))
+    commit = people.repository().get_runtime_commit(event.operation_id)
+    assert commit is not None
+    assert commit["cleared_identity_assignment"] == "pet:P"
+    assert target_group.group_id in commit["changed_group_ids"]
+
+
+@pytest.mark.parametrize("face_id", ["FA", "FB"])
+def test_direct_delete_cross_kind_overridden_face_uses_targeted_refresh(
+    recognition_edit_library, monkeypatch, face_id
+):
+    root, people, pets, edits, merges = recognition_edit_library
+    target_group, unrelated_group = _prepare_overridden_people_delete(people, face_id)
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        lambda self: pytest.fail("direct People delete refreshed every group"),
+    )
+
+    result = people.repository().delete_face(face_id)
+
+    assert result is not None
+    assert target_group.group_id in result.changed_group_ids
+    assert unrelated_group.group_id not in result.changed_group_ids
+    assert "photo" not in people.group_asset_ids(target_group.group_id)
+
+
+@pytest.mark.parametrize("face_id", ["FA", "FB"])
+def test_delete_cross_kind_overridden_face_recovery_refreshes_target_groups(
+    recognition_edit_library, monkeypatch, face_id
+):
+    root, people, pets, edits, merges = recognition_edit_library
+    target_group, unrelated_group = _prepare_overridden_people_delete(people, face_id)
+    original_refresh = FaceRepository.refresh_group_assets_for_identity_refs
+    refresh_attempts = 0
+
+    def fail_after_cleanup(self, refs):
+        nonlocal refresh_attempts
+        refresh_attempts += 1
+        if refresh_attempts == 1:
+            raise OSError("injected People delete target refresh failure")
+        return original_refresh(self, refs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            FaceRepository,
+            "refresh_all_group_assets",
+            lambda self: pytest.fail("new delete recovery used a full refresh"),
+        )
+        patcher.setattr(
+            FaceRepository,
+            "refresh_group_assets_for_identity_refs",
+            fail_after_cleanup,
+        )
+        with pytest.raises(OSError, match="target refresh failure"):
+            people.coordinator.delete_face(face_id)
+
+    state = people.repository().state_repository
+    assert state.get_annotation_identity_assignments([("person", face_id)]) == {}
+    assert "photo" in people.group_asset_ids(target_group.group_id)
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(root) / "recognition" / "operations.db"
+    )
+    pending = journal.unfinished()
+    assert [operation.kind for operation in pending] == ["people_delete_face"]
+    commit = people.repository().get_runtime_commit(pending[0].operation_id)
+    assert commit is not None
+    assert commit["cleared_identity_assignment"] == "pet:P"
+
+    assert people.coordinator.delete_face("missing-face") is None
+    assert journal.unfinished() == ()
+    assert "photo" not in people.group_asset_ids(target_group.group_id)
+    assert people.group_asset_ids(unrelated_group.group_id) == ["other-b"]
+
+
+def test_legacy_people_delete_commit_keeps_full_refresh_recovery_fallback(
+    recognition_edit_library, monkeypatch
+):
+    from contextlib import closing
+
+    root, people, pets, edits, merges = recognition_edit_library
+    target_group, _unrelated_group = _prepare_overridden_people_delete(people, "FA")
+    repository = people.repository()
+    face = next(record for record in repository.get_all_faces() if record.face_id == "FA")
+    operation_id = "legacy-people-delete-without-assignment-target"
+    with closing(repository._connect()) as connection:
+        connection.execute("UPDATE faces SET person_id = NULL WHERE face_id = ?", (face.face_id,))
+        repository._write_runtime_commit(
+            connection,
+            operation_id,
+            {
+                "operation_kind": "people_delete_face",
+                "face_id": face.face_id,
+                "face_key": face.face_key,
+                "asset_id": face.asset_id,
+                "asset_rel": face.asset_rel,
+                "changed_asset_ids": [face.asset_id],
+                "changed_person_ids": [face.person_id],
+            },
+        )
+        connection.commit()
+    refresh_calls = []
+    original_refresh = FaceRepository.refresh_all_group_assets
+
+    def refresh_all(instance):
+        refresh_calls.append(1)
+        return original_refresh(instance)
+
+    monkeypatch.setattr(FaceRepository, "refresh_all_group_assets", refresh_all)
+    commit = repository.complete_runtime_state_sync(operation_id)
+    assert commit is not None and commit["state_synced"]
+    assert refresh_calls == [1]
+    assert "photo" not in people.group_asset_ids(target_group.group_id)

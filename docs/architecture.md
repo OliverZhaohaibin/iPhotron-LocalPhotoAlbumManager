@@ -260,10 +260,10 @@ selecting the current identity is a no-op. Single-detection assignments override
 identity redirects when reading both automatic and manual annotations; moving
 back to the native kind clears that override as part of recoverable state sync.
 Source display names may fill a missing canonical name only when source and
-effective identity are the same. Runtime commits retain any cleared assignment
-target so recovery can refresh only groups containing the native identities or
-the previous target; legacy commits without this metadata retain the full-refresh
-fallback.
+effective identity are the same. Move and delete runtime commits retain any
+cleared assignment target so recovery can refresh only groups containing the
+native identities or the previous target; legacy commits without this metadata
+retain the full-refresh fallback.
 
 Current public boundary names include:
 

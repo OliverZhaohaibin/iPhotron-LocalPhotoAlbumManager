@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from collections import defaultdict
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -429,6 +429,12 @@ class FaceRepository:
             )
         elif payload.get("clears_identity_assignment"):
             # Compatibility with commits written before the target identity was recorded.
+            self.refresh_all_group_assets()
+        elif (
+            operation_kind == "people_delete_face"
+            and "cleared_identity_assignment" not in payload
+        ):
+            # Legacy delete commits never recorded whether a cross-kind target existed.
             self.refresh_all_group_assets()
         persisted_payload = {
             key: value for key, value in payload.items() if key != "state_synced"
@@ -1413,6 +1419,7 @@ class FaceRepository:
         if not face_id:
             return None
         self.initialize()
+        cleared_assignment = self._annotation_assignment_target(face_id)
         with closing(self._connect()) as conn:
             row = conn.execute(
                 """
@@ -1434,6 +1441,7 @@ class FaceRepository:
                         operation_id,
                         {
                             "operation_kind": "people_delete_face",
+                            "cleared_identity_assignment": cleared_assignment,
                             "face_id": face.face_id,
                             "face_key": face.face_key,
                             "asset_id": face.asset_id,
@@ -1461,8 +1469,10 @@ class FaceRepository:
                     changed_asset_ids=(face.asset_id,),
                     changed_person_ids=((face.person_id,) if face.person_id else ()),
                 )
-                self.refresh_all_group_assets()
-                return result
+                return self._with_refreshed_identity_groups(
+                    result,
+                    (cleared_assignment,) if cleared_assignment is not None else (),
+                )
 
         if self._state_repo is None:
             return None
@@ -1474,6 +1484,7 @@ class FaceRepository:
                 operation_id,
                 {
                     "operation_kind": "people_delete_face",
+                    "cleared_identity_assignment": cleared_assignment,
                     "face_id": face_id,
                     "asset_id": manual_face.asset_id,
                     "changed_asset_ids": [manual_face.asset_id],
@@ -1489,8 +1500,19 @@ class FaceRepository:
             changed_asset_ids=(manual_face.asset_id,),
             changed_person_ids=(manual_face.person_id,),
         )
-        self.refresh_all_group_assets()
-        return result
+        return self._with_refreshed_identity_groups(
+            result,
+            (cleared_assignment,) if cleared_assignment is not None else (),
+        )
+
+    def _annotation_assignment_target(self, face_id: str) -> str | None:
+        if self._state_repo is None or not face_id:
+            return None
+        assignments = self._state_repo.get_annotation_identity_assignments(
+            (("person", face_id),)
+        )
+        target = assignments.get(("person", face_id))
+        return IdentityRef(*target).key if target is not None else None
 
     def has_face(self, face_id: str) -> bool:
         if not face_id:
@@ -1519,15 +1541,7 @@ class FaceRepository:
         if not face_id or not target_person_id:
             return None
         self.initialize()
-        assignments = (
-            self._state_repo.get_annotation_identity_assignments([("person", face_id)])
-            if self._state_repo is not None
-            else {}
-        )
-        assignment_target = assignments.get(("person", face_id))
-        cleared_assignment = (
-            IdentityRef(*assignment_target).key if assignment_target is not None else None
-        )
+        cleared_assignment = self._annotation_assignment_target(face_id)
         with closing(self._connect()) as conn:
             row = conn.execute(
                 """
@@ -1631,15 +1645,7 @@ class FaceRepository:
             return None
 
         self.initialize()
-        assignments = (
-            self._state_repo.get_annotation_identity_assignments([("person", face_id)])
-            if self._state_repo is not None
-            else {}
-        )
-        assignment_target = assignments.get(("person", face_id))
-        cleared_assignment = (
-            IdentityRef(*assignment_target).key if assignment_target is not None else None
-        )
+        cleared_assignment = self._annotation_assignment_target(face_id)
         with closing(self._connect()) as conn:
             row = conn.execute(
                 """
@@ -2264,6 +2270,19 @@ class FaceRepository:
         for group_id in sorted(group_ids):
             self.refresh_group_assets(group_id)
         return tuple(sorted(group_ids))
+
+    def _with_refreshed_identity_groups(
+        self,
+        result: FaceMutationResult,
+        identity_refs: Iterable[IdentityRef | str],
+    ) -> FaceMutationResult:
+        refreshed = self.refresh_group_assets_for_identity_refs(identity_refs)
+        if not refreshed:
+            return result
+        return replace(
+            result,
+            changed_group_ids=tuple(sorted({*result.changed_group_ids, *refreshed})),
+        )
 
     def refresh_all_group_assets(self) -> None:
         if self._state_repo is None:

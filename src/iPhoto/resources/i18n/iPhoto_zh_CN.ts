@@ -1195,6 +1195,10 @@
             <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
             <translation>同一个宠物身份不能包含同一张照片中的两个检测结果。请删除重复检测，不要通过合并绕过此限制。</translation>
         </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>同一宠物身份不能包含同一张照片中的两个标记。请为当前标记选择其他身份。</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>
@@ -1485,6 +1489,22 @@
         <message>
             <source>Please place the circle on the face before saving.</source>
             <translation>请先将圆圈放在人脸上再存储。</translation>
+        </message>
+        <message>
+            <source>Choose an existing name: merge the entire pending identity.</source>
+            <translation>选择已有名称：合并整个待确认身份。</translation>
+        </message>
+        <message>
+            <source>Choose an existing name: assign only this detection.</source>
+            <translation>选择已有名称：仅修改当前标记的归属。</translation>
+        </message>
+        <message>
+            <source>Type a name: rename the associated identity.</source>
+            <translation>输入名称：重命名所属身份。</translation>
+        </message>
+        <message>
+            <source>Type a name: create an identity for this detection.</source>
+            <translation>输入名称：为当前标记创建新身份。</translation>
         </message>
     </context>
     <context>

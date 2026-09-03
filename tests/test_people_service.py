@@ -2708,3 +2708,333 @@ def test_scanner_worker_does_not_emit_batch_for_failed_persist(tmp_path: Path) -
     assert emitted_batches == []
     assert failed_batches == [(tmp_path, 1)]
     assert worker.failed_count == 1
+
+
+@pytest.fixture
+def recognition_edit_library(tmp_path):
+    """A includes a correct automatic face and one misassigned manual face."""
+    from dataclasses import replace
+    from iPhoto.application.services.recognition_edit_service import RecognitionEditService
+
+    root = tmp_path / "EditLibrary"
+    root.mkdir()
+    get_global_repository(root).write_rows(
+        [
+            {"rel": f"{key}.jpg", "id": key, "media_type": 0}
+            for key in ("photo", "other-a", "other-b", "pet-photo")
+        ]
+    )
+    people = create_people_service(root)
+    repo = people.repository()
+    faces = [
+        _face_record(face_id="FA", asset_id="photo", asset_rel="photo.jpg", person_id="A"),
+        _face_record(face_id="FA2", asset_id="other-a", asset_rel="other-a.jpg", person_id="A"),
+        _face_record(face_id="FB0", asset_id="other-b", asset_rel="other-b.jpg", person_id="B"),
+    ]
+    persons = [
+        _person_record(person_id="A", key_face_id="FA", face_count=2, name="Alice"),
+        _person_record(person_id="B", key_face_id="FB0", face_count=1, name="Bob"),
+    ]
+    repo.replace_all(faces, persons)
+    repo.state_repository.sync_scan_results(persons, faces)
+    repo.state_repository.add_manual_face(
+        replace(
+            _manual_face_record(
+                face_id="FB",
+                asset_id="photo",
+                asset_rel="photo.jpg",
+                person_id="A",
+                thumbnail_path="thumbnails/manual.png",
+            ),
+            box_x=220,
+            box_y=60,
+        )
+    )
+    pets = create_pet_service(root)
+    pets.repository().replace_all(
+        [
+            _pet_detection_record(
+                detection_id="DP", asset_id="pet-photo", asset_rel="pet-photo.jpg", pet_id="P"
+            )
+        ],
+        [_pet_record(pet_id="P", key_detection_id="DP", detection_count=1, name="Miso")],
+    )
+    merges = Mock(wraps=RecognitionMergeService(people, pets))
+    edits = RecognitionEditService(
+        people_service=people,
+        pet_service=pets,
+        merge_service=merges,
+        mutation_coordinator=people._ensure_mutation_coordinator(),
+    )
+    yield root, people, pets, edits, merges
+    people.shutdown()
+    pets.shutdown()
+
+
+def _edit_request(service, asset_id, annotation_id, target):
+    from iPhoto.application.services.recognition_edit_service import annotation_edit_context
+    from iPhoto.domain.recognition_edits import IdentityRef, IdentitySelectionRequest
+
+    records = (
+        service.list_asset_face_annotations(asset_id)
+        if isinstance(service, PeopleService)
+        else service.list_asset_pet_annotations(asset_id)
+    )
+    record = next(
+        r
+        for r in records
+        if getattr(r, "face_id", getattr(r, "detection_id", None)) == annotation_id
+    )
+    return IdentitySelectionRequest(
+        annotation_edit_context(asset_id, record), IdentityRef.parse(target)
+    )
+
+
+def test_manual_inline_correction_preserves_other_faces_and_record(recognition_edit_library):
+    from dataclasses import replace
+    from iPhoto.domain.recognition_edits import RecognitionEditStatus
+
+    root, people, pets, edits, merges = recognition_edit_library
+    repo = people.repository()
+    before = repo.state_repository.get_manual_face("FB")
+    other_faces = [(f.face_id, f.person_id) for f in repo.get_all_faces()]
+    request = _edit_request(people, "photo", "FB", "person:B")
+    assert edits.reassign_annotation(request).status == RecognitionEditStatus.CHANGED
+    assert repo.state_repository.get_manual_face("FB") == replace(before, person_id="B")
+    assert len(repo.state_repository.get_manual_faces()) == 1
+    assert [(f.face_id, f.person_id) for f in repo.get_all_faces()] == other_faces
+    assert repo.state_repository.get_identity_redirects() == []
+    merges.merge.assert_not_called()
+    # Reopening repositories and rebuilding runtime facts must retain durable choices.
+    repo.replace_all(repo.get_all_faces(), repo.get_all_person_records())
+    reopened = FaceRepository(repo.db_path, repo.state_repository.db_path)
+    records = {r.face_id: r for r in reopened.list_asset_face_annotations("photo")}
+    assert records["FA"].canonical_identity_id == "A"
+    assert records["FB"].canonical_identity_id == "B"
+    assert records["FB"].is_manual
+
+
+@pytest.mark.parametrize("face_id", ["FA", "FB"])
+def test_person_pet_person_roundtrip_clears_override_and_repairs_groups(
+    recognition_edit_library, face_id
+):
+    from iPhoto.domain.recognition_edits import RecognitionEditStatus
+
+    root, people, pets, edits, merges = recognition_edit_library
+    people.create_group(["person:A", "person:B"])
+    pet_group = people.create_group(["pet:P", "person:A"])
+    # Keep an A detection in the same photo as the moved face.
+    repo = people.repository()
+    assert (
+        edits.reassign_annotation(_edit_request(people, "photo", face_id, "pet:P")).status
+        == RecognitionEditStatus.CHANGED
+    )
+    annotation = next(
+        r for r in people.list_asset_face_annotations("photo") if r.face_id == face_id
+    )
+    assert (annotation.canonical_identity_kind, annotation.canonical_identity_id) == ("pet", "P")
+    assert "photo" in pets.build_pet_query("P").asset_ids
+    assert "photo" in people.group_asset_ids(pet_group.group_id)
+    assert (
+        edits.reassign_annotation(_edit_request(people, "photo", face_id, "person:A")).status
+        == RecognitionEditStatus.CHANGED
+    )
+    annotation = next(
+        r for r in people.list_asset_face_annotations("photo") if r.face_id == face_id
+    )
+    assert (annotation.canonical_identity_kind, annotation.canonical_identity_id) == ("person", "A")
+    assert repo.state_repository.get_annotation_identity_assignments([("person", face_id)]) == {}
+    assert "photo" not in pets.build_pet_query("P").asset_ids
+    assert people.group_asset_ids(pet_group.group_id) == []
+    merges.merge.assert_not_called()
+
+
+def test_pet_person_pet_roundtrip_removes_single_detection_override(recognition_edit_library):
+    from iPhoto.domain.recognition_edits import RecognitionEditStatus
+
+    root, people, pets, edits, merges = recognition_edit_library
+    assert (
+        edits.reassign_annotation(_edit_request(pets, "pet-photo", "DP", "person:A")).status
+        == RecognitionEditStatus.CHANGED
+    )
+    assert "pet-photo" in people.build_cluster_query("A").asset_ids
+    assert (
+        edits.reassign_annotation(_edit_request(pets, "pet-photo", "DP", "pet:P")).status
+        == RecognitionEditStatus.CHANGED
+    )
+    annotation = pets.list_asset_pet_annotations("pet-photo")[0]
+    assert (annotation.canonical_identity_kind, annotation.canonical_identity_id) == ("pet", "P")
+    assert (
+        people.repository().state_repository.get_annotation_identity_assignments([("pet", "DP")])
+        == {}
+    )
+    assert "pet-photo" not in people.build_cluster_query("A").asset_ids
+    merges.merge.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["auto", "manual", "pet"])
+def test_move_to_new_identity_clears_cross_kind_override(recognition_edit_library, source):
+    root, people, pets, edits, merges = recognition_edit_library
+    if source == "pet":
+        people.reassign_detection_identity(
+            source_kind="pet", source_annotation_id="DP", target_identity="person:A"
+        )
+        created = pets.move_detection_to_new_pet("DP", "New pet")
+        record = pets.list_asset_pet_annotations("pet-photo")[0]
+        ref = ("pet", "DP")
+    else:
+        face_id = "FA" if source == "auto" else "FB"
+        people.reassign_detection_identity(
+            source_kind="person", source_annotation_id=face_id, target_identity="pet:P"
+        )
+        created = people.move_face_to_new_person(face_id, "New person")
+        record = next(
+            r for r in people.list_asset_face_annotations("photo") if r.face_id == face_id
+        )
+        ref = ("person", face_id)
+    assert created
+    assert record.canonical_identity_id == created
+    assert record.canonical_identity_kind == ref[0]
+    assert people.repository().state_repository.get_annotation_identity_assignments([ref]) == {}
+
+
+@pytest.mark.parametrize("source", ["auto", "manual", "pet"])
+@pytest.mark.parametrize("failure_stage", ["before_sync", "after_cleanup"])
+def test_move_recovery_replays_override_cleanup_and_group_refresh(
+    recognition_edit_library, monkeypatch, source, failure_stage
+):
+    root, people, pets, edits, merges = recognition_edit_library
+    kind = "pet" if source == "pet" else "person"
+    annotation_id = {"auto": "FA", "manual": "FB", "pet": "DP"}[source]
+    target = "person:A" if source == "pet" else "pet:P"
+    assert people.reassign_detection_identity(
+        source_kind=kind, source_annotation_id=annotation_id, target_identity=target
+    )
+    repo = pets.repository() if source == "pet" else people.repository()
+    operation_id = "test-roundtrip-recovery"
+
+    def fail_sync(self, *args):
+        raise OSError("injected after runtime commit")
+
+    with monkeypatch.context() as patcher:
+        if failure_stage == "before_sync":
+            patcher.setattr(type(repo), "complete_runtime_state_sync", fail_sync)
+        else:
+            patcher.setattr(FaceRepository, "refresh_all_group_assets", fail_sync)
+        with pytest.raises(OSError, match="after runtime commit"):
+            if source == "pet":
+                repo.move_detection_to_pet(annotation_id, "P", operation_id=operation_id)
+            else:
+                repo.move_face_to_person(annotation_id, "A", operation_id=operation_id)
+    assert bool(
+        people.repository().state_repository.get_annotation_identity_assignments(
+            [(kind, annotation_id)]
+        )
+    ) == (failure_stage == "before_sync")
+    repo.complete_runtime_state_sync(operation_id)
+    repo.complete_runtime_state_sync(operation_id)
+    assert (
+        people.repository().state_repository.get_annotation_identity_assignments(
+            [(kind, annotation_id)]
+        )
+        == {}
+    )
+    assert repo.get_runtime_commit(operation_id)["state_synced"]
+    if source == "pet":
+        assert "pet-photo" not in people.build_cluster_query("A").asset_ids
+    else:
+        assert "photo" not in pets.build_pet_query("P").asset_ids
+
+
+@pytest.mark.parametrize("entrypoint", ["inline", "info_panel"])
+def test_qt_manual_correction_reaches_persistence_and_refreshes_label(
+    recognition_edit_library, qapp, entrypoint, tmp_path
+):
+    from PySide6.QtCore import QRectF, Qt, Signal
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QWidget
+    from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+    from iPhoto.gui.ui.widgets.face_name_overlay import FaceNameOverlayWidget
+    from iPhoto.gui.ui.widgets.recognition_annotations import RecognitionIdentitySuggestion
+
+    class Viewer(QWidget):
+        viewTransformChanged = Signal()
+        firstFrameReady = Signal()
+
+        def has_image_content(self):
+            return True
+
+        def image_rect_to_viewport(self, x, y, width, height, **kwargs):
+            return QRectF(x, y, width, height)
+
+    root, people, pets, edits, merges = recognition_edit_library
+    surface = QWidget()
+    surface.resize(640, 360)
+    viewer = Viewer(surface)
+    viewer.setGeometry(surface.rect())
+    overlay = FaceNameOverlayWidget(surface)
+    overlay.setGeometry(surface.rect())
+    overlay.set_viewer(viewer)
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._recognition_edit_service = edits
+    coordinator._face_name_overlay = overlay
+    coordinator._recognition_query_service = Mock()
+    coordinator._current_presentation = SimpleNamespace(asset_id="photo")
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+
+    def refresh():
+        records = [
+            face_annotation_adapter(r, "photo") for r in people.list_asset_face_annotations("photo")
+        ]
+        overlay.set_annotations(records)
+        overlay.set_overlay_active(True)
+        viewer.viewTransformChanged.emit()
+
+    coordinator._refresh_face_name_overlay_for_current_presentation = refresh
+    overlay.annotationReassignmentSubmitted.connect(
+        coordinator._handle_annotation_reassignment_submitted
+    )
+    overlay.candidateIdentityMergeSubmitted.connect(
+        coordinator._handle_candidate_identity_merge_submitted
+    )
+    overlay.renameSubmitted.connect(coordinator._handle_face_name_rename_submitted)
+    overlay.set_identity_suggestions([RecognitionIdentitySuggestion("person:B", "Bob", None)])
+    surface.show()
+    viewer.show()
+    refresh()
+    qapp.processEvents()
+    try:
+        if entrypoint == "inline":
+            overlay._start_editing("person:FB")
+            qapp.processEvents()
+            assert "only this detection" in overlay._edit_hint.text()
+            assert "rename the associated identity" in overlay._edit_hint.text()
+            assert overlay._edit_hint.isVisible()
+            assert surface.rect().contains(overlay._edit_hint.geometry())
+            surface.grab().save(str(tmp_path / "inline-before.png"))
+            editor = overlay._editor
+            editor.setText("Bo")
+            editor._completer.setCompletionPrefix("Bo")
+            assert editor._completer.setCurrentRow(0)
+            editor._completer.complete()
+            qapp.processEvents()
+            QTest.keyClick(editor, Qt.Key.Key_Return)
+        else:
+            coordinator._handle_info_panel_face_move_requested(
+                overlay._states["person:FB"].annotation, "person:B"
+            )
+        qapp.processEvents()
+        assert overlay._states["person:FB"].layout.label_text == "Bob"
+        assert overlay._states["person:FA"].layout.label_text == "Alice"
+        assert people.repository().state_repository.get_manual_face("FB").person_id == "B"
+        assert len(people.repository().state_repository.get_manual_faces()) == 1
+        merges.merge.assert_not_called()
+        coordinator._refresh_info_panel_faces.assert_called_once_with("photo")
+        coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+        surface.grab().save(str(tmp_path / "inline-after.png"))
+    finally:
+        overlay.clear_annotations()
+        surface.close()
+        surface.deleteLater()
+        qapp.processEvents()

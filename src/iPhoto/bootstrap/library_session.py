@@ -31,6 +31,7 @@ from .library_location_service import LibraryLocationService
 from .library_scan_service import LibraryScanService
 
 if TYPE_CHECKING:
+    from ..application.services.recognition_edit_service import RecognitionEditService
     from ..application.services.recognition_merge_service import RecognitionMergeService
     from ..application.services.recognition_query_service import RecognitionQueryService
     from ..people.service import PeopleService
@@ -57,6 +58,7 @@ class LibrarySession:
     pets: PetService | None = None
     recognition_queries: RecognitionQueryService | None = None
     recognition_merges: RecognitionMergeService | None = None
+    recognition_edits: RecognitionEditService | None = None
     maps: MapRuntimePort | None = None
     map_interactions: MapInteractionServicePort | None = None
     edit: EditServicePort | None = None
@@ -71,6 +73,7 @@ class LibrarySession:
             "recognition_mutations",
             "recognition_queries",
             "recognition_merges",
+            "recognition_edits",
             "maps",
             "map_interactions",
             "locations",
@@ -184,6 +187,15 @@ class LibrarySession:
             return RecognitionMergeService(
                 self.people,
                 self.pets,
+                mutation_coordinator=self.recognition_mutations,
+            )
+        if name == "recognition_edits":
+            from ..application.services.recognition_edit_service import RecognitionEditService
+
+            return RecognitionEditService(
+                people_service=self.people,
+                pet_service=self.pets,
+                merge_service=self.recognition_merges,
                 mutation_coordinator=self.recognition_mutations,
             )
         if name == "maps":

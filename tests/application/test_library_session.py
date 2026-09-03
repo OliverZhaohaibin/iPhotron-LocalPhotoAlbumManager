@@ -72,6 +72,10 @@ def test_library_session_injects_one_recognition_mutation_owner(tmp_path: Path) 
     assert session.people._mutation_coordinator is mutations
     assert session.pets._mutation_coordinator is mutations
     assert session.recognition_merges._journal is mutations
+    assert session.recognition_edits._mutations is mutations
+    assert session.recognition_edits._people is session.people
+    assert session.recognition_edits._pets is session.pets
+    assert session.recognition_edits._merges is session.recognition_merges
     assert session.people.coordinator is not None
     assert session.pets.coordinator is not None
     assert {kind.value for kind in RecognitionOperationKind}.issubset(mutations._handlers)

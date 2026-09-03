@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
+
+from iPhoto.application.services.recognition_edit_service import annotation_edit_context
+from iPhoto.domain.recognition_edits import (
+    IdentityRef,
+    IdentityRenameRequest,
+    IdentitySelectionRequest,
+)
 
 import pytest
 
@@ -245,8 +253,10 @@ def test_candidate_face_click_opens_editor_and_confirms_renamed_cluster(qapp) ->
     QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
     qapp.processEvents()
 
-    assert _spy_records(spy) == [["person-1", "Alice"]]
-    assert overlay._states["face-1"].layout.label_text == "Alice"
+    assert _spy_records(spy) == [
+        [IdentityRenameRequest(annotation_edit_context("", annotation), "Alice")]
+    ]
+    assert overlay._states["face-1"].layout.label_text == "Pending confirmation"
 
 
 def test_unassigned_pending_face_click_creates_named_identity(qapp) -> None:
@@ -275,18 +285,22 @@ def test_unassigned_pending_face_click_creates_named_identity(qapp) -> None:
     assert len(records) == 1
     assert records[0][0].face_id == "face-1"
     assert records[0][1] == "Alice"
-    assert overlay._states["face-1"].layout.label_text == "Alice"
+    assert overlay._states["face-1"].layout.label_text == "Pending confirmation"
 
 
-@pytest.mark.parametrize("promotion_state", ["candidate", "confirmed"])
+@pytest.mark.parametrize("is_manual", [False, True])
+@pytest.mark.parametrize(
+    "promotion_state", ["candidate", "eligible", "confirmed", "legacy_visible", "unknown"]
+)
 def test_saved_name_editor_reuses_identity_dropdown_for_all_states(
     qapp,
     promotion_state: str,
+    is_manual: bool,
 ) -> None:
     _surface, viewer, overlay = _make_overlay(qapp)
     annotation = _annotation(display_name=None if promotion_state == "candidate" else "Bob")
     annotation = AssetFaceAnnotation(
-        **{**annotation.__dict__, "promotion_state": promotion_state}
+        **{**annotation.__dict__, "promotion_state": promotion_state, "is_manual": is_manual}
     )
     overlay.set_identity_suggestions(
         [RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3)]
@@ -305,15 +319,28 @@ def test_saved_name_editor_reuses_identity_dropdown_for_all_states(
     assert overlay._editor.text() == "Alice"
     assert overlay._editor.selected_identity_key() == "person:person-a"
 
-    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    merging = promotion_state == "candidate" and not is_manual
+    selection_spy = QSignalSpy(
+        overlay.candidateIdentityMergeSubmitted
+        if merging
+        else overlay.annotationReassignmentSubmitted
+    )
+    other_spy = QSignalSpy(
+        overlay.annotationReassignmentSubmitted
+        if merging
+        else overlay.candidateIdentityMergeSubmitted
+    )
+    assert ("entire pending identity" in overlay._edit_hint.text()) == merging
     rename_spy = QSignalSpy(overlay.renameSubmitted)
     QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
     qapp.processEvents()
 
     records = _spy_records(selection_spy)
     assert len(records) == 1
-    assert records[0][0].face_id == "face-1"
-    assert records[0][1] == "person:person-a"
+    assert records[0][0] == IdentitySelectionRequest(
+        annotation_edit_context("", annotation), IdentityRef("person", "person-a")
+    )
+    assert _spy_records(other_spy) == []
     assert _spy_records(rename_spy) == []
 
 
@@ -394,7 +421,7 @@ def test_saved_pet_name_dropdown_submits_existing_identity(
     editor._completer.setCompletionPrefix("Mis")
     assert editor._completer.setCurrentRow(0)
 
-    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    selection_spy = QSignalSpy(overlay.candidateIdentityMergeSubmitted)
     rename_spy = QSignalSpy(overlay.renameSubmitted)
     if selection_method == "mouse":
         index = editor._completer.currentIndex()
@@ -408,11 +435,17 @@ def test_saved_pet_name_dropdown_submits_existing_identity(
         QTest.keyClick(editor, Qt.Key.Key_Return)
     qapp.processEvents()
 
-    assert _spy_records(selection_spy) == [[annotation, "pet:pet-existing"]]
+    assert _spy_records(selection_spy) == [
+        [
+            IdentitySelectionRequest(
+                annotation_edit_context("", annotation), IdentityRef("pet", "pet-existing")
+            )
+        ]
+    ]
     assert _spy_records(rename_spy) == []
 
 
-def test_saved_name_editor_only_merges_explicit_dropdown_selection(qapp) -> None:
+def test_saved_name_editor_only_reassigns_explicit_dropdown_selection(qapp) -> None:
     _surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_identity_suggestions(
         [RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3)]
@@ -424,13 +457,19 @@ def test_saved_name_editor_only_merges_explicit_dropdown_selection(qapp) -> None
     assert overlay._editor is not None
     overlay._editor.setText("Alice")
 
-    selection_spy = QSignalSpy(overlay.existingIdentitySubmitted)
+    selection_spy = QSignalSpy(overlay.annotationReassignmentSubmitted)
     rename_spy = QSignalSpy(overlay.renameSubmitted)
     QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
     qapp.processEvents()
 
     assert _spy_records(selection_spy) == []
-    assert _spy_records(rename_spy) == [["person-1", "Alice"]]
+    assert _spy_records(rename_spy) == [
+        [
+            IdentityRenameRequest(
+                annotation_edit_context("", _annotation(display_name="Bob")), "Alice"
+            )
+        ]
+    ]
 
 
 def test_face_name_overlay_hover_updates_highlighted_face(qapp) -> None:
@@ -865,8 +904,14 @@ def test_face_name_overlay_commits_entered_name(qapp, entered_text: str, expecte
     QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
     qapp.processEvents()
 
-    assert _spy_records(spy) == [["person-1", expected_name]]
-    assert overlay._states["face-1"].layout.label_text == (expected_name or "unnamed")
+    assert _spy_records(spy) == [
+        [
+            IdentityRenameRequest(
+                annotation_edit_context("", _annotation(display_name="Bob")), expected_name
+            )
+        ]
+    ]
+    assert overlay._states["face-1"].layout.label_text == "Bob"
 
 
 def test_face_name_overlay_identity_suggestions_mix_people_and_pets(qapp) -> None:
@@ -1132,3 +1177,48 @@ def test_manual_face_press_does_not_clear_draft_when_editor_loses_focus(qapp) ->
     assert overlay._manual_draft is not None
     assert overlay._manual_editor is not None
     assert overlay._drag_mode == "move"
+
+
+@pytest.mark.parametrize("state", ["candidate", "confirmed"])
+def test_selecting_current_identity_is_strict_noop(qapp, state):
+    _surface, viewer, overlay = _make_overlay(qapp)
+    record = replace(_annotation(display_name="Alice"), promotion_state=state)
+    overlay.set_annotations([record])
+    overlay.set_identity_suggestions(
+        [RecognitionIdentitySuggestion("person:person-1", "Alice", None)]
+    )
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    overlay._start_editing("face-1")
+    spies = [
+        QSignalSpy(signal)
+        for signal in (
+            overlay.renameSubmitted,
+            overlay.annotationReassignmentSubmitted,
+            overlay.candidateIdentityMergeSubmitted,
+        )
+    ]
+    overlay._editor._handle_completion_activated(overlay._editor._model.index(0, 0))
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
+    assert all(_spy_records(spy) == [] for spy in spies)
+    assert overlay._states["face-1"].annotation == record
+    assert overlay._editor is None
+    assert overlay._edit_hint is None
+
+
+def test_cancel_discards_selection_and_scope_hint(qapp):
+    _surface, viewer, overlay = _make_overlay(qapp)
+    record = _annotation(display_name="Alice")
+    overlay.set_annotations([record])
+    overlay.set_identity_suggestions([RecognitionIdentitySuggestion("person:b", "Bob", None)])
+    overlay.set_overlay_active(True)
+    viewer.viewTransformChanged.emit()
+    overlay._start_editing("face-1")
+    spy = QSignalSpy(overlay.annotationReassignmentSubmitted)
+    overlay._editor._handle_completion_activated(overlay._editor._model.index(0, 0))
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Escape)
+    qapp.processEvents()
+    assert _spy_records(spy) == []
+    assert overlay._states["face-1"].annotation == record
+    assert overlay._edit_hint is None

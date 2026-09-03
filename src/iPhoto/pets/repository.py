@@ -947,7 +947,11 @@ class PetRepository:
                 target_pet_id = str(payload.get("target_pet_id") or "")
                 if target_pet_id:
                     self._state_repo.confirm_pet(target_pet_id)
-        if str(payload.get("operation_kind") or "") == "pet_delete_detection":
+        if str(payload.get("operation_kind") or "") in {
+            "pet_delete_detection",
+            "pet_move_detection",
+            "pet_move_detection_new",
+        }:
             face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
             face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
             detection_id = str(payload.get("detection_id") or "")

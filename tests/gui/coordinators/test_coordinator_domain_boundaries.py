@@ -133,6 +133,7 @@ def test_recognition_rebinds_runtime_services_after_library_change() -> None:
     roots = [Path("/library/first")]
     people_services = {root: MagicMock() for root in roots}
     pet_services = {root: MagicMock() for root in roots}
+    edit_services = {root: MagicMock() for root in roots}
     context = MagicMock()
     coordinator = RecognitionCoordinator(
         context=context,
@@ -141,6 +142,7 @@ def test_recognition_rebinds_runtime_services_after_library_change() -> None:
         library_root_getter=lambda: roots[0],
         people_service_getter=lambda *, library_root: people_services[library_root],
         pet_service_getter=lambda *, library_root: pet_services[library_root],
+        recognition_edit_getter=lambda *, library_root: edit_services[library_root],
         cluster_callback=MagicMock(),
         group_callback=MagicMock(),
         pet_callback=MagicMock(),
@@ -151,12 +153,15 @@ def test_recognition_rebinds_runtime_services_after_library_change() -> None:
     roots[0] = next_root
     people_services[next_root] = MagicMock()
     pet_services[next_root] = MagicMock()
+    edit_services[next_root] = MagicMock()
     coordinator.rebind_library()
 
     context.library.bind_recognition_services.assert_called_once_with(
         people_services[next_root],
         pet_services[next_root],
     )
+
+    coordinator._detail.set_recognition_edit_service.assert_called_with(edit_services[next_root])
 
 
 def test_recognition_applies_hidden_people_preference_when_page_is_created() -> None:

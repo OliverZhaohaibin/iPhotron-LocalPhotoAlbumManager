@@ -45,6 +45,7 @@ class RecognitionAnnotation:
     is_stale: bool = False
     stale_reason: str | None = None
     promotion_state: str = "legacy_visible"
+    asset_id: str = ""
 
     @property
     def kind(self) -> str:
@@ -79,7 +80,9 @@ class RecognitionAnnotation:
         return f"{self.canonical_identity_kind}:{self.canonical_identity_id}"
 
 
-def face_annotation_adapter(annotation: AssetFaceAnnotation) -> RecognitionAnnotation:
+def face_annotation_adapter(
+    annotation: AssetFaceAnnotation, asset_id: str = ""
+) -> RecognitionAnnotation:
     return RecognitionAnnotation(
         source_detection_kind="person",
         source_annotation_id=annotation.face_id,
@@ -87,9 +90,7 @@ def face_annotation_adapter(annotation: AssetFaceAnnotation) -> RecognitionAnnot
         source_identity_id=annotation.source_identity_id or annotation.person_id,
         canonical_identity_kind=annotation.canonical_identity_kind or "person",
         canonical_identity_id=annotation.canonical_identity_id or annotation.person_id,
-        canonical_display_name=(
-            annotation.canonical_display_name or annotation.display_name
-        ),
+        canonical_display_name=(annotation.canonical_display_name or annotation.display_name),
         box_x=annotation.box_x,
         box_y=annotation.box_y,
         box_w=annotation.box_w,
@@ -99,10 +100,13 @@ def face_annotation_adapter(annotation: AssetFaceAnnotation) -> RecognitionAnnot
         thumbnail_path=annotation.thumbnail_path,
         is_manual=annotation.is_manual,
         promotion_state=annotation.promotion_state,
+        asset_id=asset_id,
     )
 
 
-def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotation:
+def pet_annotation_adapter(
+    annotation: AssetPetAnnotation, asset_id: str = ""
+) -> RecognitionAnnotation:
     display_name = annotation.canonical_display_name or annotation.display_name
     return RecognitionAnnotation(
         source_detection_kind="pet",
@@ -122,4 +126,5 @@ def pet_annotation_adapter(annotation: AssetPetAnnotation) -> RecognitionAnnotat
         is_stale=annotation.is_stale,
         stale_reason=annotation.stale_reason,
         promotion_state=annotation.promotion_state,
+        asset_id=asset_id,
     )

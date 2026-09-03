@@ -280,10 +280,9 @@ class PetService:
         people_boxes = self.people_boxes_by_asset_ids(scoped_ids)
         return coordinator.reconcile_people_overlaps(people_boxes)
 
-    def rename_pet(self, pet_id: str, new_name: str | None) -> None:
+    def rename_pet(self, pet_id: str, new_name: str | None) -> bool:
         coordinator = self.coordinator
-        if coordinator is not None:
-            coordinator.rename_pet(pet_id, new_name)
+        return bool(coordinator and coordinator.rename_pet(pet_id, new_name) is not None)
 
     def set_pet_hidden(self, pet_id: str, hidden: bool) -> bool:
         coordinator = self.coordinator

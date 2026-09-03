@@ -9,6 +9,14 @@ import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for playback coordinator tests", exc_type=ImportError)
 
+from iPhoto.application.services.recognition_edit_service import annotation_edit_context
+from iPhoto.domain.recognition_edits import (
+    IdentityRef,
+    IdentitySelectionRequest,
+    IdentityRenameRequest,
+    RecognitionEditOutcome,
+    RecognitionEditStatus,
+)
 from iPhoto.application.ports import LocationWriteJobRecord
 from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
@@ -2209,24 +2217,10 @@ def test_refresh_face_name_overlay_hides_for_video() -> None:
 
 
 def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> None:
-    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._people_service = Mock(rename_cluster=Mock())
-    coordinator._recognition_query_service = Mock()
-    coordinator._current_presentation = _make_presentation(
-        path="/fake/photo.jpg",
-        asset_id="asset-photo",
-        is_video=False,
-    )
-    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
-    coordinator._people_dashboard_refresh_callback = Mock()
-
-    PlaybackCoordinator._handle_face_name_rename_submitted(
-        coordinator,
-        "person-a",
-        "  Alice  ",
-    )
-
-    coordinator._people_service.rename_cluster.assert_called_once_with("person-a", "Alice")
+    coordinator = _edit_coordinator()
+    request = Mock()
+    coordinator._handle_face_name_rename_submitted(request)
+    coordinator._recognition_edit_service.rename_identity.assert_called_once_with(request)
     coordinator._recognition_query_service.invalidate.assert_called_once_with(None)
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
@@ -2290,7 +2284,7 @@ def test_handle_info_panel_face_delete_requested_refreshes_views() -> None:
 
 def test_handle_info_panel_face_move_requested_refreshes_views() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._people_service = Mock(move_face_to_person=Mock(return_value=True))
+    coordinator._recognition_edit_service = _edit_service_double()
     coordinator._current_presentation = _make_presentation(
         path="/fake/photo.jpg",
         asset_id="asset-photo",
@@ -2317,7 +2311,11 @@ def test_handle_info_panel_face_move_requested_refreshes_views() -> None:
         "person-b",
     )
 
-    coordinator._people_service.move_face_to_person.assert_called_once_with("face-1", "person-b")
+    coordinator._recognition_edit_service.reassign_annotation.assert_called_once_with(
+        IdentitySelectionRequest(
+            annotation_edit_context("asset-photo", annotation), IdentityRef("person", "person-b")
+        )
+    )
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
     coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
@@ -2399,200 +2397,76 @@ def test_unassigned_pending_face_rename_creates_confirmed_person() -> None:
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
-def test_unassigned_pending_face_dropdown_moves_detection_to_existing_identity() -> None:
+def _edit_service_double(outcome=None):
+    result = outcome or RecognitionEditOutcome(RecognitionEditStatus.CHANGED)
+    return Mock(
+        reassign_annotation=Mock(return_value=result),
+        merge_candidate_identity=Mock(return_value=result),
+        rename_identity=Mock(return_value=result),
+    )
+
+
+def _edit_coordinator(outcome=None):
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._handle_info_panel_face_move_requested = Mock()
-    annotation = AssetFaceAnnotation(
-        face_id="noise-face",
-        person_id=None,
-        display_name=None,
-        box_x=0,
-        box_y=0,
-        box_w=10,
-        box_h=10,
-        image_width=100,
-        image_height=100,
-        promotion_state="candidate",
-    )
-
-    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
-        coordinator,
-        annotation,
-        "person:person-existing",
-    )
-
-    coordinator._handle_info_panel_face_move_requested.assert_called_once_with(
-        annotation,
-        "person:person-existing",
-    )
-
-
-def test_assigned_name_dropdown_merges_entire_identity_into_selection() -> None:
-    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._recognition_merge_service = Mock(
-        merge=Mock(return_value=SimpleNamespace(merged=True, failure=None))
-    )
+    coordinator._recognition_edit_service = _edit_service_double(outcome)
     coordinator._recognition_query_service = Mock()
+    coordinator._face_name_overlay = Mock()
     coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
-    coordinator._current_presentation = None
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._current_presentation = _make_presentation(asset_id="asset-photo", is_video=False)
     coordinator._people_dashboard_refresh_callback = Mock()
-    annotation = AssetFaceAnnotation(
-        face_id="face-1",
-        person_id="person-candidate",
-        display_name=None,
-        box_x=0,
-        box_y=0,
-        box_w=10,
-        box_h=10,
-        image_width=100,
-        image_height=100,
-        promotion_state="candidate",
-    )
+    return coordinator
 
-    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
-        coordinator,
-        annotation,
-        "person:person-existing",
-    )
 
-    coordinator._recognition_merge_service.merge.assert_called_once_with(
-        "person:person-candidate",
-        "person:person-existing",
-    )
+@pytest.mark.parametrize(
+    "method,operation",
+    [
+        ("_handle_annotation_reassignment_submitted", "reassign_annotation"),
+        ("_handle_candidate_identity_merge_submitted", "merge_candidate_identity"),
+    ],
+)
+def test_inline_routes_explicit_scope_without_inferring_from_identity(method, operation):
+    coordinator = _edit_coordinator()
+    request = Mock()
+    getattr(coordinator, method)(request)
+    getattr(coordinator._recognition_edit_service, operation).assert_called_once_with(request)
+    assert len(coordinator._recognition_edit_service.mock_calls) == 1
     coordinator._recognition_query_service.invalidate.assert_called_once_with(None)
+
+
+@pytest.mark.parametrize("operation", ["reassign_annotation", "merge_candidate_identity"])
+def test_pet_conflict_message_describes_the_requested_scope(operation):
+    coordinator = _edit_coordinator(
+        RecognitionEditOutcome(RecognitionEditStatus.REJECTED, "same_asset_conflict")
+    )
+    coordinator._run_recognition_edit(operation, Mock())
+    message = coordinator._face_name_overlay.show_name_error.call_args.args[0]
+    assert "same photo" in message
+    assert ("instead of merging" in message) == (operation == "merge_candidate_identity")
     coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
-    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
-
-
-def test_pet_name_dropdown_reports_same_asset_merge_conflict() -> None:
-    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._recognition_merge_service = Mock(
-        merge=Mock(
-            return_value=SimpleNamespace(
-                merged=False,
-                failure=SimpleNamespace(value="same_asset_conflict"),
-            )
-        )
-    )
-    coordinator._face_name_overlay = Mock()
-    annotation = RecognitionAnnotation(
-        source_detection_kind="pet",
-        source_annotation_id="det-1",
-        source_identity_kind="pet",
-        source_identity_id="pet-candidate",
-        canonical_identity_kind="pet",
-        canonical_identity_id="pet-candidate",
-        canonical_display_name=None,
-        box_x=0,
-        box_y=0,
-        box_w=10,
-        box_h=10,
-        image_width=100,
-        image_height=100,
-        promotion_state="candidate",
-    )
-
-    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
-        coordinator,
-        annotation,
-        "pet:pet-existing",
-    )
-
-    coordinator._face_name_overlay.show_name_error.assert_called_once_with(
-        "A pet identity cannot contain two detections from the same photo. "
-        "Delete a duplicate detection instead of merging it."
-    )
-
-
-def test_unassigned_pet_name_dropdown_reports_same_asset_move_conflict() -> None:
-    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._pet_service = Mock(
-        move_detection_to_pet_with_outcome=Mock(
-            return_value=SimpleNamespace(
-                succeeded=False,
-                failure=SimpleNamespace(value="same_asset_conflict"),
-            )
-        )
-    )
-    coordinator._face_name_overlay = Mock()
-    annotation = RecognitionAnnotation(
-        source_detection_kind="pet",
-        source_annotation_id="det-unassigned",
-        source_identity_kind="pet",
-        source_identity_id=None,
-        canonical_identity_kind="pet",
-        canonical_identity_id=None,
-        canonical_display_name=None,
-        box_x=0,
-        box_y=0,
-        box_w=10,
-        box_h=10,
-        image_width=100,
-        image_height=100,
-        promotion_state="candidate",
-    )
-
-    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
-        coordinator,
-        annotation,
-        "pet:pet-existing",
-    )
-
-    coordinator._pet_service.move_detection_to_pet_with_outcome.assert_called_once_with(
-        "det-unassigned",
-        "pet-existing",
-    )
-    coordinator._face_name_overlay.show_name_error.assert_called_once_with(
-        "A pet identity cannot contain two detections from the same photo. "
-        "Delete a duplicate detection instead of merging it."
-    )
 
 
 @pytest.mark.parametrize(
     "failure",
-    ["recovery_pending", "shutting_down", "rejected"],
+    ["recovery_pending", "shutting_down", "rejected", "context_changed", "not_found", "io_error"],
 )
-def test_unassigned_pet_name_dropdown_reports_generic_move_failure(failure: str) -> None:
-    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._pet_service = Mock(
-        move_detection_to_pet_with_outcome=Mock(
-            return_value=SimpleNamespace(
-                succeeded=False,
-                failure=SimpleNamespace(value=failure),
-            )
-        )
-    )
-    coordinator._face_name_overlay = Mock()
-    annotation = RecognitionAnnotation(
-        source_detection_kind="pet",
-        source_annotation_id="det-unassigned",
-        source_identity_kind="pet",
-        source_identity_id=None,
-        canonical_identity_kind="pet",
-        canonical_identity_id=None,
-        canonical_display_name=None,
-        box_x=0,
-        box_y=0,
-        box_w=10,
-        box_h=10,
-        image_width=100,
-        image_height=100,
-        promotion_state="candidate",
-    )
+def test_edit_failure_refreshes_real_state_and_reports_error(failure):
+    coordinator = _edit_coordinator(RecognitionEditOutcome(RecognitionEditStatus.REJECTED, failure))
+    coordinator._run_recognition_edit("reassign_annotation", Mock())
+    coordinator._face_name_overlay.show_name_error.assert_called_once()
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
 
-    PlaybackCoordinator._handle_face_name_existing_identity_submitted(
-        coordinator,
-        annotation,
-        "pet:pet-existing",
-    )
 
-    coordinator._face_name_overlay.show_name_error.assert_called_once_with(
-        "The name could not be assigned. The identities may have changed."
-    )
+def test_noop_does_not_refresh_or_report_error():
+    coordinator = _edit_coordinator(RecognitionEditOutcome(RecognitionEditStatus.UNCHANGED))
+    coordinator._run_recognition_edit("reassign_annotation", Mock())
+    coordinator._recognition_query_service.invalidate.assert_not_called()
+    coordinator._face_name_overlay.show_name_error.assert_not_called()
 
 
 def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._recognition_edit_service = _edit_service_double()
     coordinator._pet_service = Mock(
         delete_detection=Mock(return_value=True),
         move_detection_to_pet_with_outcome=Mock(
@@ -2637,9 +2511,10 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
     )
 
     coordinator._pet_service.delete_detection.assert_called_once_with("det-1")
-    coordinator._pet_service.move_detection_to_pet_with_outcome.assert_called_once_with(
-        "det-1",
-        "pet-b",
+    coordinator._recognition_edit_service.reassign_annotation.assert_called_once_with(
+        IdentitySelectionRequest(
+            annotation_edit_context("asset-photo", annotation), IdentityRef("pet", "pet-b")
+        )
     )
     coordinator._pet_service.move_detection_to_new_pet.assert_called_once_with("det-1", "Nori")
     assert coordinator._refresh_info_panel_faces.call_count == 3
@@ -2647,6 +2522,7 @@ def test_handle_info_panel_pet_detection_actions_use_pet_service() -> None:
 
 def test_cross_kind_annotation_routes_identity_and_detection_mutations_separately() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._recognition_edit_service = _edit_service_double()
     coordinator._people_service = Mock(
         rename_cluster=Mock(),
         delete_face=Mock(return_value=True),
@@ -2683,8 +2559,9 @@ def test_cross_kind_annotation_routes_identity_and_detection_mutations_separatel
 
     PlaybackCoordinator._handle_face_name_rename_submitted(
         coordinator,
-        pet_source_person_identity.person_id,
-        "Alice Updated",
+        IdentityRenameRequest(
+            annotation_edit_context("asset-photo", pet_source_person_identity), "Alice Updated"
+        ),
     )
     PlaybackCoordinator._handle_info_panel_face_delete_requested(
         coordinator,
@@ -2696,14 +2573,17 @@ def test_cross_kind_annotation_routes_identity_and_detection_mutations_separatel
         "person:person-b",
     )
 
-    coordinator._people_service.rename_cluster.assert_called_once_with(
-        "person-a", "Alice Updated"
+    coordinator._recognition_edit_service.rename_identity.assert_called_once_with(
+        IdentityRenameRequest(
+            annotation_edit_context("asset-photo", pet_source_person_identity), "Alice Updated"
+        )
     )
     coordinator._pet_service.delete_detection.assert_called_once_with("det-1")
-    coordinator._people_service.reassign_detection_identity.assert_called_once_with(
-        source_kind="pet",
-        source_annotation_id="det-1",
-        target_identity="person:person-b",
+    coordinator._recognition_edit_service.reassign_annotation.assert_called_once_with(
+        IdentitySelectionRequest(
+            annotation_edit_context("asset-photo", pet_source_person_identity),
+            IdentityRef("person", "person-b"),
+        )
     )
     coordinator._people_service.delete_face.assert_not_called()
 

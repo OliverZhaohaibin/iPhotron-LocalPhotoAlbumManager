@@ -178,6 +178,10 @@ LibrarySession
   thumbnails
   people
   pets
+  recognition_mutations
+  recognition_queries
+  recognition_merges
+  recognition_edits
   maps
   map_interactions
   edit
@@ -238,6 +242,21 @@ FFmpeg, GUI helpers, or runtime singletons.
 events, and port protocols. Application code depends on ports and domain values.
 It must not import GUI modules, concrete persistence modules, Qt workers,
 widgets, or process-wide repository singletons.
+
+`LibrarySession.recognition_edits` owns explicit single-detection reassignment,
+pending-candidate identity merge, and identity rename requests from Detail.
+Requests capture the asset, native detection reference, and expected identity
+state. The service re-reads annotations under the shared recognition mutation
+lease before dispatching through the existing People/Pets services and journal.
+Inline naming and Info Panel share the same reassignment operation.
+
+The inline selection policy lives in `domain/recognition_edits.py`. Only an
+independent, non-manual `candidate` identity is merged as a whole. Manual,
+unassigned, `eligible`, confirmed, redirected, and legacy annotations are edited
+one detection at a time. Typed text remains an explicit identity rename, and
+selecting the current identity is a no-op. Single-detection assignments override
+identity redirects when reading both automatic and manual annotations; moving
+back to the native kind clears that override as part of recoverable state sync.
 
 Current public boundary names include:
 

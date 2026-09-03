@@ -368,12 +368,11 @@ class PeopleService:
         }
         return self._build_group_summary(repository, group, summaries_by_id, pet_summaries_by_id)
 
-    def rename_cluster(self, person_id: str, new_name: str | None) -> None:
+    def rename_cluster(self, person_id: str, new_name: str | None) -> bool:
         if self._library_root is None:
-            return
+            return False
         coordinator = self.coordinator
-        if coordinator is not None:
-            coordinator.rename_person(person_id, new_name)
+        return bool(coordinator and coordinator.rename_person(person_id, new_name) is not None)
 
     def pin_block_reason(self, person_id: str) -> str | None:
         """Return a human-readable reason why *person_id* cannot be pinned."""

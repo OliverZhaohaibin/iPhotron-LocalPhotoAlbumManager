@@ -5,46 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
 
+from iPhoto.domain.recognition_edits import IdentityKind, IdentityRef
 from iPhoto.pets.records import PetMergeOutcome, PetMutationFailure
 from iPhoto.recognition.mutation_coordinator import (
     RecognitionMutationCoordinator,
     get_recognition_mutation_coordinator,
 )
-
-IdentityKind = Literal["person", "pet"]
-
-
-@dataclass(frozen=True, slots=True)
-class IdentityRef:
-    """A collision-free reference to one recognition identity."""
-
-    kind: IdentityKind
-    entity_id: str
-
-    def __post_init__(self) -> None:
-        normalized_id = str(self.entity_id or "").strip()
-        if self.kind not in {"person", "pet"} or not normalized_id:
-            raise ValueError("identity kind and entity id are required")
-        object.__setattr__(self, "entity_id", normalized_id)
-
-    @property
-    def key(self) -> str:
-        return f"{self.kind}:{self.entity_id}"
-
-    @classmethod
-    def parse(cls, value: object) -> IdentityRef | None:
-        if isinstance(value, cls):
-            return value
-        text = str(value or "").strip()
-        if ":" not in text:
-            return None
-        kind, entity_id = (part.strip() for part in text.split(":", 1))
-        if kind not in {"person", "pet"} or not entity_id:
-            return None
-        return cls(kind=kind, entity_id=entity_id)  # type: ignore[arg-type]
-
 
 class IdentityMergeFailure(StrEnum):
     INVALID_IDENTITY = "invalid_identity"

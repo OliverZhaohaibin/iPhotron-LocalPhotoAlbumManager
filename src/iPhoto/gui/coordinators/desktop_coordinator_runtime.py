@@ -843,6 +843,7 @@ class DesktopCoordinatorRuntime(QObject):
             pet_service_getter=self._pet_service,
             recognition_query_getter=self._recognition_query_service,
             recognition_merge_getter=self._recognition_merge_service,
+            recognition_edit_getter=self._recognition_edit_service,
             cluster_callback=self._on_people_cluster_activated,
             group_callback=self._on_people_group_activated,
             pet_callback=self._on_pet_activated,
@@ -976,6 +977,13 @@ class DesktopCoordinatorRuntime(QObject):
         session_root = getattr(session, "library_root", None) if session is not None else None
         if session is not None and (library_root is None or session_root == library_root):
             return getattr(session, "recognition_merges", None)
+        return None
+
+    def _recognition_edit_service(self, library_root: Path | None = None):
+        session = self._active_session()
+        session_root = getattr(session, "library_root", None) if session is not None else None
+        if session is not None and (library_root is None or session_root == library_root):
+            return getattr(session, "recognition_edits", None)
         return None
 
     def _map_runtime(self):

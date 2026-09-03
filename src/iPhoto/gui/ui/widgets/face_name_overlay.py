@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -31,8 +31,24 @@ from PySide6.QtGui import (
     QStandardItem,
     QStandardItemModel,
 )
-from PySide6.QtWidgets import QApplication, QCompleter, QLineEdit, QListView, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCompleter,
+    QLabel,
+    QLineEdit,
+    QListView,
+    QToolTip,
+    QWidget,
+)
 
+from iPhoto.application.services.recognition_edit_service import annotation_edit_context
+from iPhoto.domain.recognition_edits import (
+    AnnotationEditContext,
+    IdentityRef,
+    IdentityRenameRequest,
+    IdentitySelectionRequest,
+    InlineSelectionScope,
+)
 from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
@@ -191,7 +207,7 @@ class _FaceNameEditor(QLineEdit):
         """Return only an explicitly activated completion.
 
         Saved identity labels use this stricter form because silently treating a
-        typed duplicate name as a merge would be surprising and destructive.
+        typed duplicate name as a selection would change the operation scope.
         Manual face creation keeps the looser exact-name matching exposed by
         :meth:`suggestion_identity_key` for backwards compatibility.
         """
@@ -284,9 +300,10 @@ class _FaceNameEditor(QLineEdit):
 
 
 class FaceNameOverlayWidget(QWidget):
-    renameSubmitted = Signal(str, object)
+    renameSubmitted = Signal(object)
     unassignedRenameSubmitted = Signal(object, str)
-    existingIdentitySubmitted = Signal(object, str)
+    annotationReassignmentSubmitted = Signal(object)
+    candidateIdentityMergeSubmitted = Signal(object)
     manualFaceSubmitted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -304,6 +321,8 @@ class FaceNameOverlayWidget(QWidget):
         self._hovered_face_id: str | None = None
         self._editing_face_id: str | None = None
         self._editor: _FaceNameEditor | None = None
+        self._editing_context: AnnotationEditContext | None = None
+        self._edit_hint: QLabel | None = None
         self._name_suggestions: list[_NameSuggestion] = []
         self._manual_draft: _ManualFaceDraft | None = None
         self._manual_editor: _FaceNameEditor | None = None
@@ -731,6 +750,8 @@ class FaceNameOverlayWidget(QWidget):
             self.setHidden(True)
             if self._editor is not None:
                 self._editor.hide()
+            if self._edit_hint is not None:
+                self._edit_hint.hide()
             self._set_saved_hover_tracking_enabled(False)
             return
         show_saved = self._active and viewer_ready and bool(self._states)
@@ -746,6 +767,8 @@ class FaceNameOverlayWidget(QWidget):
         self.setHidden(not (show_saved or show_manual))
         if self._editor is not None:
             self._editor.setVisible(show_saved and self._editing_face_id is not None)
+        if self._edit_hint is not None:
+            self._edit_hint.setVisible(show_saved and self._editing_face_id is not None)
         if self._manual_editor is not None:
             self._manual_editor.setVisible(show_manual)
             self._manual_editor.setEnabled(not self._manual_busy)
@@ -759,6 +782,8 @@ class FaceNameOverlayWidget(QWidget):
             self.raise_()
         if self._editor is not None and self._editor.isVisible():
             self._editor.raise_()
+        if self._edit_hint is not None and self._edit_hint.isVisible():
+            self._edit_hint.raise_()
         if self._manual_editor is not None and self._manual_editor.isVisible():
             self._manual_editor.raise_()
 
@@ -836,6 +861,17 @@ class FaceNameOverlayWidget(QWidget):
                     viewer_rect,
                 )
                 self._editor.setGeometry(editor_rect)
+                if self._edit_hint is not None:
+                    width = min(420, viewer_rect.width())
+                    height = self._edit_hint.heightForWidth(width)
+                    x = max(
+                        viewer_rect.left(),
+                        min(editor_rect.center().x() - width // 2, viewer_rect.right() - width + 1),
+                    )
+                    y = editor_rect.bottom() + 4
+                    if y + height > viewer_rect.bottom():
+                        y = max(viewer_rect.top(), editor_rect.top() - height - 4)
+                    self._edit_hint.setGeometry(x, y, width, height)
         if self._manual_draft is not None:
             self._manual_draft.center = self._clamp_manual_center(
                 self._manual_draft.center,
@@ -1282,6 +1318,28 @@ class FaceNameOverlayWidget(QWidget):
         self._set_hovered_face_id(None)
         self._set_saved_hover_tracking_enabled(False)
         self._editing_face_id = face_id
+        self._editing_context = annotation_edit_context(
+            getattr(state.annotation, "asset_id", ""), state.annotation
+        )
+        hint = QLabel(self.parentWidget() or self)
+        hint.setWordWrap(True)
+        hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        hint.setStyleSheet(
+            "QLabel { background: palette(base); color: palette(text); padding: 6px;"
+            " border-radius: 6px; font-size: 11px; }"
+        )
+        scope_text = (
+            tr("FaceNameOverlay", "Choose an existing name: merge the entire pending identity.")
+            if self._editing_context.selection_scope == InlineSelectionScope.CANDIDATE_IDENTITY
+            else tr("FaceNameOverlay", "Choose an existing name: assign only this detection.")
+        )
+        typing_text = (
+            tr("FaceNameOverlay", "Type a name: rename the associated identity.")
+            if self._editing_context.current_identity is not None
+            else tr("FaceNameOverlay", "Type a name: create an identity for this detection.")
+        )
+        hint.setText(scope_text + "\n" + typing_text)
+        self._edit_hint = hint
         editor = _FaceNameEditor(self.parentWidget() or self)
         editor.set_name_suggestions(self._name_suggestions)
         editor.setText(
@@ -1294,6 +1352,7 @@ class FaceNameOverlayWidget(QWidget):
         self._editor = editor
         self._relayout()
         editor.show()
+        hint.show()
         editor.setFocus(Qt.FocusReason.MouseFocusReason)
         editor.selectAll()
 
@@ -1310,44 +1369,27 @@ class FaceNameOverlayWidget(QWidget):
         if not person_id and not new_name:
             self._cancel_editing()
             return
-        if selected_identity_key and not self._is_current_identity(
-            state.annotation,
-            selected_identity_key,
-        ):
-            annotation = state.annotation
-            self._teardown_editor(show_chip=True)
-            self.existingIdentitySubmitted.emit(annotation, selected_identity_key)
+        context = self._editing_context
+        if context is None:
+            self._cancel_editing()
             return
-        if hasattr(state.annotation, "canonical_display_name"):
-            fields = getattr(state.annotation, "__dataclass_fields__", {})
-            changes = {"canonical_display_name": new_name}
-            if "display_name" in fields:
-                changes["display_name"] = new_name
-            if new_name and "promotion_state" in fields:
-                changes["promotion_state"] = "confirmed"
-            state.annotation = replace(state.annotation, **changes)
-        else:
-            state.annotation = replace(state.annotation, display_name=new_name)
-        updated_annotation = state.annotation
+        if selected_identity_key:
+            target = IdentityRef.parse(selected_identity_key)
+            self._teardown_editor(show_chip=True)
+            if target is None or target == context.current_identity:
+                return
+            request = IdentitySelectionRequest(context, target)
+            if context.selection_scope == InlineSelectionScope.CANDIDATE_IDENTITY:
+                self.candidateIdentityMergeSubmitted.emit(request)
+            else:
+                self.annotationReassignmentSubmitted.emit(request)
+            return
+        annotation = state.annotation
         self._teardown_editor(show_chip=True)
         if person_id:
-            self.renameSubmitted.emit(person_id, new_name)
+            self.renameSubmitted.emit(IdentityRenameRequest(context, new_name))
         elif new_name:
-            self.unassignedRenameSubmitted.emit(updated_annotation, new_name)
-
-    @staticmethod
-    def _is_current_identity(
-        annotation: object,
-        identity_key: str,
-    ) -> bool:
-        current_identity = getattr(annotation, "person_id", None)
-        if not isinstance(current_identity, str) or not current_identity:
-            return False
-        if current_identity.startswith(("person:", "pet:")):
-            return current_identity == identity_key
-        kind = getattr(annotation, "kind", "person")
-        normalized_kind = "pet" if kind == "pet" else "person"
-        return f"{normalized_kind}:{current_identity}" == identity_key
+            self.unassignedRenameSubmitted.emit(annotation, new_name)
 
     def _cancel_editing(self) -> None:
         if self._editing_face_id is None and self._editor is None:
@@ -1359,7 +1401,12 @@ class FaceNameOverlayWidget(QWidget):
         face_id = self._editing_face_id
         editor = self._editor
         self._editing_face_id = None
+        self._editing_context = None
         self._editor = None
+        if self._edit_hint is not None:
+            self._edit_hint.hide()
+            self._edit_hint.deleteLater()
+            self._edit_hint = None
         if editor is not None:
             editor.hide()
             editor.deleteLater()

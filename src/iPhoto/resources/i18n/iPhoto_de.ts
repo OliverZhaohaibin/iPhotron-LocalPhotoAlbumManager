@@ -1195,6 +1195,10 @@
             <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
             <translation>Eine Haustieridentität kann nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie eine doppelte Erkennung, anstatt sie zusammenzuführen.</translation>
         </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>Eine Haustieridentität darf nicht zwei Erkennungen aus demselben Foto enthalten. Wählen Sie eine andere Identität für diese Erkennung.</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>
@@ -1485,6 +1489,22 @@
         <message>
             <source>Please place the circle on the face before saving.</source>
             <translation>Platzieren Sie vor dem Sichern den Kreis auf dem Gesicht.</translation>
+        </message>
+        <message>
+            <source>Choose an existing name: merge the entire pending identity.</source>
+            <translation>Vorhandenen Namen wählen: die gesamte unbestätigte Identität zusammenführen.</translation>
+        </message>
+        <message>
+            <source>Choose an existing name: assign only this detection.</source>
+            <translation>Vorhandenen Namen wählen: nur diese Erkennung zuordnen.</translation>
+        </message>
+        <message>
+            <source>Type a name: rename the associated identity.</source>
+            <translation>Namen eingeben: die zugehörige Identität umbenennen.</translation>
+        </message>
+        <message>
+            <source>Type a name: create an identity for this detection.</source>
+            <translation>Namen eingeben: eine Identität für diese Erkennung erstellen.</translation>
         </message>
     </context>
     <context>

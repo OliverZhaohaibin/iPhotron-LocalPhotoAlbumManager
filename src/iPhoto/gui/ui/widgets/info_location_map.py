@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import (
     QCoreApplication,
     QEvent,
+    QMetaObject,
     QObject,
     QPoint,
     QPointF,
@@ -272,7 +273,9 @@ class InfoLocationMapView(QWidget):
             map_runtime.capabilities() if map_runtime is not None else None
         )
         self._map_package_root = resolve_map_package_root(map_runtime)
+        self._map_construction_fingerprint = self._runtime_construction_fingerprint()
         self._map_widget: MapWidgetBase | None = None
+        self._map_signal_connections: list[QMetaObject.Connection] = []
         self._event_bridge = MapEventSurfaceBridge(
             self,
             install_application_filter=True,
@@ -293,7 +296,6 @@ class InfoLocationMapView(QWidget):
         self._pending_viewport_sync_queue = False
         self._map_creation_generation = 0
         self._map_lifecycle = _MapLifecycle.UNINITIALIZED
-        self._runtime_rebuild_pending = False
         self._native_fallback_attempted = False
         self._pin_paint_callback: Callable[[QPainter], None] | None = None
         self._uses_post_render_pin = False
@@ -366,28 +368,38 @@ class InfoLocationMapView(QWidget):
     def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
         """Bind the session-owned runtime snapshot used for mini-map creation."""
 
-        previous_package_root = self._map_package_root
-        previous_capabilities = self._map_runtime_capabilities
+        if self._map_lifecycle == _MapLifecycle.SHUTDOWN:
+            return
         self._map_runtime = map_runtime
         self._map_runtime_capabilities = (
             map_runtime.capabilities() if map_runtime is not None else None
         )
         self._map_package_root = resolve_map_package_root(map_runtime)
-        runtime_changed = (
-            self._map_package_root != previous_package_root
-            or self._map_runtime_capabilities != previous_capabilities
-        )
-        if runtime_changed:
-            self._map_creation_generation += 1
-            self._native_fallback_attempted = False
-            if self._map_widget is not None and self._map_package_root != previous_package_root:
+        fingerprint = self._runtime_construction_fingerprint()
+        if fingerprint == self._map_construction_fingerprint:
+            return
+        self._map_construction_fingerprint = fingerprint
+        self._native_fallback_attempted = False
+        if self._map_widget is not None or self._map_lifecycle == _MapLifecycle.FAILED:
+            if self.isVisible():
                 self._show_map_placeholder()
-                if self.isVisible():
-                    self._runtime_rebuild_pending = True
-                else:
-                    self._release_map_widget()
-            elif self._map_lifecycle == _MapLifecycle.FAILED:
-                self._map_lifecycle = _MapLifecycle.UNINITIALIZED
+            self._release_map_widget(preserve_viewport=True)
+        if self.isVisible() and self._latitude is not None and self._longitude is not None:
+            self.prepare_surface()
+            self.schedule_deferred_content()
+
+    def _runtime_construction_fingerprint(self) -> tuple[object, ...]:
+        """Exclude search/status updates so an in-flight first frame stays valid."""
+
+        capabilities = self._map_runtime_capabilities
+        return (
+            self._map_package_root,
+            capabilities is not None,
+            getattr(capabilities, "preferred_backend", None),
+            getattr(capabilities, "python_gl_available", None),
+            getattr(capabilities, "native_widget_available", None),
+            getattr(capabilities, "osmand_extension_available", None),
+        )
 
     def map_widget(self) -> MapWidgetBase | None:
         return self._map_widget
@@ -396,7 +408,7 @@ class InfoLocationMapView(QWidget):
         return self._latitude, self._longitude
 
     def prepare_surface(self) -> None:
-        """Attach the final map surface before the containing panel is painted."""
+        """Attach the surface before paint; Python controller construction is still synchronous."""
 
         if self._map_lifecycle in {
             _MapLifecycle.SURFACE_READY,
@@ -407,10 +419,19 @@ class InfoLocationMapView(QWidget):
         }:
             return
         self._show_map_placeholder()
-        self._create_map_widget()
+        try:
+            self._create_map_widget(allow_native=not self._native_fallback_attempted)
+        except Exception:  # noqa: BLE001 - optional backend must degrade gracefully
+            LOGGER.warning("Failed to prepare mini-map surface", exc_info=True)
+            if self._backend_kind == "osmand_native" and not self._native_fallback_attempted:
+                self._native_fallback_attempted = True
+                self._release_map_widget(preserve_viewport=True)
+                self.prepare_surface()
+                return
+            self._fail_map_content()
+            return
         if self._map_widget is None:
-            self._map_lifecycle = _MapLifecycle.FAILED
-            self._show_map_failure()
+            self._fail_map_content()
             return
         self._map_lifecycle = _MapLifecycle.SURFACE_READY
 
@@ -428,27 +449,31 @@ class InfoLocationMapView(QWidget):
         map_widget = self._map_widget
         if map_widget is None:
             return
-        starter = getattr(map_widget, "start_deferred_content", None)
-        if callable(starter):
-            try:
+        try:
+            starter = getattr(map_widget, "start_deferred_content", None)
+            if callable(starter):
                 starter()
-            except Exception:
-                LOGGER.warning("Failed to start deferred mini-map content", exc_info=True)
-                if self._backend_kind == "osmand_native" and not self._native_fallback_attempted:
-                    self._native_fallback_attempted = True
-                    self._release_map_widget()
-                    self._show_map_placeholder()
-                    self._create_map_widget(allow_native=False)
-                    if self._map_widget is not None:
-                        self._map_lifecycle = _MapLifecycle.SURFACE_READY
-                        self.start_deferred_content()
-                        return
-                self._map_lifecycle = _MapLifecycle.FAILED
-                self._show_map_failure()
+            if map_widget is not self._map_widget:
                 return
-        request_update = getattr(map_widget, "request_full_update", None)
-        if callable(request_update):
-            request_update()
+            request_update = getattr(map_widget, "request_full_update", None)
+            if callable(request_update):
+                request_update()
+        except Exception:  # noqa: BLE001 - optional backend must degrade gracefully
+            if map_widget is not self._map_widget:
+                return
+            LOGGER.warning("Failed to start deferred mini-map content", exc_info=True)
+            if self._backend_kind == "osmand_native" and not self._native_fallback_attempted:
+                self._native_fallback_attempted = True
+                self._release_map_widget(preserve_viewport=True)
+                self.prepare_surface()
+                self.start_deferred_content()
+                return
+            self._fail_map_content()
+
+    def _fail_map_content(self) -> None:
+        self._release_map_widget(preserve_viewport=True)
+        self._map_lifecycle = _MapLifecycle.FAILED
+        self._show_map_failure()
 
     def schedule_deferred_content(self) -> None:
         if self._map_lifecycle in {
@@ -474,6 +499,8 @@ class InfoLocationMapView(QWidget):
         self._sync_square_height(target_width)
 
     def set_location(self, latitude: float, longitude: float, *, zoom: float | None = None) -> None:
+        if self._map_lifecycle == _MapLifecycle.SHUTDOWN:
+            return
         next_latitude = float(latitude)
         next_longitude = float(longitude)
         next_zoom = float(zoom if zoom is not None else self.DEFAULT_ZOOM)
@@ -503,7 +530,10 @@ class InfoLocationMapView(QWidget):
         self._pending_viewport_sync = True
         self._screen_point = None
         if self._map_widget is None:
-            self._show_map_placeholder()
+            if self._map_lifecycle == _MapLifecycle.FAILED:
+                self._show_map_failure()
+            else:
+                self._show_map_placeholder()
             self._overlay.hide()
             return
 
@@ -547,17 +577,20 @@ class InfoLocationMapView(QWidget):
             self._request_pin_repaint()
 
     def shutdown(self) -> None:
+        if self._map_lifecycle == _MapLifecycle.SHUTDOWN:
+            return
         self._map_lifecycle = _MapLifecycle.SHUTDOWN
         self._release_map_widget()
         self._map_clip_frame.hide()
 
-    def _release_map_widget(self) -> None:
+    def _release_map_widget(self, *, preserve_viewport: bool = False) -> None:
         self._deferred_start_timer.stop()
         self._pin_sync_timer.stop()
         self._pin_settle_timer.stop()
         self._viewport_sync_timer.stop()
         self._viewport_settle_timer.stop()
         self._map_creation_generation += 1
+        self._disconnect_map_signals()
         self._reset_drag_cursor()
         self._remove_map_event_filters()
         if self._map_widget is not None:
@@ -574,11 +607,22 @@ class InfoLocationMapView(QWidget):
                 map_widget.setParent(None)
                 map_widget.deleteLater()
         self._screen_point = None
-        self._pending_viewport_sync = False
+        if not preserve_viewport:
+            self._latitude = None
+            self._longitude = None
+            self._requested_zoom = self.DEFAULT_ZOOM
+            self._last_set_location = None
+        # A replacement needs the requested viewport even if the old widget had
+        # already applied it (or the user had subsequently panned that widget).
+        self._pending_viewport_sync = self._latitude is not None and self._longitude is not None
         self._overlay.set_screen_point(None)
         self._overlay.hide()
         self._map_host.hide()
-        self._runtime_rebuild_pending = False
+        self._backend_kind = "unavailable"
+        QCoreApplication.removePostedEvents(self, self._PIN_SYNC_EVENT)
+        QCoreApplication.removePostedEvents(self, self._VIEWPORT_SYNC_EVENT)
+        self._pending_pin_sync_queue = False
+        self._pending_viewport_sync_queue = False
         if self._map_lifecycle != _MapLifecycle.SHUTDOWN:
             self._map_lifecycle = _MapLifecycle.UNINITIALIZED
 
@@ -613,8 +657,6 @@ class InfoLocationMapView(QWidget):
         self._deferred_start_timer.stop()
         self._reset_drag_cursor()
         super().hideEvent(event)
-        if self._runtime_rebuild_pending:
-            self._release_map_widget()
 
     def event(self, event: QEvent) -> bool:  # type: ignore[override]
         if event.type() == self._PIN_SYNC_EVENT:
@@ -904,20 +946,40 @@ class InfoLocationMapView(QWidget):
             self._pending_viewport_sync = False
 
     def _connect_map_signals(self) -> None:
-        if self._map_widget is None:
+        map_widget = self._map_widget
+        if map_widget is None:
             return
 
-        view_changed = getattr(self._map_widget, "viewChanged", None)
-        if view_changed is not None:
-            view_changed.connect(self._handle_map_view_changed)
+        generation = self._map_creation_generation
+        callbacks = (
+            ("viewChanged", self._handle_map_view_changed),
+            ("panned", self._handle_map_panned),
+            ("panFinished", self._handle_map_pan_finished),
+            (
+                "firstFramePresented",
+                lambda: self._handle_first_frame_presented(generation, map_widget),
+            ),
+        )
+        for name, callback in callbacks:
+            signal = getattr(map_widget, name, None)
+            if signal is None:
+                continue
 
-        panned = getattr(self._map_widget, "panned", None)
-        if panned is not None:
-            panned.connect(self._handle_map_panned)
+            def handle_signal(*args, callback=callback) -> None:
+                # Disconnecting cannot retract a callback already queued by Qt.
+                if (
+                    generation == self._map_creation_generation
+                    and map_widget is self._map_widget
+                    and self._map_lifecycle != _MapLifecycle.SHUTDOWN
+                ):
+                    callback(*args)
 
-        pan_finished = getattr(self._map_widget, "panFinished", None)
-        if pan_finished is not None:
-            pan_finished.connect(self._handle_map_pan_finished)
+            self._map_signal_connections.append(signal.connect(handle_signal))
+
+    def _disconnect_map_signals(self) -> None:
+        for connection in self._map_signal_connections:
+            QObject.disconnect(connection)
+        self._map_signal_connections.clear()
 
     def _project_current_location(self, *, center_fallback: bool) -> QPointF | None:
         if self._map_widget is None or self._latitude is None or self._longitude is None:
@@ -1025,18 +1087,6 @@ class InfoLocationMapView(QWidget):
             prepare_surface()
         self._install_map_event_filters()
         self._map_host_layout.addWidget(self._map_widget, 1)
-        generation = self._map_creation_generation
-        first_frame = getattr(self._map_widget, "firstFramePresented", None)
-        if first_frame is not None:
-            def handle_first_frame(
-                generation: int = generation,
-                widget: object = self._map_widget,
-            ) -> None:
-                self._handle_first_frame_presented(generation, widget)
-
-            first_frame.connect(
-                handle_first_frame
-            )
         self._install_pin_painter_if_supported()
         self._connect_map_signals()
         self._sync_square_height()

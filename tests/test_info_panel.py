@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,9 +18,11 @@ from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSi
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPainter, QPixmap, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 
+from iPhoto.application.ports import MapRuntimeCapabilities
 from iPhoto.gui.i18n import formatters
 from iPhoto.gui.ui.widgets import info_location_map as info_location_map_module
 from iPhoto.gui.ui.widgets import info_panel as info_panel_module
+from iPhoto.gui.ui.widgets import map_widget_factory as map_widget_factory_module
 from iPhoto.gui.ui.widgets.info_panel import (
     _FACE_ADD_BUTTON_SIZE,
     _FACE_ADD_ICON_SIZE,
@@ -116,6 +120,75 @@ def _process_deferred_panel_content(qapp: QApplication) -> None:
             map_widget = widget._location_map._map_widget
             if isinstance(map_widget, _FakeMiniMapWidget) and map_widget.auto_present_first_frame:
                 map_widget.present_first_frame()
+
+
+@pytest.fixture
+def mini_map_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Exercise the real backend chooser with controllable QWidget surfaces."""
+
+    created = []
+    attempts = []
+    failures = {}
+
+    class _RuntimeMap(_FakeMiniMapWidget):
+        kind = "cpu"
+
+        def __init__(self, parent=None, *, map_source=None):
+            attempts.append(self.kind)
+            if failures.get(self.kind) == "construct":
+                raise RuntimeError("map construction unavailable")
+            super().__init__(parent, map_source=map_source)
+            self.auto_present_first_frame = False
+            created.append(self)
+
+        def prepare_surface(self):
+            if failures.get(self.kind) == "surface":
+                raise RuntimeError("map surface unavailable")
+
+        def start_deferred_content(self):
+            if failures.get(self.kind) == "content":
+                raise RuntimeError("map content unavailable")
+
+    class _GLMap(_RuntimeMap):
+        kind = "gl"
+
+    class _NativeMap(_RuntimeMap):
+        kind = "native"
+
+    def python_widget(*, use_opengl):
+        return _GLMap if use_opengl else _RuntimeMap
+
+    monkeypatch.setattr(map_widget_factory_module, "NativeOsmAndWidget", _NativeMap)
+    monkeypatch.setattr(map_widget_factory_module, "_preferred_python_widget_class", python_widget)
+    monkeypatch.setattr(info_location_map_module, "_preferred_python_widget_class", python_widget)
+    runtime = SimpleNamespace(
+        root=tmp_path,
+        snapshot=MapRuntimeCapabilities(
+            display_available=True,
+            preferred_backend="osmand_python",
+            python_gl_available=False,
+            native_widget_available=False,
+            osmand_extension_available=True,
+            location_search_available=False,
+            status_message="Python map available",
+        ),
+    )
+    runtime.capabilities = lambda: runtime.snapshot
+    runtime.package_root = lambda: runtime.root
+    panel = InfoPanel()
+    panel.set_map_runtime(runtime)
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {"rel": "map.jpg", "name": "map.jpg", "gps": {"lat": 48.137154, "lon": 11.576124}}
+    )
+    return SimpleNamespace(
+        panel=panel,
+        view=panel._location_map,
+        runtime=runtime,
+        created=created,
+        attempts=attempts,
+        failures=failures,
+    )
 
 
 def _expected_panel_size(panel: InfoPanel) -> QSize:
@@ -631,10 +704,14 @@ def test_info_panel_location_map_is_reused_until_explicit_shutdown(
     map_widget = panel._location_map._map_widget
     assert isinstance(map_widget, _FakeMiniMapWidget)
 
+    map_widget.center_on(139.65, 35.6764)
+    map_widget.set_zoom(12.0)
     for _ in range(20):
         panel.close()
         qapp.processEvents()
         assert panel._location_map._map_widget is map_widget
+        assert map_widget.center_lonlat() == (139.65, 35.6764)
+        assert map_widget.zoom == 12.0
         assert map_widget.shutdown_calls == 0
         panel.show()
         qapp.processEvents()
@@ -759,12 +836,273 @@ def test_info_panel_deferred_native_failure_falls_back_behind_placeholder(
         }
     )
 
+    panel.prepare_for_presentation()
+    native_widget = panel._location_map._map_widget
     panel.show()
     _process_deferred_panel_content(qapp)
 
     assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
     assert not isinstance(panel._location_map._map_widget, _FailingDeferredNativeMap)
     assert panel._location_map._backend_kind == "osmand_python"
+    assert panel._location_map._map_widget.center_lonlat() == (11.576124, 48.137154)
+    assert panel._location_map._map_widget.zoom == panel._location_map.DEFAULT_ZOOM
+    assert panel._location_map._placeholder.isHidden()
+    assert native_widget.shutdown_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("changes", "kind", "backend"),
+    [
+        (
+            {"native_widget_available": True, "preferred_backend": "osmand_native"},
+            "native",
+            "osmand_native",
+        ),
+        ({"python_gl_available": True}, "gl", "osmand_python"),
+        ({"osmand_extension_available": False}, "cpu", "osmand_python"),
+        ({"preferred_backend": "unavailable"}, "cpu", "osmand_python"),
+    ],
+)
+def test_info_panel_capabilities_change_rebuilds_map(
+    qapp, mini_map_runtime, changes, kind, backend,
+):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    old_widget.present_first_frame()
+    h.view.set_location(48.137154, 11.576124, zoom=11.0)
+
+    h.runtime.snapshot = replace(h.runtime.snapshot, **changes)
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+
+    new_widget = h.view.map_widget()
+    assert new_widget is not old_widget
+    assert new_widget.kind == kind
+    assert old_widget.shutdown_calls == 1
+    assert h.view._backend_kind == backend
+    assert not h.view._placeholder.isHidden()
+    new_widget.present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert new_widget.center_lonlat() == (11.576124, 48.137154)
+    assert new_widget.zoom == 11.0
+
+
+def test_info_panel_visible_runtime_root_change_rebuilds_without_reopening(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    old_widget.present_first_frame()
+    size = h.panel.size()
+
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    new_widget = h.view.map_widget()
+    assert new_widget is not old_widget
+    assert old_widget.shutdown_calls == 1
+    assert h.panel.isVisible()
+    assert not h.view._placeholder.isHidden()
+    assert Path(new_widget._map_source.data_path) == (
+        h.runtime.root / "tiles" / "extension" / "World_basemap_2.obf"
+    )
+    new_widget.present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert new_widget.center_lonlat() == (11.576124, 48.137154)
+    assert h.panel.size() == size
+
+
+@pytest.mark.parametrize("loading", [False, True])
+@pytest.mark.parametrize(
+    "changes",
+    [{"display_available": False}, {"location_search_available": True}, {"status_message": "new"}],
+)
+def test_info_panel_nonconstruction_runtime_change_keeps_first_frame_valid(
+    qapp, mini_map_runtime, loading, changes,
+):
+    h = mini_map_runtime
+    h.panel.prepare_for_presentation()
+    if loading:
+        h.panel.show()
+        _process_deferred_panel_content(qapp)
+    widget = h.view.map_widget()
+    generation = h.view._map_creation_generation
+    h.runtime.snapshot = replace(h.runtime.snapshot, **changes)
+    h.panel.set_map_runtime(h.runtime)
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+
+    assert h.view.map_widget() is widget
+    assert h.view._map_creation_generation == generation
+    assert widget.shutdown_calls == 0
+    widget.present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert widget.center_lonlat() == (11.576124, 48.137154)
+
+
+def test_info_panel_runtime_rebuild_rejects_queued_old_signals_and_uses_latest_gps(
+    qapp, mini_map_runtime,
+):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+
+    def emit_old_signals():
+        old_widget.firstFramePresented.emit()
+        old_widget.panned.emit(QPointF(100.0, 100.0))
+        old_widget.viewChanged.emit(0.5, 0.5, 2.0)
+        old_widget.panFinished.emit()
+
+    # Cross-thread emission queues callbacks on the GUI thread before release.
+    worker = Thread(target=emit_old_signals)
+    worker.start()
+    worker.join()
+    assert h.view._map_lifecycle.name == "LOADING"
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    new_widget = h.view.map_widget()
+    h.panel.set_asset_metadata(
+        {"rel": "tokyo.jpg", "name": "tokyo.jpg", "gps": {"lat": 35.6764, "lon": 139.65}}
+    )
+    _process_deferred_panel_content(qapp)
+
+    assert old_widget.shutdown_calls == 1
+    assert h.view._map_lifecycle.name == "LOADING"
+    assert not h.view._placeholder.isHidden()
+    new_widget.present_first_frame()
+    assert h.view._placeholder.isHidden()
+    assert new_widget.center_lonlat() == (139.65, 35.6764)
+
+
+def test_info_panel_hidden_runtime_rebuild_is_lazy_and_preserves_viewport(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    old_widget.present_first_frame()
+    h.view.set_location(48.137154, 11.576124, zoom=10.0)
+    h.panel.dismiss()
+
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    assert h.view.map_widget() is None
+    assert h.view.current_location() == (48.137154, 11.576124)
+    assert old_widget.shutdown_calls == 1
+    assert len(h.created) == 1
+
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    new_widget = h.view.map_widget()
+    assert len(h.created) == 2
+    new_widget.present_first_frame()
+    assert new_widget.center_lonlat() == (11.576124, 48.137154)
+    assert new_widget.zoom == 10.0
+    assert h.view._placeholder.isHidden()
+
+
+@pytest.mark.parametrize(
+    ("native_failure", "python_failure"),
+    [("content", "construct"), ("content", "surface"), ("content", "content"),
+     ("construct", "construct"), ("surface", "content")],
+)
+def test_info_panel_failed_fallback_shows_error_and_recovers_on_runtime_change(
+    qapp, mini_map_runtime, native_failure, python_failure,
+):
+    h = mini_map_runtime
+    h.failures.update(native=native_failure, cpu=python_failure)
+    h.runtime.snapshot = replace(
+        h.runtime.snapshot, native_widget_available=True, preferred_backend="osmand_native",
+    )
+    h.panel.set_map_runtime(h.runtime)
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+
+    assert h.view._map_lifecycle.name == "FAILED"
+    assert h.view.map_widget() is None
+    assert h.view._placeholder.isHidden()
+    assert not h.view._message_label.isHidden()
+    assert h.attempts == ["native", "cpu"]
+    assert all(widget.shutdown_calls == 1 for widget in h.created)
+    # Metadata refresh must not replace a terminal error with a loading cover.
+    h.view.set_location(35.6764, 139.65)
+    assert h.view._placeholder.isHidden()
+    assert not h.view._message_label.isHidden()
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    assert h.attempts == ["native", "cpu"]
+
+    h.failures.clear()
+    h.runtime.root /= "recovered-root"
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    h.view.map_widget().present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert h.view._message_label.isHidden()
+    assert h.view.map_widget().center_lonlat() == (11.576124, 48.137154)
+
+
+def test_info_panel_rebinding_same_construction_does_not_retry_native(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.failures["native"] = "content"
+    h.runtime.snapshot = replace(
+        h.runtime.snapshot, native_widget_available=True, preferred_backend="osmand_native",
+    )
+    h.panel.set_map_runtime(h.runtime)
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    widget = h.view.map_widget()
+    generation = h.view._map_creation_generation
+    assert h.attempts == ["native", "cpu"]
+
+    for _ in range(3):
+        h.runtime.snapshot = replace(h.runtime.snapshot, status_message="updated")
+        h.panel.set_map_runtime(
+            SimpleNamespace(
+                capabilities=h.runtime.capabilities, package_root=h.runtime.package_root,
+            )
+        )
+        _process_deferred_panel_content(qapp)
+    assert h.view.map_widget() is widget
+    assert h.view._map_creation_generation == generation
+    assert h.view._native_fallback_attempted
+    assert h.attempts == ["native", "cpu"]
+    widget.present_first_frame()
+    assert h.view._placeholder.isHidden()
+    assert widget.center_lonlat() == (11.576124, 48.137154)
+
+
+def test_info_panel_shutdown_rejects_runtime_location_and_old_frame(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    h.panel.shutdown()
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    h.view.set_location(35.6764, 139.65)
+    old_widget.present_first_frame()
+    old_widget.panned.emit(QPointF(10.0, 10.0))
+    h.view.prepare_surface()
+    h.view.schedule_deferred_content()
+    h.view.start_deferred_content()
+    _process_deferred_panel_content(qapp)
+
+    assert h.view._map_lifecycle.name == "SHUTDOWN"
+    assert h.view.map_widget() is None
+    assert h.view.current_location() == (None, None)
+    assert not h.view._pending_viewport_sync
+    assert not h.view._pending_viewport_sync_queue
+    assert not h.view._pending_pin_sync_queue
+    assert old_widget.shutdown_calls == 1
+    assert len(h.created) == 1
 
 
 def test_info_panel_lazy_map_uses_latest_location_and_does_not_recreate_after_shutdown(

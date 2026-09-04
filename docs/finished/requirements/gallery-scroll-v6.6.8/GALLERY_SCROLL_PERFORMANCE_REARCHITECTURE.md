@@ -1,6 +1,9 @@
 # Windows/Linux 大型图库 Gallery 滚动性能重构
 
-> 状态：核心架构已在 v6.6.8 分支实现；Windows/Linux 发布性能验收仍需按平台执行
+> 状态：核心架构已在 v6.6.8 实现并归档；归档时 Windows/Linux 发布性能验收
+> 尚未完全闭环。当前 Gallery 回归与目标平台验证要求以
+> [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](../../../misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md)
+> 为准。
 > 文档版本：1.2
 > 创建日期：2026-06-11
 > 适用架构：vNext / Qt Widgets Gallery

@@ -12,6 +12,9 @@ Documents:
 - `large_library_performance/`: archived large-library performance
   rearchitecture and implementation guide. The core contracts are now part of
   current architecture and guardrail docs.
+- `i18n/`: completed i18n rollout, implementation handoff, and terminology
+  history. Current UI-text regression rules are in
+  `docs/misc/I18N_UI_TEXT_GUARDRAILS.md`.
 - `face-ocr-2026-02/`: superseded combined Face/OCR design and Immich research.
   Current People behavior is documented in the architecture; the future OCR
   product requirement is under `docs/requirements/ocr/`.

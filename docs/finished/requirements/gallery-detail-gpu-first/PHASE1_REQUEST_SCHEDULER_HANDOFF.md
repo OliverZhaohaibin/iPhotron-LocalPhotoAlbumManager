@@ -1,5 +1,8 @@
 # Phase 1 Handoff：Detail 请求调度与去重
 
+> **状态：已完成的历史 handoff。** 当前实现以
+> [`docs/architecture.md`](../../../architecture.md) 和生产测试为准。
+
 > 更新日期：2026-07-18
 > Phase 1 状态：代码与定向自动化测试完成，随本 handoff 一并提交
 > 当前分支：`codex/gallery-detail-gpu-first-phase1`

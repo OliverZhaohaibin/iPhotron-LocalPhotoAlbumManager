@@ -1,5 +1,11 @@
 # 启动链路工程收口报告
 
+> **状态：2026-07 历史 closure，已被取代。** 下述状态和平台差异只描述当时
+> 的实现。当前三平台统一 QRhi startup lifecycle 以
+> [`docs/architecture.md`](../../../architecture.md) 为准；当前证据协议见
+> [`STARTUP_BENCHMARK_RUNBOOK.md`](../../../requirements/STARTUP_BENCHMARK_RUNBOOK.md)
+> 与 [`STARTUP_MANUAL_VALIDATION_MATRIX.md`](../../../requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md)。
+
 更新日期：2026-07-27
 
 ## 当前状态
@@ -9,7 +15,7 @@
 - 本机 packaged 状态：`local_packaged_offscreen_pass / cocoa_manual_run_required`
 - Windows、Linux、macOS Intel：`pending_manual_validation`
 - 全平台状态：`pending_manual_validation`
-- 需求归档：保留在 `docs/requirements/startup-chain-optimization`，不得提前移动到 `docs/finished/requirements`
+- 归档状态：本文因后续 lifecycle 重构移入 `docs/finished/requirements`；尚未完成的跨平台证据由当前 validation matrix 跟踪
 
 `engineering_complete` 只在最终 v4 Cocoa/Metal/OpenGL 本机验证和固定 baseline
 `6ff592f7` 的同构 30 次 A/B 证据通过后写入。其他平台未做实机测试，因此本报告不输出“全平台 PASS”。

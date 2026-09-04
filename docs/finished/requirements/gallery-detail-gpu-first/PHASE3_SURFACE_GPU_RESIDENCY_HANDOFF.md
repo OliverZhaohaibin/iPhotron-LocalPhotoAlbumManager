@@ -1,5 +1,8 @@
 # Phase 3 Handoff：中性 Surface Cache 与 GPU Residency
 
+> **状态：已完成的历史 handoff。** Surface cache 已在后续工作中演进；当前
+> 合同以 [`docs/architecture.md`](../../../architecture.md) 和生产测试为准。
+
 > 更新日期：2026-07-18
 > Phase 3 状态：代码与自动化测试完成；三平台 packaged 性能采样未执行
 > 当前分支：`codex/gallery-detail-gpu-first-phase1`

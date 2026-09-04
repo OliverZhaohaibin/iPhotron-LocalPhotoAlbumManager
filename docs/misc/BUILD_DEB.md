@@ -58,12 +58,22 @@ iPhotron_VERSION_amd64/
 
 ## The `control` File
 
-The `DEBIAN/control` file contains the package metadata. Create it with content
-like the following:
+Read the release version from `pyproject.toml` once and use the expanded value
+for both the staging directory and package metadata:
+
+```bash
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+PKG_ROOT="iPhotron_${VERSION}_amd64"
+```
+
+The `DEBIAN/control` file contains the package metadata. Create it with the
+expanded value of `VERSION` rather than a hard-coded release number. The
+`${VERSION}` marker below means the value printed by the command above; do not
+write the marker literally into the final control file.
 
 ```
 Package: iPhotron
-Version: 5.00
+Version: ${VERSION}
 Section: graphics
 Priority: optional
 Architecture: amd64
@@ -79,7 +89,7 @@ Description: Folder-native local photo album manager
 > | Field | Value | Notes |
 > |-------|-------|-------|
 > | `Package` | `iPhotron` | Binary package name |
-> | `Version` | `5.00` | Upstream version; update to match your release |
+> | `Version` | `${VERSION}` | Exact upstream version read from `pyproject.toml` |
 > | `Architecture` | `amd64` | Target CPU architecture (x86-64) |
 > | `Maintainer` | `OliverZhao` | Name (and optionally email) of the package maintainer |
 > | `Description` | short + long | First line is the synopsis; indented lines form the long description |
@@ -89,7 +99,8 @@ Description: Folder-native local photo album manager
 1. **Prepare the staging tree** — copy your compiled iPhotron binary into the correct location inside the staging directory:
 
    ```bash
-   PKG_ROOT=iPhotron_5.00_amd64
+   VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+   PKG_ROOT="iPhotron_${VERSION}_amd64"
    APP_ROOT="$PKG_ROOT/opt/iPhotron"
    BIN_ROOT="$PKG_ROOT/usr/local/bin"
    APP_DIST=dist/YOUR_STANDALONE_DIR

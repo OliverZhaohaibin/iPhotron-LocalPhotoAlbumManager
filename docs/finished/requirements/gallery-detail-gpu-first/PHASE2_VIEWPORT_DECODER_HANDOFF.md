@@ -1,5 +1,10 @@
 # Phase 2 Handoff：Detail 视口级 Decoder
 
+> **状态：已完成的历史 handoff。** 当前 decoder 合同以
+> [`docs/architecture.md`](../../../architecture.md) 和
+> [`DETAIL_OPEN_BENCHMARK_RUNBOOK.md`](../../../requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md)
+> 为准。
+
 > 更新日期：2026-07-18
 > Phase 2 状态：代码、定向自动化测试与文档完成；packaged 性能采样未执行
 > 当前分支：`codex/gallery-detail-gpu-first-phase1`
@@ -129,7 +134,7 @@ suffix、尺寸、层级、backend/fallback 与原因，不记录绝对路径。
 ```
 
 采集字段和逐格式步骤已同步到
-[`DETAIL_OPEN_BENCHMARK_RUNBOOK.md`](../DETAIL_OPEN_BENCHMARK_RUNBOOK.md)。原始输出继续放在被忽略的
+[`DETAIL_OPEN_BENCHMARK_RUNBOOK.md`](../../../requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md)。原始输出继续放在被忽略的
 `benchmark-output/`。
 
 ## 7. 自动化验证实录

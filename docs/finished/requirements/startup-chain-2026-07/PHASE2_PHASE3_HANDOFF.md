@@ -1,11 +1,17 @@
 # 启动链路第二、第三阶段交接文档
 
+> **状态：2026-07 历史 handoff，已被取代。** 当前三平台 native surface
+> hierarchy 与 first-paint lifecycle 以
+> [`docs/architecture.md`](../../../architecture.md) 为准；下文只用于解释当时的
+> 阶段决策。
+
 更新日期：2026-07-13
 
-> 本文保留为阶段性历史记录。当前实现、证据状态和剩余人工矩阵以
-> `ENGINEERING_CLOSURE_REPORT.md` 与 `MANUAL_VALIDATION_MATRIX.md` 为准；
+> 本文保留为阶段性历史记录。`ENGINEERING_CLOSURE_REPORT.md` 是当时的
+> closure；当前验收以
+> [`STARTUP_MANUAL_VALIDATION_MATRIX.md`](../../../requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md) 为准；
 > 下文“剩余改造”中的多项工作已在 2026-07-14 完成。
-> 2026-07-22 合并前复审与修复结果见 `NEXT_DEVELOPMENT_HANDOFF.md`。
+> 2026-07-22 合并前复审与修复结果见历史文件 `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 1. 交接结论
 

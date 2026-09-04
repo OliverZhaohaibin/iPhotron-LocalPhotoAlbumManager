@@ -1,5 +1,10 @@
 # Gallery → Detail GPU-first 打开链路重构
 
+> **状态：已完成的历史实施记录。** 当前生产合同以
+> [`docs/architecture.md`](../../../architecture.md) 和
+> [`DETAIL_OPEN_BENCHMARK_RUNBOOK.md`](../../../requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md)
+> 为准。
+
 > 状态：Phase 1–5 工程收口完成；GPU-first 为唯一生产路径，三平台功能/视觉验收完成
 > 文档版本：1.1
 > 创建日期：2026-07-18
@@ -338,7 +343,7 @@ GPU texture cache：
 - 取消事务单独统计，不并入完成延迟。
 - 原始 JSONL 留在被忽略的 `benchmark-output/`，不得记录用户绝对路径。
 - 具体命令沿用并逐阶段更新
-  [`DETAIL_OPEN_BENCHMARK_RUNBOOK.md`](../DETAIL_OPEN_BENCHMARK_RUNBOOK.md)。
+  [`DETAIL_OPEN_BENCHMARK_RUNBOOK.md`](../../../requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md)。
 
 ### 8.3 发布与迁移
 

@@ -1,5 +1,11 @@
 # Phase 5 Handoff：统一 Render Transaction 与三平台工程关闭
 
+> **状态：已完成的历史 closure。** 后续平台 decoder、QRhi startup 和 surface
+> lifecycle 已继续演进；当前合同以
+> [`docs/architecture.md`](../../../architecture.md) 和
+> [`DETAIL_OPEN_BENCHMARK_RUNBOOK.md`](../../../requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md)
+> 为准。
+
 > 更新日期：2026-07-19
 > Phase 5 状态：工程收口完成；GPU-first 为唯一生产路径，Windows/Linux 手工验收完成
 > 基线提交：`da427c6bffd844bab0ee395fefc1475f4e542d97`

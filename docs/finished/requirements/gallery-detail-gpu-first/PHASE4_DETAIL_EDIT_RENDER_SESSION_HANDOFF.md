@@ -1,5 +1,8 @@
 # Phase 4 Handoff：Detail/Edit 共享 GPU Render Session
 
+> **状态：已完成的历史 handoff。** 当前 Detail/Edit render session 合同以
+> [`docs/architecture.md`](../../../architecture.md) 和生产测试为准。
+
 > 更新日期：2026-07-18
 > Phase 4 状态：代码与自动化测试完成；三平台 packaged 性能采样未执行
 > 当前分支：`codex/gallery-detail-gpu-first-phase1`

@@ -4,7 +4,7 @@
 > 日期：2026-06-07
 > 配套需求：`pet_recognition_clustering_requirements.md`
 > 状态：历史实施指南；功能已落地
-> 当前生产契约：[`../../misc/PETS_RECOGNITION_RUNTIME.md`](../../misc/PETS_RECOGNITION_RUNTIME.md)
+> 当前生产契约：[`../../../misc/PETS_RECOGNITION_RUNTIME.md`](../../../misc/PETS_RECOGNITION_RUNTIME.md)
 
 本文保留实施前的设计推导和建议文件落点。涉及“应新增”“建议”“Phase”或未来时态的内容均是历史计划，不代表当前代码仍未实现。维护现有运行时应以 `docs/architecture.md`、上述 production contract 和代码测试为准。
 

@@ -177,7 +177,7 @@ state, are stored in a validated `settings.json` file:
 |---|---|
 | **Threat** | A model or model-loader source changes upstream or is replaced in transit/cache |
 | **Impact** | Recognition failure, unsafe model parsing, or execution of changed loader code |
-| **Mitigation** | HTTPS downloads, a pinned immutable DINOv2 Torch Hub revision, explicit model-cache overrides, and offline release builds with reviewed files under `extension/models/` |
+| **Mitigation** | Reviewed HTTPS model artifacts; the production DINOv2 TorchScript artifact is pinned by exact SHA-256 and byte size in `model_manifest.json`; production never executes Torch Hub; release conversion is performed separately; explicit model-cache overrides and offline release builds use reviewed files under `extension/models/` |
 | **Operator control** | Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` to require pre-provisioned Pets models |
 
 ---

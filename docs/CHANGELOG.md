@@ -4,6 +4,13 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — Cross-Platform QRhi Startup Lifecycle
+
+- Unified Windows, macOS, and Linux startup so the hidden Detail surface shell
+  and all three QRhi widgets enter their final native parent hierarchy before
+  the top-level window is shown. Detail chrome and multimedia runtime continue
+  after first paint without post-show surface creation or reparenting.
+
 ## Unreleased — Gallery Detail GPU-first Rendering
 
 ### Rendering pipeline
@@ -60,8 +67,10 @@ the existing People dashboard, gallery, groups, pins, and media annotations.*
 - Added tiled fallback detection for small cats/dogs, stable `pet_key`
   canonicalization, detector/clustering pipeline versioning, and graceful
   pending-state recovery when optional dependencies or models are unavailable.
-- Pinned the DINOv2 Torch Hub source to an immutable revision and kept the
-  shared model contract under `src/extension/models/pets/`.
+- Switched DINOv2 production loading to a fixed TorchScript artifact verified
+  by exact SHA-256 and byte size; Torch Hub is restricted to the release
+  conversion workflow. The shared model contract remains under
+  `src/extension/models/pets/`.
 
 #### 💾 Library-Scoped Pets State
 - Added independent `pet_status` bookkeeping to `global_index.db`, rebuildable
@@ -244,12 +253,12 @@ assignment, and packaged runtime coverage.*
   English literals in high-risk GUI APIs such as `setText`, `setToolTip`,
   `QAction`, dialogs, and status messages.
 - Added Apple Photos-aligned edit terminology notes under
-  `docs/requirements/i18n/` and a long-term i18n UI text guardrail under
+  `docs/finished/requirements/i18n/` and a long-term i18n UI text guardrail under
   `docs/misc/`.
 
 #### 🐾 Requirements Planning
 - Added pet recognition and clustering requirements plus a development guide
-  under `docs/requirements/pets-cluster/`; these documents describe planned
+  under `docs/finished/requirements/pets-cluster/`; these documents describe planned
   work and do not yet represent shipped runtime behavior.
 
 #### 🍎 macOS Media Rendering

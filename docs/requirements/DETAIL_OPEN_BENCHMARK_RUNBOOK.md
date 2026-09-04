@@ -14,7 +14,7 @@
 .venv/bin/python tools/run_detail_packaged_benchmark.py \
   --app dist/main.app \
   --library tools/testbase \
-  --manifest docs/requirements/gallery-detail-gpu-first/DETAIL_BENCHMARK_MANIFEST.example.json \
+  --manifest docs/requirements/DETAIL_BENCHMARK_MANIFEST.example.json \
   --output-dir benchmark-output/macos-metal/candidate/cold \
   --baseline-summary benchmark-output/macos-metal/baseline/cold/summary.json \
   --commit <candidate-commit> \
@@ -52,10 +52,10 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
 
 - `level_selected`：检查 `suffix`、`decode_level`、物理 viewport、请求原因；`full` 必须有可解释的
   极端 crop、未知旧库尺寸或 texture-limit 原因。
-- `backend_selected`：记录格式实际使用 `qt`、`wic` 或 `rawpy` 以及 worker 解码耗时，
-  不得从扩展名推断 backend。Windows JPEG 路由变更必须在同一台机器、同一批样本上与变更前基线比较；
+- `backend_selected`：记录格式实际使用 `qt`、`imageio`、`wic` 或 `rawpy` 以及 worker 解码耗时，
+  不得从扩展名推断 backend。macOS 非 RAW 样本应记录 `imageio`，不得错误归类为 `qt`；Windows JPEG 路由变更必须在同一台机器、同一批样本上与变更前基线比较；
   `jpeg-cold` 和 `jpeg-hot-gpu` 的 `click_to_image` P50/P95 均不得回退，并继续满足 150/80ms 绝对门槛。
-- `decode_fallback`：统计 `pillow`、`qt_full_scale`、`half`、`full`、`full_level`；没有 fallback
+- `decode_fallback`：统计 `imageio_to_qt`、`wic_to_qt`、`pillow`、`qt_full_scale`、`half`、`full`、`full_level`；没有 fallback
   的样本也要计入分母。
 - `surface_ready`：核对最终 detached surface 的宽高与 decode level。
 - `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。
@@ -128,7 +128,8 @@ JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总�
 
 ## 平台矩阵
 
-- macOS Metal；macOS OpenGL 诊断模式。
+- macOS Metal；macOS OpenGL 诊断模式。两者的非 RAW packaged 样本都必须确认
+  `imageio` 选择；原生解码失败时必须记录 `imageio_to_qt`。
 - Windows OpenGL QRhi。
 - Linux OpenGL QRhi。
 - JPEG/PNG/HEIC/RAW，MP4/MOV/MKV，H.264/H.265，4K/HDR、旋转、trim、adjusted video 与 Live Photo。

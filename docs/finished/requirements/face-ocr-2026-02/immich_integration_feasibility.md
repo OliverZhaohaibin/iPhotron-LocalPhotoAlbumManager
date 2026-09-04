@@ -1,5 +1,10 @@
 # 🔍 Immich 人脸识别 / OCR 集成可行性评估
 
+> **状态：非权威历史研究快照。** 本文只保留当时的方案比较，不定义当前
+> People 或未来 OCR 的生产技术合同。当前架构见
+> [`docs/architecture.md`](../../../architecture.md)，未来 OCR 产品需求见
+> [`OCR_REQUIREMENTS.md`](../../../requirements/ocr/OCR_REQUIREMENTS.md)。
+
 > 版本 1.0 · 2026-03-08
 >
 > 本文档评估将 [Immich](https://github.com/immich-app/immich) 项目中 **人脸识别** 与 **OCR 文字识别** 模块集成到 iPhotron 的可行性与工作量，并与基于 OpenCV DNN 从零开发的方案进行对比分析。

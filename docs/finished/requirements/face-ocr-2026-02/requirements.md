@@ -1,5 +1,10 @@
 # 📋 人脸识别 / OCR 文字识别 — 需求文档
 
+> **状态：历史设计，已被取代。** People 当前实现以
+> [`docs/architecture.md`](../../../architecture.md) 和生产代码为准；本文中的
+> OpenCV/聚类/数据库方案不是现行合同。仍有效的未来 OCR 产品需求已提炼到
+> [`docs/requirements/ocr/OCR_REQUIREMENTS.md`](../../../requirements/ocr/OCR_REQUIREMENTS.md)。
+
 > 版本 1.0 · 2026-02-18
 >
 > 本文档定义 iPhotron 中 **人脸识别（Face Recognition & Clustering）** 与 **OCR 文字提取** 两大子系统的完整功能需求、数据库设计、任务调度架构，以及 GPU / CPU 并行策略。

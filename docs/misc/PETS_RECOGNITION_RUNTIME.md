@@ -3,7 +3,7 @@
 This note records the production contract for pet detection, clustering,
 persistence, and People & Pets UI integration. It supplements
 [`architecture.md`](../architecture.md); the older documents under
-`docs/requirements/pets-cluster/` are historical design inputs.
+`docs/finished/requirements/pets-cluster/` are historical design inputs.
 
 ## Runtime Ownership
 

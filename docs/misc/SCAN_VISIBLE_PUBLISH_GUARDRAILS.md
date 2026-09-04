@@ -20,15 +20,19 @@ viewmodels, or status/progress plumbing.
   visible range yet.
 - Location/Map scan consumers should subscribe to `ScanBatchCommitted`, not
   legacy chunk payloads.
-- Face and Pet workers may consume committed scan rows, but must not publish
-  uncommitted scanner chunks into their snapshot databases.
-- Interactive scans feed both AI workers while metadata batches commit. Startup
-  scans defer both workers until metadata completion, then drain persisted
-  `pending`/`retry` status rows. Keep `face_status` and `pet_status` independent.
+- Metadata commits may update Face/Pet eligibility and status, but must not
+  publish uncommitted scanner chunks into recognition snapshot databases.
+- Startup, metadata-scan completion, persisted `pending`/`retry` rows, and an
+  interactive rescan do not activate AI workers. Desktop activation requires
+  the People view to have been shown and its first viewport to be ready, then
+  waits for the 350 ms quiet interval.
+- After recognition has been activated for the current library, Face and Pet
+  workers may drain persisted eligible rows and consume later committed scan
+  rows. Keep `face_status` and `pet_status` independent.
 
 ## Focused Checks
 
 ```bash
 .venv/bin/python -m pytest tests/application/test_scan_library_use_case.py tests/application/test_library_scan_service.py tests/library/test_scanner_worker.py -q
-.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py -q
+.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/gui/coordinators/test_coordinator_domain_boundaries.py tests/test_library_manager.py -q
 ```

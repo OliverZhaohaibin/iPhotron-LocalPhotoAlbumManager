@@ -3,6 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+PROJECT_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+
+optional_model_args=()
+if [[ -d "$ROOT_DIR/src/extension/models" ]]; then
+  optional_model_args+=("--include-data-dir=src/extension/models=extension/models")
+fi
 
 python -m nuitka \
   --standalone \
@@ -31,7 +37,7 @@ python -m nuitka \
   --include-package=pillow_heif \
   --include-module=_pillow_heif \
   --noinclude-data-files=torch/include \
-  --include-data-dir=src/extension/models=extension/models \
+  "${optional_model_args[@]}" \
   --include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n \
   --include-data-file=src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json \
   --include-data-dir=src/maps/tiles=maps/tiles \
@@ -66,8 +72,10 @@ done
 python tools/build_manifest.py \
   --root "$ROOT_DIR" \
   --artifact "$ARTIFACT_PATH" \
+  --artifact-tree "$ROOT_DIR/dist/entrypoint.dist" \
   --build-driver "$ROOT_DIR/scripts/build_nuitka_fast.sh" \
   --build-flag "profile=fast" \
+  --build-flag "project_version=$PROJECT_VERSION" \
   --build-flag "lto=yes" \
   --build-flag "compiler=clang" \
   --native-runtime "$ROOT_DIR/src/maps/tiles/extension/bin" \

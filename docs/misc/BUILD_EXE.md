@@ -119,9 +119,10 @@ Install them into the build environment before running Nuitka:
 python -m pip install -e ".[ai-demo]"
 ```
 
-The app downloads InsightFace models when a People scan first needs them. An
-offline build may instead bundle the checked-in model cache. The expected
-source layout is:
+InsightFace may populate missing models when its selected model root is
+writable. An offline build may instead bundle an optional local/release staging
+cache. `src/extension/models/` is ignored by Git and is not guaranteed in a
+fresh clone. The expected staging layout is:
 
 | Path | Purpose |
 |---|---|
@@ -185,9 +186,9 @@ extension/models/pets/
 └── embedding/dinov2_vits14/dinov2_vits14.pt
 ```
 
-The existing `--include-data-dir=src/extension/models=extension/models` flag
-copies both People and Pets models when those files exist. Manual Nuitka builds
-that enable Pets should also include the optional runtime explicitly:
+The platform build scripts copy `src/extension/models` to `extension/models`
+only when optional assets have been staged. Manual Nuitka builds that enable
+Pets should also include the optional runtime explicitly:
 
 ```bash
 --include-package=onnxruntime
@@ -204,10 +205,12 @@ build must not be advertised as Pets-enabled merely because the model directory
 was copied; add the flags above (or update the script) and perform the Pets smoke
 test before release.
 
-If models are intentionally omitted, first-use download uses the platform user
-cache (or an explicit `IPHOTO_PET_MODEL_DIR`). Set
-`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` for controlled
-offline deployments. See
+If models are intentionally omitted, the YOLOX detector may download into the
+platform user cache (or an explicit writable `IPHOTO_PET_MODEL_DIR`). The
+current `model_manifest.json` sets DINOv2 `torchscript_url` to `null`, so the
+embedder must be pre-provisioned through staging, a bundled fallback, or an
+override. Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` for controlled offline
+deployments. See
 [`PETS_RECOGNITION_RUNTIME.md`](PETS_RECOGNITION_RUNTIME.md) for the runtime and
 persistence contract.
 
@@ -250,8 +253,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -Outpu
 ```
 
 The default is a fast-starting base package: it omits the map extension's
-roughly 45,000 files and the People/Pets model cache. Those resources are
-resolved from the per-user extension cache when their feature is used. Pass
+roughly 45,000 files and optional staged People/Pets models. The runtime uses
+its platform-specific search roots; Pets can acquire YOLOX but requires a
+pre-provisioned DINOv2 artifact. Pass
 `-IncludeOptionalAssets` when a controlled deployment requires a completely
 offline bundle. Every build writes `nuitka-compilation-report.xml` below the
 output directory for import auditing. The executable icon defaults to
@@ -348,11 +352,20 @@ layout is bundled automatically. The Linux maps runtime is picked up from
 `src/maps/tiles/extension/bin`, and the native widget expects Qt's XCB desktop
 OpenGL path when it is selected at runtime.
 
+The ignored `src/extension/models` directory is optional. The script adds its
+Nuitka data-directory argument only when that directory exists, so a clean
+checkout can produce a core standalone build. An offline recognition release
+must stage and validate the intended People/Pets artifacts first, then verify
+that the resulting `dist/entrypoint.dist/extension/models` tree contains them.
+
 This remains a directory-based standalone build. Nuitka's Linux icon option is
 for onefile binaries, so the standalone ELF does not embed an application icon.
 Do not switch this build to onefile just to add an icon. AppImage packaging
 continues to receive its desktop icon separately through
 `scripts/build_appimage.sh --icon <path-to.png>`.
+See [`BUILD_APPIMAGE.md`](BUILD_APPIMAGE.md) for the complete AppImage flow and
+[`BUILD_FLATPAK.md`](BUILD_FLATPAK.md) for the x86_64 standalone-wrapper
+Flatpak flow.
 
 ### Recommended macOS runtime sync
 
@@ -376,11 +389,10 @@ resolved non-system Mach-O dependencies, then patches `install_name`/rpaths and
 ad-hoc signs the staged binaries. A manual macOS packaging command must include
 `src/maps/tiles` and the QRhi `.qsb` shader files just like the Windows script.
 
-Example Nuitka command (adjust paths for your platform):
-
-> **Note:** The entry point `src/iPhoto/gui/main.py` is used as an example.
-> Verify and adjust this path to match your project's actual entry point if
-> it differs.
+Example Nuitka command (adjust platform flags as needed). It intentionally
+omits model data; append
+`--include-data-dir=src/extension/models=extension/models` only after optional
+offline assets have been staged:
 
 ```bash
 nuitka --standalone \
@@ -396,9 +408,8 @@ nuitka --standalone \
     --include-package=iPhoto \
     --include-package=insightface \
     --include-package=onnxruntime \
-    --include-data-dir=src/extension/models=extension/models \
     --output-dir=dist \
-    src/iPhoto/gui/main.py
+    src/entrypoint.py
 ```
 
 ### Startup-speed optimized build profile (recommended)
@@ -425,10 +436,9 @@ nuitka --standalone \
     --include-package=iPhoto \
     --include-package=insightface \
     --include-package=onnxruntime \
-    --include-data-dir=src/extension/models=extension/models \
     --assume-yes-for-downloads \
     --output-dir=dist \
-    src/iPhoto/gui/main.py
+    src/entrypoint.py
 ```
 
 Notes:
@@ -448,7 +458,7 @@ Notes:
 | `--include-package=iPhoto` | Ensures all iPhoto sub-packages (including the AOT `.so`/`.pyd`) are included |
 | `--include-package=insightface` | Bundles the InsightFace runtime used by People scanning |
 | `--include-package=onnxruntime` | Bundles the ONNX runtime used by InsightFace models |
-| `--include-data-dir=src/extension/models=extension/models` | Optional: bundles the shared People/Pets model cache for an offline build |
+| `--include-data-dir=src/extension/models=extension/models` | Optional: bundles ignored, explicitly staged People/Pets models for an offline build |
 | `--nofollow-import-to=albumentations` and related pydantic packages | Avoids unused InsightFace mask-rendering dependencies that are not needed for People clustering |
 | QRhi `.qsb` data files | Required for macOS/Metal and OpenGL QRhi media previews; include `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` |
 
@@ -503,8 +513,9 @@ After building, confirm that:
    find dist/ -name "video_renderer.frag.qsb"
    ```
 
-6. The packaged output includes the recognition model cache when it is intended to be
-   shipped offline:
+6. Verify both supported Linux packaging postures. A clean checkout without
+   `src/extension/models` must build without an `extension/models` payload. An
+   offline-recognition build must include every explicitly staged artifact:
 
    ```powershell
    Get-ChildItem -Recurse dist\ -Filter "det_500m.onnx"

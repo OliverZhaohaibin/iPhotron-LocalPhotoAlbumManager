@@ -219,10 +219,19 @@ extra:
 pip install -e ".[pets-ai]"
 ```
 
-The runtime uses the same model-cache posture as People: local files are used
-first, and a missing cache can be downloaded on first scan. The default shared
-cache is `src/extension/models/pets/`, or `IPHOTO_PET_MODEL_DIR` when that
-environment variable is set:
+Pets model lookup is independent from People and follows this order:
+
+```text
+IPHOTO_PET_MODEL_DIR override
+-> writable platform user cache
+-> optional packaged extension/models/pets fallback
+```
+
+The default writable cache is `~/Library/Caches/iPhoto/models/pets` on macOS,
+`%LOCALAPPDATA%\iPhoto\models\pets` on Windows, and
+`${XDG_CACHE_HOME:-~/.cache}/iPhoto/models/pets` on Linux. The ignored
+`src/extension/models/pets/` directory is an optional local/release staging
+input, not content guaranteed by a fresh clone:
 
 ```text
 pets/
@@ -230,18 +239,21 @@ pets/
   embedding/dinov2_vits14/dinov2_vits14.pt
 ```
 
-When the YOLOX detector is missing, iPhotron downloads it from the configured
-HTTPS model URL into the shared cache. The default URL points to the upstream
-YOLOX release asset and can be overridden with:
+When the YOLOX detector is missing, iPhotron can download it from the configured
+HTTPS model URL into the writable cache and validates its hash and size. The
+default URL points to the upstream YOLOX release asset and can be overridden
+with:
 
 ```bash
 export IPHOTO_PET_DETECTOR_MODEL_URL="https://example.invalid/yolox_nano.onnx"
 ```
 
-Production never executes Torch Hub. It loads a packaged DINOv2 TorchScript model,
-or downloads the fixed HTTPS artifact declared by SHA-256 and exact byte size in
-`src/iPhoto/pets/model_manifest.json`. Release engineering may regenerate the
-artifact from the pinned source revision with
+Production never executes Torch Hub. It loads the DINOv2 TorchScript model only
+after validating the SHA-256 and exact byte size declared in
+`src/iPhoto/pets/model_manifest.json`. The current manifest has
+`torchscript_url: null`, so DINOv2 cannot currently be downloaded on first use;
+it must be supplied by the packaged staging directory or an explicit override.
+Release engineering may regenerate the artifact from the pinned source revision with
 `tools/convert_dinov2_torchscript.py`; that tool also checks eager/TorchScript
 numeric equivalence before publishing.
 
@@ -364,13 +376,16 @@ This directory is the contract used by:
 
 On Linux, iPhotron can use both the helper-backed OBF renderer and the native
 OsmAnd widget. The native widget currently expects Qt's XCB desktop OpenGL path,
-so when that backend is selected iPhotron auto-sets:
+but Maps does not choose the desktop platform. When the user, launcher, or
+runtime has already selected `QT_QPA_PLATFORM=xcb`, iPhotron supplies defaults
+for:
 
-- `QT_QPA_PLATFORM=xcb`
 - `QT_OPENGL=desktop`
 - `QT_XCB_GL_INTEGRATION=xcb_glx`
 
-That means native maps on Linux currently run best on X11 or XWayland. If a
+It does not force a Wayland session onto XCB. Native maps currently run best on
+X11 or XWayland and may fall back to the helper-backed renderer on native
+Wayland. If a
 `PySide6-OsmAnd-SDK/` checkout exists either inside this repository root or as a
 sibling directory next to it, iPhotron prefers its
 `tools/osmand_render_helper_native/dist-linux/` widget build during development.
@@ -657,17 +672,16 @@ The failure mode that triggered this guidance was:
 ERROR: Failed to initialize GLEW: GLX 1.2 and up are not supported
 ```
 
-That error appeared only after entering the map section in a packaged build,
-even though the unfrozen source checkout already had Linux X11 forcing in the
-main entry point.
+That error appeared only after entering the map section in a packaged build.
+Current startup preserves the selected desktop platform rather than forcing
+Linux X11 globally.
 
 When touching Linux map packaging, keep these rules in place:
 
-- Treat packaged/frozen Linux runs as a dedicated code path. Before
-  `QApplication` is created, force `QT_QPA_PLATFORM=xcb` for packaged builds
-  unless `IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND=1` is set explicitly for
-  debugging.
-- When `QT_QPA_PLATFORM=xcb`, keep `QT_OPENGL=desktop` and
+- Treat packaged/frozen Linux runs as a dedicated validation target, but do not
+  force `QT_QPA_PLATFORM=xcb`. Exercise both the existing Wayland selection and
+  an explicitly selected XCB session.
+- Only when `QT_QPA_PLATFORM=xcb` is already selected, keep `QT_OPENGL=desktop` and
   `QT_XCB_GL_INTEGRATION=xcb_glx` aligned so the native OsmAnd widget gets the
   GLX-backed desktop OpenGL context expected by GLEW.
 - Do not use the generic OpenGL probe as the only gate for the native widget.
@@ -703,24 +717,29 @@ keep the opt-out behind a documented environment variable.
 
 The People feature scans assets in the background, detects faces with
 InsightFace, stores face embeddings, and clusters those embeddings into people.
-The runtime model cache is shared at:
+`IPHOTO_FACE_MODEL_DIR` is the explicit override. Windows otherwise uses the
+writable `%LOCALAPPDATA%\iPhoto\extensions\faces\v1\models` cache. On macOS and
+Linux, the current fallback resolves `extension/models` beside the installed
+package. In a source checkout, the corresponding paths are optional ignored
+local/release staging inputs:
 
 | Path | Purpose |
 |------|---------|
-| `src/extension/models/buffalo_s/` | Checked-in InsightFace model cache |
+| `src/extension/models/buffalo_s/` | Optional local/release InsightFace staging cache |
 | `src/extension/models/buffalo_s/det_500m.onnx` | Face detector |
 | `src/extension/models/buffalo_s/w600k_mbf.onnx` | Face recognition embedding model |
 
-The default packaged path is resolved from the installed package as
-`extension/models`. For local debugging, override it with:
+These files are not tracked and are not guaranteed in a fresh clone. For local
+debugging, override the model root with:
 
 ```powershell
 $env:IPHOTO_FACE_MODEL_DIR = "D:\python_code\iPhoto\iPhotos\src\extension\models"
 ```
 
-The model directory may be absent in a packaged build. In that case
-InsightFace can download the model pack on first use, but release builds should
-still bundle the model cache when an offline-ready distribution is required.
+InsightFace can populate a missing model pack only when its selected model root
+is writable. Offline-ready releases should stage and bundle the model cache;
+read-only non-Windows packages must not rely on downloading into
+`extension/models`.
 
 ### InsightFace import rules
 
@@ -993,7 +1012,10 @@ passes the same default ICO to Nuitka, which requires `imageio` to convert it
 to the app bundle's ICNS resource. Linux remains a standalone build and gets
 its desktop icon only at the AppImage packaging stage.
 
-See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and manual flags.
+See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and
+manual flags. Linux delivery formats have dedicated canonical guides:
+[BUILD_APPIMAGE.md](misc/BUILD_APPIMAGE.md) and
+[BUILD_FLATPAK.md](misc/BUILD_FLATPAK.md).
 
 ---
 
@@ -1015,7 +1037,7 @@ after a native menu or another widget has committed the top-level handle.
 Keep imports above that boundary narrow. In particular, importing
 `iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the
 People/Pets AI pipelines, map rendering, asset-import services, edit-session models, or
-`MainCoordinator`. Package-level convenience imports in startup-reachable
+`DesktopCoordinatorRuntime`. Package-level convenience imports in startup-reachable
 packages should use `__getattr__` lazy exports, while imports needed only by a
 scan or optional feature should live at the call site. Preserve public names so
 callers and test patch targets continue to work.
@@ -1042,7 +1064,7 @@ The profiler appends JSON Lines records containing `stage`, `elapsed_ms`,
 
 Unset the variable for normal launches; disabled profiling does not create a
 file. Compare at least `main_window.show_called`, `main_window.first_paint`,
-feature creation, and `main_coordinator.started` when investigating a
+feature creation, and `desktop_coordinator_runtime.started` when investigating a
 regression.
 
 Run the focused startup guardrails with:
@@ -1278,7 +1300,7 @@ test(core): add unit tests for curve resolver
 
 | Command | Entry Point | Description |
 |---------|-------------|-------------|
-| `iphoto-gui` | `iPhoto.gui.main:main` | GUI application |
+| `iphoto-gui` | `iPhoto.entrypoint:main` | Lightweight dispatch and startup preparation before `iPhoto.gui.main.main` |
 | `iphoto` | `iPhoto.cli:app` | Typer CLI, using headless `LibrarySession` surfaces |
 
 Important runtime entry classes:

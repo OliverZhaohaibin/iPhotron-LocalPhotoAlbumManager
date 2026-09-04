@@ -69,8 +69,8 @@ the existing People dashboard, gallery, groups, pins, and media annotations.*
   pending-state recovery when optional dependencies or models are unavailable.
 - Switched DINOv2 production loading to a fixed TorchScript artifact verified
   by exact SHA-256 and byte size; Torch Hub is restricted to the release
-  conversion workflow. The shared model contract remains under
-  `src/extension/models/pets/`.
+  conversion workflow. Optional offline model staging uses
+  `src/extension/models/pets/`; those ignored files are not fresh-clone assets.
 
 #### 💾 Library-Scoped Pets State
 - Added independent `pet_status` bookkeeping to `global_index.db`, rebuildable
@@ -91,8 +91,12 @@ the existing People dashboard, gallery, groups, pins, and media annotations.*
 #### 🚀 Startup And Worker Lifecycle
 - Deferred saved-library metadata scanning until the first gallery window is
   warmed, with a bounded fallback timer.
-- Deferred startup Face/Pet AI workers until metadata scanning completes;
-  interactive rescans continue to feed both workers from committed scan rows.
+- Recognition services may bind and warm cached dashboard data without starting
+  model inference. Ordinary startup, metadata-scan completion, queued
+  `pending`/`retry` rows, and an interactive rescan do not activate AI workers.
+- Automatic Face/Pet scanning activates after the People surface is opened and
+  its first viewport is ready, followed by the current 350 ms quiet delay.
+  Once activated, workers may consume rows committed by later scans.
 - Hardened cancellation and shutdown waits for scanner, face, pet, thumbnail,
   map, playback, and event-bus resources.
 

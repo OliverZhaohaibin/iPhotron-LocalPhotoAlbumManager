@@ -82,11 +82,12 @@ Silicon 本轮由工程任务执行；Intel 保持 `pending_manual_validation`�
 
 | 场景 | 必测平台/输入 | 通过条件 | 状态 |
 | --- | --- | --- | --- |
-| 只读安装目录与首次模型落盘 | macOS Apple Silicon、macOS Intel、Windows `Program Files`、Linux AppImage | bundled root 保持只读；查找顺序为 override、用户 cache、bundled；缺失模型只写用户 cache；首次识别成功 | `pending_manual_validation` |
-| 模型获取与自愈 | 在线下载、离线 bundled fallback、损坏 cache、代理失败、证书失败 | 在线文件 hash/size/shape 正确；离线可用 bundled；损坏 cache 可重取；代理/证书失败给出可操作提示且不污染 cache | `pending_manual_validation` |
-| DINOv2 production artifact provenance | online cache 与 offline bundled artifact | production 不执行 Torch Hub；`dinov2_vits14.pt` 在加载前通过 manifest 中的 exact SHA-256、byte size 和 shape 校验；记录 artifact/build manifest SHA；损坏文件不能进入 runtime | `pending_manual_validation` |
+| 只读安装目录与首次模型落盘 | macOS Apple Silicon、macOS Intel、Windows `Program Files`、Linux AppImage | bundled root 保持只读；Pets 查找顺序为 override、用户 cache、bundled；缺失 YOLOX 只写用户 cache；DINOv2 使用预置且校验通过的 artifact；首次识别成功 | `pending_manual_validation` |
+| 模型获取与自愈 | YOLOX 在线下载、DINOv2 预置/override、离线 bundled fallback、损坏 cache、代理失败、证书失败 | YOLOX 在线文件 hash/size/shape 正确；DINOv2 不尝试无 URL 下载；离线可用 bundled；损坏 cache 可重取或回退；代理/证书失败给出可操作提示且不污染 cache | `pending_manual_validation` |
+| DINOv2 production artifact provenance | user cache/override 与 offline bundled artifact | production 不执行 Torch Hub；`dinov2_vits14.pt` 在加载前通过 manifest 中的 exact SHA-256、byte size 和 shape 校验；当前 null URL 不触发下载；记录 artifact/build manifest SHA；损坏文件不能进入 runtime | `pending_manual_validation` |
+| 桌面识别激活 gate | 普通启动、metadata scan、已有 pending/retry、打开 People 并完成首个 viewport | 前三种情况均不启动模型 worker；只有 People 已显示且首 viewport ready 后经过 350 ms quiet delay 才激活；已激活 worker 可消费后续 committed rows | `pending_manual_validation` |
 | 真实旧图库升级 | 含 name、cover、hidden、rejection、pet merge、跨类型 merge 的脱敏副本 | interactive 不被 backfill 阻塞；后台清空 pending/retry；durable state 不丢；失败资产明确显示 stale/source generation | `pending_manual_validation` |
-| 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
+| 真实照片识别 | 多宠照片、小目标 tile、People overlap、抱宠照片、墙面人像、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 overlap 层级符合契约；明显更大且占图低于阈值的 pet body 包含小人脸时保留，mural-shaped 冲突仍抑制；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
 | Windows Live Photo 静态图方向 | Windows packaged，优先复测 `IMG_3684.HEIC` 的脱敏副本，并覆盖 iPhone Orientation 5/6/7/8 的 HEIC+MOV/JPEG+MOV | 静态图与动态视频视觉方向一致；静态图无二次 EXIF 旋转；JPEG 等 WIC 未预转正格式仍正确应用 EXIF；首次展示、Live Motion 返回静帧和连续切换均通过 | `user_verified_original_sample_pass / formal_artifact_evidence_pending` |
 | 取消、切库与恢复 | 扫描中快速取消、连续切库、journal 各提交点进程 kill/restart | GUI 不阻塞；旧 worker 不写新库或发迟到事件；重启最终 `finalized`；无 redirect/detection/rejection/cover/group-cache split-brain | `pending_manual_validation` |
 | 50k packaged 报告 | 上述四类平台各自正式产物，已有 50k 再新增 2 个 | 记录耗时、峰值 RAM、WAL 增量、取消延迟、退出线程与后台恢复；满足 `pets-scale-contract` 阈值 | `pending_manual_validation` |

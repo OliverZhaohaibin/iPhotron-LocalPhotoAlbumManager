@@ -7,8 +7,10 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -30,12 +32,31 @@ def _sha256_path(path: Path) -> str:
     if path.is_file():
         return _sha256_file(path)
     digest = hashlib.sha256()
+    root_mode = stat.S_IMODE(path.lstat().st_mode)
+    digest.update(f"D\0{root_mode:o}\0.\0".encode("utf-8"))
     for item in sorted(path.rglob("*"), key=lambda candidate: candidate.as_posix()):
-        if not item.is_file():
-            continue
-        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        item_stat = item.lstat()
+        relative = item.relative_to(path).as_posix()
+        mode = stat.S_IMODE(item_stat.st_mode)
+        if stat.S_ISLNK(item_stat.st_mode):
+            kind = "L"
+            payload = os.readlink(item).encode("utf-8", errors="surrogateescape")
+        elif stat.S_ISREG(item_stat.st_mode):
+            kind = "F"
+            payload = _sha256_file(item).encode("ascii")
+        elif stat.S_ISDIR(item_stat.st_mode):
+            kind = "D"
+            payload = b""
+        else:
+            kind = "O"
+            payload = b""
+        digest.update(kind.encode("ascii"))
         digest.update(b"\0")
-        digest.update(_sha256_file(item).encode("ascii"))
+        digest.update(f"{mode:o}".encode("ascii"))
+        digest.update(b"\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -83,6 +104,28 @@ def _canonical_hash(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _build_host() -> dict[str, str]:
+    distro_id = ""
+    distro_version_id = ""
+    if platform.system() == "Linux":
+        try:
+            os_release = platform.freedesktop_os_release()
+        except OSError:
+            os_release = {}
+        distro_id = str(os_release.get("ID") or "").strip().lower()
+        distro_version_id = str(os_release.get("VERSION_ID") or "").strip()
+    libc_name, libc_version = platform.libc_ver()
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "platform_release": platform.release(),
+        "distro_id": distro_id,
+        "distro_version_id": distro_version_id,
+        "libc_name": str(libc_name or ""),
+        "libc_version": str(libc_version or ""),
+    }
+
+
 def create_manifest(
     *,
     root: Path,
@@ -91,6 +134,7 @@ def create_manifest(
     build_flags: list[str],
     native_runtime: Path | None,
     assets: list[Path],
+    artifact_tree: Path | None = None,
 ) -> dict[str, Any]:
     dependencies = _installed_distributions()
 
@@ -106,6 +150,7 @@ def create_manifest(
         "pyside6_version": _package_version("PySide6"),
         "qt_version": _package_version("PySide6_Essentials"),
         "nuitka_version": _package_version("Nuitka"),
+        "build_host": _build_host(),
         "build_driver_sha256": _sha256_path(build_driver),
         "build_flags": sorted(str(flag) for flag in build_flags),
         "dependency_snapshot_sha256": _canonical_hash(dependencies),
@@ -124,6 +169,10 @@ def create_manifest(
         "source_revision": _git_revision(root),
         "artifact_path": artifact.name,
         "artifact_sha256": _sha256_path(artifact),
+        "artifact_tree_path": artifact_tree.name if artifact_tree is not None else None,
+        "artifact_tree_sha256": (
+            _sha256_path(artifact_tree) if artifact_tree is not None else None
+        ),
         "environment": environment,
         "environment_fingerprint": _canonical_hash(environment),
     }
@@ -133,6 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--artifact-tree", type=Path)
     parser.add_argument("--build-driver", type=Path, required=True)
     parser.add_argument("--build-flag", action="append", default=[])
     parser.add_argument("--native-runtime", type=Path)
@@ -159,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
             args.native_runtime.expanduser().resolve() if args.native_runtime else None
         ),
         assets=[path.expanduser().resolve() for path in args.asset],
+        artifact_tree=(
+            args.artifact_tree.expanduser().resolve() if args.artifact_tree else None
+        ),
     )
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -26,6 +26,9 @@
 
 **💡 快速安装：** 点击上方按钮直接下载最新安装程序。
 
+**最新稳定版：** v6.6.8。下方功能文档描述的是当前开发分支；标记为
+Unreleased 的功能不一定包含在上方 v6.6.8 安装包中。
+
 - **Windows：** 直接运行 `.exe` 安装程序。
 - **Linux：** 安装命令为：
 
@@ -45,6 +48,10 @@ chmod +x iPhotron-6.6.8-x86_64.AppImage
 ```bash
 flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak
 ```
+
+v6.6.8 Flatpak 保留历史文件名和应用身份；后续 Flatpak bundle 使用
+`io.github.oliverzhaohaibin.iPhotron`。迁移方法见
+[Flatpak 指南](../misc/BUILD_FLATPAK.md#migration-from-the-v668-legacy-id)。
 
 **开发者安装：**
 
@@ -137,7 +144,7 @@ iPhotron 的离线 OBF 地图运行时以自包含的 **maps extension** 形式�
 平台地图运行时说明：
 - 当平台运行时可用时，iPhotron 既可使用 helper-backed OBF renderer，也可使用原生 OsmAnd widget。
 - 如果仓库旁边存在 `PySide6-OsmAnd-SDK/` 工作区，Linux 和 macOS 开发环境可优先使用其中 `tools/osmand_render_helper_native/dist-*` 的 widget 构建产物。
-- 原生 Linux widget 目前依赖 Qt 的 XCB + desktop OpenGL 路径；选择该后端时，iPhotron 会自动设置 `QT_QPA_PLATFORM=xcb`、`QT_OPENGL=desktop` 与 `QT_XCB_GL_INTEGRATION=xcb_glx`。
+- 原生 Linux widget 会在 XCB 已由用户、launcher 或运行环境选中时使用 XCB + desktop OpenGL 路径。iPhotron 不会强制把 Wayland 会话切换到 XCB；仅当 `QT_QPA_PLATFORM=xcb` 已设置时，才补充 `QT_OPENGL=desktop` 与 `QT_XCB_GL_INTEGRATION=xcb_glx` 默认值。
 - macOS 上 legacy OpenGL 地图使用 `QOpenGLWindow + createWindowContainer()`，以避开透明主窗口下 `QOpenGLWidget` 的合成问题；媒体预览默认走支持 Metal 的 QRhi 路径，可通过 `IPHOTO_RHI_BACKEND=opengl` 强制 OpenGL。
 
 | 未启用 maps extension | 启用 maps extension |
@@ -175,10 +182,10 @@ Nuitka 打包、runtime 同步与安装器说明请参阅
 您可以为人物命名、合并重复 cluster、隐藏或重新显示隐藏人物，并让选定封面在重新扫描后继续保留。
 
 独立的 Pets 管线使用 YOLOX 检测猫狗、使用 DINOv2 生成 embedding，并在同一页面展示宠物个体卡片。
-宠物可以命名、合并、隐藏、置顶、设置封面并打开对应图库。人物与宠物可以加入同一个 identity group，
-但当同一图片区域同时被识别为 People 人脸和 pet 时，People 结果优先；冲突的 pet 检测会从可重建的
-Pets 快照中移除，因此不会继续生成重复卡片、宠物图库结果、详情标注或 overlay。该规则只组合比较
-检测框，People 与 Pets 的模型、记录、索引和持久状态仍保持独立。
+宠物可以命名、合并、隐藏、置顶、设置封面并打开对应图库。人物与宠物可以加入同一个 identity group。
+明显的人脸冲突通常会抑制重复的 pet 检测，避免生成重复卡片、宠物图库结果、详情标注或 overlay；
+但运行时会保留包含较小人脸的明显更大的宠物身体检测框，避免把被人抱着的真实宠物误删。该规则只
+比较检测框，People 与 Pets 的模型、记录、索引和持久状态仍保持独立。
 
 将多个人物组成 group 后，可以查看这些人物共同出现的照片。Group 卡片支持设置封面、拖拽排序，
 未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，
@@ -259,6 +266,8 @@ ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回
 | [Development](../development.md) | 开发环境、依赖、调试，以及面向 Windows / Linux / macOS 的 maps extension 构建流程 |
 | [Pets Runtime](../misc/PETS_RECOGNITION_RUNTIME.md) | 当前宠物模型、扫描调度、持久化、变更安全和 People & Pets 组合契约 |
 | [Executable Build](../misc/BUILD_EXE.md) | Nuitka 打包、AOT、QRhi shader 资源、maps extension 同步与平台运行时说明 |
+| [AppImage Build](../misc/BUILD_APPIMAGE.md) | Linux standalone 到 AppImage 的规范打包与验证流程 |
+| [Flatpak Build](../misc/BUILD_FLATPAK.md) | x86_64 standalone-wrapper Flatpak bundle 的规范构建流程 |
 | [Security](../security.md) | 权限、加密、数据存储位置、威胁模型 |
 | [Changelog](../CHANGELOG.md) | 所有版本更新记录 |
 
@@ -270,8 +279,8 @@ ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回
 |------|------|
 | **ExifTool** | 读取 EXIF、GPS、QuickTime 和实况照片元数据；在用户执行 Assign Location 时写入 GPS 元数据。 |
 | **FFmpeg / FFprobe** | 生成视频缩略图并解析视频信息。 |
-| **InsightFace / ONNXRuntime + `buffalo_s` 模型** | 可选的 People 人脸扫描：使用 `src/extension/models/buffalo_s/` 中的 `det_500m.onnx` 进行人脸检测，使用 `w600k_mbf.onnx` 生成人脸 embedding。 |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | 可选的 Pets 扫描：使用 `src/extension/models/pets/` 中的模型进行猫狗检测和宠物个体 embedding。 |
+| **InsightFace / ONNXRuntime + `buffalo_s` 模型** | 可选的 People 人脸扫描；模型来自可写 cache、显式 override 或预置/随包模型。 |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | 可选的 Pets 扫描；模型来自平台用户 cache、显式 override 或预置/随包模型。YOLOX 可在完整性校验下下载，当前 DINOv2 artifact 必须预先提供。 |
 
 > 请确保 FFmpeg/FFprobe 已加入系统 `PATH`；如果需要把指定地点的 GPS 写回原始媒体文件，
 > 也请安装 ExifTool。

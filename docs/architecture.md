@@ -210,9 +210,11 @@ and the lightweight main-window shell. Before any widget that can force native
 handle creation (notably `QMenuBar`) is constructed, the hidden Detail surface
 shell and all three QRhi widgets are attached with their final parents. The
 window then calls `show()`. Only after the shell emits `firstPainted` may startup
-complete the Detail chrome/playback runtime, import and start `MainCoordinator`,
-resume library startup tasks, or select the initial collection. This is an
-architecture constraint rather than a timer-based optimization.
+preload the post-paint modules, complete the Detail chrome/playback runtime,
+construct and start `DesktopCoordinatorRuntime`, probe and commit the saved
+library, select and warm the initial Gallery collection, and finally schedule
+idle startup work such as the deferred metadata scan. This is an architecture
+constraint rather than a timer-based optimization.
 
 `Ui_MainWindow.ensure_feature()` owns the on-demand lifetime of the detail,
 preview, Map, People, and Albums bundles. It caches each bundle and emits
@@ -440,22 +442,22 @@ sequenceDiagram
     participant Paint as First Paint
     participant Runtime as RuntimeContext
     participant Feature as Feature Bundles
-    participant Coordinator as MainCoordinator
+    participant Coordinator as DesktopCoordinatorRuntime
     participant Session as LibrarySession
     participant Infra as Infrastructure
 
     UI->>Runtime: create(defer_startup=True)
+    UI->>UI: prepare final-parent native QRhi hierarchy
     UI->>UI: show lightweight window shell
     UI-->>Paint: firstPainted
-    Paint->>Feature: create deferred hidden features over event-loop turns
-    Feature->>Coordinator: import, wire, and start
-    Coordinator->>Runtime: resume_startup_tasks(defer_scan=True)
-    Runtime->>Runtime: open saved library root
+    Paint->>Feature: preload modules and complete non-native Detail features
+    Feature->>Coordinator: construct, bind, and start
+    Coordinator->>Runtime: request saved-library probe
     Runtime->>Session: create library-scoped session
     Session->>Infra: bind SQLite/cache/people/pets/maps/edit adapters
-    Runtime-->>Coordinator: session surfaces ready
-    Coordinator->>Coordinator: warm first gallery window
-    Coordinator->>Runtime: start_deferred_startup_scan()
+    Runtime-->>Coordinator: commit validated library and bind session surfaces
+    Coordinator->>Coordinator: select and warm first Gallery window
+    Coordinator->>Runtime: schedule deferred metadata scan as idle work
 ```
 
 Headless callers do not use the paint boundary; they create the same
@@ -543,8 +545,6 @@ sequenceDiagram
     participant Scan as ScanLibraryUseCase
     participant Scanner as MediaScannerPort
     participant Repo as AssetRepositoryPort
-    participant Faces as FaceScanWorker
-    participant Pets as PetScanWorker
     participant Pairing as Live Photo Pairing
 
     Trigger->>Session: scan(scope, filters)
@@ -553,8 +553,7 @@ sequenceDiagram
     Scanner-->>Scan: scan chunks
     Scan->>Repo: merge scan rows
     Scan->>Repo: append scan job/event records
-    Scan->>Faces: enqueue face-eligible committed rows
-    Scan->>Pets: enqueue pet-eligible committed rows
+    Scan->>Repo: update Face/Pet eligibility and status
     Scan->>Pairing: refresh roles/materialization
     Scan-->>Trigger: progress/result + ScanBatchCommitted
 ```
@@ -562,12 +561,28 @@ sequenceDiagram
 Scanning has one application use case. Qt workers adapt threading/progress, and
 CLI uses the same session surface without Qt. UI scan batches are ready-only and
 carry full thumbnail cache keys so visible media rows are immediately drawable.
-For an interactive rescan, Face and Pet workers run alongside metadata scanning
-and receive committed rows. When saved-library startup requires a metadata
-scan, AI workers are deferred until it finishes, then drain `pending`/`retry`
-rows from the global index. A scan-complete startup does not create AI workers.
-The workers and their databases remain independent; failure or a missing
-optional runtime in one must not block the other.
+Metadata commits may create or update Face/Pet `pending`, `retry`, `done`, and
+`skipped` bookkeeping, but scanning does not itself activate model workers.
+Application startup, metadata-scan completion, persisted `pending`/`retry` rows,
+and an interactive rescan must not bypass the recognition feature gate.
+
+The desktop recognition activation contract is:
+
+```text
+People view shown
+    +
+People first viewport ready
+    +
+350 ms quiet delay
+    -> LibraryRuntimeController.activate_recognition_scans()
+```
+
+Recognition services and cached dashboard summaries may be bound or warmed
+without importing or initializing AI models. Once the gate has activated the
+workers for the current library, they may drain persisted eligible rows and
+consume rows committed by later metadata scans. The Face and Pet workers and
+their databases remain independent; failure or a missing optional runtime in
+one must not block the other.
 
 ### Assign Location
 

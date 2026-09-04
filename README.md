@@ -27,6 +27,10 @@
 
 **💡 Quick Install:** Click the buttons above to download the latest installer directly.
 
+**Latest stable release:** v6.6.8. The feature documentation below describes
+the current development branch. Features listed as Unreleased may not be
+available in the v6.6.8 installers above.
+
 - **Windows:** Run the `.exe` installer directly.
 - **Linux (.deb):** Install with the following command:
 
@@ -46,6 +50,10 @@ chmod +x iPhotron-6.6.8-x86_64.AppImage
 ```bash
 flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak
 ```
+
+The v6.6.8 Flatpak keeps its legacy filename and application identity. Future
+Flatpak bundles use `io.github.oliverzhaohaibin.iPhotron`; see the
+[Flatpak migration guide](docs/misc/BUILD_FLATPAK.md#migration-from-the-v668-legacy-id).
 
 **For developers** — install from source:
 
@@ -142,7 +150,7 @@ The extension currently contains:
 Platform maps notes:
 - iPhotron can use both the helper-backed OBF renderer and the native OsmAnd widget when the platform runtime is available.
 - If a sibling `PySide6-OsmAnd-SDK/` checkout exists, Linux and macOS development can prefer its `tools/osmand_render_helper_native/dist-*` widget builds.
-- The native Linux widget currently expects Qt's XCB desktop OpenGL path. When that backend is selected, iPhotron auto-sets `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop`, and `QT_XCB_GL_INTEGRATION=xcb_glx`.
+- The native Linux widget uses the XCB desktop OpenGL path when XCB has already been selected. iPhotron does not force a Wayland session onto XCB; it only supplies `QT_OPENGL=desktop` and `QT_XCB_GL_INTEGRATION=xcb_glx` defaults when `QT_QPA_PLATFORM=xcb` is already set by the user, launcher, or runtime.
 - On macOS, the legacy OpenGL map uses `QOpenGLWindow + createWindowContainer()` to avoid transparent-window `QOpenGLWidget` composition issues; media previews default to the Metal-capable QRhi path unless `IPHOTO_RHI_BACKEND=opengl` is set.
 
 | Without maps extension | With maps extension |
@@ -185,12 +193,12 @@ named, merged, hidden, pinned, assigned covers, and opened as gallery queries.
 People and Pets may participate in the same identity groups while their runtime
 indexes and durable state remain separate.
 
-When a pet detection and a People face detection refer to the same image
-region, People takes priority. The conflicting pet detection is removed from
-the rebuildable Pets snapshot, so it does not create a duplicate dashboard
-card, gallery result, detail annotation, or overlay. This cross-type filter
-compares geometry only; People and Pets records, models, indexes, and durable
-state remain independently owned.
+Strong People/face conflicts normally suppress the duplicate pet detection so
+it does not create another dashboard card, gallery result, detail annotation,
+or overlay. The runtime preserves a clearly larger pet-body detection that
+contains a smaller human face, however, so a legitimate pet being held by a
+person is not discarded. This cross-type filter compares geometry only; People
+and Pets records, models, indexes, and durable state remain independently owned.
 
 Drag people into groups to collect shared photos for multiple people. Group
 cards can use a selected cover, be reordered, and be disbanded when they are not
@@ -283,6 +291,8 @@ For deeper technical details, see the following docs:
 | [Development](docs/development.md) | Dev environment, dependencies, debugging, and the side-project-based maps extension workflow for Windows, Linux, and macOS |
 | [Pets Runtime](docs/misc/PETS_RECOGNITION_RUNTIME.md) | Current Pets models, scan scheduling, persistence, mutation safety, and People & Pets composition contract |
 | [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, QRhi shader assets, maps extension sync, and platform runtime notes |
+| [AppImage Build](docs/misc/BUILD_APPIMAGE.md) | Canonical Linux standalone-to-AppImage packaging and validation |
+| [Flatpak Build](docs/misc/BUILD_FLATPAK.md) | Canonical x86_64 standalone-wrapper Flatpak bundle workflow |
 | [Security](docs/security.md) | Permissions, encryption, data storage locations, threat model |
 | [Changelog](docs/CHANGELOG.md) | All version release notes and changes |
 
@@ -294,8 +304,8 @@ For deeper technical details, see the following docs:
 |------|----------|
 | **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata; writes GPS metadata for explicit Assign Location actions. |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info. |
-| **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning: face detection (`det_500m.onnx`) and face embeddings (`w600k_mbf.onnx`) from `src/extension/models/buffalo_s/`. |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optional Pets scanning: cat/dog detection and pet identity embeddings from `src/extension/models/pets/`. |
+| **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning using a writable cache, explicit override, or staged/bundled models. |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optional Pets scanning using the platform user cache, an explicit override, or staged/bundled models. YOLOX can download with integrity checks; the current DINOv2 artifact must be pre-provisioned. |
 
 > Ensure FFmpeg/FFprobe are available in your system `PATH`; install ExifTool if
 > you want assigned GPS coordinates written back into original media files.

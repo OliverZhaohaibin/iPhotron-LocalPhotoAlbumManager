@@ -253,13 +253,15 @@ assignment, and packaged runtime coverage.*
   English literals in high-risk GUI APIs such as `setText`, `setToolTip`,
   `QAction`, dialogs, and status messages.
 - Added Apple Photos-aligned edit terminology notes under
-  `docs/finished/requirements/i18n/` and a long-term i18n UI text guardrail under
-  `docs/misc/`.
+  `docs/requirements/i18n/` (now archived under
+  `docs/finished/requirements/i18n/`) and a long-term i18n UI text guardrail
+  under `docs/misc/`.
 
 #### 🐾 Requirements Planning
 - Added pet recognition and clustering requirements plus a development guide
-  under `docs/finished/requirements/pets-cluster/`; these documents describe planned
-  work and do not yet represent shipped runtime behavior.
+  under `docs/requirements/pets-cluster/` (now archived under
+  `docs/finished/requirements/pets-cluster/`); these documents described
+  planned work at the time and did not yet represent shipped runtime behavior.
 
 #### 🍎 macOS Media Rendering
 - Added platform QRhi backend selection via `IPHOTO_RHI_BACKEND`; macOS now

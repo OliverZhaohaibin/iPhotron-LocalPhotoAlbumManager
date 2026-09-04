@@ -113,6 +113,7 @@ class RecognitionCoordinator(QObject):
         pet_callback: Callable[[str], None],
         recognition_query_getter: Callable[..., object | None] | None = None,
         recognition_merge_getter: Callable[..., object | None] | None = None,
+        recognition_edit_getter: Callable[..., object | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -124,6 +125,7 @@ class RecognitionCoordinator(QObject):
         self._pet_service_getter = pet_service_getter
         self._recognition_query_getter = recognition_query_getter
         self._recognition_merge_getter = recognition_merge_getter
+        self._recognition_edit_getter = recognition_edit_getter
         self._cluster_callback = cluster_callback
         self._group_callback = group_callback
         self._pet_callback = pet_callback
@@ -190,6 +192,13 @@ class RecognitionCoordinator(QObject):
         set_query_service = getattr(self._detail, "set_recognition_query_service", None)
         if callable(set_query_service):
             set_query_service(query_service)
+        set_edit_service = getattr(self._detail, "set_recognition_edit_service", None)
+        if callable(set_edit_service):
+            set_edit_service(
+                self._recognition_edit_getter(library_root=root)
+                if self._recognition_edit_getter is not None
+                else None
+            )
         self._detail.set_people_library_root(root)
         if self._people_page is not None:
             self._bind_services(

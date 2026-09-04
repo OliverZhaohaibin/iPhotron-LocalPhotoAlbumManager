@@ -1195,6 +1195,10 @@
             <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
             <translation>Eine Haustieridentität kann nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie eine doppelte Erkennung, anstatt sie zusammenzuführen.</translation>
         </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>Eine Haustieridentität darf nicht zwei Erkennungen aus demselben Foto enthalten. Wählen Sie eine andere Identität für diese Erkennung.</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>

@@ -16,6 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
+from iPhoto.domain.recognition_edits import IdentityRef
+
 from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.state_repository import FaceStateRepository
 from iPhoto.recognition.promotion import (
@@ -947,7 +949,11 @@ class PetRepository:
                 target_pet_id = str(payload.get("target_pet_id") or "")
                 if target_pet_id:
                     self._state_repo.confirm_pet(target_pet_id)
-        if str(payload.get("operation_kind") or "") == "pet_delete_detection":
+        if str(payload.get("operation_kind") or "") in {
+            "pet_delete_detection",
+            "pet_move_detection",
+            "pet_move_detection_new",
+        }:
             face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
             face_index_path = self._db_path.parent.parent / "faces" / "face_index.db"
             detection_id = str(payload.get("detection_id") or "")
@@ -956,10 +962,20 @@ class PetRepository:
                     "pet", detection_id
                 )
                 if face_index_path.exists():
-                    FaceRepository(
-                        face_index_path,
-                        face_state_path,
-                    ).refresh_all_group_assets()
+                    face_repository = FaceRepository(face_index_path, face_state_path)
+                    cleared_assignment = IdentityRef.parse(
+                        payload.get("cleared_identity_assignment")
+                    )
+                    if "cleared_identity_assignment" in payload:
+                        face_repository.refresh_group_assets_for_identity_refs(
+                            (
+                                *(IdentityRef("pet", pet_id) for pet_id in affected_pet_ids),
+                                *((cleared_assignment,) if cleared_assignment is not None else ()),
+                            )
+                        )
+                    else:
+                        # Old runtime commits did not retain the cleared target.
+                        face_repository.refresh_all_group_assets()
 
     @staticmethod
     def _mark_runtime_state_synced(
@@ -2921,18 +2937,27 @@ class PetRepository:
         face_index_db_path = self._db_path.parent.parent / "faces" / "face_index.db"
         if not face_state_db_path.exists() or not face_index_db_path.exists():
             return
-        state_repository = FaceStateRepository(face_state_db_path)
-        group_ids = state_repository.list_group_ids_for_pets(unique_pet_ids)
-        if not group_ids:
-            return
-        face_repository = FaceRepository(face_index_db_path, face_state_db_path)
-        for group_id in group_ids:
-            face_repository.refresh_group_assets(group_id)
+        FaceRepository(
+            face_index_db_path,
+            face_state_db_path,
+        ).refresh_group_assets_for_identity_refs(
+            IdentityRef("pet", pet_id) for pet_id in unique_pet_ids
+        )
 
     def refresh_people_group_assets_for_pets(self, pet_ids: Iterable[str]) -> None:
         """Refresh cross-kind group caches after a committed Pet mutation."""
 
         self._refresh_people_group_assets_for_pets(pet_ids)
+
+    def _annotation_assignment_target(self, detection_id: str) -> str | None:
+        face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
+        if not detection_id or not face_state_path.exists():
+            return None
+        assignments = FaceStateRepository(
+            face_state_path
+        ).get_annotation_identity_assignments((("pet", detection_id),))
+        target = assignments.get(("pet", detection_id))
+        return IdentityRef(*target).key if target is not None else None
 
     def delete_detection(
         self,
@@ -2946,11 +2971,7 @@ class PetRepository:
         if self._state_repo is not None:
             self._state_repo.add_rejected_pet_key(detection.pet_key)
             self._state_repo.clear_cover_for_detection(detection_id)
-        face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
-        if face_state_path.exists():
-            FaceStateRepository(face_state_path).clear_annotation_identity_assignment(
-                "pet", detection_id
-            )
+        cleared_assignment = self._annotation_assignment_target(detection_id)
         effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM pet_detections WHERE detection_id = ?", (detection_id,))
@@ -2961,6 +2982,7 @@ class PetRepository:
                 effective_operation_id,
                 {
                     "operation_kind": "pet_delete_detection",
+                    "cleared_identity_assignment": cleared_assignment,
                     "affected_pet_ids": list(changed_pet_ids),
                     "changed_pet_ids": list(changed_pet_ids),
                     "changed_asset_ids": [detection.asset_id],
@@ -2975,7 +2997,6 @@ class PetRepository:
         self.complete_runtime_state_sync(effective_operation_id)
         if detection.thumbnail_path:
             self.prune_unreferenced_thumbnails((detection.thumbnail_path,))
-        self._refresh_people_group_assets_for_pets((detection.pet_id,))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
             changed_pet_ids=(detection.pet_id,) if detection.pet_id else (),
@@ -2992,6 +3013,7 @@ class PetRepository:
         detection = self.get_detection(detection_id)
         if detection is None or not target_pet_id:
             return None
+        cleared_assignment = self._annotation_assignment_target(detection_id)
         effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             target = conn.execute(
@@ -3033,6 +3055,7 @@ class PetRepository:
                 effective_operation_id,
                 {
                     "operation_kind": "pet_move_detection",
+                    "cleared_identity_assignment": cleared_assignment,
                     "affected_pet_ids": list(changed_pet_ids),
                     "changed_pet_ids": list(changed_pet_ids),
                     "changed_asset_ids": [detection.asset_id],
@@ -3045,7 +3068,6 @@ class PetRepository:
         self.complete_runtime_state_sync(effective_operation_id)
         if self._state_repo is not None:
             self._state_repo.confirm_pet(target_pet_id)
-        self._refresh_people_group_assets_for_pets((detection.pet_id, target_pet_id))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
             changed_pet_ids=changed_pet_ids,
@@ -3062,6 +3084,7 @@ class PetRepository:
         detection = self.get_detection(detection_id)
         if detection is None or not new_pet_id:
             return None
+        cleared_assignment = self._annotation_assignment_target(detection_id)
         effective_operation_id = operation_id or f"internal-{uuid.uuid4().hex}"
         with closing(self._connect()) as conn:
             conn.execute(
@@ -3075,6 +3098,7 @@ class PetRepository:
                 effective_operation_id,
                 {
                     "operation_kind": "pet_move_detection_new",
+                    "cleared_identity_assignment": cleared_assignment,
                     "affected_pet_ids": list(changed_pet_ids),
                     "changed_pet_ids": list(changed_pet_ids),
                     "changed_asset_ids": [detection.asset_id],
@@ -3088,7 +3112,6 @@ class PetRepository:
         self.complete_runtime_state_sync(effective_operation_id)
         if new_name:
             self.rename_pet(new_pet_id, new_name)
-        self._refresh_people_group_assets_for_pets((detection.pet_id, new_pet_id))
         return PetMutationResult(
             changed_asset_ids=(detection.asset_id,),
             changed_pet_ids=changed_pet_ids,

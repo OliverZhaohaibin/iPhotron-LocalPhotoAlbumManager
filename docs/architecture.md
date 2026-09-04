@@ -178,6 +178,10 @@ LibrarySession
   thumbnails
   people
   pets
+  recognition_mutations
+  recognition_queries
+  recognition_merges
+  recognition_edits
   maps
   map_interactions
   edit
@@ -238,6 +242,31 @@ FFmpeg, GUI helpers, or runtime singletons.
 events, and port protocols. Application code depends on ports and domain values.
 It must not import GUI modules, concrete persistence modules, Qt workers,
 widgets, or process-wide repository singletons.
+
+`LibrarySession.recognition_edits` owns explicit single-detection reassignment,
+pending-candidate identity merge, and identity rename requests from Detail.
+Requests capture the asset, native detection reference, and expected identity
+state. Rename requests also carry the normalized name observed when the editor
+opened. The service re-reads annotations under the shared recognition mutation
+lease and uses that name as a compare-and-set guard before dispatching through
+the existing People/Pets services and journal. Inline naming and Info Panel
+share the same reassignment operation.
+
+The inline selection policy lives in `domain/recognition_edits.py`. Only an
+independent, non-manual `candidate` identity is merged as a whole. Manual,
+unassigned, `eligible`, confirmed, redirected, and legacy annotations are edited
+one detection at a time. Typed text remains an explicit identity rename, and
+selecting the current identity is a no-op. Single-detection assignments override
+identity redirects when reading both automatic and manual annotations; moving
+back to the native kind clears that override as part of recoverable state sync.
+Source display names may fill a missing canonical name only when source and
+effective identity are the same. Move and delete runtime commits retain any
+cleared assignment target so recovery can refresh only groups containing the
+native identities or the previous target; legacy commits without this metadata
+retain the full-refresh fallback.
+Targeted group lookup expands every native or assignment identity through the
+durable redirect map, so mutations of source detections also refresh groups that
+were remapped to their canonical People/Pets identities.
 
 Current public boundary names include:
 

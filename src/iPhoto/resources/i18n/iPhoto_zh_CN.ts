@@ -1195,6 +1195,10 @@
             <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
             <translation>同一个宠物身份不能包含同一张照片中的两个检测结果。请删除重复检测，不要通过合并绕过此限制。</translation>
         </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>同一宠物身份不能包含同一张照片中的两个标记。请为当前标记选择其他身份。</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>

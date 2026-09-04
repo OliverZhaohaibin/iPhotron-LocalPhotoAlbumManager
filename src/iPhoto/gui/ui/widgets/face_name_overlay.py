@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -31,8 +31,26 @@ from PySide6.QtGui import (
     QStandardItem,
     QStandardItemModel,
 )
-from PySide6.QtWidgets import QApplication, QCompleter, QLineEdit, QListView, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCompleter,
+    QLineEdit,
+    QListView,
+    QToolTip,
+    QWidget,
+)
 
+from iPhoto.application.services.recognition_edit_service import (
+    annotation_edit_context,
+    current_identity_display_name,
+)
+from iPhoto.domain.recognition_edits import (
+    AnnotationEditContext,
+    IdentityRef,
+    IdentityRenameRequest,
+    IdentitySelectionRequest,
+    InlineSelectionScope,
+)
 from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
@@ -191,7 +209,7 @@ class _FaceNameEditor(QLineEdit):
         """Return only an explicitly activated completion.
 
         Saved identity labels use this stricter form because silently treating a
-        typed duplicate name as a merge would be surprising and destructive.
+        typed duplicate name as a selection would change the operation scope.
         Manual face creation keeps the looser exact-name matching exposed by
         :meth:`suggestion_identity_key` for backwards compatibility.
         """
@@ -284,9 +302,10 @@ class _FaceNameEditor(QLineEdit):
 
 
 class FaceNameOverlayWidget(QWidget):
-    renameSubmitted = Signal(str, object)
+    renameSubmitted = Signal(object)
     unassignedRenameSubmitted = Signal(object, str)
-    existingIdentitySubmitted = Signal(object, str)
+    annotationReassignmentSubmitted = Signal(object)
+    candidateIdentityMergeSubmitted = Signal(object)
     manualFaceSubmitted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -304,6 +323,8 @@ class FaceNameOverlayWidget(QWidget):
         self._hovered_face_id: str | None = None
         self._editing_face_id: str | None = None
         self._editor: _FaceNameEditor | None = None
+        self._editing_context: AnnotationEditContext | None = None
+        self._editing_expected_name: str | None = None
         self._name_suggestions: list[_NameSuggestion] = []
         self._manual_draft: _ManualFaceDraft | None = None
         self._manual_editor: _FaceNameEditor | None = None
@@ -703,7 +724,7 @@ class FaceNameOverlayWidget(QWidget):
         if getattr(annotation, "promotion_state", "legacy_visible") == "candidate":
             display_name = tr("FaceNameOverlay", "Pending confirmation")
         else:
-            name = getattr(annotation, "canonical_display_name", None) or annotation.display_name
+            name = current_identity_display_name(annotation)
             display_name = (
                 name.strip()
                 if isinstance(name, str) and name.strip()
@@ -1282,13 +1303,13 @@ class FaceNameOverlayWidget(QWidget):
         self._set_hovered_face_id(None)
         self._set_saved_hover_tracking_enabled(False)
         self._editing_face_id = face_id
+        self._editing_context = annotation_edit_context(
+            getattr(state.annotation, "asset_id", ""), state.annotation
+        )
+        self._editing_expected_name = current_identity_display_name(state.annotation)
         editor = _FaceNameEditor(self.parentWidget() or self)
         editor.set_name_suggestions(self._name_suggestions)
-        editor.setText(
-            getattr(state.annotation, "canonical_display_name", None)
-            or state.annotation.display_name
-            or ""
-        )
+        editor.setText(self._editing_expected_name or "")
         editor.commitRequested.connect(self._commit_editing)
         editor.cancelRequested.connect(self._cancel_editing)
         self._editor = editor
@@ -1310,44 +1331,28 @@ class FaceNameOverlayWidget(QWidget):
         if not person_id and not new_name:
             self._cancel_editing()
             return
-        if selected_identity_key and not self._is_current_identity(
-            state.annotation,
-            selected_identity_key,
-        ):
-            annotation = state.annotation
-            self._teardown_editor(show_chip=True)
-            self.existingIdentitySubmitted.emit(annotation, selected_identity_key)
+        context = self._editing_context
+        if context is None:
+            self._cancel_editing()
             return
-        if hasattr(state.annotation, "canonical_display_name"):
-            fields = getattr(state.annotation, "__dataclass_fields__", {})
-            changes = {"canonical_display_name": new_name}
-            if "display_name" in fields:
-                changes["display_name"] = new_name
-            if new_name and "promotion_state" in fields:
-                changes["promotion_state"] = "confirmed"
-            state.annotation = replace(state.annotation, **changes)
-        else:
-            state.annotation = replace(state.annotation, display_name=new_name)
-        updated_annotation = state.annotation
+        if selected_identity_key:
+            target = IdentityRef.parse(selected_identity_key)
+            self._teardown_editor(show_chip=True)
+            if target is None or target == context.current_identity:
+                return
+            request = IdentitySelectionRequest(context, target)
+            if context.selection_scope == InlineSelectionScope.CANDIDATE_IDENTITY:
+                self.candidateIdentityMergeSubmitted.emit(request)
+            else:
+                self.annotationReassignmentSubmitted.emit(request)
+            return
+        annotation = state.annotation
+        expected_name = self._editing_expected_name
         self._teardown_editor(show_chip=True)
         if person_id:
-            self.renameSubmitted.emit(person_id, new_name)
+            self.renameSubmitted.emit(IdentityRenameRequest(context, new_name, expected_name))
         elif new_name:
-            self.unassignedRenameSubmitted.emit(updated_annotation, new_name)
-
-    @staticmethod
-    def _is_current_identity(
-        annotation: object,
-        identity_key: str,
-    ) -> bool:
-        current_identity = getattr(annotation, "person_id", None)
-        if not isinstance(current_identity, str) or not current_identity:
-            return False
-        if current_identity.startswith(("person:", "pet:")):
-            return current_identity == identity_key
-        kind = getattr(annotation, "kind", "person")
-        normalized_kind = "pet" if kind == "pet" else "person"
-        return f"{normalized_kind}:{current_identity}" == identity_key
+            self.unassignedRenameSubmitted.emit(annotation, new_name)
 
     def _cancel_editing(self) -> None:
         if self._editing_face_id is None and self._editor is None:
@@ -1359,6 +1364,8 @@ class FaceNameOverlayWidget(QWidget):
         face_id = self._editing_face_id
         editor = self._editor
         self._editing_face_id = None
+        self._editing_context = None
+        self._editing_expected_name = None
         self._editor = None
         if editor is not None:
             editor.hide()

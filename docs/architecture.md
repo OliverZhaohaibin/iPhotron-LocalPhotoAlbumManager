@@ -225,6 +225,12 @@ macOS, and Linux share one QRhi lifecycle: the final native surface hierarchy is
 prepared pre-show, while `ensure_feature("detail")` completes its non-native UI
 and QtMultimedia runtime post-paint. Platform allowlists, post-show surface
 creation, parentless surface warm-up, and hide/show workarounds are forbidden.
+Windows OpenGL Python-module warm-up is enabled only after startup reaches its
+terminal state and is triggered by a later Detail hover/click; it is never a
+startup prerequisite. QRhi/context creation and GPU resource allocation remain
+on the active Detail surface. Windows reveal waits for the additional QRhi
+submission heuristic, but that wait is bounded and may fail open only after the
+matching current-generation media content was already submitted.
 The pre-show hierarchy is part of shell construction: failure is terminal and
 non-recoverable for that process. Startup-generation retry applies only after a
 valid visible shell exists; it must not claim to reconstruct the native

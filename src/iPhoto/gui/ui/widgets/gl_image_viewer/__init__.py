@@ -8,6 +8,6 @@ The main entry point is the GLImageViewer class, which maintains backward
 compatibility with the original single-file implementation.
 """
 
-from .widget import GLImageViewer
+from .widget import GLImageViewer, preload_opengl_python_runtime
 
-__all__ = ["GLImageViewer"]
+__all__ = ["GLImageViewer", "preload_opengl_python_runtime"]

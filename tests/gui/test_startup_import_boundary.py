@@ -38,6 +38,35 @@ if loaded:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_startup_preloader_does_not_warm_opengl_playback_runtime() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src/iPhoto/gui/main.py"
+    ).read_text(encoding="utf-8")
+    preload_body = source.split(
+        "def _preload_startup_modules() -> object:",
+        1,
+    )[1].split("def _start_startup_imports", 1)[0]
+
+    assert "OpenGL.GL" not in preload_body
+    assert "iPhoto.gui.ui.widgets.gl_renderer" not in preload_body
+    assert "preload_opengl_python_runtime" not in preload_body
+
+
+def test_interaction_warmup_is_enabled_only_after_startup_terminal() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src/iPhoto/gui/main.py"
+    ).read_text(encoding="utf-8")
+    idle_body = source.split("def _run_idle_startup_jobs() -> None:", 1)[1].split(
+        "def _enqueue_idle_startup_jobs", 1
+    )[0]
+
+    assert idle_body.index("startup.complete()") < idle_body.index(
+        "enable_detail_interaction_warmup"
+    )
+
+
 def test_main_window_import_keeps_optional_features_unloaded() -> None:
     project_root = Path(__file__).resolve().parents[2]
     env = dict(os.environ)

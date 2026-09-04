@@ -75,8 +75,13 @@ failed graphics contract, not a successful reproduction run.
 
 The extra active-surface `frameSubmitted` is a QRhi submission heuristic, not a
 DXGI/DWM presentation fence. It verifies the application state machine and an
-additional Qt composition submission; only the real Windows repetition matrix
-can determine whether it fixes the user-visible first-frame leak.
+additional Qt composition submission. The reveal wait is bounded: after the
+matching current-generation media submission, a missing extra composition may
+end with `post_submit_deadline` followed by `surface_revealed` with
+`reason=deadline`. A stale transition must instead record
+`post_submit_discarded` and must not reveal its media. Only the real Windows
+repetition matrix can determine whether this preserves the user-visible
+first-frame leak fix.
 
 The default timeout is 30 minutes. Override it with `-MaxMinutes 60` if the scan takes longer.
 The expanded directory is retained beside the ZIP so its contents can be reviewed before

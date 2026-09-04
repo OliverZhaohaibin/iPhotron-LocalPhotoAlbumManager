@@ -140,6 +140,9 @@ class _FakeImageViewer(QWidget):
     def current_image_source(self):
         return self._current_source
 
+    def render_backend_name(self) -> str:
+        return "opengl"
+
     def set_adjustments(self, adjustments):
         self._adjustments = dict(adjustments)
 
@@ -266,6 +269,62 @@ class TestInitCoverTracking:
         assert controller._pool is not QThreadPool.globalInstance()
         assert controller._pool.maxThreadCount() == 2
         assert controller._preparation_pool.maxThreadCount() == 2
+
+    def test_image_decode_primes_qrhi_surface_under_pending_cover(
+        self,
+        controller,
+        tmp_path,
+        mocker,
+    ):
+        source = tmp_path / "cold-open.jpg"
+        source.write_bytes(b"source")
+        update = mocker.patch.object(controller._image_viewer, "update")
+        mocker.patch.object(controller, "_schedule_render_runtime_warmup")
+        mocker.patch.object(
+            controller,
+            "_schedule_adjustment_preparation",
+            return_value=True,
+        )
+
+        assert controller.display_image(source, request_generation=12)
+
+        assert controller._player_stack.currentWidget() is controller._image_viewer
+        assert controller._pending_image_generation == 12
+        assert controller._pending_image_key is None
+        update.assert_called_once()
+
+    def test_primed_image_decode_failure_returns_to_placeholder(
+        self,
+        controller,
+        tmp_path,
+    ):
+        source = (tmp_path / "broken.jpg").absolute()
+        controller._loading_source = source
+        controller._loading_started_at = time.perf_counter()
+        controller._begin_image_transition(13)
+
+        controller._on_adjusted_image_failed(source, "decode failed")
+
+        assert controller._player_stack.currentWidget() is controller._placeholder
+        assert controller._pending_image_generation is None
+        assert controller._pending_image_key is None
+        assert controller._placeholder.text() == "decode failed"
+
+    def test_runtime_warmup_is_disabled_until_startup_terminal(
+        self,
+        controller,
+        monkeypatch,
+        mocker,
+    ):
+        monkeypatch.setattr(
+            "iPhoto.gui.ui.controllers.player_view_controller.sys.platform",
+            "win32",
+        )
+        start = mocker.patch.object(controller._preparation_pool, "start")
+
+        controller._schedule_render_runtime_warmup()
+
+        start.assert_not_called()
 
     def test_latest_preparation_bypasses_one_blocked_raw_worker(
         self,
@@ -1231,6 +1290,93 @@ class TestInitCoverTracking:
         assert controller._pending_image_generation is None
         hide_cover.assert_called_once()
 
+    def test_windows_image_reveal_deadline_is_bounded(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller._player_stack.setCurrentWidget(controller._image_viewer)
+        controller._present_generation = 45
+        controller._present_started_at = time.perf_counter()
+        controller._present_source = Path("image-45.jpg")
+        controller._arm_image_transition(45, "image-45")
+
+        controller._image_viewer.stillFrameSubmitted.emit("image-45", 45)
+        qapp.processEvents()
+
+        assert controller._post_submit_deadline_timer is not None
+        assert controller._post_submit_deadline_timer.isActive()
+        controller._on_post_submit_deadline()
+
+        assert controller._pending_image_generation is None
+        assert not controller._post_submit_deadline_timer.isActive()
+        hide_cover.assert_called_once()
+
+    def test_matching_composition_cancels_windows_reveal_deadline(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        controller._player_stack.setCurrentWidget(controller._image_viewer)
+        controller._arm_image_transition(46, "image-46")
+        controller._image_viewer.stillFrameSubmitted.emit("image-46", 46)
+        qapp.processEvents()
+
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._post_submit_deadline_timer is not None
+        assert not controller._post_submit_deadline_timer.isActive()
+        assert controller._pending_image_generation is None
+
+    def test_new_transition_cancels_windows_reveal_deadline(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        controller._player_stack.setCurrentWidget(controller._image_viewer)
+        controller._arm_image_transition(47, "image-47")
+        controller._image_viewer.stillFrameSubmitted.emit("image-47", 47)
+        qapp.processEvents()
+        assert controller._post_submit_deadline_timer.isActive()
+
+        controller._arm_image_transition(48, "image-48")
+
+        assert not controller._post_submit_deadline_timer.isActive()
+        assert controller._pending_image_generation == 48
+        assert controller._pending_image_key == "image-48"
+
+    def test_stale_windows_deadline_discards_barrier_without_reveal(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller._player_stack.setCurrentWidget(controller._image_viewer)
+        controller._arm_image_transition(50, "image-50")
+        controller._image_viewer.stillFrameSubmitted.emit("image-50", 50)
+        qapp.processEvents()
+        controller._pending_image_generation = 51
+        controller._pending_image_key = "image-51"
+
+        controller._on_post_submit_deadline()
+
+        assert controller._peek_post_submit_payload("image") is None
+        assert controller._pending_image_generation == 51
+        hide_cover.assert_not_called()
+
     def test_delayed_old_composition_does_not_consume_new_still_generation(
         self,
         controller,
@@ -1370,6 +1516,51 @@ class TestInitCoverTracking:
         assert controller._pending_video_content_serial is None
         controls_enabled.assert_called_with(True)
         hide_cover.assert_called_once()
+
+    def test_windows_video_reveal_deadline_is_bounded(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(
+            controller._video_area,
+            "request_active_surface_update",
+        )
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller.begin_video_transition(49, interactive_when_ready=True)
+        controller._video_area.surfaceFrameSubmitted.emit(49, 3)
+        qapp.processEvents()
+
+        controller._on_post_submit_deadline()
+
+        assert controller._pending_video_generation is None
+        assert controller._pending_video_content_serial is None
+        assert not controller._post_submit_deadline_timer.isActive()
+        hide_cover.assert_called_once()
+
+    def test_interaction_schedules_windows_opengl_import_warmup_once(
+        self,
+        controller,
+        monkeypatch,
+    ):
+        warmed = Event()
+        monkeypatch.setattr(
+            "iPhoto.gui.ui.controllers.player_view_controller.sys.platform",
+            "win32",
+        )
+        monkeypatch.setattr(
+            "iPhoto.gui.ui.controllers.player_view_controller.preload_opengl_python_runtime",
+            warmed.set,
+        )
+
+        controller.enable_interaction_warmup()
+        controller._schedule_render_runtime_warmup()
+        controller._schedule_render_runtime_warmup()
+
+        assert warmed.wait(5)
+        assert controller._render_runtime_warmup_requested is True
 
     def test_invalid_composition_does_not_consume_post_submit_payload(
         self,

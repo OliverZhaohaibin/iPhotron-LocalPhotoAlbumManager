@@ -171,6 +171,24 @@ def _load_gl_renderer_class():
         GLRenderer = _GLRenderer
     return GLRenderer
 
+
+def preload_opengl_python_runtime() -> None:
+    """Import raw-OpenGL helpers without creating Qt or GPU resources.
+
+    The interaction-triggered Detail warm-up runs this on a worker thread.  It
+    must stay limited to Python imports: QRhi/context access and renderer
+    resource allocation remain in ``initialize()`` on the GUI/render path.
+    """
+
+    started = time.perf_counter()
+    _load_gl_module()
+    _load_gl_renderer_class()
+    emit_detail_event(
+        "gl_runtime_preloaded",
+        generation=0,
+        duration_ms=(time.perf_counter() - started) * 1000.0,
+    )
+
 # 如果你的工程没有这个函数，可以改成固定背景色
 try:
     from ...palette import viewer_surface_color  # type: ignore
@@ -1450,9 +1468,23 @@ class GLImageViewer(QRhiWidget):
         self.complete_runtime()
         if self._gl_initialized:
             return
+        initialize_started = time.perf_counter()
+        backend = self.render_backend_name()
+        emit_detail_event(
+            "qrhi_initialize_started",
+            generation=0,
+            backend=backend,
+        )
         rhi = self.rhi()
         if rhi is None:
             _LOGGER.warning("QRhi not available - image rendering disabled")
+            emit_detail_event(
+                "qrhi_initialize_finished",
+                generation=0,
+                backend=backend,
+                success=False,
+                duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+            )
             return
         if not self._uses_raw_gl:
             renderer = RhiImageRenderer()
@@ -1460,12 +1492,26 @@ class GLImageViewer(QRhiWidget):
                 renderer.initialize_resources(rhi, self.renderTarget().renderPassDescriptor(), cb)
             except Exception:
                 _LOGGER.exception("Failed to initialise QRhi image renderer")
+                emit_detail_event(
+                    "qrhi_initialize_finished",
+                    generation=0,
+                    backend=backend,
+                    success=False,
+                    duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+                )
                 return
             self._renderer = renderer
             self._adjustment_applicator.invalidate_cache()
             self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
             self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
             self._gl_initialized = True
+            emit_detail_event(
+                "qrhi_initialize_finished",
+                generation=0,
+                backend=backend,
+                success=True,
+                duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+            )
             return
 
         # Make the underlying OpenGL context current so we can issue raw GL
@@ -1474,6 +1520,13 @@ class GLImageViewer(QRhiWidget):
         current_context = QOpenGLContext.currentContext()
         if current_context is None:
             _LOGGER.warning("Current OpenGL context unavailable - image rendering disabled")
+            emit_detail_event(
+                "qrhi_initialize_finished",
+                generation=0,
+                backend=backend,
+                success=False,
+                duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+            )
             return
         gf = current_context.extraFunctions()
         self._gl_funcs = gf
@@ -1491,6 +1544,13 @@ class GLImageViewer(QRhiWidget):
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
         self._gl_initialized = True
+        emit_detail_event(
+            "qrhi_initialize_finished",
+            generation=0,
+            backend=backend,
+            success=True,
+            duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+        )
 
     def releaseResources(self) -> None:  # type: ignore[override]
         """QRhiWidget override: release renderer resources."""
